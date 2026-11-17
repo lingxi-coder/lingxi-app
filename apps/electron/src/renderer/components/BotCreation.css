@@ -1,4 +1,4 @@
-.bot-create-intro { display: flex; flex-direction: column; gap: 22px; max-width: 640px; padding: 28px; border: 1px solid var(--bots-border); border-radius: 20px; background: var(--bots-surface); }
+.bot-create-intro { display: flex; flex-direction: column; gap: 22px; max-width: 640px; padding: 28px; border: 1px solid var(--bots-line); border-radius: 20px; background: var(--bots-surface); }
 .bot-create-intro-icon, .bot-proposal-icon { display: grid; place-items: center; flex: none; width: 52px; height: 52px; border-radius: 15px; background: var(--bots-accent-bg, transparent); color: var(--bots-accent, var(--bot-proposal-accent)); }
 .bots-page .bot-create-intro-copy h2 { margin: 0 0 10px; font-size: clamp(22px, 2.5vw, 28px); font-weight: 620; letter-spacing: -.025em; line-height: 1.25; }
 .bot-create-intro-copy p { max-width: 45ch; font-size: 14px; line-height: 1.7; color: var(--bots-muted); }

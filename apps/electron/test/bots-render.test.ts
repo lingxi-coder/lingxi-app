@@ -23,6 +23,7 @@ import { BotMemoryPanel, BotSkillsPanel } from '../src/renderer/components/BotPa
 import { BotCreate, BotList, Bots, shownProblems } from '../src/renderer/components/Bots';
 import { BetaSidebar, BetaTopBar } from '../src/renderer/components/BetaDesktop';
 import { Theme } from '../src/renderer/theme/ThemeContext';
+import { controlBorder } from '../src/renderer/theme/teamsTheme';
 import { tokens } from '../src/renderer/theme/tokens';
 import { pinEnglish } from './bot-ui-helpers';
 
@@ -378,12 +379,30 @@ test('a Bot opens to its general settings, with the routines and tasks listed fi
   assert.match(html, /First helper/);
   for (const tab of ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions']) assert.match(html, new RegExp(`<button type="button"[^>]*>${tab}</button>`), tab);
   assert.ok(html.indexOf('>Routines</button>') < html.indexOf('>Tasks</button>') && html.indexOf('>Tasks</button>') < html.indexOf('>General</button>'), 'the routines and the tasks come before the settings');
-  assert.match(html, /aria-current="page">General</);
+  assert.ok(!html.includes('aria-current'), 'the sections are tabs, not links to pages');
   assert.ok(!html.includes('>Chats</button>'), 'the chats of a Bot are listed under it in the sidebar, not here');
   assert.ok(!html.includes('Loading chats'));
   assert.match(html, />New chat</);
   assert.match(html, />Delete Bot</);
   assert.ok(!html.includes('role="dialog"'), 'nothing is asked until deletion is started');
+});
+
+test('the sections of a Bot are a tab list: one tab selected and in the tab order, each naming the panel it controls, the panel naming the selected tab', async () => {
+  const bots = await pageBots({ kind: 'detail', botId: 'a' }, [bot({ botId: 'a', name: 'Alpha' })]);
+  const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
+  assert.match(html, /<div class="bots-tabs" role="tablist" aria-label="Bot settings">/);
+  const tabs = [...html.matchAll(/<button type="button" role="tab" id="([^"]+)" aria-selected="(true|false)" aria-controls="([^"]+)" tabindex="(-?\d+)">([^<]+)<\/button>/g)]
+    .map((match) => ({ id: match[1]!, selected: match[2], controls: match[3]!, tabindex: match[4], label: match[5] }));
+  assert.deepEqual(tabs.map((tab) => tab.label), ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions', 'Package &amp; Market']);
+  assert.deepEqual(tabs.filter((tab) => tab.selected === 'true').map((tab) => tab.label), ['General'], 'one is selected');
+  assert.deepEqual(tabs.filter((tab) => tab.tabindex === '0').map((tab) => tab.label), ['General'], 'and it is the one Tab reaches: the arrow keys go to the others');
+  assert.ok(tabs.every((tab) => tab.selected === 'true' || tab.tabindex === '-1'));
+  assert.equal(new Set(tabs.map((tab) => tab.id)).size, tabs.length, 'each has an id of its own');
+  const panel = /<div class="bots-tabpanel" role="tabpanel" id="([^"]+)" aria-labelledby="([^"]+)" tabindex="0">/.exec(html);
+  assert.ok(panel, 'the tab list has a panel');
+  assert.ok(tabs.every((tab) => tab.controls === panel![1]), 'every tab controls it');
+  assert.equal(panel![2], tabs.find((tab) => tab.selected === 'true')!.id, 'and it is labelled by the selected one');
+  assert.ok(html.indexOf('role="tablist"') < html.indexOf('role="tabpanel"'));
 });
 
 test('a request to delete the Bot comes up as the question whether to, and nothing is deleted until it is answered', async () => {
@@ -467,6 +486,39 @@ test('a Bot\'s own page and the form that makes a Bot do not carry the settings 
   }
 });
 
+// ---- Outlines ----
+
+const channelOf = (value: number) => { const c = value / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+const luminanceOf = (hex: string) => 0.2126 * channelOf(Number.parseInt(hex.slice(1, 3), 16)) + 0.7152 * channelOf(Number.parseInt(hex.slice(3, 5), 16)) + 0.0722 * channelOf(Number.parseInt(hex.slice(5, 7), 16));
+const contrastOf = (a: string, b: string) => { const [light, dark] = [luminanceOf(a), luminanceOf(b)].sort((x, y) => y - x) as [number, number]; return (light + 0.05) / (dark + 0.05); };
+
+test('the page outlines its controls at 3:1 against the page in both palettes, with the same derivation Teams uses, and keeps the hairline for dividers', async () => {
+  for (const dark of [true, false]) {
+    const t = tokens(dark);
+    const bots = await pageBots({ kind: 'list' }, [bot({ botId: 'a', name: 'Alpha' })]);
+    const element = React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop });
+    const html = renderToStaticMarkup(React.createElement(Theme.Provider, { value: t }, element));
+    const variable = (name: string) => new RegExp(`${name}:([^;"]+)`).exec(html)?.[1];
+    const outline = variable('--bots-border')!;
+    assert.equal(outline, controlBorder(t), `${dark ? 'dark' : 'light'}: the derivation is the one of --teams-border`);
+    assert.match(outline, /^#[0-9a-f]{6}$/, 'a plain color, which contrast can be measured on');
+    assert.equal(variable('--bots-line'), t.border, `${dark ? 'dark' : 'light'}: the hairline is what dividers keep`);
+    // What the outline sits on: the page, the fill of a field or a card, and a card that is hovered.
+    for (const [name, surface] of [['page', t.stageBg], ['surface', t.surface], ['hover', t.surfaceHover]] as const) {
+      assert.ok(contrastOf(outline, surface) >= 3, `${dark ? 'dark' : 'light'} outline on the ${name} is ${contrastOf(outline, surface).toFixed(2)}:1`);
+    }
+  }
+});
+
+test('in the stylesheets of the page controls keep the 3:1 outline, and frames, dividers and tags the hairline', () => {
+  const css = ['Bots.css', 'BotCreation.css'].map((name) => readFileSync(join(process.cwd(), 'src/renderer/components', name), 'utf8')).join('\n').replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((match) => ({ selectors: match[1]!.split(',').map((part) => part.trim()), body: match[2]! }));
+  /** The color a rule gives the line it draws, in `border` or `border-top`, from the first rule for the selector that draws one. */
+  const lineOf = (selector: string) => rules.filter((rule) => rule.selectors.includes(selector)).map((rule) => /\bborder(?:-top)?:\s*[^;]*var\((--bots-[a-z]+)\)/.exec(rule.body)?.[1]).find((variable) => variable !== undefined);
+  for (const control of ['.bots-page button', '.bots-page input', '.bot-create-mode', '.bots-accept-list label']) assert.equal(lineOf(control), '--bots-border', control);
+  for (const frame of ['.bots-avatar', '.bots-row', '.bots-tag', '.bots-viewer', '.bots-folder-list li', '.bots-savebar', '.bot-create-intro']) assert.equal(lineOf(frame), '--bots-line', frame);
+});
+
 // ---- The window around the page ----
 
 function sidebarBridge(overrides: Record<string, unknown> = {}) {
@@ -476,6 +528,8 @@ function sidebarBridge(overrides: Record<string, unknown> = {}) {
 const railOf = (html: string) => /<nav[^>]*desktop-nav-rail[\s\S]*?<\/nav>/.exec(html)?.[0] ?? '';
 const buttonLabels = (html: string) => [...html.matchAll(/<button[^>]*aria-label="([^"]+)"/g)].map((match) => match[1]);
 const markedLabels = (html: string) => [...railOf(html).matchAll(/data-active="true"(?: aria-current="page")? aria-label="([^"]+)"/g)].map((match) => match[1]);
+/** The rail buttons that a screen reader is told are the current page, which are the ones that are drawn marked. */
+const currentLabels = (html: string) => [...railOf(html).matchAll(/<button[^>]*aria-current="page"[^>]*aria-label="([^"]+)"/g)].map((match) => match[1]);
 
 test('the sidebar offers Bots only where the host said they can be used, and only once', () => {
   const without = render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop }));
@@ -512,6 +566,20 @@ test('the sidebar mode marks Home, Bots, Teams or Friends, Home when none was gi
   assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'bots', apps: true })), ['Bots', 'Apps']);
   assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'teams', scheduled: true })), ['Scheduled tasks'], 'Cron owns its sidebar, so the mode is not marked behind it');
   assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'home', apps: true })), ['Home', 'Apps']);
+});
+
+test('the rail tells assistive technology which page it is on with aria-current, for exactly the buttons it draws marked', () => {
+  const sidebar = (props: Record<string, unknown> = {}) => render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop, botsAvailable: true, ...props }));
+  for (const props of [{}, { sidebarMode: 'home' }, { sidebarMode: 'bots' }, { sidebarMode: 'teams' }, { sidebarMode: 'friends' }, { sidebarMode: 'bots', apps: true }, { sidebarMode: 'teams', scheduled: true }, { sidebarMode: 'friends', changes: true }, { scheduled: true }]) {
+    const html = sidebar(props);
+    assert.deepEqual(currentLabels(html), markedLabels(html), JSON.stringify(props));
+  }
+  assert.deepEqual(currentLabels(sidebar({ sidebarMode: 'bots' })), ['Bots']);
+  assert.deepEqual(currentLabels(sidebar({ sidebarMode: 'friends', apps: true })), ['Friends', 'Apps']);
+  assert.deepEqual(currentLabels(sidebar({ sidebarMode: 'teams', scheduled: true })), ['Scheduled tasks'], 'a page that owns the sidebar is the current one, and the mode behind it is not');
+  const bots = railOf(sidebar({ sidebarMode: 'bots' }));
+  assert.match(bots, /class="desktop-rail-button" data-active="true" aria-current="page" aria-label="Bots"/, 'the mark that CSS draws from stays with it');
+  assert.equal([...bots.matchAll(/aria-current="page"/g)].length, 1, 'one button of the rail is the current page');
 });
 
 test('the rail buttons of the modes ask for their mode, and Home still opens the chat for a sidebar with no one to keep the mode', () => {

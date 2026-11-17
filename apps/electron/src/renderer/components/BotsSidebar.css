@@ -1,0 +1,47 @@
+/*
+ * The sidebar in Bots mode (BotsSidebar.tsx). Its colors are the Desktop's tokens, which the component sets as
+ * --bots-sidebar-* variables on its root, as the Bots page does with --bots-*. The rows of the chats are SessionRow's
+ * (BetaDesktop.tsx), which the Home sidebar shares; the hover, selected and focus looks of a row are global.css's.
+ */
+.bots-sidebar { flex: 1; min-height: 0; overflow-y: auto; padding: 0 10px 12px; }
+
+.bots-sidebar-heading { min-height: 35px; padding: 3px 4px 5px 8px; display: flex; align-items: center; }
+.bots-sidebar-heading h2 { flex: 1; color: var(--bots-sidebar-text4); font-size: 12.5px; font-weight: 500; letter-spacing: .01em; }
+.bots-sidebar-add { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: var(--bots-sidebar-text3); cursor: pointer; }
+
+/* What the list says in words: loading, a failure with its retry, no Bots yet, no chats yet. */
+.bots-sidebar-note { margin: 0; padding: 8px 10px 8px 9px; color: var(--bots-sidebar-text4); font-size: 11.5px; line-height: 1.5; }
+.bots-sidebar-note[data-tone='danger'] { color: var(--bots-sidebar-danger); }
+/* Under a Bot, the note starts where its chats' titles do. */
+.bots-sidebar-note[data-nested] { padding-left: 30px; }
+.bots-sidebar-empty { display: grid; justify-items: start; gap: 8px; }
+.bots-sidebar-link { padding: 0; border: 0; background: transparent; color: var(--bots-sidebar-accent); cursor: pointer; font: inherit; text-decoration: underline; }
+.bots-sidebar-create { min-height: 32px; padding: 5px 10px; border: .5px solid var(--bots-sidebar-line); border-radius: 8px; background: transparent; color: var(--bots-sidebar-text); cursor: pointer; font-size: 12.5px; font-weight: 500; }
+
+/* A Bot: its row (the button that opens and closes it, and the two that show on hover or focus), then its chats. */
+.bots-sidebar-bot { position: relative; margin-bottom: 2px; }
+.bots-sidebar-row { position: relative; }
+.bots-sidebar-toggle { width: 100%; min-height: 37px; display: flex; align-items: center; gap: 8px; padding: 7px 62px 7px 8px; border: 0; border-radius: 8px; background: transparent; color: var(--bots-sidebar-text2); cursor: pointer; text-align: left; }
+/* The chevron points down while the Bot is open and to the side while it is closed. */
+.bots-sidebar-toggle > svg { flex: none; color: var(--bots-sidebar-text4); }
+.bots-sidebar-toggle[aria-expanded='false'] > svg { transform: rotate(-90deg); }
+.bots-sidebar-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
+.bots-sidebar-row > .sidebar-row-action { position: absolute; top: 5px; width: 26px; height: 26px; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--bots-sidebar-text3); cursor: pointer; }
+.bots-sidebar-row > .sidebar-row-action[data-slot='new-chat'] { right: 32px; }
+.bots-sidebar-row > .sidebar-row-action[data-slot='menu'] { right: 4px; }
+.bots-sidebar-row > .sidebar-row-action:disabled { cursor: wait; }
+.bots-sidebar-more { min-height: 32px; margin-left: 30px; padding: 5px 8px; border: 0; border-radius: 7px; background: transparent; color: var(--bots-sidebar-text4); cursor: pointer; font-size: 11.5px; }
+
+/*
+ * A Bot at work shows a filled dot and one that waits for the owner a ring, so the two differ in shape and not only
+ * in color (green and amber alike to some eyes). Eight pixels leave the ring a hole it can be seen by. Both colors
+ * are 4.1:1 or more against the sidebar in the light palette and 7.3:1 or more in the dark one.
+ */
+.bots-sidebar-activity { flex: none; box-sizing: border-box; width: 8px; height: 8px; border-radius: 50%; }
+.bots-sidebar-activity[data-state='working'] { background: var(--bots-sidebar-ok); }
+.bots-sidebar-activity[data-state='waiting'] { border: 1.5px solid var(--bots-sidebar-warn); }
+/* Forced colors replace the palette; the filled dot and the ring then keep their shapes in the text color. */
+@media (forced-colors: active) {
+  .bots-sidebar-activity[data-state='working'] { background: CanvasText; }
+  .bots-sidebar-activity[data-state='waiting'] { border-color: CanvasText; }
+}

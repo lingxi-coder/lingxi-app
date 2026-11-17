@@ -42,7 +42,7 @@ struct AddFriendView: View {
         .onChange(of: friends.authority) { _, _ in text = ""; lookup.clear(); change = nil }
         .onChange(of: friends.profile?.friendCode) { _, _ in copied = false }
         .confirmationDialog(
-            Text(LocalizedStringKey(change == .off ? "friends_link_off_confirm" : "friends_link_reset_confirm")),
+            Text(LocalizedStringKey(change == .off ? "friends_link_off_title" : "friends_link_reset_title")),
             isPresented: Binding(get: { change != nil }, set: { if !$0 { change = nil } }),
             titleVisibility: .visible, presenting: change
         ) { pending in
@@ -50,6 +50,8 @@ struct AddFriendView: View {
                 run(rotate: pending == .reset)
             }
             Button("common_cancel", role: .cancel) {}
+        } message: { pending in
+            Text(LocalizedStringKey(pending == .off ? "friends_link_off_body" : "friends_link_reset_body"))
         }
         .accessibilityIdentifier("friends.add.screen")
     }
@@ -71,20 +73,20 @@ struct AddFriendView: View {
                         UIPasteboard.general.string = code.link
                         copied = true
                     } label: {
-                        Label("friends_link_copy", systemImage: "doc.on.doc")
+                        Label("friends_link_copy", systemImage: "doc.on.doc").minimumHitTarget(minWidth: 0)
                     }
                     .accessibilityIdentifier("friends.link.copy")
                     ShareLink(item: String(localized: "friends_link_share_message") + " " + code.link) {
-                        Label("friends_link_share", systemImage: "square.and.arrow.up")
+                        Label("friends_link_share", systemImage: "square.and.arrow.up").minimumHitTarget(minWidth: 0)
                     }
                     .accessibilityIdentifier("friends.link.share")
                 }
                 .buttonStyle(.borderless)
                 if copied { Text("friends_link_copied").font(.footnote).foregroundStyle(.secondary) }
                 HStack(spacing: 20) {
-                    Button("friends_link_reset") { change = .reset }
+                    Button { change = .reset } label: { Text("friends_link_reset").minimumHitTarget(minWidth: 0) }
                         .accessibilityIdentifier("friends.link.reset")
-                    Button("friends_link_off", role: .destructive) { change = .off }
+                    Button(role: .destructive) { change = .off } label: { Text("friends_link_off").minimumHitTarget(minWidth: 0) }
                         .accessibilityIdentifier("friends.link.off")
                 }
                 .buttonStyle(.borderless)

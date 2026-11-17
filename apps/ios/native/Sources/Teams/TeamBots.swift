@@ -4,6 +4,18 @@ struct TeamMemberRef: Codable, Equatable, Sendable { let uid: String; let genera
 struct TeamUsePolicy: Codable, Equatable, Sendable { let mode: String; var members: [TeamMemberRef]? }
 struct TeamRequestQuotas: Codable, Equatable, Sendable { let team: Int; let member: Int; let bot: Int }
 struct TeamBotAutoReply: Decodable, Equatable, Sendable { let daily: Int }
+/// Only member-safe state crosses this boundary; detailed host/model failures stay on Desktop.
+enum TeamBotAvailability: String, Decodable, Equatable, Sendable {
+    case ready, paused, offline, maintenance, quota_exhausted, unverified
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .unverified
+    }
+}
+struct TeamBotCapabilities: Decodable, Equatable, Sendable {
+    let durableWait: Bool
+    let writeOperations: Bool
+}
 struct TeamBotCard: Decodable, Identifiable, Equatable, Sendable {
     let sharedBotId: String
     let name: String
@@ -21,9 +33,119 @@ struct TeamBotCard: Decodable, Identifiable, Equatable, Sendable {
     var sharedList: TeamBotListInfo? = nil
     /// Present when the maintainer published the Bot to judge for itself whether to answer: `daily` caps those answers per UTC day.
     var autoReply: TeamBotAutoReply? = nil
+    var examples: [String]? = nil
+    var capabilities: TeamBotCapabilities? = nil
+    var availability: TeamBotAvailability? = nil
+    var dailyRemaining: Int? = nil
+    /// UTC epoch milliseconds, already projected for this member by the service.
+    var quotaResetsAt: Double? = nil
+    /// Independent freshness boundary for the projected status, including maintenance.
+    var statusExpiresAt: Double? = nil
+    /// A known refusal survives stale/failed validation; only a fresh ready projection can release it.
+    private var unavailableUntilRevalidated: TeamBotAvailability? = nil
+    private enum CodingKeys: String, CodingKey {
+        case sharedBotId, name, description, maintainer, revision, state, permitted, ready, onlineUntil, usePolicy, quotas, instanceId
+        case sharedList, examples, capabilities, availability, dailyRemaining, quotaResetsAt, statusExpiresAt, autoReply
+    }
+    var newRequestBlock: TeamBotAvailability? {
+        [.paused, .offline, .maintenance, .quota_exhausted].contains(memberAvailability) ? memberAvailability : unavailableUntilRevalidated
+    }
+    func awaitingStatusValidation() -> Self {
+        var result = self
+        result.unavailableUntilRevalidated = newRequestBlock
+        result.availability = .unverified
+        result.dailyRemaining = nil
+        return result
+    }
+    func preservingAdmission(from previous: Self?, now: Double) -> Self {
+        var result = expiringStatus(at: now)
+        let freshReady = memberAvailability == .ready && (memberStatusExpiry.map { $0 > now } ?? false)
+        if !freshReady { result.unavailableUntilRevalidated = result.newRequestBlock ?? previous?.newRequestBlock }
+        return result
+    }
+    var memberStatusExpiry: Double? {
+        let value = statusExpiresAt ?? (ready ? onlineUntil : nil)
+        return value.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+    }
+    func expiringStatus(at now: Double) -> Self {
+        guard let expiry = memberStatusExpiry, expiry <= now else { return self }
+        return awaitingStatusValidation()
+    }
+    var memberAvailability: TeamBotAvailability { availability ?? .unverified }
+    var memberExamples: [String] {
+        var seen = Set<String>()
+        return Array((examples ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }.prefix(3))
+    }
+    var memberRemaining: Int? { dailyRemaining.flatMap { $0 >= 0 ? $0 : nil } }
+    var memberQuotaReset: Double? { quotaResetsAt.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } }
     var id: String { sharedBotId }
     var selectable: Bool { state == "published" && permitted }
     var avatarId: String { sharedBotId }
+}
+/// Member directory visibility is determined by the server response; use permission only gates new use.
+enum TeamBotMemberRules {
+    static func directory(_ cards: [TeamBotCard]) -> [TeamBotCard] {
+        cards.filter { $0.state == "published" || $0.state == "paused" }
+    }
+    /// Only new Bot requests observe this gate. A never-verified projection defers to the server; a known refusal waits for revalidation.
+    static func blockedAvailability(targets: Set<String>, cards: [TeamBotCard], operation: String = "create", answeringWait: Bool = false) -> TeamBotAvailability? {
+        guard operation == "create", !answeringWait else { return nil }
+        return cards.first { targets.contains($0.sharedBotId) && $0.newRequestBlock != nil }?.newRequestBlock
+    }
+    static func validatedCards(_ incoming: [TeamBotCard], previous: [TeamBotCard], now: Double) -> [TeamBotCard] {
+        incoming.map { card in card.preservingAdmission(from: previous.first { $0.sharedBotId == card.sharedBotId }, now: now) }
+    }
+    /// Preserve only known refusals on read failure; this grants no use permission to cards that used to be unavailable.
+    static func failedValidation(_ cards: [TeamBotCard]) -> [TeamBotCard] {
+        cards.filter { $0.newRequestBlock != nil }.map { $0.awaitingStatusValidation() }
+    }
+    static func nextStatusRefresh(_ cards: [TeamBotCard], now: Double) -> Double? {
+        cards.compactMap(\.memberStatusExpiry).filter { $0 > now }.min()
+    }
+}
+/// What a member reads about a Bot in the list, picker, details and conversation header. The words are catalog keys, the `teams_bot_*` keys
+/// Desktop and Web read too (`packages/teams/BotMemberDetails.tsx`), so every client says the same thing in every language. These rules
+/// choose the keys and the figures; `TeamsStrings.swift` puts them into the UI language.
+enum TeamBotMemberText {
+    /// One "label: value" item of the member text. The label is a catalog key; the value is another key (Supported, Not supported, Unknown)
+    /// or a figure that needs no translation (a count, a UTC time).
+    struct Item: Equatable, Sendable {
+        enum Value: Equatable, Sendable { case key(String), figure(String) }
+        let label: String
+        let value: Value
+    }
+
+    /// How a Bot's availability reads. A Bot whose sharing stopped reads "Sharing stopped" (`teams_bot_disabled`, docs/TEAMS-UI-POLISH.md U1).
+    static func availabilityKey(_ value: TeamBotAvailability) -> String {
+        switch value {
+        case .ready: "teams_bot_avail_ready"
+        case .paused: "teams_bot_disabled"
+        case .offline: "teams_bot_avail_offline"
+        case .maintenance: "teams_bot_avail_maintenance"
+        case .quota_exhausted: "teams_bot_avail_quota"
+        case .unverified: "teams_bot_avail_unverified"
+        }
+    }
+    /// Wait and resume, and write operations, each Supported or Not supported. A Bot that has not reported them is Unknown for both.
+    static func capabilities(_ value: TeamBotCapabilities?) -> [Item] {
+        func supported(_ on: Bool?) -> Item.Value { .key(on.map { $0 ? "teams_bot_supported" : "teams_bot_not_supported" } ?? "chat_status_unknown") }
+        return [Item(label: "teams_bot_wait_resume", value: supported(value?.durableWait)),
+                Item(label: "teams_bot_write_ops", value: supported(value?.writeOperations))]
+    }
+    /// The member's own requests left today, or Unknown when the service has not said.
+    static func remaining(_ value: Int?) -> Item {
+        Item(label: "teams_bot_remaining_today", value: value.map { .figure(String($0)) } ?? .key("chat_status_unknown"))
+    }
+    /// When the daily quota resets, in UTC; `nil` when the service reports no usable time.
+    static func reset(_ value: Double?) -> Item? {
+        guard let value, value.isFinite, value > 0 else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd HH:mm 'UTC'"
+        return Item(label: "teams_bot_resets", value: .figure(formatter.string(from: Date(timeIntervalSince1970: value / 1000))))
+    }
 }
 /// What a Bot run cost, as the host reports it. `missing` carries no figures; `partial` and `complete` carry the
 /// token counts, and the cost only when the host could price it (`costMicros` in millionths of `currency`).

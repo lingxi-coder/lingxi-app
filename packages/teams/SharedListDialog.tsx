@@ -4,30 +4,31 @@ import { executionCommand, type ExecutionScope, type SharedBotCard, type SharedL
 import type { TeamMember, TeamsApi } from './index.js';
 import { messageErrorText } from './errors.js';
 import { Dialog } from './ui';
+import { intlTag, teamsText, useTeamsText } from './i18n.js';
 
 const failure = (error: unknown) => error instanceof Error ? error.message : 'SERVICE_UNAVAILABLE';
 const fits = (text: string) => new TextEncoder().encode(text).length <= LIST_ITEM_BYTES;
 
 /** One change of a list revision in words. A change that renamed and ticked an item says both. */
-export function listChangeText(change: SharedListLoggedChange, zh: boolean): string {
-  const t = (en: string, cn: string) => zh ? cn : en;
-  if (change.op === 'add') return t(`Added “${change.text}”`, `添加了“${change.text}”`);
+export function listChangeText(change: SharedListLoggedChange, locale: string): string {
+  const t = teamsText(locale);
+  if (change.op === 'add') return t('teams_list_added_fmt', change.text);
   const was = change.before.text;
-  if (change.op === 'remove') return t(`Removed “${was}”`, `移除了“${was}”`);
+  if (change.op === 'remove') return t('teams_list_removed_fmt', was);
   const parts: string[] = [];
-  if (change.text !== undefined && change.text !== was) parts.push(t(`Renamed “${was}” to “${change.text}”`, `将“${was}”改为“${change.text}”`));
+  if (change.text !== undefined && change.text !== was) parts.push(t('teams_list_renamed_fmt', was, change.text));
   const name = change.text ?? was;
-  if (change.done !== undefined && change.done !== change.before.done) parts.push(change.done ? t(`Ticked “${name}”`, `勾选了“${name}”`) : t(`Unticked “${name}”`, `取消勾选了“${name}”`));
-  if (!parts.length) return t(`Saved “${name}” unchanged`, `保存了未更改的“${name}”`);
-  return zh ? parts.join('；') : parts.map((part, index) => index ? part[0]!.toLowerCase() + part.slice(1) : part).join('; ');
+  if (change.done !== undefined && change.done !== change.before.done) parts.push(change.done ? t('teams_list_ticked_fmt', name) : t('teams_list_unticked_fmt', name));
+  if (!parts.length) return t('teams_list_unchanged_fmt', name);
+  return parts.map((part, index) => index && t.locale === 'en' ? part[0]!.toLowerCase() + part.slice(1) : part).join(t('tw_list_change_separator'));
 }
 /** Who made a revision: a member by name, or the Bot and the member whose request it was working on. */
-export function listAuthorText(author: SharedListAuthor, { uid, members, botName, zh }: { uid: string; members: TeamMember[]; botName: string; zh: boolean }): string {
-  const t = (en: string, cn: string) => zh ? cn : en;
+export function listAuthorText(author: SharedListAuthor, { uid, members, botName, locale }: { uid: string; members: TeamMember[]; botName: string; locale: string }): string {
+  const t = teamsText(locale);
   const person = (who: { uid: string; generation: number }, self: string) => who.uid === uid ? self
-    : members.find(member => member.uid === who.uid && member.generation === who.generation)?.displayName ?? t('a former member', '已离开的成员');
-  if (author.kind === 'user') return person(author, t('You', '你'));
-  return t(`${botName}, for ${person(author.requester, 'you')}`, `${botName}（为${person(author.requester, '你')}）`);
+    : members.find(member => member.uid === who.uid && member.generation === who.generation)?.displayName ?? t('teams_list_history_former_inline');
+  if (author.kind === 'user') return person(author, t('teams_list_history_you'));
+  return t('teams_list_history_for_fmt', botName, person(author.requester, t('teams_list_history_you_inline')));
 }
 
 /**
@@ -35,14 +36,14 @@ export function listAuthorText(author: SharedListAuthor, { uid, members, botName
  * A change is saved only on top of the list it was made from. When someone else, or the Bot, saved first, nothing is saved:
  * the list is read again, what the person typed stays where it is, and saving it again is their decision.
  */
-export function SharedListDialog({ api, scope, bot, uid, members, zh, onClose }: {
-  api: TeamsApi; scope: ExecutionScope; bot: Pick<SharedBotCard, 'sharedBotId' | 'name' | 'sharedList'>; uid: string; members: TeamMember[]; zh: boolean; onClose(): void;
+export function SharedListDialog({ api, scope, bot, uid, members, locale, onClose }: {
+  api: TeamsApi; scope: ExecutionScope; bot: Pick<SharedBotCard, 'sharedBotId' | 'name' | 'sharedList'>; uid: string; members: TeamMember[]; locale: string; onClose(): void;
 }) {
   const [list, setList] = useState<SharedList>(), [text, setText] = useState(''), [editing, setEditing] = useState<{ itemId: string; text: string }>();
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [moved, setMoved] = useState(false);
   /** One operation id per exact change of one revision, so repeating a save whose answer was lost changes nothing twice. */
   const operation = useRef<{ key: string; id: string }>();
-  const t = (en: string, cn: string) => zh ? cn : en;
+  const t = useTeamsText(locale);
   /** The newest revision shown. A read that answers after a newer one is dropped, so the list never goes back. */
   const latest = useRef(-1);
   const read = async () => {
@@ -95,43 +96,43 @@ export function SharedListDialog({ api, scope, bot, uid, members, zh, onClose }:
   const usable = (value: string) => value.trim().length > 0 && fits(value);
   const long = !fits(text) || !!editing && !fits(editing.text);
 
-  return <Dialog title={list?.title ?? bot.sharedList?.title ?? t('Shared list', '共享清单')} onClose={onClose}><div className="tw-form tw-list">
+  return <Dialog title={list?.title ?? bot.sharedList?.title ?? t('teams_list_open')} onClose={onClose}><div className="tw-form tw-list">
     {list ? <>
-      <p className="tw-hint">{t(`Everyone who can use ${bot.name} sees this list and can change it. ${bot.name} can read and change it too.`, `所有可以使用 ${bot.name} 的人都能查看并修改此清单，${bot.name} 也可以读取和修改它。`)}</p>
-      {moved ? <p role="alert">{t('The list was changed in the meantime, so your change was not saved. Check the list below, then try again if it is still needed.', '清单在此期间已被修改，你的更改未保存。请查看下方的最新清单，如仍有需要再重试。')}</p> : null}
+      <p className="tw-hint">{t('teams_list_hint_fmt', bot.name, bot.name)}</p>
+      {moved ? <p role="alert">{t('tw_list_moved_below')}</p> : null}
       {list.items.length ? <ul className="tw-list-items">{list.items.map(item => <li key={item.itemId}>
         {editing?.itemId === item.itemId
           ? <form onSubmit={event => { event.preventDefault(); if (usable(editing.text) && editing.text.trim() !== item.text) void write([{ op: 'update', itemId: item.itemId, text: editing.text }], () => setEditing(undefined)); }}>
-            <input aria-label={t('Item text', '条目内容')} value={editing.text} onChange={event => setEditing({ itemId: item.itemId, text: event.target.value })} />
-            <button type="submit" disabled={busy || !usable(editing.text) || editing.text.trim() === item.text}>{t('Save', '保存')}</button>
-            <button type="button" onClick={() => setEditing(undefined)}>{t('Cancel', '取消')}</button>
+            <input aria-label={t('tw_list_item_text')} value={editing.text} onChange={event => setEditing({ itemId: item.itemId, text: event.target.value })} />
+            <button type="submit" disabled={busy || !usable(editing.text) || editing.text.trim() === item.text}>{t('common_save')}</button>
+            <button type="button" onClick={() => setEditing(undefined)}>{t('common_cancel')}</button>
           </form>
           : <><label><input type="checkbox" checked={item.done} disabled={busy} onChange={event => void write([{ op: 'update', itemId: item.itemId, done: event.target.checked }])} /><span data-done={item.done}>{item.text}</span></label>
-            <button type="button" disabled={busy} aria-label={t(`Edit “${item.text}”`, `编辑“${item.text}”`)} onClick={() => setEditing({ itemId: item.itemId, text: item.text })}>{t('Edit', '编辑')}</button>
-            <button type="button" disabled={busy} aria-label={t(`Remove “${item.text}”`, `移除“${item.text}”`)} onClick={() => void write([{ op: 'remove', itemId: item.itemId }])}>{t('Remove', '移除')}</button></>}
-      </li>)}</ul> : <p className="tw-hint">{t('Nothing is on the list yet.', '清单还是空的。')}</p>}
+            <button type="button" disabled={busy} aria-label={t('tw_list_edit_fmt', item.text)} onClick={() => setEditing({ itemId: item.itemId, text: item.text })}>{t('teams_list_edit')}</button>
+            <button type="button" disabled={busy} aria-label={t('tw_list_remove_fmt', item.text)} onClick={() => void write([{ op: 'remove', itemId: item.itemId }])}>{t('teams_list_remove')}</button></>}
+      </li>)}</ul> : <p className="tw-hint">{t('teams_list_empty')}</p>}
       <form className="tw-list-add" onSubmit={event => { event.preventDefault(); if (usable(text)) void write([{ op: 'add', text }], () => setText('')); }}>
-        <input data-autofocus aria-label={t('New item', '新条目')} placeholder={t('Add an item', '添加条目')} value={text} onChange={event => setText(event.target.value)} />
-        <button type="submit" className="tw-primary" disabled={busy || !usable(text)}>{t('Add', '添加')}</button>
+        <input data-autofocus aria-label={t('tw_list_new_item')} placeholder={t('teams_list_add_placeholder')} value={text} onChange={event => setText(event.target.value)} />
+        <button type="submit" className="tw-primary" disabled={busy || !usable(text)}>{t('teams_list_add')}</button>
       </form>
-      {long ? <p role="alert">{t('This item is too long to save. Shorten it and try again.', '条目过长，无法保存。请缩短后重试。')}</p> : null}
-    </> : error ? null : <p role="status">{t('Loading the list…', '正在加载清单…')}</p>}
-    {error ? <p role="alert">{messageErrorText(error, zh)}</p> : null}
+      {long ? <p role="alert">{t('teams_list_too_long')}</p> : null}
+    </> : error ? null : <p role="status">{t('teams_list_loading')}</p>}
+    {error ? <p role="alert">{messageErrorText(error, locale)}</p> : null}
     {list ? <details className="tw-list-history" onToggle={event => {
       if ((event.currentTarget as HTMLDetailsElement).open && !opened.current) { opened.current = true; void page(); }
     }}>
-      <summary>{t('History', '修改记录')}</summary>
+      <summary>{t('teams_list_history')}</summary>
       {history ? history.revisions.length ? <ol>{history.revisions.map(revision => <li key={revision.dataRevision}>
-        <p><strong>{listAuthorText(revision.author, { uid, members, botName: bot.name, zh })}</strong> · <time dateTime={new Date(revision.createdAt).toISOString()}>{new Date(revision.createdAt).toLocaleString(zh ? 'zh-CN' : 'en')}</time></p>
-        <ul>{revision.changes.map((change, index) => <li key={index}>{listChangeText(change, zh)}</li>)}</ul>
-      </li>)}</ol> : <p className="tw-hint">{t('No changes yet.', '还没有修改。')}</p> : historyError ? null : <p role="status">{t('Loading the history…', '正在加载修改记录…')}</p>}
-      {history?.hasMore ? <button type="button" onClick={() => void page(history.revisions.at(-1)?.dataRevision)}>{t('Show older changes', '显示更早的修改')}</button> : null}
-      {historyError ? <p role="alert">{messageErrorText(historyError, zh)}</p> : null}
-      <p className="tw-hint">{t('The latest 200 changes are kept.', '保留最近 200 次修改。')}</p>
+        <p><strong>{listAuthorText(revision.author, { uid, members, botName: bot.name, locale })}</strong> · <time dateTime={new Date(revision.createdAt).toISOString()}>{new Date(revision.createdAt).toLocaleString(intlTag(locale))}</time></p>
+        <ul>{revision.changes.map((change, index) => <li key={index}>{listChangeText(change, locale)}</li>)}</ul>
+      </li>)}</ol> : <p className="tw-hint">{t('teams_list_history_empty')}</p> : historyError ? null : <p role="status">{t('teams_list_history_loading')}</p>}
+      {history?.hasMore ? <button type="button" onClick={() => void page(history.revisions.at(-1)?.dataRevision)}>{t('teams_list_history_older')}</button> : null}
+      {historyError ? <p role="alert">{messageErrorText(historyError, locale)}</p> : null}
+      <p className="tw-hint">{t('teams_list_history_kept')}</p>
     </details> : null}
     <div className="tw-dialog-actions">
-      <button type="button" disabled={busy} onClick={() => void attempt(async () => { setMoved(false); await read(); if (opened.current) await page(); })}>{t('Refresh', '刷新')}</button>
-      <button type="button" onClick={onClose}>{t('Close', '关闭')}</button>
+      <button type="button" disabled={busy} onClick={() => void attempt(async () => { setMoved(false); await read(); if (opened.current) await page(); })}>{t('teams_list_refresh')}</button>
+      <button type="button" onClick={onClose}>{t('common_close')}</button>
     </div>
   </div></Dialog>;
 }

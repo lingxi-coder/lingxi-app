@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
@@ -30,7 +31,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
@@ -80,13 +83,20 @@ internal fun TeamComposer(
         val start = if (editing != null) editing.text else draft.text
         mutableStateOf(TextFieldValue(start, TextRange(start.length)))
     }
+    androidx.compose.runtime.LaunchedEffect(draft.text, editing?.id) {
+        if (editing == null && field.text != draft.text) field = TextFieldValue(draft.text, TextRange(draft.text.length))
+    }
     val askable = conversation.kind == "group" || conversation.kind == "channel"
     val mention = if (askable && editing == null) TeamsComposeLogic.mentionAt(field.text, field.selection.end) else null
     val candidates = if (mention != null && draft.targets.size < TeamsComposeLogic.MAX_TARGETS) TeamsComposeLogic.mentionCandidates(bots, conversation, draft.targets, mention.query) else emptyList()
     val staleTargets = if (editing == null && askable) composerStaleTargets(draft.targets, bots, conversation) else emptySet()
     val staleBotDm = conversation.kind == "bot_dm" && conversation.sharedBotIds.size != 1
     val tooLong = TeamsComposeLogic.byteLength(field.text) > TeamsComposeLogic.MESSAGE_BYTES
-    val canSend = TeamAttachments.canSend(field.text, files) && !messaging.submitting && (editing != null || (staleTargets.isEmpty() && !staleBotDm))
+    val viewer = messaging.cache?.let { TeamMemberRef(uid, it.generation) }
+    val answeringWait = TeamTaskActions.answerableWait(replyTo, messaging.tasks, viewer, TeamTaskActions.pendingWaitIds(messaging.cache?.outbox.orEmpty())) != null
+    val requestTargets = if (conversation.kind == "bot_dm") conversation.sharedBotIds else draft.targets
+    val blockedBots = TeamBotEntry.blockedRequests(requestTargets, bots, editing != null || answeringWait)
+    val canSend = TeamAttachments.canSend(field.text, files) && !messaging.submitting && blockedBots.isEmpty() && (editing != null || (staleTargets.isEmpty() && !staleBotDm))
     val hasAskableBots = askable && bots.any { it.selectable && "shared_bot:${it.sharedBotId}" in conversation.participants }
     fun update(value: TextFieldValue, targets: Set<String> = draft.targets) {
         field = value
@@ -107,14 +117,14 @@ internal fun TeamComposer(
         if (voice?.listening == true) TeamVoiceListening()
         if (candidates.isNotEmpty()) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                Text(stringResource(R.string.teams_composer_bots_can_ask), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(stringResource(R.string.teams_composer_bots_can_ask), Modifier.semantics { heading() }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 candidates.forEach { bot ->
                     Row(
-                        Modifier.fillMaxWidth().clickable {
+                        Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) {
                             val at = requireNotNull(mention)
                             val cleaned = TeamsComposeLogic.withoutMention(field.text, at.start, field.selection.end)
                             update(TextFieldValue(cleaned, TextRange(at.start.coerceAtMost(cleaned.length))), draft.targets + bot.sharedBotId)
-                        }.padding(vertical = 6.dp),
+                        },
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         BotAvatar(bot.avatarId, 24.dp)
@@ -142,7 +152,7 @@ internal fun TeamComposer(
             FlowRow(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 draft.targets.sorted().forEach { key ->
                     val bot = bots.firstOrNull { it.sharedBotId == key }
-                    val name = bot?.name ?: "Bot"
+                    val name = bot?.name ?: stringResource(R.string.teams_bot_tag)
                     val remove = stringResource(R.string.teams_composer_remove_bot_fmt, name)
                     InputChip(
                         selected = false, onClick = { update(field, draft.targets - key) },
@@ -155,6 +165,9 @@ internal fun TeamComposer(
             }
         }
         TeamDraftFiles(files, refusals, onRemoveFile, onDismissRefusals)
+        blockedBots.forEach { bot ->
+            Text(bot.name + " · " + botAvailabilityText(bot), Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
         if (staleTargets.isNotEmpty() || staleBotDm) Text(stringResource(R.string.teams_error_bot_access_changed), Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.Bottom) {
             if (onChooseFiles != null) TeamAttachButton(enabled = files.size < TeamAttachments.MESSAGE_FILES && !messaging.submitting, onChosen = onChooseFiles)

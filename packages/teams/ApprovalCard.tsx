@@ -3,29 +3,29 @@ import { executionCommand, type ExecutionScope, type MemberExecutionCommand } fr
 import { messageErrorText } from './errors.js';
 import type { TeamsApi } from './index.js';
 import type { ListApproval, ListApprovalChange, TeamMessage } from './messages.js';
+import { teamsText, useTeamsText } from './i18n.js';
 
 /** One proposed change in words. `item` is the item as it read when the Bot asked; an item that was gone by then has no text to show. */
-export function approvalChangeText(change: ListApprovalChange, zh: boolean): string {
-  const t = (en: string, cn: string) => zh ? cn : en;
-  const item = change.item ? `“${change.item}”` : t('an item that is no longer on the list', '一个已不在清单中的条目');
-  if (change.op === 'add') return t(`Add “${change.text ?? ''}”`, `添加“${change.text ?? ''}”`);
-  if (change.op === 'remove') return t(`Remove ${item}`, `移除${item}`);
-  const done = change.done === undefined ? '' : change.done ? t('mark it as done', '标记为已完成') : t('mark it as not done', '标记为未完成');
-  if (change.text !== undefined) return t(`Change ${item} to “${change.text}”${done ? ` and ${done}` : ''}`, `将${item}改为“${change.text}”${done ? `并${done}` : ''}`);
-  return change.done ? t(`Mark ${item} as done`, `将${item}标记为已完成`) : t(`Mark ${item} as not done`, `将${item}标记为未完成`);
+export function approvalChangeText(change: ListApprovalChange, locale: string): string {
+  const t = teamsText(locale);
+  const item = change.item ? `“${change.item}”` : t('teams_approval_missing_item');
+  if (change.op === 'add') return t('teams_approval_add_fmt', `“${change.text ?? ''}”`);
+  if (change.op === 'remove') return t('teams_approval_remove_fmt', item);
+  if (change.text !== undefined) return t(change.done === undefined ? 'teams_approval_change_fmt' : change.done ? 'teams_approval_change_done_fmt' : 'teams_approval_change_undone_fmt', item, `“${change.text}”`);
+  return change.done ? t('teams_approval_done_fmt', item) : t('teams_approval_undone_fmt', item);
 }
 
 /** The Bot's request to change its list, under the message that carries it. While the task waits, only the member it works for gets the two buttons;
  * everyone else sees who is deciding. Afterwards the card says how it ended. Nothing is saved to the list before an approval. */
-export function ApprovalCard({ api, scope, conversationId, message, approval, state, decider, zh, onChanged }: {
+export function ApprovalCard({ api, scope, conversationId, message, approval, state, decider, locale, onChanged }: {
   api: TeamsApi; scope: ExecutionScope; conversationId: string; message: TeamMessage; approval: ListApproval;
   /** `decide`: this viewer may decide now. `waiting`: someone else may. Otherwise how it ended, or `closed` when it ended without a decision. */
   state: 'decide' | 'waiting' | 'approved' | 'declined' | 'closed';
   /** Who decides, or decided. */
-  decider: string; zh: boolean;
+  decider: string; locale: string;
   onChanged?(): void;
 }) {
-  const t = (en: string, cn: string) => zh ? cn : en;
+  const t = useTeamsText(locale);
   const [sending, setSending] = useState<'approve' | 'deny'>(), [error, setError] = useState('');
   // One command per decision: a retry after a lost answer repeats the same ids, so the reply is never posted twice.
   const commands = useRef(new Map<string, Extract<MemberExecutionCommand, { action: 'decideWait' }>>());
@@ -38,20 +38,20 @@ export function ApprovalCard({ api, scope, conversationId, message, approval, st
     catch (e) { setError(e instanceof Error ? e.message : 'SERVICE_UNAVAILABLE'); }
     finally { setSending(undefined); onChanged?.(); }
   };
-  const failure = ['WAIT_CLOSED', 'WAIT_REQUIRED', 'WAIT_KIND_MISMATCH'].includes(error) ? t('This request is no longer waiting for a decision.', '此请求已不再等待决定。')
-    : error === 'WAIT_RECIPIENT_REQUIRED' ? t('Only the person who asked the Bot can decide this.', '只有向 Bot 提出请求的人才能决定。') : error ? messageErrorText(error, zh) : '';
-  return <section className="team-approval" aria-label={t('Proposed list change', '清单修改请求')}>
-    <p><b>{t(`Change the list “${approval.title}”`, `修改清单“${approval.title}”`)}</b></p>
-    <ul>{approval.changes.map((change, index) => <li key={index}>{approvalChangeText(change, zh)}</li>)}</ul>
+  const failure = ['WAIT_CLOSED', 'WAIT_REQUIRED', 'WAIT_KIND_MISMATCH'].includes(error) ? t('tw_approval_not_waiting')
+    : error === 'WAIT_RECIPIENT_REQUIRED' ? t('tw_approval_requester_only') : error ? messageErrorText(error, locale) : '';
+  return <section className="team-approval" aria-label={t('tw_approval_title')}>
+    <p><b>{t('teams_approval_title_fmt', approval.title)}</b></p>
+    <ul>{approval.changes.map((change, index) => <li key={index}>{approvalChangeText(change, locale)}</li>)}</ul>
     {state === 'decide' ? <>
-      <p className="teams-hint">{t('Nothing is changed unless you approve. If the list has changed since the Bot asked, the change is not saved.', '只有你批准后才会修改。如果清单在 Bot 提出请求后已有变动，此修改不会保存。')}</p>
+      <p className="teams-hint">{t('teams_approval_hint')}</p>
       <div className="teams-row-actions">
-        <button type="button" disabled={!!sending} onClick={() => void decide('approve')}>{sending === 'approve' ? t('Approving…', '正在批准…') : t('Approve', '批准')}</button>
-        <button type="button" disabled={!!sending} onClick={() => void decide('deny')}>{sending === 'deny' ? t('Declining…', '正在拒绝…') : t('Decline', '拒绝')}</button>
-      </div></> : <p className="teams-hint" role="status">{state === 'waiting' ? t(`Waiting for ${decider} to approve or decline.`, `等待 ${decider} 批准或拒绝。`)
-        : state === 'approved' ? t(`Approved by ${decider}.`, `${decider} 已批准。`)
-        : state === 'declined' ? t(`Declined by ${decider}. Nothing was changed.`, `${decider} 已拒绝，未作修改。`)
-        : t('This request ended without a decision. Nothing was changed.', '此请求未经决定即已结束，未作修改。')}</p>}
+        <button type="button" disabled={!!sending} onClick={() => void decide('approve')}>{sending === 'approve' ? t('tw_approval_approving') : t('teams_approval_approve')}</button>
+        <button type="button" disabled={!!sending} onClick={() => void decide('deny')}>{sending === 'deny' ? t('tw_approval_declining') : t('teams_approval_decline')}</button>
+      </div></> : <p className="teams-hint" role="status">{state === 'waiting' ? t('teams_approval_waiting_member_fmt', decider)
+        : state === 'approved' ? t('teams_approval_approved_by_fmt', decider)
+        : state === 'declined' ? t('teams_approval_declined_by_fmt', decider)
+        : t('teams_approval_closed')}</p>}
     {failure ? <p role="alert">{failure}</p> : null}
   </section>;
 }

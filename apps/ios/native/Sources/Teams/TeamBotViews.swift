@@ -1,5 +1,50 @@
 import SwiftUI
 
+extension TeamBotMemberText {
+    /// One item in the UI language: "Wait and resume: Supported".
+    static func text(_ item: Item) -> String {
+        let value: String
+        switch item.value {
+        case .key(let key): value = TeamsText.localized(key)
+        case .figure(let figure): value = figure
+        }
+        return TeamsText.localized(item.label) + ": " + value
+    }
+
+    /// Items on one line, "Wait and resume: Supported · Write operations: Not supported". The colon and the middle dot are punctuation, the
+    /// same in every language and on every client, so they stay in code; only the words are resources (docs/TEAMS-UI-POLISH.md U12).
+    static func line(_ items: [Item]) -> String { TeamsStreamLogic.joinedLine(items.map(text)) }
+}
+
+/// Member-safe service projection. Missing fields stay explicitly unverified.
+struct TeamBotMemberInfo: View {
+    @Environment(\.locale) private var locale
+    let bot: TeamBotCard
+    var unverified = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(LocalizedStringKey(TeamBotMemberText.availabilityKey(unverified ? .unverified : bot.memberAvailability)))
+                .accessibilityIdentifier("teams.bot.availability.\(bot.sharedBotId)")
+            Text(verbatim: TeamBotMemberText.line(TeamBotMemberText.capabilities(bot.capabilities)))
+            Text(verbatim: TeamBotMemberText.line([TeamBotMemberText.remaining(unverified ? nil : bot.memberRemaining)]))
+                .accessibilityIdentifier("teams.bot.remaining.\(bot.sharedBotId)")
+            if !unverified, let reset = TeamBotMemberText.reset(bot.memberQuotaReset) { Text(verbatim: TeamBotMemberText.line([reset])) }
+        }
+        .font(.caption).foregroundStyle(.secondary)
+    }
+}
+
+/// What a tap on one of the Bot's example requests does: it fills the draft and never sends (`teams_bot_examples_hint`, the words Desktop and
+/// Web use). Nothing when the Bot has no examples.
+struct TeamBotExamplesHint: View {
+    let bot: TeamBotCard
+
+    var body: some View {
+        if !bot.memberExamples.isEmpty { Text("teams_bot_examples_hint").font(.caption).foregroundStyle(.secondary) }
+    }
+}
+
 struct TeamBotCardView: View {
     let bot: TeamBotCard
     let ownerName: String
@@ -8,17 +53,19 @@ struct TeamBotCardView: View {
     /// The audience line (`teams_bot_use_all`, `teams_bot_use_listed`). A friendship has no audience to choose, so the Bots of a
     /// friend chat leave it out (docs/FRIENDS-CLIENTS.md D21).
     var showsAudience = true
-    /// The owner's way to stop it: a Team pauses a Bot (`teams_bot_pause`), a friendship stops sharing it (`friends_share_bot_stop`, D23).
-    var pauseTitle: LocalizedStringKey = "teams_bot_pause"
     let onMessage: () -> Void
-    let onPause: () -> Void
+    /// The maintainer's one way to end a Bot's availability, on Teams and Friends alike: "Stop sharing" (`friends_share_bot_stop`,
+    /// docs/TEAMS-UI-POLISH.md U1). The caller confirms it.
+    let onStopSharing: () -> Void
     /// Opens the list the Bot shares. Set only for a viewer the service lets read it.
     var onList: (() -> Void)? = nil
+    var onExample: ((String) -> Void)? = nil
+    var unverified = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-                AgentAvatar(agentID: bot.avatarId, size: 36)
+                AgentAvatar(agentID: bot.avatarId, size: 40)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(bot.name).font(.body.weight(.semibold))
                     Text("teams_bot_owner \(ownerName)").font(.caption).foregroundStyle(.secondary)
@@ -26,8 +73,7 @@ struct TeamBotCardView: View {
             }
             if !bot.description.isEmpty { Text(bot.description).font(.subheadline) }
             if (bot.state == "published") {
-                Label(LocalizedStringKey(bot.ready ? "remote_online" : "teams_bot_offline_queued"), systemImage: bot.ready ? "circle.fill" : "moon.zzz")
-                    .font(.caption).foregroundStyle(bot.ready ? Color.green : Color.secondary)
+                TeamBotMemberInfo(bot: bot, unverified: unverified)
                 if showsAudience {
                     Text(LocalizedStringKey(bot.usePolicy.mode == "all" ? "teams_bot_use_all" : "teams_bot_use_listed")).font(.caption).foregroundStyle(.secondary)
                 }
@@ -36,29 +82,52 @@ struct TeamBotCardView: View {
                 Text("teams_bot_disabled").font(.caption.weight(.semibold)).foregroundStyle(.orange)
                 Text("teams_bot_not_shared").font(.caption).foregroundStyle(.secondary)
             }
-            HStack(spacing: 10) {
-                if bot.selectable {
-                    Button("teams_bot_message", action: onMessage).buttonStyle(.borderedProminent)
-                }
-                if let onList {
-                    Button("teams_list_open", systemImage: "checklist", action: onList).buttonStyle(.bordered)
-                        .accessibilityIdentifier("teams.bot.list.\(bot.sharedBotId)")
-                }
-                if isOwner && (bot.state == "published") {
-                    Button(pauseTitle, role: .destructive, action: onPause).buttonStyle(.bordered)
+            if bot.selectable, let onExample {
+                TeamBotExamplesHint(bot: bot)
+                ForEach(bot.memberExamples, id: \.self) { example in
+                    Button { onExample(example) } label: {
+                        Label(example, systemImage: "text.bubble").font(.subheadline).minimumHitTarget(minWidth: 0, alignment: .leading)
+                    }
+                    .buttonStyle(.borderless).disabled(busy)
                 }
             }
-            .controlSize(.small)
+            // Three buttons at 44 pt do not fit side by side on a narrow phone or under a large text size: they stack then.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) { actions }
+                VStack(alignment: .leading, spacing: 0) { actions }
+            }
             .disabled(busy)
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.bot.\(bot.sharedBotId)")
     }
+
+    @ViewBuilder private var actions: some View {
+        if bot.selectable {
+            Button(action: onMessage) { Text("teams_bot_message").minimumHitTarget(minWidth: 0) }
+                .buttonStyle(.borderedProminent)
+        }
+        if let onList {
+            Button(action: onList) { Label("teams_list_open", systemImage: "checklist").minimumHitTarget(minWidth: 0) }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("teams.bot.list.\(bot.sharedBotId)")
+        }
+        if isOwner && (bot.state == "published") {
+            Button(role: .destructive, action: onStopSharing) { Text("friends_share_bot_stop").minimumHitTarget(minWidth: 0) }
+                .buttonStyle(.bordered)
+        }
+    }
 }
 
+/// What one Bot request looks like in a conversation (docs/TEAMS-UI-POLISH.md U4): the state as a glyph and a word, the Bot's name, one
+/// line of detail (the usage once the run has finished; before that what is going on or what to do) and the buttons it needs. The text
+/// block is one accessibility element, "Bot, state, detail"; the buttons stay reachable beside it.
 struct TeamTaskCard: View {
     @Environment(TeamsWorkspace.self) private var workspace
+    @Environment(\.locale) private var locale
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ScaledMetric(relativeTo: .footnote) private var glyphSide: CGFloat = 16
     let task: TeamTask
     let botName: String
     /// The signed-in member, and the Bot's maintainer when its card is known: they decide who may cancel.
@@ -71,69 +140,68 @@ struct TeamTaskCard: View {
     @State private var cancelling = false
     @State private var reviewing = false
 
+    private var run: TeamsBotText.RunState { TeamsBotText.runState(task.state) }
     private var canCancel: Bool { TeamTaskActions.canCancel(task, viewer: viewer, maintainer: maintainer) }
     private var canResolve: Bool { TeamOperationRules.canResolve(viewer: viewer, maintainer: maintainer) }
+    /// An outside action of unknown outcome: the maintainer confirms it where the review screen is.
+    private var canReview: Bool { task.state == "needs_reconciliation" && TeamOperationRules.canReview(task, viewer: viewer, maintainer: maintainer) }
+    /// The usage line is the detail once the run has finished: Completed, and Cancelled when the Bot had already used the model (a task
+    /// cancelled before any model call has nothing to report).
+    private var showsUsage: Bool { task.state == "completed" || (task.state == "cancelled" && task.usage != nil) }
     private var waitLine: String? {
         guard task.state == "waiting", let wait = task.wait else { return nil }
         let expires = TeamsBotText.expiryText(at: wait.expiresAt, now: Date().timeIntervalSince1970 * 1000)
         return wait.recipient == viewer ? String(localized: "teams_task_waiting_you \(expires)") : String(localized: "teams_task_waiting_member \(recipientName) \(expires)")
     }
+
+    /// The state's word: the table's, except while a cancellation is on its way and while a tool waits for an approval.
+    private var stateKey: String {
+        if task.cancelling { return "teams_task_cancelling" }
+        if task.state == "waiting", task.wait?.kind == "tool_approval" { return "teams_task_waiting_approval" }
+        return run.labelKey
+    }
+
+    /// The one line under the Bot's name. Waiting and Needs checking write their own, since they know the person: who the task waits
+    /// for, and why the outcome of an action outside the chat is unknown.
+    private func detailLine(_ words: TeamsBotText.UsageStrings) -> String? {
+        switch task.state {
+        case "waiting": waitLine
+        case "needs_reconciliation": TeamsText.localized(canResolve ? "teams_task_needs_checking_maintainer" : "teams_task_needs_checking_hint")
+        default: showsUsage ? TeamsBotText.usageLine(task.usage, strings: words) : run.detailKey.map(TeamsText.localized)
+        }
+    }
+
+    /// The text block keeps the identifier of the line it carries.
+    private var textIdentifier: String {
+        switch task.state {
+        case "waiting" where waitLine != nil: "teams.task.wait.\(task.taskId)"
+        case "needs_reconciliation": "teams.task.checking.\(task.taskId)"
+        default: showsUsage ? "teams.task.usage.\(task.taskId)" : "teams.task.state.\(task.taskId)"
+        }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(botName).font(.subheadline.weight(.semibold))
-            Button {
-                Task { await workspace.run { try await workspace.messaging?.refreshTask(task.taskId) } }
-            } label: {
-                Label(LocalizedStringKey(task.cancelling ? "teams_task_cancelling" : task.state == "waiting" && task.wait?.kind == "tool_approval" ? "teams_task_waiting_approval" : TeamsBotText.stateKey(task.state)), systemImage: "arrow.clockwise")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            .buttonStyle(.borderless)
-            if let waitLine {
-                Text(waitLine).font(.caption).foregroundStyle(.secondary)
-                    .accessibilityIdentifier("teams.task.wait.\(task.taskId)")
-            }
-            // An outside action of unknown outcome: the maintainer confirms it where the review screen is.
-            if task.state == "needs_reconciliation" {
-                Text(canResolve ? "teams_task_needs_checking_maintainer" : "teams_task_needs_checking_hint").font(.caption).foregroundStyle(.secondary)
-                    .accessibilityIdentifier("teams.task.checking.\(task.taskId)")
-                if TeamOperationRules.canReview(task, viewer: viewer, maintainer: maintainer) {
-                    Button(canResolve ? "teams_ops_review" : "teams_ops_view", systemImage: "checklist") { reviewing = true }
-                        .buttonStyle(.bordered).controlSize(.small)
-                        .accessibilityIdentifier("teams.task.review.\(task.taskId)")
+        let words = TeamsBotText.UsageStrings.current(locale: locale)
+        let state = TeamsText.localized(stateKey)
+        let detail = detailLine(words)
+        VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    glyph
+                    Text(verbatim: state).font(.footnote.weight(.semibold)).foregroundStyle(.primary)
+                }
+                Text(verbatim: botName).font(.subheadline.weight(.semibold))
+                if let detail {
+                    Text(verbatim: detail)
+                        .font(.footnote).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            // A task cancelled before any model call has nothing to report.
-            if !(task.state == "cancelled" && task.usage == nil) {
-                Text(TeamsBotText.usageLine(task.usage, strings: .current))
-                    .font(.caption).foregroundStyle(.secondary)
-                    .accessibilityIdentifier("teams.task.usage.\(task.taskId)")
-            }
-            if onReply != nil || canCancel {
-                HStack(spacing: 10) {
-                    if let onReply {
-                        Button("teams_message_reply", systemImage: "arrowshape.turn.up.left", action: onReply)
-                            .buttonStyle(.borderedProminent)
-                            .accessibilityIdentifier("teams.task.reply.\(task.taskId)")
-                    }
-                    if canCancel {
-                        Button("teams_task_cancel", role: .destructive) {
-                            guard !cancelling else { return }
-                            cancelling = true
-                            Task { await workspace.run { try await workspace.messaging?.cancelTask(task.taskId) }; cancelling = false }
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(cancelling)
-                        .accessibilityIdentifier("teams.task.cancel.\(task.taskId)")
-                    }
-                }
-                .controlSize(.small)
-            }
-            if let artifactId = task.artifactId {
-                Button("teams_artifact_open", systemImage: "doc.text") {
-                    Task { await workspace.openArtifact(artifactId) }
-                }
-                .buttonStyle(.borderless)
-            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text(verbatim: TeamsStreamLogic.spokenLine([botName, state, detail])))
+            .accessibilityValue(Text(verbatim: showsUsage ? (TeamsBotText.tokenSplit(task.usage, strings: words) ?? "") : ""))
+            .accessibilityIdentifier(textIdentifier)
+            if hasActions { actions }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.task.\(task.taskId)")
@@ -141,7 +209,87 @@ struct TeamTaskCard: View {
             TeamOperationsSheet(taskId: task.taskId, model: workspace.messaging, canResolve: canResolve, members: workspace.directory) { reviewing = false }
         }
     }
+
+    /// The state's glyph. It is decorative: the label next to it is the state. Processing is a spinner, and the static `ellipsis.circle`
+    /// under Reduce Motion (U10).
+    @ViewBuilder private var glyph: some View {
+        if run.spins && !reduceMotion {
+            ProgressView().controlSize(.mini).frame(width: glyphSide, height: glyphSide).accessibilityHidden(true)
+        } else {
+            Image(systemName: run.symbol)
+                .font(.footnote)
+                .foregroundStyle(tint)
+                .frame(width: glyphSide, height: glyphSide)
+                .accessibilityHidden(true)
+        }
+    }
+
+    private var tint: Color {
+        switch run.tone {
+        case .ok: .green
+        case .danger: .red
+        case .muted: .secondary
+        }
+    }
+
+    private var hasActions: Bool { run.active || onReply != nil || canCancel || canReview || task.artifactId != nil }
+
+    /// The first eight states of the table have at most one button: a task that is still going offers "Refresh status", a finished one
+    /// that has a document offers "Open document", the others say what to do in their detail. A waiting task adds Reply and Cancel task,
+    /// Needs checking adds Review. The buttons stack under a large text size.
+    private var actions: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) { buttons }
+            VStack(alignment: .leading, spacing: 0) { buttons }
+        }
+    }
+
+    @ViewBuilder private var buttons: some View {
+        if run.active {
+            Button {
+                Task { await workspace.run { try await workspace.messaging?.refreshTask(task.taskId) } }
+            } label: {
+                Label("teams_run_refresh", systemImage: "arrow.clockwise").font(.footnote).minimumHitTarget(minWidth: 0, alignment: .leading)
+            }
+            .buttonStyle(.borderless)
+        }
+        if let onReply {
+            Button(action: onReply) {
+                Label("teams_message_reply", systemImage: "arrowshape.turn.up.left").minimumHitTarget(minWidth: 0)
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("teams.task.reply.\(task.taskId)")
+        }
+        if canCancel {
+            Button(role: .destructive) {
+                guard !cancelling else { return }
+                cancelling = true
+                Task { await workspace.run { try await workspace.messaging?.cancelTask(task.taskId) }; cancelling = false }
+            } label: {
+                Text("teams_task_cancel").minimumHitTarget(minWidth: 0)
+            }
+            .buttonStyle(.bordered)
+            .disabled(cancelling)
+            .accessibilityIdentifier("teams.task.cancel.\(task.taskId)")
+        }
+        if canReview {
+            Button { reviewing = true } label: {
+                Label(LocalizedStringKey(canResolve ? "teams_ops_review" : "teams_ops_view"), systemImage: "checklist").minimumHitTarget(minWidth: 0)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("teams.task.review.\(task.taskId)")
+        }
+        if let artifactId = task.artifactId {
+            Button {
+                Task { await workspace.openArtifact(artifactId) }
+            } label: {
+                Label("teams_artifact_open", systemImage: "doc.text").font(.footnote).minimumHitTarget(minWidth: 0, alignment: .leading)
+            }
+            .buttonStyle(.borderless)
+        }
+    }
 }
+
 /// A Bot's request to change its list, under the message that carries it: each change in words, and Approve and Decline for the member the
 /// Bot works for while the task waits. Afterwards it says how the request ended. Nothing is saved to the list before an approval.
 struct TeamApprovalCard: View {
@@ -196,25 +344,31 @@ struct TeamApprovalCard: View {
                     .accessibilityIdentifier("teams.approval.status.\(waitId)")
             } else {
                 Text("teams_approval_hint").font(.caption).foregroundStyle(.secondary)
-                HStack(spacing: 10) {
-                    Button("teams_approval_approve") { decide(true) }
-                        .buttonStyle(.borderedProminent)
-                        .accessibilityIdentifier("teams.approval.approve.\(waitId)")
-                    Button("teams_approval_decline", role: .destructive) { decide(false) }
-                        .buttonStyle(.bordered)
-                        .accessibilityIdentifier("teams.approval.decline.\(waitId)")
+                // The two buttons stack under a large text size, as the buttons of the run card do.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) { decisionButtons }
+                    VStack(alignment: .leading, spacing: 0) { decisionButtons }
                 }
-                .controlSize(.small)
                 .disabled(sending)
             }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.approval.\(waitId)")
     }
+
+    @ViewBuilder private var decisionButtons: some View {
+        Button { decide(true) } label: { Text("teams_approval_approve").minimumHitTarget(minWidth: 0) }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("teams.approval.approve.\(waitId)")
+        Button(role: .destructive) { decide(false) } label: { Text("teams_approval_decline").minimumHitTarget(minWidth: 0) }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("teams.approval.decline.\(waitId)")
+    }
 }
+
 /// Artifact links come from Bot output, so only web links may leave the app.
 enum TeamArtifactLinkPolicy {
     static func allows(_ url: URL) -> Bool {

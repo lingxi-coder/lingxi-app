@@ -177,7 +177,7 @@ private struct FriendProfileSheet: View {
                 if let friend = friends.friend(uid) {
                     Section {
                         VStack(spacing: 8) {
-                            PersonAvatar(id: friend.uid, name: friend.displayName, size: 72)
+                            PersonAvatar(id: friend.uid, name: friend.displayName, size: 56)
                             Text(verbatim: friend.displayName).font(.title2.weight(.semibold)).multilineTextAlignment(.center)
                             if let handle = friend.handle { Text(verbatim: "@" + handle).foregroundStyle(.secondary) }
                             if friend.sinceMs > 0 {

@@ -134,6 +134,14 @@ class TeamsStreamLogicTest {
         assertEquals("8:05 AM", TeamsStreamLogic.formatClock(1793606700000L, utc, Locale.US).replace(' ', ' '))
     }
 
+    @Test fun anInviteExpiryIsAnInstantOrNothing() {
+        assertEquals(1795089600000L, TeamsStreamLogic.parseInstantMs("2026-11-19T12:00:00.000Z"))
+        assertEquals(1795089600000L, TeamsStreamLogic.parseInstantMs("2026-11-19T12:00:00Z"))
+        assertNull(TeamsStreamLogic.parseInstantMs("next Thursday"))
+        assertNull(TeamsStreamLogic.parseInstantMs(""))
+        assertNull(TeamsStreamLogic.parseInstantMs(null))
+    }
+
     @Test fun aStreamMessageTakesTheBotKeyOnlyFromBotAuthors() {
         val bot = TeamMessage("m", 1, "u5", "shared_bot", "hi", 1, "c", false, null, null, sharedBotId = "sharedbot_k", createdAt = "2026-11-02T08:00:00Z")
         val user = bot.copy(authorKind = "user", authorUid = "u2")

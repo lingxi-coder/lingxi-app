@@ -25,7 +25,16 @@ const click = selector => run(`document.querySelector(${JSON.stringify(selector)
 const rail = name => `.desktop-nav-rail [aria-label="${name}"]`;
 const sidebar = 'nav[aria-label="Bots"]';
 const botRow = name => `${sidebar} button[title="${name}"]`;
-const marked = async () => run(`Array.from(document.querySelectorAll('.desktop-nav-rail button[data-active]')).map(button => button.getAttribute('aria-label'))`);
+const railButtons = attribute => run(`Array.from(document.querySelectorAll('.desktop-nav-rail button[${attribute}]')).map(button => button.getAttribute('aria-label'))`);
+// What the rail marks for the eye (data-active) is what it marks for assistive technology (aria-current), at every step that looks.
+const marked = async () => {
+  const active = await railButtons('data-active');
+  assert.deepEqual(await railButtons('aria-current="page"'), active, 'aria-current is on the buttons that are marked');
+  return active;
+};
+const press = name => run(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(name)}, bubbles: true, cancelable: true }))`);
+const focused = () => run(`document.activeElement?.dataset?.row ?? document.activeElement?.textContent`);
+const rows = () => run(`Array.from(document.querySelectorAll('${'nav[aria-label="Bots"]'} [data-row]')).map(row => [row.dataset.row, row.tabIndex])`);
 const shown = selector => run(`document.querySelector(${JSON.stringify(selector)})?.getClientRects().length > 0`);
 const calls = () => run('window.fixtureCalls');
 const menuAction = action => run(`window.applicationMenuAction(${JSON.stringify(action)})`);
@@ -53,6 +62,7 @@ try {
   assert.deepEqual(await run(`Array.from(document.querySelectorAll('${sidebar} button[aria-expanded]:not([aria-haspopup])')).map(button => button.title)`), ['Beta', 'Alpha']);
   assert.equal(await run(`Boolean(document.querySelector('.sidebar-new-chat'))`), false, 'the projects and their actions are Home\'s');
   assert.deepEqual((await calls()).filter(call => call[0] === 'updateSettings').at(-1), ['updateSettings', { sidebar: { mode: 'bots' } }]);
+  assert.deepEqual(await rows(), [['bot/beta', 0], ['bot/alpha', -1]], 'the Bots are rows of one list, and Tab reaches the first of them');
   result.botsMode = true;
 
   // Opening a Bot lists its chats newest first, five to begin with; which Bots are open is saved.
@@ -66,7 +76,28 @@ try {
   await wait(`document.querySelectorAll('${sidebar} [data-session-id]').length === 7`);
   await run(`Array.from(document.querySelectorAll('${sidebar} button')).find(button => /Show less/.test(button.textContent)).click()`);
   await wait(`document.querySelectorAll('${sidebar} [data-session-id]').length === 5`);
+  assert.deepEqual(await rows(), [['bot/beta', 0], ['bot/alpha', -1], ['chat/alpha/a-1', -1], ['chat/alpha/a-2', -1], ['chat/alpha/a-3', -1], ['chat/alpha/a-4', -1], ['chat/alpha/a-5', -1]],
+    'a Bot\'s chats follow it in the list');
+  assert.deepEqual(await run(`Array.from(document.querySelectorAll('${sidebar} *')).filter(element => element.getClientRects().length > 0 && Array.from(element.childNodes).some(node => node.nodeType === 3 && node.textContent.trim())).map(element => [element.className || element.tagName, getComputedStyle(element).fontSize]).filter(([, size]) => parseFloat(size) < 11)`),
+    [], 'no text of the sidebar is below 11px');
   result.chatsListed = true;
+
+  // The arrow keys move the focus down and up the list, Home and End go to its ends, and the stop for Tab goes where the focus does.
+  await run(`document.querySelector('${botRow('Beta')}').focus()`);
+  assert.equal(await focused(), 'bot/beta');
+  await press('ArrowDown'); assert.equal(await focused(), 'bot/alpha');
+  await press('ArrowDown'); assert.equal(await focused(), 'chat/alpha/a-1');
+  await press('ArrowDown'); assert.equal(await focused(), 'chat/alpha/a-2');
+  assert.deepEqual((await rows()).filter(([, tabIndex]) => tabIndex === 0), [['chat/alpha/a-2', 0]], 'one stop for Tab, where the focus is');
+  await press('End'); assert.equal(await focused(), 'chat/alpha/a-5');
+  await press('ArrowDown'); assert.equal(await focused(), 'chat/alpha/a-5', 'the list does not go round');
+  await press('ArrowUp'); assert.equal(await focused(), 'chat/alpha/a-4');
+  await press('Home'); assert.equal(await focused(), 'bot/beta');
+  await press('ArrowUp'); assert.equal(await focused(), 'bot/beta');
+  assert.deepEqual((await rows()).filter(([, tabIndex]) => tabIndex === 0), [['bot/beta', 0]]);
+  // Other keys do not move the focus: a letter leaves it where it is.
+  await press('a'); assert.equal(await focused(), 'bot/beta');
+  result.rowKeys = true;
 
   // A chat opens in the chat view, the sidebar stays in Bots mode, and the chat is the marked row.
   await click(`${sidebar} [data-session-id="a-2"]`);
@@ -121,7 +152,32 @@ try {
   assert.deepEqual(await marked(), ['Bots']);
   assert.deepEqual(await run(`Array.from(document.querySelectorAll('.bots-tabs button')).map(button => button.textContent)`),
     ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions', 'Package & Market'], 'no Chats tab: the chats are in the sidebar');
-  assert.equal(await run(`document.querySelector('.bots-tabs button[aria-current="page"]').textContent`), 'General');
+  // The sections are a tablist: one tab in the tab order, the selected one, which the panel is labelled by; the arrow keys, Home and End move to a tab and select it.
+  const tabs = '.bots-tabs[role="tablist"] [role="tab"]';
+  const selectedTab = () => run(`document.querySelector('${tabs}[aria-selected="true"]')?.textContent`);
+  assert.equal(await run(`document.querySelectorAll('${tabs}').length`), 9);
+  assert.equal(await selectedTab(), 'General');
+  assert.equal(await run(`document.querySelectorAll('.bots-tabs button:not([role="tab"])').length`), 0, 'every button of the strip is a tab');
+  assert.deepEqual(await run(`Array.from(document.querySelectorAll('${tabs}')).filter(tab => tab.tabIndex === 0).map(tab => tab.textContent)`), ['General'], 'only the selected tab is reached by Tab');
+  assert.equal(await run(`(() => { const tab = document.querySelector('${tabs}[aria-selected="true"]'); const panel = document.querySelector('[role="tabpanel"]'); return tab.getAttribute('aria-controls') === panel.id && panel.getAttribute('aria-labelledby') === tab.id; })()`), true, 'the tab and its panel name each other');
+  assert.equal(await run(`document.querySelectorAll('.bots-tabs [aria-current]').length`), 0, 'selected is aria-selected here, not aria-current');
+  await run(`document.querySelector('${tabs}[aria-selected="true"]').focus()`);
+  await press('ArrowRight');
+  await wait(`document.activeElement?.textContent === 'Persona' && document.activeElement.getAttribute('aria-selected') === 'true'`);
+  assert.equal(await selectedTab(), 'Persona', 'moving to a tab selects it');
+  assert.equal(await run(`document.querySelector('[role="tabpanel"]').getAttribute('aria-labelledby') === document.activeElement.id`), true);
+  await press('End');
+  await wait(`document.activeElement?.textContent === 'Package & Market' && document.activeElement.getAttribute('aria-selected') === 'true'`);
+  await press('ArrowRight');
+  await wait(`document.activeElement?.textContent === 'Routines' && document.activeElement.getAttribute('aria-selected') === 'true'`);
+  await press('ArrowLeft');
+  await wait(`document.activeElement?.textContent === 'Package & Market' && document.activeElement.getAttribute('aria-selected') === 'true'`);
+  await press('Home');
+  await wait(`document.activeElement?.textContent === 'Routines' && document.activeElement.getAttribute('aria-selected') === 'true'`);
+  assert.deepEqual(await run(`Array.from(document.querySelectorAll('${tabs}')).filter(tab => tab.tabIndex === 0).map(tab => tab.textContent)`), ['Routines'], 'the tab in the tab order goes with the selection');
+  await press('ArrowDown'); assert.equal(await selectedTab(), 'Routines', 'the keys of a column are not the keys of a strip');
+  await run(`Array.from(document.querySelectorAll('${tabs}')).find(tab => tab.textContent === 'General').click()`);
+  await wait(`document.querySelector('${tabs}[aria-selected="true"]')?.textContent === 'General'`);
   result.botPageFromTitle = true;
 
   // A right click on a Bot: its menu, the arrow keys, Escape and where the focus goes back to.

@@ -3,6 +3,7 @@ import type { BotUi, BotsApi } from '../../shared/bots';
 import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
 import { useT } from '../theme/ThemeContext';
+import { controlBorder } from '../theme/teamsTheme';
 import { botDraftProblems, createBot, emptyBotDraft, hasBotDraftProblems, sortBots, type BotDraft, type BotDraftProblems } from '../bridge/botForm';
 import { LoginItemController } from '../bridge/botLoginItem';
 import { botActivity, botRuntimes, relativeActivity, type BotActivity } from '../bridge/botSession';
@@ -51,7 +52,8 @@ export function Bots({ visible, bots, api, bridge, onOpenChat, onNewRoutine, onO
   const models: ModelChoices = { references: bridge.desktop.models, details: bridge.desktop.modelDetails };
   const style = {
     '--bots-background': t.stageBg, '--bots-text': t.text, '--bots-muted': t.text3, '--bots-surface': t.surface,
-    '--bots-surface-hover': t.surfaceHover, '--bots-border': t.border, '--bots-accent': t.accent, '--bots-accent-bg': t.accentBg,
+    // Outlines of controls are 3:1 against the page (the hairline gives 1.2:1); the hairline is for dividers and for frames that are not controls.
+    '--bots-surface-hover': t.surfaceHover, '--bots-border': controlBorder(t), '--bots-line': t.border, '--bots-accent': t.accent, '--bots-accent-bg': t.accentBg,
     '--bots-error': t.danger, '--bots-ok': t.ok, '--bots-warn': t.warn,
   } as CSSProperties;
 

@@ -15,7 +15,7 @@ const { TeamSidebar } = loadTeamsModule<typeof import('../../../packages/teams/T
 // ── Fixture ──
 
 const at = (minute: number) => new Date(2026, 10, 2, 11, minute).toISOString();
-async function open(context: TestContext) {
+async function open(context: TestContext, setup: (fake: FakeTeams) => void = () => {}) {
   withDom(context);
   const fake = new FakeTeams();
   const bot = botCard();
@@ -31,6 +31,7 @@ async function open(context: TestContext) {
     message(2, { text: 'Mine', author: { kind: 'user', uid: 'alice' }, createdAt: at(2) }),
     message(3, { text: 'Three', createdAt: at(3) }),
   ]);
+  setup(fake);
   const workspace = new TeamsWorkspace(fake.api, uid, { storage: memoryStorage, environment: new EventTarget(), refreshDelay: 5 });
   context.after(() => workspace.close());
   const snapshot = (): TeamsSnapshot => workspace.getSnapshot();
@@ -39,7 +40,7 @@ async function open(context: TestContext) {
 }
 
 
-const conversationView = (workspace: TeamsWorkspace, more: Record<string, unknown> = {}) => (snapshot: TeamsSnapshot) => createElement(TeamConversationView, { workspace, snapshot, zh: false, now: new Date(2026, 10, 2, 12).getTime(), ...more } as never);
+const conversationView = (workspace: TeamsWorkspace, more: Record<string, unknown> = {}) => (snapshot: TeamsSnapshot) => createElement(TeamConversationView, { workspace, snapshot, locale: 'en', now: new Date(2026, 10, 2, 12).getTime(), ...more } as never);
 const mutations = (fake: FakeTeams): MessageMutation[] => fake.commands.filter((command): command is MessageMutation => command.action === 'mutate');
 const commandsOf = (fake: FakeTeams, action: MessageCommand['action']) => fake.commands.filter(command => command.action === action);
 
@@ -73,7 +74,7 @@ scenario('composer: @ offers the Bots of the conversation, only a chosen Bot is 
   assert.equal(page.byClass('tw-mentions').length, 0);
   await page.type(box(), 'hey @Fix', 8);
   const options = page.find(node => node.props.role === 'option');
-  assert.deepEqual(options.map(textOf), ['FBFixture BotOnline'], 'the usable Bot of this channel matches the query (initials, name, presence)');
+  assert.deepEqual(options.map(textOf), ['FBFixture BotStatus unverified'], 'a missing availability projection is not presented as online');
   assert.equal(box().props['aria-activedescendant'], options[0].props.id);
   assert.equal(await page.key(box(), 'Escape'), true, 'Escape closes the list'); assert.equal(page.byClass('tw-mentions').length, 0);
   await page.type(box(), 'hey @Fi', 7); assert.equal(page.byClass('tw-mentions').length, 1, 'typing again reopens it');
@@ -157,7 +158,7 @@ scenario('marking read goes to the server and clears the unread divider and the 
 scenario('sidebar: choosing a row opens it, the team menu switches teams, the row menu marks read', async context => {
   const { fake, workspace, snapshot } = await open(context);
   const chosen: string[] = [];
-  const page = await mount(workspace, snapshot => createElement(TeamSidebar, { workspace, snapshot, zh: false, now: new Date(2026, 10, 2, 12).getTime(), onConversationSelected: (id: string) => chosen.push(id) } as never)); context.after(() => page.unmount());
+  const page = await mount(workspace, snapshot => createElement(TeamSidebar, { workspace, snapshot, locale: 'en', now: new Date(2026, 10, 2, 12).getTime(), onConversationSelected: (id: string) => chosen.push(id) } as never)); context.after(() => page.unmount());
   const row = (id: string) => page.find(node => node.props['data-row'] === id)[0];
   await page.click(row('dm-bob'));
   assert.equal(snapshot().selectedConversationId, 'dm-bob'); assert.deepEqual(chosen, ['dm-bob']);
@@ -183,7 +184,7 @@ scenario('sidebar: choosing a row opens it, the team menu switches teams, the ro
 scenario('sidebar: the team menu is the way into the details panel, and the sidebar has no button of its own for it', async context => {
   const { workspace } = await open(context);
   const opened: Array<string | undefined> = [];
-  const page = await mount(workspace, snapshot => createElement(TeamSidebar, { workspace, snapshot, zh: false, onOpenSettings: (tab?: string) => { opened.push(tab); } } as never)); context.after(() => page.unmount());
+  const page = await mount(workspace, snapshot => createElement(TeamSidebar, { workspace, snapshot, locale: 'en', onOpenSettings: (tab?: string) => { opened.push(tab); } } as never)); context.after(() => page.unmount());
   assert.equal(page.byLabel('Team members & settings').length, 0, 'the conversation header has the panel\'s button; the sidebar does not repeat it');
   await page.click(page.oneByClass('tw-switcher'));
   const entry = page.find(node => node.props.role === 'menuitem' && textOf(node) === 'Team members & settings');
@@ -195,7 +196,7 @@ scenario('sidebar: the team menu is the way into the details panel, and the side
 
 scenario('sidebar: arrow keys move between rows; the + buttons open dialogs that create things', async context => {
   const { fake, workspace, snapshot } = await open(context);
-  const page = await mount(workspace, snapshot => createElement(TeamSidebar, { workspace, snapshot, zh: false } as never)); context.after(() => page.unmount());
+  const page = await mount(workspace, snapshot => createElement(TeamSidebar, { workspace, snapshot, locale: 'en' } as never)); context.after(() => page.unmount());
   // Keyboard movement uses the DOM; give the container the rows to move between.
   const focused: string[] = [];
   const rows = ['chan-general', 'dm-bob'].map(id => ({ id, focus: () => focused.push(id), matches: () => true, props: {} }));
@@ -239,7 +240,7 @@ scenario('sidebar: an invitation link opens the join dialog without joining; a b
   const { fake, workspace, snapshot } = await open(context);
   let handled = 0;
   const code = 'B'.repeat(32);
-  const page = await mount(workspace, snapshot => createElement(TeamSidebar, { workspace, snapshot, zh: false, initialInvite: code, onInviteHandled: () => { handled++; } } as never)); context.after(() => page.unmount());
+  const page = await mount(workspace, snapshot => createElement(TeamSidebar, { workspace, snapshot, locale: 'en', initialInvite: code, onInviteHandled: () => { handled++; } } as never)); context.after(() => page.unmount());
   assert.equal(handled, 1); assert.equal(fake.teamCommands.length, 0, 'opening a link never joins');
   const dialog = page.find(node => node.type === 'dialog')[0]; assert.match(textOf(dialog), /Join a team/);
   const field = page.find(node => node.type === 'input')[0]; assert.equal(field.props.value, code);
@@ -264,7 +265,7 @@ scenario('drawer: tabs follow the arrow keys, Escape closes, the handle resizes,
   await until(() => !!snapshot().detail, 'detail');
   const events: string[] = [];
   const widths: number[] = [];
-  const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer, { workspace, snapshot, zh: false, onClose: () => events.push('close'), onTabChange: (tab: string) => events.push(`tab:${tab}`), onWidthChange: (width: number) => widths.push(width) } as never)); context.after(() => page.unmount());
+  const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer, { workspace, snapshot, locale: 'en', onClose: () => events.push('close'), onTabChange: (tab: string) => events.push(`tab:${tab}`), onWidthChange: (width: number) => widths.push(width) } as never)); context.after(() => page.unmount());
   const aside = () => page.find(node => node.type === 'aside')[0];
   const tablist = page.oneByClass('tw-tabs');
   assert.deepEqual(page.find(node => node.props.role === 'tab').map(node => node.props['aria-selected']), [true, false, false]);
@@ -284,12 +285,13 @@ scenario('drawer: tabs follow the arrow keys, Escape closes, the handle resizes,
   await page.key(aside(), 'Escape'); assert.deepEqual(events.slice(-1), ['close']);
   events.length = 0;
   await page.click(page.button('Delete team'));
-  const dialog = page.find(node => node.type === 'dialog')[0]; assert.equal(dialog.props.role, 'alertdialog'); assert.match(textOf(dialog), /Delete Acme for everyone\?/);
+  const dialog = page.find(node => node.type === 'dialog')[0]; assert.equal(dialog.props.role, 'alertdialog'); assert.match(textOf(dialog), /Delete “Acme”\?/); assert.match(textOf(dialog), /Everyone loses access to its conversations and shared Bots\. This can’t be undone\./);
+  assert.ok(dialog.props['aria-describedby'], 'the consequence is what the dialog is described by');
   await page.key(aside(), 'Escape'); assert.deepEqual(events, [], 'Escape belongs to the confirmation');
   assert.equal(fake.teamCommands.length, 0, 'nothing happens until it is confirmed');
   await page.click(page.button('Cancel')); assert.equal(page.find(node => node.type === 'dialog').length, 0);
   await page.click(page.button('Delete team'));
-  await page.click(page.find(node => node.type === 'dialog')[0].findAll((node: any) => node.type === 'button' && textOf(node) === 'Delete team')[0]);
+  await page.click(page.find(node => node.type === 'dialog')[0].findAll((node: any) => node.type === 'button' && textOf(node) === 'Delete')[0]);
   await until(() => fake.teamCommands.length === 1, 'the delete');
   assert.deepEqual(fake.teamCommands[0], { action: 'delete', teamId: 'team-aaaa' }); assert.deepEqual(events, ['close'], 'the drawer was about the team that is gone');
 });
@@ -297,7 +299,7 @@ scenario('drawer: tabs follow the arrow keys, Escape closes, the handle resizes,
 scenario('drawer: the owner gives the team to a member after reading what does and does not change (M3-3)', async context => {
   const { fake, workspace, snapshot } = await open(context);
   await until(() => !!snapshot().detail, 'detail');
-  const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer, { workspace, snapshot, zh: false, onClose() {} } as never)); context.after(() => page.unmount());
+  const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer, { workspace, snapshot, locale: 'en', onClose() {} } as never)); context.after(() => page.unmount());
   const offers = page.find(node => node.type === 'button' && textOf(node) === 'Make owner');
   assert.equal(offers.length, snapshot().detail!.members.length - 1, 'every other member can be given the team, and the owner cannot give it to themselves');
   await page.click(offers[0]);
@@ -313,15 +315,18 @@ scenario('drawer: the owner gives the team to a member after reading what does a
 scenario('drawer: members can be promoted and removed after a confirmation, and invitations are created and revoked', async context => {
   const { fake, workspace, snapshot } = await open(context);
   await until(() => !!snapshot().detail, 'detail');
-  const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer, { workspace, snapshot, zh: false, onClose() {} } as never)); context.after(() => page.unmount());
+  const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer, { workspace, snapshot, locale: 'en', onClose() {} } as never)); context.after(() => page.unmount());
   await page.click(page.find(node => node.type === 'button' && textOf(node) === 'Make admin')[0]);
-  assert.match(textOf(page.find(node => node.type === 'dialog')[0]), /Change Bob’s role\?|Change Owner’s role\?/);
-  await page.click(page.button('Change role'));
+  const inDialog = (name: string) => page.find(node => node.type === 'dialog')[0].findAll((node: any) => node.type === 'button' && textOf(node) === name)[0];
+  assert.match(textOf(page.find(node => node.type === 'dialog')[0]), /Make (Bob|Owner) an admin\?/); assert.match(textOf(page.find(node => node.type === 'dialog')[0]), /Admins can invite people and remove members\./);
+  assert.match(inDialog('Make admin').props.className, /tw-primary/, 'a change of role is not drawn as destruction');
+  await page.click(inDialog('Make admin'));
   await until(() => fake.teamCommands.length === 1, 'the role command');
   assert.equal(fake.teamCommands[0]!.action, 'role'); assert.equal((fake.teamCommands[0] as { role: string }).role, 'admin');
   await page.click(page.find(node => node.type === 'button' && textOf(node) === 'Remove' && classes(node).includes('tw-danger-btn'))[0]);
-  assert.match(textOf(page.find(node => node.type === 'dialog')[0]), /Remove (Bob|Owner)\?/);
-  await page.click(page.find(node => node.type === 'dialog')[0].findAll((node: any) => node.type === 'button' && textOf(node) === 'Remove')[0]);
+  assert.match(textOf(page.find(node => node.type === 'dialog')[0]), /Remove (Bob|Owner) from the team\?/); assert.match(textOf(page.find(node => node.type === 'dialog')[0]), /They lose access to its conversations and shared Bots\. They can rejoin with a new invite\./);
+  assert.match(inDialog('Remove').props.className, /tw-danger-btn/, 'removing is destructive');
+  await page.click(inDialog('Remove'));
   await until(() => fake.teamCommands.length === 2, 'the remove command'); assert.equal(fake.teamCommands[1]!.action, 'remove');
   fake.execute = async command => { fake.teamCommands.push(command); return command.action === 'invite' ? { code: 'C'.repeat(32) } : {}; };
   await page.click(page.find(node => node.props.role === 'tab' && textOf(node) === 'Invites')[0]);
@@ -333,6 +338,27 @@ scenario('drawer: members can be promoted and removed after a confirmation, and 
   assert.deepEqual([invite.role, invite.maxUses, invite.ttlSeconds], ['member', 5, 86400]);
   await until(() => !!snapshot().inviteLink, 'the link');
   assert.equal(page.find(node => node.type === 'input' && node.props.readOnly === true)[0].props.value, `https://lingxios.net/open/team/join?code=${'C'.repeat(32)}`);
+});
+
+scenario('drawer: revoking an invite asks first, and a confirmation can be cancelled while its change is still in flight', async context => {
+  const invite = { id: 'invite-1', role: 'member' as const, expiresAt: new Date(2026, 11, 2).toISOString(), uses: 0, maxUses: 5, revoked: false };
+  const { fake, workspace, snapshot } = await open(context, setup => { const base = setup.detail; setup.detail = async id => { const value = await base(id); return id === 'team-aaaa' ? { ...value, invites: [invite] } : value; }; });
+  await until(() => snapshot().detail?.invites.length === 1, 'the invite');
+  const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer, { workspace, snapshot, locale: 'en', onClose() {} } as never)); context.after(() => page.unmount());
+  const dialog = () => page.find(node => node.type === 'dialog')[0], inDialog = (name: string) => dialog().findAll((node: any) => node.type === 'button' && textOf(node) === name)[0];
+  await page.click(page.find(node => node.props.role === 'tab' && textOf(node) === 'Invites')[0]);
+  await page.click(page.find(node => node.type === 'button' && textOf(node) === 'Revoke')[0]);
+  assert.equal(dialog().props.role, 'alertdialog'); assert.match(textOf(dialog()), /Revoke this invite\?/); assert.match(textOf(dialog()), /The link stops working right away\. People who already joined stay in the team\./);
+  assert.equal(fake.teamCommands.length, 0, 'asking is not doing');
+  assert.equal(inDialog('Cancel').props['data-autofocus'], true, 'the safe choice has the focus');
+  // The change takes its time: the confirm waits, Cancel does not.
+  const release: (() => void)[] = [];
+  fake.execute = command => new Promise(resolve => { fake.teamCommands.push(command); release.push(() => resolve({})); });
+  await page.click(inDialog('Revoke'));
+  await until(() => fake.teamCommands.length === 1, 'the revoke'); assert.equal(fake.teamCommands[0]!.action, 'revokeInvite');
+  assert.equal(inDialog('Revoke').props.disabled, true, 'it is not sent twice'); assert.notEqual(inDialog('Cancel').props.disabled, true, 'but the person is not held in the dialog');
+  await page.click(inDialog('Cancel')); assert.equal(page.find(node => node.type === 'dialog').length, 0);
+  await page.during(() => { release.forEach(done => done()); });
 });
 
 scenario('the conversation view toggles the details drawer through its header button', async context => {

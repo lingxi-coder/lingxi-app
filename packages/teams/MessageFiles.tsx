@@ -4,6 +4,7 @@ import { messageErrorText } from './errors.js';
 import type { ExecutionScope } from './execution.js';
 import type { MessageApi } from './messages.js';
 import { Dialog, Icon } from './ui';
+import { useTeamsText } from './i18n.js';
 
 type Api = Pick<MessageApi, 'messages'>;
 /** Pictures up to this size are shown without being asked for; a larger one waits for a click. */
@@ -34,17 +35,17 @@ export function saveFile(file: MessageAttachment, bytes: Uint8Array): void {
 }
 
 /** The files of an unsent message: what each is, how far its upload is, and a way to take it out again. */
-export function DraftFiles({ files, zh, onRemove }: { files: readonly DraftFile[]; zh: boolean; onRemove(uploadId: string): void }): ReactElement | null {
-  const t = (en: string, cn: string) => zh ? cn : en, locale = zh ? 'zh-CN' : 'en-US';
+export function DraftFiles({ files, locale, onRemove }: { files: readonly DraftFile[]; locale: string; onRemove(uploadId: string): void }): ReactElement | null {
+  const t = useTeamsText(locale);
   if (!files.length) return null;
-  return <ul className="tw-files tw-draft-files" aria-label={t('Files to send', '待发送的文件')}>
+  return <ul className="tw-files tw-draft-files" aria-label={t('tw_file_to_send')}>
     {files.map(file => <li key={file.uploadId} className="tw-file" data-state={file.state}>
       <Icon name={isImage(file) ? 'image' : 'file'} />
       <span className="tw-file-text"><b>{file.name}</b>
-        <small role="status">{file.state === 'failed' ? messageErrorText(file.error ?? 'UPLOAD_FAILED', zh)
-          : file.state === 'uploading' ? t(`Uploading… ${Math.floor(file.sent / file.byteLength * 100)}%`, `正在上传… ${Math.floor(file.sent / file.byteLength * 100)}%`)
+        <small role="status">{file.state === 'failed' ? messageErrorText(file.error ?? 'UPLOAD_FAILED', locale)
+          : file.state === 'uploading' ? t('tw_file_uploading_fmt', Math.floor(file.sent / file.byteLength * 100))
           : fileSize(file.byteLength, locale)}</small></span>
-      <button type="button" className="tw-icon-btn" aria-label={t(`Remove ${file.name}`, `移除 ${file.name}`)} onClick={() => onRemove(file.uploadId)}><Icon name="x" size={12} /></button>
+      <button type="button" className="tw-icon-btn" aria-label={t('teams_file_remove_fmt', file.name)} onClick={() => onRemove(file.uploadId)}><Icon name="x" size={12} /></button>
     </li>)}
   </ul>;
 }
@@ -53,18 +54,19 @@ export function DraftFiles({ files, zh, onRemove }: { files: readonly DraftFile[
  * The files a message carries. A picture is shown in place; any file can be saved; plain text can be read here. Every look at a
  * file asks the service, which answers only while the viewer reads the conversation. The sender can take a file back.
  */
-export function MessageFiles({ api, scope, files, zh, save = saveFile, onRevoke }: {
-  api: Api; scope: ExecutionScope; files: readonly MessageAttachment[]; zh: boolean;
+export function MessageFiles({ api, scope, files, locale, save = saveFile, onRevoke }: {
+  api: Api; scope: ExecutionScope; files: readonly MessageAttachment[]; locale: string;
   /** Test seam: where a saved file goes. */ save?(file: MessageAttachment, bytes: Uint8Array): void;
   /** Present for the sender while they may still change the conversation. */ onRevoke?(file: MessageAttachment): void;
 }): ReactElement {
-  return <ul className="tw-files" aria-label={zh ? '文件' : 'Files'}>
-    {files.map(file => <MessageFile key={file.attachmentId} api={api} scope={scope} file={file} zh={zh} save={save} onRevoke={onRevoke} />)}
+  const t = useTeamsText(locale);
+  return <ul className="tw-files" aria-label={t('remote_files')}>
+    {files.map(file => <MessageFile key={file.attachmentId} api={api} scope={scope} file={file} locale={locale} save={save} onRevoke={onRevoke} />)}
   </ul>;
 }
 
-function MessageFile({ api, scope, file, zh, save, onRevoke }: { api: Api; scope: ExecutionScope; file: MessageAttachment; zh: boolean; save(file: MessageAttachment, bytes: Uint8Array): void; onRevoke?(file: MessageAttachment): void }): ReactElement {
-  const t = (en: string, cn: string) => zh ? cn : en, locale = zh ? 'zh-CN' : 'en-US';
+function MessageFile({ api, scope, file, locale, save, onRevoke }: { api: Api; scope: ExecutionScope; file: MessageAttachment; locale: string; save(file: MessageAttachment, bytes: Uint8Array): void; onRevoke?(file: MessageAttachment): void }): ReactElement {
+  const t = useTeamsText(locale);
   const picture = isImage(file) && !file.revoked;
   const [url, setUrl] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState(''), [open, setOpen] = useState(false), [text, setText] = useState<string>();
   const [wanted, setWanted] = useState(picture && file.byteLength <= AUTO_PREVIEW_BYTES);
@@ -87,22 +89,22 @@ function MessageFile({ api, scope, file, zh, save, onRevoke }: { api: Api; scope
   }, [wanted, picture, file.attachmentId, scope.teamId, scope.generation]);
   useEffect(() => { if (file.revoked) forgetAttachment(scope, file); }, [file, scope]);
 
-  if (file.revoked) return <li className="tw-file" data-state="revoked"><Icon name="file" /><span className="tw-file-text"><b>{file.name}</b><small>{t('Taken back by its sender', '已被发送者收回')}</small></span></li>;
+  if (file.revoked) return <li className="tw-file" data-state="revoked"><Icon name="file" /><span className="tw-file-text"><b>{file.name}</b><small>{t('teams_file_taken_back')}</small></span></li>;
   const size = fileSize(file.byteLength, locale);
   const actions = <>
-    {file.mime === 'text/plain' ? <button type="button" disabled={busy} onClick={() => void read(bytes => { setText(new TextDecoder().decode(bytes.subarray(0, 256 * 1024))); setOpen(true); })}>{t('Open', '打开')}</button> : null}
-    <button type="button" className="tw-icon-btn" disabled={busy} aria-label={t(`Save ${file.name}`, `保存 ${file.name}`)} title={t('Save', '保存')} onClick={() => void read(bytes => save(file, bytes))}><Icon name="download" /></button>
-    {onRevoke ? <button type="button" className="tw-icon-btn tw-danger" aria-label={t(`Take back ${file.name}`, `收回 ${file.name}`)} title={t('Take back', '收回')} onClick={() => onRevoke(file)}><Icon name="trash" /></button> : null}
+    {file.mime === 'text/plain' ? <button type="button" disabled={busy} onClick={() => void read(bytes => { setText(new TextDecoder().decode(bytes.subarray(0, 256 * 1024))); setOpen(true); })}>{t('common_open')}</button> : null}
+    <button type="button" className="tw-icon-btn" disabled={busy} aria-label={t('tw_file_save_fmt', file.name)} title={t('common_save')} onClick={() => void read(bytes => save(file, bytes))}><Icon name="download" /></button>
+    {onRevoke ? <button type="button" className="tw-icon-btn tw-danger" aria-label={t('tw_file_take_back_fmt', file.name)} title={t('tw_handover_take_back')} onClick={() => onRevoke(file)}><Icon name="trash" /></button> : null}
   </>;
   return <li className="tw-file" data-kind={picture ? 'image' : 'file'}>
-    {picture && url ? <button type="button" className="tw-file-picture" aria-label={t(`View ${file.name}`, `查看 ${file.name}`)} onClick={() => setOpen(true)}><img src={url} alt={file.name} /></button>
-      : picture && !wanted ? <button type="button" className="tw-file-picture tw-file-placeholder" onClick={() => setWanted(true)}><Icon name="image" size={20} />{t('Show picture', '显示图片')}</button>
+    {picture && url ? <button type="button" className="tw-file-picture" aria-label={t('tw_file_view_fmt', file.name)} onClick={() => setOpen(true)}><img src={url} alt={file.name} /></button>
+      : picture && !wanted ? <button type="button" className="tw-file-picture tw-file-placeholder" onClick={() => setWanted(true)}><Icon name="image" size={20} />{t('tw_file_show_picture')}</button>
       : <Icon name={picture ? 'image' : 'file'} />}
     <span className="tw-file-text"><b>{file.name}</b>
-      <small role={error ? 'alert' : 'status'}>{error ? messageErrorText(error, zh) : busy ? t('Loading…', '正在加载…') : size}</small></span>
+      <small role={error ? 'alert' : 'status'}>{error ? messageErrorText(error, locale) : busy ? t('teams_loading') : size}</small></span>
     <span className="tw-file-actions">{actions}</span>
     {open ? <Dialog title={file.name} onClose={() => setOpen(false)}>
-      {picture ? <img className="tw-file-full" src={url} alt={file.name} /> : <pre className="tw-file-textview">{text}{file.byteLength > 256 * 1024 ? `\n${t('… Save the file to read the rest.', '… 保存文件以阅读其余内容。')}` : ''}</pre>}
+      {picture ? <img className="tw-file-full" src={url} alt={file.name} /> : <pre className="tw-file-textview">{text}{file.byteLength > 256 * 1024 ? `\n${t('tw_file_truncated')}` : ''}</pre>}
     </Dialog> : null}
   </li>;
 }

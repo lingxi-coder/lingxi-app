@@ -277,7 +277,7 @@
   "bots_delete_tasks_unknown": "進行中のタスクを確認できませんでした。この Bot を削除すると、進行中のタスクはキャンセルされます。",
   "bots_background_title": "バックグラウンドでの実行",
   "bots_keep_awake": "Bot の作業中は、この Mac をスリープさせない",
-  "bots_keep_awake_hint": "Bot のルーティンの実行時刻の 10 分前からも、スリープしません。ふたを閉じると Mac はスリープします。",
+  "bots_keep_awake_hint": "Bot のルーティンの実行時刻の 10 分前からも、スリープしません。電源に接続している間は、チームや友だちと共有している Bot がオンラインである限りスリープしません。ふたを閉じると Mac はスリープします。",
   "bots_login_item": "ログイン時に LingXi をバックグラウンドで開く",
   "bots_login_item_hint": "Bot がルーティンを実行したりタスクを受け取ったりできるのは、この Mac で LingXi が開いている間だけです。",
   "bots_login_item_unavailable": "インストール済みのアプリでのみ利用できます。",

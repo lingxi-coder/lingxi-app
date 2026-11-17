@@ -108,9 +108,9 @@ struct TeamAttachButton: View {
             Button("teams_file_add_documents", systemImage: "folder") { showDocuments = true }
         } label: {
             Group {
-                if reading { ProgressView() } else { Image(systemName: "paperclip").font(.system(size: 18, weight: .medium)) }
+                if reading { ProgressView() } else { Image(systemName: "paperclip").font(.title3.weight(.medium)) }
             }
-            .frame(width: 32, height: 32)
+            .minimumHitTarget()
         }
         .disabled(disabled || reading)
         .accessibilityLabel(Text("teams_file_add"))
@@ -141,6 +141,7 @@ struct TeamAttachButton: View {
 /// The files of the unsent message, each with where its upload stands and a button to take it out, and under
 /// them the chosen files that were not taken, each with the reason.
 struct TeamDraftFilesView: View {
+    @ScaledMetric(relativeTo: .footnote) private var iconWidth: CGFloat = 20
     let files: [TeamDraftFile]
     let refusals: [TeamFileRefusal]
     let onRemove: (String) -> Void
@@ -159,8 +160,13 @@ struct TeamDraftFilesView: View {
                         }
                         .foregroundStyle(.orange)
                         Spacer(minLength: 8)
-                        Button(action: onDismissRefusals) { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                            .accessibilityLabel(Text("common_close"))
+                        Button(action: onDismissRefusals) {
+                            // The strip stays as small as it was; the hit area of the button is 44 x 44 and overlaps the strip's free space (U6).
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                                .minimumHitTarget()
+                                .padding(.horizontal, -14).padding(.vertical, -14)
+                        }
+                        .accessibilityLabel(Text("common_close"))
                     }
                     .accessibilityIdentifier("teams.composer.files.refused")
                 }
@@ -171,7 +177,7 @@ struct TeamDraftFilesView: View {
 
     private func row(_ file: TeamDraftFile) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: TeamFileIcon.name(file.mime)).foregroundStyle(.secondary).frame(width: 20).accessibilityHidden(true)
+            Image(systemName: TeamFileIcon.name(file.mime)).foregroundStyle(.secondary).frame(width: iconWidth).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text(file.name).font(.footnote.weight(.semibold)).lineLimit(1).truncationMode(.middle)
                 switch file.state {
@@ -185,8 +191,13 @@ struct TeamDraftFilesView: View {
                 }
             }
             Spacer(minLength: 8)
-            Button { onRemove(file.uploadId) } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                .accessibilityLabel(Text("teams_file_remove \(file.name)"))
+            Button { onRemove(file.uploadId) } label: {
+                // The row keeps its height; the button's 44 x 44 hit area overlaps the row's padding (U6).
+                Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    .minimumHitTarget()
+                    .padding(.horizontal, -14).padding(.vertical, -14)
+            }
+            .accessibilityLabel(Text("teams_file_remove \(file.name)"))
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
         .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -213,6 +224,7 @@ enum TeamFileIcon {
 /// The sender can take a file back; everyone then sees that it was taken back.
 struct TeamMessageFilesView: View {
     @Environment(TeamsWorkspace.self) private var workspace
+    @ScaledMetric(relativeTo: .footnote) private var iconWidth: CGFloat = 20
     let message: TeamMessage
     let context: TeamConversationContext
 
@@ -237,7 +249,7 @@ struct TeamMessageFilesView: View {
             Button("teams_file_take_back", role: .destructive) {
                 Task { await workspace.run { try await context.model.revokeAttachment(file.attachmentId) } }
             }
-            Button("teams_cancel", role: .cancel) {}
+            Button("common_cancel", role: .cancel) {}
         } message: { _ in
             Text("teams_file_take_back_detail")
         }
@@ -245,7 +257,7 @@ struct TeamMessageFilesView: View {
 
     private func takenBack(_ file: TeamMessageAttachment) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: "doc").foregroundStyle(.tertiary).frame(width: 20).accessibilityHidden(true)
+            Image(systemName: "doc").foregroundStyle(.tertiary).frame(width: iconWidth).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text(file.name).font(.footnote.weight(.semibold)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 Text("teams_file_taken_back").font(.caption2).italic().foregroundStyle(.secondary)
@@ -262,20 +274,24 @@ struct TeamMessageFilesView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     if file.isImage { TeamInlinePicture(file: file, model: context.model) }
                     HStack(spacing: 8) {
-                        if opening == file.attachmentId { ProgressView().frame(width: 20) }
-                        else { Image(systemName: TeamFileIcon.name(file.mime)).foregroundStyle(.secondary).frame(width: 20).accessibilityHidden(true) }
+                        if opening == file.attachmentId { ProgressView().frame(width: iconWidth) }
+                        else { Image(systemName: TeamFileIcon.name(file.mime)).foregroundStyle(.secondary).frame(width: iconWidth).accessibilityHidden(true) }
                         VStack(alignment: .leading, spacing: 1) {
                             Text(file.name).font(.footnote.weight(.semibold)).foregroundStyle(.primary).lineLimit(1).truncationMode(.middle)
                             Text(verbatim: TeamAttachments.size(file.byteLength)).font(.caption2).foregroundStyle(.secondary)
                         }
                     }
+                    // The padding keeps the look; the row is at least 44 pt high at every text size (U6).
                     .padding(.horizontal, 10).padding(.vertical, 6)
+                    .frame(minHeight: 44)
                     .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
             }
             .buttonStyle(.plain)
             .disabled(opening != nil)
             .accessibilityLabel(Text("teams_file_open \(file.name)"))
+            // The label replaces what the row shows, so the size is said as the value.
+            .accessibilityValue(Text(verbatim: TeamAttachments.size(file.byteLength)))
             .accessibilityIdentifier("teams.message.file.\(file.attachmentId)")
             .contextMenu {
                 Button("common_open", systemImage: "eye") { open(file) }

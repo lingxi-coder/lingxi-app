@@ -1,6 +1,10 @@
 import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactElement, type ReactNode, type RefObject } from 'react';
 import type { TeamConversation } from './messages.js';
+import { rovingIndex } from './roving.js';
 import { conversationParticipants, type Identity, type TeamsSnapshot } from './workspace.js';
+import { teamsText, useTeamsText } from './i18n.js';
+
+export { rovingIndex };
 
 /** Layout effects warn on the server; there they are plain effects. */
 export const useIsoLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
@@ -31,6 +35,16 @@ export type RenderAvatar = (identity: Identity, size: number) => ReactNode;
  */
 export type RenderMarkdown = (text: string) => ReactNode;
 
+/**
+ * The avatar scale (U2 of docs/TEAMS-UI-POLISH.md): 20 for chips, 24 for mention rows and pickers, 32 for a message's author and a
+ * header, 40 for list rows (conversations, members, friends), 56 for profile and detail headers. There are no other sizes.
+ * A person is a circle; a Bot, a channel's `#` tile and a team's mark are rounded squares of 24% of their side (workspace.css).
+ */
+export const AVATAR_SIZES = [20, 24, 32, 40, 56] as const;
+
+/** The avatar of one person inside a stack of avatars in a lead of `lead` pixels: the largest size of the scale that is at most 70% of it. */
+export const stackedSize = (lead: number): number => [...AVATAR_SIZES].reverse().find(size => size <= lead * 0.7) ?? AVATAR_SIZES[0];
+
 /** Every entry has at least 4.5:1 contrast against the white initials. */
 export const AVATAR_COLORS = ['#4a5fc1', '#2e7d6b', '#b04a6e', '#8a5a1f', '#6b4fa3', '#2a7aa3', '#9a4b2d', '#4f7a28', '#a1427d', '#5a6b78', '#3f6fb5', '#a8571a'] as const;
 
@@ -60,9 +74,9 @@ export function Avatar({ identity, size, render }: { identity: Identity; size: n
     style={{ width: size, height: size, fontSize: Math.max(10, Math.round(size * 0.42)), background: avatarColor(identity.id) }}>{initials(identity.name)}</span>;
 }
 
-/** A team's square mark: its initials on a color that stays the same for the team. */
-export function TeamMark({ id, name }: { id: string; name: string }): ReactElement {
-  return <span className="tw-team-mark" aria-hidden="true" style={{ background: avatarColor(id) }}>{initials(name)}</span>;
+/** A team's rounded-square mark: its initials on a color that stays the same for the team. 24 pixels unless `size` says otherwise. */
+export function TeamMark({ id, name, size }: { id: string; name: string; size?: number }): ReactElement {
+  return <span className="tw-team-mark" aria-hidden="true" style={{ background: avatarColor(id), ...(size ? { width: size, height: size, fontSize: Math.max(11, Math.round(size * 0.42)) } : {}) }}>{initials(name)}</span>;
 }
 
 /** Up to `max` avatars, then "+N". */
@@ -78,15 +92,16 @@ export function AvatarStack({ identities, size, render, max = 3, more }: { ident
  * The picture for a conversation: `#` for a channel, the other person for a dm, the Bot for a Bot dm,
  * and a short stack of members for a group. `label` is the name used when no participant is known.
  */
-export function ConversationLead({ conversation, label, snapshot, zh, size = 28, render }: {
-  conversation: TeamConversation; label: string; snapshot: Pick<TeamsSnapshot, 'directory' | 'bots' | 'uid'>; zh: boolean; size?: number; render?: RenderAvatar;
+export function ConversationLead({ conversation, label, snapshot, locale, size = 40, render }: {
+  conversation: TeamConversation; label: string; snapshot: Pick<TeamsSnapshot, 'directory' | 'bots' | 'uid'>; locale: string; size?: number; render?: RenderAvatar;
 }): ReactElement {
+  const t = useTeamsText(locale);
   if (conversation.kind === 'channel') return <span className="tw-chan" aria-hidden="true" style={{ width: size, height: size, fontSize: Math.round(size * 0.55) }}>#</span>;
-  const people = conversationParticipants(conversation, snapshot.directory, snapshot.bots, snapshot.uid, zh);
+  const people = conversationParticipants(conversation, snapshot.directory, snapshot.bots, snapshot.uid, locale);
   const others = people.filter(person => !person.self);
   const fallback: Identity = { kind: conversation.kind === 'bot_dm' ? 'bot' : 'user', id: conversation.id, name: label };
   if (conversation.kind === 'group') {
-    return <AvatarStack identities={others.length ? others : people.length ? people : [fallback]} size={Math.round(size * 0.7)} max={2} render={render} more={count => zh ? `另外 ${count} 人` : `${count} more`} />;
+    return <AvatarStack identities={others.length ? others : people.length ? people : [fallback]} size={stackedSize(size)} max={2} render={render} more={count => t('tw_more_fmt', count)} />;
   }
   const lead = conversation.kind === 'bot_dm' ? people.find(person => person.kind === 'bot') : others[0] ?? people[0];
   return <Avatar identity={lead ?? fallback} size={size} render={render} />;
@@ -112,20 +127,33 @@ const paths = {
   panel: 'M4 5h16v14H4zM15 5v14',
   copy: 'M9 9h11v11H9zM5 15V5h10',
   bot: 'M12 8V4H8M6 8h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2zM2 14h2M20 14h2M15 13v2M9 13v2',
+  // The glyphs of a Bot run's state (U4): a circle or a triangle, then what it says. None of them is told apart by colour alone.
+  clock: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2',
+  clockSlash: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2M4.5 4.5l15 15',
+  spinner: 'M12 3a9 9 0 1 0 9 9',
+  dotsCircle: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM6.9 12a.6.6 0 1 0 1.2 0 .6.6 0 1 0-1.2 0M11.4 12a.6.6 0 1 0 1.2 0 .6.6 0 1 0-1.2 0M15.9 12a.6.6 0 1 0 1.2 0 .6.6 0 1 0-1.2 0',
+  checkCircle: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM8 12l3 3 5-6',
+  alert: 'M12 3l10 18H2L12 3zM12 10v5M12 18h.01',
+  pauseCircle: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM10 9v6M14 9v6',
+  lock: 'M7 11V8a5 5 0 0 1 10 0v3M6 11h12v9H6z',
+  ban: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM5.6 5.6l12.8 12.8',
+  xCircle: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9 9l6 6M15 9l-6 6',
+  help: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .8-1 1.5M12 17h.01',
   clip: 'M21 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l7.9-7.9',
   file: 'M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M9 13h6M9 17h6',
   image: 'M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zM9 9.5h.01M20 15l-4.5-4.5L6 20',
   download: 'M12 4v11M7 11l5 5 5-5M5 20h14',
 } as const;
 export type IconName = keyof typeof paths;
-export function Icon({ name, size = 16 }: { name: IconName; size?: number }): ReactElement {
-  return <svg className="tw-icon" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={name === 'more' ? 3 : 2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d={paths[name]} /></svg>;
+export function Icon({ name, size = 16, className }: { name: IconName; size?: number; className?: string }): ReactElement {
+  return <svg className={className ? `tw-icon ${className}` : 'tw-icon'} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={name === 'more' ? 3 : 2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false"><path d={paths[name]} /></svg>;
 }
 
 /** Numeric unread badge. The label is the accessible name; the digits are only decoration. */
-export function UnreadBadge({ count, zh }: { count: number; zh: boolean }): ReactElement | null {
+export function UnreadBadge({ count, locale }: { count: number; locale: string }): ReactElement | null {
+  const t = useTeamsText(locale);
   if (count <= 0) return null;
-  return <span className="tw-badge" role="img" aria-label={zh ? `${count} 条未读` : `${count} unread`}>{count > 99 ? '99+' : count}</span>;
+  return <span className="tw-badge" role="img" aria-label={t('tw_unread_fmt', count)}>{count > 99 ? '99+' : count}</span>;
 }
 
 // ─── Dialog ─────────────────────────────────────────────────────────────────
@@ -135,8 +163,8 @@ export function UnreadBadge({ count, zh }: { count: number; zh: boolean }): Reac
  * keeps focus inside, closes on Escape or a click outside its panel, and gives focus back to what
  * opened it. Render it only while it is open; theme variables still inherit from its parent.
  */
-export function Dialog({ title, role = 'dialog', onClose, children }: { title: string; role?: 'dialog' | 'alertdialog'; onClose(): void; children: ReactNode }): ReactElement {
-  const ref = useRef<HTMLDialogElement>(null), id = useId();
+export function Dialog({ title, role = 'dialog', description, onClose, children }: { title: string; role?: 'dialog' | 'alertdialog'; description?: ReactNode; onClose(): void; children: ReactNode }): ReactElement {
+  const ref = useRef<HTMLDialogElement>(null), id = useId(), bodyId = `${id}-body`;
   const close = useRef(onClose);
   close.current = onClose;
   useEffect(() => {
@@ -147,11 +175,12 @@ export function Dialog({ title, role = 'dialog', onClose, children }: { title: s
     (node.querySelector<HTMLElement>('[data-autofocus]') ?? node.querySelector<HTMLElement>('input:not([type=hidden]), textarea, select, button'))?.focus();
     return () => { if (node.open && typeof node.close === 'function') node.close(); opener?.focus(); };
   }, []);
-  return <dialog ref={ref} className="tw-dialog" role={role} aria-labelledby={id}
+  return <dialog ref={ref} className="tw-dialog" role={role} aria-labelledby={id} aria-describedby={description ? bodyId : undefined}
     onCancel={event => { event.preventDefault(); close.current(); }}
     onClick={event => { if (event.target === event.currentTarget) close.current(); }}>
     <div className="tw-dialog-panel">
       <h2 id={id} className="tw-dialog-title">{title}</h2>
+      {description ? <p id={bodyId} className="tw-dialog-body">{description}</p> : null}
       {children}
     </div>
   </dialog>;
@@ -234,19 +263,18 @@ export function PopupMenu({ label, items, onClose, anchor, align = 'start' }: {
 // ─── Keyboard ───────────────────────────────────────────────────────────────
 
 /**
- * Where roving focus goes for a key press in a list or tab strip: the next or previous item
- * (wrapping only when asked to), Home and End. `undefined` when the key does not move focus.
+ * The key handler of a list of rows (`[data-row]` buttons) inside the element it is set on: the arrow keys, Home and End move focus
+ * to the neighbouring row, and Tab leaves the list from its one tab stop. The Teams and Friends sidebars use it on their `.tw-sections`.
+ * The rule itself, `rovingIndex`, is in `roving.ts`.
  */
-export function rovingIndex(count: number, current: number, key: string, options: { prev?: string; next?: string; wrap?: boolean } = {}): number | undefined {
-  if (count <= 0) return undefined;
-  const { prev = 'ArrowUp', next = 'ArrowDown', wrap = false } = options;
-  if (key === 'Home') return 0;
-  if (key === 'End') return count - 1;
-  if (key !== next && key !== prev) return undefined;
-  const from = current < 0 ? (key === next ? -1 : count) : current;
-  const to = key === next ? from + 1 : from - 1;
-  if (wrap) return (to % count + count) % count;
-  return Math.max(0, Math.min(count - 1, to));
+export function rovingKeys(event: KeyboardEvent<HTMLElement>, selector = '[data-row]'): void {
+  const target = event.target as HTMLElement;
+  if (!target.matches?.(selector)) return;
+  const rows = [...event.currentTarget.querySelectorAll<HTMLElement>(selector)];
+  const to = rovingIndex(rows.length, rows.indexOf(target), event.key);
+  if (to === undefined) return;
+  event.preventDefault();
+  rows[to]?.focus();
 }
 
 // ─── Shared wording ─────────────────────────────────────────────────────────
@@ -255,7 +283,12 @@ export function rovingIndex(count: number, current: number, key: string, options
 export type DrawerTab = 'members' | 'invites' | 'bots';
 
 /** Who can read Team data. Shown wherever a person creates, joins or opens a team, and on the conversation header and the details panel. */
-export const platformNotice = (zh: boolean): string => zh
-  ? '团队资料与消息平台可读。与 Bot 的对话对该 Bot 的所有者可见。'
-  : 'Team data and messages are readable by the platform. A Bot’s owner can read conversations with their Bot.';
-export const platformChip = (zh: boolean): string => zh ? '平台可读' : 'Platform readable';
+export const platformNotice = (locale: string): string => teamsText(locale)('teams_disclosure');
+export const platformChip = (locale: string): string => teamsText(locale)('tw_team_platform_readable');
+
+/** Stands where markup goes in a translated sentence: `withSlot(t('teams_replying_to_fmt', SLOT), <b>{name}</b>)` puts the node where the language says the name. */
+export const SLOT = '\uE000';
+export function withSlot(sentence: string, node: ReactNode): ReactElement {
+  const [before = '', after = ''] = sentence.split(SLOT);
+  return <>{before}{node}{after}</>;
+}

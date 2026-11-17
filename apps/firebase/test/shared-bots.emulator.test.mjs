@@ -4,7 +4,7 @@ import { initializeApp, deleteApp } from 'firebase-admin/app';
 import { createHash } from 'node:crypto';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { TeamsStore, createTeamsHandler } from '../src/teams.mjs';
-import { SharedBotsStore } from '../src/shared-bots.mjs';
+import { SharedBotsStore, deriveGrantPermit } from '../src/shared-bots.mjs';
 import { onTeamMessageCreated } from '../src/team-message-push.mjs';
 import { TeamMessagesStore } from '../src/team-messages.mjs';
 import { admissionId } from '../src/team-execution-contract.mjs';
@@ -65,6 +65,125 @@ test('execution 2: simultaneous duplicate submissions create one message, admiss
   assert.ok((await db.collection(`teams/${teamId}/requestQuotas`).get()).docs.every(doc => doc.data().used === 1));
   await assert.rejects(execute('submit', { ...payload, text: 'Changed' }, member), { code: 'MESSAGE_ID_CONFLICT' });
 });
+test('directory: examples are pinned to publication, capabilities come from the active deployment, and metadata stays out of model inputs', options, async () => {
+  const current = publish(), example = 'EXAMPLE-NOT-A-MODEL-INSTRUCTION';
+  await execute('publishSharedBot', { ...current, expectedRevision: 1, examples: [`  ${example}  `],
+    deployment: { ...current.deployment, revision: 2, capabilities: { durableWait: true, writeOperations: false, delegation: false } } });
+  await execute('heartbeatDeployment', { ...host, ready: true });
+  const card = (await execute('listSharedBots', {}, member)).bots[0];
+  assert.deepEqual(card.examples, [example]);
+  assert.deepEqual(card.capabilities, { durableWait: true, writeOperations: false });
+  assert.equal(card.instanceId, undefined); assert.equal(card.availability, 'ready');
+  assert.equal(card.statusExpiresAt, now + 90000);
+  assert.equal(card.dailyRemaining, 20); assert.equal(card.quotaResetsAt, Date.UTC(2026, 10, 6));
+  const started = await start();
+  assert.ok(!JSON.stringify({ task: started.task, inputs: started.inputs }).includes(example));
+  assert.equal(started.examples, undefined); assert.equal(started.dailyRemaining, undefined);
+  await execute('publishSharedBot', { ...current, expectedRevision: 2, deployment: { ...current.deployment, revision: 3 } });
+  assert.deepEqual((await execute('listSharedBots', {}, member)).bots[0].examples, []);
+});
+test('directory: healthy, maintenance, stale and missing reports use conservative projections without changing the online admission lease', options, async () => {
+  const deployment = db.doc(`teams/${teamId}/deployments/${host.deploymentId}`), card = async () => (await execute('listSharedBots', {}, member)).bots[0];
+  for (const healthReason of ['bot', 'runtime', 'model']) {
+    await execute('heartbeatDeployment', { ...host, ready: false, healthReason });
+    const stored = (await deployment.get()).data(), projected = await card();
+    assert.equal(stored.checkedAt, now); assert.equal(stored.healthUntil, now + 90000); assert.equal(stored.onlineUntil, 0);
+    assert.equal(projected.availability, 'maintenance'); assert.equal(projected.ready, false);
+    assert.equal(projected.statusExpiresAt, now + 90000);
+    for (const field of ['healthReason', 'checkedAt', 'healthUntil', 'reason']) assert.equal(projected[field], undefined);
+    await assert.rejects(execute('submit', submit(), member), { code: 'HOST_UNAVAILABLE' });
+  }
+  const signal = (await db.doc(`teams/${teamId}/signals/sharedbot_01`).get()).data().updatedAt.toMillis();
+  now += 90000;
+  const expired = await card();
+  assert.equal(expired.availability, 'offline'); assert.equal(expired.statusExpiresAt, undefined);
+  assert.equal((await db.doc(`teams/${teamId}/signals/sharedbot_01`).get()).data().updatedAt.toMillis(), signal, 'health expires without a new host signal');
+  await execute('heartbeatDeployment', { ...host, ready: false });
+  assert.equal((await card()).availability, 'offline'); assert.equal((await deployment.get()).data().healthReason, undefined);
+  await execute('heartbeatDeployment', { ...host, ready: true });
+  assert.equal((await deployment.get()).data().healthReason, undefined);
+  await deployment.update({ checkedAt: FieldValue.delete(), healthUntil: FieldValue.delete() });
+  assert.equal((await card()).availability, 'unverified'); assert.equal((await card()).ready, true);
+  assert.equal((await card()).statusExpiresAt, now + 90000);
+  await deployment.update({ checkedAt: now - 100000, healthUntil: now - 10000, healthReason: 'model' });
+  assert.equal((await card()).availability, 'unverified');
+  await deployment.update({ enabled: false });
+  assert.equal((await card()).availability, 'offline'); assert.equal((await card()).capabilities, undefined);
+});
+test('directory: quota remaining uses actual shared counters and current limits, resets at UTC midnight and exposes no member usage', options, async () => {
+  const bot = db.doc(`teams/${teamId}/sharedBots/sharedbot_01`), card = async actor => (await execute('listSharedBots', {}, actor)).bots[0];
+  const quotaId = (...parts) => createHash('sha256').update(JSON.stringify(parts)).digest('hex');
+  const day = new Date(now).toISOString().slice(0, 10), quota = (...parts) => db.doc(`teams/${teamId}/requestQuotas/${quotaId(day, ...parts)}`);
+  await quota('team').set({ day, used: 3, limit: 1 });
+  await quota('member', member.uid, 1).set({ day, used: 2, limit: 1 });
+  await quota('member', other.uid, 1).set({ day, used: 19, limit: 1 });
+  await quota('bot', 'sharedbot_01').set({ day, used: 7, limit: 1 });
+  await bot.update({ quotas: { team: 15, member: 8, bot: 10 } });
+  assert.equal((await card(member)).dailyRemaining, 3);
+  await bot.update({ quotas: { team: 15, member: 8, bot: 100 } });
+  assert.equal((await card(member)).dailyRemaining, 6);
+  assert.equal((await card(other)).dailyRemaining, 0); assert.equal((await card(other)).availability, 'quota_exhausted');
+  await bot.update({ quotas: { team: 4, member: 8, bot: 100 } });
+  assert.equal((await card(member)).dailyRemaining, 1);
+  const projected = await card(member);
+  for (const field of ['used', 'memberUsage', 'teamUsage', 'botUsage', 'counters']) assert.equal(projected[field], undefined);
+  await execute('submit', submit(), member);
+  assert.equal((await card(member)).dailyRemaining, 0);
+  assert.equal((await card(member)).availability, 'quota_exhausted');
+  await assert.rejects(execute('submit', submit(), member), { code: 'REQUEST_QUOTA_EXCEEDED' });
+  now = Date.UTC(2026, 10, 6) - 1000; await execute('heartbeatDeployment', { ...host, ready: true });
+  assert.equal((await card(member)).statusExpiresAt, Date.UTC(2026, 10, 6), 'UTC quota reset refreshes before a later host lease expires');
+  now = Date.UTC(2026, 10, 6); await execute('heartbeatDeployment', { ...host, ready: true });
+  assert.equal((await card(member)).dailyRemaining, 4); assert.equal((await card(member)).quotaResetsAt, Date.UTC(2026, 10, 7));
+});
+test('directory: pausing retains the current policy audience but blocks use, and retired Bots are private', options, async () => {
+  const p = publish();
+  await execute('publishSharedBot', { ...p, expectedRevision: 1, usePolicy: { mode: 'listed', members: [{ uid: member.uid, generation: 1 }] },
+    deployment: { ...p.deployment, revision: 2 } });
+  await execute('pauseSharedBot', { sharedBotId: 'sharedbot_01', expectedRevision: 2 });
+  const card = (await execute('listSharedBots', {}, member)).bots[0];
+  assert.equal(card.availability, 'paused'); assert.equal(card.permitted, false); assert.equal(card.ready, false);
+  assert.equal(card.statusExpiresAt, undefined);
+  assert.deepEqual((await execute('listSharedBots', {}, other)).bots, []);
+  await assert.rejects(execute('submit', submit(), member), { code: 'BOT_USE_REQUIRED' });
+  await db.doc(`teams/${teamId}/sharedBots/sharedbot_01`).update({ 'identity.state': 'retired' });
+  assert.deepEqual((await execute('listSharedBots', {}, member)).bots, []);
+});
+test('directory: a multi-Bot request spends shared team and member slots per target and a separate slot for each Bot', options, async () => {
+  const p = publish(), second = 'sharedbot_02', secondHost = { ...host, deploymentId: 'deployment_02' }, group = 'chat_multi_bots';
+  await execute('publishSharedBot', { ...p, sharedBotId: second, deployment: { ...p.deployment, ...secondHost, sharedBotId: second },
+    quotas: { team: 50, member: 10, bot: 2 } });
+  await execute('heartbeatDeployment', { ...secondHost, ready: true });
+  await execute('createConversation', { conversationId: group, kind: 'group', title: 'Two assistants',
+    participantUids: [member.uid, other.uid], sharedBotIds: ['sharedbot_01', second] }, member);
+  const payload = { ...submit(), conversationId: group, targets: ['sharedbot_01', second] };
+  const receipt = await execute('submit', payload, member); assert.equal(receipt.tasks.length, 2);
+  const cards = (await execute('listSharedBots', {}, member)).bots;
+  assert.equal(cards.find(card => card.sharedBotId === 'sharedbot_01').dailyRemaining, 18);
+  assert.equal(cards.find(card => card.sharedBotId === second).dailyRemaining, 1);
+  await execute('submit', { ...submit(), conversationId: group, targets: ['sharedbot_01', second] }, member);
+  assert.equal((await execute('listSharedBots', {}, member)).bots.find(card => card.sharedBotId === second).availability, 'quota_exhausted');
+  await assert.rejects(execute('submit', { ...submit(), conversationId: group, targets: ['sharedbot_01', second] }, member), { code: 'REQUEST_QUOTA_EXCEEDED' });
+});
+test('directory: account activation clears health and fences the previous account; membership generations fence directory and quota access', options, async () => {
+  const read = command('listSharedBots', {}), initial = await store.execute(member, read);
+  assert.equal(initial.bots[0].dailyRemaining, 20);
+  await execute('submit', submit(), member);
+  assert.equal((await store.execute(member, read)).bots[0].dailyRemaining, 19, 'reads never replay a cached projection');
+  assert.equal((await store.execute(other, read)).bots[0].dailyRemaining, 20, 'the same command in another account reads that account only');
+  await execute('heartbeatDeployment', { ...host, ready: false, healthReason: 'model' });
+  await execute('activateDeployment', { deploymentId: host.deploymentId, hostId: host.hostId, expectedAccountEpoch: 1, newAccountEpoch: 2 });
+  const stored = (await db.doc(`teams/${teamId}/deployments/${host.deploymentId}`).get()).data();
+  for (const field of ['healthReason', 'checkedAt', 'healthUntil']) assert.equal(stored[field], undefined);
+  await assert.rejects(execute('heartbeatDeployment', { ...host, ready: true }), { code: 'DEPLOYMENT_REQUIRED' });
+  await execute('heartbeatDeployment', { ...host, accountEpoch: 2, ready: true });
+  await db.doc(`teams/${teamId}/members/${member.uid}`).update({ generation: 2 });
+  await assert.rejects(store.execute(member, read), { code: 'STALE_MEMBERSHIP' });
+  const next = await store.execute(member, { ...read, generation: 2 }); assert.equal(next.bots[0].dailyRemaining, 20);
+  await db.doc(`teams/${teamId}/members/${owner.uid}`).update({ generation: 2 });
+  const offline = await store.execute(member, { ...read, generation: 2 });
+  assert.equal(offline.bots[0].availability, 'offline'); assert.equal(offline.bots[0].permitted, false); assert.equal(offline.bots[0].ready, false);
+});
 test('execution 2: concurrent start returns exactly one capability and never replays it', options, async () => {
   const receipt = await execute('submit', submit(), member), p = { ...host, taskId: receipt.tasks[0].taskId, expectedLastChangeSeq: receipt.changeSeq };
   const commands = Array.from({ length: 12 }, () => command('startTask', p));
@@ -73,6 +192,55 @@ test('execution 2: concurrent start returns exactly one capability and never rep
   const index = values.findIndex(value => value.execute);
   assert.deepEqual(await store.execute(owner, commands[index]), { execute: false, taskId: p.taskId });
   assert.equal((await chatRef().collection('triggers').get()).size, 0);
+});
+test('grant recovery: a saved start nonce proves the committed permit after a lost answer without replaying the grant', options, async () => {
+  const p = publish(), sharedList = { title: 'Groceries', description: 'The current shopping list', approval: 'requester' };
+  await execute('publishSharedBot', { ...p, expectedRevision: 1, sharedList,
+    deployment: { ...p.deployment, revision: 2, capabilities: { durableWait: true, writeOperations: true, delegation: false } } });
+  await execute('heartbeatDeployment', { ...host, ready: true });
+  const receipt = await execute('submit', submit(), member), taskId = receipt.tasks[0].taskId, nonce = '17'.repeat(32);
+  const payload = { ...host, taskId, expectedLastChangeSeq: receipt.changeSeq, permitNonce: nonce }, request = command('startTask', payload);
+  const permitId = deriveGrantPermit('team', teamId, host.deploymentId, taskId, 1, nonce);
+  const validate = (fields = {}) => execute('validateTask', { ...host, taskId, permitId, expectedLastChangeSeq: receipt.changeSeq, ...fields });
+  await assert.rejects(validate(), { code: 'EXECUTION_PERMIT_REQUIRED' });
+  const prepared = await execute('prepareTask', { ...host, taskId });
+  assert.deepEqual(prepared.sharedList, sharedList); assert.equal(prepared.physicalDispatchesSpent, 0);
+  await store.execute(owner, request); // Commit, deliberately discard the response as a transport-ACK-loss model.
+  assert.deepEqual(await store.execute(owner, request), { execute: false, taskId });
+  const context = await validate();
+  assert.equal(context.task.epoch, 1); assert.equal(context.messageId, prepared.messageId); assert.equal(context.messageSeq, prepared.messageSeq);
+  assert.deepEqual(context.inputs, prepared.inputs); assert.deepEqual(context.sharedList, sharedList); assert.equal(context.physicalDispatchesSpent, 0);
+  assert.equal(context.permitId, undefined); assert.equal(context.permitNonce, undefined);
+  const records = [(await db.doc(`teams/${teamId}/tasks/${taskId}`).get()).data(),
+    ...(await db.collection(`teams/${teamId}/executionReceipts`).get()).docs.map(doc => doc.data())];
+  assert.ok(!JSON.stringify(records).includes(nonce)); assert.ok(!JSON.stringify(records).includes(permitId));
+  await assert.rejects(store.execute(owner, { ...request, payload: { ...payload, permitNonce: '18'.repeat(32) } }), { code: 'COMMAND_ID_CONFLICT' });
+  await assert.rejects(validate({ expectedLastChangeSeq: receipt.changeSeq + 1 }), { code: 'INVALID_CHANGE_CURSOR' });
+  await execute('activateDeployment', { deploymentId: host.deploymentId, hostId: host.hostId, expectedAccountEpoch: 1, newAccountEpoch: 2 });
+  await assert.rejects(validate(), { code: 'DEPLOYMENT_REQUIRED' });
+  await execute('heartbeatDeployment', { ...host, accountEpoch: 2, ready: true });
+  assert.equal((await validate({ accountEpoch: 2 })).task.epoch, 1, 'current host fence can validate its saved candidate without minting an epoch');
+  const quota = (await db.collection(`teams/${teamId}/requestQuotas`).get()).docs;
+  assert.ok(quota.every(doc => doc.data().used === 1));
+});
+test('grant recovery: two start nonces compete for one permit and the loser cannot validate or finish it', options, async () => {
+  const receipt = await execute('submit', submit(), member), taskId = receipt.tasks[0].taskId;
+  const nonces = ['21'.repeat(32), '22'.repeat(32)], commands = nonces.map(permitNonce => command('startTask',
+    { ...host, taskId, expectedLastChangeSeq: receipt.changeSeq, permitNonce }));
+  const values = await Promise.all(commands.map(request => store.execute(owner, request)));
+  assert.equal(values.filter(value => value.execute).length, 1);
+  const winner = values.findIndex(value => value.execute), loser = 1 - winner;
+  for (const index of [winner, loser]) {
+    const permitId = deriveGrantPermit('team', teamId, host.deploymentId, taskId, 1, nonces[index]);
+    const validate = execute('validateTask', { ...host, taskId, permitId, expectedLastChangeSeq: receipt.changeSeq });
+    if (index === winner) assert.equal((await validate).task.epoch, 1);
+    else {
+      await assert.rejects(validate, { code: 'EXECUTION_PERMIT_REQUIRED' });
+      await assert.rejects(execute('completeTask', result(values[winner], { permitId })), { code: 'EXECUTION_PERMIT_REQUIRED' });
+    }
+  }
+  assert.deepEqual(await store.execute(owner, commands[winner]), { execute: false, taskId });
+  assert.equal((await db.doc(`teams/${teamId}/tasks/${taskId}`).get()).data().epoch, 1);
 });
 test('execution 2: command identity rejects changed payload without mutation', options, async () => {
   const value = command('submit', submit()); await store.execute(member, value);
@@ -279,6 +447,69 @@ async function paused({ activeMs = 60000, wait = {} } = {}) {
   const response = await execute('pauseTask', pausePayload(started, wait));
   return { started, response, taskId: started.task.taskId };
 }
+test('grant recovery: lost recovery-continue answer reconciles the nonce and preserves budget and physical dispatches across epochs', options, async () => {
+  const started = await start(), taskId = started.task.taskId, nonce = '31'.repeat(32), deadline = started.task.deadline;
+  assert.match(started.permitId, /^[A-Za-z0-9_-]{32}$/u, 'a client without a nonce still gets the original server-random permit');
+  now += 10000; await heartbeat();
+  const request = command('continueTask', continuePayload(taskId, { reason: 'recovery', permitNonce: nonce, dispatchedRequests: 4 }));
+  await store.execute(owner, request); // Commit without retaining the grant response.
+  assert.deepEqual(await store.execute(owner, request), { execute: false, taskId });
+  const permitId = deriveGrantPermit('team', teamId, host.deploymentId, taskId, 2, nonce);
+  const context = await execute('validateTask', { ...host, taskId, permitId, expectedLastChangeSeq: 1 });
+  assert.equal(context.task.epoch, 2); assert.equal(context.task.deadline, deadline); assert.equal(context.task.activeSpentMs, 10000);
+  assert.equal(context.physicalDispatchesSpent, 4); assert.equal(context.permitId, undefined); assert.equal(context.permitNonce, undefined);
+  await assert.rejects(execute('validateTask', { ...host, taskId, permitId: started.permitId, expectedLastChangeSeq: 1 }), { code: 'EXECUTION_PERMIT_REQUIRED' });
+  await assert.rejects(store.execute(owner, { ...request, payload: { ...request.payload, permitNonce: '32'.repeat(32) } }), { code: 'COMMAND_ID_CONFLICT' });
+  const next = await execute('continueTask', continuePayload(taskId, { expectedEpoch: 2, reason: 'recovery', permitNonce: nonce, dispatchedRequests: 3 }));
+  assert.equal(next.permitId, deriveGrantPermit('team', teamId, host.deploymentId, taskId, 3, nonce));
+  assert.notEqual(next.permitId, permitId); assert.notEqual(next.permitId, started.permitId);
+  assert.equal(next.physicalDispatchesSpent, 4); assert.equal(next.task.deadline, deadline);
+  for (const oldPermit of [started.permitId, permitId]) {
+    await assert.rejects(execute('validateTask', { ...host, taskId, permitId: oldPermit, expectedLastChangeSeq: 1 }), { code: 'EXECUTION_PERMIT_REQUIRED' });
+    await assert.rejects(execute('completeTask', result(started, { permitId: oldPermit })), { code: 'EXECUTION_PERMIT_REQUIRED' });
+  }
+  assert.ok((await db.collection(`teams/${teamId}/requestQuotas`).get()).docs.every(doc => doc.data().used === 1));
+});
+test('grant recovery: lost answer-continue response is reconciled without granting a second epoch or losing the server dispatch count', options, async () => {
+  const { taskId } = await paused(), nonce = '41'.repeat(32);
+  await execute('answerWait', answerPayload(), member); await heartbeat();
+  const request = command('continueTask', continuePayload(taskId, { permitNonce: nonce, dispatchedRequests: 5 }));
+  await store.execute(owner, request);
+  assert.deepEqual(await store.execute(owner, request), { execute: false, taskId });
+  const permitId = deriveGrantPermit('team', teamId, host.deploymentId, taskId, 2, nonce);
+  const context = await execute('validateTask', { ...host, taskId, permitId, expectedLastChangeSeq: 1 });
+  assert.equal(context.task.epoch, 2); assert.equal(context.task.activeSpentMs, 60000); assert.equal(context.physicalDispatchesSpent, 5);
+  assert.equal((await taskData(taskId)).resume, undefined);
+  assert.equal((await execute('continueTask', continuePayload(taskId, { permitNonce: '42'.repeat(32) }))).execute, false);
+  assert.equal((await taskData(taskId)).epoch, 2);
+});
+test('grant recovery: two continue nonces compete for one next epoch; no competing candidate becomes authoritative', options, async () => {
+  const started = await start(), taskId = started.task.taskId, nonces = ['51'.repeat(32), '52'.repeat(32)];
+  const requests = nonces.map(permitNonce => command('continueTask', continuePayload(taskId, { reason: 'recovery', permitNonce })));
+  const values = await Promise.all(requests.map(request => store.execute(owner, request)));
+  assert.equal(values.filter(value => value.execute).length, 1);
+  const winner = values.findIndex(value => value.execute), loser = 1 - winner;
+  assert.equal(values[winner].permitId, deriveGrantPermit('team', teamId, host.deploymentId, taskId, 2, nonces[winner]));
+  await assert.rejects(execute('validateTask', { ...host, taskId, expectedLastChangeSeq: 1,
+    permitId: deriveGrantPermit('team', teamId, host.deploymentId, taskId, 2, nonces[loser]) }), { code: 'EXECUTION_PERMIT_REQUIRED' });
+  assert.deepEqual(await store.execute(owner, requests[winner]), { execute: false, taskId });
+  assert.equal((await taskData(taskId)).epoch, 2);
+});
+test('grant recovery: a newer caller watermark cannot hide edits or recalls after the task input was admitted', options, async () => {
+  const { TeamMessagesStore } = await import('../src/team-messages.mjs'), messages = new TeamMessagesStore(db, () => now);
+  await chatRef().update({ kind: 'group' });
+  await messages.execute(member, { action: 'mutate', teamId, generation: 1, conversationId, messageId: 'source_msg01', changeId: 'source_ch01', operation: 'create', text: 'Old detail' });
+  const receipt = await execute('submit', submit(), member), taskId = receipt.tasks[0].taskId, nonce = '61'.repeat(32);
+  await execute('startTask', { ...host, taskId, expectedLastChangeSeq: 2, permitNonce: nonce });
+  const permitId = deriveGrantPermit('team', teamId, host.deploymentId, taskId, 1, nonce);
+  for (const [index, operation] of ['edit', 'recall'].entries()) {
+    await messages.execute(member, { action: 'mutate', teamId, generation: 1, conversationId, messageId: 'source_msg01',
+      changeId: `source_rewrite_${index}`, operation, text: operation === 'edit' ? 'Changed detail' : '' });
+    const latest = (await chatRef().get()).data().lastChangeSeq;
+    await assert.rejects(execute('validateTask', { ...host, taskId, permitId, expectedLastChangeSeq: latest }), { code: 'SOURCE_CHANGED' });
+  }
+  assert.equal((await taskData(taskId)).epoch, 1);
+});
 const asContinued = (started, granted) => ({ task: started.task, permitId: granted.permitId, inputs: granted.inputs });
 
 test('wait: pause invalidates the permit and publishes one question with a durable wait record', options, async () => {

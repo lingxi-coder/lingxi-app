@@ -1,6 +1,11 @@
 package com.lingxi.code.bots
 
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -12,6 +17,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.lingxi.code.R
@@ -253,9 +259,48 @@ class BotsTabUiTest {
         compose.onNodeWithText(text(R.string.mobile_bots_unsupported)).assertIsDisplayed()
     }
 
-    @Test fun aComputerWithNoBotsSaysSo() {
+    @Test fun aComputerWithNoBotsSaysWhatIsEmptyHowABotGetsHereAndOffersToCheckAgain() {
         showTree(tree(listOf(host("h1")), ready("h1"), liveBots("h1")))
-        compose.onNodeWithText(text(R.string.mobile_bots_none)).assertIsDisplayed()
+        compose.onNodeWithText(text(R.string.mobile_bots_none_title)).assertIsDisplayed()
+        compose.onNodeWithText(text(R.string.mobile_bots_none_hint)).assertIsDisplayed()
+        compose.onNodeWithTag(BotsTags.connect("h1")).assertDoesNotExist()
+        compose.onNodeWithTag(BotsTags.checkAgain("h1")).assertHeightIsAtLeast(48.dp).performClick()
+        // Dialling the computer that is already connected only nudges it to read its Bots again.
+        assertEvents("connect:h1")
+    }
+
+    private fun speaks(stateRes: Int) = SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, text(stateRes))
+
+    @Test fun aComputerHeaderIsAFortyEightDpButtonThatSpeaksCollapsedOrExpanded() {
+        showTree(tree(listOf(host("h1"), host("h2")), collapsed = setOf("h1")))
+        compose.onNodeWithTag(BotsTags.host("h1")).assertHeightIsAtLeast(48.dp).assert(speaks(R.string.teams_section_collapsed))
+        compose.onNodeWithTag(BotsTags.host("h2")).assertHeightIsAtLeast(48.dp).assert(speaks(R.string.teams_section_expanded))
+        compose.onNodeWithTag(BotsTags.host("h1")).assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button))
+    }
+
+    @Test fun aBotRowIsAFortyEightDpButtonThatSpeaksCollapsedOrExpanded() {
+        showTree(
+            tree(
+                listOf(host("h1")), ready("h1"), liveBots("h1", liveBot("a"), liveBot("b")),
+                chats = heldChats("h1", "a", listOf(liveChat("s1"))), expanded = setOf(BotsLogic.botKey("h1", "a")),
+            ),
+        )
+        compose.onNodeWithTag(BotsTags.bot("h1", "a")).assertHeightIsAtLeast(48.dp).assert(speaks(R.string.teams_section_expanded))
+        compose.onNodeWithTag(BotsTags.bot("h1", "b")).assertHeightIsAtLeast(48.dp).assert(speaks(R.string.teams_section_collapsed))
+        compose.onNodeWithTag(BotsTags.bot("h1", "b")).assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button))
+    }
+
+    @Test fun theBotChatRowsAndTheShowMoreRowMeetTheFortyEightDpTarget() {
+        val chats = (1..BotsLogic.FIRST_CHATS + 2).map { liveChat("s$it") }
+        showTree(
+            tree(
+                listOf(host("h1")), ready("h1"), liveBots("h1", liveBot("a")),
+                chats = heldChats("h1", "a", chats), expanded = setOf(BotsLogic.botKey("h1", "a")),
+            ),
+        )
+        compose.onNodeWithTag(BotsTags.newChat("h1", "a")).assertHeightIsAtLeast(48.dp)
+        compose.onNodeWithTag(BotsTags.chat("h1", "a", "s1")).assertHeightIsAtLeast(48.dp)
+        compose.onNodeWithTag(BotsTags.showMore("h1", "a")).assertHeightIsAtLeast(48.dp)
     }
 
     @Test fun aComputerNeverConnectedOffersToConnect() {

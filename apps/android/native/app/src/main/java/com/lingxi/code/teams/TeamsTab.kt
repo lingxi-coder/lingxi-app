@@ -2,7 +2,9 @@ package com.lingxi.code.teams
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -23,6 +25,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -44,16 +47,17 @@ import com.lingxi.code.friends.FriendLink
 import com.lingxi.code.friends.FriendMemberSheet
 import com.lingxi.code.friends.FriendOutcome
 import com.lingxi.code.friends.FriendProof
-import com.lingxi.code.friends.FriendsBanner
 import com.lingxi.code.friends.FriendsWorkspace
 import com.lingxi.code.friends.FriendState
 import com.lingxi.code.friends.InviteFriendsSheet
+import com.lingxi.code.friends.NoticeSnackbar
 import com.lingxi.code.friends.friendNamesText
 import com.lingxi.code.settings.SettingsRoutes
 import com.lingxi.code.tabs.AppTab
 import com.lingxi.code.tabs.LocalTabHost
 import com.lingxi.code.tabs.LocalWideLayout
 import com.lingxi.code.tabs.OnTabReselected
+import com.lingxi.code.theme.rememberReduceMotion
 import java.util.UUID
 
 /**
@@ -82,6 +86,7 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
     val host = LocalTabHost.current
     val wide = LocalWideLayout.current
     val listState = rememberLazyListState()
+    val reduceMotion = rememberReduceMotion()
     var scrollTop by remember { mutableIntStateOf(0) }
     // Add friend on a member (D15) is the Friends workspace's own lookup; the friends there are who shows "Friends" instead of the action.
     val friends = remember(context) { FriendsWorkspace.get(context.applicationContext) }
@@ -100,6 +105,10 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
     fun openConversation(id: String) = setStack(if (wide) stack.filterNot { it.startsWith("c:") } + "c:$id" else stack + "c:$id")
     fun openDetails() = setStack(if ("details" in stack) stack else stack + "details")
 
+    val entryLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    val botEntryLease = remember(teams.uid, teams.selectedId, stackText) { TeamBotEntryLease() }
+    DisposableEffect(botEntryLease) { onDispose { botEntryLease.active = false } }
+    val entryIsCurrent = { botEntryLease.active && entryLifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED) }
     val uid = teams.uid
     LaunchedEffect(joinCode, uid) {
         if (joinCode != null && uid != null) { joinPrefill = joinCode; sheet = "join"; onJoinCodeHandled() }
@@ -115,7 +124,7 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
     BackHandler(enabled = stack.isNotEmpty()) { setStack(stack.dropLast(1)) }
     // Re-tapping the tab pops to the list, then scrolls it to the top.
     OnTabReselected(AppTab.Teams) { if (stack.isNotEmpty()) setStack(emptyList()) else scrollTop++ }
-    LaunchedEffect(scrollTop) { if (scrollTop > 0) listState.animateScrollToItem(0) }
+    LaunchedEffect(scrollTop) { if (scrollTop > 0) { if (reduceMotion) listState.scrollToItem(0) else listState.animateScrollToItem(0) } }
 
     Box(modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).windowInsetsPadding(WindowInsets.systemBars).imePadding().testTag(TeamsTags.ROOT)) {
         val team = teams.teams.firstOrNull { it.id == teams.selectedId }
@@ -127,12 +136,15 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
             )
             !teams.loaded -> Box(Modifier.fillMaxSize().testTag(TeamsTags.LOADING), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             teams.teams.isEmpty() && teams.loading -> Box(Modifier.fillMaxSize().testTag(TeamsTags.LOADING), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+            // U9: what is empty, what to do, then the two actions 8 dp apart. The platform disclosure is read in the Create sheet, before a team exists.
             teams.teams.isEmpty() -> TeamsMessageState(
-                stringResource(R.string.teams_empty), Modifier.testTag(TeamsTags.EMPTY), icon = Icons.Outlined.Groups, body = stringResource(R.string.teams_disclosure),
+                stringResource(R.string.teams_empty_title), Modifier.testTag(TeamsTags.EMPTY), icon = Icons.Outlined.Groups, body = stringResource(R.string.teams_empty),
                 action = {
-                    Button(onClick = { workspace.teamsModel.clearError(); sheet = "create" }) { Text(stringResource(R.string.teams_create)) }
-                    OutlinedButton(onClick = { workspace.teamsModel.clearError(); joinPrefill = ""; sheet = "join" }) { Text(stringResource(R.string.teams_join)) }
-                    TextButton(onClick = { sheet = "services" }, modifier = Modifier.testTag("teams.empty.services")) { Text(stringResource(R.string.services_title)) }
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Button(onClick = { workspace.teamsModel.clearError(); sheet = "create" }) { Text(stringResource(R.string.teams_create)) }
+                        OutlinedButton(onClick = { workspace.teamsModel.clearError(); joinPrefill = ""; sheet = "join" }) { Text(stringResource(R.string.teams_join)) }
+                        TextButton(onClick = { sheet = "services" }, modifier = Modifier.testTag("teams.empty.services")) { Text(stringResource(R.string.services_title)) }
+                    }
                 },
             )
             team == null -> TeamsMessageState(
@@ -148,7 +160,8 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                         onOpenConversation = ::openConversation, onSwitchTeam = { sheet = "switcher" }, onNew = { sheet = it },
                         onToggleSection = workspace::toggleSection,
                         onMarkRead = { workspace.messagingModel.markRead(it.id, it.lastSeq) },
-                        onMessageBot = { id -> messageBot(workspace, messaging, uid, id) { openConversation(it) } },
+                        onMessageBot = { id -> messageBot(workspace, messaging, uid, id, isCurrent = entryIsCurrent) { openConversation(it) } },
+                        onBotExample = { id, example -> messageBot(workspace, messaging, uid, id, example, entryIsCurrent) { openConversation(it) } },
                         onArtifact = { workspace.messagingModel.openArtifact(it) },
                         onRefreshTask = { workspace.messagingModel.refreshTask(it) },
                         onCancelTask = { workspace.messagingModel.cancelTask(it) },
@@ -168,7 +181,8 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                         workspace = workspace, uid = uid, team = team, teams = teams, messaging = messaging, showBack = !wide,
                         friendUids = friendUids, onAddFriend = { member -> friends.member.lookup(FriendProof.Team(team.id, member.uid)); sheet = "addFriend" },
                         onInviteFriends = { sheet = "inviteFriends" }, onClose = { setStack(stack.filterNot { it == "details" }) },
-                        onMessageBot = { key -> messageBot(workspace, messaging, uid, key) { openConversation(it) } }, modifier = m,
+                        onMessageBot = { key -> messageBot(workspace, messaging, uid, key, isCurrent = entryIsCurrent) { openConversation(it) } },
+                        onBotExample = { key, example -> messageBot(workspace, messaging, uid, key, example, entryIsCurrent) { openConversation(it) } }, modifier = m,
                     )
                 }
                 if (wide) {
@@ -233,20 +247,30 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                 onDismiss = dismiss,
             )
         }
-        if (invited.isNotEmpty()) {
-            val locale = LocalConfiguration.current.locales[0]
-            FriendsBanner(stringResource(R.string.friends_invite_sent_to_fmt, friendNamesText(invited, locale)), invited, onDismiss = { invited = emptyList() }, modifier = Modifier.align(Alignment.BottomCenter))
-        }
+        // The tab's one-shot line, in the tab's own Snackbar host (a polite live region with a Dismiss action).
+        val locale = LocalConfiguration.current.locales[0]
+        NoticeSnackbar(
+            key = invited.takeIf { it.isNotEmpty() },
+            text = if (invited.isEmpty()) null else stringResource(R.string.friends_invite_sent_to_fmt, friendNamesText(invited, locale)),
+        ) { invited = emptyList() }
     }
 }
 
 /** Opens the viewer's Bot DM with the Bot or creates it; the same rule as the Bots list on the Desktop. A friend's chat starts one the same way (D22). */
-internal fun messageBot(workspace: TeamsWorkspace, messaging: TeamMessagingState, uid: String, sharedBotId: String, open: (String) -> Unit) {
+internal fun messageBot(workspace: TeamsWorkspace, messaging: TeamMessagingState, uid: String, sharedBotId: String,
+                        example: String? = null, isCurrent: () -> Boolean = { true }, open: (String) -> Unit) {
+    val context = workspace.botEntryContext(uid) ?: return
+    val bot = messaging.bots.firstOrNull { it.sharedBotId == sharedBotId && it.selectable } ?: return
+    if (example != null && example !in bot.examples) return
+    fun opened(id: String) {
+        if (!TeamBotEntry.canOpen(context, workspace.botEntryContext(uid), isCurrent())) return
+        if (example != null) workspace.seedBotExample(context, id, example)
+        open(id)
+    }
     val existing = TeamsListLogic.findBotDm(messaging.cache?.conversations.orEmpty(), uid, sharedBotId, messaging.bots)
-    if (existing != null) { open(existing.id); return }
-    val bot = messaging.bots.firstOrNull { it.sharedBotId == sharedBotId } ?: return
+    if (existing != null) { opened(existing.id); return }
     val id = UUID.randomUUID().toString()
-    workspace.messagingModel.create("bot_dm", bot.name, emptyList(), id, listOf(sharedBotId)) { open(id) }
+    workspace.messagingModel.create("bot_dm", bot.name, emptyList(), id, listOf(sharedBotId), shouldOpen = { TeamBotEntry.canOpen(context, workspace.botEntryContext(uid), isCurrent()) }) { opened(id) }
 }
 
 @Composable

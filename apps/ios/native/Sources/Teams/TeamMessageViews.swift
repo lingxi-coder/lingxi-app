@@ -75,27 +75,35 @@ struct TeamConversationContext {
 
     func isMine(_ message: TeamMessage) -> Bool { message.author.kind == "user" && message.author.uid == uid }
 
-    /// Whether a Bot can be reached now: `teams_bot_disabled`, `remote_online` or `teams_bot_offline_queued`.
-    func presenceKey(_ card: TeamBotCard) -> String {
-        card.state != "published" ? "teams_bot_disabled" : card.ready ? "remote_online" : "teams_bot_offline_queued"
+    /// Who wrote a message, as its author line reads: "You" on the viewer's own messages (docs/TEAMS-UI-POLISH.md U3), else the
+    /// name of the person or the Bot.
+    func authorName(of message: TeamMessage) -> String {
+        isMine(message) ? TeamsText.you : identity(of: message).name
+    }
+
+    /// The same member-safe, freshness-aware status shown by the Bot directory.
+    @MainActor
+    func presenceText(_ card: TeamBotCard) -> String {
+        TeamsText.localized(TeamBotMemberText.availabilityKey(model.botsUnverified ? .unverified : card.memberAvailability))
     }
 
     /// The second line of the header (Desktop `conversationSubtitle`): a Bot DM says whether the Bot is reachable
     /// and whose it is, a dm says what it is, a group or channel how many are in it; a friend's chat names their `@username`.
     /// `nil` when there is nothing to say.
+    @MainActor
     var subtitle: String? {
         if let pair { return pair.handle.map { "@" + $0 } }
         switch conversation.kind {
         case "bot_dm":
             guard let card = card(forKey: conversation.effectiveSharedBotId) else { return nil }
-            return String(localized: String.LocalizationValue(presenceKey(card))) + " · " + String(localized: "teams_bot_owner \(userName(card.maintainer.uid))")
+            return TeamsStreamLogic.joinedLine([presenceText(card), String(localized: "teams_bot_owner \(userName(card.maintainer.uid))")])
         case "dm":
             return strings.directMessage
         default:
             let members = conversation.participants.filter { $0.hasPrefix("user:") }.count
             let bots = conversation.participants.filter { $0.hasPrefix("shared_bot:") }.count
-            let parts = [members > 0 ? TeamsText.membersCount(members) : nil, bots > 0 ? TeamsText.botsCount(bots) : nil].compactMap { $0 }
-            return parts.isEmpty ? nil : parts.joined(separator: " · ")
+            let line = TeamsStreamLogic.joinedLine([members > 0 ? TeamsText.membersCount(members) : nil, bots > 0 ? TeamsText.botsCount(bots) : nil])
+            return line.isEmpty ? nil : line
         }
     }
 
@@ -161,8 +169,13 @@ struct StreamUnreadDivider: View {
 /// One message of the stream: the avatar and name on the first message of a run, the time, the reply quote,
 /// the text (or the recall notice), the edit mark, and the Bot cards that belong to it. Long-press opens the
 /// message actions (reply, edit and recall for the viewer's own text, copy); nothing on a recalled message.
+///
+/// The viewer's own messages read "You" and sit on a faint tint of the accent (U3); the rows of one run touch, so a run reads as one
+/// block. For VoiceOver the author, time, quote, text and edit mark are one element with the message actions; the files and the Bot cards
+/// stay elements of their own, so their buttons can be reached.
 struct TeamMessageCell: View {
     @Environment(\.locale) private var locale
+    @ScaledMetric(relativeTo: .body) private var percent: CGFloat = 100
     let message: TeamMessage
     let grouped: Bool
     let context: TeamConversationContext
@@ -176,38 +189,15 @@ struct TeamMessageCell: View {
 
     var body: some View {
         let identity = context.identity(of: message)
+        let name = context.authorName(of: message)
         HStack(alignment: .top, spacing: 10) {
             if grouped {
-                Color.clear.frame(width: 32, height: 1)
+                Color.clear.frame(width: AvatarScale.side(32, percent: percent), height: 1)
             } else {
                 IdentityAvatar(identity: identity, size: 32)
             }
             VStack(alignment: .leading, spacing: 3) {
-                if !grouped { header(identity) }
-                if let quote { quoteLine(quote) }
-                if recalled {
-                    Text("teams_message_recalled").italic().foregroundStyle(.secondary)
-                } else if message.text.isEmpty && !message.files.isEmpty {
-                    // A message of files alone has no text line.
-                    EmptyView()
-                } else if TeamsBotText.rendersMarkdown(authorKind: message.author.kind, recalled: recalled) {
-                    // A shared Bot writes Markdown: the chat's renderer, web links only. Images stay inert.
-                    AIText(markdown: context.text(of: message))
-                        .teamBotLinkPolicy()
-                        .accessibilityIdentifier("teams.message.body.\(message.id)")
-                } else {
-                    Text(context.text(of: message))
-                }
-                if !message.files.isEmpty { TeamMessageFilesView(message: message, context: context).padding(.top, 2) }
-                if !recalled, let read = message.readFiles, !read.isEmpty {
-                    // What the Bot's model was given, as the service checked it.
-                    Label { Text("teams_files_read \(read.map(\.name).joined(separator: ", "))") } icon: { Image(systemName: "paperclip") }
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .accessibilityIdentifier("teams.message.read.\(message.id)")
-                }
-                if message.editedAt != nil && !recalled {
-                    Text("teams_message_edited").font(.caption2).foregroundStyle(.secondary)
-                }
+                content(identity, name: name)
                 cards
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -215,6 +205,7 @@ struct TeamMessageCell: View {
         .padding(.horizontal, 16)
         .padding(.top, grouped ? 1 : 10)
         .padding(.bottom, 1)
+        .background { if context.isMine(message) { Color.accentColor.opacity(0.06) } }
         .contentShape(Rectangle())
         .contextMenu {
             if !recalled {
@@ -224,13 +215,78 @@ struct TeamMessageCell: View {
                 if let onRecall { Button("teams_message_recall", systemImage: "trash", role: .destructive) { onRecall(message) } }
             }
         }
-        .modifier(MessageActionsAccessibility(message: message, onReply: recalled ? nil : onReply, onEdit: recalled ? nil : onEdit, onRecall: recalled ? nil : onRecall))
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.message.\(message.id)")
     }
 
-    private func header(_ identity: TeamIdentity) -> some View {
+    private var edited: Bool { message.editedAt != nil && !recalled }
+
+    /// A message of files alone in the middle of a run has nothing to say above its files: no author line, no text.
+    private var wordsAreEmpty: Bool { grouped && quote == nil && !recalled && message.text.isEmpty && !message.files.isEmpty }
+
+    /// What the message carries. The author line, the quote, the text and the edit mark are one element for VoiceOver, with the message
+    /// actions. The files are buttons (open, take back) and what the Bot read is a line of its own, so they stay elements of their own
+    /// beside it, like the Bot cards.
+    private func content(_ identity: TeamIdentity, name: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if !wordsAreEmpty { words(identity, name: name) }
+            if !message.files.isEmpty { TeamMessageFilesView(message: message, context: context).padding(.top, 2) }
+            if !recalled, let read = message.readFiles, !read.isEmpty {
+                // What the Bot's model was given, as the service checked it.
+                Label { Text("teams_files_read \(read.map(\.name).joined(separator: ", "))") } icon: { Image(systemName: "paperclip") }
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("teams.message.read.\(message.id)")
+            }
+            if edited {
+                // Under the files, as they are drawn; VoiceOver has it in the words' label.
+                Text("teams_message_edited").font(.caption2).foregroundStyle(.secondary).accessibilityHidden(!wordsAreEmpty)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func words(_ identity: TeamIdentity, name: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if !grouped { header(identity, name: name) }
+            if let quote { quoteLine(quote) }
+            if recalled {
+                Text("teams_message_recalled").italic().foregroundStyle(.secondary)
+            } else if message.text.isEmpty && !message.files.isEmpty {
+                // A message of files alone has no text line.
+                EmptyView()
+            } else if TeamsBotText.rendersMarkdown(authorKind: message.author.kind, recalled: recalled) {
+                // A shared Bot writes Markdown: the chat's renderer, web links only. Images stay inert.
+                AIText(markdown: context.text(of: message))
+                    .teamBotLinkPolicy()
+            } else {
+                Text(context.text(of: message))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text(verbatim: spokenLabel(identity, name: name)))
+        .accessibilityIdentifier("teams.message.body.\(message.id)")
+        .modifier(MessageActionsAccessibility(message: message, recalled: recalled, onReply: onReply, onEdit: onEdit, onRecall: onRecall))
+    }
+
+    /// "Ann, Bot, 10:32, Sam, Hello there, Sure, Edited": author, Bot tag, time, the quote, the text, the edit mark.
+    private func spokenLabel(_ identity: TeamIdentity, name: String) -> String {
+        let said = context.text(of: message)
+        let text = recalled ? TeamsText.localized("teams_message_recalled")
+            : TeamsBotText.rendersMarkdown(authorKind: message.author.kind, recalled: recalled) ? TeamsBotText.plainText(said) : said
+        return TeamsStreamLogic.spokenLine([
+            name,
+            identity.kind == .bot ? context.strings.bot : nil,
+            TeamsStreamLogic.formatClock(atMs: message.createdAtMs, locale: locale),
+            quote.map { TeamsStreamLogic.spokenLine([$0.author, $0.text]) },
+            text,
+            edited ? TeamsText.localized("teams_message_edited") : nil,
+        ])
+    }
+
+    private func header(_ identity: TeamIdentity, name: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(identity.name).font(.subheadline.weight(.semibold)).lineLimit(1)
+            Text(verbatim: name).font(.subheadline.weight(.semibold)).lineLimit(1)
             if identity.kind == .bot {
                 Text(context.strings.bot)
                     .font(.caption2.weight(.semibold))
@@ -278,32 +334,46 @@ struct TeamMessageCell: View {
                              onReply: context.answerableWait(of: message) == nil ? nil : onReply.map { reply in { reply(message) } })
                     .padding(.top, 4)
             } else {
-                Button("teams_task_view") { Task { try? await context.model.refreshTask(taskId) } }
+                Button {
+                    Task { try? await context.model.refreshTask(taskId) }
+                } label: {
+                    Text("teams_task_view").minimumHitTarget(minWidth: 0, alignment: .leading)
+                }
             }
         }
         if ids.isEmpty, let artifactId = message.artifactId {
-            Button("teams_artifact_open") { Task { try? await context.model.openArtifact(artifactId) } }
+            Button {
+                Task { try? await context.model.openArtifact(artifactId) }
+            } label: {
+                Text("teams_artifact_open").minimumHitTarget(minWidth: 0, alignment: .leading)
+            }
         }
     }
 
 }
 
-/// The message actions for VoiceOver and Switch Control (the context menu is gesture-only).
+/// The message actions for VoiceOver and Switch Control (the context menu is gesture-only): reply, edit and recall where they apply,
+/// and Copy. A recalled message has none of them.
 private struct MessageActionsAccessibility: ViewModifier {
     let message: TeamMessage
+    let recalled: Bool
     let onReply: ((TeamMessage) -> Void)?
     let onEdit: ((TeamMessage) -> Void)?
     let onRecall: ((TeamMessage) -> Void)?
 
     func body(content: Content) -> some View {
-        content
-            .accessibilityElement(children: .contain)
-            .accessibilityHint(Text("teams_message_actions"))
-            .accessibilityActions {
-                if let onReply { Button("teams_message_reply") { onReply(message) } }
-                if let onEdit { Button("teams_message_edit") { onEdit(message) } }
-                if let onRecall { Button("teams_message_recall") { onRecall(message) } }
-            }
+        if recalled {
+            content
+        } else {
+            content
+                .accessibilityHint(Text("teams_message_actions"))
+                .accessibilityActions {
+                    if let onReply { Button("teams_message_reply") { onReply(message) } }
+                    if let onEdit { Button("teams_message_edit") { onEdit(message) } }
+                    if !message.text.isEmpty { Button("chat_message_copy") { UIPasteboard.general.string = message.text } }
+                    if let onRecall { Button("teams_message_recall") { onRecall(message) } }
+                }
+        }
     }
 }
 
@@ -323,25 +393,31 @@ struct TeamOutboxCell: View {
         HStack(alignment: .top, spacing: 10) {
             IdentityAvatar(identity: identity, size: 32)
             VStack(alignment: .leading, spacing: 3) {
-                Text(identity.name).font(.subheadline.weight(.semibold))
-                Text(LocalizedStringKey(status)).font(.caption).foregroundStyle(intent.error == nil ? Color.secondary : Color.orange)
-                switch intent.operation {
-                case "recall": Text("teams_message_recall").foregroundStyle(.secondary)
-                case "edit": Text(String(localized: "teams_message_edit") + ": " + intent.text).foregroundStyle(.secondary)
-                default:
-                    if !intent.text.isEmpty { Text(intent.text).foregroundStyle(.secondary) }
-                    if let names = intent.attachmentNames, !names.isEmpty {
-                        Label(names.joined(separator: ", "), systemImage: "paperclip").font(.footnote).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(verbatim: TeamsText.you).font(.subheadline.weight(.semibold))
+                    Text(LocalizedStringKey(status)).font(.caption).foregroundStyle(intent.error == nil ? Color.secondary : Color.orange)
+                    switch intent.operation {
+                    case "recall": Text("teams_message_recall").foregroundStyle(.secondary)
+                    case "edit": Text(String(localized: "teams_message_edit") + ": " + intent.text).foregroundStyle(.secondary)
+                    default:
+                        if !intent.text.isEmpty { Text(intent.text).foregroundStyle(.secondary) }
+                        if let names = intent.attachmentNames, !names.isEmpty {
+                            Label(names.joined(separator: ", "), systemImage: "paperclip").font(.footnote).foregroundStyle(.secondary)
+                        }
                     }
                 }
-                Button("teams_message_discard", role: .destructive, action: onDiscard)
-                    .font(.caption)
-                    .disabled(inFlight)
+                .accessibilityElement(children: .combine)
+                Button(role: .destructive, action: onDiscard) {
+                    Text("teams_message_discard").font(.footnote).minimumHitTarget(minWidth: 0, alignment: .leading)
+                }
+                .disabled(inFlight)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 16)
         .padding(.top, 10)
+        .padding(.bottom, 1)
+        .background(Color.accentColor.opacity(0.06))
         .opacity(0.9)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.outbox.\(intent.id)")

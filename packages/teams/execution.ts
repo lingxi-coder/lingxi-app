@@ -8,6 +8,17 @@ export interface SharedBotCard {
   revision: number; state: 'draft' | 'published' | 'paused' | 'retired';
   permitted: boolean; ready: boolean; onlineUntil: number; usePolicy: UsePolicy;
   quotas: RequestQuotas; instanceId?: string;
+  /** Up to three prompts pinned to this publication; selecting one only fills the member's draft. */
+  examples?: string[];
+  /** Reported by the active deployment; absence means not yet verified. */
+  capabilities?: { durableWait: boolean; writeOperations: boolean };
+  availability?: 'ready' | 'paused' | 'offline' | 'maintenance' | 'quota_exhausted' | 'unverified';
+  /** Refresh this projected status at this server-computed UTC millisecond deadline, even without a signal. */
+  statusExpiresAt?: number;
+  /** Remaining requests for this member, bounded by team, membership and Bot UTC-day counters. */
+  dailyRemaining?: number;
+  /** Next UTC midnight, in milliseconds. Admission remains transactional. */
+  quotaResetsAt?: number;
   /** The Bot keeps a list its members and its runs change together. With `approval`, a run only proposes a change and the member who asked decides. */
   sharedList?: { title: string; approval?: 'requester' };
   /** The Bot may answer messages nobody asked it about, in Chats that turn this on, at most `daily` times a day. */
@@ -111,7 +122,7 @@ export function executionCommand<A extends MemberExecutionAction>(scope: Executi
   if (!isMemberExecutionCommand(command)) throw new Error('INVALID_INPUT');
   return command as unknown as Extract<MemberExecutionCommand, { action: A }>;
 }
-export interface LocalPublishableBot { instanceId: string; name: string; description: string; model?: string; requiredResources?: string[] }
+export interface LocalPublishableBot { instanceId: string; name: string; description: string; model?: string; requiredResources?: string[]; examples?: string[]; capabilities?: { durableWait: boolean; writeOperations: boolean } }
 export interface SelectedSharedFile { token: string; kind: 'file' | 'skill'; name: string; sha256: string; bytes: number; mediaType: string }
 /**
  * How one Bot is served from the computer that publishes it. `checking` until a pass has an answer; `not_ready` names what its maintainer
@@ -134,6 +145,7 @@ export interface AcceptSharedBotInput extends ExecutionScope { transferId: strin
 export interface PublishLocalBotInput extends ExecutionScope {
   publicationId: string; sharedBotId: string; instanceId: string; expectedRevision: number;
   role: string; usePolicy: UsePolicy; fileTokens: string[]; resourceBindings?: Record<string, string>; quotas: RequestQuotas;
+  examples?: string[];
   /** Files of the Bot's current publication that stay shared unchanged, by resource id. A current file that is neither kept nor replaced stops being shared. */
   keptResources?: string[];
   /** Files of the current publication whose text is replaced: resource id to the token of the newly selected file. The resource keeps its id and gets its next revision. */

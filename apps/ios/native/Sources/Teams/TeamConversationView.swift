@@ -12,6 +12,7 @@ struct TeamConversationView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
     @Environment(\.locale) private var locale
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(AppNavigationModel.self) private var navigation
     let conversationID: String
     /// Called when the conversation is gone (the viewer is not in it any more). By default the screen pops itself;
@@ -37,6 +38,7 @@ struct TeamConversationView: View {
     @State private var savedText: String?
     @State private var draft = TeamComposerDraft()
     @State private var draftLoaded = false
+    @State private var ownedDraftKey = ""
     /// The app's voice input, made the first time the microphone is used here. What it hears goes into the box.
     @State private var voice: VoiceInteractionController?
     @FocusState private var composerFocused: Bool
@@ -54,22 +56,35 @@ struct TeamConversationView: View {
         // The model is replaced when the team or its membership generation changes; the new one must open this thread.
         .task(id: workspace.messaging.map(ObjectIdentifier.init)) { workspace.openConversation(conversationID) }
         .onAppear {
-            if !draftLoaded { draft = workspace.draft(for: conversationID); draftLoaded = true }
+            if !draftLoaded || ownedDraftKey != workspace.draftKey(conversationID) { loadDraft() }
             showNotice = workspace.pair == nil && !workspace.platformNoticeShown
             workspace.markPlatformNoticeShown()
         }
         .onChange(of: draft) { _, value in
-            if draftLoaded, editing == nil { workspace.setDraft(value, for: conversationID) }
+            if draftLoaded, editing == nil, ownedDraftKey == workspace.draftKey(conversationID) { workspace.setDraft(value, for: conversationID) }
         }
         .onDisappear {
-            if draftLoaded, editing == nil { workspace.setDraft(draft, for: conversationID) }
+            if draftLoaded, editing == nil, ownedDraftKey == workspace.draftKey(conversationID) { workspace.setDraft(draft, for: conversationID) }
             voice?.close()
         }
         // Another account, another team, or the viewer's membership changed: what was being said is dropped, not moved.
-        .onChange(of: workspace.draftKey(conversationID)) { _, _ in voice?.close() }
+        .onChange(of: workspace.draftKey(conversationID)) { _, _ in
+            voice?.close()
+            editing = nil; savedText = nil
+            loadDraft()
+        }
+        .onChange(of: workspace.draft(for: conversationID)) { _, value in
+            if ownedDraftKey == workspace.draftKey(conversationID), editing == nil, draft != value { draft = value }
+        }
         // Without `.contain` the identifier is copied onto every child (composer input, send, rows).
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.conversation.\(conversationID)")
+    }
+
+    private func loadDraft() {
+        ownedDraftKey = workspace.draftKey(conversationID)
+        draft = workspace.draft(for: conversationID)
+        draftLoaded = true
     }
 
     // MARK: Not there (yet)
@@ -82,8 +97,10 @@ struct TeamConversationView: View {
                 Text(creation.title).font(.headline)
                 Text(LocalizedStringKey(creation.error.map(TeamsErrors.key) ?? (creation.attempted == true ? "teams_message_confirming" : "teams_message_pending")))
                     .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                Button("teams_message_discard", role: .destructive) {
+                Button(role: .destructive) {
                     Task { if await workspace.run({ try await model?.discardCreation() }) { dismiss() } }
+                } label: {
+                    Text("teams_message_discard").minimumHitTarget()
                 }
                 .disabled((creation.attempted == true && creation.error == nil) || (creation.leaseUntil ?? 0) > Date().timeIntervalSince1970 * 1000)
             }
@@ -113,10 +130,13 @@ struct TeamConversationView: View {
         let carrying = carriesFiles(context)
         return VStack(spacing: 0) {
             banners(context)
+            if conversation.kind == "bot_dm", let bot = context.bots.first(where: { conversation.participants.contains("shared_bot:\($0.sharedBotId)") }) {
+                TeamBotMemberInfo(bot: bot, unverified: model.botsUnverified).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal).padding(.vertical, 6)
+            }
             stream(context, messages: messages)
             voicePanel
             TeamComposerView(
-                context: context, draft: $draft, editing: editing, replying: replying(context, messages: messages), busy: workspace.messageBusy,
+                context: context, draft: $draft, editing: editing, answeringWait: answering(context) != nil, replying: replying(context, messages: messages), busy: workspace.messageBusy,
                 files: carrying ? workspace.files(for: conversationID) : [], refusals: carrying ? workspace.refusals(for: conversationID) : [],
                 onChooseFiles: carrying ? { workspace.addFiles($0, to: conversationID) } : nil,
                 onRemoveFile: { workspace.removeFile($0, from: conversationID) }, onDismissRefusals: { workspace.dismissRefusals(for: conversationID) },
@@ -150,6 +170,7 @@ struct TeamConversationView: View {
                         Button("teams_mark_read", systemImage: "checkmark.circle") { Task { await workspace.markRead(conversation.id) } }
                             .disabled(model.offline || workspace.messageBusy)
                     } label: { Image(systemName: "ellipsis.circle") }
+                    .accessibilityLabel(Text("teams_conversation_menu"))
                     .accessibilityIdentifier("teams.conversation.more")
                 }
             }
@@ -161,7 +182,7 @@ struct TeamConversationView: View {
             Button("teams_message_recall", role: .destructive) {
                 Task { await workspace.run { try await model.queue(operation: "recall", text: "", messageId: message.id) } }
             }
-            Button("teams_cancel", role: .cancel) {}
+            Button("common_cancel", role: .cancel) {}
         } message: { _ in
             Text("teams_recall_confirm_detail")
         }
@@ -204,9 +225,9 @@ struct TeamConversationView: View {
         let model = context.model
         return VStack(spacing: 0) {
             if !model.error.isEmpty {
-                TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(model.error)), actionTitle: "mcp_reconnect") { workspace.reconnect() }
+                TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(model.error)), actionTitle: "teams_reconnect") { workspace.reconnect() }
             } else if model.directoryReady && model.offline {
-                TeamsBanner(kind: .offline, title: "teams_offline_title", detail: "teams_messages_offline", actionTitle: "mcp_reconnect") { workspace.reconnect() }
+                TeamsBanner(kind: .offline, title: "teams_offline_title", detail: "teams_messages_offline", actionTitle: "teams_reconnect") { workspace.reconnect() }
             }
             if !workspace.actionError.isEmpty, workspace.actionError != model.error {
                 TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(workspace.actionError)), actionTitle: "common_close") { workspace.clearActionError() }
@@ -243,15 +264,22 @@ struct TeamConversationView: View {
                         .padding(.horizontal, 16).padding(.vertical, 10)
                 }
                 if start > 0 {
-                    Button("teams_messages_earlier") { showEarlier(messages: messages, start: start, rows: rows) }
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
+                    Button {
+                        showEarlier(messages: messages, start: start, rows: rows)
+                    } label: {
+                        Text("teams_messages_earlier").font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity).minimumHitTarget(minWidth: 0)
+                    }
                 }
                 if messages.isEmpty {
-                    Text(LocalizedStringKey(thread == nil && conversation.lastSeq > 0 ? "teams_loading_messages" : "teams_empty_thread"))
-                        .font(.footnote).foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity).padding(.vertical, 24)
+                    if thread == nil && conversation.lastSeq > 0 {
+                        Text("teams_loading_messages")
+                            .font(.footnote).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity).padding(.vertical, 24)
+                    } else {
+                        // Nothing here yet: the composer below is the action (U9).
+                        TeamsStateView(systemImage: "bubble.left.and.bubble.right", title: "teams_preview_none", message: "teams_empty_thread_hint")
+                            .frame(maxWidth: .infinity).padding(.vertical, 24)
+                    }
                 }
                 ForEach(rows, id: \.key) { row in
                     switch row {
@@ -326,7 +354,7 @@ struct TeamConversationView: View {
         .overlay(alignment: .bottomTrailing) {
             if placed && !atBottom {
                 Button {
-                    withAnimation { position.scrollTo(edge: .bottom) }
+                    withAnimation(.lxMotion(reduceMotion)) { position.scrollTo(edge: .bottom) }
                     seenSeq = newest
                 } label: {
                     HStack(spacing: 6) {
@@ -336,6 +364,7 @@ struct TeamConversationView: View {
                     .padding(.horizontal, 12).padding(.vertical, 8)
                     .background(.regularMaterial, in: Capsule())
                     .overlay(Capsule().stroke(Color.primary.opacity(0.1)))
+                    .minimumHitTarget()
                 }
                 .buttonStyle(.plain)
                 .padding(12)
@@ -459,6 +488,8 @@ struct TeamConversationView: View {
     }
 
     private func send(_ context: TeamConversationContext) async {
+        let ownerKey = workspace.draftKey(conversationID)
+        guard ownedDraftKey == ownerKey else { return }
         let body = draft.text, reply = draft.replyToID, targets = draft.targets, changing = editing
         // A reply to a Bot's question that still waits for the viewer is its answer: it continues that task and asks no Bot.
         let waitId = answering(context)
@@ -475,7 +506,7 @@ struct TeamConversationView: View {
             guard model.selected == conversationID else { throw TeamMessageFailure(code: "INVALID_INPUT") }
             try await model.queue(operation: changing == nil ? "create" : "edit", text: body, messageId: changing?.id, replyTo: reply, targets: changing == nil ? targets : [], files: files)
         }
-        guard sent else { return }
+        guard sent, ownedDraftKey == ownerKey, workspace.draftKey(conversationID) == ownerKey, workspace.messaging === context.model else { return }
         workspace.filesSent(files.map(\.uploadId), in: conversationID)
         if changing != nil {
             // The set-aside draft comes back (Desktop: `onClearEditing` restores the text kept while editing).

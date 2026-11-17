@@ -6,6 +6,7 @@ import SwiftUI
 struct TeamsListView: View {
     @Environment(TeamsWorkspace.self) private var workspace
     @Environment(\.locale) private var locale
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let uid: String
     let team: TeamSummary
     /// The conversation open beside the list (wide layout); highlighted. Empty on phones.
@@ -14,6 +15,8 @@ struct TeamsListView: View {
     var scrollToTop = 0
     let onOpen: (String) -> Void
     let onSwitchTeam: () -> Void
+    /// Opens the details of the team (members, invites, Bots): from the team menu of the toolbar, as from the switcher.
+    let onDetails: () -> Void
     let onNew: (TeamsSheet) -> Void
 
     @State private var query = ""
@@ -30,11 +33,18 @@ struct TeamsListView: View {
         func unread(_ conversation: TeamMessageConversation) -> Int { model?.unread(of: conversation) ?? 0 }
     }
 
+    private func open(_ bot: TeamBotCard, example: String? = nil) {
+        Task {
+            if let id = await workspace.openBotDM(bot, example: example) { onOpen(id) }
+        }
+    }
+
     var body: some View {
         let model = workspace.messaging
         let strings = TeamsListStrings.current
         let members = workspace.directory
         let bots = model?.bots ?? []
+        let memberBots = TeamBotMemberRules.directory(bots)
         let all = model?.cache?.conversations ?? []
         let labels = Dictionary(all.map { ($0.id, TeamsListLogic.conversationLabel($0, members: members, uid: uid, bots: bots, strings: strings)) }, uniquingKeysWith: { first, _ in first })
         let context = Context(model: model, strings: strings, members: members, bots: bots, labels: labels, online: model.map { !$0.offline } ?? false)
@@ -47,25 +57,40 @@ struct TeamsListView: View {
                     .listRowInsets(EdgeInsets()).listRowSeparator(.hidden).listRowBackground(Color.clear)
                     .id(Self.topID)
                     .accessibilityHidden(true)
-                if !bots.isEmpty {
-                    Section("teams_assistants") {
-                        ForEach(bots.filter(\.selectable)) { bot in
-                            Button {
-                                let id = UUID().uuidString
-                                Task {
-                                    let done = await workspace.run { try await model?.create(kind: "bot_dm", title: bot.name, uids: [], sharedBotIds: [bot.sharedBotId], id: id) }
-                                    if done { onOpen(id) }
-                                }
-                            } label: {
-                                HStack {
-                                    AgentAvatar(agentID: bot.sharedBotId, size: 32)
-                                    VStack(alignment: .leading) {
+                // The team's shared Bots (U1: "Bots", never "Assistants"). A paused Bot stays in the directory, so its state can be read; it opens
+                // the chat the viewer already has with it, if any. The Bot's own lines (state, what it can do, the quota, example requests) are
+                // `TeamBotMemberInfo`, the member-safe projection.
+                if !memberBots.isEmpty {
+                    Section("remote_bots") {
+                        ForEach(memberBots) { bot in
+                            VStack(alignment: .leading, spacing: 8) {
+                                let history = TeamsListLogic.findBotDm(all, uid: uid, sharedBotId: bot.sharedBotId, bots: bots)
+                                Button {
+                                    // Opens the DM the viewer already has with the Bot, and creates one only when there is none.
+                                    if bot.selectable { open(bot) } else if let history { onOpen(history.id) }
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        AgentAvatar(agentID: bot.avatarId, size: 40)
                                         Text(bot.name).font(.body.weight(.semibold))
-                                        Text(LocalizedStringKey(bot.ready ? "remote_online" : "teams_bot_offline_queued")).font(.caption).foregroundStyle(.secondary)
                                     }
+                                    .padding(.vertical, 4)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(workspace.messageBusy || (!bot.selectable && history == nil))
+                                .accessibilityIdentifier("teams.assistant.\(bot.sharedBotId)")
+                                TeamBotMemberInfo(bot: bot, unverified: model?.botsUnverified == true)
+                                TeamBotExamplesHint(bot: bot)
+                                ForEach(bot.memberExamples, id: \.self) { example in
+                                    Button { open(bot, example: example) } label: {
+                                        Label(example, systemImage: "text.bubble").font(.subheadline).minimumHitTarget(minWidth: 0, alignment: .leading)
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .disabled(workspace.messageBusy || !bot.selectable)
+                                    .accessibilityIdentifier("teams.assistant.example.\(bot.sharedBotId)")
                                 }
                             }
-                            .accessibilityIdentifier("teams.assistant.\(bot.sharedBotId)")
                         }
                     }
                 }
@@ -79,9 +104,14 @@ struct TeamsListView: View {
                     }
                 }
                 ForEach((model?.cache?.commands ?? []).filter { $0.error != nil }) { command in
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 0) {
                         Text(LocalizedStringKey(TeamsErrors.key(command.error ?? "INVALID_INPUT"))).font(.caption).foregroundStyle(.secondary)
-                        Button("teams_message_discard") { Task { await workspace.run { try await model?.discardCommand(command.id) } } }
+                        Button {
+                            Task { await workspace.run { try await model?.discardCommand(command.id) } }
+                        } label: {
+                            Text("teams_message_discard").font(.footnote).minimumHitTarget(minWidth: 0, alignment: .leading)
+                        }
+                        .buttonStyle(.borderless)
                     }
                 }
                 if let creation = model?.cache?.creation { creationRow(creation) }
@@ -97,7 +127,7 @@ struct TeamsListView: View {
                 } else {
                     section(.channels, "teams_group_channels", groups.channels, context)
                     section(.direct, "teams_group_direct", groups.direct, context)
-                    section(.bots, "teams_group_bot_dm", groups.botDirect, context)
+                    section(.bots, "teams_group_bot_chats", groups.botDirect, context)
                 }
             }
             .listStyle(.plain)
@@ -108,7 +138,7 @@ struct TeamsListView: View {
                 workspace.messaging?.refresh()
             }
             .onChange(of: scrollToTop) { _, _ in
-                withAnimation { proxy.scrollTo(Self.topID, anchor: .top) }
+                withAnimation(.lxMotion(reduceMotion)) { proxy.scrollTo(Self.topID, anchor: .top) }
             }
         }
         .sheet(item: Binding(get: { workspace.messaging?.artifact }, set: { if $0 == nil { workspace.messaging?.closeArtifact() } })) { artifact in
@@ -118,6 +148,15 @@ struct TeamsListView: View {
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { teamChip }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button { onDetails() } label: { Label("teams_team_details", systemImage: "person.2") }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .accessibilityLabel(Text("teams_team_menu"))
+                .accessibilityIdentifier("teams.menu")
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     NewConversationItems(onNew: onNew)
@@ -138,13 +177,15 @@ struct TeamsListView: View {
         let others = workspace.unreadByTeam.reduce(0) { $0 + ($1.key == team.id ? 0 : $1.value) }
         return Button(action: onSwitchTeam) {
             HStack(spacing: 6) {
-                TeamAvatar(teamID: team.id, name: team.name, size: 24)
-                Text(team.name).font(.subheadline.weight(.semibold)).lineLimit(1).frame(maxWidth: 150, alignment: .leading)
+                TeamAvatar(teamID: team.id, name: team.name, size: 20)
+                Text(team.name).font(.subheadline.weight(.semibold)).lineLimit(1)
                 Image(systemName: "chevron.up.chevron.down").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
                 TeamsUnreadBadge(count: others)
             }
         }
         .accessibilityLabel(Text(verbatim: team.name))
+        .accessibilityValue(others > 0 ? Text("teams_other_unread") : Text(verbatim: ""))
         .accessibilityHint(Text("teams_switch_team"))
         .accessibilityIdentifier("teams.chip")
     }
@@ -156,10 +197,10 @@ struct TeamsListView: View {
         VStack(spacing: 0) {
             if let model = workspace.messaging {
                 if !model.error.isEmpty {
-                    TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(model.error)), actionTitle: "mcp_reconnect") { workspace.reconnect() }
+                    TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(model.error)), actionTitle: "teams_reconnect") { workspace.reconnect() }
                         .accessibilityIdentifier("teams.banner.error")
                 } else if model.directoryReady && model.fromCache {
-                    TeamsBanner(kind: .offline, title: "teams_offline_title", detail: "teams_messages_offline", actionTitle: "mcp_reconnect") { workspace.reconnect() }
+                    TeamsBanner(kind: .offline, title: "teams_offline_title", detail: "teams_messages_offline", actionTitle: "teams_reconnect") { workspace.reconnect() }
                         .accessibilityIdentifier("teams.banner.offline")
                 }
                 if !workspace.actionError.isEmpty, workspace.actionError != model.error {
@@ -183,14 +224,16 @@ struct TeamsListView: View {
 
     /// A conversation that was created on this device and is not confirmed yet.
     private func creationRow(_ creation: TeamMessageCreation) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 0) {
             Text(creation.title).font(.body.weight(.semibold)).lineLimit(1)
             Text(LocalizedStringKey(creation.error.map(TeamsErrors.key) ?? (creation.attempted == true ? "teams_message_confirming" : "teams_message_pending")))
                 .font(.caption).foregroundStyle(.secondary)
-            Button("teams_message_discard", role: .destructive) {
+            Button(role: .destructive) {
                 Task { await workspace.run { try await workspace.messaging?.discardCreation() } }
+            } label: {
+                Text("teams_message_discard").font(.footnote).minimumHitTarget(minWidth: 0, alignment: .leading)
             }
-            .font(.caption)
+            .buttonStyle(.borderless)
             .disabled((creation.attempted == true && creation.error == nil) || (creation.leaseUntil ?? 0) > Date().timeIntervalSince1970 * 1000)
         }
         .padding(.vertical, 4)
@@ -211,7 +254,7 @@ struct TeamsListView: View {
                 }
             } header: {
                 Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { workspace.toggleSection(kind) }
+                    withAnimation(.lxMotion(reduceMotion, .easeInOut(duration: 0.2))) { workspace.toggleSection(kind) }
                 } label: {
                     HStack(spacing: 8) {
                         Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary).textCase(nil)
@@ -221,11 +264,14 @@ struct TeamsListView: View {
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                             .rotationEffect(.degrees(collapsed ? -90 : 0))
+                            .accessibilityHidden(true)
                     }
-                    .contentShape(Rectangle())
+                    .minimumHitTarget(minWidth: 0)
                 }
                 .buttonStyle(.plain)
                 .accessibilityAddTraits(.isHeader)
+                .accessibilityValue(Text(collapsed ? "teams_section_collapsed" : "teams_section_expanded"))
+                .accessibilityHint(Text(collapsed ? "teams_section_expand" : "teams_section_collapse"))
                 .accessibilityIdentifier("teams.section.\(kind.rawValue)")
             }
         }
@@ -253,6 +299,7 @@ struct TeamsListView: View {
         }
         .buttonStyle(.plain)
         .listRowBackground(conversation.id == selectedConversation ? Color.accentColor.opacity(0.12) : Color.clear)
+        .accessibilityAddTraits(conversation.id == selectedConversation ? .isSelected : [])
         .swipeActions(edge: .leading, allowsFullSwipe: true) {
             if unread > 0 && context.online {
                 Button("teams_mark_read", systemImage: "checkmark.circle") {

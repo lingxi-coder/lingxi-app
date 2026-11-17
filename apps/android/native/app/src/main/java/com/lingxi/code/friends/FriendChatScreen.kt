@@ -187,7 +187,7 @@ private fun ChatUnavailable(showBack: Boolean, onBack: () -> Unit, modifier: Mod
 private fun FriendMenu(onProfile: () -> Unit, onRemove: () -> Unit, onBlock: () -> Unit) {
     var open by remember { mutableStateOf(false) }
     Box {
-        IconButton(onClick = { open = true }, modifier = Modifier.testTag(FriendsTags.CHAT_MENU)) { Icon(Icons.Outlined.MoreVert, stringResource(R.string.composer_more)) }
+        IconButton(onClick = { open = true }, modifier = Modifier.testTag(FriendsTags.CHAT_MENU)) { Icon(Icons.Outlined.MoreVert, stringResource(R.string.teams_conversation_menu)) }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             DropdownMenuItem(text = { Text(stringResource(R.string.friends_menu_view_profile)) }, onClick = { open = false; onProfile() })
             DropdownMenuItem(text = { Text(stringResource(R.string.friends_menu_remove), color = MaterialTheme.colorScheme.error) }, onClick = { open = false; onRemove() })

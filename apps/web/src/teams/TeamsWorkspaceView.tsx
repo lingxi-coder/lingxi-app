@@ -3,6 +3,7 @@ import { Markdown } from '../remote/markdown';
 import type { TeamMember, TeamsApi } from '../../../../packages/teams';
 import { InviteNotice } from '../../../../packages/teams/friend-dialogs';
 import type { FriendsApi } from '../../../../packages/teams/friends';
+import { useTeamsText } from '../../../../packages/teams/i18n';
 import '../../../../packages/teams/styles';
 import { TeamConversationView } from '../../../../packages/teams/TeamConversationView';
 import { TeamDetailsDrawer } from '../../../../packages/teams/TeamDetailsDrawer';
@@ -11,13 +12,14 @@ import type { DrawerTab, RenderMarkdown } from '../../../../packages/teams/ui';
 import { useTeamsWorkspace, type UseTeams } from '../../../../packages/teams/useTeamsWorkspace';
 import { InviteFriends } from '../friends/InviteFriends';
 import { MemberFriend } from '../friends/MemberFriend';
+import { renderTeamAvatar } from './teamAvatar';
 import './teams-web.css';
 
 /** A shared Bot's messages and documents use the Markdown renderer of Web's own chat (`Transcript`): React elements only, links limited to http(s) and mailto. */
 const renderMarkdown: RenderMarkdown = text => <Markdown text={text} />;
 
 interface LayoutProps {
-  zh: boolean;
+  locale: string;
   /** An invitation from a link: the join dialog opens with it filled in, but never joins by itself. */
   invite?: string;
   onInviteHandled?(): void;
@@ -37,29 +39,30 @@ export function TeamsWorkspaceView({ api, uid, ...layout }: LayoutProps & { api:
  * on the right. Under 760px wide only one of the sidebar and the conversation is shown at a time. Wrap it in
  * `.teams-web`, which sets the workspace's colors from the site's theme.
  */
-export function TeamsWorkspaceLayout({ teams: { workspace, snapshot }, zh, invite, onInviteHandled, onInviteResolved, friends }: LayoutProps & { teams: UseTeams }) {
+export function TeamsWorkspaceLayout({ teams: { workspace, snapshot }, locale, invite, onInviteHandled, onInviteResolved, friends }: LayoutProps & { teams: UseTeams }) {
+  const t = useTeamsText(locale);
   const [drawer, setDrawer] = useState<{ open: boolean; tab: DrawerTab }>({ open: false, tab: 'members' });
   const [adding, setAdding] = useState<TeamMember>();
   const [inviting, setInviting] = useState(false);
   const [invited, setInvited] = useState<string[]>();
   const [pane, setPane] = useState<'list' | 'conversation'>();
-  if (!workspace || !snapshot) return <p role="status" className="teams-web-note">{zh ? '正在加载…' : 'Loading…'}</p>;
+  if (!workspace || !snapshot) return <p role="status" className="teams-web-note">{t('teams_loading')}</p>;
   return (
     <div className="teams-web-body" data-pane={pane ?? (snapshot.team ? 'conversation' : 'list')}>
       <div className="teams-web-sidebar">
-        <TeamSidebar workspace={workspace} snapshot={snapshot} zh={zh} initialInvite={invite} onInviteHandled={onInviteHandled} onInviteResolved={() => { setPane('conversation'); onInviteResolved?.(); }}
+        <TeamSidebar workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} initialInvite={invite} onInviteHandled={onInviteHandled} onInviteResolved={() => { setPane('conversation'); onInviteResolved?.(); }}
           onOpenSettings={tab => setDrawer(current => ({ open: true, tab: tab ?? current.tab }))} onConversationSelected={() => setPane('conversation')} />
       </div>
       <div className="teams-web-conversation">
-        <button type="button" className="teams-web-back" onClick={() => setPane('list')}>{zh ? '‹ 会话列表' : '‹ Conversations'}</button>
-        {invited ? <InviteNotice names={invited} zh={zh} onDone={() => setInvited(undefined)} /> : null}
-        <TeamConversationView workspace={workspace} snapshot={snapshot} zh={zh} renderMarkdown={renderMarkdown} detailsOpen={drawer.open}
+        <button type="button" className="teams-web-back" onClick={() => setPane('list')}>{t('tw_back_conversations')}</button>
+        {invited ? <InviteNotice names={invited} locale={locale} onDone={() => setInvited(undefined)} /> : null}
+        <TeamConversationView workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown} detailsOpen={drawer.open}
           onToggleDetails={() => setDrawer(current => ({ ...current, open: !current.open }))} />
       </div>
-      {drawer.open ? <TeamDetailsDrawer workspace={workspace} snapshot={snapshot} zh={zh} tab={drawer.tab}
+      {drawer.open ? <TeamDetailsDrawer workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} tab={drawer.tab}
         onTabChange={tab => setDrawer(current => ({ ...current, tab }))} onClose={() => setDrawer(current => ({ ...current, open: false }))} onAddFriend={friends ? setAdding : undefined} onInviteFriends={friends ? () => setInviting(true) : undefined} /> : null}
-      {adding && friends && snapshot.team ? <MemberFriend friends={friends} teams={workspace.api} uid={snapshot.uid} teamId={snapshot.team.id} member={adding} zh={zh} onClose={() => setAdding(undefined)} /> : null}
-      {inviting && friends && snapshot.team ? <InviteFriends friends={friends} teams={workspace.api} uid={snapshot.uid} team={snapshot.team} members={snapshot.directory} zh={zh}
+      {adding && friends && snapshot.team ? <MemberFriend friends={friends} teams={workspace.api} uid={snapshot.uid} teamId={snapshot.team.id} member={adding} locale={locale} onClose={() => setAdding(undefined)} /> : null}
+      {inviting && friends && snapshot.team ? <InviteFriends friends={friends} teams={workspace.api} uid={snapshot.uid} team={snapshot.team} members={snapshot.directory} locale={locale}
         refreshMembers={() => void workspace.refresh()} onClose={names => { setInviting(false); setInvited(names.length ? names : undefined); }} /> : null}
     </div>
   );

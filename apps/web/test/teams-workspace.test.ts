@@ -51,7 +51,7 @@ test('groupConversations: Bot DMs the viewer only reads as the Bot owner follow 
 test('conversationLabel: channels are titles; dm and group fall back to the other participants', () => {
   const people = members('alice', 'bob', 'carol');
   assert.equal(conversationLabel(conversation('x', { kind: 'channel', title: ' general ' }), people, uid), 'general');
-  assert.equal(conversationLabel(conversation('x', { kind: 'channel', title: '' }), people, uid, { zh: true }), '频道');
+  assert.equal(conversationLabel(conversation('x', { kind: 'channel', title: '' }), people, uid, { locale: 'zh-Hans' }), '频道');
   const dm = (title: string) => conversation('d', { kind: 'dm', title, participants: ['user:alice', 'user:bob'] });
   assert.equal(conversationLabel(dm('Project sync'), people, uid), 'Project sync');
   assert.equal(conversationLabel(dm(''), people, uid), 'Bob');
@@ -59,12 +59,12 @@ test('conversationLabel: channels are titles; dm and group fall back to the othe
   assert.equal(conversationLabel(dm('Bob, Alice'), people, uid), 'Bob');
   const group = (title: string) => conversation('g', { kind: 'group', title, participants: ['user:alice', 'user:bob', 'user:carol'] });
   assert.equal(conversationLabel(group('Alice, Bob, Carol'), people, uid), 'Bob, Carol');
-  assert.equal(conversationLabel(group('Alice, Bob, Carol'), people, uid, { zh: true }), 'Bob、Carol');
+  assert.equal(conversationLabel(group('Alice, Bob, Carol'), people, uid, { locale: 'zh-Hans' }), 'Bob、Carol');
   assert.equal(conversationLabel(group('Launch crew'), people, uid), 'Launch crew');
   assert.equal(conversationLabel(group('  '), people, uid), 'Bob, Carol');
   assert.equal(conversationLabel(dm(''), [], uid), 'Member', 'people the directory does not list');
   assert.equal(conversationLabel(conversation('solo', { kind: 'dm', title: '', participants: ['user:alice'] }), people, uid), 'Direct message');
-  assert.equal(conversationLabel(conversation('solo', { kind: 'group', title: '', participants: [] }), people, uid, { zh: true }), '群聊');
+  assert.equal(conversationLabel(conversation('solo', { kind: 'group', title: '', participants: [] }), people, uid, { locale: 'zh-Hans' }), '群聊');
 });
 
 test('conversationLabel: a Bot DM is the Bot\'s name, with the person for the Bot owner reading someone else\'s', () => {
@@ -95,20 +95,20 @@ test('findBotDm finds only the viewer\'s own DM with that Bot', () => {
 
 test('conversationPreview follows the lastMessage rules', () => {
   const row = (lastMessage?: TeamConversation['lastMessage'], kind: TeamConversation['kind'] = 'dm') => conversation('p', { kind, ...(lastMessage ? { lastMessage } : {}) });
-  assert.equal(conversationPreview(row(), uid, false), 'No messages yet');
-  assert.equal(conversationPreview(row(), uid, true), '暂无消息');
-  assert.equal(conversationPreview(row(last(1)), uid, false), 'Hi');
-  assert.equal(conversationPreview(row(last(1, { author: { kind: 'user', uid: 'alice' } })), uid, false), 'You: Hi');
-  assert.equal(conversationPreview(row(last(1, { author: { kind: 'user', uid: 'alice' } })), uid, true), '你：Hi');
-  assert.equal(conversationPreview(row(last(1, { preview: '', recalled: true })), uid, false), 'Message recalled');
-  assert.equal(conversationPreview(row(last(1, { preview: '', recalled: true })), uid, true), '消息已撤回');
-  assert.equal(conversationPreview(row(last(1, { preview: '', recalled: true, author: { kind: 'user', uid: 'alice' } })), uid, false), 'You: Message recalled');
-  assert.equal(conversationPreview(row(last(1, { preview: '' })), uid, false), '[Non-text message]');
-  assert.equal(conversationPreview(row(last(1, { preview: '' })), uid, true), '[非文本消息]');
-  assert.equal(conversationPreview(row(last(1), 'group'), uid, false, () => 'Bob'), 'Bob: Hi', 'groups name the sender');
-  assert.equal(conversationPreview(row(last(1), 'channel'), uid, false, () => 'Bob'), 'Bob: Hi', 'so do channels');
-  assert.equal(conversationPreview(row(last(1), 'bot_dm'), uid, false, () => 'Bob'), 'Hi', 'a Bot dm does not');
-  assert.equal(conversationPreview(row(last(1), 'dm'), uid, false, () => 'Bob'), 'Hi', 'a dm does not');
+  assert.equal(conversationPreview(row(), uid, 'en'), 'No messages yet');
+  assert.equal(conversationPreview(row(), uid, 'zh-Hans'), '暂无消息');
+  assert.equal(conversationPreview(row(last(1)), uid, 'en'), 'Hi');
+  assert.equal(conversationPreview(row(last(1, { author: { kind: 'user', uid: 'alice' } })), uid, 'en'), 'You: Hi');
+  assert.equal(conversationPreview(row(last(1, { author: { kind: 'user', uid: 'alice' } })), uid, 'zh-Hans'), '你：Hi');
+  assert.equal(conversationPreview(row(last(1, { preview: '', recalled: true })), uid, 'en'), 'Message recalled');
+  assert.equal(conversationPreview(row(last(1, { preview: '', recalled: true })), uid, 'zh-Hans'), '消息已撤回');
+  assert.equal(conversationPreview(row(last(1, { preview: '', recalled: true, author: { kind: 'user', uid: 'alice' } })), uid, 'en'), 'You: Message recalled');
+  assert.equal(conversationPreview(row(last(1, { preview: '' })), uid, 'en'), '[Non-text message]');
+  assert.equal(conversationPreview(row(last(1, { preview: '' })), uid, 'zh-Hans'), '[非文本消息]');
+  assert.equal(conversationPreview(row(last(1), 'group'), uid, 'en', () => 'Bob'), 'Bob: Hi', 'groups name the sender');
+  assert.equal(conversationPreview(row(last(1), 'channel'), uid, 'en', () => 'Bob'), 'Bob: Hi', 'so do channels');
+  assert.equal(conversationPreview(row(last(1), 'bot_dm'), uid, 'en', () => 'Bob'), 'Hi', 'a Bot dm does not');
+  assert.equal(conversationPreview(row(last(1), 'dm'), uid, 'en', () => 'Bob'), 'Hi', 'a dm does not');
 });
 
 test('markdownPlainText flattens Markdown to one plain line', () => {
@@ -132,14 +132,14 @@ test('markdownPlainText flattens Markdown to one plain line', () => {
 test('only a shared Bot message preview is flattened; a person\'s and a recalled message stay as stored', () => {
   const bot = { kind: 'shared_bot' as const, sharedBotId: 'bot-aaaaaaaa', displayName: 'Fixture Bot' };
   const markdown = '# QA Follow-Up Check **Goal**';
-  assert.equal(pointerPreview(last(1, { preview: markdown, author: bot }), uid, false, () => 'Fixture Bot'), 'Fixture Bot: QA Follow-Up Check Goal');
-  assert.equal(pointerPreview(last(1, { preview: markdown }), uid, false, () => 'Bob'), `Bob: ${markdown}`);
-  assert.equal(pointerPreview(last(1, { preview: '2 * 3 * 4 # keep' }), uid, false), '2 * 3 * 4 # keep');
-  assert.equal(pointerPreview(last(1, { preview: '**G…', author: bot }), uid, false), 'G…');
-  assert.equal(pointerPreview(last(1, { preview: '---', author: bot }), uid, true), '[非文本消息]', 'a preview with no text left falls back like an empty one');
-  assert.equal(pointerPreview(last(1, { preview: '# gone', recalled: true, author: bot }), uid, false), 'Message recalled');
+  assert.equal(pointerPreview(last(1, { preview: markdown, author: bot }), uid, 'en', () => 'Fixture Bot'), 'Fixture Bot: QA Follow-Up Check Goal');
+  assert.equal(pointerPreview(last(1, { preview: markdown }), uid, 'en', () => 'Bob'), `Bob: ${markdown}`);
+  assert.equal(pointerPreview(last(1, { preview: '2 * 3 * 4 # keep' }), uid, 'en'), '2 * 3 * 4 # keep');
+  assert.equal(pointerPreview(last(1, { preview: '**G…', author: bot }), uid, 'en'), 'G…');
+  assert.equal(pointerPreview(last(1, { preview: '---', author: bot }), uid, 'zh-Hans'), '[非文本消息]', 'a preview with no text left falls back like an empty one');
+  assert.equal(pointerPreview(last(1, { preview: '# gone', recalled: true, author: bot }), uid, 'en'), 'Message recalled');
   const row = conversation('p', { kind: 'bot_dm', lastMessage: last(1, { preview: '**Done**', author: bot }) });
-  assert.equal(conversationPreview(row, uid, false), 'Done');
+  assert.equal(conversationPreview(row, uid, 'en'), 'Done');
 });
 
 // ── Workspace ──

@@ -101,7 +101,7 @@ struct TeamsTab: View {
             if let team = workspace.team {
                 TeamsListView(
                     uid: uid, team: team, scrollToTop: scrollToTop,
-                    onOpen: { open($0) }, onSwitchTeam: { sheet = .switcher }, onNew: { sheet = $0 })
+                    onOpen: { open($0) }, onSwitchTeam: { sheet = .switcher }, onDetails: { showDetails() }, onNew: { sheet = $0 })
             } else if workspace.loading || !workspace.selectedTeamID.isEmpty {
                 loadingView
             } else if workspace.teams.isEmpty {
@@ -119,7 +119,7 @@ struct TeamsTab: View {
             NavigationStack {
                 TeamsListView(
                     uid: uid, team: team, selectedConversation: paneConversation, scrollToTop: scrollToTop,
-                    onOpen: { open($0) }, onSwitchTeam: { sheet = .switcher }, onNew: { sheet = $0 })
+                    onOpen: { open($0) }, onSwitchTeam: { sheet = .switcher }, onDetails: { showDetails() }, onNew: { sheet = $0 })
             }
             .frame(width: 360)
             Divider()
@@ -203,15 +203,15 @@ struct TeamsTab: View {
     }
 
     private var noTeamsView: some View {
-        TeamsStateView(systemImage: "person.2", title: "teams_empty") {
-            VStack(spacing: 10) {
+        TeamsStateView(systemImage: "person.2", title: "teams_empty_title", message: "teams_empty") {
+            VStack(spacing: 8) {
                 Button("teams_create") { sheet = .createTeam }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("teams.empty.create")
                 Button("teams_join") { joinPrefill = ""; sheet = .joinTeam }
                     .buttonStyle(.bordered)
                     .accessibilityIdentifier("teams.empty.join")
-                Button("services_title") { sheet = .services }
+                Button { sheet = .services } label: { Text("services_title").minimumHitTarget(minWidth: 0) }
                     .buttonStyle(.borderless)
                     .accessibilityIdentifier("teams.empty.services")
             }

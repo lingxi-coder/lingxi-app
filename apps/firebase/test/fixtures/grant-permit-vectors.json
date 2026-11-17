@@ -1,0 +1,14 @@
+{
+  "domain": "lingxi-team-grant-permit-v1",
+  "deploymentId": "deployment_01",
+  "taskId": "task_0001",
+  "permitNonce": "0000000000000000000000000000000000000000000000000000000000000000",
+  "cases": [
+    { "scopeKind": "team", "scopeId": "team_0001", "targetEpoch": 1, "permitId": "599ef1643bb7ce7c8df8b28bb762cdc64cf61ecf1a0956bd6c8dc74527ce5fe5" },
+    { "scopeKind": "team", "scopeId": "team_0001", "targetEpoch": 2, "permitId": "35fc69b35ac25d0e46dc89bba6cb757cea05fd431c655b1238e8ab0244b5d1e5" },
+    { "scopeKind": "service", "scopeId": "s_service_01", "targetEpoch": 1, "permitId": "eb6ba1e1035db21c5d348ba44fa6b1a9c7bc2cf61b4bf95a9886786e0daa4957" },
+    { "scopeKind": "service", "scopeId": "team_0001", "targetEpoch": 1, "permitId": "fd5e4cf5cf8d6585754ef7f4417f64311d9fd06ef7a25a32e9a3c7038e30bbd0" },
+    { "scopeKind": "team", "scopeId": "team_0001", "targetEpoch": 1, "deploymentId": "deployment_02", "permitId": "fb85d9642d92b7f7097f622b38dd57e4e88c84a33975aa271cb25eccf0a3ab12" },
+    { "scopeKind": "team", "scopeId": "team_0001", "targetEpoch": 1, "permitNonce": "0101010101010101010101010101010101010101010101010101010101010101", "permitId": "296cc232a4bd259f7e2644697b76b2eaf71adb9e07ea8103fd99837050696661" }
+  ]
+}

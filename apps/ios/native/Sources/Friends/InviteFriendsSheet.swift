@@ -155,10 +155,12 @@ private struct InviteFriendRow: View {
                 }
                 Spacer(minLength: 8)
                 Button(action: onSend) {
-                    if busy { ProgressView() } else { Text(LocalizedStringKey(sent ? "friends_invite_sent" : "friends_invite_send")) }
+                    Group {
+                        if busy { ProgressView() } else { Text(LocalizedStringKey(sent ? "friends_invite_sent" : "friends_invite_send")) }
+                    }
+                    .minimumHitTarget(minWidth: 0)
                 }
                 .buttonStyle(.bordered)
-                .controlSize(.small)
                 .disabled(sent || busy)
                 .accessibilityIdentifier("friends.invite.send.\(card.uid)")
             }

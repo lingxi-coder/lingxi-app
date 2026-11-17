@@ -1,6 +1,7 @@
 package com.lingxi.code.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -8,6 +9,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 
 /** Shared Material palette used by native and custom conversation surfaces. */
 val LocalPalette = staticCompositionLocalOf { DesignTokens.dark }
@@ -52,23 +55,48 @@ fun LingXiTheme(
     }
 }
 
-/** Resolve foregrounds and containers together, including custom accents. */
-internal fun Palette.toColorScheme(): androidx.compose.material3.ColorScheme {
+/**
+ * Resolve foregrounds and containers together, including custom accents. Every role is taken from the palette, so none falls back to the stock
+ * (purple) scheme: a container is its tone washed into [Palette.windowBg], and the ink on a tone ([onTone]) is the palette's own background or
+ * text colour, whichever reads better, so a custom accent never needs a hard-coded black or white. `ThemeColorRolesTest` holds every pair at 4.5:1.
+ */
+internal fun Palette.toColorScheme(): ColorScheme {
     val base = if (isDark) darkColorScheme() else lightColorScheme()
-    val container = androidx.compose.ui.graphics.lerp(windowBg, accent, if (isDark) 0.22f else 0.12f)
+    // The primary container keeps its ratio; the secondary one is the accent again, quieter, so a chip, a tonal button or the selected tab follows
+    // the chosen accent instead of staying lavender; the tertiary and error ones wash their own tones.
+    fun wash(tone: Color, dark: Float, light: Float) = lerp(windowBg, tone, if (isDark) dark else light)
     return base.copy(
-        primary = accent,
-        onPrimary = if (isDark) Color(0xFF1C1B1F) else Color.White,
-        primaryContainer = container, onPrimaryContainer = text,
-        secondary = accent2, tertiary = accent3,
+        primary = accent, onPrimary = onTone(accent),
+        primaryContainer = wash(accent, 0.22f, 0.12f), onPrimaryContainer = text,
+        secondary = accent2, onSecondary = onTone(accent2),
+        secondaryContainer = wash(accent, 0.14f, 0.08f), onSecondaryContainer = text,
+        tertiary = accent3, onTertiary = onTone(accent3),
+        tertiaryContainer = wash(accent3, 0.22f, 0.12f), onTertiaryContainer = text,
+        error = danger, onError = onTone(danger),
+        errorContainer = wash(danger, 0.22f, 0.12f), onErrorContainer = text,
         background = windowBg, onBackground = text,
         surface = windowBg, onSurface = text,
         surfaceVariant = surfaceActive, onSurfaceVariant = text2,
+        // The tonal ladder: the three tokens the palette has, one rung darker than the window below them and one lighter than the active tone above.
+        surfaceContainerLowest = if (isDark) lerp(windowBg, Color.Black, 0.25f) else Color.White,
         surfaceContainerLow = surface, surfaceContainer = surfaceHover,
         surfaceContainerHigh = surfaceActive,
-        surfaceContainerHighest = base.surfaceContainerHighest,
+        surfaceContainerHighest = lerp(surfaceActive, text, if (isDark) 0.06f else 0.03f),
+        surfaceDim = if (isDark) windowBg else lerp(windowBg, text, 0.14f),
+        surfaceBright = if (isDark) lerp(windowBg, text, 0.19f) else windowBg,
+        inverseSurface = text, inverseOnSurface = windowBg,
         outline = borderStrong, outlineVariant = border,
         inversePrimary = Accents.color(Accents.DEFAULT_ID, !isDark),
-        surfaceTint = accent, error = danger,
+        surfaceTint = accent,
     )
+}
+
+/** The ink for content on [tone]: the palette's background or text colour, whichever contrasts more with it. */
+internal fun Palette.onTone(tone: Color): Color = if (contrastRatio(windowBg, tone) >= contrastRatio(text, tone)) windowBg else text
+
+/** WCAG 2.x contrast ratio of two opaque colours, 1 to 21. */
+internal fun contrastRatio(a: Color, b: Color): Float {
+    val x = a.luminance()
+    val y = b.luminance()
+    return (maxOf(x, y) + 0.05f) / (minOf(x, y) + 0.05f)
 }

@@ -45,6 +45,7 @@ import com.lingxi.code.bindings.android.RemoteSessionStatusFfi
 import com.lingxi.code.bindings.android.RemoteSessionSummaryFfi
 import com.lingxi.code.bindings.android.RemoteTransportFfi
 import com.lingxi.code.components.PageTopBar
+import com.lingxi.code.theme.ConfirmDialog
 import com.lingxi.code.theme.LingXiTheme
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
@@ -156,16 +157,12 @@ internal fun RemoteHostScreen(
         RemoteConnectionUi.Idle -> RemoteStatePage(actions) { RemoteNotConnected(hostName, host, onConnect = connect) }
     }
     if (forgetting) {
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { forgetting = false },
-            title = { Text(stringResource(R.string.remote_forget)) },
-            text = { Text(stringResource(R.string.remote_forget_help)) },
-            confirmButton = {
-                TextButton(onClick = { forgetting = false; scope.launch { runCatching { manager.forget(hostId) }; onLeave() } }) {
-                    Text(stringResource(R.string.remote_forget))
-                }
-            },
-            dismissButton = { TextButton(onClick = { forgetting = false }) { Text(stringResource(R.string.common_cancel)) } },
+        // U8: a title that names the act, what it does (only this phone), a verb for the button in the error colour, and Cancel.
+        ConfirmDialog(
+            title = stringResource(R.string.remote_forget_title), body = stringResource(R.string.remote_forget_help),
+            confirm = stringResource(R.string.remote_forget_confirm), destructive = true,
+            onConfirm = { forgetting = false; scope.launch { runCatching { manager.forget(hostId) }; onLeave() } },
+            onDismiss = { forgetting = false },
         )
     }
 }

@@ -43,9 +43,10 @@ struct BotsHostSection: View {
             }
         } header: {
             HStack {
+                let collapsed = store.collapsedHosts.contains(host.hostId)
                 Button { store.toggleHost(host.hostId) } label: {
                     HStack {
-                        Image(systemName: store.collapsedHosts.contains(host.hostId) ? "chevron.right" : "chevron.down")
+                        Image(systemName: collapsed ? "chevron.right" : "chevron.down").accessibilityHidden(true)
                         Image(systemName: "desktopcomputer").accessibilityHidden(true)
                         VStack(alignment: .leading) {
                             Text(host.name).font(.headline).foregroundStyle(.primary)
@@ -55,11 +56,12 @@ struct BotsHostSection: View {
                                 Text("mobile_bots_last_seen \(relative(host.lastSeenMs))").font(.caption)
                             }
                         }
-                    }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                    }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("bots.host.\(host.hostId)")
-                .accessibilityValue(Text(store.collapsedHosts.contains(host.hostId) ? "chat_run_expand" : "chat_run_collapse"))
+                .accessibilityValue(Text(collapsed ? "teams_section_collapsed" : "teams_section_expanded"))
+                .accessibilityHint(Text(collapsed ? "teams_section_expand" : "teams_section_collapse"))
                 Button(action: openComputer) { Image(systemName: "info.circle").frame(minWidth: 44, minHeight: 44) }
                     .accessibilityLabel("mobile_bots_computer_details")
                     .accessibilityIdentifier("bots.computer.\(host.hostId)")
@@ -80,13 +82,21 @@ struct BotsHostSection: View {
         switch facts.kind {
         case .loading: ProgressView("remote_loading")
         case .unsupported: Text("mobile_bots_unsupported").foregroundStyle(.secondary)
-        case .noBots: Text("mobile_bots_none").foregroundStyle(.secondary)
+        case .noBots:
+            // What is empty, why, and what to do (U9): looking again is connecting again, which asks the computer for its Bots.
+            TeamsStateView(systemImage: "cpu", title: "mobile_bots_none_title", message: "mobile_bots_none_hint") {
+                Button(action: connect) { Text("mobile_bots_none_check_again").minimumHitTarget(minWidth: 0) }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("bots.check-again.\(host.hostId)")
+            }
+            .listRowSeparator(.hidden)
         case .offlineNoSnapshot:
             Text("remote_offline")
             Text("remote_offline_help").font(.caption).foregroundStyle(.secondary)
         case .notPaired, .connectToLoad:
             Text(facts.kind == .notPaired ? "remote_not_paired" : "mobile_bots_connect_to_load")
-            Button("remote_connect", action: connect).accessibilityIdentifier("bots.connect.\(host.hostId)")
+            Button(action: connect) { Text("remote_connect").minimumHitTarget(minWidth: 0, alignment: .leading) }
+                .accessibilityIdentifier("bots.connect.\(host.hostId)")
         case .bots:
             ForEach(bots) { bot in
                 BotsTreeBot(manager: manager, host: host, bot: bot, dimmed: facts.dimmed,
@@ -151,12 +161,13 @@ private struct BotsTreeBot: View {
                                 .foregroundStyle(.orange).accessibilityLabel(Text("remote_bot_waiting \(bot.waitingThreads)"))
                         }
                     }
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.caption)
-                }.contentShape(Rectangle()).opacity(dimmed ? 0.55 : 1)
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.caption).accessibilityHidden(true)
+                }.frame(minHeight: 44).contentShape(Rectangle()).opacity(dimmed ? 0.55 : 1)
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("bots.bot.\(host.hostId).\(bot.id)")
-            .accessibilityValue(Text(expanded ? "chat_run_collapse" : "chat_run_expand"))
+            .accessibilityValue(Text(expanded ? "teams_section_expanded" : "teams_section_collapsed"))
+            .accessibilityHint(Text(expanded ? "teams_section_collapse" : "teams_section_expand"))
             if expanded { chatRows.padding(.leading, 24) }
         }
         .onAppear { visible = true }
@@ -178,6 +189,7 @@ private struct BotsTreeBot: View {
                 Task { await createChat() }
             } label: {
                 HStack { Label("remote_bot_new_chat", systemImage: "plus"); if creating { ProgressView() } }
+                    .minimumHitTarget(minWidth: 0, alignment: .leading)
             }
             .disabled(creating || !(ready || host.online && host.paired))
             .accessibilityIdentifier("bots.new-chat.\(host.hostId).\(bot.id)")
@@ -186,11 +198,13 @@ private struct BotsTreeBot: View {
             }
             if ready && (listing.error != nil || activationFailed) {
                 Text("mobile_bots_chats_failed").font(.caption)
-                Button("common_retry") {
+                Button {
                     Task {
                         do { try await manager.reloadBot(key); activationFailed = false }
                         catch { activationFailed = true }
                     }
+                } label: {
+                    Text("common_retry").minimumHitTarget(minWidth: 0, alignment: .leading)
                 }
             }
             if let chats {
@@ -204,13 +218,17 @@ private struct BotsTreeBot: View {
                                 Text(pending == .permission ? "remote_needs_permission" : pending == .question ? "remote_needs_question" : "remote_needs_computer_access")
                                     .font(.caption).foregroundStyle(.orange)
                             } else if chat.status == .running { Text("remote_status_running").font(.caption) }
-                        }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle()).opacity(dimmed ? 0.55 : 1)
+                        }.frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle()).opacity(dimmed ? 0.55 : 1)
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("remote.session.\(chat.id)")
                 }
-                if window.showMore { Button("mobile_bots_show_more \(window.hidden)") { showAll = true } }
-                if window.showLess { Button("chat_tool_show_less") { showAll = false } }
+                if window.showMore {
+                    Button { showAll = true } label: { Text("mobile_bots_show_more \(window.hidden)").minimumHitTarget(minWidth: 0, alignment: .leading) }
+                }
+                if window.showLess {
+                    Button { showAll = false } label: { Text("chat_tool_show_less").minimumHitTarget(minWidth: 0, alignment: .leading) }
+                }
             }
             if let failure { Text(failure).font(.caption).foregroundStyle(.red) }
         }

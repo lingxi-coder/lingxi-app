@@ -137,7 +137,7 @@ test('The message model carries a waitId from Firestore, and the client has the 
   assert.equal(firestoreMessage('message-2', { ...base, waitId: 'wait-test', replyTo: 'message-1' }).waitId, 'wait-test');
   assert.equal('waitId' in firestoreMessage('message-2', base), false);
   const { messageErrorText } = await import('../../../packages/teams/errors');
-  for (const code of ['WAIT_CLOSED', 'WAIT_RECIPIENT_REQUIRED', 'WAIT_REQUIRED', 'TASK_REVOKED', 'TASK_CANCEL_FORBIDDEN']) for (const zh of [false, true]) assert.doesNotMatch(messageErrorText(code, zh), /Could not sync|消息同步未完成/, `${code} has its own text`);
+  for (const code of ['WAIT_CLOSED', 'WAIT_RECIPIENT_REQUIRED', 'WAIT_REQUIRED', 'TASK_REVOKED', 'TASK_CANCEL_FORBIDDEN']) for (const locale of ['en', 'zh-Hans']) assert.doesNotMatch(messageErrorText(code, locale), /Could not sync|消息同步未完成/, `${code} has its own text`);
 });
 test('document and operation member commands are strict; ledger writes belong to the host', () => {
   const document = { title: 'Trip plan', body: '# Trip plan' }, revise = { artifactId: 'artifact_01', expectedRevision: 1, operationId: 'operation_01', document };

@@ -2,6 +2,8 @@ package com.lingxi.code.friends
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -9,7 +11,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -26,8 +27,10 @@ import com.lingxi.code.R
 import com.lingxi.code.teams.TeamBotCard
 import com.lingxi.code.teams.TeamSharedListRules
 import com.lingxi.code.teams.TeamMember
+import com.lingxi.code.teams.StopSharingDialog
 import com.lingxi.code.teams.TeamMessagingState
 import com.lingxi.code.teams.TeamsErrorBanner
+import com.lingxi.code.teams.TeamsMessageState
 import com.lingxi.code.teams.TeamsOfflineBanner
 import com.lingxi.code.teams.botAvailabilityText
 import com.lingxi.code.theme.BotAvatar
@@ -56,16 +59,23 @@ internal fun FriendBotsScreen(
     onList: (TeamBotCard) -> Unit = {},
 ) {
     val online = !messaging.offline
+    // The read has not settled: it failed, or it is still out. A settled empty list is the empty state.
+    val unsettled = messaging.botsFailed || !messaging.botsLoaded
     Column(modifier.fillMaxSize().testTag(FriendsTags.BOTS_SCREEN)) {
         FriendsPageHeader(stringResource(R.string.friends_bots_title), showBack, onBack)
         if (messaging.directoryReady && messaging.offline) TeamsOfflineBanner(onReconnect)
         if (messaging.error.isNotEmpty() && messaging.error != "SERVICE_UNAVAILABLE") TeamsErrorBanner(messaging.error, onRetry = onReconnect)
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             if (messaging.bots.isEmpty()) item(key = "status") {
-                Text(
-                    stringResource(if (messaging.botsFailed) R.string.teams_bots_unverified else if (!messaging.botsLoaded) R.string.teams_bots_loading else R.string.friends_bots_none),
-                    Modifier.testTag(FriendsTags.BOTS_STATUS), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                if (unsettled) {
+                    Text(
+                        stringResource(if (messaging.botsFailed) R.string.teams_bots_unverified else R.string.teams_bots_loading),
+                        Modifier.testTag(FriendsTags.BOTS_STATUS), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    // U9: loaded and empty says what is empty, then how a Bot gets here.
+                    TeamsMessageState(stringResource(R.string.friends_bots_none), Modifier.testTag(FriendsTags.BOTS_STATUS), body = stringResource(R.string.friends_bots_share_hint), fill = false)
+                }
             }
             items(messaging.bots, key = { "bot-${it.sharedBotId}" }) { bot ->
                 FriendBotRow(bot, ownerName(bot, members, uid), uid, generation, online, onMessage = { onMessage(bot.sharedBotId) }, onStop = { onStop(bot) },
@@ -74,7 +84,10 @@ internal fun FriendBotsScreen(
             item(key = "note") {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(stringResource(R.string.friends_bots_note), Modifier.testTag(FriendsTags.BOTS_NOTE), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(stringResource(R.string.friends_bots_share_hint), Modifier.testTag(FriendsTags.BOTS_SHARE_HINT), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    // With nothing to list, the hint is the body of the empty state above instead of a second copy here.
+                    if (messaging.bots.isNotEmpty() || unsettled) {
+                        Text(stringResource(R.string.friends_bots_share_hint), Modifier.testTag(FriendsTags.BOTS_SHARE_HINT), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
         }
@@ -89,19 +102,21 @@ private fun ownerName(bot: TeamBotCard, members: List<TeamMember>, uid: String):
 
 /**
  * One Bot of the friendship: the Teams Bot card without its audience and quota lines, which a friendship does not have (D21). Message needs a
- * usable Bot and a connection; Stop sharing is the person's own published Bot only, and asks first (D23).
+ * usable Bot and a connection; Stop sharing is the person's own published Bot only, and asks first (D23). The (up to three) actions wrap under each
+ * other rather than run out of the row at a large font size.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun FriendBotRow(bot: TeamBotCard, owner: String, uid: String, generation: Long, online: Boolean, onMessage: () -> Unit, onStop: () -> Unit, onList: (() -> Unit)? = null) {
     var confirm by remember(bot.sharedBotId, bot.revision, bot.state) { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp).testTag(FriendsTags.bot(bot.sharedBotId)), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        BotAvatar(bot.avatarId, 40.dp)
+        BotAvatar(bot.avatarId, 56.dp)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(bot.name, style = MaterialTheme.typography.titleMedium)
             if (bot.description.isNotBlank()) Text(bot.description, style = MaterialTheme.typography.bodyMedium)
             Text("${botAvailabilityText(bot)} · ${stringResource(R.string.teams_bot_owner_fmt, owner)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (!bot.permitted) Text(stringResource(R.string.teams_bot_not_permitted), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Row {
+            FlowRow {
                 TextButton(enabled = online && bot.selectable, onClick = onMessage, modifier = Modifier.testTag(FriendsTags.botMessage(bot.sharedBotId))) { Text(stringResource(R.string.teams_bot_message)) }
                 if (onList != null) TextButton(enabled = online, onClick = onList, modifier = Modifier.testTag("teams.bot.list.${bot.sharedBotId}")) { Text(stringResource(R.string.teams_list_open)) }
                 if (bot.canPause(uid, generation)) {
@@ -110,11 +125,6 @@ private fun FriendBotRow(bot: TeamBotCard, owner: String, uid: String, generatio
             }
         }
     }
-    if (confirm) AlertDialog(
-        onDismissRequest = { confirm = false },
-        title = { Text(stringResource(R.string.friends_share_bot_stop)) },
-        text = { Text(stringResource(R.string.teams_bot_unbind_detail)) },
-        confirmButton = { TextButton(onClick = { confirm = false; onStop() }) { Text(stringResource(R.string.friends_share_bot_stop), color = MaterialTheme.colorScheme.error) } },
-        dismissButton = { TextButton(onClick = { confirm = false }) { Text(stringResource(R.string.common_cancel)) } },
-    )
+    // U8: the one Stop sharing dialog of Teams and Friends, with the Bot's name in the title.
+    if (confirm) StopSharingDialog(bot.name, onConfirm = { confirm = false; onStop() }, onDismiss = { confirm = false })
 }

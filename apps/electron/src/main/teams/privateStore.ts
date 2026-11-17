@@ -1,9 +1,10 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
 import { link, lstat, mkdir, open, readdir, rename, unlink } from 'node:fs/promises';
-import type { TeamRunResult, BotChatScope } from './process.js';
+import type { TeamRunResult, BotChatScope, TeamTaskCheckpoint } from './process.js';
 import type { TaskUsage } from '../../../../../packages/teams/execution.js';
 import { dirname, join } from 'node:path';
+import { withProviderAccountLock } from '../provider-accounts.js';
 
 export interface TeamModelRoute {
   model_provider: string; model_protocol: string; model_id: string; model_endpoint: string;
@@ -15,15 +16,26 @@ export interface SharedBotBinding { schemaVersion: 1; ownerUid: string; teamId: 
 export interface TeamDataRef { path: string; sha256: string; bytes: number }
 /** A publication, or (`action`) the take-over of an offered Bot, saved before it is sent so that a lost answer is asked for again with the same command. */
 export interface SavedPublication { schemaVersion: 1; requestDigest: string; binding: SharedBotBinding; payload: Record<string, unknown>; action?: 'completeTransfer' }
+/** A grant candidate is not authority. Keep the original RPC and SDK baseline until the task is delivered. */
+export interface SavedGrantIntent {
+  action: 'startTask' | 'continueTask'; phase: 'pending' | 'validated'; nonce: string; commandId: string; targetEpoch: number;
+  payload: Record<string, unknown>; binding: SharedBotBinding; checkpoint?: TeamTaskCheckpoint;
+  messageId: string; requester: { uid: string; generation: number };
+  cursor?: TeamTaskCheckpoint['cursor'];
+  /** Incremented durably before each RPC; a later false answer cannot retire an earlier unknown request. */
+  rpcAttempts?: number;
+}
 /** One task this host holds or held a model permit for. It lives until the task's result is delivered or the task can no longer continue.
  * Replaced in place as the task moves on: a new attempt, a question, an answer. */
 export interface SavedExecution { schemaVersion: 2; scope: BotChatScope; teamId: string; generation: number; taskId: string;
+  grant?: SavedGrantIntent;
   /** End of the current attempt's active budget. */ deadlineAt: number; commandId: string;
   /** Host fields, the current permit and the input grants: the base of every host command for the task. */ payload: Record<string, unknown>;
   /** Attempt number of the current permit: 1 after startTask, then one more per granted continueTask. */ epoch: number;
   /** The request message and the source watermark the task was admitted with. */ messageSeq: number; lastChangeSeq: number;
   /** The admitted input batch. A continuing worker is given the same bytes, so it is kept as long as this record. */ batch: TeamDataRef;
   /** The Bot may ask its requester a question (the deployment publishes durable waits). */ ask: boolean;
+  /** Nobody asked the Bot in a group or channel: it never asks the member a question back. */ unasked?: boolean;
   /** Nobody asked the Bot and its triage was unsure: the Bot may leave the message unanswered. Every attempt is offered the same. */ mayDecline?: boolean;
   /** The files of Chat messages in the batch: the model was given them, and a finished task says so. */ files?: { attachmentId: string; sha256: string }[];
   /** The Bot's shared list, offered to the worker of this task. Its writes go through the operation ledger. */ list?: { title: string; description: string; approval?: 'requester' };
@@ -142,6 +154,9 @@ export class TeamPrivateStore {
   private serial<T>(run: () => Promise<T>): Promise<T> {
     const result = this.operation.then(run); this.operation = result.catch(() => undefined); return result;
   }
+  private executionSerial<T>(uid:string,taskId:string,run:()=>Promise<T>):Promise<T>{
+    return this.serial(async()=>withProviderAccountLock(await directory(join((await this.owner(uid)).root,'execution-locks')),digest(taskId),run));
+  }
   constructor(userData: string) {
     this.root = privateDirectory(join(realpathSync.native(userData), 'shared-bot-host-v2'));
     const path = join(this.root, 'host-id');
@@ -225,13 +240,38 @@ export class TeamPrivateStore {
     await unlink(reference.path).catch(error => { if (error.code !== 'ENOENT') throw error; });
   }
   /** Atomic replace: the record is whole at every instant, and a later attempt never goes back to an earlier one. */
-  saveExecution(uid: string, value: SavedExecution): Promise<void> { return this.serial(async () => {
+  saveExecution(uid: string, value: SavedExecution): Promise<void> { return this.executionSerial(uid,value.taskId,async () => {
     const paths = await this.owner(uid), root = paths.executions, path = join(root, value.taskId), text = JSON.stringify(value);
     if (!/^[A-Za-z0-9_-]{8,64}$/u.test(value.taskId) || value.schemaVersion !== 2 || !Number.isSafeInteger(value.epoch) || value.epoch < 1
       || Buffer.byteLength(text) > 64 * 1024 || !this.transportPath(paths.transport, value.batch)) throw new Error('UNSAFE_TEAM_STORAGE');
-    try { const previous = JSON.parse(await read(path, 64 * 1024)) as SavedExecution; if (previous.schemaVersion === 2 && previous.epoch > value.epoch) throw new Error('STALE_EXECUTION'); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    try { const previous = JSON.parse(await read(path, 64 * 1024)) as SavedExecution; if (previous.schemaVersion === 2 && (previous.epoch > value.epoch
+      || (previous.grant||value.grant) && JSON.stringify(previous.grant) !== JSON.stringify(value.grant))) throw new Error('STALE_EXECUTION'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; if(value.grant)throw new Error('STALE_EXECUTION'); }
     await rename(await writeTemporary(root, text), path); await syncDirectory(root);
+  }); }
+  /** Single-instance Desktop owns this store. Initial intent uses create-no-replace; all transitions compare the complete prior record. */
+  compareExecution(uid: string, before: SavedExecution | undefined, next: SavedExecution): Promise<boolean> { return this.executionSerial(uid,next.taskId,async () => {
+    const paths = await this.owner(uid), path = join(paths.executions,next.taskId), text = JSON.stringify(next);
+    if (next.schemaVersion !== 2 || !/^[A-Za-z0-9_-]{8,64}$/u.test(next.taskId) || !Number.isSafeInteger(next.epoch) || next.epoch < 1
+      || Buffer.byteLength(text)>64*1024 || !this.transportPath(paths.transport,next.batch)) throw new Error('UNSAFE_TEAM_STORAGE');
+    if (next.grant && (!/^[a-f0-9]{64}$/u.test(next.grant.nonce) || !Number.isSafeInteger(next.grant.targetEpoch) || next.grant.targetEpoch < 1
+      || next.grant.rpcAttempts!==undefined&&(!Number.isSafeInteger(next.grant.rpcAttempts)||next.grant.rpcAttempts<0)
+      || next.grant.binding.ownerUid!==uid || next.grant.binding.teamId!==next.teamId || next.grant.payload.taskId!==next.taskId)) throw new Error('UNSAFE_TEAM_STORAGE');
+    try { await lstat(join(paths.outbox,next.taskId)); return false; } catch(error) { if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error; }
+    let current: string | undefined; try { current=await read(path,64*1024); } catch(error) { if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error; }
+    if (before ? current!==JSON.stringify(before) : current!==undefined) return false;
+    if (before) { await rename(await writeTemporary(paths.executions,text),path); await syncDirectory(paths.executions); }
+    else { try { await create(path,text); } catch(error) { if((error as NodeJS.ErrnoException).code==='EEXIST')return false;throw error; } }
+    return true;
+  }); }
+  discardExecution(uid: string, expected: SavedExecution, restore?: SavedExecution): Promise<boolean> { return this.executionSerial(uid,expected.taskId,async () => {
+    const paths=await this.owner(uid),path=join(paths.executions,expected.taskId);
+    let current:string;try{current=await read(path,64*1024);}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return false;throw error;}
+    if(current!==JSON.stringify(expected))return false;
+    try{await lstat(join(paths.outbox,expected.taskId));return false;}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+    if(restore)await rename(await writeTemporary(paths.executions,JSON.stringify(restore)),path);else await unlink(path);
+    await syncDirectory(paths.executions);
+    if(!restore)await this.releaseDataRef(uid,expected.batch);return true;
   }); }
   async executions(uid: string): Promise<SavedExecution[]> {
     const root = (await this.owner(uid)).executions, values: SavedExecution[] = [];
@@ -267,11 +307,14 @@ export class TeamPrivateStore {
       return result as TeamRunResult;
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
   }
-  saveDelivery(uid: string, value: SavedDelivery): Promise<void> { return this.serial(async () => {
+  saveDelivery(uid: string, value: SavedDelivery, expected?: SavedExecution): Promise<boolean> { return this.executionSerial(uid,value.taskId,async () => {
     const path = join((await this.owner(uid)).outbox, value.taskId), text = JSON.stringify(value);
+    if(expected){let current:SavedExecution;try{current=JSON.parse(await read(join((await this.owner(uid)).executions,value.taskId),64*1024));}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return false;throw error;}
+      if(current.epoch!==expected.epoch||current.payload.permitId!==expected.payload.permitId||JSON.stringify(current.grant)!==JSON.stringify(expected.grant))return false;}
     if (!/^[A-Za-z0-9_-]{8,64}$/u.test(value.taskId) || text.length > 512 * 1024) throw new Error('UNSAFE_TEAM_STORAGE');
     try { await create(path, text); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
     if (await read(path, 512 * 1024) !== text) throw new Error('UNSAFE_TEAM_STORAGE');
+    return true;
   }); }
   deliveries(uid: string): Promise<SavedDelivery[]> { return this.serial(async () => {
     const root = (await this.owner(uid)).outbox, values: SavedDelivery[] = [];
@@ -283,13 +326,17 @@ export class TeamPrivateStore {
     return values;
   }); }
   /** The task is over for this host: its delivery, its execution record and the input batch the record kept are removed. */
-  delivered(uid: string, taskId: string): Promise<void> { return this.serial(async () => {
+  delivered(uid: string, taskId: string, expected?: SavedExecution): Promise<boolean> { return this.executionSerial(uid,taskId,async () => {
     if (!/^[A-Za-z0-9_-]{8,64}$/u.test(taskId)) throw new Error('UNSAFE_TEAM_STORAGE');
-    const paths = await this.owner(uid), root = paths.outbox; await unlink(join(root, taskId)).catch(error => { if (error.code !== 'ENOENT') throw error; }); await syncDirectory(root);
+    const paths = await this.owner(uid), root = paths.outbox;
+    if(expected){let current:SavedExecution;try{current=JSON.parse(await read(join(paths.executions,taskId),64*1024));}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return false;throw error;}
+      if(current.epoch!==expected.epoch||current.payload.permitId!==expected.payload.permitId||JSON.stringify(current.grant)!==JSON.stringify(expected.grant))return false;}
+    await unlink(join(root, taskId)).catch(error => { if (error.code !== 'ENOENT') throw error; }); await syncDirectory(root);
     let batch: TeamDataRef | undefined;
     try { batch = (JSON.parse(await read(join(paths.executions, taskId), 64 * 1024)) as SavedExecution).batch; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     await unlink(join(paths.executions, taskId)).catch(error => { if (error.code !== 'ENOENT') throw error; }); await syncDirectory(paths.executions);
     if (batch && this.transportPath(paths.transport, batch)) await unlink(batch.path).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    return true;
   }); }
   private validateSnapshot(value: TeamPersonaSnapshot): void {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_TEAM_SNAPSHOT');

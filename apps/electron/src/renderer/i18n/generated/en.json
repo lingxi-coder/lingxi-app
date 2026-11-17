@@ -314,7 +314,7 @@
   "bots_delete_tasks_unknown": "The tasks that are still going on could not be checked. Deleting this Bot cancels any that are.",
   "bots_background_title": "Running in the background",
   "bots_keep_awake": "Keep this Mac awake while Bots are working",
-  "bots_keep_awake_hint": "Also stays awake for the ten minutes before a Bot's routine is due. Closing the lid still puts the Mac to sleep.",
+  "bots_keep_awake_hint": "Also stays awake for the ten minutes before a Bot's routine is due and, while plugged in, for as long as a Bot you share with a team or a friend is online. Closing the lid still puts the Mac to sleep.",
   "bots_login_item": "Open LingXi in the background when you log in",
   "bots_login_item_hint": "Bots run routines and take tasks only while LingXi is open on this Mac.",
   "bots_login_item_unavailable": "Available in the installed app.",

@@ -9,7 +9,11 @@ internal data class TeamMemberRef(val uid: String, val generation: Long) {
 internal data class TeamBotAutoReply(val daily: Int)
 internal data class TeamBotCard(val sharedBotId: String, val name: String, val description: String, val maintainer: TeamMemberRef,
     val revision: Long, val state: String, val permitted: Boolean, val ready: Boolean, val onlineUntil: Long, val usePolicy: JSONObject,
-    val quotas: JSONObject, val instanceId: String?, val sharedList: TeamBotListInfo? = null, val autoReply: TeamBotAutoReply? = null) {
+    val quotas: JSONObject, val instanceId: String?, val sharedList: TeamBotListInfo? = null,
+    val examples: List<String> = emptyList(), val capabilities: TeamBotCapabilities? = null,
+    val availability: String? = null, val dailyRemaining: Long? = null, val quotaResetsAt: Long? = null, val statusExpiresAt: Long? = null,
+    /** Client-only: an expired/failed health projection cannot lift a previously known admission block. */
+    val admissionBlockedPendingRefresh: Boolean = false, val autoReply: TeamBotAutoReply? = null) {
     val selectable get() = state == "published" && permitted
     val avatarId get() = sharedBotId
     fun canPause(uid: String, generation: Long) = state == "published" && maintainer == TeamMemberRef(uid, generation)
@@ -17,7 +21,11 @@ internal data class TeamBotCard(val sharedBotId: String, val name: String, val d
         fun parse(v: JSONObject) = TeamBotCard(v.getString("sharedBotId"), v.getString("name"), v.getString("description"),
             TeamMemberRef.parse(v.getJSONObject("maintainer")), v.getLong("revision"), v.getString("state"), v.getBoolean("permitted"),
             v.getBoolean("ready"), v.getLong("onlineUntil"), v.getJSONObject("usePolicy"), v.getJSONObject("quotas"), v.stringOrNull("instanceId"),
-            v.optJSONObject("sharedList")?.let(TeamBotListInfo::parse), v.optJSONObject("autoReply")?.let { TeamBotAutoReply(it.getInt("daily")) })
+            v.optJSONObject("sharedList")?.let(TeamBotListInfo::parse), TeamBotEntry.examples(v), TeamBotCapabilities.parse(v.optJSONObject("capabilities")),
+            (v.opt("availability") as? String)?.takeIf { it in TeamBotEntry.availabilities },
+            TeamBotEntry.nonnegativeInteger(v.opt("dailyRemaining")), TeamBotEntry.nonnegativeInteger(v.opt("quotaResetsAt")),
+            TeamBotEntry.nonnegativeInteger(v.opt("statusExpiresAt")),
+            autoReply = v.optJSONObject("autoReply")?.let { TeamBotAutoReply(it.getInt("daily")) })
     }
 }
 /** Which Bots of a Chat judge for themselves whether to answer its messages. Any person in a group, channel or Bot DM may change it. */

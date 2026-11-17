@@ -256,7 +256,6 @@ export function App() {
   const activeBot = botChat ? bots.state.bots.find((bot) => bot.botId === activeBotId) : undefined;
   const botSessions = useBotSessions(botsApi);
   // Teams: one workspace for the window, which the sidebar, the page and the rail's unread count all read.
-  const zh = locale.startsWith('zh');
   const teams = useTeams({}, bridge.setBotsKeepAwake);
   const friends = useFriends();
   const teamsDrawer = useTeamsDrawer({
@@ -663,9 +662,9 @@ export function App() {
               ? <BotsSidebar bots={bots} sessions={botSessions} bridge={bridge} query={search} chatVisible={page === 'chat'}
                   onOpenChat={showChat} onLeave={leaveBots} onOpenBot={openBot} onCreateBot={createBot} />
               : mode === 'friends'
-              ? <FriendsPanel friends={friends} zh={zh} locale={locale} initialCode={friendTarget?.kind === 'add' ? friendTarget.code : undefined}
+              ? <FriendsPanel friends={friends} locale={locale} initialCode={friendTarget?.kind === 'add' ? friendTarget.code : undefined}
                   onCodeHandled={handledFriendCode} onShowFriends={showFriends} />
-              : <TeamsSidebar teams={teams} zh={zh} query={search} initialInvite={teamInvite} onInviteHandled={handledTeamInvite}
+              : <TeamsSidebar teams={teams} locale={locale} query={search} initialInvite={teamInvite} onInviteHandled={handledTeamInvite}
                   onShowTeams={showTeams} onOpenSettings={openTeamDetails} onOpenServices={openBotServices} onCloseServices={closeBotServices} />}
             sidebarCollapsed={sidebarCollapsed}
             onSidebarCollapsedChange={setSidebarCollapsed}
@@ -700,8 +699,8 @@ export function App() {
           {page === 'apps' && localAppInstallStatus && <p role="status" className="local-app-update">{localAppInstallStatus}</p>}
           <ErrorBanner bridge={{ error: localAppNavigationError, clearError: clearLocalAppNavigationError }} presentation={localAppNavigationPresentation} />
           <ErrorBanner bridge={bridge} />
-          {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} friends={friends} zh={zh} locale={locale} drawer={teamsDrawer} services={botServices} onCloseServices={closeBotServices} /></Suspense>}
-          {page === 'friends' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('friends_loading')}</p>}><FriendsPage friends={friends} zh={zh} locale={locale} /></Suspense>}
+          {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} friends={friends} locale={locale} drawer={teamsDrawer} services={botServices} onCloseServices={closeBotServices} /></Suspense>}
+          {page === 'friends' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('friends_loading')}</p>}><FriendsPage friends={friends} locale={locale} /></Suspense>}
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps sidebarTarget={pageSidebar} visible={page === 'apps'} onCreate={() => openLocalAppChat()} onDevelopmentBlocked={() => setLocalAppNavigationError(tr('local_app_development_requires_code'))} canDevelop={bridge.bootstrap?.conversationSpaces.activeMode === 'code' && !bridge.sessionLoading} /></div>
           {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>
             <Bots visible={page === 'bots'} bots={bots} api={botsApi} bridge={bridge}

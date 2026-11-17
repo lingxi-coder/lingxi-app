@@ -60,6 +60,26 @@ final class AgentAvatarTests: XCTestCase {
         XCTAssertEqual(Set((0..<300).map { agentAvatarIndex("agent-\($0)") }).count, 28)
     }
 
+    // MARK: Size (docs/TEAMS-UI-POLISH.md U2, U7)
+
+    /// An avatar is its base size times the scale of the body text: never smaller than the base, never more than one and a half times it.
+    func testAnAvatarGrowsWithTheTextAndIsCappedAtOneAndAHalfTimes() {
+        for base in [20, 24, 32, 40, 56] as [CGFloat] {
+            XCTAssertEqual(AvatarScale.side(base, percent: 100), base, "The default text size is the base size")
+            XCTAssertEqual(AvatarScale.side(base, percent: 120), base * 1.2, accuracy: 0.0001)
+            XCTAssertEqual(AvatarScale.side(base, percent: 150), base * 1.5, accuracy: 0.0001)
+            XCTAssertEqual(AvatarScale.side(base, percent: 311), base * 1.5, accuracy: 0.0001, "AX5 is capped")
+            XCTAssertEqual(AvatarScale.side(base, percent: 85), base, "Smaller text does not shrink an avatar")
+        }
+    }
+
+    /// A Bot, a channel and a team are the same rounded square: 0.24 times the side.
+    func testTheRoundedSquareHasARadiusOfTwentyFourHundredthsOfTheSide() {
+        XCTAssertEqual(AvatarScale.cornerRadius(side: 40), 9.6, accuracy: 0.0001)
+        XCTAssertEqual(AvatarScale.cornerRadius(side: 56), 13.44, accuracy: 0.0001)
+        XCTAssertEqual(AvatarScale.cornerRadius(side: 0), 0)
+    }
+
     /// Desktop's loop over a ready-made key, for the cases that must not be normalised again.
     private func hashIndex(_ key: String) -> Int {
         var hash: Int64 = 0

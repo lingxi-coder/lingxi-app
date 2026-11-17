@@ -1,6 +1,6 @@
 import type { TeamMember, TeamsApi } from './index.js';
 import {
-  badgeCount, compareBlocks, compareOffers, confirmBody, definitive, FRIEND_CHAT, lookupBody, newRequestId, nextOfferExpiry,
+  badgeCount, compareBlocks, compareOffers, confirmBody, DEFAULT_MEMBER_NAME, definitive, FRIEND_CHAT, lookupBody, newRequestId, nextOfferExpiry,
   type BlockEntry, type FriendCard, type FriendProfile, type FriendsApi, type FriendsCommand, type FriendsResult, type LookupResult, type Proof, type TeamOffer,
 } from './friends.js';
 import { TeamsWorkspace, type TeamsWorkspaceOptions } from './workspace.js';
@@ -20,6 +20,8 @@ export interface FriendChat {
   ended: boolean;
   /** The friendship was just made (D7): the view says `friends_now_friends(name)` once, and the friend's card is awaited. */
   joined: boolean;
+  /** Counts the requests to show the friend's Shared Bots over the chat (the friend row's menu): the view opens its panel whenever it grows. */
+  botsRequest: number;
 }
 
 export interface FriendsSnapshot {
@@ -48,6 +50,8 @@ export interface FriendsSnapshot {
   readonly profile: FriendProfile | undefined;
   readonly profileLoading: boolean;
   readonly profileError: string;
+  /** The profile still has the name the backend gives an account that has none (`DEFAULT_MEMBER_NAME`): the root asks for one. */
+  readonly profileNameUnset: boolean;
   readonly chat: FriendChat | undefined;
   /** Increments when the Requests section should be scrolled into view (a `friend/requests` link). */
   readonly requestsFocus: number;
@@ -156,11 +160,13 @@ export class FriendsWorkspace {
 
   /**
    * Open a friend's chat. With `joined` (the friendship was just made) the friend's card is awaited; otherwise a
-   * person who is not a friend, once the first cards have arrived, gets the unavailable page.
+   * person who is not a friend, once the first cards have arrived, gets the unavailable page. With `bots` the friend's
+   * Shared Bots are shown over the chat as well.
    */
-  readonly openChat = (uid: string, joined = false): void => {
+  readonly openChat = (uid: string, joined = false, bots = false): void => {
     if (this.closed) return;
-    if (this.chat?.uid !== uid) { this.dropChat(); this.chat = { uid, name: '', workspace: undefined, ended: false, joined }; }
+    if (this.chat?.uid !== uid) { this.dropChat(); this.chat = { uid, name: '', workspace: undefined, ended: false, joined, botsRequest: 0 }; }
+    if (bots) this.chat!.botsRequest++;
     this.page = 'chat'; this.settle();
   };
 
@@ -199,11 +205,11 @@ export class FriendsWorkspace {
     return 'error' in outcome ? outcome.error : '';
   };
 
-  /** D10: end the friendship, or end it and block the person. On success the list is shown. */
+  /** D10: end the friendship, or end it and block the person. On success the list is shown when it was this friend's chat that was open; from the list's row menu the open page stays. */
   readonly leave = async (uid: string, action: 'remove' | 'block'): Promise<string> => {
     const outcome = await this.call({ action, otherUid: uid });
     if ('error' in outcome) return outcome.error;
-    this.show('home');
+    if (this.page === 'chat' && this.chat?.uid === uid) this.show('home');
     return '';
   };
 
@@ -377,7 +383,8 @@ export class FriendsWorkspace {
       blocksLoading: !this.blocksLoaded, blocksError: this.blocksError, offers: [...this.offers].sort(compareOffers(now)), now,
       badge: badgeCount(this.cards, this.offers, now),
       profile: this.profile, profileLoading: this.profileLoading, profileError: this.profileError,
-      chat: chat && { uid: chat.uid, name: chat.name, handle: chat.handle, workspace: chat.workspace, ended: chat.ended, joined: chat.joined },
+      profileNameUnset: this.profile?.displayName === DEFAULT_MEMBER_NAME,
+      chat: chat && { uid: chat.uid, name: chat.name, handle: chat.handle, workspace: chat.workspace, ended: chat.ended, joined: chat.joined, botsRequest: chat.botsRequest },
       requestsFocus: this.requestsFocus,
     };
   }

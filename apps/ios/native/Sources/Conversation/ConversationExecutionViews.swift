@@ -2,6 +2,11 @@ import SwiftUI
 
 struct ConversationExecutionRunCard: View {
     @Environment(\.theme) private var t
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    // The card grows with the text size (docs/TEAMS-UI-POLISH.md U7): its icons and its dot scale with the style they sit beside.
+    @ScaledMetric(relativeTo: .footnote) private var headerIcon: CGFloat = 14
+    @ScaledMetric(relativeTo: .caption) private var smallIcon: CGFloat = 12
+    @ScaledMetric(relativeTo: .footnote) private var dot: CGFloat = 6
     // Pinned status must not consume the conversation viewport by default.
     // The header still exposes liveness/status and expands on demand.
     @State private var collapsed = true
@@ -15,18 +20,18 @@ struct ConversationExecutionRunCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Button {
-                withAnimation(.easeInOut(duration: 0.15)) { collapsed.toggle() }
+                withAnimation(.lxMotion(reduceMotion, .easeInOut(duration: 0.15))) { collapsed.toggle() }
             } label: {
                 HStack(spacing: 8) {
-                    LXIcon(name: .workflow, size: 14, color: statusColor, stroke: 1.8)
+                    LXIcon(name: .workflow, size: headerIcon, color: statusColor, stroke: 1.8)
                     Text("chat_agent_run")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.footnote.weight(.semibold))
                         .foregroundColor(statusColor)
                     StatusChip(text: run.status.label, accent: statusColor)
                     Spacer(minLength: 6)
                     if let cost = run.costFormatted, !cost.isEmpty {
                         Text(cost)
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.caption.weight(.medium))
                             .foregroundColor(t.text3)
                     }
                     Image(systemName: collapsed ? "chevron.down" : "chevron.up")
@@ -54,10 +59,10 @@ struct ConversationExecutionRunCard: View {
                                     HStack(alignment: .top, spacing: 8) {
                                         Circle()
                                             .fill(color(for: notice.kind))
-                                            .frame(width: 6, height: 6)
-                                            .padding(.top, 6)
+                                            .frame(width: dot, height: dot)
+                                            .padding(.top, dot)
                                         Text(notice.text)
-                                            .font(.system(size: 12.5))
+                                            .font(.footnote)
                                             .foregroundColor(t.text2)
                                             .fixedSize(horizontal: false, vertical: true)
                                     }
@@ -104,7 +109,7 @@ struct ConversationExecutionRunCard: View {
                             VStack(alignment: .leading, spacing: 5) {
                                 ForEach(run.compactions) { item in
                                     Text(String(localized: "chat_compaction \(item.messagesBefore) \(item.messagesAfter) \(item.bytesSaved)"))
-                                        .font(.system(size: 12))
+                                        .font(.caption)
                                         .foregroundColor(t.text3)
                                 }
                             }
@@ -113,19 +118,19 @@ struct ConversationExecutionRunCard: View {
                         if run.activeWorkers > 0 || !run.workers.isEmpty {
                             VStack(alignment: .leading, spacing: 6) {
                                 Text(run.coordinatorTeam.map { String(localized: "chat_team_active_agents \($0) \(run.activeWorkers)") } ?? String(localized: "chat_active_agents \(run.activeWorkers)"))
-                                    .font(.system(size: 12.5, weight: .medium))
+                                    .font(.footnote.weight(.medium))
                                     .foregroundColor(t.text2)
                                 ForEach(run.workers) { worker in
                                     HStack(spacing: 8) {
                                         Text(worker.name)
-                                            .font(.system(size: 12.5, weight: .medium))
+                                            .font(.footnote.weight(.medium))
                                             .foregroundColor(t.text)
                                         Text(worker.agentType)
-                                            .font(.system(size: 11.5))
+                                            .font(.caption)
                                             .foregroundColor(t.text4)
                                         Spacer(minLength: 4)
                                         Text(worker.status)
-                                            .font(.system(size: 11.5))
+                                            .font(.caption)
                                             .foregroundColor(t.text3)
                                     }
                                 }
@@ -149,13 +154,13 @@ struct ConversationExecutionRunCard: View {
     private func blockPanel(icon: LXIconName, title: String, body: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                LXIcon(name: icon, size: 12, color: t.text3, stroke: 1.7)
+                LXIcon(name: icon, size: smallIcon, color: t.text3, stroke: 1.7)
                 Text(title)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.caption.weight(.medium))
                     .foregroundColor(t.text3)
             }
             Text(body)
-                .font(.system(size: 12.5))
+                .font(.footnote)
                 .foregroundColor(t.text2)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -193,18 +198,18 @@ private struct ConversationShellCardView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text("Shell")
-                    .font(.system(size: 12.5, weight: .semibold))
+                    .font(.footnote.weight(.semibold))
                     .foregroundColor(t.text)
                 StatusChip(text: card.status.label, accent: statusColor)
                 if let duration = ConversationExecutionParsing.formatDuration(card.durationMs) {
                     Text(duration)
-                        .font(.system(size: 11.5))
+                        .font(.caption)
                         .foregroundColor(t.text4)
                 }
                 Spacer(minLength: 6)
                 if let exit = card.exitCode {
                     Text("exit \(exit)")
-                        .font(.system(size: 11.5))
+                        .font(.caption)
                         .foregroundColor(t.text3)
                 }
             }
@@ -214,7 +219,7 @@ private struct ConversationShellCardView: View {
             }
             if let cwd = card.cwd, !cwd.isEmpty {
                 Text(cwd)
-                    .font(.system(size: 11.5))
+                    .font(.caption)
                     .foregroundColor(t.text4)
             }
             if let onOpenInTerminal, !card.command.isEmpty {
@@ -227,7 +232,7 @@ private struct ConversationShellCardView: View {
                         )
                     )
                 }
-                .font(.system(size: 12.5, weight: .medium))
+                .font(.footnote.weight(.medium))
                 .buttonStyle(.plain)
                 .foregroundColor(t.accent)
                 .accessibilityIdentifier("conversation.shell.open-terminal")
@@ -240,7 +245,7 @@ private struct ConversationShellCardView: View {
             }
             if card.truncated {
                 Text("chat_output_truncated")
-                    .font(.system(size: 11.5))
+                    .font(.caption)
                     .foregroundColor(t.text3)
             }
         }
@@ -254,7 +259,7 @@ private struct ConversationShellCardView: View {
     private func labeledOutput(_ label: String, _ text: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
-                .font(.system(size: 11.5, weight: .medium))
+                .font(.caption.weight(.medium))
                 .foregroundColor(t.text4)
             mono(text)
         }
@@ -262,7 +267,7 @@ private struct ConversationShellCardView: View {
 
     private func mono(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 12, design: .monospaced))
+            .font(.caption.monospaced())
             .foregroundColor(t.text2)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -285,7 +290,7 @@ private struct StatusChip: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 11.5, weight: .medium))
+            .font(.caption.weight(.medium))
             .foregroundColor(accent)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
@@ -302,7 +307,7 @@ private struct UsageChip: View {
 
     var body: some View {
         Text("\(label) \(value)")
-            .font(.system(size: 11.5))
+            .font(.caption)
             .foregroundColor(t.text3)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)

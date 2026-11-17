@@ -11,7 +11,7 @@ import { isServiceId } from '../../../../../packages/teams/hosted-service.js';
 import { ATTACHMENT_MESSAGE_BYTES, ATTACHMENT_MESSAGE_FILES, downloadAttachment, type MessageAttachment } from '../../../../../packages/teams/attachments.js';
 import type { BotStore } from '../bots/store.js';
 import { validateBotManifest } from '../bots/package.js';
-import { TeamPrivateStore, digest, validateTeamModelRoute, type TeamModelSelection, type TeamPersonaSnapshot, type SharedBotBinding, type PublishedDocument, type SavedExecution, type SavedDelivery, type TeamDataRef } from './privateStore.js';
+import { TeamPrivateStore, digest, validateTeamModelRoute, type TeamModelSelection, type TeamPersonaSnapshot, type SharedBotBinding, type PublishedDocument, type SavedExecution, type SavedDelivery, type TeamDataRef, type SavedGrantIntent } from './privateStore.js';
 import { runTeamHost, runResult, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult, type TeamRunResult, type TeamTaskCheckpoint, type TeamTaskWait, type TeamContinuation, type BotChatScope, type TeamOperation, type TeamOperationOutcome } from './process.js';
 import type { LocalTeamHost, TeamAccountContext } from './service.js';
 import { triageReply, type ReplyDecision } from './replyTriage.js';
@@ -49,7 +49,7 @@ export interface TeamConnectorOptions {
 interface Selected { context: TeamAccountContext; instanceId: string; expires: number; document: PublishedDocument }
 /** `resume` marks a waiting task whose requester answered: it is queued again and continues from its checkpoint. */
 interface HostTask extends TeamTaskView { messageId: string; messageSeq: number; resume?: { waitId: string; answerMessageId: string; answerSeq: number; /** The requester's decision, when the wait was an approval. */ decision?: 'approve' | 'deny' } }
-interface TaskContext { task: HostTask; messageId: string; messageSeq: number; inputs: Array<{ grantId: string; resourceId: string; digest: string }>;
+interface TaskContext { task: HostTask & { epoch?: number }; physicalDispatchesSpent?: number; messageId: string; messageSeq: number; inputs: Array<{ grantId: string; resourceId: string; digest: string }>;
   /** `prepareTask` only: what kind of Chat the task is in. */ conversationKind?: string;
   deployment: { deploymentId: string; definitionDigest: string; accountEpoch: number; capabilities?: { durableWait?: boolean } };
   /** Present when the Bot has a shared list and this deployment records its writes. */ sharedList?: SharedListOffer }
@@ -73,6 +73,10 @@ const scopeKey = (b: SharedBotBinding) => JSON.stringify([b.teamId, b.sharedBotI
 const serialKey = (b: SharedBotBinding, conversationId: string) => JSON.stringify([b.teamId, b.sharedBotId, conversationId]);
 const activation = (b: SharedBotBinding, c: TeamAccountContext) => JSON.stringify([c.epoch,b.deploymentId,b.accountEpoch]);
 const newId = () => randomBytes(16).toString('base64url');
+export const grantPermit = (scopeKind: 'team' | 'service', scopeId: string, deploymentId: string, taskId: string, targetEpoch: number, nonce: string): string => {
+  if (!Number.isSafeInteger(targetEpoch) || targetEpoch < 1 || !/^[a-f0-9]{64}$/u.test(nonce)) throw new Error('INVALID_GRANT_INTENT');
+  return digest(JSON.stringify(['lingxi-team-grant-permit-v1',scopeKind,scopeId,deploymentId,taskId,targetEpoch,nonce]));
+};
 const errorCode = (error: unknown) => {
   if (error instanceof TeamHostFailure || error instanceof TeamsApiError) return error.code;
   const text = error instanceof Error ? error.message : error; // An abort reason (`signal.throwIfAborted()`) is the bare code.
@@ -185,15 +189,29 @@ export class TeamConnector implements LocalTeamHost {
   private hostFields(b: SharedBotBinding) { return { deploymentId: b.deploymentId, hostId: this.options.privateStore.hostId, accountEpoch: b.accountEpoch }; }
   async localBots(uid: string): Promise<LocalPublishableBot[]> {
     this.available(); const context = this.context(uid); this.assert(context);
-    const bots = await Promise.all(this.options.store.list().map(async b => ({ instanceId: b.bot_id, name: b.name, description: b.description, ...(b.model ? { model: b.model } : {}),
-      requiredResources: await this.requiredResources(b.bot_id) }))); this.assert(context); return bots;
+    const bots = await Promise.all(this.options.store.list().map(async b => {
+      const manifest = await this.marketPackage(b.bot_id);
+      let capabilities: LocalPublishableBot['capabilities'];
+      try {
+        const selected = b.model ?? this.options.defaultModel();
+        if (selected) {
+          const { route } = await this.options.modelRoute(selected); validateTeamModelRoute(route);
+          const continues = CONTINUABLE_PROTOCOLS.includes(route.model_protocol);
+          capabilities = { durableWait: continues, writeOperations: continues };
+        }
+      } catch { /* A missing local route leaves this Bot's capabilities unknown; no provider request is made. */ }
+      return { instanceId: b.bot_id, name: b.name, description: b.description, ...(b.model ? { model: b.model } : {}),
+        requiredResources: manifest?.resources.filter(r => r.required).map(r => r.id) ?? [],
+        ...(capabilities ? { capabilities } : {}),
+        ...(manifest ? { examples: manifest.examples.slice(0, 3).map(example => example.trim()).filter(Boolean) } : {}) };
+    })); this.assert(context); return bots;
   }
-  private async requiredResources(instanceId: string): Promise<string[]> {
-    const bot = this.options.store.get(instanceId); if (!bot.marketOrigin) return [];
+  private async marketPackage(instanceId: string): Promise<ReturnType<typeof validateBotManifest> | undefined> {
+    const bot = this.options.store.get(instanceId); if (!bot.marketOrigin) return undefined;
     const path = join(this.options.store.botDir(instanceId), 'market-package.json');
     const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     try { const info = await handle.stat(); if (!info.isFile() || info.nlink !== 1 || info.size > 1024 * 1024) throw new Error('INVALID_BOT_PACKAGE');
-      return validateBotManifest(JSON.parse(await handle.readFile('utf8'))).resources.filter(r => r.required).map(r => r.id); }
+      return validateBotManifest(JSON.parse(await handle.readFile('utf8'))); }
     finally { await handle.close(); }
   }
   async selectSharedFiles(uid: string, instanceId: string): Promise<SelectedSharedFile[]> {
@@ -237,10 +255,13 @@ export class TeamConnector implements LocalTeamHost {
     this.available(); const context = this.context(uid), key = JSON.stringify([uid, input?.teamId, input?.sharedBotId]);
     if (this.publishing.has(key)) throw new Error('BOT_REVISION_CONFLICT'); this.publishing.add(key);
     try {
-      if (!input || Object.keys(input).some(k => !['teamId','generation','publicationId','sharedBotId','instanceId','expectedRevision','usePolicy','fileTokens','quotas','role','resourceBindings','sharedList','keptResources','replacedResources','autoReply'].includes(k))
+      if (!input || Object.keys(input).some(k => !['teamId','generation','publicationId','sharedBotId','instanceId','expectedRevision','usePolicy','fileTokens','quotas','role','resourceBindings','sharedList','keptResources','replacedResources','examples','autoReply'].includes(k))
         || ![input.teamId,input.publicationId,input.sharedBotId,input.instanceId].every(id) || !Number.isSafeInteger(input.generation) || input.generation < 1
         || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0 || typeof input.role !== 'string' || !input.role.trim() || input.role.includes('\0') || Buffer.byteLength(input.role) > 64 * 1024
         || !Array.isArray(input.fileTokens) || input.fileTokens.length > 49 || new Set(input.fileTokens).size !== input.fileTokens.length) throw new Error('INVALID_INPUT');
+      if (input.examples !== undefined && (!Array.isArray(input.examples) || input.examples.length > 3
+        || Array.from(input.examples).some(example => typeof example !== 'string' || !example.trim() || example.includes('\0') || Buffer.byteLength(example.trim()) > 2000))) throw new Error('INVALID_INPUT');
+      const examples = input.examples?.map(example => example.trim()) ?? [];
       const kept = input.keptResources ?? [], replaced = input.replacedResources ?? {};
       if (!Array.isArray(kept) || !kept.every(id) || new Set(kept).size !== kept.length || !replaced || typeof replaced !== 'object' || Array.isArray(replaced)
         || !Object.keys(replaced).every(id) || Object.keys(replaced).some(key => kept.includes(key)) || Object.values(replaced).some(token => typeof token !== 'string' || input.fileTokens.includes(token))
@@ -279,7 +300,7 @@ export class TeamConnector implements LocalTeamHost {
       const documents: PublishedDocument[] = [{ resourceId: digest(JSON.stringify([input.publicationId, 'persona'])), revision: 1, kind: 'persona', name: 'Role', text: input.role, digest: digest(input.role) }];
       const chosen = (token: string): PublishedDocument => { const selection = this.selections.get(token);
         if (!selection || selection.context.uid !== uid || selection.context.epoch !== context.epoch || selection.instanceId !== input.instanceId || selection.expires <= this.now()) throw new Error('INVALID_SHARED_FILE_TOKEN'); return {...selection.document}; };
-      const required = await this.requiredResources(input.instanceId); this.assert(context);
+      const required = (await this.marketPackage(input.instanceId))?.resources.filter(r => r.required).map(r => r.id) ?? []; this.assert(context);
       // Files of the current publication stay or are replaced under their own resource id; the ones not named here stop being shared.
       if (kept.length || Object.keys(replaced).length) {
         const current = (await this.options.privateStore.bindings(uid)).find(b => b.teamId === input.teamId && b.sharedBotId === input.sharedBotId); this.assert(context);
@@ -317,7 +338,7 @@ export class TeamConnector implements LocalTeamHost {
         snapshot: snapshotId, accountEpoch: Math.max(1, (existing?.accountEpoch ?? 0) + 1), publicationId: input.publicationId,
         grantIds: documents.map(d => digest(JSON.stringify([input.sharedBotId,input.expectedRevision+1,d.resourceId]))), sessionEpoch: (existing?.sessionEpoch ?? 0) + 1 };
       const payload = {
-        sharedBotId: input.sharedBotId, expectedRevision: input.expectedRevision, name: bot.name, description: bot.description, usePolicy: input.usePolicy, quotas: input.quotas,
+        sharedBotId: input.sharedBotId, expectedRevision: input.expectedRevision, name: bot.name, description: bot.description, usePolicy: input.usePolicy, quotas: input.quotas, examples,
         ...(list ? { sharedList: { title: list.title.trim(), description: list.description.trim(), ...(list.approval === 'requester' ? { approval: 'requester' } : {}) } } : {}),
         ...(auto ? { autoReply: { daily: auto.daily } } : {}),
         deployment: { deploymentId: binding.deploymentId, sharedBotId: binding.sharedBotId, revision: binding.revision, hostId: this.options.privateStore.hostId, owner: { uid, generation: input.generation },
@@ -442,7 +463,7 @@ export class TeamConnector implements LocalTeamHost {
           await this.options.renewModelAccount?.(request.accountId,request.identityGeneration,request.credentialRevision); await authorize();
           const refreshed=await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!refreshed) throw new Error('TEAM_MODEL_UNAVAILABLE'); return refreshed; },
         bootstrap:{version:3,type:'run',storageRoot:paths.runtime,workerExecutable:bins.worker,scope,taskId,invocationId:randomUUID(),instructions:'Confirm model readiness. Reply READY. Do not call tools.',inputBatchRef:reference,knowledge:[],deadlineAt:this.now()+45000,
-          model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),limits:{max_turns:1,context_window_tokens:32768,output_tokens_per_request:64,physical_dispatches:1}}}));
+          model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),limits:{max_turns:1,context_window_tokens:32768,output_tokens_per_request:512,physical_dispatches:1}}}));
       assert(); if (result.status !== 'completed' || !result.text?.trim()) throw new Error('TEAM_MODEL_UNAVAILABLE'); await authorize();
     } finally { await this.options.privateStore.releaseDataRef(c.uid,reference); }
   }
@@ -537,8 +558,8 @@ export class TeamConnector implements LocalTeamHost {
         if (!reason) try { const accounts = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!accounts) reason = 'model'; } catch { reason = 'model'; }
         const ready = !reason;
         if (this.resting) throw new Error('TEAM_HOST_RESTING');
-        if ((this.heartbeats.get(scopeKey(b)) ?? 0) + 20000 < this.now() || !ready) {
-          await this.command(c,b,'heartbeatDeployment',{...this.hostFields(b),ready}); assert(); this.heartbeats.set(scopeKey(b),this.now());
+        if ((this.heartbeats.get(scopeKey(b)) ?? 0) + 20000 < this.now() || !ready || this.served.get(scopeKey(b))?.state === 'not_ready') {
+          await this.command(c,b,'heartbeatDeployment',{...this.hostFields(b),ready,...(reason ? { healthReason: reason } : {})}); assert(); this.heartbeats.set(scopeKey(b),this.now());
         }
         this.served.set(scopeKey(b), reason ? { state: 'not_ready', reason } : { state: 'ready' });
         if (!ready) { this.stopBinding(b.teamId,b.sharedBotId); continue; }
@@ -571,9 +592,25 @@ export class TeamConnector implements LocalTeamHost {
       if (!bindingsByDeployment.has(key)) bindingsByDeployment.set(key, binding);
     }
     let environment: HostEnvironment | undefined;
-    for (const intent of await this.options.privateStore.executions(c.uid)) {
+    const intents=await this.options.privateStore.executions(c.uid),retainedTasks=new Set(intents.map(intent=>intent.taskId));
+    const pendingGrants=new Set(intents.filter(intent=>intent.grant?.phase==='pending').map(intent=>intent.taskId));
+    for (const intent of intents) {
       if (await handled(intent)) continue;
       const deploymentId = intent.payload.deploymentId, b = typeof deploymentId === 'string' ? bindingsByDeployment.get(`${intent.teamId}\0${deploymentId}`) : undefined;
+      if(intent.grant?.phase==='pending'){
+        if((this.deferred.get(intent.taskId)??0)>this.now())continue;
+        if(b&&!inactive.has(scopeKey(b)))try{
+          const promoted=await this.reconcileGrant(c,b,intent);assert();
+          if(promoted){
+            const paths=await this.options.privateStore.owner(c.uid),bins=this.options.binaries();
+            const result=await this.options.privateStore.savedResult(c.uid,promoted.taskId)??runResult(await (this.options.run??runTeamHost)({executable:bins.host,home:paths.home,tmp:paths.tmp,signal:AbortSignal.timeout(10000),timeoutMs:10000,assertCurrent:assert,
+              bootstrap:{version:3,type:'inspect_result',storageRoot:paths.runtime,workerExecutable:bins.worker,scope:promoted.scope,taskId:promoted.taskId}}));assert();
+            if(result.status==='completed'||result.status==='failed')await this.saveResult(c,promoted,result);
+            else await this.recover(c,b,promoted,{paths,bins},revision,assert);
+          }
+        }catch{assert();}finally{if(revision===this.revision)this.deferred.set(intent.taskId,this.now()+(this.options.retryMs??5000));}
+        continue;
+      }
       if (intent.wait) {
         // The task continues only through its answer, as a queued task with `resume` (below). Never answered, cancelled or expired: nothing is left to do for it.
         if (this.now() > intent.wait.expiresAt + QUEUE_MS + DELIVERY_SKEW_MS) await this.options.privateStore.delivered(c.uid,intent.taskId);
@@ -648,6 +685,7 @@ export class TeamConnector implements LocalTeamHost {
     for (const candidate of candidates) {
       if (candidate.task.optional === true && !candidate.task.resume && candidate.task.messageSeq < latest.get(serialKey(candidate.binding,candidate.task.conversationId))!) continue;
       assert(); if (this.active.size+this.probes >= Math.min(4,this.options.maxConcurrent ?? 4)) break;
+      if(pendingGrants.has(candidate.task.taskId)||retainedTasks.has(candidate.task.taskId)&&!candidate.task.resume)continue;
       const key = serialKey(candidate.binding,candidate.task.conversationId); if (this.active.has(key)) continue;
       const { binding, task, snapshot } = candidate, resume = task.resume;
       this.launch(revision,task.taskId,binding.instanceId,key,signal => resume ? this.answer(c,binding,task,resume,snapshot,signal) : this.execute(c,binding,task,snapshot,signal));
@@ -668,12 +706,114 @@ export class TeamConnector implements LocalTeamHost {
       bootstrap:{version:3,type:'inspect_task',storageRoot:paths.runtime,workerExecutable:bins.worker,scope:record.scope,taskId:record.taskId,model}});
     assert(); if (result.status !== 'task_checkpoint') throw new Error('TEAM_HOST_PROTOCOL'); return result;
   }
+  private candidate(record: SavedExecution): string {
+    const grant=record.grant!;
+    return grantPermit(isServiceId(record.teamId)?'service':'team',record.teamId,grant.binding.deploymentId,record.taskId,grant.targetEpoch,grant.nonce);
+  }
+  private grantIntent(b: SharedBotBinding, record: SavedExecution, context: TaskContext, action: SavedGrantIntent['action'], payload: Record<string,unknown>, checkpoint?: TeamTaskCheckpoint): SavedExecution {
+    const targetEpoch=action==='startTask'?1:record.epoch+1,nonce=randomBytes(32).toString('hex');
+    if(!Number.isSafeInteger(targetEpoch)||targetEpoch<1)throw new Error('INVALID_GRANT_INTENT');
+    const request={...payload,permitNonce:nonce};
+    return {...record,grant:{action,phase:'pending',nonce,targetEpoch,payload:request,binding:b,checkpoint,rpcAttempts:0,
+      commandId:digest(JSON.stringify([action,request,record.batch.sha256])),messageId:context.messageId,requester:context.task.requester}};
+  }
+  private async promoteGrant(c: TeamAccountContext, b: SharedBotBinding, record: SavedExecution, context: TaskContext): Promise<SavedExecution | undefined> {
+    const grant=record.grant!;
+    if (grant.binding.ownerUid!==c.uid || b.ownerUid!==c.uid || b.teamId!==record.teamId || b.generation!==record.generation
+      || b.sharedBotId!==record.scope.sharedBotId || b.instanceId!==grant.binding.instanceId || b.sessionEpoch!==record.scope.sessionEpoch
+      || context.task.taskId!==record.taskId || context.task.sharedBotId!==record.scope.sharedBotId || context.task.conversationId!==record.scope.conversationId
+      || context.task.epoch!==grant.targetEpoch || context.task.state!=='running' || context.messageId!==grant.messageId || context.messageSeq!==record.messageSeq
+      || context.task.requester.uid!==grant.requester.uid || context.task.requester.generation!==grant.requester.generation
+      || context.deployment.deploymentId!==b.deploymentId || context.deployment.definitionDigest!==grant.binding.snapshot || context.deployment.accountEpoch!==b.accountEpoch
+      || !Number.isSafeInteger(context.task.deadline) || context.task.deadline<=0
+      || context.physicalDispatchesSpent!==undefined&&(!Number.isSafeInteger(context.physicalDispatchesSpent)||context.physicalDispatchesSpent<0||context.physicalDispatchesSpent>DISPATCH_LIMIT)
+      || JSON.stringify(context.inputs.map(input=>input.grantId).sort())!==JSON.stringify([...b.grantIds].sort())) throw new Error('INVALID_GRANT_CONTEXT');
+    const snapshot=await this.options.privateStore.snapshot(c.uid,b.snapshot);
+    if(context.inputs.length!==snapshot.documents.length||context.inputs.some(input=>!snapshot.documents.some(document=>document.resourceId===input.resourceId&&document.digest===input.digest)))throw new Error('INPUT_GRANT_REQUIRED');
+    const {pause:_pause,wait:_wait,list:_list,...kept}=record;
+    const next:SavedExecution={...kept,epoch:grant.targetEpoch,deadlineAt:context.task.deadline,
+      payload:{...record.payload,...this.hostFields(b),permitId:this.candidate(record)},grant:{...grant,phase:'validated'},
+      dispatched:Math.max(record.dispatched,grant.checkpoint?.dispatchesObserved??0,context.physicalDispatchesSpent??0),
+      recoveries:record.recoveries+(grant.action==='continueTask'&&grant.payload.reason==='recovery'?1:0),
+      // A Bot nobody asked does not ask the member who wrote back: in a group they did not ask it anything.
+      ask:context.deployment.capabilities?.durableWait===true&&CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol)&&record.unasked!==true,
+      ...(CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol)&&listOffer(context.sharedList)?{list:listOffer(context.sharedList)!}:{})};
+    return await this.options.privateStore.compareExecution(c.uid,record,next)?next:undefined;
+  }
+  /** A safe grant receipt never replays a permit. Only its candidate plus the original source/context proves admission. */
+  private async sendGrant(c:TeamAccountContext,b:SharedBotBinding,record:SavedExecution):Promise<SavedExecution|undefined>{
+    this.assert(c);const grant=record.grant!,rpcAttempts=(grant.rpcAttempts??1)+1;
+    if(!Number.isSafeInteger(rpcAttempts))throw new Error('INVALID_GRANT_INTENT');
+    const sent={...record,grant:{...grant,rpcAttempts}};
+    if(!await this.options.privateStore.compareExecution(c.uid,record,sent))return undefined;
+    const result=await this.command<TaskContext & {execute:boolean;permitId?:string}>(c,b,grant.action,grant.payload,grant.commandId);
+    if(result.execute===true&&result.permitId===this.candidate(sent))return this.promoteGrant(c,b,sent,result);
+    if(result.execute!==false)throw new Error('INVALID_GRANT_CONTEXT');
+    return this.reconcileGrant(c,b,sent,true);
+  }
+  private async retryGrant(c:TeamAccountContext,b:SharedBotBinding,record:SavedExecution,context?:TaskContext):Promise<SavedExecution|undefined>{
+    const grant=record.grant!;
+    if(grant.binding.accountEpoch===b.accountEpoch)return this.sendGrant(c,b,record);
+    // Activation fenced the old host epoch. Retain the original input and SDK baseline, changing only the RPC identity.
+    context??=await this.command<TaskContext>(c,b,'prepareTask',{...this.hostFields(b),taskId:record.taskId});this.assert(c);
+    const next=this.grantIntent(b,record,context,grant.action,{...grant.payload,...this.hostFields(b)},grant.checkpoint);
+    next.grant!.cursor=grant.cursor;
+    return await this.options.privateStore.compareExecution(c.uid,record,next)?this.sendGrant(c,b,next):undefined;
+  }
+  private async reconcileGrant(c:TeamAccountContext,b:SharedBotBinding,record:SavedExecution,knownAnswer=false):Promise<SavedExecution|undefined>{
+    const grant=record.grant!;this.assert(c);
+    // Publication/owner changes never promote an earlier definition's candidate.
+    if(b.snapshot!==grant.binding.snapshot||b.revision!==grant.binding.revision||b.deploymentId!==grant.binding.deploymentId||b.generation!==record.generation)return undefined;
+    try {
+      const context=await this.command<TaskContext>(c,b,'validateTask',{...this.hostFields(b),taskId:record.taskId,permitId:this.candidate(record),expectedLastChangeSeq:record.lastChangeSeq});this.assert(c);
+      return this.promoteGrant(c,b,record,context);
+    }catch(error){if(!definitive(error))throw error;}
+    const task=await this.command<HostTask>(c,b,'getTask',{taskId:record.taskId});this.assert(c);
+    if(task.taskId!==record.taskId||task.sharedBotId!==record.scope.sharedBotId||task.conversationId!==record.scope.conversationId
+      ||task.requester?.uid!==grant.requester.uid||task.requester.generation!==grant.requester.generation)throw new Error('INVALID_GRANT_CONTEXT');
+    if(grant.action==='continueTask'&&task.state==='running'){
+      try{
+        const prior=await this.command<TaskContext>(c,b,'validateTask',{...this.hostFields(b),taskId:record.taskId,permitId:record.payload.permitId,expectedLastChangeSeq:record.lastChangeSeq});this.assert(c);
+        if(prior.task.epoch===record.epoch){
+          if(!knownAnswer)return this.retryGrant(c,b,record,prior);
+          if(grant.rpcAttempts!==1)return undefined;
+          const {grant:_grant,...original}=record;
+          if(await this.options.privateStore.discardExecution(c.uid,record,original)&&grant.payload.reason==='recovery')await this.saveResult(c,original,this.failedResult(original),true);return undefined;}
+      }catch(error){if(!definitive(error))throw error;}
+    }
+    if(task.state==='queued'){
+      if(knownAnswer){if(grant.rpcAttempts!==1)return undefined;const {grant:_grant,...original}=record;await this.options.privateStore.discardExecution(c.uid,record,grant.action==='continueTask'?original:undefined);return undefined;}
+      return this.retryGrant(c,b,record);
+    }
+    // A competing permit, lost authority or a cancelled/finished task is never a licence to run or deliver a guessed failure.
+    if(['completed','failed','interrupted','expired','cancelled','declined'].includes(task.state))await this.options.privateStore.discardExecution(c.uid,record);
+    return undefined;
+  }
   /** A running attempt whose worker is gone and left no result. The durable checkpoint decides: report the question it stopped at, continue it in a new worker, or end it. */
   private async recover(c: TeamAccountContext, b: SharedBotBinding, record: SavedExecution, environment: HostEnvironment, revision: number, assert: () => void) {
     const key = serialKey(b,record.scope.conversationId); if (this.active.has(key)) return;
     const snapshot = await this.options.privateStore.snapshot(c.uid,b.snapshot); assert();
     const checkpoint = await this.checkpoint(record,snapshot,environment,assert);
     if (checkpoint.phase === 'result_recorded') return; // The next result probe reads it.
+    const grant=record.grant;
+    if(grant?.phase==='validated'){
+      const initial=grant.action==='startTask'&&checkpoint.phase==='absent'&&checkpoint.attempts===0&&checkpoint.dispatchesObserved===0
+        &&JSON.stringify(checkpoint.cursor)===JSON.stringify(grant.cursor);
+      const baseline=grant.checkpoint;
+      const continuation=grant.action==='continueTask'&&baseline&&checkpoint.attempts===baseline.attempts
+        &&checkpoint.checkpointDigest===baseline.checkpointDigest&&checkpoint.dispatchesObserved===baseline.dispatchesObserved;
+      if(initial||continuation){
+        if(continuation&&!checkpoint.continuable)return;
+        if(this.active.size+this.probes>=Math.min(4,this.options.maxConcurrent??4))return;
+        const accounts=await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles);assert();if(!accounts)return;
+        const answer=record.answered;
+        this.launch(revision,record.taskId,b.instanceId,key,signal=>this.attempt(c,b,snapshot,record,accounts,environment,signal,continuation?{
+          epoch:record.epoch,expected_checkpoint_digest:baseline!.checkpointDigest,
+          ...(answer?{answer:{wait_id:answer.waitId,message_id:answer.messageId,text:answer.text,...(answer.approved!==undefined?{approved:answer.approved}:{})}}:{})}:undefined));return;
+      }
+      // A digest alone says nothing about SDK consumption: tombstone count is independent of cloud epoch.
+      if(baseline&&checkpoint.attempts<=baseline.attempts)return;
+    }
     // The attempt that died was already continuing with the answer to this question: it gets the same answer again.
     const answered = !!checkpoint.wait && record.answered?.waitId === checkpoint.wait.waitId;
     if (checkpoint.continuable && checkpoint.wait && !answered && record.ask) {
@@ -701,29 +841,21 @@ export class TeamConnector implements LocalTeamHost {
     // An approval is continued only with a decision, a question only with an answer in words.
     const approval = checkpoint.wait.kind === 'tool_approval';
     if (approval !== (resume.decision === 'approve' || resume.decision === 'deny')) throw new Error('SOURCE_CHANGED');
-    await this.resume(c,b,{...record,answered:{waitId:resume.waitId,messageId:message.messageId,text:message.text,...(approval ? { approved: resume.decision === 'approve' } : {})}},snapshot,checkpoint,'answer',environment,signal);
+    const answered={...record,answered:{waitId:resume.waitId,messageId:message.messageId,text:message.text,...(approval ? { approved: resume.decision === 'approve' } : {})}};
+    await this.options.privateStore.saveExecution(c.uid,answered);assert();
+    await this.resume(c,b,answered,snapshot,checkpoint,'answer',environment,signal);
   }
   /** One more attempt of a task this host already ran: after its worker was interrupted (`recovery`) or its question was answered (`answer`). The server grants each at most once. */
   private async resume(c: TeamAccountContext, b: SharedBotBinding, record: SavedExecution, snapshot: TeamPersonaSnapshot, checkpoint: TeamTaskCheckpoint, reason: 'answer' | 'recovery', environment: HostEnvironment, signal: AbortSignal) {
     const assert = () => { this.assert(c); signal.throwIfAborted(); };
     const accounts = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
     const payload = {...this.hostFields(b),taskId:record.taskId,expectedEpoch:record.epoch,checkpointDigest:checkpoint.checkpointDigest,reason,dispatchedRequests:Math.max(record.dispatched,checkpoint.dispatchesObserved)};
-    const grant = await this.command<ContinueGrant>(c,b,'continueTask',payload,digest(JSON.stringify(['continueTask',payload])));
-    if (!grant.execute || !id(grant.permitId) || !grant.task || !Number.isSafeInteger(grant.epoch) || grant.epoch! <= record.epoch) {
-      this.log('team_task_continue_refused', { taskId: record.taskId, reason, state: grant.state ?? null });
-      // A running attempt is closed with its own permit (a cancelled task then reads as cancelled). An answered task holds no permit: it has ended on the server, or it is tried again until it expires.
-      if (reason === 'recovery') await this.saveResult(c,record,this.failedResult(record),true);
-      else if (grant.state === 'failed') await this.options.privateStore.delivered(c.uid,record.taskId);
-      else { assert(); this.deferred.set(record.taskId,this.now()+(this.options.retryMs??5000)); }
-      return;
-    }
+    const context=await this.command<TaskContext>(c,b,reason==='answer'?'prepareTask':'validateTask',{...this.hostFields(b),taskId:record.taskId,
+      ...(reason==='recovery'?{permitId:record.payload.permitId,expectedLastChangeSeq:record.lastChangeSeq}:{})});assert();
+    const pending=this.grantIntent(b,record,context,'continueTask',payload,checkpoint);
+    if(!await this.options.privateStore.compareExecution(c.uid,record,pending))return;
+    const next=await this.sendGrant(c,b,pending);if(!next){this.deferred.set(record.taskId,this.now()+(this.options.retryMs??5000));return;}
     this.deferred.delete(record.taskId); this.deferredCodes.delete(record.taskId);
-    const { pause: _pause, wait: _wait, ...rest } = record;
-    const { list: _list, ...kept } = rest, offered = CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) ? listOffer(grant.sharedList) : undefined;
-    const next: SavedExecution = { ...kept, ...(offered ? { list: offered } : {}), epoch: grant.epoch!, deadlineAt: grant.task.deadline, payload: {...record.payload,...this.hostFields(b),permitId:grant.permitId},
-      dispatched: Math.max(record.dispatched,checkpoint.dispatchesObserved,grant.physicalDispatchesSpent ?? 0), recoveries: record.recoveries + (reason === 'recovery' ? 1 : 0) };
-    // The permit is spent: save it before any abort check, as for the first attempt.
-    await this.options.privateStore.saveExecution(c.uid,next);
     const answer = checkpoint.wait && next.answered?.waitId === checkpoint.wait.waitId ? next.answered : undefined;
     await this.attempt(c,b,snapshot,next,accounts,environment,signal,{ epoch: next.epoch, expected_checkpoint_digest: checkpoint.checkpointDigest,
       ...(answer ? { answer: { wait_id: answer.waitId, message_id: answer.messageId, text: answer.text, ...(answer.approved !== undefined ? { approved: answer.approved } : {}) } } : {}) });
@@ -745,6 +877,8 @@ export class TeamConnector implements LocalTeamHost {
       || prepared.inputs.length !== snapshot.documents.length) throw new Error('INPUT_GRANT_REQUIRED');
     // Nobody asked the Bot for this one: judge first whether it answers at all, before any file is read or any permit spent.
     let mayDecline = false;
+    // A Bot nobody asked does not ask the member who wrote back: in a group they did not ask it anything.
+    const unasked = task.optional === true && prepared.conversationKind !== 'bot_dm';
     if (task.optional === true) {
       const kind = prepared.conversationKind ?? 'group';
       const recent = await this.options.service.hostReadChat(c,{...sourceScope,mode:'before',beforeSeq:prepared.messageSeq+1,limit:13}); assert();
@@ -763,22 +897,19 @@ export class TeamConnector implements LocalTeamHost {
     try {
     assert(); const accounts = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
     const startPayload={...fields,expectedLastChangeSeq:source.lastChangeSeq};
-    const started = await this.command<TaskContext & {execute:boolean;permitId?:string}>(c,b,'startTask',startPayload,digest(JSON.stringify(['startTask',startPayload,reference.sha256])));
-    if (!started.execute || !started.permitId) { assert(); this.deferred.set(task.taskId,this.now()+(this.options.retryMs??5000)); return; }
-    this.deferred.delete(task.taskId); this.deferredCodes.delete(task.taskId);
     const record: SavedExecution = { schemaVersion:2, scope, teamId:b.teamId,generation:b.generation,taskId:task.taskId,
-      commandId:digest(JSON.stringify([task.taskId,'delivery'])),deadlineAt:started.task.deadline,payload:{...fields,permitId:started.permitId,inputGrantIds:b.grantIds},
+      commandId:digest(JSON.stringify([task.taskId,'delivery'])),deadlineAt:prepared.task.deadline,payload:{...fields,inputGrantIds:b.grantIds},
       epoch:1,messageSeq:prepared.messageSeq,lastChangeSeq:source.lastChangeSeq,batch:reference,dispatched:0,recoveries:0,
-      // A Bot nobody asked does not ask the member who wrote back: in a group they did not ask it anything.
-      ask:started.deployment?.capabilities?.durableWait === true && CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) && !(task.optional === true && prepared.conversationKind !== 'bot_dm'),
-      ...(mayDecline ? { mayDecline: true } : {}),
+      ask:prepared.deployment?.capabilities?.durableWait === true && CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) && !unasked,
+      ...(unasked ? { unasked: true } : {}), ...(mayDecline ? { mayDecline: true } : {}),
       ...(files.length ? { files: files.map(({ attachmentId, sha256 }) => ({ attachmentId, sha256 })) } : {}),
-      ...(CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) && listOffer(started.sharedList) ? { list: listOffer(started.sharedList)! } : {}) };
-    // The permit is spent: save it before any abort check, so a revoke now ends in a failed result instead of losing the permit.
-    // `c` is the account that sent startTask: the execution and its failed delivery stay in that account's private store, never in the current one, and `assert` in the attempt keeps the worker from starting.
-    // The stale context can no longer send completeTask; discovery delivers it once that account is current again, or the deadline derives `interrupted`.
-    await this.options.privateStore.saveExecution(c.uid,record); kept = true;
-    await this.attempt(c,b,snapshot,record,accounts,environment,signal);
+      ...(CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) && listOffer(prepared.sharedList) ? { list: listOffer(prepared.sharedList)! } : {}) };
+    const pending=this.grantIntent(b,record,prepared,'startTask',startPayload);
+    pending.grant!.cursor={sessionRevision:cursor.sessionRevision,lastMessageSeq:cursor.lastMessageSeq,lastChangeSeq:cursor.lastChangeSeq};
+    if(!await this.options.privateStore.compareExecution(c.uid,undefined,pending))return;kept=true;
+    const admitted=await this.sendGrant(c,b,pending);if(!admitted){this.deferred.set(task.taskId,this.now()+(this.options.retryMs??5000));return;}
+    this.deferred.delete(task.taskId);this.deferredCodes.delete(task.taskId);
+    await this.attempt(c,b,snapshot,admitted,accounts,environment,signal);
     } finally { if (!kept) await this.options.privateStore.releaseDataRef(c.uid,reference); }
   }
   /** The files the model is given with a task: those of the message that asked, then of the message it answers, then of the other new
@@ -804,6 +935,7 @@ export class TeamConnector implements LocalTeamHost {
   }
   /** One worker attempt under the record's current permit, and what it ends in: a delivered result, a question, or an interruption left for recovery. */
   private async attempt(c: TeamAccountContext, b: SharedBotBinding, snapshot: TeamPersonaSnapshot, record: SavedExecution, accounts: ProviderAccountLaunch, { paths, bins }: HostEnvironment, outer: AbortSignal, continuation?: TeamContinuation) {
+    if(record.dispatched>=DISPATCH_LIMIT){await this.saveResult(c,record,this.failedResult(record),true);return;}
     const execution = new AbortController(), signal = AbortSignal.any([outer, execution.signal]);
     const assert = () => { this.assert(c); signal.throwIfAborted(); };
     const fields = {...this.hostFields(b),taskId:record.taskId}, permitId = record.payload.permitId, sourceScope = {teamId:b.teamId,generation:b.generation,conversationId:record.scope.conversationId};
@@ -844,13 +976,14 @@ export class TeamConnector implements LocalTeamHost {
         this.log('team_task_failed', { taskId: record.taskId, code, aborted: signal.aborted });
         // Only an interruption is continued: this host is closing, or the process stopped without a verdict. Discovery then asks the durable checkpoint.
         // Lost authority, a cancellation and a refusal by the worker itself end the task: the permit is spent and the model never runs again for it.
-        if (code === 'CLOSED' || !signal.aborted && INTERRUPTIONS.includes(code)) return;
+        if (code === 'CLOSED' || !signal.aborted && (INTERRUPTIONS.includes(code)||code==='TASK_INTERRUPTED'||code==='CHECKPOINT_MISMATCH')) return;
         const saved = await this.options.privateStore.savedResult(c.uid,record.taskId).catch(() => undefined);
         await this.saveResult(c,record,saved ?? this.failedResult(record),!saved); return; // Delivered by discovery once the account and fence are current again.
       }
       if (stop) { await this.pause(c,b,{...record,usage:totalUsage(record.usage,result.usage,false)},stop); return; }
       const delivery = await this.saveResult(c,record,result); assert();
-      await this.command(c,b,'completeTask',delivery.payload,delivery.commandId); assert(); await this.options.privateStore.delivered(c.uid,record.taskId);
+      if(!delivery)return;
+      await this.command(c,b,'completeTask',delivery.payload,delivery.commandId); assert(); await this.options.privateStore.delivered(c.uid,record.taskId,record);
     } finally { clearInterval(interval); await Promise.all(references.map(ref=>this.options.privateStore.releaseDataRef(c.uid,ref))); }
   }
   /** One request of the running Bot to its shared list.
@@ -948,7 +1081,7 @@ export class TeamConnector implements LocalTeamHost {
       ...(result.status==='completed' && record.files?.length ? { readFiles: record.files } : {}),...(result.document && !declined ? {document:{title:result.document.title,body:result.document.markdown}} : {})};
     const delivery: SavedDelivery = {schemaVersion:1,teamId:record.teamId,generation:record.generation,taskId:record.taskId,deadlineAt:record.deadlineAt,commandId:record.commandId,
       ...(synthesized ? { synthesized: true as const } : {}),payload};
-    await this.options.privateStore.saveDelivery(c.uid,delivery); return delivery;
+    return await this.options.privateStore.saveDelivery(c.uid,delivery,record)?delivery:undefined;
   }
   /** An unasked task this host will not run: the server ends it before any model runs. The command id is the task's, so a repeat is the same request. */
   private async decline(c: TeamAccountContext, b: SharedBotBinding, taskId: string, reason: 'triage' | 'superseded') {

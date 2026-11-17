@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import { AccountSignInContext } from '../src/renderer/bridge/useAccountState';
 import { unreadBadgeText } from '../src/renderer/bridge/teamsUnread';
+import { agentAvatarIndex } from '../src/renderer/components/agentAvatarArt';
 import { teamBotAvatarId } from '../src/renderer/components/TeamAvatar';
 import { TeamsSignIn } from '../src/renderer/components/TeamsSignIn';
 import { tr } from '../src/renderer/i18n/locale';
@@ -44,6 +45,20 @@ test('a Bot has the avatar of its id in the Teams views as in the Bots sidebar, 
   assert.equal(teamBotAvatarId('bot:owner-uid:host-1:3f2b8c10-1c0e-4c7f-9d2e-5a1b6e7f8a90'), '3f2b8c10-1c0e-4c7f-9d2e-5a1b6e7f8a90');
   assert.equal(teamBotAvatarId('planner'), 'planner', 'a card id is its own');
   assert.equal(teamBotAvatarId(teamBotAvatarId('bot:u:h:planner')), 'planner', 'and the same Bot is the same either way');
+});
+
+test('the avatar of a Bot is the same on every client: the id it is looked up by and the index it maps to follow the shared vectors', () => {
+  const fixtures = new URL('../../../packages/bridge-client/fixtures/', import.meta.url);
+  const vectors = JSON.parse(readFileSync(new URL('mobile-team-bot-vectors.json', fixtures), 'utf8')) as {
+    avatars: { teamBotAvatarId: [string, string][]; indexPrefixed: { agentId: string; repeat?: { char: string; count: number }; expect: number }[] };
+  };
+  assert.ok(vectors.avatars.teamBotAvatarId.length >= 3 && vectors.avatars.indexPrefixed.length >= 8, 'the vectors are there');
+  for (const [input, expected] of vectors.avatars.teamBotAvatarId) assert.equal(teamBotAvatarId(input), expected, input);
+  // The file stores a long id as one character and a count.
+  for (const row of vectors.avatars.indexPrefixed) assert.equal(agentAvatarIndex(row.repeat ? row.repeat.char.repeat(row.repeat.count) : row.agentId), row.expect, row.agentId);
+  const identities = JSON.parse(readFileSync(new URL('agent-avatar-identities.json', fixtures), 'utf8')) as { id: string; index: number }[];
+  assert.ok(identities.length >= 30);
+  for (const row of identities) assert.equal(agentAvatarIndex(row.id), row.index, JSON.stringify(row.id));
 });
 
 // --- theming ---------------------------------------------------------------------------------------------------
@@ -110,6 +125,24 @@ test('under the Desktop palettes text on every Teams surface reads at 4.5:1 and 
     for (const [part, surface] of PART_PAIRS) {
       const ratio = contrast(color(part), color(surface));
       assert.ok(ratio >= 3, `${dark ? 'dark' : 'light'}: ${part} against ${surface} is ${ratio.toFixed(2)}:1`);
+    }
+  }
+});
+
+// U3: the signed-in person's own rows are tinted with the accent at 6% over the stream (`--tw-own`), and the tint is all that marks them.
+// What is written on it, and on it under the pointer (the hover colour at 55% over it), must still read.
+test('under the Desktop palettes the tint of the own rows keeps text at 4.5:1, with and without the pointer, in the light and the dark one', () => {
+  assert.match(workspaceCss, /--tw-own:\s*color-mix\(in srgb, var\(--tw-accent\) 6%, transparent\)/, 'the tint is the accent at 6%');
+  for (const dark of [false, true]) {
+    const variables = teamsThemeVariables(tokens(dark));
+    const color = (name: string) => variables[`--teams-${name}`]!;
+    const own = mixColors(color('accent'), color('bg'), 0.06), hovered = mixColors(color('hover'), own, 0.55);
+    assert.notEqual(own, color('bg'), `${dark ? 'dark' : 'light'}: the tint can be told from the stream`);
+    for (const [where, surface] of [['own', own], ['own under the pointer', hovered]] as const) {
+      for (const text of ['fg', 'muted', 'accent-text', 'danger']) {
+        const ratio = contrast(color(text), surface);
+        assert.ok(ratio >= 4.5, `${dark ? 'dark' : 'light'}: ${text} on ${where} (${surface}) is ${ratio.toFixed(2)}:1`);
+      }
     }
   }
 });

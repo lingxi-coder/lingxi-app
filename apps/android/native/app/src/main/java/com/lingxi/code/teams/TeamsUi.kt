@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.text.format.DateFormat
 import androidx.annotation.StringRes
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -33,6 +34,12 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -92,7 +99,7 @@ internal fun rememberTeamsListStrings(): TeamsListStrings {
     return TeamsListStrings(
         channel = stringResource(R.string.teams_conversation_channel), directMessage = stringResource(R.string.teams_label_direct),
         group = stringResource(R.string.teams_conversation_group), member = stringResource(R.string.teams_member),
-        you = stringResource(R.string.teams_preview_you), bot = "Bot", noMessages = stringResource(R.string.teams_preview_none),
+        you = stringResource(R.string.teams_preview_you), bot = stringResource(R.string.teams_bot_tag), noMessages = stringResource(R.string.teams_preview_none),
         recalled = stringResource(R.string.teams_message_recalled), nonText = stringResource(R.string.teams_preview_non_text),
         listSeparator = if (chinese) TeamsListStrings.ZH_LIST_SEPARATOR else ", ",
         authorSeparator = if (chinese) TeamsListStrings.ZH_AUTHOR_SEPARATOR else ": ",
@@ -120,6 +127,8 @@ internal fun teamsErrorRes(code: String): Int = when {
     code.contains("STORAGE") -> R.string.teams_messages_storage_error
     code in setOf("BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "BOT_SELECTION_STALE", "CONVERSATION_POLICY_REQUIRED", "ARTIFACT_READ_REQUIRED", "GRANT_READ_REQUIRED", "INPUT_GRANT_REQUIRED") -> R.string.teams_error_bot_access_changed
     code == "BOT_MAINTAINER_CHANGED" -> R.string.teams_composer_lock_bot_handed_over
+    code == "BOT_STATUS_UNVERIFIED" -> R.string.teams_composer_lock_bot_unverified
+    code == "HOST_UNAVAILABLE" -> R.string.services_error_host_unavailable
     code == "REQUEST_QUOTA_EXCEEDED" -> R.string.teams_error_request_quota
     code == "MESSAGE_LISTENER_FAILED" -> R.string.teams_error_sync_failed
     code in setOf("MESSAGE_RECALLED", "MESSAGE_ID_CONFLICT", "MESSAGE_AUTHOR_REQUIRED", "PARTICIPANT_REQUIRED", "CONVERSATION_REJECTED", "INVALID_INPUT",
@@ -194,25 +203,25 @@ internal fun dayLabelText(kind: DayKind, atMs: Long): String {
 internal fun formatDate(atMs: Long, zone: ZoneId, locale: Locale, skeleton: String): String =
     DateTimeFormatter.ofPattern(DateFormat.getBestDateTimePattern(locale, skeleton), locale).withZone(zone).format(Instant.ofEpochMilli(atMs))
 
-/** "Offline · saved messages" with the reason and a Reconnect action. */
+/** "Offline · saved messages" with the reason and a Reconnect action; a polite live region, so a screen reader says it when it appears. */
 @Composable
 internal fun TeamsOfflineBanner(onReconnect: () -> Unit, modifier: Modifier = Modifier) {
-    Surface(modifier.fillMaxWidth().testTag(TeamsTags.OFFLINE), color = MaterialTheme.colorScheme.surfaceVariant) {
+    Surface(modifier.fillMaxWidth().testTag(TeamsTags.OFFLINE).semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite }, color = MaterialTheme.colorScheme.surfaceVariant) {
         Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Icon(Icons.Outlined.CloudOff, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
             Column(Modifier.weight(1f)) {
                 Text(stringResource(R.string.teams_offline_title), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
                 Text(stringResource(R.string.teams_messages_offline), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            TextButton(onClick = onReconnect) { Text(stringResource(R.string.mcp_reconnect)) }
+            TextButton(onClick = onReconnect) { Text(stringResource(R.string.teams_reconnect)) }
         }
     }
 }
 
-/** A command or sync error, with an optional Retry. */
+/** A command or sync error, with an optional Retry; a polite live region. */
 @Composable
 internal fun TeamsErrorBanner(code: String, modifier: Modifier = Modifier, onRetry: (() -> Unit)? = null) {
-    Surface(modifier.fillMaxWidth().testTag(TeamsTags.ERROR), color = MaterialTheme.colorScheme.errorContainer) {
+    Surface(modifier.fillMaxWidth().testTag(TeamsTags.ERROR).semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite }, color = MaterialTheme.colorScheme.errorContainer) {
         Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Icon(Icons.Outlined.ErrorOutline, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onErrorContainer)
             Text(stringResource(teamsErrorRes(code)), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer)
@@ -221,15 +230,38 @@ internal fun TeamsErrorBanner(code: String, modifier: Modifier = Modifier, onRet
     }
 }
 
-/** A centred message: an optional icon, a title, an optional body and an optional action. */
+/**
+ * A centred message (docs/TEAMS-UI-POLISH.md U9): an optional icon, a title that says what is empty, an optional body that says what to do and an
+ * optional action. It fills its parent; pass [fill] = false where it sits in a list, so it only takes the room it needs.
+ */
 @Composable
 internal fun TeamsMessageState(
-    title: String, modifier: Modifier = Modifier, icon: ImageVector? = null, body: String? = null, action: (@Composable () -> Unit)? = null,
+    title: String, modifier: Modifier = Modifier, icon: ImageVector? = null, body: String? = null, fill: Boolean = true, action: (@Composable () -> Unit)? = null,
 ) {
-    Column(modifier.fillMaxSize().padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(
+        modifier.then(if (fill) Modifier.fillMaxSize() else Modifier.fillMaxWidth()).padding(32.dp),
+        verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
         if (icon != null) { Icon(icon, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant); Spacer(Modifier.height(12.dp)) }
-        Text(title, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+        Text(title, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
         if (body != null) { Spacer(Modifier.height(6.dp)); Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center) }
         if (action != null) { Spacer(Modifier.height(16.dp)); action() }
     }
+}
+
+/**
+ * The accent at 6 percent over the stream: the faint row tint of the signed-in person's own messages (U3). `ThemeColorRolesTest` composites exactly
+ * this over the surface and holds the text on it at 4.5:1; docs/TEAMS-UI-POLISH.md Appendix D has the numbers.
+ */
+internal const val OWN_MESSAGE_TINT = 0.06f
+
+/**
+ * A collapsible header's click and semantics (U11): the whole row is the button, its action reads Collapse or Expand, its value reads Expanded or
+ * Collapsed, and the chevron beside it stays decorative (`contentDescription = null`). Callers add `heightIn(min = 48.dp)` for the touch target.
+ */
+@Composable
+internal fun Modifier.disclosure(expanded: Boolean, onClick: () -> Unit): Modifier {
+    val action = stringResource(if (expanded) R.string.teams_section_collapse else R.string.teams_section_expand)
+    val state = stringResource(if (expanded) R.string.teams_section_expanded else R.string.teams_section_collapsed)
+    return clickable(onClickLabel = action, role = Role.Button, onClick = onClick).semantics { stateDescription = state }
 }

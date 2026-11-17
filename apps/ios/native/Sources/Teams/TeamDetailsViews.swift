@@ -141,7 +141,7 @@ struct TeamConversationDetailsSheet: View {
     private func row(_ person: Participant, _ context: TeamConversationContext) -> some View {
         let identity = person.identity
         return HStack(spacing: 12) {
-            IdentityAvatar(identity: identity, size: 36)
+            IdentityAvatar(identity: identity, size: 40)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(identity.name).font(.body.weight(.semibold)).lineLimit(1)
@@ -155,13 +155,10 @@ struct TeamConversationDetailsSheet: View {
                 }
                 if let card = person.card {
                     Text("teams_bot_owner \(context.userName(card.maintainer.uid))").font(.caption).foregroundStyle(.secondary)
-                    Text(LocalizedStringKey(context.presenceKey(card))).font(.caption).foregroundStyle(card.state == "published" && card.ready ? Color.green : Color.secondary)
+                    Text(context.presenceText(card)).font(.caption).foregroundStyle(.secondary)
                 } else if let role = person.role {
-                    HStack(spacing: 4) {
-                        if identity.isSelf { Text(context.strings.you); Text("·") }
-                        Text(TeamsText.role(role))
-                    }
-                    .font(.caption).foregroundStyle(.secondary)
+                    Text(verbatim: TeamsStreamLogic.joinedLine([identity.isSelf ? context.strings.you : nil, TeamsText.roleName(role)]))
+                        .font(.caption).foregroundStyle(.secondary)
                 } else if identity.isSelf {
                     Text(context.strings.you).font(.caption).foregroundStyle(.secondary)
                 }

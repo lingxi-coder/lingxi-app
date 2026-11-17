@@ -3,10 +3,10 @@ package com.lingxi.code.friends
 import android.icu.text.ListFormatter
 import android.icu.text.RelativeDateTimeFormatter
 import androidx.annotation.StringRes
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -14,18 +14,25 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
-import kotlinx.coroutines.delay
 import java.util.Locale
 
 /** Test tags of the Friends tab. */
@@ -131,43 +138,41 @@ internal fun FriendsErrorText(error: FriendsError, modifier: Modifier = Modifier
     )
 }
 
-/** The header of a pushed page (or a pane when wide): Back on phones, Close beside other panes. */
+/** The header of a pushed page (or a pane when wide): Back on phones, Close beside other panes. At least 56 dp, so a larger font grows it (U7). */
 @Composable
 internal fun FriendsPageHeader(title: String, showBack: Boolean, onClose: () -> Unit) {
-    Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         IconButton(onClick = onClose, modifier = Modifier.testTag(FriendsTags.BACK)) {
             if (showBack) Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.remote_back)) else Icon(Icons.Outlined.Close, stringResource(R.string.common_close))
         }
-        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(title, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
     }
 }
 
-/** A line the Friends tab shows for a few seconds (D4, D7, D16, D27); a tap dismisses it. */
+/** The line a [FriendsNotice] reads as (D4, D7, D16, D27). */
 @Composable
-internal fun FriendsNoticeBanner(notice: FriendsNotice, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
-    val text = when (notice) {
-        is FriendsNotice.NowFriends -> stringResource(R.string.friends_now_friends_fmt, notice.name)
-        FriendsNotice.ChatUnavailable -> stringResource(R.string.friends_chat_unavailable)
-        is FriendsNotice.OfferJoined -> stringResource(R.string.friends_offer_joined_fmt, notice.teamName)
-    }
-    FriendsBanner(text, notice, onDismiss, modifier)
+internal fun friendsNoticeText(notice: FriendsNotice): String = when (notice) {
+    is FriendsNotice.NowFriends -> stringResource(R.string.friends_now_friends_fmt, notice.name)
+    FriendsNotice.ChatUnavailable -> stringResource(R.string.friends_chat_unavailable)
+    is FriendsNotice.OfferJoined -> stringResource(R.string.friends_offer_joined_fmt, notice.teamName)
 }
 
 /**
- * The line of [FriendsNoticeBanner] for a one-shot that another tab owns, such as the Teams tab's "invitation sent" (D26). It stays for a few
- * seconds from the moment [key] changes; a tap dismisses it.
+ * The one-shot line of a tab (D4, D7, D16, D26, D27) in a Material Snackbar over the bottom of the tab's root: a polite live region, so a screen
+ * reader says it, with a Dismiss action and no five-second timer (the host gives it the longer duration, which a screen reader extends further).
+ * It shows [text] each time [key] changes to something other than null, and calls [onDismiss] when the line is gone, whether the person dismissed
+ * it or it timed out. A newer [key] replaces the line on screen.
  */
 @Composable
-internal fun FriendsBanner(text: String, key: Any, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
-    LaunchedEffect(key) { delay(NOTICE_MS); onDismiss() }
-    Surface(
-        onClick = onDismiss, modifier = modifier.padding(16.dp).testTag(FriendsTags.NOTICE),
-        shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.inverseSurface, shadowElevation = 4.dp,
-    ) {
-        Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.inverseOnSurface)
-        }
+internal fun BoxScope.NoticeSnackbar(key: Any?, text: String?, onDismiss: () -> Unit) {
+    val host = remember { SnackbarHostState() }
+    val latestDismiss by rememberUpdatedState(onDismiss)
+    LaunchedEffect(key) {
+        if (key == null || text == null) return@LaunchedEffect
+        host.showSnackbar(text, withDismissAction = true, duration = SnackbarDuration.Long)
+        latestDismiss()
     }
+    SnackbarHost(host, Modifier.align(Alignment.BottomCenter)) { data -> Snackbar(data, Modifier.testTag(FriendsTags.NOTICE)) }
 }
 
 /**
@@ -181,5 +186,3 @@ internal fun offerExpiryText(expiry: OfferExpiry.Live, locale: Locale): String =
 
 /** Names as a list in the person's language ("Ann, Ben and Cy"; "甲、乙和丙"). */
 internal fun friendNamesText(names: List<String>, locale: Locale): String = ListFormatter.getInstance(locale).format(names)
-
-private const val NOTICE_MS = 5_000L

@@ -223,6 +223,6 @@ class TeamBotsTest {
         val unreadable = TeamMessageConversation.fromDocument("chat_0002", mapOf("kind" to "group", "title" to "Trip", "participants" to listOf("user:alice"), "lastSeq" to 0L, "lastChangeSeq" to 0L, "lastMessage" to null,
             "autoReply" to mapOf("revision" to "3", "targets" to listOf("sharedbot_c"))), 0) { null }
         assertNull(unreadable.autoReply)
-        assertEquals(R.string.teams_task_declined, teamTaskStateRes("declined"))
+        assertEquals(R.string.teams_task_declined, TeamsBotText.runState("declined").label)
     }
 }

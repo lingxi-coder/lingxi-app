@@ -14,6 +14,7 @@ import { hostNode, reactTestRenderer, scenario, settle, textOf, withDom } from '
 const require = createRequire(import.meta.url);
 const { TeamsWorkspaceView } = loadTeamsModule<typeof import('../src/teams/TeamsWorkspaceView')>(new URL('../src/teams/TeamsWorkspaceView', import.meta.url).pathname);
 const { SignInCard } = loadTeamsModule<typeof import('../src/teams/SignInCard')>(new URL('../src/teams/SignInCard', import.meta.url).pathname);
+const i18n = loadTeamsModule<typeof import('../../../packages/teams/i18n')>('i18n');
 const code = 'a'.repeat(32), intentKey = 'lingxi.teams.inviteIntent.1';
 const store = () => { const values = new Map<string, string>(); return { values, getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); }, removeItem: (key: string) => { values.delete(key); } }; };
 
@@ -27,6 +28,7 @@ function pageFixture() {
     'firebase/auth': { onAuthStateChanged(_auth: unknown, next: (user: User | null) => void) { listeners.add(next); next(null); return () => { listeners.delete(next); }; } },
     '../app/firebase': { auth }, '../teams/firestore': { teamsDatabase: () => ({}) }, '../teams/invite-intent': intent,
     '../teams/api': { webTeamsApi: () => ({ ...fake.api, close() {} }) }, '../friends/api': { webFriendsApi: () => ({ close() {} }) }, '../teams/TeamsWorkspaceView': { TeamsWorkspaceView }, '../teams/SignInCard': { SignInCard },
+    '../../../../packages/teams/i18n': i18n,
   };
   new Function('require', 'module', 'exports', compiled.outputText)((id: string) => id in mocks ? mocks[id] : require(id), module, module.exports);
   return { Page: module.exports.default, fake, signIn() { const user = { uid: 'alice', email: 'fixture@example.invalid' } as User; listeners.forEach(next => next(user)); } };

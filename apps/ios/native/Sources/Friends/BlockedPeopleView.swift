@@ -28,12 +28,13 @@ struct BlockedPeopleView: View {
                             .accessibilityIdentifier("friends.blocked.error")
                     }
                     if friends.blocks.isEmpty {
-                        Text("friends_blocked_empty").foregroundStyle(.secondary)
+                        TeamsStateView(systemImage: "hand.raised", title: "friends_blocked_empty_title", message: "friends_blocked_empty_body")
+                            .listRowSeparator(.hidden).listRowBackground(Color.clear)
                             .accessibilityIdentifier("friends.blocked.empty")
                     }
                     ForEach(friends.blockedPeople) { block in row(block) }
                 } footer: {
-                    Text("friends_unblock_footer")
+                    if !friends.blocks.isEmpty { Text("friends_unblock_footer") }
                 }
             }
         }
@@ -49,17 +50,18 @@ struct BlockedPeopleView: View {
         // The entry has no name when it was made before the backend kept one (D12): `Member`.
         let name = block.displayName.isEmpty ? String(localized: "teams_member") : block.displayName
         return HStack(spacing: 12) {
-            PersonAvatar(id: block.uid, name: name, size: 36)
+            PersonAvatar(id: block.uid, name: name, size: 40)
             VStack(alignment: .leading, spacing: 2) {
                 Text(verbatim: name).font(.body.weight(.semibold)).lineLimit(1)
                 if let handle = block.handle { Text(verbatim: "@" + handle).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
             }
             Spacer(minLength: 8)
-            Button("friends_unblock") {
+            Button {
                 Task { await friends.end("unblock", with: block.uid) }
+            } label: {
+                Text("friends_unblock").minimumHitTarget(minWidth: 0)
             }
             .buttonStyle(.bordered)
-            .controlSize(.small)
             .disabled(friends.isBusy(block.uid))
             .accessibilityIdentifier("friends.unblock.\(block.uid)")
         }

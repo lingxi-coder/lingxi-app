@@ -32586,36 +32586,70 @@
         }
       }
     },
-    "friends_blocked_empty": {
+    "friends_blocked_empty_body": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "你还没有屏蔽任何人。"
+            "value": "被你屏蔽的人无法找到你，也无法向你发送请求。他们会显示在这里。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "你還沒有封鎖任何人。"
+            "value": "被你封鎖的人無法找到你，也無法向你傳送請求。他們會顯示在這裡。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "You haven't blocked anyone."
+            "value": "People you block can’t find you or send you requests. They will appear here."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "ブロックしている人はいません。"
+            "value": "ブロックした人は、あなたを見つけたりリクエストを送ったりできません。ここに表示されます。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "차단한 사람이 없습니다."
+            "value": "차단한 사람은 나를 찾거나 요청을 보낼 수 없습니다. 차단한 사람이 여기에 표시됩니다."
+          }
+        }
+      }
+    },
+    "friends_blocked_empty_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "没有已屏蔽的人"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "沒有已封鎖的人"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No blocked people"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ブロックした人はいません"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "차단한 사람이 없습니다"
           }
         }
       }
@@ -32693,31 +32727,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bot 在其所有者的 Desktop 上运行。所有者可阅读与它的所有对话。"
+            "value": "Bot 在其维护者的 Desktop 上运行。维护者可阅读与它的所有对话。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bot 在其擁有者的 Desktop 上執行。擁有者可閱讀與它的所有對話。"
+            "value": "Bot 在其維護者的 Desktop 上執行。維護者可閱讀與它的所有對話。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "A Bot runs on its owner’s Desktop. The owner can read every conversation with it."
+            "value": "A Bot runs on its maintainer’s Desktop. The maintainer can read every conversation with it."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bot は所有者の Desktop 上で動作します。所有者は、その Bot とのすべての会話を読めます。"
+            "value": "Bot はメンテナーの Desktop 上で動作します。メンテナーは、その Bot とのすべての会話を読めます。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bot은 소유자의 Desktop에서 실행됩니다. 소유자는 해당 Bot과 나눈 모든 대화를 읽을 수 있습니다."
+            "value": "Bot은 메인테이너의 Desktop에서 실행됩니다. 메인테이너는 해당 Bot과 나눈 모든 대화를 읽을 수 있습니다."
           }
         }
       }
@@ -32820,6 +32854,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "이 대화는 더 이상 사용할 수 없습니다."
+          }
+        }
+      }
+    },
+    "friends_clip_link": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀好友链接"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "靈犀好友連結"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LingXi friend link"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LingXi の友だちリンク"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LingXi 친구 링크"
           }
         }
       }
@@ -34252,36 +34320,70 @@
         }
       }
     },
-    "friends_link_off_confirm": {
+    "friends_link_off_body": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "关闭好友链接？在你创建新链接之前，任何人都无法通过它添加你。"
+            "value": "在你创建新链接之前，任何人都无法通过它添加你。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "關閉好友連結？在你建立新連結之前，任何人都無法透過它新增你。"
+            "value": "在你建立新連結之前，任何人都無法透過它新增你。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Turn off your friend link? No one can add you with it until you create a new one."
+            "value": "No one can add you with it until you create a new one."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "友だちリンクを無効にしますか？新しいリンクを作成するまで、このリンクで追加されることはありません。"
+            "value": "新しいリンクを作成するまで、このリンクで追加されることはありません。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "친구 링크를 끌까요? 새 링크를 만들 때까지 아무도 이 링크로 나를 추가할 수 없습니다."
+            "value": "새 링크를 만들 때까지 아무도 이 링크로 나를 추가할 수 없습니다."
+          }
+        }
+      }
+    },
+    "friends_link_off_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭好友链接？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "關閉好友連結？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Turn off your friend link?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "友だちリンクを無効にしますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "친구 링크를 끌까요?"
           }
         }
       }
@@ -34320,36 +34422,70 @@
         }
       }
     },
-    "friends_link_reset_confirm": {
+    "friends_link_reset_body": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "重置好友链接？旧链接会立即失效。"
+            "value": "旧链接会立即失效。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "重設好友連結？舊連結會立即失效。"
+            "value": "舊連結會立即失效。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Reset your friend link? The old link stops working immediately."
+            "value": "The old link stops working immediately."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "友だちリンクをリセットしますか？古いリンクはすぐに使えなくなります。"
+            "value": "古いリンクはすぐに使えなくなります。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "친구 링크를 재설정할까요? 이전 링크는 즉시 사용할 수 없게 됩니다."
+            "value": "이전 링크는 즉시 사용할 수 없게 됩니다."
+          }
+        }
+      }
+    },
+    "friends_link_reset_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重置好友链接？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重設好友連結？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reset your friend link?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "友だちリンクをリセットしますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "친구 링크를 재설정할까요?"
           }
         }
       }
@@ -39216,36 +39352,104 @@
         }
       }
     },
-    "mobile_bots_none": {
+    "mobile_bots_none_check_again": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "这台电脑上没有可远程使用的 Bot。在电脑上的灵犀里为 Bot 打开“远程控制”后，它会显示在这里。"
+            "value": "重新检查"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "這台電腦上沒有可遠端使用的 Bot。在電腦上的靈犀裡為 Bot 開啟「遠端控制」後，它會顯示在這裡。"
+            "value": "重新檢查"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "No Bots can be used remotely on this computer. Turn on “Remote control” for a Bot in LingXi on the computer and it will show up here."
+            "value": "Check again"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "このパソコンにはリモートで使える Bot がありません。パソコンの LingXi で Bot の「リモート操作」をオンにすると、ここに表示されます。"
+            "value": "もう一度確認"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "이 컴퓨터에는 원격으로 사용할 수 있는 Bot이 없습니다. 컴퓨터의 LingXi에서 Bot의 ‘원격 제어’를 켜면 여기에 표시됩니다."
+            "value": "다시 확인"
+          }
+        }
+      }
+    },
+    "mobile_bots_none_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在电脑上的灵犀里为 Bot 打开“远程控制”后，它会显示在这里。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在電腦上的靈犀裡為 Bot 開啟「遠端控制」後，它會顯示在這裡。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In LingXi on your computer, turn on “Remote control” for a Bot and it will show up here."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "パソコンの LingXi で Bot の「リモート操作」をオンにすると、ここに表示されます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "컴퓨터의 LingXi에서 Bot의 ‘원격 제어’를 켜면 여기에 표시됩니다."
+          }
+        }
+      }
+    },
+    "mobile_bots_none_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "没有可远程使用的 Bot"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "沒有可遠端使用的 Bot"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No Bots to use remotely"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "リモートで使える Bot がありません"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "원격으로 사용할 수 있는 Bot이 없습니다"
           }
         }
       }
@@ -54482,6 +54686,40 @@
         }
       }
     },
+    "remote_forget_confirm": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "忘记"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "忘記"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Forget"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "削除"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "잊기"
+          }
+        }
+      }
+    },
     "remote_forget_help": {
       "localizations": {
         "zh-Hans": {
@@ -54512,6 +54750,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "이 휴대폰의 페어링만 제거됩니다. 컴퓨터의 기기 목록은 LingXi 설정에서 제거하세요."
+          }
+        }
+      }
+    },
+    "remote_forget_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "忘记此电脑？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "忘記此電腦？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Forget this computer?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このパソコンを削除しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 컴퓨터를 잊을까요?"
           }
         }
       }
@@ -57300,6 +57572,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "링크로 서비스 열기"
+          }
+        }
+      }
+    },
+    "services_menu": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "服务选项"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "服務選項"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Service options"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "サービスのオプション"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "서비스 옵션"
           }
         }
       }
@@ -94069,7 +94375,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Admin"
+            "value": "管理員"
           }
         },
         "en": {
@@ -94081,13 +94387,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Admin"
+            "value": "管理者"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Admin"
+            "value": "관리자"
           }
         }
       }
@@ -95191,7 +95497,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "打开文档"
+            "value": "開啟文件"
           }
         },
         "en": {
@@ -95203,13 +95509,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Open document"
+            "value": "ドキュメントを開く"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Open document"
+            "value": "문서 열기"
           }
         }
       }
@@ -95244,40 +95550,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Document"
-          }
-        }
-      }
-    },
-    "teams_assistants": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "助手"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "助手"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Assistants"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Assistants"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Assistants"
           }
         }
       }
@@ -95486,36 +95758,240 @@
         }
       }
     },
-    "teams_bot_disabled": {
+    "teams_bot_avail_maintenance": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "已停用 · 需重新绑定"
+            "value": "暂时维护中"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "已停用 · 需重新綁定"
+            "value": "暫時維護中"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Disabled · needs rebinding"
+            "value": "Temporarily under maintenance"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "無効 · 再バインドが必要"
+            "value": "一時的にメンテナンス中"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "사용 안 함 · 다시 연결 필요"
+            "value": "일시적으로 점검 중"
+          }
+        }
+      }
+    },
+    "teams_bot_avail_offline": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "宿主离线"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "宿主離線"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Host offline"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ホストがオフライン"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "호스트 오프라인"
+          }
+        }
+      }
+    },
+    "teams_bot_avail_quota": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "今日额度已用完"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "今日額度已用完"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Daily quota exhausted"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本日の上限に達しました"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "오늘의 한도를 모두 사용했습니다"
+          }
+        }
+      }
+    },
+    "teams_bot_avail_ready": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已就绪"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已就緒"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ready"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "準備完了"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "준비됨"
+          }
+        }
+      }
+    },
+    "teams_bot_avail_unverified": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "状态未确认"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "狀態未確認"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Status unverified"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "状態を確認できません"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "상태를 확인할 수 없음"
+          }
+        }
+      }
+    },
+    "teams_bot_disabled": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已停止共享"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已停止共享"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sharing stopped"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "共有停止中"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "공유 중지됨"
+          }
+        }
+      }
+    },
+    "teams_bot_examples_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "示例会加入草稿，请检查后自行发送。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "範例會加入草稿，請檢查後自行傳送。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Examples add to your draft. Review and send when ready."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "入力例は下書きに追加されます。内容を確認してから送信してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "예시는 초안에 추가됩니다. 내용을 확인한 뒤 직접 보내세요."
           }
         }
       }
@@ -95593,31 +96069,65 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "尚未共享。在 Desktop 重新绑定后可接收新请求。"
+            "value": "不再接收新请求。维护者可在灵犀 Desktop 重新共享此 Bot。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "尚未共享。在 Desktop 重新綁定後可接收新請求。"
+            "value": "不再接收新請求。維護者可在靈犀 Desktop 重新共享此 Bot。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Not shared. Rebind on Desktop to enable new requests."
+            "value": "New requests are off. The maintainer can share this Bot again from LingXi Desktop."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "未共有です。Desktop で再バインドすると新しいリクエストを受け付けます。"
+            "value": "新しいリクエストは受け付けていません。メンテナーが LingXi Desktop から再共有できます。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "공유되지 않았습니다. Desktop에서 다시 연결하면 새 요청을 받을 수 있습니다."
+            "value": "새 요청을 받지 않습니다. 메인테이너가 LingXi Desktop에서 다시 공유할 수 있습니다."
+          }
+        }
+      }
+    },
+    "teams_bot_not_supported": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "不支持"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "不支援"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not supported"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "非対応"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "지원되지 않음"
           }
         }
       }
@@ -95667,7 +96177,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "维护者：%@"
+            "value": "維護者：%@"
           }
         },
         "en": {
@@ -95679,13 +96189,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Maintainer: %@"
+            "value": "メンテナー: %@"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Maintainer: %@"
+            "value": "메인테이너: %@"
           }
         }
       }
@@ -95701,7 +96211,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "维护者：%1$s"
+            "value": "維護者：%1$s"
           }
         },
         "en": {
@@ -95713,183 +96223,251 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Maintainer: %1$s"
+            "value": "メンテナー: %1$s"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Maintainer: %1$s"
+            "value": "메인테이너: %1$s"
           }
         }
       }
     },
-    "teams_bot_pause": {
+    "teams_bot_remaining_today": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "暂停共享"
+            "value": "本人今日剩余请求"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "暂停共享"
+            "value": "本人今日剩餘請求"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Pause sharing"
+            "value": "Your remaining requests today"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Pause sharing"
+            "value": "自分の今日の残りリクエスト数"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Pause sharing"
+            "value": "오늘 남은 내 요청 수"
           }
         }
       }
     },
-    "teams_bot_unbind": {
+    "teams_bot_resets": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "解除绑定"
+            "value": "重置于"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "解除綁定"
+            "value": "重置於"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Unbind"
+            "value": "Resets"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "バインド解除"
+            "value": "リセット時刻"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "연결 해제"
+            "value": "초기화 시각"
           }
         }
       }
     },
-    "teams_bot_unbind_detail": {
+    "teams_bot_stop_detail": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "将停止新的 Bot 请求，现有会话历史保留。"
+            "value": "将停止向此 Bot 发送新请求，现有会话会保留。你可以在灵犀 Desktop 重新共享。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "將停止新的 Bot 請求，現有會話歷史保留。"
+            "value": "將停止向此 Bot 傳送新請求，現有會話會保留。你可以在靈犀 Desktop 重新共享。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "New Bot requests will stop. Existing conversation history remains."
+            "value": "New requests to this Bot stop. Existing conversations stay. You can share it again from LingXi Desktop."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "新しい Bot リクエストは停止します。既存の会話履歴は残ります。"
+            "value": "この Bot への新しいリクエストは停止します。既存の会話は残ります。LingXi Desktop からいつでも再共有できます。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "새로운 Bot 요청이 중지됩니다. 기존 대화 기록은 유지됩니다."
+            "value": "이 Bot에 대한 새 요청이 중지됩니다. 기존 대화는 그대로 유지됩니다. LingXi Desktop에서 다시 공유할 수 있습니다."
           }
         }
       }
     },
-    "teams_bot_unbind_title %@": {
+    "teams_bot_stop_title %@": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "解除 %@ 的绑定？"
+            "value": "停止共享“%@”？"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "解除 %@ 的綁定？"
+            "value": "停止共享「%@」？"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Unbind %@?"
+            "value": "Stop sharing “%@”?"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ のバインドを解除しますか？"
+            "value": "「%@」の共有を停止しますか？"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ 연결을 해제할까요?"
+            "value": "“%@” 공유를 중지할까요?"
           }
         }
       }
     },
-    "teams_bot_unbind_title_fmt": {
+    "teams_bot_stop_title_fmt": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "解除 %1$s 的绑定？"
+            "value": "停止共享“%1$s”？"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "解除 %1$s 的綁定？"
+            "value": "停止共享「%1$s」？"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Unbind %1$s?"
+            "value": "Stop sharing “%1$s”?"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "%1$s のバインドを解除しますか？"
+            "value": "「%1$s」の共有を停止しますか？"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "%1$s 연결을 해제할까요?"
+            "value": "“%1$s” 공유를 중지할까요?"
+          }
+        }
+      }
+    },
+    "teams_bot_supported": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "支持"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "支援"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Supported"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "対応"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "지원됨"
+          }
+        }
+      }
+    },
+    "teams_bot_tag": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bot"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bot"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bot"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bot"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bot"
           }
         }
       }
@@ -95933,31 +96511,99 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "仅所有者与指定成员可用"
+            "value": "仅维护者与指定成员可用"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "僅擁有者與指定成員可用"
+            "value": "僅維護者與指定成員可用"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Only owner and listed members may use"
+            "value": "Only the maintainer and listed members may use"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "所有者と指定したメンバーのみ利用可能"
+            "value": "メンテナーと指定したメンバーのみ利用可能"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "소유자와 지정된 멤버만 사용 가능"
+            "value": "메인테이너와 지정된 멤버만 사용 가능"
+          }
+        }
+      }
+    },
+    "teams_bot_wait_resume": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待与恢复"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待與恢復"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wait and resume"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "待機と再開"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대기 및 재개"
+          }
+        }
+      }
+    },
+    "teams_bot_write_ops": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "写入操作"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "寫入操作"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Write operations"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "書き込み操作"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "쓰기 작업"
           }
         }
       }
@@ -96149,31 +96795,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bot 在所有者的 Desktop 上运行。所有者可阅读包含其 Bot 的所有会话。团队成员无法批准其工具操作。"
+            "value": "Bot 在维护者的 Desktop 上运行。维护者可阅读包含其 Bot 的所有会话。团队成员无法批准其工具操作。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bot 在擁有者的 Desktop 上執行。擁有者可閱讀包含其 Bot 的所有會話。團隊成員無法核准其工具操作。"
+            "value": "Bot 在維護者的 Desktop 上執行。維護者可閱讀包含其 Bot 的所有會話。團隊成員無法核准其工具操作。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bots run on their owner’s Desktop. The owner can read every conversation containing their Bot. Team members cannot approve its tools."
+            "value": "Bots run on their maintainer’s Desktop. The maintainer can read every conversation containing their Bot. Team members cannot approve its tools."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bot は所有者の Desktop 上で動作します。所有者は自分の Bot を含むすべての会話を読めます。チームメンバーはそのツール操作を承認できません。"
+            "value": "Bot はメンテナーの Desktop 上で動作します。メンテナーは自分の Bot を含むすべての会話を読めます。チームメンバーはそのツール操作を承認できません。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bot은 소유자의 Desktop에서 실행됩니다. 소유자는 자신의 Bot이 포함된 모든 대화를 읽을 수 있습니다. 팀원은 해당 도구 작업을 승인할 수 없습니다."
+            "value": "Bot은 메인테이너의 Desktop에서 실행됩니다. 메인테이너는 자신의 Bot이 포함된 모든 대화를 읽을 수 있습니다. 팀원은 해당 도구 작업을 승인할 수 없습니다."
           }
         }
       }
@@ -96412,6 +97058,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "팀 선택"
+          }
+        }
+      }
+    },
+    "teams_clip_invite": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀团队邀请"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "靈犀團隊邀請"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LingXi team invitation"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LingXi チームの招待"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LingXi 팀 초대"
+          }
+        }
+      }
+    },
+    "teams_clip_message": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "灵犀团队消息"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "靈犀團隊訊息"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LingXi team message"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LingXi チームのメッセージ"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LingXi 팀 메시지"
           }
         }
       }
@@ -96761,31 +97475,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "你因拥有其中的 Bot 而可阅读此会话，但只有参与者可以发送消息。"
+            "value": "你因维护其中的 Bot 而可阅读此会话，但只有参与者可以发送消息。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "你因擁有其中的 Bot 而可閱讀此會話，但只有參與者可以傳送訊息。"
+            "value": "你因維護其中的 Bot 而可閱讀此會話，但只有參與者可以傳送訊息。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "You can read this conversation because you own its Bot, but only participants can send messages."
+            "value": "You can read this conversation because you maintain its Bot, but only participants can send messages."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "この会話の Bot の所有者のため閲覧できますが、メッセージを送れるのは参加者だけです。"
+            "value": "あなたはこの会話に含まれる Bot のメンテナーなので閲覧できますが、メッセージを送れるのは参加者だけです。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "이 대화의 Bot을 소유하고 있어 읽을 수 있지만, 메시지는 참가자만 보낼 수 있습니다."
+            "value": "이 대화에 포함된 Bot의 메인테이너이므로 읽을 수 있지만, 메시지는 참가자만 보낼 수 있습니다."
           }
         }
       }
@@ -96795,31 +97509,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "发送消息会请求此 Bot。其所有者可阅读此会话。"
+            "value": "发送消息会请求此 Bot。其维护者可阅读此会话。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "傳送訊息會請求此 Bot。其擁有者可閱讀此會話。"
+            "value": "傳送訊息會請求此 Bot。其維護者可閱讀此會話。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Messages ask this Bot automatically. Its owner can read this conversation."
+            "value": "Messages ask this Bot automatically. Its maintainer can read this conversation."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "メッセージを送ると、この Bot に自動で依頼されます。所有者はこの会話を読めます。"
+            "value": "メッセージを送ると、この Bot に自動で依頼されます。メンテナーはこの会話を読めます。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "메시지를 보내면 이 Bot에게 자동으로 요청됩니다. 소유자가 이 대화를 읽을 수 있습니다."
+            "value": "메시지를 보내면 이 Bot에게 자동으로 요청됩니다. 메인테이너가 이 대화를 읽을 수 있습니다."
           }
         }
       }
@@ -96994,138 +97708,410 @@
         }
       }
     },
-    "teams_confirm": {
+    "teams_confirm_delete_body": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "确认"
+            "value": "所有成员都将无法再访问该团队的会话和共享的 Bot。此操作无法撤销。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confirm"
+            "value": "所有成員都將無法再存取該團隊的會話與共享的 Bot。此操作無法復原。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confirm"
+            "value": "Everyone loses access to its conversations and shared Bots. This can’t be undone."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confirm"
+            "value": "すべてのメンバーが、このチームの会話や共有された Bot にアクセスできなくなります。この操作は取り消せません。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confirm"
+            "value": "모든 멤버가 이 팀의 대화와 공유된 Bot에 더 이상 접근할 수 없습니다. 이 작업은 되돌릴 수 없습니다."
           }
         }
       }
     },
-    "teams_confirm_change": {
+    "teams_confirm_delete_button": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "确认更改此成员的身份？"
+            "value": "删除"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confirm this membership change?"
+            "value": "刪除"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confirm this membership change?"
+            "value": "Delete"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confirm this membership change?"
+            "value": "削除"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confirm this membership change?"
+            "value": "삭제"
           }
         }
       }
     },
-    "teams_confirm_delete": {
+    "teams_confirm_delete_title %@": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "删除此团队？所有成员将失去访问权限。"
+            "value": "删除“%@”？"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Delete this team? All members will lose access."
+            "value": "刪除「%@」？"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Delete this team? All members will lose access."
+            "value": "Delete “%@”?"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Delete this team? All members will lose access."
+            "value": "「%@」を削除しますか？"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Delete this team? All members will lose access."
+            "value": "“%@” 팀을 삭제할까요?"
           }
         }
       }
     },
-    "teams_confirm_leave": {
+    "teams_confirm_delete_title_fmt": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "退出此团队？"
+            "value": "删除“%1$s”？"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Leave this team?"
+            "value": "刪除「%1$s」？"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Leave this team?"
+            "value": "Delete “%1$s”?"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Leave this team?"
+            "value": "「%1$s」を削除しますか？"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Leave this team?"
+            "value": "“%1$s” 팀을 삭제할까요?"
+          }
+        }
+      }
+    },
+    "teams_confirm_demote_body": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "对方将无法再邀请他人或移除成员。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "對方將無法再邀請他人或移除成員。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "They will no longer be able to invite people or remove members."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メンバーの招待やメンバーの削除はできなくなります。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "더 이상 사람들을 초대하거나 멤버를 내보낼 수 없습니다."
+          }
+        }
+      }
+    },
+    "teams_confirm_demote_button": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设为成员"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "設為成員"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make member"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メンバーにする"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "일반 멤버로 변경"
+          }
+        }
+      }
+    },
+    "teams_confirm_demote_title %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将 %@ 设为成员？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "將 %@ 設為成員？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make %@ a member?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ さんを一般メンバーにしますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 님을 일반 멤버로 바꿀까요?"
+          }
+        }
+      }
+    },
+    "teams_confirm_demote_title_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将 %1$s 设为成员？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "將 %1$s 設為成員？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make %1$s a member?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s さんを一般メンバーにしますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s 님을 일반 멤버로 바꿀까요?"
+          }
+        }
+      }
+    },
+    "teams_confirm_leave_body": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你将无法再访问该团队的会话和共享的 Bot。如需回来，需要新的邀请。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你將無法再存取該團隊的會話與共享的 Bot。若要回來，需要新的邀請。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You will lose access to its conversations and shared Bots. To come back, you need a new invite."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このチームの会話や共有された Bot にアクセスできなくなります。再び参加するには、新しい招待が必要です。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 팀의 대화와 공유된 Bot에 더 이상 접근할 수 없습니다. 다시 들어오려면 새 초대가 필요합니다."
+          }
+        }
+      }
+    },
+    "teams_confirm_leave_button": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "退出"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "離開"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leave"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "退出する"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "나가기"
+          }
+        }
+      }
+    },
+    "teams_confirm_leave_title %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "退出“%@”？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "離開「%@」？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leave “%@”?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "「%@」から退出しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "“%@” 팀에서 나갈까요?"
+          }
+        }
+      }
+    },
+    "teams_confirm_leave_title_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "退出“%1$s”？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "離開「%1$s」？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leave “%1$s”?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "「%1$s」から退出しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "“%1$s” 팀에서 나갈까요?"
           }
         }
       }
@@ -97160,6 +98146,448 @@
           "stringUnit": {
             "state": "translated",
             "value": "이 멤버를 팀 소유자로 지정할까요? 회원님은 관리자로 팀에 남으며, 새 소유자만 회원님을 다시 소유자로 지정할 수 있습니다. 각 Bot은 관리하던 멤버에게 그대로 남고, 각 채팅은 참여자에게만 그대로 남습니다."
+          }
+        }
+      }
+    },
+    "teams_confirm_make_owner_title %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将 %@ 设为所有者？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "將 %@ 設為擁有者？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make %@ the owner?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ さんをオーナーにしますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 님을 소유자로 지정할까요?"
+          }
+        }
+      }
+    },
+    "teams_confirm_make_owner_title_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将 %1$s 设为所有者？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "將 %1$s 設為擁有者？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make %1$s the owner?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s さんをオーナーにしますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s 님을 소유자로 지정할까요?"
+          }
+        }
+      }
+    },
+    "teams_confirm_promote_body": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "管理员可以邀请他人并移除成员。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "管理員可以邀請他人並移除成員。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Admins can invite people and remove members."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "管理者は、メンバーの招待やメンバーの削除ができます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "관리자는 사람들을 초대하고 멤버를 내보낼 수 있습니다."
+          }
+        }
+      }
+    },
+    "teams_confirm_promote_button": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设为管理员"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "設為管理員"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make admin"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "管理者にする"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "관리자로 지정"
+          }
+        }
+      }
+    },
+    "teams_confirm_promote_title %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将 %@ 设为管理员？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "將 %@ 設為管理員？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make %@ an admin?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ さんを管理者にしますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 님을 관리자로 지정할까요?"
+          }
+        }
+      }
+    },
+    "teams_confirm_promote_title_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将 %1$s 设为管理员？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "將 %1$s 設為管理員？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make %1$s an admin?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s さんを管理者にしますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s 님을 관리자로 지정할까요?"
+          }
+        }
+      }
+    },
+    "teams_confirm_remove_body": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "对方将无法再访问该团队的会话和共享的 Bot，之后可通过新的邀请重新加入。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "對方將無法再存取該團隊的會話與共享的 Bot，之後可透過新的邀請重新加入。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "They lose access to its conversations and shared Bots. They can rejoin with a new invite."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このチームの会話や共有された Bot にアクセスできなくなります。新しい招待があれば再び参加できます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 팀의 대화와 공유된 Bot에 더 이상 접근할 수 없습니다. 새 초대를 받으면 다시 참가할 수 있습니다."
+          }
+        }
+      }
+    },
+    "teams_confirm_remove_button": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "移除"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "移除"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "削除"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "내보내기"
+          }
+        }
+      }
+    },
+    "teams_confirm_remove_title %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将 %@ 移出团队？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "將 %@ 移出團隊？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove %@ from the team?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ さんをチームから削除しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 님을 팀에서 내보낼까요?"
+          }
+        }
+      }
+    },
+    "teams_confirm_remove_title_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将 %1$s 移出团队？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "將 %1$s 移出團隊？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove %1$s from the team?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s さんをチームから削除しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s 님을 팀에서 내보낼까요?"
+          }
+        }
+      }
+    },
+    "teams_confirm_revoke_body": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "链接会立即失效。已经加入的人会留在团队中。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "連結會立即失效。已經加入的人會留在團隊中。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The link stops working right away. People who already joined stay in the team."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "リンクはすぐに使えなくなります。すでに参加した人はチームに残ります。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "링크는 즉시 사용할 수 없게 됩니다. 이미 참가한 사람은 팀에 그대로 남습니다."
+          }
+        }
+      }
+    },
+    "teams_confirm_revoke_button": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "撤销"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "撤銷"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Revoke"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取り消す"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "철회"
+          }
+        }
+      }
+    },
+    "teams_confirm_revoke_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "撤销此邀请？"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "撤銷此邀請？"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Revoke this invite?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この招待を取り消しますか？"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 초대를 철회할까요?"
           }
         }
       }
@@ -97237,7 +98665,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "私聊"
+            "value": "私信"
           }
         },
         "zh-Hant": {
@@ -97296,6 +98724,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "그룹"
+          }
+        }
+      }
+    },
+    "teams_conversation_menu": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话选项"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "會話選項"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Conversation options"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会話のオプション"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "대화 옵션"
           }
         }
       }
@@ -97447,7 +98909,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Create team"
+            "value": "建立團隊"
           }
         },
         "en": {
@@ -97459,13 +98921,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Create team"
+            "value": "チームを作成"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Create team"
+            "value": "팀 만들기"
           }
         }
       }
@@ -97481,7 +98943,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "1 day"
+            "value": "1 天"
           }
         },
         "en": {
@@ -97493,13 +98955,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "1 day"
+            "value": "1 日"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "1 day"
+            "value": "1일"
           }
         }
       }
@@ -97515,7 +98977,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Delete team"
+            "value": "刪除團隊"
           }
         },
         "en": {
@@ -97527,13 +98989,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Delete team"
+            "value": "チームを削除"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Delete team"
+            "value": "팀 삭제"
           }
         }
       }
@@ -97549,7 +99011,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Make member"
+            "value": "設為成員"
           }
         },
         "en": {
@@ -97561,13 +99023,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Make member"
+            "value": "メンバーにする"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Make member"
+            "value": "일반 멤버로 변경"
           }
         }
       }
@@ -97577,31 +99039,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "团队资料与消息平台可读。与 Bot 的对话对该 Bot 的所有者可见。"
+            "value": "团队资料与消息平台可读。与 Bot 的对话对该 Bot 的维护者可见。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Team data and messages are readable by the platform. A Bot’s owner can read conversations with their Bot."
+            "value": "團隊資料與訊息平台可讀。與 Bot 的對話對該 Bot 的維護者可見。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Team data and messages are readable by the platform. A Bot’s owner can read conversations with their Bot."
+            "value": "Team data and messages are readable by the platform. A Bot’s maintainer can read conversations with their Bot."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Team data and messages are readable by the platform. A Bot’s owner can read conversations with their Bot."
+            "value": "チームのデータとメッセージはプラットフォームから閲覧できます。Bot とのやり取りは、その Bot のメンテナーも読めます。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Team data and messages are readable by the platform. A Bot’s owner can read conversations with their Bot."
+            "value": "팀 데이터와 메시지는 플랫폼에서 읽을 수 있습니다. Bot과의 대화는 해당 Bot의 메인테이너가 읽을 수 있습니다."
           }
         }
       }
@@ -98524,6 +99986,74 @@
         }
       }
     },
+    "teams_empty_thread_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打个招呼，开始对话吧。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打個招呼，開始對話吧。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Say hello to start the conversation."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "あいさつして会話を始めましょう。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "인사를 건네 대화를 시작해 보세요."
+          }
+        }
+      }
+    },
+    "teams_empty_title": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "还没有团队"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "還沒有團隊"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No teams yet"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "チームはまだありません"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "아직 팀이 없습니다"
+          }
+        }
+      }
+    },
     "teams_error": {
       "localizations": {
         "zh-Hans": {
@@ -98535,7 +100065,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Could not connect to Teams. Check your connection and try again."
+            "value": "無法連線到團隊服務，請檢查網路後再試。"
           }
         },
         "en": {
@@ -98547,47 +100077,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Could not connect to Teams. Check your connection and try again."
+            "value": "チームに接続できませんでした。接続を確認して、もう一度お試しください。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Could not connect to Teams. Check your connection and try again."
-          }
-        }
-      }
-    },
-    "teams_error_answer_rejected": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "此答案无法接收，请检查问题与原始请求人身份。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "此答案無法接收，請檢查問題與原始請求人身分。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "This answer cannot be accepted. Check the question and original requester."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "この回答は受け付けられません。質問と元の依頼者を確認してください。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "이 답변을 받을 수 없습니다. 질문과 원래 요청자를 확인하세요."
+            "value": "팀에 연결할 수 없습니다. 연결 상태를 확인하고 다시 시도하세요."
           }
         }
       }
@@ -99079,7 +100575,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Expires in"
+            "value": "有效期限"
           }
         },
         "en": {
@@ -99091,13 +100587,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Expires in"
+            "value": "有効期間"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Expires in"
+            "value": "유효 기간"
           }
         }
       }
@@ -100122,7 +101618,7 @@
         }
       }
     },
-    "teams_group_bot_dm": {
+    "teams_group_bot_chats": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -100139,7 +101635,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bot DMs"
+            "value": "Bot chats"
           }
         },
         "ja": {
@@ -100235,7 +101731,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "1 hour"
+            "value": "1 小時"
           }
         },
         "en": {
@@ -100247,13 +101743,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "1 hour"
+            "value": "1 時間"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "1 hour"
+            "value": "1시간"
           }
         }
       }
@@ -100269,7 +101765,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Create invite link"
+            "value": "建立邀請連結"
           }
         },
         "en": {
@@ -100281,13 +101777,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Create invite link"
+            "value": "招待リンクを作成"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Create invite link"
+            "value": "초대 링크 만들기"
           }
         }
       }
@@ -100303,7 +101799,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "This invite has expired, was revoked or has no uses left."
+            "value": "邀請已過期、已撤銷或已用盡。"
           }
         },
         "en": {
@@ -100315,13 +101811,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "This invite has expired, was revoked or has no uses left."
+            "value": "この招待は期限切れ、取り消し済み、または使用回数の上限に達しています。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "This invite has expired, was revoked or has no uses left."
+            "value": "이 초대는 만료되었거나 철회되었거나 남은 사용 횟수가 없습니다."
           }
         }
       }
@@ -100337,7 +101833,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Invite link or code"
+            "value": "邀請連結或邀請碼"
           }
         },
         "en": {
@@ -100349,13 +101845,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Invite link or code"
+            "value": "招待リンクまたは招待コード"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Invite link or code"
+            "value": "초대 링크 또는 초대 코드"
           }
         }
       }
@@ -100507,7 +102003,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Invites"
+            "value": "邀請"
           }
         },
         "en": {
@@ -100519,13 +102015,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Invites"
+            "value": "招待"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Invites"
+            "value": "초대"
           }
         }
       }
@@ -100541,7 +102037,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Join a team"
+            "value": "加入團隊"
           }
         },
         "en": {
@@ -100553,13 +102049,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Join a team"
+            "value": "チームに参加"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Join a team"
+            "value": "팀 참가"
           }
         }
       }
@@ -100575,7 +102071,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confirm and join"
+            "value": "確認加入"
           }
         },
         "en": {
@@ -100587,13 +102083,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confirm and join"
+            "value": "確認して参加"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confirm and join"
+            "value": "확인하고 참가"
           }
         }
       }
@@ -100609,7 +102105,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Join only teams you trust. Your name will be visible to their members."
+            "value": "僅加入你信任的團隊。加入後團隊成員可見你的名稱。"
           }
         },
         "en": {
@@ -100621,13 +102117,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Join only teams you trust. Your name will be visible to their members."
+            "value": "信頼できるチームにだけ参加してください。参加すると、メンバーにあなたの名前が表示されます。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Join only teams you trust. Your name will be visible to their members."
+            "value": "신뢰하는 팀에만 참가하세요. 참가하면 팀 멤버에게 내 이름이 표시됩니다."
           }
         }
       }
@@ -100711,7 +102207,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Leave team"
+            "value": "離開團隊"
           }
         },
         "en": {
@@ -100723,13 +102219,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Leave team"
+            "value": "チームを退出"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Leave team"
+            "value": "팀 나가기"
           }
         }
       }
@@ -102173,7 +103669,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Loading…"
+            "value": "正在載入…"
           }
         },
         "en": {
@@ -102185,13 +103681,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Loading…"
+            "value": "読み込み中…"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Loading…"
+            "value": "불러오는 중…"
           }
         }
       }
@@ -102309,7 +103805,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Member"
+            "value": "成員"
           }
         },
         "en": {
@@ -102321,13 +103817,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Member"
+            "value": "メンバー"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Member"
+            "value": "멤버"
           }
         }
       }
@@ -102343,7 +103839,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Members"
+            "value": "成員"
           }
         },
         "en": {
@@ -102355,13 +103851,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Members"
+            "value": "メンバー"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Members"
+            "value": "멤버"
           }
         }
       }
@@ -102473,31 +103969,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "等待服务器确认，重试会沿用同一条消息。"
+            "value": "正在等待确认，重试不会重复发送。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "等待伺服器確認，重試會沿用同一則訊息。"
+            "value": "正在等待確認，重試不會重複傳送。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Waiting for server confirmation. Retries keep the same message identity."
+            "value": "Waiting for confirmation. Retrying won’t send it twice."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "サーバーの確認を待っています。再試行でも同じメッセージを使用します。"
+            "value": "確認を待っています。再試行しても二重に送信されることはありません。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "서버 확인을 기다리는 중입니다. 재시도해도 같은 메시지를 사용합니다."
+            "value": "확인을 기다리는 중입니다. 다시 시도해도 중복 전송되지 않습니다."
           }
         }
       }
@@ -102609,31 +104105,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "此待发操作未被接受，请丢弃后重试。"
+            "value": "未能发送。请丢弃后重试。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "此待發操作未被接受，請捨棄後重試。"
+            "value": "未能傳送。請捨棄後重試。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This pending change was rejected. Discard it and try again."
+            "value": "This couldn’t be sent. Discard it and try again."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "この未送信の操作は拒否されました。破棄してやり直してください。"
+            "value": "送信できませんでした。破棄してやり直してください。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "대기 중인 변경이 거부되었습니다. 삭제한 후 다시 시도하세요."
+            "value": "보내지 못했습니다. 삭제한 후 다시 시도하세요."
           }
         }
       }
@@ -102955,7 +104451,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Team name"
+            "value": "團隊名稱"
           }
         },
         "en": {
@@ -102967,13 +104463,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Team name"
+            "value": "チーム名"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Team name"
+            "value": "팀 이름"
           }
         }
       }
@@ -103051,31 +104547,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bot 的所有者可阅读包含其 Bot 的所有会话。"
+            "value": "Bot 的维护者可阅读包含其 Bot 的所有会话。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bot 的擁有者可閱讀包含其 Bot 的所有會話。"
+            "value": "Bot 的維護者可閱讀包含其 Bot 的所有會話。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "A Bot’s owner can read every conversation that includes their Bot."
+            "value": "A Bot’s maintainer can read every conversation that includes their Bot."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bot の所有者は、その Bot を含むすべての会話を読めます。"
+            "value": "Bot のメンテナーは、その Bot を含むすべての会話を読めます。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bot 소유자는 자신의 Bot이 포함된 모든 대화를 읽을 수 있습니다."
+            "value": "Bot 메인테이너는 자신의 Bot이 포함된 모든 대화를 읽을 수 있습니다."
           }
         }
       }
@@ -103493,31 +104989,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "暂无可用的 Bot。请 Bot 所有者共享，或在团队设置中共享你自己的 Bot。"
+            "value": "暂无可用的 Bot。请 Bot 的维护者共享，或在灵犀 Desktop 中共享你自己的 Bot。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "暫無可用的 Bot。請 Bot 擁有者共享，或在團隊設定中共享你自己的 Bot。"
+            "value": "暫無可用的 Bot。請 Bot 的維護者共享，或在靈犀 Desktop 中共享你自己的 Bot。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "No Bots are available to you yet. Ask a Bot’s owner to share one, or share your own from Team settings."
+            "value": "No Bots are available to you yet. Ask a Bot’s maintainer to share one, or share your own from LingXi Desktop."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "利用できる Bot はまだありません。Bot の所有者に共有を依頼するか、チームの設定で自分の Bot を共有してください。"
+            "value": "利用できる Bot はまだありません。Bot のメンテナーに共有を依頼するか、LingXi Desktop から自分の Bot を共有してください。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "사용할 수 있는 Bot이 아직 없습니다. Bot 소유자에게 공유를 요청하거나 팀 설정에서 내 Bot을 공유하세요."
+            "value": "사용할 수 있는 Bot이 아직 없습니다. Bot 메인테이너에게 공유를 요청하거나 LingXi Desktop에서 내 Bot을 공유하세요."
           }
         }
       }
@@ -104474,6 +105970,40 @@
         }
       }
     },
+    "teams_other_unread": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "其他团队有未读消息"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "其他團隊有未讀訊息"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Other teams have unread messages"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ほかのチームに未読メッセージがあります"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "다른 팀에 읽지 않은 메시지가 있습니다"
+          }
+        }
+      }
+    },
     "teams_owner": {
       "localizations": {
         "zh-Hans": {
@@ -104485,7 +106015,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Owner"
+            "value": "擁有者"
           }
         },
         "en": {
@@ -104497,13 +106027,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Owner"
+            "value": "オーナー"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Owner"
+            "value": "소유자"
           }
         }
       }
@@ -104621,7 +106151,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Make admin"
+            "value": "設為管理員"
           }
         },
         "en": {
@@ -104633,319 +106163,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Make admin"
+            "value": "管理者にする"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Make admin"
-          }
-        }
-      }
-    },
-    "teams_question_discard": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "丢弃被拒绝的答案"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "捨棄被拒絕的答案"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Discard rejected answer"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "拒否された回答を破棄"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "거부된 답변 삭제"
-          }
-        }
-      }
-    },
-    "teams_question_inactive": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "此问题已无法回答。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "此問題已無法回答。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "This question is no longer active."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "この質問にはもう回答できません。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "이 질문에는 더 이상 답할 수 없습니다."
-          }
-        }
-      }
-    },
-    "teams_question_pending": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "答案已保存，等待确认；重新连接后将重试相同答案。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "答案已儲存，等待確認；重新連線後將重試相同答案。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Answer saved. Waiting for confirmation; reconnecting retries this exact answer."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "回答を保存しました。確認待ちです。再接続すると同じ回答を再送します。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "답변을 저장했습니다. 확인을 기다리는 중이며, 다시 연결하면 같은 답변을 재전송합니다."
-          }
-        }
-      }
-    },
-    "teams_question_received": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "答案已确认收到。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "答案已確認收到。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Answer received."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "回答を受け取りました。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "답변을 받았습니다."
-          }
-        }
-      }
-    },
-    "teams_question_rejected": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "答案被拒绝，未更改内容或使用新身份重发。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "答案被拒絕，未更改內容或使用新身分重發。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Answer was rejected. It was not changed or resent with a new identity."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "回答は拒否されました。内容は変更されず、新しい ID でも再送されていません。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "답변이 거부되었습니다. 내용을 바꾸거나 새 ID로 다시 보내지 않았습니다."
-          }
-        }
-      }
-    },
-    "teams_question_requester_only": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "仅同一次成员身份的原始请求人可回答。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "僅同一次成員身分的原始請求人可回答。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Only the original requester in the same membership can answer."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "同じメンバーシップの元の依頼者だけが回答できます。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "같은 멤버십의 원래 요청자만 답할 수 있습니다."
-          }
-        }
-      }
-    },
-    "teams_question_send": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "发送答案"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "傳送答案"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Send answer"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "回答を送信"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "답변 보내기"
-          }
-        }
-      }
-    },
-    "teams_question_title": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bot 提问"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bot 提問"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bot question"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bot からの質問"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bot 질문"
-          }
-        }
-      }
-    },
-    "teams_question_verifying": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在确认此问题是否仍可回答。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在確認此問題是否仍可回答。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Waiting to verify this question is still active."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "この質問がまだ有効か確認しています。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "이 질문이 아직 유효한지 확인하는 중입니다."
+            "value": "관리자로 지정"
           }
         }
       }
@@ -105052,274 +106276,36 @@
         }
       }
     },
-    "teams_recover_confirm": {
+    "teams_reconnect": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "我已检查中断请求并确认结束。"
+            "value": "重新连接"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "我已檢查中斷請求並確認結束。"
+            "value": "重新連線"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "I checked the interrupted request and want to settle it."
+            "value": "Reconnect"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "中断されたリクエストを確認し、完了することに同意します。"
+            "value": "再接続"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "중단된 요청을 확인했으며 마무리하겠습니다."
-          }
-        }
-      }
-    },
-    "teams_recover_discard": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "丢弃被拒绝的处理结果"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "捨棄被拒絕的處理結果"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Discard rejected settlement"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "拒否された結果を破棄"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "거부된 결과 삭제"
-          }
-        }
-      }
-    },
-    "teams_recover_explain": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "此操作会结束该请求，不会重新执行工具。请先检查外部操作结果。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "此操作會結束該請求，不會重新執行工具。請先檢查外部操作結果。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "This settles the request without running its tools again. Check any external effects before writing the result."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ツールを再実行せずにリクエストを完了します。結果を書く前に、外部への影響を確認してください。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "도구를 다시 실행하지 않고 요청을 마무리합니다. 결과를 작성하기 전에 외부 작업 결과를 확인하세요."
-          }
-        }
-      }
-    },
-    "teams_recover_rejected": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "处理结果被拒绝，请检查运行状态后再创建新的处理结果。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "處理結果被拒絕，請檢查執行狀態後再建立新的處理結果。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Settlement was rejected. Review the run before creating a new settlement."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "結果は拒否されました。実行状況を確認してから新しい結果を作成してください。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "결과가 거부되었습니다. 실행 상태를 확인한 후 새 결과를 만드세요."
-          }
-        }
-      }
-    },
-    "teams_recover_result": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "发送到会话的处理结果"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "傳送到會話的處理結果"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Result for the conversation"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "会話に送る結果"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "대화에 보낼 결과"
-          }
-        }
-      }
-    },
-    "teams_recover_saved": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "处理结果已保存，重新连接后将重试交付原始结果，不会运行工具。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "處理結果已儲存，重新連線後將重試傳送原始結果，不會執行工具。"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Settlement saved. Reconnecting retries this exact result without running tools."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "結果を保存しました。再接続するとツールを実行せずに同じ結果の配信を再試行します。"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "결과를 저장했습니다. 다시 연결하면 도구를 실행하지 않고 같은 결과를 다시 전달합니다."
-          }
-        }
-      }
-    },
-    "teams_recover_submit": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "结束请求"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "結束請求"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Settle request"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "リクエストを完了"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "요청 마무리"
-          }
-        }
-      }
-    },
-    "teams_recover_summary": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "处理已中断请求"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "處理已中斷請求"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Resolve interrupted request"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "中断されたリクエストを処理"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "중단된 요청 처리"
+            "value": "다시 연결"
           }
         }
       }
@@ -105437,7 +106423,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Revoke"
+            "value": "撤銷"
           }
         },
         "en": {
@@ -105449,13 +106435,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Revoke"
+            "value": "取り消す"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Revoke"
+            "value": "철회"
           }
         }
       }
@@ -105471,7 +106457,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Revoked"
+            "value": "已撤銷"
           }
         },
         "en": {
@@ -105483,285 +106469,251 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Revoked"
+            "value": "取り消し済み"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Revoked"
+            "value": "철회됨"
           }
         }
       }
     },
-    "teams_run_host_model_unavailable": {
+    "teams_run_authorization_required": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop 上配置的模型或凭证不可用，请检查供应商设置。"
+            "value": "需要授权"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop 上設定的模型或憑證無法使用，請檢查供應商設定。"
+            "value": "需要授權"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The configured model or credential is unavailable on Desktop. Check provider settings."
+            "value": "Authorization required"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop で設定されたモデルまたは認証情報を利用できません。プロバイダー設定を確認してください。"
+            "value": "承認が必要です"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop에 설정된 모델 또는 자격 증명을 사용할 수 없습니다. 공급자 설정을 확인하세요."
+            "value": "승인 필요"
           }
         }
       }
     },
-    "teams_run_host_recovery_required": {
+    "teams_run_authorization_required_detail": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop 已停止此中断运行，请检查后结束请求。"
+            "value": "暂时无法显示此结果，请联系 Bot 的维护者授权。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop 已停止此中斷執行，請檢查後結束請求。"
+            "value": "暫時無法顯示此結果，請聯絡 Bot 的維護者授權。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop stopped this interrupted run. Review it before settling the request."
+            "value": "This result can’t be shown yet. Ask the Bot’s maintainer to authorize it."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop はこの中断された実行を停止しました。内容を確認してからリクエストを完了してください。"
+            "value": "この結果はまだ表示できません。Bot のメンテナーに承認を依頼してください。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop이 중단된 이 실행을 멈췄습니다. 확인한 후 요청을 마무리하세요."
+            "value": "이 결과는 아직 표시할 수 없습니다. Bot 메인테이너에게 승인을 요청하세요."
           }
         }
       }
     },
-    "teams_run_host_result_pending": {
+    "teams_run_expired": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "原始结果已保存在 Desktop，重新连接后将重试交付，不会再次运行工具。"
+            "value": "已过期"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "原始結果已儲存在 Desktop，重新連線後將重試傳送，不會再次執行工具。"
+            "value": "已過期"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The exact result is saved on Desktop. Reconnecting retries delivery without running tools again."
+            "value": "Expired"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "元の結果は Desktop に保存されています。再接続すると、ツールを再実行せずに配信を再試行します。"
+            "value": "期限切れ"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "원래 결과가 Desktop에 저장되어 있습니다. 다시 연결하면 도구를 다시 실행하지 않고 전달을 재시도합니다."
+            "value": "만료됨"
           }
         }
       }
     },
-    "teams_run_host_retrying": {
+    "teams_run_expired_detail": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop 正在重新连接，将重试已保存的请求。"
+            "value": "Bot 所在的 Desktop 未能及时接收，请重新发送。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop 正在重新連線，將重試已儲存的請求。"
+            "value": "Bot 所在的 Desktop 未能及時接收，請重新傳送。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop is reconnecting. The saved request will be retried."
+            "value": "The Bot’s Desktop didn’t pick this up in time. Send it again."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop が再接続中です。保存済みのリクエストを再試行します。"
+            "value": "Bot の Desktop が時間内に受け取れませんでした。もう一度送信してください。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop이 다시 연결 중입니다. 저장된 요청을 다시 시도합니다."
+            "value": "Bot의 Desktop이 제때 요청을 받지 못했습니다. 다시 보내세요."
           }
         }
       }
     },
-    "teams_run_host_runtime_unavailable": {
+    "teams_run_failed_detail": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop 的团队隔离运行时不可用，请检查已安装版本。"
+            "value": "Bot 未能完成此请求，请重新发送。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop 的團隊隔離執行環境無法使用，請檢查已安裝版本。"
+            "value": "Bot 未能完成此請求，請重新傳送。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The isolated Teams runtime is unavailable on Desktop. Check the installed Desktop build."
+            "value": "The Bot couldn’t finish this request. Send it again."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop の分離されたチーム実行環境を利用できません。インストール済みのバージョンを確認してください。"
+            "value": "Bot はこのリクエストを完了できませんでした。もう一度送信してください。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop의 격리된 팀 런타임을 사용할 수 없습니다. 설치된 버전을 확인하세요."
+            "value": "Bot이 이 요청을 완료하지 못했습니다. 다시 보내세요."
           }
         }
       }
     },
-    "teams_run_host_storage_error": {
+    "teams_run_interrupted": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop 无法保存请求状态，请检查本地存储后重试。"
+            "value": "已中断"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop 無法儲存請求狀態，請檢查本機儲存空間後重試。"
+            "value": "已中斷"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop could not save the request state. Check local storage before retrying."
+            "value": "Interrupted"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop がリクエストの状態を保存できませんでした。ローカルストレージを確認してから再試行してください。"
+            "value": "中断されました"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Desktop이 요청 상태를 저장하지 못했습니다. 로컬 저장소를 확인한 후 다시 시도하세요."
+            "value": "중단됨"
           }
         }
       }
     },
-    "teams_run_missed": {
+    "teams_run_interrupted_detail": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "离线期间已过期"
+            "value": "Bot 所在的 Desktop 在完成前停止了，请发送新的请求。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "離線期間已過期"
+            "value": "Bot 所在的 Desktop 在完成前停止了，請傳送新的請求。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Expired while offline"
+            "value": "The Bot’s Desktop stopped before finishing. Send a new request."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "オフライン中に期限切れになりました"
+            "value": "完了する前に Bot の Desktop が停止しました。新しいリクエストを送信してください。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "오프라인 중 만료됨"
-          }
-        }
-      }
-    },
-    "teams_run_preparing": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "准备中"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "準備中"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Preparing"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "準備中"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "준비 중"
+            "value": "완료되기 전에 Bot의 Desktop이 멈췄습니다. 새 요청을 보내세요."
           }
         }
       }
@@ -105800,70 +106752,138 @@
         }
       }
     },
-    "teams_run_recovered": {
+    "teams_run_processing_detail": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "所有者已恢复"
+            "value": "Bot 正在处理。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "擁有者已復原"
+            "value": "Bot 正在處理。"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Recovered by owner"
+            "value": "The Bot is working on it."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "オーナーが復旧しました"
+            "value": "Bot が処理しています。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "소유자가 복구함"
+            "value": "Bot이 처리하고 있습니다."
           }
         }
       }
     },
-    "teams_run_recovery": {
+    "teams_run_queued": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "需要所有者恢复"
+            "value": "已排队"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "需要擁有者復原"
+            "value": "已排隊"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Owner recovery required"
+            "value": "Queued"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "オーナーによる復旧が必要"
+            "value": "待機中"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "소유자 복구 필요"
+            "value": "대기 중"
+          }
+        }
+      }
+    },
+    "teams_run_queued_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待 Bot 所在的 Desktop 接收此请求。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待 Bot 所在的 Desktop 接收此請求。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for the Bot’s Desktop to pick this up."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bot の Desktop が受け取るのを待っています。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bot의 Desktop이 요청을 받을 때까지 기다리는 중입니다."
+          }
+        }
+      }
+    },
+    "teams_run_refresh": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新状态"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新整理狀態"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refresh status"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "状態を更新"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "상태 새로고침"
           }
         }
       }
@@ -105902,6 +106922,40 @@
         }
       }
     },
+    "teams_run_revoked_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你已无法再使用此 Bot。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你已無法再使用此 Bot。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You no longer have access to this Bot."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この Bot を利用できなくなりました。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 Bot을 더 이상 사용할 수 없습니다."
+          }
+        }
+      }
+    },
     "teams_search_placeholder": {
       "localizations": {
         "zh-Hans": {
@@ -105932,6 +106986,142 @@
           "stringUnit": {
             "state": "translated",
             "value": "대화 검색"
+          }
+        }
+      }
+    },
+    "teams_section_collapse": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "收起"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "收合"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Collapse"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "折りたたむ"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "접기"
+          }
+        }
+      }
+    },
+    "teams_section_collapsed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已收起"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已收合"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Collapsed"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "折りたたみ済み"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "접힘"
+          }
+        }
+      }
+    },
+    "teams_section_expand": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "展开"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "展開"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Expand"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "展開"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "펼치기"
+          }
+        }
+      }
+    },
+    "teams_section_expanded": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已展开"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已展開"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Expanded"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "展開済み"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "펼쳐짐"
           }
         }
       }
@@ -105981,7 +107171,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Membership changed. Refresh before trying again."
+            "value": "成員身分已變更，請重新整理後再試。"
           }
         },
         "en": {
@@ -105993,13 +107183,13 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Membership changed. Refresh before trying again."
+            "value": "メンバーシップが変更されました。更新してからもう一度お試しください。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Membership changed. Refresh before trying again."
+            "value": "멤버십이 변경되었습니다. 새로 고친 뒤 다시 시도하세요."
           }
         }
       }
@@ -106034,40 +107224,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "팀 전환"
-          }
-        }
-      }
-    },
-    "teams_task_authorization_required": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "维护者需要处理授权"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "维护者需要处理授权"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Maintainer action required"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Maintainer action required"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Maintainer action required"
           }
         }
       }
@@ -106204,74 +107360,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "답장 안 함"
-          }
-        }
-      }
-    },
-    "teams_task_expired": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "请求已过期"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "请求已过期"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Request expired"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Request expired"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Request expired"
-          }
-        }
-      }
-    },
-    "teams_task_interrupted": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "请求中断，请重新发送"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "请求中断，请重新发送"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Request interrupted; send a new request"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Request interrupted; send a new request"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Request interrupted; send a new request"
           }
         }
       }
@@ -106650,6 +107738,40 @@
         }
       }
     },
+    "teams_team_menu": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "团队选项"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "團隊選項"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Team options"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "チームのオプション"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "팀 옵션"
+          }
+        }
+      }
+    },
     "teams_title": {
       "localizations": {
         "zh-Hans": {
@@ -106680,40 +107802,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "팀"
-          }
-        }
-      }
-    },
-    "teams_usage_complete": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "完整用量"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "完整用量"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Complete usage"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "使用量(完全)"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "사용량(완전)"
           }
         }
       }
@@ -106791,31 +107879,31 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "用量缺失 · 费用未知"
+            "value": "用量不可用"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "用量缺失 · 費用未知"
+            "value": "用量無法取得"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Missing usage · cost unknown"
+            "value": "Usage unavailable"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "使用量なし · 費用不明"
+            "value": "使用量を取得できません"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "사용량 없음 · 비용 알 수 없음"
+            "value": "사용량을 확인할 수 없음"
           }
         }
       }
@@ -106922,6 +108010,74 @@
         }
       }
     },
+    "teams_usage_tokens_total %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ tokens"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ tokens"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ tokens"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ トークン"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 토큰"
+          }
+        }
+      }
+    },
+    "teams_usage_tokens_total_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s tokens"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s tokens"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s tokens"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s トークン"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s 토큰"
+          }
+        }
+      }
+    },
     "teams_uses": {
       "localizations": {
         "zh-Hans": {
@@ -106933,7 +108089,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Uses"
+            "value": "可用次數"
           }
         },
         "en": {
@@ -106945,13 +108101,81 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "Uses"
+            "value": "使用回数"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Uses"
+            "value": "사용 횟수"
+          }
+        }
+      }
+    },
+    "teams_uses_decrease": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "减少可用次数"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "減少可用次數"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Decrease uses"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "利用回数を減らす"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "사용 횟수 줄이기"
+          }
+        }
+      }
+    },
+    "teams_uses_increase": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "增加可用次数"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "增加可用次數"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Increase uses"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "利用回数を増やす"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "사용 횟수 늘리기"
           }
         }
       }
@@ -106967,7 +108191,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "7 days"
+            "value": "7 天"
           }
         },
         "en": {
@@ -106979,13 +108203,47 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "7 days"
+            "value": "7 日間"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "7 days"
+            "value": "7일"
+          }
+        }
+      }
+    },
+    "teams_you": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "あなた"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "나"
           }
         }
       }

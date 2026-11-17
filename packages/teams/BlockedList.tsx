@@ -2,10 +2,11 @@ import { useState, type ReactElement } from 'react';
 import { friendsErrorText } from './errors.js';
 import type { FriendsViewProps } from './FriendsSidebar';
 import { Avatar } from './ui';
+import { useTeamsText } from './i18n.js';
 
 /** Blocked people (D12): the newest block first, with Unblock and no confirmation. Names are the ones kept when the block was made. */
-export function BlockedList({ workspace, snapshot, zh, renderAvatar }: FriendsViewProps): ReactElement {
-  const t = (en: string, cn: string) => zh ? cn : en;
+export function BlockedList({ workspace, snapshot, locale, renderAvatar }: FriendsViewProps): ReactElement {
+  const t = useTeamsText(locale);
   const [busy, setBusy] = useState<string>();
   const [failed, setFailed] = useState<{ uid: string; code: string }>();
   const unblock = async (uid: string) => {
@@ -15,27 +16,30 @@ export function BlockedList({ workspace, snapshot, zh, renderAvatar }: FriendsVi
     if (code) setFailed({ uid, code });
   };
   return <section className="tw-scope tw-friends-page" aria-labelledby="tw-friends-blocked">
-    <h2 id="tw-friends-blocked">{t('Blocked people', '已屏蔽的人')}</h2>
-    {snapshot.blocksLoading ? <p className="tw-hint" role="status">{t('Loading…', '正在加载…')}</p>
+    <h2 id="tw-friends-blocked">{t('friends_blocked_title')}</h2>
+    {snapshot.blocksLoading ? <p className="tw-hint" role="status">{t('teams_loading')}</p>
       : snapshot.blocksError ? <div className="tw-form">
-        <p role="alert" className="tw-error">{t("Couldn't load your friends. Check your connection and try again.", '无法加载好友，请检查网络后重试。')}</p>
-        <button type="button" onClick={workspace.retry}>{t('Retry', '重试')}</button>
+        <p role="alert" className="tw-error">{t('friends_load_error')}</p>
+        <button type="button" onClick={workspace.retry}>{t('common_retry')}</button>
       </div>
-      : !snapshot.blocks.length ? <p className="tw-hint">{t("You haven't blocked anyone.", '你还没有屏蔽任何人。')}</p>
-      : <ul className="tw-people" aria-label={t('Blocked people', '已屏蔽的人')}>
+      : !snapshot.blocks.length ? <div className="tw-empty">
+        <h3>{t('friends_blocked_empty_title')}</h3>
+        <p>{t('friends_blocked_empty_body')}</p>
+      </div>
+      : <ul className="tw-people" aria-label={t('friends_blocked_title')}>
         {snapshot.blocks.map(block => {
-          const name = block.displayName || t('Member', '成员');
+          const name = block.displayName || t('teams_member');
           return <li key={block.uid}>
-            <Avatar identity={{ kind: 'user', id: block.uid, name }} size={32} render={renderAvatar} />
+            <Avatar identity={{ kind: 'user', id: block.uid, name }} size={40} render={renderAvatar} />
             <div className="tw-person-text">
               <b>{name}</b>
               {block.handle ? <small>@{block.handle}</small> : null}
-              {failed?.uid === block.uid ? <small role="alert" className="tw-error">{friendsErrorText(failed.code, zh)}</small> : null}
+              {failed?.uid === block.uid ? <small role="alert" className="tw-error">{friendsErrorText(failed.code, locale)}</small> : null}
             </div>
-            <div className="tw-person-actions"><button type="button" disabled={busy === block.uid} onClick={() => void unblock(block.uid)}>{t('Unblock', '解除屏蔽')}</button></div>
+            <div className="tw-person-actions"><button type="button" disabled={busy === block.uid} onClick={() => void unblock(block.uid)}>{t('friends_unblock')}</button></div>
           </li>;
         })}
       </ul>}
-    <p className="tw-hint">{t("Unblocking doesn't restore the friendship. Either of you can send a new request.", '解除屏蔽不会恢复好友关系，双方都可以重新发送请求。')}</p>
+    <p className="tw-hint">{t('friends_unblock_footer')}</p>
   </section>;
 }

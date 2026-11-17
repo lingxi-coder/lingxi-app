@@ -1,0 +1,209 @@
+{
+  "fixtureDigest": "0de92afa15703988b989456b171050b9cc128320f2d8dd189735862a98343946",
+  "schemaVersion": 1,
+  "fixtureId": "assistant-value-p0-20261116",
+  "date": "2026-11-16",
+  "source": ".omx/plans/2026-11-16-assistant-value-improvement-plan-v2.md",
+  "participants": {
+    "family": [
+      "家庭成员甲",
+      "家庭成员乙"
+    ],
+    "team": [
+      "团队成员一",
+      "团队成员二"
+    ],
+    "owners": [
+      "甲",
+      "乙",
+      "丙"
+    ]
+  },
+  "familySource": "2026-11-16家庭库存：牛奶0盒，鸡蛋2个，大米1袋。目标：牛奶2盒，鸡蛋6个，大米1袋。只列需采购的项目。",
+  "teamSource": "A提交需求清单，负责人甲，截止2026-11-20；B审核方案，负责人乙，截止2026-11-21；C发布通知，负责人丙，截止2026-11-23，依赖B。",
+  "family": [
+    {
+      "id": "F01",
+      "actor": "first",
+      "action": "submit",
+      "prompt": "请读取共享的家庭库存与目标，计算并生成采购清单，只列需要采购的物品。每项text采用“品名：库存N单位；目标N单位；采购N单位”的格式，初始done=false。",
+      "expected": [
+        {
+          "text": "牛奶：库存0盒；目标2盒；采购2盒",
+          "done": false
+        },
+        {
+          "text": "鸡蛋：库存2个；目标6个；采购4个",
+          "done": false
+        }
+      ]
+    },
+    {
+      "id": "F02",
+      "actor": "second",
+      "action": "submit",
+      "prompt": "鸡蛋目标改为4个，库存不变。请重新计算并更新原采购清单，保留其他物品与完成状态，不得增加重复项。",
+      "expected": [
+        {
+          "text": "牛奶：库存0盒；目标2盒；采购2盒",
+          "done": false
+        },
+        {
+          "text": "鸡蛋：库存2个；目标4个；采购2个",
+          "done": false
+        }
+      ]
+    },
+    {
+      "id": "F03",
+      "actor": "first",
+      "action": "submit",
+      "prompt": "牛奶已购齐。仅将原牛奶项done标记true，保留所有text和鸡蛋done=false。",
+      "expected": [
+        {
+          "text": "牛奶：库存0盒；目标2盒；采购2盒",
+          "done": true
+        },
+        {
+          "text": "鸡蛋：库存2个；目标4个；采购2个",
+          "done": false
+        }
+      ]
+    },
+    {
+      "id": "F04",
+      "actor": "first",
+      "action": "replay",
+      "replayOf": "F03",
+      "expected": [
+        {
+          "text": "牛奶：库存0盒；目标2盒；采购2盒",
+          "done": true
+        },
+        {
+          "text": "鸡蛋：库存2个；目标4个；采购2个",
+          "done": false
+        }
+      ]
+    },
+    {
+      "id": "F05",
+      "actor": "secondDevice",
+      "action": "reopen",
+      "expected": [
+        {
+          "text": "牛奶：库存0盒；目标2盒；采购2盒",
+          "done": true
+        },
+        {
+          "text": "鸡蛋：库存2个；目标4个；采购2个",
+          "done": false
+        }
+      ]
+    }
+  ],
+  "team": [
+    {
+      "id": "T01",
+      "actor": "first",
+      "action": "submit",
+      "prompt": "从共享项目资料生成A、B、C三项清单。text严格采用“标识｜事项｜负责人姓名｜截止YYYY-MM-DD｜无依赖/依赖B”；done均为false。保留全部负责人、日期和C依赖B。",
+      "expected": [
+        {
+          "text": "A｜提交需求清单｜负责人甲｜截止2026-11-20｜无依赖",
+          "done": false
+        },
+        {
+          "text": "B｜审核方案｜负责人乙｜截止2026-11-21｜无依赖",
+          "done": false
+        },
+        {
+          "text": "C｜发布通知｜负责人丙｜截止2026-11-23｜依赖B",
+          "done": false
+        }
+      ]
+    },
+    {
+      "id": "T02",
+      "actor": "second",
+      "action": "submit",
+      "prompt": "A提交需求清单已完成。只改原A项done=true，不改其余项。",
+      "expected": [
+        {
+          "text": "A｜提交需求清单｜负责人甲｜截止2026-11-20｜无依赖",
+          "done": true
+        },
+        {
+          "text": "B｜审核方案｜负责人乙｜截止2026-11-21｜无依赖",
+          "done": false
+        },
+        {
+          "text": "C｜发布通知｜负责人丙｜截止2026-11-23｜依赖B",
+          "done": false
+        }
+      ]
+    },
+    {
+      "id": "T03",
+      "actor": "second",
+      "action": "submit",
+      "prompt": "B审核方案截止改为2026-11-22。更新原B项text，保留负责人乙、done=false；其余不改。",
+      "expected": [
+        {
+          "text": "A｜提交需求清单｜负责人甲｜截止2026-11-20｜无依赖",
+          "done": true
+        },
+        {
+          "text": "B｜审核方案｜负责人乙｜截止2026-11-22｜无依赖",
+          "done": false
+        },
+        {
+          "text": "C｜发布通知｜负责人丙｜截止2026-11-23｜依赖B",
+          "done": false
+        }
+      ]
+    },
+    {
+      "id": "T04",
+      "actor": "first",
+      "action": "submit",
+      "prompt": "按最新清单生成共享说明文档，每项一行，逐字复制text并添加“｜已完成”或“｜未完成”。只用最新截止日期。不得改清单。",
+      "expected": [
+        {
+          "text": "A｜提交需求清单｜负责人甲｜截止2026-11-20｜无依赖",
+          "done": true
+        },
+        {
+          "text": "B｜审核方案｜负责人乙｜截止2026-11-22｜无依赖",
+          "done": false
+        },
+        {
+          "text": "C｜发布通知｜负责人丙｜截止2026-11-23｜依赖B",
+          "done": false
+        }
+      ],
+      "expectedDocument": "A｜提交需求清单｜负责人甲｜截止2026-11-20｜无依赖｜已完成\nB｜审核方案｜负责人乙｜截止2026-11-22｜无依赖｜未完成\nC｜发布通知｜负责人丙｜截止2026-11-23｜依赖B｜未完成"
+    },
+    {
+      "id": "T05",
+      "actor": "secondDevice",
+      "action": "reopenAndAsk",
+      "prompt": "重新打开后，请读取最新清单和共享Chat历史，回答：A是否完成、B最新截止日期、C负责人和依赖，并识别最后修改B截止日期的成员。用“A完成状态；B截止日期；C负责人姓名，依赖标识；B最后修改者成员显示名或稳定作者标识”的格式。",
+      "expected": [
+        {
+          "text": "A｜提交需求清单｜负责人甲｜截止2026-11-20｜无依赖",
+          "done": true
+        },
+        {
+          "text": "B｜审核方案｜负责人乙｜截止2026-11-22｜无依赖",
+          "done": false
+        },
+        {
+          "text": "C｜发布通知｜负责人丙｜截止2026-11-23｜依赖B",
+          "done": false
+        }
+      ],
+      "expectedAnswer": "A已完成；B截止2026-11-22；C负责人丙，依赖B"
+    }
+  ]
+}

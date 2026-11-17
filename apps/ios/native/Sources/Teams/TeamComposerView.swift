@@ -9,6 +9,7 @@ struct TeamComposerView: View {
     let context: TeamConversationContext
     @Binding var draft: TeamComposerDraft
     let editing: TeamMessage?
+    var answeringWait = false
     /// The message being answered and who wrote it.
     let replying: (author: String, text: String)?
     let busy: Bool
@@ -36,9 +37,15 @@ struct TeamComposerView: View {
     private var model: TeamMessagingModel { context.model }
     private var conversation: TeamMessageConversation { context.conversation }
     private var lock: ComposerLock {
-        TeamsComposeLogic.composerLock(
+        let value = TeamsComposeLogic.composerLock(
             uid: context.uid, kind: conversation.kind, participants: conversation.participants, readers: conversation.readers,
             bots: context.bots, botsLoaded: model.botsLoaded, botsUnverified: model.botsUnverified)
+        if (editing != nil || answeringWait), [.botUnavailable, .botChecking, .botUnverified].contains(value) { return .none }
+        return value
+    }
+    private var availabilityBlock: TeamBotAvailability? {
+        TeamBotMemberRules.blockedAvailability(targets: TeamBotSelection.targets(in: conversation, selected: Set(draft.targets)), cards: context.bots,
+            operation: editing == nil ? "create" : "edit", answeringWait: answeringWait)
     }
     private var asks: Bool { editing == nil && (conversation.kind == "group" || conversation.kind == "channel") }
     private var askable: Bool { asks && context.bots.contains { $0.selectable && conversation.participants.contains("shared_bot:\($0.sharedBotId)") } }
@@ -102,7 +109,7 @@ struct TeamComposerView: View {
             bar(systemImage: "pencil") {
                 Text("teams_editing_message").font(.footnote.weight(.semibold))
             } trailing: {
-                Button("teams_cancel", action: onCancelEdit).font(.footnote)
+                Button(action: onCancelEdit) { Text("common_cancel").font(.footnote).minimumHitTarget(minWidth: 0) }
             }
         }
         if let replying {
@@ -110,7 +117,7 @@ struct TeamComposerView: View {
                 Text("teams_replying_to \(replying.author)").font(.footnote.weight(.semibold))
                 Text(replying.text).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             } trailing: {
-                Button(action: onCancelReply) { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                Button(action: onCancelReply) { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary).minimumHitTarget() }
                     .accessibilityLabel(Text("teams_cancel_reply"))
             }
         }
@@ -138,7 +145,10 @@ struct TeamComposerView: View {
                                 AgentAvatar(agentID: context.avatarID(forSharedBotId: key), size: 20)
                                 Text("@" + name).font(.footnote.weight(.semibold))
                                 Button { draft.targets.removeAll { $0 == key } } label: {
+                                    // The chip stays small; the hit area of its remove button is 44 x 44 and overlaps the chip's padding.
                                     Image(systemName: "xmark.circle.fill").font(.footnote).foregroundStyle(.secondary)
+                                        .minimumHitTarget()
+                                        .padding(.horizontal, -14).padding(.vertical, -14)
                                 }
                                 .accessibilityLabel(Text("teams_composer_remove_bot \(name)"))
                             }
@@ -146,6 +156,7 @@ struct TeamComposerView: View {
                             .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
                         }
                     }
+                    .frame(minHeight: 44)
                 }
             }
             .accessibilityIdentifier("teams.composer.chips")
@@ -162,19 +173,20 @@ struct TeamComposerView: View {
                 HStack {
                     Text("teams_composer_bots_can_ask").font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    Button { dismissedMention = mention.start } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                    Button { dismissedMention = mention.start } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary).minimumHitTarget() }
                         .accessibilityLabel(Text("common_close"))
                 }
-                .padding(.horizontal, 12).padding(.vertical, 6)
+                .padding(.horizontal, 12)
                 ForEach(options) { bot in
                     Button { pick(bot, mention: mention) } label: {
                         HStack(spacing: 10) {
                             AgentAvatar(agentID: bot.avatarId, size: 24)
                             Text(bot.name).font(.body.weight(.semibold)).foregroundStyle(.primary).lineLimit(1)
                             Spacer()
-                            Text(LocalizedStringKey(bot.ready ? "remote_online" : "teams_bot_offline_queued")).font(.caption).foregroundStyle(.secondary)
+                            Text(LocalizedStringKey(TeamBotMemberText.availabilityKey(bot.memberAvailability))).font(.caption).foregroundStyle(.secondary)
                         }
-                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 44)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -221,7 +233,7 @@ struct TeamComposerView: View {
             }
             if asks {
                 Button(action: insertAt) {
-                    Image(systemName: "at").font(.system(size: 18, weight: .medium)).frame(width: 32, height: 32)
+                    Image(systemName: "at").font(.title3.weight(.medium)).minimumHitTarget()
                 }
                 .disabled(!askable || draft.targets.count >= TeamsComposeLogic.maxTargets)
                 .accessibilityLabel(Text("teams_composer_ask_bot"))
@@ -235,14 +247,14 @@ struct TeamComposerView: View {
                 .accessibilityIdentifier("teams.composer.input")
                 .onChange(of: draft.text) { _, _ in dismissedMention = -1 }
             Button(action: onVoice) {
-                Image(systemName: listening ? "stop.fill" : "mic").font(.system(size: 18, weight: .medium)).frame(width: 32, height: 32)
+                Image(systemName: listening ? "stop.fill" : "mic").font(.title3.weight(.medium)).minimumHitTarget()
             }
             .accessibilityLabel(Text(LocalizedStringKey(listening ? "composer_stop_recording" : "composer_record")))
             .accessibilityIdentifier("teams.composer.voice")
             Button(action: onSend) {
-                Image(systemName: editing != nil ? "checkmark.circle.fill" : "arrow.up.circle.fill").font(.system(size: 30))
+                Image(systemName: editing != nil ? "checkmark.circle.fill" : "arrow.up.circle.fill").font(.title).minimumHitTarget()
             }
-            .disabled(busy || !TeamAttachments.canSend(text: draft.text, files: files))
+            .disabled(busy || availabilityBlock != nil || !TeamAttachments.canSend(text: draft.text, files: files))
             .accessibilityLabel(Text(LocalizedStringKey(editing != nil ? "teams_message_save" : "teams_message_send")))
             .accessibilityIdentifier("teams.composer.send")
         }
@@ -250,6 +262,11 @@ struct TeamComposerView: View {
 
     @ViewBuilder
     private var footer: some View {
+        if let availabilityBlock {
+            let status = model.botsUnverified || context.bots.contains { $0.newRequestBlock == availabilityBlock && $0.memberAvailability == .unverified } ? TeamBotAvailability.unverified : availabilityBlock
+            Text(LocalizedStringKey(TeamBotMemberText.availabilityKey(status)))
+                .font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("teams.composer.availability")
+        }
         if tooLong {
             Text("teams_composer_too_long").font(.caption).foregroundStyle(.red)
         } else if bytes > Int(Double(TeamsComposeLogic.messageBytes) * 0.9) {

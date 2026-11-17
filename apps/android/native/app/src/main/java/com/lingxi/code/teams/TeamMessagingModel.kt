@@ -259,7 +259,7 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
                 }
                 if (botsDirty) {
                     botsDirty = false
-                    try { val bots = execute("listSharedBots", JSONObject(), life).getJSONArray("bots").objects().map(TeamBotCard::parse); mutable.update { it.copy(bots = bots, botsLoaded = true, botsFailed = false) } }
+                    try { val bots = execute("listSharedBots", JSONObject(), life).getJSONArray("bots").objects().map(TeamBotCard::parse); mutable.update { it.copy(bots = TeamBotEntry.acceptSnapshot(it.bots, bots, System.currentTimeMillis()), botsLoaded = true, botsFailed = false) } }
                     catch (error: Exception) { botsDirty = true; throw error }
                 }
                 if (artifactNeedsValidation) {
@@ -278,7 +278,7 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
                 if (active && lifecycle == life) {
                     val code = (error as? TeamMessageFailure)?.code ?: "SERVICE_UNAVAILABLE"
                     again = false
-                    mutable.update { it.copy(offline = true, error = code, bots = emptyList(), tasks = emptyList(), artifact = null, botsFailed = true) }
+                    mutable.update { it.copy(offline = true, error = code, bots = it.bots.map(TeamBotEntry::unverified), tasks = emptyList(), artifact = null, botsFailed = true) }
                     if (code in setOf("MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP", "INVALID_SESSION", "SIGN_IN_REQUIRED", "CONVERSATION_REQUIRED")) invalidate()
                 }
             } finally { if (lifecycle == life) { running = false; scheduleRetry(); scheduleDeadline(); if (again) { again = false; refresh() } } }
@@ -349,14 +349,18 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
     /** Runs a caller's request where the model's own work runs, so it sees the same account, team and generation checks. */
     private suspend fun <T> onModel(block: suspend () -> T): T =
         kotlinx.coroutines.withContext(scope.coroutineContext[kotlin.coroutines.ContinuationInterceptor] ?: kotlin.coroutines.EmptyCoroutineContext) { block() }
-    fun create(kind: String, title: String, parties: List<String>, id: String, sharedBotIds: List<String> = emptyList(), onSuccess: () -> Unit) = launchOperation {
-        requireTeamBotSelections(sharedBotIds, mutable.value.bots)
-        if ((kind == "bot_dm" && sharedBotIds.size != 1) || (kind == "dm" && sharedBotIds.isNotEmpty())) throw TeamMessageFailure("BOT_SELECTION_STALE")
-        val payload = JSONObject().put("conversationId", id).put("kind", kind).put("title", title).put("participantUids", JSONArray(if (kind == "bot_dm") listOf(uid) else (listOf(uid) + parties).distinct()))
-        val intent = if (sharedBotIds.isNotEmpty()) executionCommand("createConversation", payload.put("sharedBotIds", JSONArray(sharedBotIds)), id)
-            else payload.put("action", "create").put("teamId", teamId).put("generation", generation)
-        commit(lifecycle) { if (it.creation != null) throw TeamMessageFailure("CREATION_PENDING"); it.copy(creation = intent) }
-        select(id); onSuccess()
+    fun create(kind: String, title: String, parties: List<String>, id: String, sharedBotIds: List<String> = emptyList(), shouldOpen: () -> Boolean = { true }, onSuccess: () -> Unit) {
+        val life = lifecycle
+        launchOperation {
+            if (!active || life != lifecycle || auth.currentUser?.uid != uid) throw CancellationException()
+            requireTeamBotSelections(sharedBotIds, mutable.value.bots)
+            if ((kind == "bot_dm" && sharedBotIds.size != 1) || (kind == "dm" && sharedBotIds.isNotEmpty())) throw TeamMessageFailure("BOT_SELECTION_STALE")
+            val payload = JSONObject().put("conversationId", id).put("kind", kind).put("title", title).put("participantUids", JSONArray(if (kind == "bot_dm") listOf(uid) else (listOf(uid) + parties).distinct()))
+            val intent = if (sharedBotIds.isNotEmpty()) executionCommand("createConversation", payload.put("sharedBotIds", JSONArray(sharedBotIds)), id)
+                else payload.put("action", "create").put("teamId", teamId).put("generation", generation)
+            commit(life) { if (it.creation != null) throw TeamMessageFailure("CREATION_PENDING"); it.copy(creation = intent) }
+            if (shouldOpen()) { select(id); onSuccess() }
+        }
     }
     /**
      * [waitId] makes a new message the answer to a Bot's question: it is sent as `answerWait`, asks no Bot and starts no task.
@@ -384,6 +388,7 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
                     if (conversation.kind == "bot_dm" && conversation.sharedBotIds.size != 1) throw TeamMessageFailure("BOT_SELECTION_STALE")
                     val selected = if (conversation.kind == "bot_dm") conversation.sharedBotIds else targets
                     requireTeamBotSelections(selected, mutable.value.bots, conversation.participants)
+                    TeamBotEntry.requireNewRequest(selected, mutable.value.bots)
                     selected
                 } else emptyList()
                 val said = if (carries && text.isBlank()) "" else text
@@ -425,9 +430,16 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
     private fun scheduleDeadline() {
         deadline?.cancel(); deadline = null
         val now = System.currentTimeMillis()
-        val expirations = mutable.value.bots.filter { it.ready }.map { it.onlineUntil } + mutable.value.tasks.filter { !it.terminal }.map { it.deadline }
+        val expirations = listOfNotNull(TeamBotEntry.nextStatusDeadline(mutable.value.bots, now)) + mutable.value.tasks.filter { !it.terminal }.map { it.deadline }
         val next = expirations.filter { it > now }.minOrNull() ?: return
-        if (active) deadline = scope.launch { delay(next - now); botsDirty = true; refresh() }
+        val life = lifecycle
+        if (active) deadline = scope.launch {
+            delay(next - now)
+            if (!active || life != lifecycle) return@launch
+            mutable.update { it.copy(bots = TeamBotEntry.expireStatuses(it.bots, System.currentTimeMillis())) }
+            botsDirty = true
+            refresh()
+        }
     }
     private fun scheduleRetry() {
         retry?.cancel(); retry = null

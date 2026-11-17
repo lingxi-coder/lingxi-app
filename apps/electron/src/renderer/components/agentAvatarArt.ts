@@ -40,3 +40,13 @@ export function agentAvatarIndex(agentId: string): number {
   }
   return hash % AGENT_AVATARS.length;
 }
+
+/**
+ * The id a Bot's avatar is drawn from. The Teams workspace names a Bot by its id once it has the Bot's card and by its key
+ * (`bot:<owner>:<host>:<id>`) before then, so the id is the last part of a key: the same Bot has the same avatar while its
+ * card loads, in the Bots sidebar, which draws it from the id too, and on every client (iOS and Android have the same rule,
+ * checked against the shared vectors in `mobile-team-bot-vectors.json`).
+ */
+export function teamBotAvatarId(identityId: string): string {
+  return identityId.startsWith('bot:') ? identityId.slice(identityId.lastIndexOf(':') + 1) : identityId;
+}

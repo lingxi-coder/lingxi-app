@@ -227,7 +227,7 @@ function SidebarSessionProgress({ label }: { label: string }) {
     style={{ color: t.text3 }}><span /></span>;
 }
 
-export function SessionRow({ projectPath, session, active, pinned, opening, status, metadata, pinnedSection = false, onClick, onPin, onArchive, onRename, onMenu, reorderable = false, sortableIndex = 0 }: {
+export function SessionRow({ projectPath, session, active, pinned, opening, status, metadata, pinnedSection = false, onClick, onPin, onArchive, onRename, onMenu, reorderable = false, sortableIndex = 0, roving }: {
   projectPath: string;
   session: Pick<SessionRowDto, 'uuid' | 'title' | 'modified_rfc3339' | 'message_count'>;
   metadata?: string;
@@ -245,6 +245,8 @@ export function SessionRow({ projectPath, session, active, pinned, opening, stat
   onMenu?(at: { left: number; top: number }, opener: HTMLElement): void;
   reorderable?: boolean;
   sortableIndex?: number;
+  /** The row is one of a list the arrow keys move through (the Bots sidebar's): `id` names it in the list, and only the row that is the `tabStop` is reached by Tab. */
+  roving?: { id: string; tabStop: boolean };
 }) {
   const t = useT();
   const remote = useRemoteControl();
@@ -372,6 +374,8 @@ export function SessionRow({ projectPath, session, active, pinned, opening, stat
         disabled={opening}
         aria-busy={opening || undefined}
         data-session-id={session.uuid}
+        data-row={roving?.id}
+        tabIndex={roving ? (roving.tabStop ? 0 : -1) : undefined}
         aria-current={active ? 'page' : undefined}
         title={pinnedSection ? `${title}\n${projectPath}` : title}
         aria-label={`${title}, ${sessionMetadata}${needsInput ? `, ${tr('desktop_chat_needs_input')}` : ''}`}
@@ -396,7 +400,7 @@ export function SessionRow({ projectPath, session, active, pinned, opening, stat
             : attention?.kind === 'running' ? <SidebarSessionProgress label={tr('desktop_apps_running')} />
             : !needsInput && attention && (pinnedSection || attention.kind !== 'error') ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
         </span>
-        <span className="sidebar-session-metadata" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: active ? t.text3OnActive : t.text4, fontSize: 10.5 }}>
+        <span className="sidebar-session-metadata" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: active ? t.text3OnActive : t.text4, fontSize: 11 }}>
           {sessionMetadata}
         </span>
       </button>
@@ -543,6 +547,10 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     if (onSelectSidebarMode) onSelectSidebarMode(mode);
     else if (mode === 'home') onOpenChat?.();
   };
+  // What the rail marks as the page the window is on: data-active draws it (global.css), aria-current tells assistive technology.
+  const railMarked = !scheduled && !changes;
+  const modeMarked = (mode: SidebarMode) => railMarked && sidebarMode === mode;
+  const appsMarked = railMarked && (sidebarMode === 'apps' || (!onSelectSidebarMode && apps));
   // The rail's Teams button says how many messages wait: the number is for the eye, the label for everything else.
   const teamsBadge = unreadBadgeText(teamsUnread);
   const teamsRailLabel = teamsBadge ? tr('desktop_teams_rail_unread', Math.floor(teamsUnread)) : tr('teams_title');
@@ -948,17 +956,17 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       </div>
       <div className="desktop-body">
       <nav ref={railRef} className="desktop-nav-rail no-drag" aria-label={tr('desktop_main_navigation')} aria-disabled={bridge.projectCreationOpen || undefined} onClickCapture={blockNavigation}>
-        <button type="button" className="desktop-rail-button" data-active={!scheduled && !changes && sidebarMode === 'home' || undefined} aria-label={tr('desktop_home')} title={tr('desktop_home')} onClick={() => selectMode('home')}><DesktopIcon name="home" size={20} /></button>
-        {botsAvailable && <button type="button" className="desktop-rail-button" data-active={!scheduled && !changes && sidebarMode === 'bots' || undefined} aria-label={tr('bots_title')} title={tr('bots_title')} onClick={() => selectMode('bots')}><Icon name="bot" size={21} stroke={1.7} /></button>}
-        <button type="button" className="desktop-rail-button desktop-rail-teams" data-active={!scheduled && !changes && sidebarMode === 'teams' || undefined} aria-label={teamsRailLabel} title={teamsRailLabel} onClick={() => selectMode('teams')}>
+        <button type="button" className="desktop-rail-button" data-active={modeMarked('home') || undefined} aria-current={modeMarked('home') ? 'page' : undefined} aria-label={tr('desktop_home')} title={tr('desktop_home')} onClick={() => selectMode('home')}><DesktopIcon name="home" size={20} /></button>
+        {botsAvailable && <button type="button" className="desktop-rail-button" data-active={modeMarked('bots') || undefined} aria-current={modeMarked('bots') ? 'page' : undefined} aria-label={tr('bots_title')} title={tr('bots_title')} onClick={() => selectMode('bots')}><Icon name="bot" size={21} stroke={1.7} /></button>}
+        <button type="button" className="desktop-rail-button desktop-rail-teams" data-active={modeMarked('teams') || undefined} aria-current={modeMarked('teams') ? 'page' : undefined} aria-label={teamsRailLabel} title={teamsRailLabel} onClick={() => selectMode('teams')}>
           <Icon name="users" size={21} stroke={1.7} />
           {teamsBadge && <span className="desktop-rail-count" data-kind="unread" aria-hidden="true">{teamsBadge}</span>}
         </button>
-        <button type="button" className="desktop-rail-button desktop-rail-friends" data-active={!scheduled && !changes && sidebarMode === 'friends' || undefined} aria-label={friendsRailLabel} title={friendsRailLabel} onClick={() => selectMode('friends')}>
+        <button type="button" className="desktop-rail-button desktop-rail-friends" data-active={modeMarked('friends') || undefined} aria-current={modeMarked('friends') ? 'page' : undefined} aria-label={friendsRailLabel} title={friendsRailLabel} onClick={() => selectMode('friends')}>
           <Icon name="user" size={21} stroke={1.7} />
           {friendsBadge && <span className="desktop-rail-count" data-kind="unread" aria-hidden="true">{friendsBadge}</span>}
         </button>
-        <button type="button" className="desktop-rail-button" data-active={!scheduled && !changes && (sidebarMode === 'apps' || (!onSelectSidebarMode && apps)) || undefined} aria-label={tr('apps_title')} title={tr('apps_title')} onClick={() => onSelectSidebarMode ? selectMode('apps') : onOpenApps?.()}><DesktopIcon name="apps" size={20}/></button>
+        <button type="button" className="desktop-rail-button" data-active={appsMarked || undefined} aria-current={appsMarked ? 'page' : undefined} aria-label={tr('apps_title')} title={tr('apps_title')} onClick={() => onSelectSidebarMode ? selectMode('apps') : onOpenApps?.()}><DesktopIcon name="apps" size={20}/></button>
         <span className="desktop-rail-divider" aria-hidden="true" />
         <button type="button" className="desktop-rail-button" data-active={scheduled || undefined} aria-current={scheduled ? 'page' : undefined} aria-label={tr('desktop_chat_scheduled_tasks')} title={tr('desktop_chat_scheduled_tasks')} onClick={onOpenScheduled}><DesktopIcon name="clock" size={20} /></button>
         <GitChangesButton active={changes} />
@@ -1307,7 +1315,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
               }}
             >
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{data.sessionTitle || tr('remote_untitled')}</span>
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5, fontWeight: 400 }}>{data.sessionMetadata}</span>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 11, fontWeight: 400 }}>{data.sessionMetadata}</span>
             </div>
           );
         }}

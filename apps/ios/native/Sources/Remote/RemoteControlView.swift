@@ -144,6 +144,8 @@ struct RemoteHostView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var error: String?
     @State private var appBrowser = RemoteAppBrowserLifetime()
+    /// Forget this computer is waiting for its confirmation (docs/TEAMS-UI-POLISH.md U8).
+    @State private var confirmingForget = false
     private var host: RemoteHostFfi? { manager.hosts.first { $0.hostId == hostID } }
 
     var body: some View {
@@ -171,7 +173,14 @@ struct RemoteHostView: View {
             if host?.paired == true {
                 Section {
                     Button("remote_pair_again") { Task { try? await manager.repair(hostID) } }
-                    Button("remote_forget", role: .destructive) { Task { await manager.forget(hostID) } }
+                    Button("remote_forget", role: .destructive) { confirmingForget = true }
+                        .confirmationDialog(Text("remote_forget_title"), isPresented: $confirmingForget, titleVisibility: .visible) {
+                            Button("remote_forget_confirm", role: .destructive) { Task { await manager.forget(hostID) } }
+                            Button("common_cancel", role: .cancel) {}
+                        } message: {
+                            Text("remote_forget_help")
+                        }
+                        .accessibilityIdentifier("remote.forget.\(hostID)")
                 } footer: { Text("remote_forget_help") }
             }
         }
@@ -212,7 +221,7 @@ private struct RemoteAppsSection: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(app.name)
                         if !app.summary.isEmpty { Text(app.summary).font(.caption).foregroundStyle(.secondary) }
-                        HStack(spacing: 4) { Text("remote_apps_desktop"); Text("·"); Text(phase(app.phase)) }
+                        Text(verbatim: TeamsStreamLogic.joinedLine([TeamsText.localized("remote_apps_desktop"), TeamsText.localized(phaseKey(app.phase))]))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -223,7 +232,7 @@ private struct RemoteAppsSection: View {
                         Menu {
                             Button("remote_apps_open_default") { Task { await open(app, inApp: false) } }
                             Button("remote_apps_open_in_app") { Task { await open(app, inApp: true) } }
-                        } label: { Image(systemName: "ellipsis.circle") }
+                        } label: { Image(systemName: "ellipsis.circle").minimumHitTarget() }
                             .accessibilityLabel("remote_apps_open_choice")
                     }
                 }
@@ -234,7 +243,7 @@ private struct RemoteAppsSection: View {
         .onDisappear { request &+= 1; invalidateBrowserLaunch() }
     }
 
-    private func phase(_ value: String) -> LocalizedStringKey {
+    private func phaseKey(_ value: String) -> String {
         switch value {
         case "installing": "remote_apps_phase_installing"
         case "building": "remote_apps_phase_building"

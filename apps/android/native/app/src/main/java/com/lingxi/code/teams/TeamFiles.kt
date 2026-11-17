@@ -28,7 +28,6 @@ import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.PictureAsPdf
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -37,7 +36,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -56,15 +54,19 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.lingxi.code.R
+import com.lingxi.code.theme.ConfirmDialog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -152,7 +154,8 @@ internal fun TeamAttachButton(enabled: Boolean, onChosen: (List<TeamChosenFile>)
     }
     val label = stringResource(R.string.teams_file_add)
     IconButton(enabled = enabled && !reading, onClick = { chooser.launch(TeamAttachments.CHOOSER_TYPES) }, modifier = Modifier.testTag(TeamsTags.ATTACH)) {
-        if (reading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Icon(Icons.Outlined.AttachFile, label)
+        // The button keeps its name while the files are being read.
+        if (reading) CircularProgressIndicator(Modifier.size(20.dp).semantics { contentDescription = label }, strokeWidth = 2.dp) else Icon(Icons.Outlined.AttachFile, label)
     }
 }
 
@@ -171,7 +174,7 @@ internal fun TeamDraftFiles(files: List<TeamDraftFile>, refusals: List<TeamFileR
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Icon(fileIcon(file.mime), null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                Column(Modifier.weight(1f).padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Column(Modifier.weight(1f).padding(vertical = 6.dp).semantics(mergeDescendants = true) {}, verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(file.name, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
                     when (file.state) {
                         TeamDraftFile.State.Uploading -> {
@@ -186,7 +189,7 @@ internal fun TeamDraftFiles(files: List<TeamDraftFile>, refusals: List<TeamFileR
             }
         }
         if (refusals.isNotEmpty()) Row(Modifier.fillMaxWidth().testTag(TeamsTags.REFUSED_FILES), verticalAlignment = Alignment.Top) {
-            Column(Modifier.weight(1f).padding(vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Column(Modifier.weight(1f).padding(vertical = 6.dp).semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite }, verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 refusals.forEach { refusal -> Text("${refusal.name}: ${stringResource(teamsErrorRes(refusal.code))}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
             }
             IconButton(onClick = onDismissRefusals) { Icon(Icons.Outlined.Close, stringResource(R.string.common_close), Modifier.size(18.dp)) }
@@ -212,6 +215,7 @@ internal fun TeamMessageFiles(message: TeamMessage, own: Boolean, workspace: Tea
     var failures by remember(message.id) { mutableStateOf<Map<String, String>>(emptyMap()) }
     var takingBack by remember(message.id) { mutableStateOf<TeamMessageAttachment?>(null) }
     val model = workspace.messagingModel
+    val takeBack = stringResource(R.string.teams_file_take_back)
 
     fun open(file: TeamMessageAttachment) {
         if (opening != null) return
@@ -236,7 +240,7 @@ internal fun TeamMessageFiles(message: TeamMessage, own: Boolean, workspace: Tea
     Column(Modifier.padding(top = 2.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         message.files.forEach { file ->
             if (file.revoked) {
-                Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp).testTag("teams.message.file.${file.attachmentId}.revoked"), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp).semantics(mergeDescendants = true) {}.testTag("teams.message.file.${file.attachmentId}.revoked"), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Icon(Icons.AutoMirrored.Outlined.InsertDriveFile, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.outline)
                     Column {
                         Text(file.name, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
@@ -247,18 +251,19 @@ internal fun TeamMessageFiles(message: TeamMessage, own: Boolean, workspace: Tea
             }
             var menu by remember(file.attachmentId) { mutableStateOf(false) }
             val openLabel = stringResource(R.string.teams_file_open_fmt, file.name)
-            val takeBack = stringResource(R.string.teams_file_take_back)
             Box {
                 Column(
                     Modifier
                         .combinedClickable(enabled = opening == null, onClickLabel = openLabel, onClick = { open(file) }, onLongClick = if (own) ({ menu = true }) else null)
-                        .semantics { contentDescription = openLabel; if (own) customActions = listOf(CustomAccessibilityAction(takeBack) { takingBack = file; true }) }
+                        // The description replaces the name and the size, so the size is said as the state.
+                        .semantics { contentDescription = openLabel; stateDescription = TeamAttachments.size(file.byteLength); if (own) customActions = listOf(CustomAccessibilityAction(takeBack) { takingBack = file; true }) }
                         .testTag("teams.message.file.${file.attachmentId}"),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     if (file.isImage) InlinePicture(file, model, pictures)
                     Row(
-                        Modifier.clip(MaterialTheme.shapes.small).background(MaterialTheme.colorScheme.surfaceVariant).padding(horizontal = 10.dp, vertical = 6.dp),
+                        // At least 48 dp high at every font scale (U6).
+                        Modifier.heightIn(min = 48.dp).clip(MaterialTheme.shapes.small).background(MaterialTheme.colorScheme.surfaceVariant).padding(horizontal = 10.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         if (opening == file.attachmentId) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
@@ -274,25 +279,21 @@ internal fun TeamMessageFiles(message: TeamMessage, own: Boolean, workspace: Tea
                     DropdownMenuItem(text = { Text(takeBack, color = MaterialTheme.colorScheme.error) }, onClick = { menu = false; takingBack = file })
                 }
             }
-            failures[file.attachmentId]?.let { code -> Text(stringResource(teamsErrorRes(code)), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
+            failures[file.attachmentId]?.let { code -> Text(stringResource(teamsErrorRes(code)), Modifier.semantics { liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
         }
     }
     takingBack?.let { file ->
-        AlertDialog(
-            onDismissRequest = { takingBack = null },
-            title = { Text(stringResource(R.string.teams_file_take_back_confirm_fmt, file.name)) },
-            text = { Text(stringResource(R.string.teams_file_take_back_detail)) },
-            confirmButton = {
-                TextButton(onClick = {
-                    takingBack = null
-                    scope.launch {
-                        try { model.revokeAttachment(file.attachmentId) }
-                        catch (error: CancellationException) { throw error }
-                        catch (error: Exception) { failures = failures + (file.attachmentId to ((error as? TeamMessageFailure)?.code ?: "SERVICE_UNAVAILABLE")) }
-                    }
-                }) { Text(stringResource(R.string.teams_file_take_back), color = MaterialTheme.colorScheme.error) }
+        ConfirmDialog(
+            title = stringResource(R.string.teams_file_take_back_confirm_fmt, file.name), body = stringResource(R.string.teams_file_take_back_detail),
+            confirm = takeBack, destructive = true, onDismiss = { takingBack = null },
+            onConfirm = {
+                takingBack = null
+                scope.launch {
+                    try { model.revokeAttachment(file.attachmentId) }
+                    catch (error: CancellationException) { throw error }
+                    catch (error: Exception) { failures = failures + (file.attachmentId to ((error as? TeamMessageFailure)?.code ?: "SERVICE_UNAVAILABLE")) }
+                }
             },
-            dismissButton = { TextButton(onClick = { takingBack = null }) { Text(stringResource(R.string.teams_cancel)) } },
         )
     }
 }

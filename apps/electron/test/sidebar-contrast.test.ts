@@ -36,7 +36,8 @@ test('secondary text on a selected row reaches 4.5:1 in both palettes, which the
   assert.equal(tokens(true).text3OnActive, '#b0b0b5');
 });
 
-function metadataColor(dark: boolean, active: boolean): string | undefined {
+/** The style of a row's secondary text, which is what the row reads aloud and what is shown while the row is dragged. */
+function metadataStyle(dark: boolean, active: boolean): string | undefined {
   const row = React.createElement(SessionRow, {
     projectPath: '/work/app', session: { uuid: 's1', title: 'Plan', modified_rfc3339: new Date().toISOString(), message_count: 2 },
     active, pinned: false, opening: false, onClick: () => undefined,
@@ -45,10 +46,14 @@ function metadataColor(dark: boolean, active: boolean): string | undefined {
   console.error = () => undefined;
   try {
     const html = renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(dark) }, React.createElement(DragDropProvider, null, row)));
-    return /class="sidebar-session-metadata" style="[^"]*color:(#[0-9a-f]{6})/.exec(html)?.[1];
+    return /class="sidebar-session-metadata" style="([^"]*)"/.exec(html)?.[1];
   } finally {
     console.error = error;
   }
+}
+
+function metadataColor(dark: boolean, active: boolean): string | undefined {
+  return /color:(#[0-9a-f]{6})/.exec(metadataStyle(dark, active) ?? '')?.[1];
 }
 
 test('only a selected row\'s secondary text takes the contrast color, in either palette', () => {
@@ -56,5 +61,15 @@ test('only a selected row\'s secondary text takes the contrast color, in either 
     const t = tokens(dark);
     assert.equal(metadataColor(dark, true), t.text3OnActive, `${dark ? 'dark' : 'light'} selected`);
     assert.equal(metadataColor(dark, false), t.text4, `${dark ? 'dark' : 'light'} not selected`);
+  }
+});
+
+test('a row\'s secondary text is 11px, the smallest text the sidebar draws, selected or not', () => {
+  for (const dark of [true, false]) {
+    for (const active of [true, false]) {
+      const style = metadataStyle(dark, active);
+      assert.ok(style, 'the row has secondary text');
+      assert.match(style, /(?:^|;)font-size:11px(?:;|$)/, `${dark ? 'dark' : 'light'} ${active ? 'selected' : 'not selected'}: ${style}`);
+    }
   }
 });

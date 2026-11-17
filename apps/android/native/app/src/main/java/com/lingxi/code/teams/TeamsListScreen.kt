@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -55,13 +56,17 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.text
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
 import com.lingxi.code.tabs.TabLogic
+import com.lingxi.code.theme.BotAvatar
 import com.lingxi.code.theme.ConversationLead
 import com.lingxi.code.theme.TeamTile
 
@@ -84,6 +89,7 @@ internal fun TeamsListScreen(
     onReconnect: () -> Unit,
     onDiscardCreation: () -> Unit,
     onMessageBot: (String) -> Unit = {},
+    onBotExample: (String, String) -> Unit = { _, _ -> },
     onArtifact: (String) -> Unit = {},
     onRefreshTask: (String) -> Unit = {},
     onCancelTask: (String) -> Unit = {},
@@ -96,6 +102,7 @@ internal fun TeamsListScreen(
     val strings = rememberTeamsListStrings()
     val conversations = messaging.cache?.conversations.orEmpty()
     val bots = messaging.bots
+    val memberBots = TeamBotEntry.memberDirectory(bots)
     val now = rememberNowMs()
     var searching by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
@@ -108,9 +115,11 @@ internal fun TeamsListScreen(
     val otherTeamsUnread = unreadByTeam.filterKeys { it != teams.selectedId }.values.sum()
     val invalid = messaging.error == "INVALID_DATA" || messaging.error == "INVALID_MESSAGE_SNAPSHOT"
     val listError = messaging.error.isNotEmpty() && !invalid && !messaging.revoked && messaging.error != "SERVICE_UNAVAILABLE"
+    val otherUnread = stringResource(R.string.teams_other_unread)
+    val switchTeam = stringResource(R.string.teams_switch_team)
 
     Column(modifier.fillMaxSize().testTag(TeamsTags.LIST)) {
-        Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             if (searching) {
                 val focus = remember { FocusRequester() }
                 LaunchedEffect(Unit) { focus.requestFocus() }
@@ -123,13 +132,14 @@ internal fun TeamsListScreen(
                 IconButton(onClick = { searching = false; query = "" }) { Icon(Icons.Outlined.Close, stringResource(R.string.common_close)) }
             } else {
                 Row(
-                    Modifier.weight(1f, fill = false).clip(MaterialTheme.shapes.medium).clickable(onClick = onSwitchTeam).padding(horizontal = 8.dp, vertical = 6.dp).testTag(TeamsTags.TEAM_CHIP),
+                    Modifier.weight(1f, fill = false).heightIn(min = 48.dp).clip(MaterialTheme.shapes.medium).clickable(onClickLabel = switchTeam, onClick = onSwitchTeam).padding(horizontal = 8.dp, vertical = 6.dp).testTag(TeamsTags.TEAM_CHIP),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    if (team != null) TeamTile(team.id, team.name, 28.dp)
+                    if (team != null) TeamTile(team.id, team.name, 20.dp)
                     Text(team?.name ?: stringResource(R.string.teams_choose_team), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                     Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(20.dp))
-                    if (otherTeamsUnread > 0) Box(Modifier.size(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary))
+                    // The dot speaks as text, so inside the chip's one merged element it reads after the team name instead of replacing it.
+                    if (otherTeamsUnread > 0) Box(Modifier.size(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary).semantics { text = AnnotatedString(otherUnread) })
                 }
                 Spacer(Modifier.weight(1f))
                 IconButton(onClick = { searching = true }, modifier = Modifier.testTag(TeamsTags.SEARCH)) { Icon(Icons.Outlined.Search, stringResource(R.string.teams_search_placeholder)) }
@@ -160,21 +170,30 @@ internal fun TeamsListScreen(
                 )
                 visible.isEmpty() && query.isNotBlank() -> TeamsMessageState(stringResource(R.string.teams_no_matches), Modifier.testTag(TeamsTags.NO_MATCHES))
                 else -> LazyColumn(Modifier.fillMaxSize(), state = listState) {
-                    if (query.isBlank() && bots.any { it.selectable }) {
-                        item(key = "assistants") { Text(stringResource(R.string.teams_assistants), Modifier.padding(16.dp), style = MaterialTheme.typography.titleSmall) }
-                        items(bots.filter { it.selectable }, key = { "assistant-${it.sharedBotId}" }) { bot ->
-                            TextButton(onClick = { onMessageBot(bot.sharedBotId) }, modifier = Modifier.fillMaxWidth().testTag("teams.assistant.${bot.sharedBotId}")) {
-                                Text(bot.name + " · " + botAvailabilityText(bot))
+                    // The team's shared Bots, as rows like the conversations: the Bot's own art, its name and its state (U1: "Bots", never "Assistants"). A paused
+                    // Bot stays listed, so its state can be read, but cannot be asked; the lines under the row are the member-safe projection of the Bot.
+                    if (query.isBlank() && memberBots.isNotEmpty()) {
+                        item(key = "assistants") { Text(stringResource(R.string.remote_bots), Modifier.padding(16.dp).semantics { heading() }, style = MaterialTheme.typography.titleSmall) }
+                        items(memberBots, key = { "assistant-${it.sharedBotId}" }) { bot ->
+                            Column(Modifier.fillMaxWidth()) {
+                                TeamBotRow(bot, enabled = bot.selectable, onClick = { onMessageBot(bot.sharedBotId) })
+                                // In the column of the row's text: the avatar (40 dp) and its gap (12 dp) after the 16 dp edge.
+                                Column(Modifier.fillMaxWidth().padding(start = 68.dp, end = 16.dp, bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    if (bot.description.isNotBlank()) Text(bot.description, style = MaterialTheme.typography.bodyMedium)
+                                    TeamBotMemberInfo(bot, enabled = !messaging.submitting && messaging.cache?.creation == null, onExample = { onBotExample(bot.sharedBotId, it) })
+                                }
                             }
                         }
                     }
                     if (query.isBlank() && messaging.tasks.isNotEmpty()) {
-                        item(key = "tasks") { Text(stringResource(R.string.teams_recent_tasks), Modifier.padding(16.dp), style = MaterialTheme.typography.titleSmall) }
+                        item(key = "tasks") { Text(stringResource(R.string.teams_recent_tasks), Modifier.padding(16.dp).semantics { heading() }, style = MaterialTheme.typography.titleSmall) }
                         items(messaging.tasks, key = { "task-${it.taskId}" }) { task ->
                             val bot = bots.firstOrNull { it.sharedBotId == task.sharedBotId }
                             TeamTaskCard(
                                 task, bot?.name ?: strings.bot, onArtifact, onRefreshTask, viewer = messaging.cache?.let { TeamMemberRef(uid, it.generation) }, maintainer = bot?.maintainer,
                                 recipientName = task.wait?.let { wait -> members.firstOrNull { it.uid == wait.recipient.uid }?.displayName?.takeIf { it.isNotEmpty() } } ?: strings.member, onCancel = onCancelTask, onReview = onReviewTask,
+                                // A card in the list has no message column around it: it takes the list's own 16 dp edge.
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                             )
                         }
                     }
@@ -190,7 +209,7 @@ internal fun TeamsListScreen(
                     val sections = listOf(
                         Triple(TeamsWorkspace.SECTION_CHANNELS, R.string.teams_group_channels, groups.channels),
                         Triple(TeamsWorkspace.SECTION_DIRECT, R.string.teams_group_direct, groups.direct),
-                        Triple(TeamsWorkspace.SECTION_BOTS, R.string.teams_group_bot_dm, groups.botDirect),
+                        Triple(TeamsWorkspace.SECTION_BOTS, R.string.teams_group_bot_chats, groups.botDirect),
                     )
                     for ((id, title, rows) in sections) {
                         if (rows.isEmpty()) continue
@@ -216,18 +235,32 @@ internal fun TeamsListScreen(
     }
 }
 
+/** A collapsible group heading (U11): the whole row is the 48 dp button, the chevron is decorative, the state is spoken as Expanded or Collapsed. */
 @Composable
 private fun SectionHeader(id: String, title: String, collapsed: Boolean, unread: Int, onClick: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 8.dp).testTag(TeamsTags.section(id)),
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).disclosure(expanded = !collapsed, onClick = onClick).padding(horizontal = 16.dp, vertical = 8.dp).testTag(TeamsTags.section(id)),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(title, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+        Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
         if (collapsed && unread > 0) UnreadBadge(unread)
-        Icon(
-            Icons.Outlined.KeyboardArrowDown, stringResource(if (collapsed) R.string.chat_run_expand else R.string.chat_run_collapse),
-            Modifier.size(20.dp).rotate(if (collapsed) -90f else 0f), tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(20.dp).rotate(if (collapsed) -90f else 0f), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/** One shared Bot of the team: its avatar (keyed by `avatarId`), its name and its state; a tap opens or starts its Bot chat, unless the Bot cannot be asked ([enabled]). */
+@Composable
+private fun TeamBotRow(bot: TeamBotCard, enabled: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(enabled = enabled, onClickLabel = stringResource(R.string.teams_bot_message), onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 10.dp).testTag("teams.assistant.${bot.sharedBotId}"),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        BotAvatar(bot.avatarId, 40.dp)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(bot.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(botAvailabilityText(bot), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
     }
 }
 

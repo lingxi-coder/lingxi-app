@@ -2,6 +2,7 @@ package com.lingxi.code.friends
 
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.CompositionLocalProvider
@@ -440,7 +441,8 @@ class FriendsScreensUiTest {
     @Test fun resetAndTurnOffAskBeforeTheyActAndCancelChangesNothing() {
         showAdd()
         rule.onNodeWithTag(FriendsTags.LINK_RESET).performClick()
-        rule.onNodeWithText(text(R.string.friends_link_reset_confirm)).assertIsDisplayed()
+        rule.onNodeWithText(text(R.string.friends_link_reset_title)).assertIsDisplayed()
+        rule.onNodeWithText(text(R.string.friends_link_reset_body)).assertIsDisplayed()
         rule.onNode(inDialog(text(R.string.common_cancel))).performClick()
         rule.waitForIdle()
         assertTrue("nothing was sent: $events", "rotate" !in events && "revoke" !in events)
@@ -451,7 +453,8 @@ class FriendsScreensUiTest {
         assertEquals(1, events.count { it == "rotate" })
 
         rule.onNodeWithTag(FriendsTags.LINK_OFF).performClick()
-        rule.onNodeWithText(text(R.string.friends_link_off_confirm)).assertIsDisplayed()
+        rule.onNodeWithText(text(R.string.friends_link_off_title)).assertIsDisplayed()
+        rule.onNodeWithText(text(R.string.friends_link_off_body)).assertIsDisplayed()
         rule.onNode(inDialog(text(R.string.friends_link_off))).performClick()
         rule.waitForIdle()
         assertEquals(1, events.count { it == "revoke" })
@@ -790,7 +793,8 @@ class FriendsScreensUiTest {
 
         update { state = FriendsState(uid = uid, blocksLoaded = true) }
         rule.onNodeWithTag(FriendsTags.BLOCKED_EMPTY).assertIsDisplayed()
-        rule.onNodeWithText(text(R.string.friends_blocked_empty)).assertIsDisplayed()
+        rule.onNodeWithText(text(R.string.friends_blocked_empty_title)).assertIsDisplayed()
+        rule.onNodeWithText(text(R.string.friends_blocked_empty_body)).assertIsDisplayed()
     }
 
     @Test fun theBlockedPageHasItsTitleAndLeavesThroughBack() {
@@ -802,19 +806,26 @@ class FriendsScreensUiTest {
 
     // --- The notice line (D4, D7, D16) -----------------------------------------------------------------------------
 
-    @Test fun aNewFriendNoticeNamesThemAndATapDismissesIt() {
-        show { FriendsNoticeBanner(FriendsNotice.NowFriends("Ann"), onDismiss = { events += "dismiss" }) }
+    /** The notice as the tab roots show it (U12): one Snackbar with a Dismiss button, at the bottom of a Box that fills the tab. */
+    private fun showNotice(notice: FriendsNotice) = show {
+        Box(Modifier.fillMaxSize()) { NoticeSnackbar(notice, friendsNoticeText(notice)) { events += "dismiss" } }
+    }
+
+    private fun dismissButton() = rule.onNode(hasClickAction() and hasAnyAncestor(hasTestTag(FriendsTags.NOTICE)))
+
+    @Test fun aNewFriendNoticeNamesThemAndItsDismissButtonClosesIt() {
+        showNotice(FriendsNotice.NowFriends("Ann"))
         rule.onNodeWithTag(FriendsTags.NOTICE).assertIsDisplayed()
         rule.onNodeWithText(text(R.string.friends_now_friends_fmt, "Ann")).assertIsDisplayed()
-        rule.onNodeWithTag(FriendsTags.NOTICE).performClick()
-        assertTrue("a tap dismisses it: $events", "dismiss" in events)
+        dismissButton().performClick()
+        rule.waitUntil(timeoutMillis = 5_000) { "dismiss" in events }
     }
 
     @Test fun anUnavailableChatNoticeSaysSoAndDismissesItselfAfterAFewSeconds() {
-        show { FriendsNoticeBanner(FriendsNotice.ChatUnavailable, onDismiss = { events += "dismiss" }) }
+        showNotice(FriendsNotice.ChatUnavailable)
         rule.onNodeWithText(text(R.string.friends_chat_unavailable)).assertIsDisplayed()
         assertTrue("it stays for a while: $events", events.isEmpty())
-        rule.waitUntil(timeoutMillis = 10_000) { "dismiss" in events }
+        rule.waitUntil(timeoutMillis = 20_000) { "dismiss" in events }
     }
 
     // --- Team invitations (D27, D28) --------------------------------------------------------------------------------
@@ -911,16 +922,17 @@ class FriendsScreensUiTest {
     }
 
     @Test fun aJoinedInvitationIsAnnouncedByTeamName() {
-        show { FriendsNoticeBanner(FriendsNotice.OfferJoined("Book club"), onDismiss = { events += "dismiss" }) }
+        showNotice(FriendsNotice.OfferJoined("Book club"))
         rule.onNodeWithText(text(R.string.friends_offer_joined_fmt, "Book club")).assertIsDisplayed()
-        rule.onNodeWithTag(FriendsTags.NOTICE).performClick()
-        assertTrue("a tap dismisses it: $events", "dismiss" in events)
+        dismissButton().performClick()
+        rule.waitUntil(timeoutMillis = 5_000) { "dismiss" in events }
     }
 
     @Test fun theInvitedFriendsAreAnnouncedAsAListInThePersonsLanguage() {
         val locale = rule.activity.resources.configuration.locales[0]
-        show { FriendsBanner(text(R.string.friends_invite_sent_to_fmt, friendNamesText(listOf("Ann", "Bo"), locale)), "key", onDismiss = { events += "dismiss" }) }
-        rule.onNodeWithTag(FriendsTags.NOTICE).assert(hasText(text(R.string.friends_invite_sent_to_fmt, friendNamesText(listOf("Ann", "Bo"), locale))))
+        val sent = text(R.string.friends_invite_sent_to_fmt, friendNamesText(listOf("Ann", "Bo"), locale))
+        show { Box(Modifier.fillMaxSize()) { NoticeSnackbar("key", sent) { events += "dismiss" } } }
+        rule.onNodeWithTag(FriendsTags.NOTICE).assert(hasAnyDescendant(hasText(sent)))
         assertTrue(friendNamesText(listOf("Ann", "Bo"), locale).let { "Ann" in it && "Bo" in it })
     }
 
@@ -1042,7 +1054,7 @@ class FriendsScreensUiTest {
         rule.onNodeWithTag(TeamsTags.OFFLINE).assertIsDisplayed()
         rule.onNodeWithTag(FriendsTags.botMessage(friendBot.sharedBotId)).assertIsNotEnabled()
         rule.onNodeWithTag(FriendsTags.botStop(ownBot.sharedBotId)).assertIsNotEnabled()
-        rule.onNodeWithText(text(R.string.mcp_reconnect)).performClick()
+        rule.onNodeWithText(text(R.string.teams_reconnect)).performClick()
         assertEquals(listOf("reconnect"), events)
     }
 
@@ -1052,7 +1064,9 @@ class FriendsScreensUiTest {
         rule.onNodeWithTag(FriendsTags.botStop("sharedbot_old")).assertDoesNotExist()
         rule.onNodeWithTag(FriendsTags.botMessage("sharedbot_old")).assertIsNotEnabled()
         rule.onNodeWithTag(FriendsTags.botStop(ownBot.sharedBotId)).assert(hasText(text(R.string.friends_share_bot_stop))).performClick()
-        rule.onNode(inDialog(text(R.string.teams_bot_unbind_detail))).assertIsDisplayed()
+        // The one Stop sharing dialog of Teams and Friends: the Bot's name in the title, then what stops and what stays.
+        rule.onNode(inDialog(text(R.string.teams_bot_stop_title_fmt, ownBot.name))).assertIsDisplayed()
+        rule.onNode(inDialog(text(R.string.teams_bot_stop_detail))).assertIsDisplayed()
         rule.onNode(inDialog(text(R.string.common_cancel))).performClick()
         rule.waitForIdle()
         assertTrue("a cancel stops nothing: $events", events.isEmpty())
@@ -1074,10 +1088,14 @@ class FriendsScreensUiTest {
         rule.onNodeWithTag(FriendsTags.BOTS_STATUS).assert(hasText(text(R.string.teams_bots_unverified)))
     }
 
-    @Test fun anEmptyBotsReadSaysNoBotsAreSharedYet() {
+    @Test fun anEmptyBotsReadSaysWhatIsEmptyAndHowABotGetsThereOnceAndKeepsTheNote() {
         showBots(emptyList())
-        rule.onNodeWithTag(FriendsTags.BOTS_STATUS).assert(hasText(text(R.string.friends_bots_none)))
-        rule.onNodeWithTag(FriendsTags.BOTS_SHARE_HINT).assertIsDisplayed()
+        // U9: one empty state, title then body; the hint is its body, not a second copy under the note.
+        rule.onNodeWithTag(FriendsTags.BOTS_STATUS).assert(
+            hasAnyDescendant(hasText(text(R.string.friends_bots_none))) and hasAnyDescendant(hasText(text(R.string.friends_bots_share_hint))),
+        )
+        rule.onNodeWithTag(FriendsTags.BOTS_SHARE_HINT).assertDoesNotExist()
+        rule.onNodeWithTag(FriendsTags.BOTS_NOTE).assertIsDisplayed()
     }
 
     // --- The tab against the real default app ------------------------------------------------------------------------

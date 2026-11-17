@@ -277,7 +277,7 @@
   "bots_delete_tasks_unknown": "진행 중인 작업을 확인하지 못했습니다. 이 Bot을 삭제하면 진행 중인 작업은 취소됩니다.",
   "bots_background_title": "백그라운드에서 실행",
   "bots_keep_awake": "Bot이 작업하는 동안 이 Mac을 깨워 두기",
-  "bots_keep_awake_hint": "Bot의 루틴 실행 시각 10분 전부터도 깨어 있습니다. 덮개를 닫으면 Mac은 여전히 잠자기 상태가 됩니다.",
+  "bots_keep_awake_hint": "Bot의 루틴 실행 시각 10분 전부터도 깨어 있습니다. 전원에 연결된 동안에는 팀이나 친구와 공유한 Bot이 온라인인 한 계속 깨어 있습니다. 덮개를 닫으면 Mac은 여전히 잠자기 상태가 됩니다.",
   "bots_login_item": "로그인할 때 LingXi를 백그라운드에서 열기",
   "bots_login_item_hint": "Bot은 이 Mac에서 LingXi가 열려 있는 동안에만 루틴을 실행하고 작업을 받을 수 있습니다.",
   "bots_login_item_unavailable": "설치된 앱에서만 사용할 수 있습니다.",

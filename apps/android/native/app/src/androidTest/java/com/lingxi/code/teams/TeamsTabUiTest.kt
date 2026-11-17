@@ -10,7 +10,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -153,6 +157,34 @@ class TeamsTabUiTest {
         assertEquals(listOf("toggle:${TeamsWorkspace.SECTION_CHANNELS}"), events)
     }
 
+    @Test fun aSectionHeaderIsOneButtonThatSpeaksExpandedOrCollapsed() {
+        showList(collapsed = setOf(TeamsWorkspace.SECTION_CHANNELS))
+        val collapsed = rule.onNodeWithTag(TeamsTags.section(TeamsWorkspace.SECTION_CHANNELS))
+        collapsed.assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, text(R.string.teams_section_collapsed)))
+        collapsed.assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button))
+        rule.onNodeWithTag(TeamsTags.section(TeamsWorkspace.SECTION_DIRECT))
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, text(R.string.teams_section_expanded)))
+    }
+
+    @Test fun theTeamChipAndTheBotRowsMeetTheFortyEightDpTarget() {
+        showList(messaging(conversations = emptyList()))
+        rule.onNodeWithTag(TeamsTags.TEAM_CHIP).assertHeightIsAtLeast(48.dp)
+        rule.onNodeWithTag("teams.assistant.${helper.sharedBotId}").assertHeightIsAtLeast(48.dp)
+    }
+
+    @Test fun sectionHeadersMeetTheFortyEightDpTarget() {
+        showList()
+        listOf(TeamsWorkspace.SECTION_CHANNELS, TeamsWorkspace.SECTION_DIRECT, TeamsWorkspace.SECTION_BOTS).forEach {
+            rule.onNodeWithTag(TeamsTags.section(it)).assertHeightIsAtLeast(48.dp)
+        }
+    }
+
+    @Test fun theTeamsBotsAreTitledBotsAndTheOtherTeamsDotIsSpokenWithTheChip() {
+        showList(messaging(conversations = emptyList()), unreadByTeam = mapOf("t2" to 3))
+        rule.onNodeWithText(text(R.string.remote_bots)).assertIsDisplayed()
+        rule.onNodeWithTag(TeamsTags.TEAM_CHIP).assert(hasText(text(R.string.teams_other_unread)))
+    }
+
     @Test fun searchFiltersByTheRowLabelAndSaysWhenNothingMatches() {
         showList()
         rule.onNodeWithTag(TeamsTags.SEARCH).performClick()
@@ -199,7 +231,7 @@ class TeamsTabUiTest {
         showList(messaging(offline = true))
         rule.onNodeWithTag(TeamsTags.OFFLINE).assertIsDisplayed()
         rule.onNodeWithTag(TeamsTags.row("b")).assertIsDisplayed()
-        rule.onNodeWithText(text(R.string.mcp_reconnect)).performClick()
+        rule.onNodeWithText(text(R.string.teams_reconnect)).performClick()
         assertEquals(listOf("reconnect"), events)
     }
 

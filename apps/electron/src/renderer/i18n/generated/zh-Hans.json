@@ -314,7 +314,7 @@
   "bots_delete_tasks_unknown": "无法检查仍在进行的任务。删除这个 Bot 会取消其中仍在进行的任务。",
   "bots_background_title": "在后台运行",
   "bots_keep_awake": "Bot 工作时让这台 Mac 保持唤醒",
-  "bots_keep_awake_hint": "Bot 的例行任务执行前的 10 分钟内，也会保持唤醒。合上盖子时 Mac 仍会进入睡眠。",
+  "bots_keep_awake_hint": "Bot 的例行任务执行前的 10 分钟内，也会保持唤醒；接通电源时，只要你共享给团队或好友的 Bot 在线，也会保持唤醒。合上盖子时 Mac 仍会进入睡眠。",
   "bots_login_item": "登录时在后台打开灵犀",
   "bots_login_item_hint": "只有灵犀在这台 Mac 上保持打开，Bot 才会执行例行任务并接收任务。",
   "bots_login_item_unavailable": "仅在已安装的应用中可用。",

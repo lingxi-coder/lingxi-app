@@ -36,6 +36,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
@@ -44,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
 import com.lingxi.code.teams.TeamsSheet
 import com.lingxi.code.teams.rememberCopyToClipboard
+import com.lingxi.code.theme.ConfirmDialog
 import com.lingxi.code.theme.PersonAvatar
 import kotlinx.coroutines.delay
 
@@ -92,7 +96,7 @@ internal fun AddFriendScreen(
 @Composable
 private fun MyFriendLink(state: FriendsState, onRetry: () -> Unit, onRotate: () -> Unit, onRevoke: () -> Unit) {
     val profile = state.profile
-    val copy = rememberCopyToClipboard("LingXi friend link")
+    val copy = rememberCopyToClipboard(stringResource(R.string.friends_clip_link))
     val context = LocalContext.current
     val shareMessage = stringResource(R.string.friends_link_share_message)
     val shareTitle = stringResource(R.string.friends_link_share)
@@ -131,7 +135,7 @@ private fun MyFriendLink(state: FriendsState, onRetry: () -> Unit, onRotate: () 
                             TextButton(onClick = { confirm = "reset" }, enabled = !state.linkOp.busy, modifier = Modifier.testTag(FriendsTags.LINK_RESET)) { Text(stringResource(R.string.friends_link_reset)) }
                             TextButton(onClick = { confirm = "off" }, enabled = !state.linkOp.busy, modifier = Modifier.testTag(FriendsTags.LINK_OFF)) { Text(stringResource(R.string.friends_link_off), color = MaterialTheme.colorScheme.error) }
                         }
-                        if (copied) Text(stringResource(R.string.friends_link_copied), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                        if (copied) Text(stringResource(R.string.friends_link_copied), Modifier.semantics { liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
                     }
                 }
                 state.linkOp.error?.let { FriendsErrorText(it) }
@@ -142,15 +146,13 @@ private fun MyFriendLink(state: FriendsState, onRetry: () -> Unit, onRotate: () 
 
     if (confirm.isNotEmpty()) {
         val resetting = confirm == "reset"
-        AlertDialog(
-            onDismissRequest = { confirm = "" },
-            text = { Text(stringResource(if (resetting) R.string.friends_link_reset_confirm else R.string.friends_link_off_confirm)) },
-            confirmButton = {
-                TextButton(onClick = { if (resetting) onRotate() else onRevoke(); confirm = "" }) {
-                    Text(stringResource(if (resetting) R.string.friends_link_reset else R.string.friends_link_off), color = MaterialTheme.colorScheme.error)
-                }
-            },
-            dismissButton = { TextButton(onClick = { confirm = "" }) { Text(stringResource(R.string.common_cancel)) } },
+        // U8: a title that names the act, what it does, a verb for the button in the error colour, and Cancel.
+        ConfirmDialog(
+            title = stringResource(if (resetting) R.string.friends_link_reset_title else R.string.friends_link_off_title),
+            body = stringResource(if (resetting) R.string.friends_link_reset_body else R.string.friends_link_off_body),
+            confirm = stringResource(if (resetting) R.string.friends_link_reset else R.string.friends_link_off), destructive = true,
+            onConfirm = { if (resetting) onRotate() else onRevoke(); confirm = "" },
+            onDismiss = { confirm = "" },
         )
     }
 }
@@ -197,7 +199,7 @@ internal fun FriendResultCard(lookup: LookupState, onConfirm: (note: String) -> 
     Surface(modifier.fillMaxWidth().testTag(FriendsTags.RESULT), shape = MaterialTheme.shapes.medium, tonalElevation = 1.dp) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                PersonAvatar(result.uid, result.displayName, 44.dp)
+                PersonAvatar(result.uid, result.displayName, 40.dp)
                 Column(Modifier.weight(1f)) {
                     Text(result.displayName.ifEmpty { stringResource(R.string.teams_member) }, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     result.handle?.let { Text("@$it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis) }

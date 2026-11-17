@@ -322,6 +322,9 @@ AREAS = [
     ("packages/host-identity/", FULL_NEEDLES),
     ("apps/", CLIENT_NEEDLES),
     ("packages/bridge-client/", CLIENT_NEEDLES),
+    # The Desktop/Web Teams UI shares the app UI policy: its text bundle (i18n.generated.ts, generated from
+    # resources/translations) shows the product name to people, exactly as the native catalogs do.
+    ("packages/teams/", CLIENT_NEEDLES),
     ("resources/", CLIENT_NEEDLES),
     # This directory is the first-party visual identity kit, whose purpose is
     # to define and display product names. Apply the same display-name policy

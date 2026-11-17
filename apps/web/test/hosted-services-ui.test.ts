@@ -69,7 +69,7 @@ function fake(host = false) {
 const store = { subscribe: () => () => {}, getSnapshot: () => 0 }, fast = { answering: 10, idle: 10 };
 async function open(context: TestContext, f: ReturnType<typeof fake>, more: Record<string, unknown> = {}) {
   withDom(context);
-  const page = await mount(store, () => createElement(HostedServices, { api: f.api, uid, zh: false, renderMarkdown: (text: string) => createElement('article', { 'data-md': true }, text),
+  const page = await mount(store, () => createElement(HostedServices, { api: f.api, uid, locale: 'en', renderMarkdown: (text: string) => createElement('article', { 'data-md': true }, text),
     link: (id: string) => serviceLink('https://lingxios.net', id), refreshMs: fast, ...more }));
   context.after(() => page.unmount());
   const field = (label: string) => page.find(node => ['input', 'textarea', 'select'].includes(node.type) && textOf(node.parent) .startsWith(label))[0];

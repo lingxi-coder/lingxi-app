@@ -348,7 +348,7 @@ final class TeamMessagingModel {
                 }
                 if botsDirty {
                     botsDirty = false
-                    do { let cards: TeamBotList = try await execute("listSharedBots", payload: [:], life: life); bots = cards.bots; botsLoaded = true; botsUnverified = false }
+                    do { let cards: TeamBotList = try await execute("listSharedBots", payload: [:], life: life); bots = TeamBotMemberRules.validatedCards(cards.bots, previous: bots, now: Date().timeIntervalSince1970 * 1000); botsLoaded = true; botsUnverified = false }
                     catch { botsDirty = true; botsUnverified = true; throw error }
                 }
                 if artifactNeedsValidation {
@@ -366,7 +366,7 @@ final class TeamMessagingModel {
             } catch {
                 guard active, life == lifecycle else { return }
                 // Without the card list Bot availability is unknown, not "unavailable".
-                again = false; offline = true; bots = []; botsUnverified = true; tasks = []; artifact = nil; self.error = (error as? TeamMessageFailure)?.code ?? "SERVICE_UNAVAILABLE"
+                again = false; offline = true; bots = TeamBotMemberRules.failedValidation(bots); botsUnverified = true; tasks = []; artifact = nil; self.error = (error as? TeamMessageFailure)?.code ?? "SERVICE_UNAVAILABLE"
                 if ["MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP", "INVALID_SESSION", "SIGN_IN_REQUIRED", "CONVERSATION_REQUIRED"].contains(self.error) { invalidate() }
             }
         }
@@ -471,6 +471,9 @@ final class TeamMessagingModel {
         }
         let conversation = cache?.conversations.first { $0.id == selected }
         let resolvedTargets = operation == "create" ? conversation.map { Array(TeamBotSelection.targets(in: $0, selected: Set(targets))).sorted() } : nil
+        if let blocked = TeamBotMemberRules.blockedAvailability(targets: Set(resolvedTargets ?? []), cards: bots, operation: operation) {
+            throw TeamMessageFailure(code: blocked == .quota_exhausted ? "REQUEST_QUOTA_EXCEEDED" : "HOST_UNAVAILABLE")
+        }
         let intent = TeamMessageIntent(teamId: teamId, generation: generation, conversationId: selected, messageId: messageId ?? UUID().uuidString, changeId: UUID().uuidString, operation: operation, text: carries && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : text, replyTo: replyTo, targets: resolvedTargets ?? nil,
                                        attachments: carries ? files.map(\.uploadId) : nil, attachmentNames: carries ? files.map(\.name) : nil)
         try await commit { $0.outbox.append(intent) }; refresh()
@@ -594,9 +597,20 @@ final class TeamMessagingModel {
     private func scheduleDeadline() {
         deadline?.cancel(); deadline = nil
         let now = Date().timeIntervalSince1970 * 1000
-        let expirations = bots.filter { $0.ready }.map(\.onlineUntil) + tasks.filter { !$0.terminal }.map(\.deadline)
+        var expirations = tasks.filter { !$0.terminal }.map(\.deadline)
+        if let status = TeamBotMemberRules.nextStatusRefresh(bots, now: now) { expirations.append(status) }
         guard active, let next = expirations.filter({ $0 > now }).min() else { return }
-        deadline = Task { [weak self] in do { try await Task.sleep(for: .seconds((next - now) / 1000)); self?.botsDirty = true; self?.refresh() } catch {} }
+        let life = lifecycle
+        deadline = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds((next - now) / 1000))
+                guard let self, self.active, self.lifecycle == life else { return }
+                let current = Date().timeIntervalSince1970 * 1000
+                self.bots = self.bots.map { $0.expiringStatus(at: current) }
+                self.botsDirty = true
+                self.refresh()
+            } catch {}
+        }
     }
     private func scheduleRetry() {
         retry?.cancel(); retry = nil

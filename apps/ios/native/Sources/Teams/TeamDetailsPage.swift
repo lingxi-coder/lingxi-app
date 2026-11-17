@@ -28,10 +28,10 @@ struct TeamDetailsPage: View {
     }
 
     private struct Confirmation: Identifiable {
-        enum Kind { case role, owner, remove, leave, delete }
+        enum Kind { case role, owner, remove, leave, delete, revoke }
         let id = UUID()
         let kind: Kind
-        /// Who or what it is about, shown under the question.
+        /// Who or what it is about: the name in the question (the invite has none).
         let subject: String
         let input: [String: Any]
     }
@@ -41,7 +41,7 @@ struct TeamDetailsPage: View {
     @State private var ttl = 86400
     @State private var inviteRole = "member"
     @State private var confirmation: Confirmation?
-    @State private var pausing: TeamBotCard?
+    @State private var stopping: TeamBotCard?
     @State private var listOf: TeamBotCard?
     @State private var copied = false
     /// The member whose "Add friend" sheet is open (docs/FRIENDS-CLIENTS.md D15).
@@ -88,7 +88,7 @@ struct TeamDetailsPage: View {
         }
         .hidesTabBarWhenPushed(in: .teams)
         // A change of account or membership invalidates what the person was about to confirm.
-        .onChange(of: workspace.authority) { _, _ in confirmation = nil; pausing = nil; listOf = nil }
+        .onChange(of: workspace.authority) { _, _ in confirmation = nil; stopping = nil; listOf = nil }
         .onChange(of: workspace.invitationLink) { _, _ in copied = false }
         // Leaving, deleting or losing the team leaves nothing to show.
         .onChange(of: workspace.team == nil) { _, gone in if gone { onClose() } }
@@ -142,36 +142,33 @@ struct TeamDetailsPage: View {
             isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } }),
             titleVisibility: .visible, presenting: confirmation
         ) { pending in
-            Button(confirmKey(pending), role: .destructive) { confirmNow(pending) }
-            Button("teams_cancel", role: .cancel) {}
+            // Making someone an admin or a member is a change, not a loss: only the others are destructive (docs/TEAMS-UI-POLISH.md U8).
+            Button(confirmKey(pending), role: pending.kind == .role ? nil : .destructive) { confirmNow(pending) }
+            Button("common_cancel", role: .cancel) {}
         } message: { pending in
-            Text(verbatim: pending.subject)
+            if let sentence = body(pending) { Text(sentence) } else { Text(verbatim: pending.subject) }
         }
         .confirmationDialog(
-            Text("teams_bot_pause"),
-            isPresented: Binding(get: { pausing != nil }, set: { if !$0 { pausing = nil } }),
-            titleVisibility: .visible, presenting: pausing
+            stopping.map { Text("teams_bot_stop_title \($0.name)") } ?? Text(verbatim: ""),
+            isPresented: Binding(get: { stopping != nil }, set: { if !$0 { stopping = nil } }),
+            titleVisibility: .visible, presenting: stopping
         ) { bot in
-            Button("teams_bot_pause", role: .destructive) { pause(bot) }
+            Button("friends_share_bot_stop", role: .destructive) { stopSharing(bot) }
                 .disabled(workspace.messaging?.offline ?? true)
-            Button("teams_cancel", role: .cancel) {}
+            Button("common_cancel", role: .cancel) {}
         } message: { _ in
-            Text("teams_bot_pause")
+            Text("teams_bot_stop_detail")
         }
     }
 
     private func header(_ team: TeamSummary) -> some View {
         Section {
             HStack(spacing: 14) {
-                TeamAvatar(teamID: team.id, name: team.name, size: 48)
+                TeamAvatar(teamID: team.id, name: team.name, size: 56)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(team.name).font(.title3.weight(.semibold))
-                    HStack(spacing: 4) {
-                        Text(TeamsText.role(team.role))
-                        Text("·")
-                        Text(TeamsText.membersCount(team.memberCount))
-                    }
-                    .font(.subheadline).foregroundStyle(.secondary)
+                    Text(verbatim: TeamsStreamLogic.joinedLine([TeamsText.roleName(team.role), TeamsText.membersCount(team.memberCount)]))
+                        .font(.subheadline).foregroundStyle(.secondary)
                 }
             }
             .padding(.vertical, 2)
@@ -202,23 +199,19 @@ struct TeamDetailsPage: View {
         Section {
             ForEach(detail.members) { member in
                 HStack(spacing: 12) {
-                    PersonAvatar(id: member.uid, name: member.displayName, size: 36)
+                    PersonAvatar(id: member.uid, name: member.displayName, size: 40)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(member.displayName).font(.body.weight(.semibold)).lineLimit(1)
-                        HStack(spacing: 4) {
-                            if member.uid == workspace.uid { Text("teams_preview_you"); Text("·") }
-                            Text(TeamsText.role(member.role))
-                        }
-                        .font(.caption).foregroundStyle(.secondary)
+                        Text(verbatim: TeamsStreamLogic.joinedLine([member.uid == workspace.uid ? String(localized: "teams_preview_you") : nil, TeamsText.roleName(member.role)]))
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 8)
                     if member.uid != workspace.uid, friends.uid != nil {
                         if friends.friend(member.uid) != nil {
                             Text("friends_relation_friends").font(.caption).foregroundStyle(.secondary)
                         } else {
-                            Button("friends_add") { befriending = member }
+                            Button { befriending = member } label: { Text("friends_add").minimumHitTarget(minWidth: 0) }
                                 .buttonStyle(.bordered)
-                                .controlSize(.small)
                                 .accessibilityIdentifier("teams.member.addfriend.\(member.uid)")
                         }
                     }
@@ -244,7 +237,7 @@ struct TeamDetailsPage: View {
                                 ])
                             }
                         } label: {
-                            Image(systemName: "ellipsis.circle").font(.title3)
+                            Image(systemName: "ellipsis.circle").font(.title3).minimumHitTarget()
                         }
                         .accessibilityLabel(Text(verbatim: member.displayName))
                         .accessibilityIdentifier("teams.member.actions.\(member.uid)")
@@ -313,10 +306,10 @@ struct TeamDetailsPage: View {
                         UIPasteboard.general.string = link
                         copied = true
                     } label: {
-                        Label("teams_copy", systemImage: "doc.on.doc")
+                        Label("teams_copy", systemImage: "doc.on.doc").minimumHitTarget(minWidth: 0)
                     }
                     ShareLink(item: link) {
-                        Label("teams_invite_share", systemImage: "square.and.arrow.up")
+                        Label("teams_invite_share", systemImage: "square.and.arrow.up").minimumHitTarget(minWidth: 0)
                     }
                 }
                 .buttonStyle(.borderless)
@@ -336,8 +329,10 @@ struct TeamDetailsPage: View {
                     if invite.revoked {
                         Text("teams_revoked").font(.caption).foregroundStyle(.secondary)
                     } else {
-                        Button("teams_revoke", role: .destructive) {
-                            Task { await workspace.execute(["action": "revokeInvite", "teamId": team.id, "inviteId": invite.id]) }
+                        Button(role: .destructive) {
+                            confirmation = Confirmation(kind: .revoke, subject: "", input: ["action": "revokeInvite", "teamId": team.id, "inviteId": invite.id])
+                        } label: {
+                            Text("teams_revoke").minimumHitTarget(minWidth: 0)
                         }
                         .buttonStyle(.borderless)
                         .disabled(workspace.busy || !TeamRoles.canRevoke(viewerRole: team.role, inviteRole: invite.role))
@@ -359,7 +354,7 @@ struct TeamDetailsPage: View {
         } else {
             expiry = invite.expiresAt
         }
-        return "\(invite.uses)/\(invite.maxUses) · \(expiry)"
+        return TeamsStreamLogic.joinedLine(["\(invite.uses)/\(invite.maxUses)", expiry])
     }
 
     // MARK: Bots
@@ -370,6 +365,7 @@ struct TeamDetailsPage: View {
         let bots = model?.bots ?? []
         let status: LocalizedStringKey? = model?.botsUnverified == true ? "teams_bots_unverified" : model?.botsLoaded == true ? nil : "teams_bots_loading"
         let offline = model?.offline ?? true
+        let empty = bots.isEmpty && status == nil
         Section {
             TeamsNote(text: "teams_bots_note", systemImage: "info.circle")
             if let status { TeamsNote(text: status, systemImage: "exclamationmark.triangle") }
@@ -383,16 +379,21 @@ struct TeamDetailsPage: View {
                     onMessage: {
                         Task { if let id = await workspace.openBotDM(bot) { onOpenConversation(id) } }
                     },
-                    onPause: { pausing = bot },
-                    onList: TeamSharedListRules.canOpen(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: team.generation)) && !offline ? { listOf = bot } : nil)
+                    onStopSharing: { stopping = bot },
+                    onList: TeamSharedListRules.canOpen(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: team.generation)) && !offline ? { listOf = bot } : nil,
+                    onExample: { example in
+                        Task { if let id = await workspace.openBotDM(bot, example: example) { onOpenConversation(id) } }
+                    }, unverified: model?.botsUnverified == true)
             }
-            if bots.isEmpty && status == nil {
-                Text("teams_bots_none").font(.footnote).foregroundStyle(.secondary)
+            if empty {
+                // What is empty, and what to do about it (U9): the hint is the body here, so the footer leaves it out.
+                TeamsStateView(systemImage: "cpu", title: "teams_bots_none", message: "teams_bots_share_hint")
+                    .listRowSeparator(.hidden).listRowBackground(Color.clear)
             }
         } header: {
             Text("teams_bots_title")
         } footer: {
-            Text("teams_bots_share_hint")
+            if !empty { Text("teams_bots_share_hint") }
         }
         if !workspace.actionError.isEmpty {
             Section {
@@ -408,7 +409,7 @@ struct TeamDetailsPage: View {
         return id == workspace.uid ? strings.you : strings.member
     }
 
-    private func pause(_ bot: TeamBotCard) {
+    private func stopSharing(_ bot: TeamBotCard) {
         Task { await workspace.run { try await workspace.messaging?.pause(bot) } }
     }
 
@@ -429,22 +430,39 @@ struct TeamDetailsPage: View {
         }
     }
 
+    /// The title names the thing (U8): the team, the person, or for an invite, what is being revoked.
     private func question(_ pending: Confirmation) -> Text {
         switch pending.kind {
-        case .role, .remove: Text("teams_confirm_change")
-        case .owner: Text("teams_confirm_make_owner")
-        case .leave: Text("teams_confirm_leave")
-        case .delete: Text("teams_confirm_delete")
+        case .role: Text(pending.input["role"] as? String == "admin" ? "teams_confirm_promote_title \(pending.subject)" : "teams_confirm_demote_title \(pending.subject)")
+        case .owner: Text("teams_confirm_make_owner_title \(pending.subject)")
+        case .remove: Text("teams_confirm_remove_title \(pending.subject)")
+        case .leave: Text("teams_confirm_leave_title \(pending.subject)")
+        case .delete: Text("teams_confirm_delete_title \(pending.subject)")
+        case .revoke: Text("teams_confirm_revoke_title")
         }
     }
 
+    /// What the action does, in a sentence. Make owner's says what stays (the asker stays an admin, Bots and chats stay where they are).
+    private func body(_ pending: Confirmation) -> LocalizedStringKey? {
+        switch pending.kind {
+        case .role: pending.input["role"] as? String == "admin" ? "teams_confirm_promote_body" : "teams_confirm_demote_body"
+        case .owner: "teams_confirm_make_owner"
+        case .remove: "teams_confirm_remove_body"
+        case .leave: "teams_confirm_leave_body"
+        case .delete: "teams_confirm_delete_body"
+        case .revoke: "teams_confirm_revoke_body"
+        }
+    }
+
+    /// The verb of the button.
     private func confirmKey(_ pending: Confirmation) -> LocalizedStringKey {
         switch pending.kind {
-        case .role: LocalizedStringKey(pending.input["role"] as? String == "admin" ? "teams_promote" : "teams_demote")
+        case .role: pending.input["role"] as? String == "admin" ? "teams_confirm_promote_button" : "teams_confirm_demote_button"
         case .owner: "teams_make_owner"
-        case .remove: "teams_remove"
-        case .leave: "teams_leave"
-        case .delete: "teams_delete"
+        case .remove: "teams_confirm_remove_button"
+        case .leave: "teams_confirm_leave_button"
+        case .delete: "teams_confirm_delete_button"
+        case .revoke: "teams_confirm_revoke_button"
         }
     }
 

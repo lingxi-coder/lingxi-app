@@ -5,6 +5,7 @@ import { friendCollator, invitePicker, type LookupResult, type Proof } from './f
 import type { FriendsWorkspace } from './friends-workspace.js';
 import type { TeamMember, TeamSummary } from './index.js';
 import { Avatar, Dialog, type RenderAvatar } from './ui';
+import { intlTag, useTeamsText } from './i18n.js';
 
 /** Runs one lookup when the dialog opens. `undefined` while it runs. */
 function useLookup(workspace: FriendsWorkspace, proof: Proof): { result: LookupResult } | { error: string } | undefined {
@@ -25,8 +26,8 @@ function useLookup(workspace: FriendsWorkspace, proof: Proof): { result: LookupR
  * D8: a friend link was opened. It is looked up and the person is asked before anything is redeemed; the code is
  * dropped when the dialog closes, whatever came of it.
  */
-export function FriendLinkDialog({ workspace, zh, code, onClose }: { workspace: FriendsWorkspace; zh: boolean; code: string; onClose(): void }): ReactElement {
-  const t = (en: string, cn: string) => zh ? cn : en;
+export function FriendLinkDialog({ workspace, locale, code, onClose }: { workspace: FriendsWorkspace; locale: string; code: string; onClose(): void }): ReactElement {
+  const t = useTeamsText(locale);
   const proof: Proof = { kind: 'code', code };
   const found = useLookup(workspace, proof);
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
@@ -38,42 +39,97 @@ export function FriendLinkDialog({ workspace, zh, code, onClose }: { workspace: 
     setBusy(false);
     if ('error' in outcome) setError(outcome.error); else onClose();
   };
-  const cancel = <button type="button" data-autofocus onClick={onClose}>{t('Cancel', '取消')}</button>;
-  return <Dialog title={result && result.relation !== 'friends' ? t(`Add “${result.displayName}” as a friend?`, `将“${result.displayName}”添加为好友？`) : result ? result.displayName : t('Add friend', '添加好友')} onClose={onClose}>
+  const cancel = <button type="button" data-autofocus onClick={onClose}>{t('common_cancel')}</button>;
+  return <Dialog title={result && result.relation !== 'friends' ? t('friends_confirm_title_fmt', result.displayName) : result ? result.displayName : t('friends_add')} onClose={onClose}>
     <div className="tw-form">
-      {!found ? <p className="tw-hint" role="status">{t('Loading…', '正在加载…')}</p>
+      {!found ? <p className="tw-hint" role="status">{t('teams_loading')}</p>
         : 'error' in found ? <>
-          <p role="alert" className="tw-error">{found.error === 'NOT_FOUND' ? t('This friend link no longer works. Ask them for a new one.', '此好友链接已失效，请向对方索取新链接。') : friendsErrorText(found.error, zh)}</p>
+          <p role="alert" className="tw-error">{found.error === 'NOT_FOUND' ? t('friends_link_invalid') : friendsErrorText(found.error, locale)}</p>
           <div className="tw-dialog-actions">{cancel}</div>
         </>
         : result!.relation === 'friends' ? <>
-          <p>{t('Already friends', '已是好友')}</p>
-          <div className="tw-dialog-actions">{cancel}<button type="button" className="tw-primary" onClick={() => { workspace.openChat(result!.uid); onClose(); }}>{t('Open chat', '打开聊天')}</button></div>
+          <p>{t('friends_relation_friends')}</p>
+          <div className="tw-dialog-actions">{cancel}<button type="button" className="tw-primary" onClick={() => { workspace.openChat(result!.uid); onClose(); }}>{t('friends_open_chat')}</button></div>
         </> : <>
-          <p>{t('You opened a friend link. Adding them makes you friends right away.', '你正在打开好友链接。添加后会立即成为好友。')}</p>
-          {error ? <p role="alert" className="tw-error">{friendsErrorText(error, zh)}</p> : null}
-          <div className="tw-dialog-actions">{cancel}<button type="button" className="tw-primary" disabled={busy} onClick={() => void confirm()}>{t('Add friend', '添加好友')}</button></div>
+          <p>{t('friends_confirm_link_body')}</p>
+          {error ? <p role="alert" className="tw-error">{friendsErrorText(error, locale)}</p> : null}
+          <div className="tw-dialog-actions">{cancel}<button type="button" className="tw-primary" disabled={busy} onClick={() => void confirm()}>{t('friends_add')}</button></div>
         </>}
     </div>
   </Dialog>;
 }
 
 /** D15: Add friend on a Team member. The result card is the one of the Add friend page; a member who is already a friend says so. */
-export function MemberFriendDialog({ workspace, zh, teamId, member, renderAvatar, onClose }: {
-  workspace: FriendsWorkspace; zh: boolean; teamId: string; member: Pick<TeamMember, 'uid' | 'displayName'>; renderAvatar?: RenderAvatar; onClose(): void;
+export function MemberFriendDialog({ workspace, locale, teamId, member, renderAvatar, onClose }: {
+  workspace: FriendsWorkspace; locale: string; teamId: string; member: Pick<TeamMember, 'uid' | 'displayName'>; renderAvatar?: RenderAvatar; onClose(): void;
 }): ReactElement {
-  const t = (en: string, cn: string) => zh ? cn : en;
+  const t = useTeamsText(locale);
   const proof: Proof = { kind: 'team', teamId, uid: member.uid };
   const found = useLookup(workspace, proof);
   const [done, setDone] = useState('');
-  return <Dialog title={t('Add friend', '添加好友')} onClose={onClose}>
+  return <Dialog title={t('friends_add')} onClose={onClose}>
     <div className="tw-form">
       {done ? <p role="status">{done}</p>
-        : !found ? <p className="tw-hint" role="status">{t('Loading…', '正在加载…')}</p>
-        : 'error' in found ? <p role="alert" className="tw-error">{friendsErrorText(found.error, zh)}</p>
-        : <LookupCard workspace={workspace} zh={zh} proof={proof} result={found.result} renderAvatar={renderAvatar}
-          onDone={outcome => outcome ? setDone(outcome.done === 'sent' ? requestSentTo(outcome.name, zh) : nowFriends(outcome.name, zh)) : onClose()} />}
-      <div className="tw-dialog-actions"><button type="button" data-autofocus={done ? '' : undefined} onClick={onClose}>{done ? t('Close', '关闭') : t('Cancel', '取消')}</button></div>
+        : !found ? <p className="tw-hint" role="status">{t('teams_loading')}</p>
+        : 'error' in found ? <p role="alert" className="tw-error">{friendsErrorText(found.error, locale)}</p>
+        : <LookupCard workspace={workspace} locale={locale} proof={proof} result={found.result} renderAvatar={renderAvatar}
+          onDone={outcome => outcome ? setDone(outcome.done === 'sent' ? requestSentTo(outcome.name, locale) : nowFriends(outcome.name, locale)) : onClose()} />}
+      <div className="tw-dialog-actions"><button type="button" data-autofocus={done ? '' : undefined} onClick={onClose}>{done ? t('common_close') : t('common_cancel')}</button></div>
+    </div>
+  </Dialog>;
+}
+
+/**
+ * D10: a friend's profile, from the chat's menu or from the friend's row: the picture, the username and since when the two are friends.
+ * The friend's profile is read again while it is open, so a name or username that changed shows up in this session.
+ */
+export function FriendProfileDialog({ workspace, uid, name, handle, since, locale, renderAvatar, onClose }: {
+  workspace: FriendsWorkspace; uid: string; name: string; handle?: string; since?: number; locale: string; renderAvatar?: RenderAvatar; onClose(): void;
+}): ReactElement {
+  const t = useTeamsText(locale);
+  useEffect(() => { void workspace.refreshFriend(uid); }, [workspace, uid]);
+  const date = since ? new Intl.DateTimeFormat(intlTag(locale), { dateStyle: 'medium' }).format(since) : '';
+  return <Dialog title={name} onClose={onClose}>
+    <div className="tw-form">
+      <div className="tw-profile">
+        <Avatar identity={{ kind: 'user', id: uid, name }} size={56} render={renderAvatar} />
+        <div className="tw-person-text">
+          {handle ? <p>@{handle}</p> : null}
+          {date ? <p className="tw-hint">{t('friends_since_fmt', date)}</p> : null}
+        </div>
+      </div>
+      <div className="tw-dialog-actions"><button type="button" data-autofocus onClick={onClose}>{t('common_close')}</button></div>
+    </div>
+  </Dialog>;
+}
+
+/**
+ * D10: Remove friend and Block ask once. The title names the person, the body says what follows, Cancel is always there and the
+ * confirming button is the danger one. A failure is shown under the body and the dialog stays; success closes it.
+ */
+export function FriendLeaveDialog({ workspace, locale, uid, name, action, onClose }: {
+  workspace: FriendsWorkspace; locale: string; uid: string; name: string; action: 'remove' | 'block'; onClose(): void;
+}): ReactElement {
+  const t = useTeamsText(locale);
+  const [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const leave = async () => {
+    setBusy(true); setError('');
+    const code = await workspace.leave(uid, action);
+    setBusy(false); setError(code);
+    if (!code) onClose();
+  };
+  const remove = action === 'remove';
+  return <Dialog role="alertdialog" title={remove ? t('friends_remove_title_fmt', name) : t('friends_block_title_fmt', name)}
+    description={remove
+      ? t('friends_remove_body')
+      : t('friends_block_body')}
+    onClose={onClose}>
+    <div className="tw-form">
+      {error ? <p role="alert" className="tw-error">{friendsErrorText(error, locale)}</p> : null}
+      <div className="tw-dialog-actions">
+        <button type="button" data-autofocus onClick={onClose}>{t('common_cancel')}</button>
+        <button type="button" className="tw-danger-btn" disabled={busy} onClick={() => void leave()}>{remove ? t('friends_menu_remove') : t('friends_menu_block')}</button>
+      </div>
     </div>
   </Dialog>;
 }
@@ -83,15 +139,15 @@ export function MemberFriendDialog({ workspace, zh, teamId, member, renderAvatar
  * sends an offer for that row and the row then says `Invited` until the dialog closes. Closing reports the names invited, for the
  * one-shot {@link InviteNotice}: nothing is stored, because the sender cannot read offers.
  */
-export function InviteFriendsDialog({ workspace, zh, team, members, locale, renderAvatar, refreshMembers, onClose }: {
-  workspace: FriendsWorkspace; zh: boolean; team: Pick<TeamSummary, 'id' | 'name'>; members: readonly Pick<TeamMember, 'uid'>[]; locale?: string; renderAvatar?: RenderAvatar;
+export function InviteFriendsDialog({ workspace, team, members, locale, renderAvatar, refreshMembers, onClose }: {
+  workspace: FriendsWorkspace; team: Pick<TeamSummary, 'id' | 'name'>; members: readonly Pick<TeamMember, 'uid'>[]; locale: string; renderAvatar?: RenderAvatar;
   /** A friend turned out to be a member already (`ALREADY_MEMBER`): the team's member list is stale. */
   refreshMembers(): void;
   onClose(invited: string[]): void;
 }): ReactElement {
-  const t = (en: string, cn: string) => zh ? cn : en;
+  const t = useTeamsText(locale);
   const snapshot = useSyncExternalStore(workspace.subscribe, workspace.getSnapshot);
-  const tag = locale ?? (zh ? 'zh-CN' : 'en-US');
+  const tag = intlTag(locale);
   const collator = useMemo(() => friendCollator(tag), [tag]);
   const [query, setQuery] = useState('');
   const [busy, setBusy] = useState<string[]>([]);
@@ -111,48 +167,51 @@ export function InviteFriendsDialog({ workspace, zh, team, members, locale, rend
     }
   };
   const close = () => onClose(sent.map(value => value.name));
-  return <Dialog title={t(`Invite friends to “${team.name}”`, `邀请好友加入“${team.name}”`)} onClose={close}>
+  return <Dialog title={t('friends_invite_title_fmt', team.name)} onClose={close}>
     <div className="tw-form">
-      <input type="search" data-autofocus className="tw-friends-filter" aria-label={t('Search friends', '搜索好友')} placeholder={t('Search friends', '搜索好友')}
+      <input type="search" data-autofocus className="tw-friends-filter" aria-label={t('friends_filter_placeholder')} placeholder={t('friends_filter_placeholder')}
         value={query} onChange={event => setQuery(event.target.value)} />
-      {snapshot.loading ? <p className="tw-hint" role="status">{t('Loading friends…', '正在加载好友…')}</p>
+      {snapshot.loading ? <p className="tw-hint" role="status">{t('friends_loading')}</p>
         : snapshot.loadError ? <div className="tw-empty-actions">
-          <p role="alert" className="tw-error">{t("Couldn't load your friends. Check your connection and try again.", '无法加载好友，请检查网络后重试。')}</p>
-          <button type="button" onClick={workspace.retry}>{t('Retry', '重试')}</button>
+          <p role="alert" className="tw-error">{t('friends_load_error')}</p>
+          <button type="button" onClick={workspace.retry}>{t('common_retry')}</button>
         </div>
-        : !list.length ? <p className="tw-hint" role="status">{query.trim() ? t('No matching friends', '没有匹配的好友') : t('No friends to invite. Friends who are already in this team are not listed.', '没有可邀请的好友。已在此团队中的好友不会显示。')}</p>
-        : <ul className="tw-people tw-invite-picker" aria-label={t('Friends', '好友')}>
+        : !list.length ? <p className="tw-hint" role="status">{query.trim() ? t('friends_filter_empty') : t('friends_invite_empty')}</p>
+        : <ul className="tw-people tw-invite-picker" aria-label={t('friends_title')}>
           {list.map(card => {
             const done = sent.some(value => value.uid === card.uid), running = busy.includes(card.uid);
             return <li key={card.uid} aria-busy={running}>
-              <Avatar identity={{ kind: 'user', id: card.uid, name: card.displayName }} size={32} render={renderAvatar} />
+              <Avatar identity={{ kind: 'user', id: card.uid, name: card.displayName }} size={40} render={renderAvatar} />
               <div className="tw-person-text">
                 <b>{card.displayName}</b>
                 {card.handle ? <small>@{card.handle}</small> : null}
-                {failed?.uid === card.uid ? <small role="alert" className="tw-error">{offerErrorText('offerTeam', failed.code, zh)}</small> : null}
+                {failed?.uid === card.uid ? <small role="alert" className="tw-error">{offerErrorText('offerTeam', failed.code, locale)}</small> : null}
               </div>
               <div className="tw-person-actions">
-                <button type="button" disabled={running || done} onClick={() => void invite(card.uid, card.displayName)}>{done ? t('Invited', '已邀请') : t('Invite', '邀请')}</button>
+                <button type="button" disabled={running || done} onClick={() => void invite(card.uid, card.displayName)}>{done ? t('friends_invite_sent') : t('friends_invite_send')}</button>
               </div>
             </li>;
           })}
         </ul>}
-      {failed && !list.some(card => card.uid === failed.uid) ? <p role="alert" className="tw-error">{offerErrorText('offerTeam', failed.code, zh)}</p> : null}
-      <p className="tw-hint">{t('Your friend gets an invitation they can accept or decline. They see the team’s name and your name, and nothing else is shared until they join. Invitations expire after 7 days.', '好友会收到一份可接受或拒绝的邀请，只会看到团队名称和你的名称，加入之前不会共享其他任何内容。邀请 7 天后过期。')}</p>
-      <div className="tw-dialog-actions"><button type="button" onClick={close}>{t('Close', '关闭')}</button></div>
+      {failed && !list.some(card => card.uid === failed.uid) ? <p role="alert" className="tw-error">{offerErrorText('offerTeam', failed.code, locale)}</p> : null}
+      <p className="tw-hint">{t('friends_invite_disclosure')}</p>
+      <div className="tw-dialog-actions"><button type="button" onClick={close}>{t('common_close')}</button></div>
     </div>
   </Dialog>;
 }
 
-/** D26: what the person invited, once, after the picker closed. It goes away by itself, like the other notices of the Friends views. */
-export function InviteNotice({ names, zh, onDone }: { names: string[]; zh: boolean; onDone(): void }): ReactElement {
-  const t = (en: string, cn: string) => zh ? cn : en;
+/**
+ * D26: what the person invited, once, after the picker closed. It goes away by itself, like the other notices of the Friends views.
+ * The host mounts it outside any workspace view, so it is a scope of its own (the banner reads the scope's colors).
+ */
+export function InviteNotice({ names, locale, onDone }: { names: string[]; locale: string; onDone(): void }): ReactElement {
+  const t = useTeamsText(locale);
   const done = useRef(onDone);
   done.current = onDone;
   useEffect(() => {
     const timer = setTimeout(() => done.current(), 6000);
     return () => clearTimeout(timer);
   }, [names]);
-  const who = names.join(zh ? '、' : ', ');
-  return <p className="tw-banner" role="status">{t(`Invitation sent to ${who}`, `已向 ${who} 发送邀请`)}</p>;
+  const who = names.join(t('tw_list_separator'));
+  return <p className="tw-scope tw-banner" role="status">{t('friends_invite_sent_to_fmt', who)}</p>;
 }

@@ -239,6 +239,7 @@ export class TeamMessaging {
       : { action: 'create', ...this.scope, conversationId, kind, title, participantUids: [...participantUids] };
     await this.commit(old => { if (old.creation) throw new Error('CREATION_PENDING'); return { ...old, creation: { command } }; });
     this.select(conversationId); await this.refresh();
+    return conversationId;
   }
   /** `attachments`: checked uploads of this sender for the open conversation. A new message may be files alone. */
   async queue(operation: MessageMutation['operation'], text: string, messageId: string = crypto.randomUUID(), replyTo?: string, targets: string[] = [], attachments: string[] = []) {

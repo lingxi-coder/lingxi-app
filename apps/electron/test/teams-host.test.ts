@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { TeamsApiError } from '../../../packages/teams';
 import { TeamsService, type TeamAccountContext } from '../src/main/teams/service';
-import { TeamConnector, DELIVERY_SKEW_MS, type TeamHostApi } from '../src/main/teams/connector';
+import { TeamConnector, DELIVERY_SKEW_MS, grantPermit, type TeamHostApi } from '../src/main/teams/connector';
 import { TeamPrivateStore, digest, type TeamModelRoute, type TeamPersonaSnapshot } from '../src/main/teams/privateStore';
 import { runTeamHost, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult } from '../src/main/teams/process';
 import { botFixture } from './bot-helpers';
@@ -18,6 +18,8 @@ const tick=()=>new Promise<void>(resolve=>setImmediate(resolve));
 const cursor={scope:null,sessionRevision:0,lastMessageSeq:0,lastChangeSeq:0,bootstrapFromSeq:0};
 function route():TeamModelRoute{return {model_provider:'anthropic',model_protocol:'anthropic_messages',model_id:'synthetic',model_endpoint:'https://api.anthropic.com',credential_id:'anthropic',model_profile:{profile_name:'anthropic'}};}
 function accounts(){return {providerAccountHome:'/synthetic',providerAccounts:{storeScope:'fixture',configRevision:1,accounts:[],health:[]},providerAccountCredentials:{}};}
+const commandPermit=(command:any,epoch:number)=>grantPermit(command.serviceId?'service':'team',command.serviceId??command.teamId,command.payload.deploymentId,command.payload.taskId,epoch,command.payload.permitNonce);
+const permit=(f:{mock:{commands:any[]}},epoch:number)=>commandPermit(f.mock.commands.find(c=>epoch===1?c.action==='startTask':c.action==='continueTask'&&c.payload.expectedEpoch===epoch-1),epoch);
 function snapshot():TeamPersonaSnapshot{const text='Only the published role';return {...route(),instructions:text,provider_account_profiles:[route().model_profile],documents:[{resourceId:'resource001',revision:1,kind:'persona',name:'Role',text,digest:digest(text)}]};}
 function fakeService(){
  const events=new EventEmitter();let context:TeamAccountContext|undefined={uid:'owner',epoch:0};const commands:any[]=[],tasks:any[]=[],reads:any[]=[],cards:any[]=[];let deployment:any,inputs:any[]=[];const publicationReceipts=new Map<string,any>();
@@ -27,7 +29,10 @@ function fakeService(){
  else if(command.action==='listSharedBots')result={bots:cards};
  else if(command.action==='activateDeployment'){assert.equal(p.expectedAccountEpoch,deployment.accountEpoch);deployment.accountEpoch=p.newAccountEpoch;}
  else if(command.action==='listHostTasks')result={tasks:tasks.filter(t=>t.state==='queued')};
- else if(command.action==='prepareTask'||command.action==='validateTask'||command.action==='startTask'){const task=tasks.find(t=>t.taskId===p.taskId);result={task:{...task},messageId:task.messageId,messageSeq:task.messageSeq,inputs,deployment};if(command.action==='startTask'){task.state='running';result={...result,task:{...task},execute:true,permitId:'permit00001'};}}
+ else if(command.action==='getTask')result={...tasks.find(t=>t.taskId===p.taskId)};
+ else if(command.action==='prepareTask'||command.action==='validateTask'||command.action==='startTask'){const task=tasks.find(t=>t.taskId===p.taskId);
+  if(command.action==='validateTask'&&(task.state==='queued'||task._permit&&task._permit!==p.permitId))throw new TeamsApiError('EXECUTION_PERMIT_REQUIRED',403);
+  result={task:{...task},messageId:task.messageId,messageSeq:task.messageSeq,inputs,deployment};if(command.action==='startTask'){if(task.state==='running')return {execute:false,taskId:task.taskId} as T;task.state='running';task.epoch=1;task._permit=commandPermit(command,1);result={...result,task:{...task},execute:true,permitId:task._permit};}}
  else if(command.action==='completeTask'){const task=tasks.find(t=>t.taskId===p.taskId);if(task)task.state='completed';}
  return result as T;},
  hostReadChat:async(_c,request)=>{reads.push(request);if(request.mode==='changes')return {messages:[],lastSeq:1000,lastChangeSeq:1000,hasMore:false};const through=request.mode==='recent'?request.throughSeq:request.mode==='range'?request.toSeqInclusive:1;const from=request.mode==='recent'?Math.max(0,through-200):request.mode==='range'?request.fromSeqExclusive:0;
@@ -45,6 +50,58 @@ async function savedExecution(f:{privateStore:TeamPrivateStore},fields:{scope:an
  const batch=await f.privateStore.dataRef('owner',{batch:fields.taskId});return {schemaVersion:2 as const,generation:1,epoch:1,messageSeq:1,lastChangeSeq:1000,batch,ask:false,dispatched:0,recoveries:0,...fields};
 }
 async function settle(check:()=>boolean){for(let i=0;i<150;i++){if(check())return;await new Promise(r=>setTimeout(r,5));}assert.ok(check(),'condition settled');}
+
+test('local Bot capabilities follow the actual selected or default route without model or provider requests',async t=>{
+ const selected:string[]=[],providerCalls:string[]=[];
+ const f=fixture(t,async()=>{providerCalls.push('run');throw Error('UNEXPECTED_MODEL_REQUEST');},{defaultModel:()=> 'default/chat',modelRoute:async model=>{
+  selected.push(model);if(model==='missing/route')throw Error('MODEL_ROUTE_REQUIRED');
+  return {route:{...route(),model_protocol:model==='default/chat'||model==='supported/chat'?'open_ai_chat':model==='invalid/route'?'???':model==='future/protocol'?'future_protocol':'anthropic_messages'},profiles:[route().model_profile],assertCurrent:async()=>{providerCalls.push('assertCurrent');}};
+ },modelAccounts:async()=>{providerCalls.push('accounts');return accounts();},validateModel:async()=>{providerCalls.push('validate');},binaries:()=>{providerCalls.push('binaries');return {host:'/mock/host',worker:'/mock/worker'};}});
+ const supported=f.store.create({name:'Supported',model:'supported/chat'}),missing=f.store.create({name:'Missing',model:'missing/route'}),invalid=f.store.create({name:'Invalid',model:'invalid/route'}),future=f.store.create({name:'Future',model:'future/protocol'}),byDefault=f.store.create({name:'Default'});
+ const bots=await f.connector.localBots('owner'),capabilities=(instanceId:string)=>bots.find(bot=>bot.instanceId===instanceId)!.capabilities;
+ assert.deepEqual(capabilities(supported.bot_id),{durableWait:true,writeOperations:true});assert.deepEqual(capabilities(byDefault.bot_id),{durableWait:true,writeOperations:true});
+ assert.deepEqual(capabilities(f.bot.bot_id),{durableWait:false,writeOperations:false});assert.deepEqual(capabilities(future.bot_id),{durableWait:false,writeOperations:false});
+ assert.equal(capabilities(missing.bot_id),undefined);assert.equal(capabilities(invalid.bot_id),undefined);
+ assert.deepEqual(selected.sort(),['anthropic/synthetic','default/chat','future/protocol','invalid/route','missing/route','supported/chat']);assert.deepEqual(providerCalls,[]);assert.deepEqual(f.mock.commands,[]);
+ const noDefault=fixture(t);const unselected=noDefault.store.create({name:'No model'});assert.equal((await noDefault.connector.localBots('owner')).find(bot=>bot.instanceId===unselected.bot_id)!.capabilities,undefined);
+ // The directory is a preflight projection; normal read-only publication keeps its existing protocol range.
+ await f.connector.publishLocalBot('owner',f.input);assert.deepEqual(f.mock.commands.find(command=>command.action==='publishSharedBot').payload.deployment.capabilities,{durableWait:false,writeOperations:false,delegation:false});
+});
+test('local market Bots expose at most three examples from the verified manifest and never private Bot text',async t=>{
+ const f=fixture(t),examples=[' First market example ','Second market example','Third market example','Fourth market example'];
+ writeFileSync(join(f.store.botDir(f.bot.bot_id),'market-package.json'),'not a manifest');
+ const manifest={schema:1,kind:'bot',name:'Market helper',version:'1.0.0',license:'MIT',licenseFile:'LICENSE',entry:'LINGXI.md',skills:[],
+  resources:[{id:'notes',binding:'installer',required:true}],capabilities:[],runtime:{minimumBotPackageVersion:1,requiresTeamExecutionVersion:2,hostingTargets:['macos'],memberClients:['desktop']},examples,
+  files:['LINGXI.md','LICENSE'].map(path=>({path,sizeBytes:10,sha256:digest(path)}))};
+ const installed=f.store.createFromMarket({name:'Market helper',persona:'PRIVATE_MARKET_PERSONA'},
+  {market:'https://market.example',accountId:'account1',listingId:'listing1',releaseId:'release1',digest:digest('release'),installIntent:digest('install')},
+  bot=>writeFileSync(join(f.store.botDir(bot.bot_id),'market-package.json'),JSON.stringify(manifest)));
+ const bots=await f.connector.localBots('owner'),market=bots.find(bot=>bot.instanceId===installed.bot_id)!;
+ assert.deepEqual(market.examples,examples.slice(0,3).map(example=>example.trim()));assert.deepEqual(market.requiredResources,['notes']);
+ assert.equal(bots.find(bot=>bot.instanceId===f.bot.bot_id)!.examples,undefined);assert.doesNotMatch(JSON.stringify(bots),/PRIVATE_ROLE_NOT_SHARED|PRIVATE_MARKET_PERSONA|Fourth market example/);
+ writeFileSync(join(f.store.botDir(installed.bot_id),'market-package.json'),JSON.stringify({...manifest,kind:'unsupported'}));
+ await assert.rejects(f.connector.localBots('owner'),/Unsupported Bot package/);
+});
+test('publication examples validate UTF-8 bounds, survive a lost ACK with the same identity, and stay out of model instructions',async t=>{
+ let probes=0;const f=fixture(t,undefined,{validateModel:async(_context,snapshot)=>{probes++;assert.equal(snapshot.instructions,'Explicit published role');assert.doesNotMatch(JSON.stringify(snapshot),/MEMBER_EXAMPLE/);}});
+ for(const examples of [null,'text',[' '],[42],new Array(1),['a','b','c','d'],['界'.repeat(667)],['a\0b']])
+  await assert.rejects(f.connector.publishLocalBot('owner',{...f.input,examples} as any),/INVALID_INPUT/);
+ assert.equal(probes,0);assert.equal(f.mock.commands.some(command=>command.action==='publishSharedBot'),false);
+ const input={...f.input,examples:['  MEMBER_EXAMPLE  ','界'.repeat(666)+'ab']};loseOnce(f,'publishSharedBot');
+ await assert.rejects(f.connector.publishLocalBot('owner',input),/SERVICE_UNAVAILABLE/);
+ await assert.rejects(f.connector.publishLocalBot('owner',{...input,examples:['A changed example']}),/COMMAND_ID_CONFLICT/);
+ assert.deepEqual(await f.connector.publishLocalBot('owner',input),{sharedBotId,revision:1});
+ const sent=f.mock.commands.filter(command=>command.action==='publishSharedBot');assert.ok(sent.length>=2);for(const command of sent)assert.deepEqual(command,sent[0]);
+ assert.deepEqual(sent[0].payload.examples,['MEMBER_EXAMPLE','界'.repeat(666)+'ab']);assert.equal(probes,1);
+ const pending=await f.privateStore.publication('owner',input.publicationId);assert.equal(pending!.requestDigest,digest(JSON.stringify(input)));assert.deepEqual(pending!.payload.examples,sent[0].payload.examples);
+ const binding=(await f.privateStore.bindings('owner'))[0]!;assert.equal((await f.privateStore.snapshot('owner',binding.snapshot)).instructions,f.input.role);
+ await f.connector.publishLocalBot('owner',{...f.input,publicationId:'publication002',expectedRevision:1,examples:['Maintainer confirmed example']});
+ assert.deepEqual(f.mock.commands.filter(command=>command.action==='publishSharedBot').at(-1).payload.examples,['Maintainer confirmed example']);
+ await f.connector.publishLocalBot('owner',{...f.input,publicationId:'publication003',expectedRevision:2,examples:[]});
+ assert.deepEqual(f.mock.commands.filter(command=>command.action==='publishSharedBot').at(-1).payload.examples,[]);
+ await f.connector.publishLocalBot('owner',{...f.input,publicationId:'publication004',expectedRevision:3});
+ assert.deepEqual(f.mock.commands.filter(command=>command.action==='publishSharedBot').at(-1).payload.examples,[],'an omitted selection never reintroduces market defaults');
+});
 
 test('execution storage never reads retired host or writes personal definitions',async t=>{
  const f=fixture(t);mkdirSync(join(f.userData,'team-bot-host'));writeFileSync(join(f.userData,'team-bot-host','sentinel'),'old');const before=readFileSync(f.store.recordPath(f.bot.bot_id),'utf8');
@@ -86,7 +143,21 @@ test('all Bots read the service data session, including current ACL and account 
 });
 test('public message boundary rejects retired execution and private host commands',async()=>{
  const service=new TeamsService({snapshot:()=>({user:{uid:'owner'}}),getIdToken:async()=>'',onChanged:()=>()=>{}},{});
- for(const action of ['bindBot','claimBot','startBot','finishBot','botQueue','prepareTask','startTask','heartbeatDeployment'])await assert.rejects(service.messages({teamId,generation:1,action} as any,'owner'),/INVALID_INPUT/);service.close();
+ for(const action of ['bindBot','claimBot','startBot','finishBot','botQueue','publishSharedBot','prepareTask','validateTask','startTask','completeTask','pauseTask','continueTask','heartbeatDeployment','activateDeployment','listHostTasks',
+  'readTaskList','recordOperation','writeTaskList','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer'])await assert.rejects(service.messages({schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload:{}} as any,'owner'),/INVALID_INPUT/);service.close();
+});
+test('the real private TeamsService forwards every connector command while rejecting unknown actions and stale accounts',async t=>{
+ let uid='owner',epoch=0,notify=()=>{},requests=0;const service=new TeamsService({snapshot:()=>({user:{uid}}),sessionEpoch:()=>epoch,getIdToken:async()=>'synthetic-token',onChanged:cb=>{notify=cb;return()=>{};}},{});t.after(()=>service.close());
+ (service as any).connect=async()=>({db:{}});(service as any).sdk={collection:()=>({}),onSnapshot:()=>()=>{}};
+ const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});let sent:any,moveAccount=false;
+ globalThis.fetch=(async(_url,init)=>{requests++;sent=JSON.parse(String(init?.body));if(moveAccount){uid='other';epoch++;notify();}return new Response(JSON.stringify({forwarded:true}),{status:200});}) as typeof fetch;
+ const context=service.hostContext()!,actions=['listSharedBots','publishSharedBot','heartbeatDeployment','activateDeployment','listHostTasks','prepareTask','validateTask','startTask','completeTask','pauseTask','continueTask','getTask',
+  'readTaskList','recordOperation','writeTaskList','readAttachmentPart','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer'];
+ for(const action of actions){const command={schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload:{synthetic:'preserved'}};assert.deepEqual(await service.hostMessages(context,command),{forwarded:true},action);assert.deepEqual(sent,command);}
+ assert.equal(requests,actions.length);for(const action of ['submit','answerWait','decideWait','cancelTask','writeList','setCustomClaim','unknown'])await assert.rejects(service.hostMessages(context,{schemaVersion:1,action}),/INVALID_INPUT/);
+ await assert.rejects(service.hostMessages(context,{schemaVersion:2,action:'readTaskList'}),/INVALID_INPUT/);assert.equal(requests,actions.length);
+ moveAccount=true;await assert.rejects(service.hostMessages(context,{schemaVersion:1,commandId:'command002',teamId,generation:1,action:'readTaskList',payload:{}}),/INVALID_SESSION/);
+ const before=requests;await assert.rejects(service.hostMessages(context,{schemaVersion:1,action:'readTaskList'}),/INVALID_SESSION/);assert.equal(requests,before);
 });
 test('scheduler is bounded at four and serializes the same Bot Chat',async t=>{
  const runs:TeamHostProcessOptions[]=[];const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};runs.push(o);return new Promise<TeamHostResult>((_resolve,reject)=>o.signal.addEventListener('abort',()=>reject(Error('abort')),{once:true}));});
@@ -350,7 +421,7 @@ test('a revoke while startTask is pending still saves the execution and delivers
  f.mock.service.hostMessages=async(c,command)=>{if(command.action==='startTask'){entered=true;await gate;}return original(c,command);};
  f.mock.tasks.push(queued());f.mock.wake();await settle(()=>entered);f.connector.revoke();release();
  await settle(()=>completions(f).length===1);await f.connector.idle();
- assert.equal(modelRuns,0);assert.equal(completions(f)[0].payload.outcome,'failed');assert.equal(completions(f)[0].payload.permitId,'permit00001');assert.equal(f.mock.commands.filter(c=>c.action==='startTask').length,1);assert.deepEqual(await pendingFiles(f),[0,0]);
+ assert.equal(modelRuns,0);assert.equal(completions(f)[0].payload.outcome,'failed');assert.equal(completions(f)[0].payload.permitId,permit(f,1));assert.equal(f.mock.commands.filter(c=>c.action==='startTask').length,1);assert.deepEqual(await pendingFiles(f),[0,0]);
 });
 test('an account change while startTask is pending keeps the permit in the sending account and delivers its failed result when that account returns',async t=>{
  let modelRuns=0;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};modelRuns++;return {status:'completed',cursor,text:'Must not run',finishedAt:Date.now()};});
@@ -363,19 +434,19 @@ test('an account change while startTask is pending keeps the permit in the sendi
  await new Promise(r=>setTimeout(r,80));await f.connector.idle();
  assert.equal(modelRuns,0);assert.equal(completions(f).length,0);assert.equal(f.mock.commands.filter(c=>c.action==='startTask').length,1);
  assert.deepEqual([(await f.privateStore.deliveries('other')).length,(await f.privateStore.executions('other')).length],[0,0]);
- const [delivery]=await f.privateStore.deliveries('owner');assert.equal(delivery!.payload.outcome,'failed');assert.equal(delivery!.payload.permitId,'permit00001');assert.equal((await f.privateStore.executions('owner')).length,1);
+ const [delivery]=await f.privateStore.deliveries('owner');assert.equal(delivery!.payload.outcome,'failed');assert.equal(delivery!.payload.permitId,permit(f,1));assert.equal((await f.privateStore.executions('owner')).length,1);
  // The sending account signs back in: the failed result ends the task without another start or a model run.
  f.mock.switch('owner',2);await settle(()=>completions(f).length===1);await f.connector.idle();
- assert.equal(completions(f)[0].payload.outcome,'failed');assert.equal(completions(f)[0].payload.permitId,'permit00001');assert.equal(modelRuns,0);assert.equal(f.mock.commands.filter(c=>c.action==='startTask').length,1);
+ assert.equal(completions(f)[0].payload.outcome,'failed');assert.equal(completions(f)[0].payload.permitId,permit(f,1));assert.equal(modelRuns,0);assert.equal(f.mock.commands.filter(c=>c.action==='startTask').length,1);
  assert.deepEqual(await pendingFiles(f),[0,0]);assert.deepEqual([(await f.privateStore.deliveries('other')).length,(await f.privateStore.executions('other')).length],[0,0]);
 });
-test('an account change while startTask is pending and denied writes nothing and does not defer the task for the returning account',async t=>{
+test('an account change retains the unresolved grant intent only in its owner until a fenced retry',async t=>{
  const f=fixture(t);(f.connector as any).options.retryMs=60000;await f.connector.publishLocalBot('owner',f.input);
  const original=f.mock.service.hostMessages.bind(f.mock.service);let entered=false,release=()=>{},starts=0;const gate=new Promise<void>(resolve=>{release=resolve;});
  f.mock.service.hostMessages=async(c,command)=>{if(command.action==='startTask'){starts++;if(starts===1){entered=true;await gate;return {execute:false,taskId:'task00001'} as any;}}return original(c,command);};
  f.mock.tasks.push(queued());f.mock.wake();await settle(()=>entered);
  f.mock.switch();f.connector.revoke();release();await new Promise(r=>setTimeout(r,40));await f.connector.idle();
- assert.deepEqual(await pendingFiles(f),[0,0]);assert.deepEqual([(await f.privateStore.deliveries('other')).length,(await f.privateStore.executions('other')).length],[0,0]);
+ assert.deepEqual(await pendingFiles(f),[0,1]);assert.deepEqual([(await f.privateStore.deliveries('other')).length,(await f.privateStore.executions('other')).length],[0,0]);
  f.mock.switch('owner',2);await settle(()=>completions(f).length===1);assert.equal(starts,2);
 });
 test('the service hands a start permit back after an account reset mid-request, and discards every other late answer',async t=>{
@@ -537,13 +608,13 @@ test('a worker frame stops waiting to retry as soon as the run is aborted',async
 // M2: questions, answers, recovery and cancellation.
 const chatRoute=():TeamModelRoute=>({...route(),model_provider:'deepseek',model_protocol:'open_ai_chat',model_endpoint:'https://api.deepseek.com',credential_id:'deepseek',model_profile:{profile_name:'deepseek'}});
 const checkpointDigest='c'.repeat(64),waitId=`wait_${'a'.repeat(40)}`,theWait={waitId,kind:'human_input' as const,logicalStepId:'task00001/t0/c0',question:'Which city?',requestDigest:'d'.repeat(64)};
-const checkpoint=(fields:Record<string,unknown>={})=>({status:'task_checkpoint' as const,taskId:'task00001',phase:'in_flight' as const,attempts:1,dispatchesObserved:1,continuable:true,checkpointDigest,...fields});
+const checkpoint=(fields:Record<string,unknown>={})=>({status:'task_checkpoint' as const,taskId:'task00001',phase:'in_flight' as const,cursor:{sessionRevision:0,lastMessageSeq:0,lastChangeSeq:0},attempts:1,dispatchesObserved:1,continuable:true,checkpointDigest,...fields});
 const interrupted=()=>{throw new Error('TEAM_HOST_INTERRUPTED');};
 type Run=(o:TeamHostProcessOptions)=>Promise<TeamHostResult>;
 /** A Bot on a route the runtime can continue, and the server side of pause/continue. */
 function durable(t:any,worker:Run){
  const launches:TeamHostProcessOptions[]=[];
- const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};if(o.bootstrap.type!=='inspect_task')launches.push(o);return worker(o);});
+ const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};if(o.bootstrap.type!=='inspect_task')launches.push(o);const result=await worker(o);return result.status==='task_checkpoint'?{...result,attempts:launches.length}:result;});
  Object.assign((f.connector as any).options,{retryMs:10,modelRoute:async()=>({route:chatRoute(),profiles:[chatRoute().model_profile],assertCurrent:async()=>{}})});
  const original=f.mock.service.hostMessages.bind(f.mock.service),failures:Record<string,Error[]>={};
  f.mock.service.hostMessages=async(c,command)=>{const p=command.payload as any,task=f.mock.tasks.find(t=>t.taskId===p?.taskId);
@@ -551,7 +622,9 @@ function durable(t:any,worker:Run){
   f.mock.service.assertHostContext(c);f.mock.commands.push(command);const failure=failures[command.action]?.shift();if(failure)throw failure;
   if(command.action==='pauseTask'){task.state='waiting';return {taskId:p.taskId,state:'waiting',waitId:p.waitId,messageId:'bot_question01',expiresAt:Date.now()+p.expiresInMs} as any;}
   task.state='running';delete task.resume;task.epoch=p.expectedEpoch+1;
-  return {execute:true,permitId:`permit${String(task.epoch).padStart(5,'0')}`,epoch:task.epoch,task:{...task,deadline:Date.now()+300000},physicalDispatchesSpent:p.dispatchedRequests} as any;};
+  task._permit=commandPermit(command,task.epoch);
+  const context=await original(c,{...command,action:'prepareTask'});
+  return {...context as any,execute:true,permitId:task._permit,epoch:task.epoch,task:{...task,deadline:Date.now()+300000},physicalDispatchesSpent:p.dispatchedRequests} as any;};
  const read=f.mock.service.hostReadChat.bind(f.mock.service);
  f.mock.service.hostReadChat=async(c,request)=>request.mode==='byId'&&request.messageId==='answer000001'?{messages:[{messageId:'answer000001',seq:3,changeSeq:3,changeId:'change-answer1',author:{kind:'user' as const,uid:'member',displayName:'Member'},createdAt:1,text:'Lisbon',waitId,sourceTaskId:'task00001',replyTo:'bot_question01'}],lastSeq:3,lastChangeSeq:3,hasMore:false}:read(c,request);
  const sent=(action:string)=>f.mock.commands.filter(c=>c.action===action);
@@ -563,23 +636,196 @@ const done=(text='Planned for Lisbon')=>({status:'completed' as const,cursor,tex
 const finished=async(f:{mock:{commands:any[]};connector:TeamConnector})=>{await settle(()=>completions(f).length===1&&(f.connector as any).active.size===0);await f.connector.idle();};
 const quiet=async(f:{mock:{wake():void};connector:TeamConnector})=>{for(let i=0;i<4;i++){f.mock.wake();await new Promise(r=>setTimeout(r,25));await f.connector.idle();}};
 
+test('grant permit encoding matches the shared backend vectors and separates epochs and scopes',()=>{
+ const vectors=JSON.parse(readFileSync(new URL('../../firebase/test/fixtures/grant-permit-vectors.json',import.meta.url),'utf8'));
+ for(const value of vectors.cases)assert.equal(grantPermit(value.scopeKind,value.scopeId,value.deploymentId??vectors.deploymentId,vectors.taskId,value.targetEpoch,value.permitNonce??vectors.permitNonce),value.permitId);
+ assert.throws(()=>grantPermit('team',teamId,'deployment01','task00001',Number.MAX_SAFE_INTEGER+1,'a'.repeat(64)),/INVALID_GRANT_INTENT/);
+});
+const absentCheckpoint=()=>checkpoint({phase:'absent',attempts:0,dispatchesObserved:0,cursor:{sessionRevision:0,lastMessageSeq:0,lastChangeSeq:0}});
+test('a committed start with a lost ACK retains its batch and reconciles the original candidate before one initial SDK run',async t=>{
+ let runs=0,nonce:string|undefined,retained=false;const f=fixture(t,async o=>{
+  if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};if(o.bootstrap.type==='inspect_task')return absentCheckpoint();
+  runs++;assert.ok(!JSON.stringify(o.bootstrap).includes(nonce!));const [record]=await f.privateStore.executions('owner');assert.equal(record!.grant!.phase,'validated');return done();});
+ (f.connector as any).options.retryMs=10;await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages;let lost=false;
+ f.mock.service.hostMessages=async(c,command)=>{const result=await original(c,command);if(command.action==='startTask'&&!lost){lost=true;const [record]=await f.privateStore.executions('owner');nonce=record!.grant!.nonce;retained=record!.grant!.phase==='pending'&&existsSync(record!.batch.path);throw Error('SERVICE_UNAVAILABLE');}return result;};
+ f.mock.tasks.push(queued());f.mock.wake();await finished(f);
+ assert.ok(retained);assert.equal(runs,1);assert.equal(f.mock.commands.filter(c=>c.action==='startTask').length,1);assert.equal(f.mock.commands.filter(c=>c.action==='continueTask').length,0);
+ assert.equal(completions(f)[0].payload.permitId,permit(f,1));assert.equal(completions(f)[0].payload.outcome,'completed');assert.deepEqual(await pendingFiles(f),[0,0]);
+});
+test('a restart recovers a committed start candidate with the new host account fence and no second grant',async t=>{
+ let runs=0;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};if(o.bootstrap.type==='inspect_task')return absentCheckpoint();runs++;return done();});
+ await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages;let lost=false;
+ f.mock.service.hostMessages=async(c,command)=>{const result=await original(c,command);if(command.action==='startTask'&&!lost){lost=true;f.connector.close();throw Error('SERVICE_UNAVAILABLE');}return result;};
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>lost);await settle(()=>(f.connector as any).active.size===0);
+ const [pending]=await f.privateStore.executions('owner');assert.equal(pending!.grant!.phase,'pending');assert.ok(existsSync(pending!.batch.path));
+ const restarted=new TeamConnector({...((f.connector as any).options),retryMs:10});t.after(()=>restarted.close());await finished({...f,connector:restarted});
+ assert.equal(runs,1);assert.equal(f.mock.commands.filter(c=>c.action==='startTask').length,1);assert.ok(completions(f)[0].payload.accountEpoch>pending!.grant!.binding.accountEpoch);
+});
+for(const window of ['before_send','before_commit'])test(`a start intent survives ${window} restart and retains its real initial SDK cursor`,async t=>{
+ let runs=0,stopped=false;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};if(o.bootstrap.type==='inspect_task')return absentCheckpoint();runs++;return done();});
+ await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages,compare=f.privateStore.compareExecution.bind(f.privateStore);
+ if(window==='before_send')f.privateStore.compareExecution=async(uid,old,next)=>{const saved=await compare(uid,old,next);if(saved&&!old&&!stopped){stopped=true;f.connector.close();}return saved;};
+ else f.mock.service.hostMessages=async(c,command)=>{if(command.action==='startTask'&&!stopped){stopped=true;f.connector.close();throw Error('SERVICE_UNAVAILABLE');}return original(c,command);};
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>stopped);await settle(()=>(f.connector as any).active.size===0);
+ const pending=(await f.privateStore.executions('owner'))[0]!;assert.equal(pending.grant!.phase,'pending');assert.equal(f.mock.tasks[0].state,'queued');assert.equal(runs,0);
+ const restarted=new TeamConnector({...((f.connector as any).options),retryMs:10});t.after(()=>restarted.close());await finished({...f,connector:restarted});
+ assert.equal(runs,1);assert.equal(completions(f)[0].payload.outcome,'completed');assert.equal(f.mock.commands.filter(c=>c.action==='continueTask').length,0);
+ const start=f.mock.commands.find(c=>c.action==='startTask');assert.notEqual(start.payload.permitNonce,pending.grant!.nonce);assert.ok(start.payload.accountEpoch>pending.grant!.binding.accountEpoch);
+});
+test('a promotion disk failure retains the candidate and recovers without another grant or another model run',async t=>{
+ let runs=0,held=false;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};if(o.bootstrap.type==='inspect_task')return absentCheckpoint();runs++;return done();});
+ (f.connector as any).options.retryMs=10;await f.connector.publishLocalBot('owner',f.input);const compare=f.privateStore.compareExecution.bind(f.privateStore);let failed=false;
+ f.privateStore.compareExecution=async(uid,before,next)=>{if(before?.grant?.phase==='pending'&&next.grant?.phase==='validated'&&!failed){failed=true;held=existsSync(before.batch.path);throw Error('DISK_FULL');}return compare(uid,before,next);};
+ f.mock.tasks.push(queued());f.mock.wake();await finished(f);assert.ok(held);assert.equal(runs,1);assert.equal(f.mock.commands.filter(c=>c.action==='startTask').length,1);
+});
+test('a real cached terminal fixture result is inspected before a recovered candidate can consume the SDK',async t=>{
+ let sdkCalls=0;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};sdkCalls++;throw Error('UNEXPECTED_SDK_ENTRY');});
+ (f.connector as any).options.retryMs=10;await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages;let lost=false;
+ f.mock.service.hostMessages=async(c,command)=>{const result=await original(c,command);if(command.action==='startTask'&&!lost){lost=true;const paths=await f.privateStore.owner('owner');mkdirSync(join(paths.runtime,'results'),{mode:0o700});writeFileSync(join(paths.runtime,'results','task00001.json'),JSON.stringify({version:3,type:'result',...done('Cached answer')}),{mode:0o600});throw Error('SERVICE_UNAVAILABLE');}return result;};
+ f.mock.tasks.push(queued());f.mock.wake();await finished(f);assert.equal(sdkCalls,0);assert.equal(completions(f)[0].payload.text,'Cached answer');assert.equal(f.mock.commands.filter(c=>c.action==='continueTask').length,0);
+});
+test('an unknown uncommitted start retries the exact durable command and nonce',async t=>{
+ const f=fixture(t);(f.connector as any).options.retryMs=10;await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages;const starts:any[]=[];
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='startTask'){starts.push(command);if(starts.length===1)throw Error('SERVICE_UNAVAILABLE');}return original(c,command);};
+ f.mock.tasks.push(queued());f.mock.wake();await finished(f);assert.equal(starts.length,2);assert.deepEqual(starts[0],starts[1]);assert.match(starts[0].payload.permitNonce,/^[a-f0-9]{64}$/u);
+});
+test('a lost continuation ACK preserves the real checkpoint and original answer without requesting another grant',async t=>{
+ const f=durable(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint({wait:theWait}):o.bootstrap.type==='run'?asked():done());
+ await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await settle(()=>f.sent('pauseTask').length===1);await quiet(f);
+ loseOnce(f,'continueTask');f.answer();await finished(f);
+ assert.equal(f.sent('continueTask').length,1);assert.equal(f.launches.length,2);assert.equal(f.launches[1]!.bootstrap.continuation?.epoch,2);
+ assert.deepEqual(f.launches[1]!.bootstrap.continuation?.answer,{wait_id:waitId,message_id:'answer000001',text:'Lisbon'});assert.equal(completions(f)[0].payload.permitId,permit(f,2));
+});
+for(const window of ['before_send','before_commit'])test(`a running recovery continuation survives ${window} without losing the original permit or SDK baseline`,async t=>{
+ let stopped=false;const requests:any[]=[];const f=durable(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint():o.bootstrap.type==='run'?interrupted():done());
+ await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages,compare=f.privateStore.compareExecution.bind(f.privateStore);
+ if(window==='before_send')f.privateStore.compareExecution=async(uid,old,next)=>{const saved=await compare(uid,old,next);if(saved&&next.grant?.action==='continueTask'&&next.grant.phase==='pending'&&!stopped){stopped=true;f.connector.close();}return saved;};
+ else f.mock.service.hostMessages=async(c,command)=>{if(command.action==='continueTask'){requests.push(command);if(!stopped){stopped=true;throw Error('SERVICE_UNAVAILABLE');}}return original(c,command);};
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>stopped);
+ if(window==='before_send'){
+  await settle(()=>(f.connector as any).active.size===0);const pending=(await f.privateStore.executions('owner'))[0]!;assert.equal(pending.grant!.phase,'pending');assert.equal(pending.grant!.checkpoint!.attempts,1);assert.equal(f.mock.tasks[0].state,'running');assert.equal(f.launches.length,1);
+  const restarted=new TeamConnector({...((f.connector as any).options),retryMs:10});t.after(()=>restarted.close());await finished({...f,connector:restarted});
+ }else {await finished(f);assert.equal(requests.length,2);assert.deepEqual(requests[0],requests[1]);}
+ assert.equal(f.launches.length,2);assert.equal(f.sent('continueTask').length,1);assert.equal(completions(f)[0].payload.outcome,'completed');assert.equal(f.launches[1]!.bootstrap.continuation!.epoch,2);
+});
+test('an initial SDK tombstone without admission is not fabricated into an initial run or continuation',async t=>{
+ let runs=0;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};if(o.bootstrap.type==='inspect_task')return {...absentCheckpoint(),attempts:1};runs++;return done();});
+ (f.connector as any).options.retryMs=10;await f.connector.publishLocalBot('owner',f.input);loseOnce(f,'startTask');f.mock.tasks.push(queued());f.mock.wake();await finished(f);
+ assert.equal(runs,0);assert.equal(f.mock.commands.filter(c=>c.action==='continueTask').length,0);assert.equal(completions(f)[0].payload.outcome,'failed');
+});
+for(const action of ['startTask','continueTask'])test(`a false ${action} retry cannot retire an earlier unknown request that commits later`,async t=>{
+ let release=()=>{},falseAck=false,inflight:Promise<unknown>|undefined,runs=0;const gate=new Promise<void>(resolve=>{release=resolve;});
+ const f=action==='continueTask'?durable(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint():o.bootstrap.type==='run'?interrupted():done()):fixture(t,async o=>{
+  if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};if(o.bootstrap.type==='inspect_task')return absentCheckpoint();runs++;return done();});
+ (f.connector as any).options.retryMs=100;await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages,requests:any[]=[];
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action===action){requests.push(command);if(requests.length===1){inflight=gate.then(()=>original(c,command));throw Error('SERVICE_UNAVAILABLE');}if(requests.length===2){falseAck=true;return {execute:false,taskId:'task00001'} as any;}}return original(c,command);};
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>falseAck);await f.connector.idle();f.connector.close();
+ const pending=(await f.privateStore.executions('owner'))[0]!;assert.equal(pending.grant!.phase,'pending');assert.equal(pending.grant!.rpcAttempts,2);assert.ok(existsSync(pending.batch.path));assert.equal(completions(f).length,0);assert.deepEqual(requests[0],requests[1]);
+ release();await inflight;assert.equal(f.mock.tasks[0].state,'running');
+ const restarted=new TeamConnector({...((f.connector as any).options),retryMs:10});t.after(()=>restarted.close());await finished({...f,connector:restarted});
+ assert.equal(requests.length,2);assert.equal(completions(f)[0].payload.outcome,'completed');assert.equal(action==='startTask'?runs:(f as ReturnType<typeof durable>).launches.length,action==='startTask'?1:2);
+});
+test('repeated false grant answers respect retry backoff rather than waking fresh queued executions in a loop',async t=>{
+ let clock=Date.now(),requests=0;const f=fixture(t,undefined,{now:()=>clock,retryMs:100});await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages;
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='startTask'){requests++;return {execute:false,taskId:'task00001'} as any;}return original(c,command);};
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>requests===1);await f.connector.idle();
+ for(let i=0;i<8;i++){f.mock.wake();await f.connector.idle();}assert.equal(requests,1);assert.equal(completions(f).length,0);
+ clock+=101;f.mock.wake();await settle(()=>requests===2);await f.connector.idle();for(let i=0;i<8;i++){f.mock.wake();await f.connector.idle();}assert.equal(requests,2);
+});
+test('five validated unconsumed grants in distinct Chats obey the configured recovery concurrency limit',async t=>{
+ let active=0,maximum=0,released=false;const gates:Array<()=>void>=[],runs:string[]=[];const f=fixture(t,async o=>{
+  if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};if(o.bootstrap.type==='inspect_task')return {...absentCheckpoint(),taskId:o.bootstrap.taskId};
+  runs.push(o.bootstrap.taskId!);active++;maximum=Math.max(maximum,active);if(!released)await new Promise<void>(resolve=>gates.push(resolve));active--;return done();});
+ await f.connector.publishLocalBot('owner',f.input);await f.connector.idle();f.connector.close();const binding=(await f.privateStore.bindings('owner'))[0]!;
+ for(let i=0;i<5;i++){
+  const taskId=`taskfault00${i}`,chat=`chatfault00${i}`,nonce=String(i+1).repeat(64),scope={teamId,sharedBotId,conversationId:chat,sessionEpoch:binding.sessionEpoch};
+  const task={...queued(taskId),conversationId:chat,state:'running',epoch:1,_permit:grantPermit('team',teamId,binding.deploymentId,taskId,1,nonce)};f.mock.tasks.push(task);
+  const payload={deploymentId:binding.deploymentId,hostId:f.privateStore.hostId,accountEpoch:binding.accountEpoch,taskId,permitId:task._permit,inputGrantIds:binding.grantIds};
+  const base=await savedExecution(f,{scope,teamId,taskId,deadlineAt:task.deadline,commandId:`deliveryfault${i}`,payload});
+  const record={...base,grant:{action:'startTask' as const,phase:'validated' as const,nonce,commandId:`grantfault${i}`,targetEpoch:1,payload:{...payload,permitNonce:nonce},binding,messageId:task.messageId,requester:task.requester,cursor:absentCheckpoint().cursor,rpcAttempts:1}};
+  assert.equal(await f.privateStore.compareExecution('owner',undefined,record),true);
+ }
+ const restarted=new TeamConnector({...((f.connector as any).options),retryMs:10,maxConcurrent:2});t.after(()=>restarted.close());await settle(()=>runs.length===2);await restarted.idle();assert.equal(runs.length,2);assert.equal(maximum,2);
+ released=true;for(const release of gates)release();await settle(()=>completions(f).length===5);await restarted.idle();assert.equal(runs.length,5);assert.equal(maximum,2);assert.equal(new Set(runs).size,5);
+});
+test('SDK AlreadyAttempted and a busy journal wait for the winning result rather than delivering a guessed failure',async t=>{
+ let runs=0,release=false,inspections=0;const f=fixture(t,async o=>{
+  if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};
+  if(o.bootstrap.type==='inspect_result')return release?done('Winning result'):{status:'not_found',cursor};
+  if(o.bootstrap.type==='inspect_task'){inspections++;throw new TeamHostFailure('WORKER');}
+  runs++;throw new TeamHostFailure('TASK_INTERRUPTED');});
+ (f.connector as any).options.retryMs=10;await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await settle(()=>inspections>0);assert.equal(completions(f).length,0);
+ release=true;f.mock.wake();await finished(f);assert.equal(runs,1);assert.equal(completions(f)[0].payload.text,'Winning result');assert.equal(completions(f)[0].payload.outcome,'completed');
+});
+test('an intent persistence failure prevents the grant RPC and frees the unowned batch',async t=>{
+ let runs=0;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};runs++;return done();});await f.connector.publishLocalBot('owner',f.input);
+ f.privateStore.compareExecution=async()=>{throw Error('DISK_FULL');};f.mock.tasks.push(queued());f.mock.wake();await settle(()=> (f.connector as any).deferred.has('task00001'));await f.connector.idle();
+ assert.equal(runs,0);assert.equal(f.mock.commands.filter(c=>c.action==='startTask').length,0);assert.deepEqual(await pendingFiles(f),[0,0]);
+});
+test('grant record CAS excludes competing stores, late ACKs and resurrection after delivery',async t=>{
+ const f=fixture(t);await f.connector.publishLocalBot('owner',f.input);await f.connector.idle();f.connector.close();
+ const binding=(await f.privateStore.bindings('owner'))[0]!,scope={teamId,sharedBotId,conversationId,sessionEpoch:1},payload={deploymentId:binding.deploymentId,hostId:f.privateStore.hostId,accountEpoch:binding.accountEpoch,taskId:'task00001'};
+ const base=await savedExecution(f,{scope,teamId,taskId:'task00001',deadlineAt:Date.now()+60000,commandId:'delivery001',payload});
+ const intent={...base,grant:{action:'startTask' as const,phase:'pending' as const,nonce:'a'.repeat(64),commandId:'grantcmd001',targetEpoch:1,payload:{...payload,permitNonce:'a'.repeat(64)},binding,messageId:'message000001',requester:{uid:'member',generation:1}}};
+ const other=new TeamPrivateStore(f.userData);assert.equal(await f.privateStore.compareExecution('owner',undefined,intent),true);
+ assert.equal(await other.compareExecution('owner',undefined,{...intent,grant:{...intent.grant,nonce:'b'.repeat(64)}}),false);
+ const promoted={...intent,payload:{...payload,permitId:grantPermit('team',teamId,binding.deploymentId,'task00001',1,intent.grant.nonce)},grant:{...intent.grant,phase:'validated' as const}};
+ const raced=await Promise.all([f.privateStore.compareExecution('owner',intent,promoted),other.compareExecution('owner',intent,{...promoted,dispatched:1})]);assert.equal(raced.filter(Boolean).length,1);
+ const current=(await f.privateStore.executions('owner'))[0]!;assert.equal(await f.privateStore.compareExecution('owner',intent,promoted),false);
+ assert.equal(await other.delivered('owner','task00001',intent),false);assert.equal((await f.privateStore.executions('owner')).length,1);
+ const delivery={schemaVersion:1 as const,teamId,generation:1,taskId:'task00001',deadlineAt:current.deadlineAt,commandId:'delivery001',payload:{outcome:'completed',text:'Done'}};
+ assert.equal(await f.privateStore.saveDelivery('owner',delivery,current),true);assert.equal(await other.compareExecution('owner',current,{...current,epoch:2}),false);
+ await f.privateStore.delivered('owner','task00001');assert.equal(await other.compareExecution('owner',current,promoted),false);assert.equal(existsSync(current.batch.path),false);
+ await assert.rejects(f.privateStore.saveExecution('owner',promoted),/STALE_EXECUTION/);assert.deepEqual(await f.privateStore.executions('owner'),[]);
+});
+test('a late start ACK cannot promote over a newer intent or launch its worker',async t=>{
+ let entered=false,runs=0,release=()=>{};const gate=new Promise<void>(resolve=>{release=resolve;});
+ const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};runs++;return done();});
+ await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages;
+ f.mock.service.hostMessages=async(c,command)=>{const result=await original(c,command);if(command.action==='startTask'){entered=true;await gate;}return result;};
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>entered);const pending=(await f.privateStore.executions('owner'))[0]!;
+ const winner={...pending,epoch:2,payload:{...pending.payload,permitId:'winnerpermit'},grant:{...pending.grant!,action:'continueTask' as const,phase:'validated' as const,targetEpoch:2,nonce:'b'.repeat(64),commandId:'newergrant'}};
+ assert.equal(await f.privateStore.compareExecution('owner',pending,winner),true);f.connector.close();release();await settle(()=>(f.connector as any).active.size===0);
+ assert.deepEqual((await f.privateStore.executions('owner'))[0],winner);assert.equal(runs,0);assert.equal(completions(f).length,0);assert.ok(existsSync(winner.batch.path));
+});
+test('a continuation intent disk failure sends no grant and keeps the original permit, answer and batch',async t=>{
+ const f=durable(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint({wait:theWait}):asked());
+ await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await settle(()=>f.sent('pauseTask').length===1);await quiet(f);
+ const before=(await f.privateStore.executions('owner'))[0]!,compare=f.privateStore.compareExecution.bind(f.privateStore);
+ f.privateStore.compareExecution=async(uid,old,next)=>{if(next.grant?.action==='continueTask')throw Error('DISK_FULL');return compare(uid,old,next);};
+ f.answer();await settle(()=>(f.connector as any).deferred.has('task00001'));const after=(await f.privateStore.executions('owner'))[0]!;
+ assert.equal(f.sent('continueTask').length,0);assert.equal(after.payload.permitId,before.payload.permitId);assert.equal(after.grant!.commandId,before.grant!.commandId);assert.equal(after.answered!.text,'Lisbon');assert.ok(existsSync(after.batch.path));assert.equal(completions(f).length,0);
+});
+test('a candidate validated under another cloud task epoch is never promoted',async t=>{
+ let runs=0,validations=0;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};runs++;return done();});(f.connector as any).options.retryMs=10;
+ await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages;let lost=false;
+ f.mock.service.hostMessages=async(c,command)=>{const result=await original(c,command);if(command.action==='startTask'&&!lost){lost=true;throw Error('SERVICE_UNAVAILABLE');}if(command.action==='validateTask'){validations++;return {...result as any,task:{...(result as any).task,epoch:7}};}return result;};
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>validations>0);await quiet(f);assert.equal(runs,0);assert.equal(completions(f).length,0);assert.equal((await f.privateStore.executions('owner'))[0]!.grant!.phase,'pending');
+});
+for(const code of ['SOURCE_CHANGED','TASK_REVOKED','TASK_CANCELLED'])test(`lost grant reconciliation never runs through ${code}`,async t=>{
+ let runs=0,validations=0;const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};runs++;return done();});(f.connector as any).options.retryMs=10;
+ await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages;let lost=false;
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='validateTask'){validations++;throw new TeamsApiError(code,409);}const result=await original(c,command);if(command.action==='startTask'&&!lost){lost=true;throw Error('SERVICE_UNAVAILABLE');}return result;};
+ f.mock.tasks.push(queued());f.mock.wake();await settle(()=>validations>0);await quiet(f);assert.equal(runs,0);assert.equal(completions(f).length,0);assert.equal((await f.privateStore.executions('owner'))[0]!.grant!.phase,'pending');
+});
+
 test('a Bot question pauses the task and frees its slot; the answer continues it from the checkpoint with the same input',async t=>{
  const f=durable(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint({wait:theWait}):o.bootstrap.type==='run'?asked():done());
  await f.connector.publishLocalBot('owner',f.input);assert.equal(f.sent('publishSharedBot')[0].payload.deployment.capabilities.durableWait,true);
  f.mock.tasks.push(queued());f.mock.wake();await settle(()=>f.sent('pauseTask').length===1);await f.connector.idle();
  const b=(await f.privateStore.bindings('owner'))[0]!,pause=f.sent('pauseTask')[0].payload,first=f.launches[0]!.bootstrap;
  assert.equal(first.type,'run');assert.equal(first.askRequester,true);assert.equal(first.continuation,undefined);
- assert.deepEqual({...pause,pausedAt:0},{deploymentId:b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',permitId:'permit00001',inputGrantIds:b.grantIds,waitId,kind:'human_input',
+ assert.deepEqual({...pause,pausedAt:0},{deploymentId:b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',permitId:permit(f,1),inputGrantIds:b.grantIds,waitId,kind:'human_input',
   question:'Which city?',requestDigest:theWait.requestDigest,checkpointDigest,pausedAt:0,expiresInMs:86400000,dispatchedRequests:1,outputAudience:{mode:'published_inputs'}});
  // Waiting holds no worker and no slot, and nothing treats it as a lost run.
  await quiet(f);assert.equal((f.connector as any).active.size,0);assert.equal(f.launches.length,1);assert.equal(f.sent('pauseTask').length,1);assert.equal(completions(f).length,0);assert.equal(f.sent('continueTask').length,0);
  const waiting=(await f.privateStore.executions('owner'))[0]!;assert.equal(waiting.wait?.waitId,waitId);assert.equal(waiting.pause,undefined);assert.ok(existsSync(waiting.batch.path));
  f.answer();await finished(f);
- assert.deepEqual(f.sent('continueTask').map(c=>c.payload),[{deploymentId:b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',expectedEpoch:1,checkpointDigest,reason:'answer',dispatchedRequests:1}]);
+ assert.deepEqual(f.sent('continueTask').map(c=>({...c.payload,permitNonce:undefined})),[{deploymentId:b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',expectedEpoch:1,checkpointDigest,reason:'answer',dispatchedRequests:1,permitNonce:undefined}]);
  const second=f.launches[1]!.bootstrap;assert.equal(f.launches.length,2);assert.equal(second.type,'continue');assert.equal(second.askRequester,true);
  assert.deepEqual(second.continuation,{epoch:2,expected_checkpoint_digest:checkpointDigest,answer:{wait_id:waitId,message_id:'answer000001',text:'Lisbon'}});
  assert.deepEqual(second.inputBatchRef,first.inputBatchRef);assert.equal(second.limits?.physical_dispatches,31);assert.equal(second.taskId,'task00001');
- const result=completions(f)[0].payload;assert.equal(result.permitId,'permit00002');assert.equal(result.outcome,'completed');assert.equal(result.text,'Planned for Lisbon');
+ const result=completions(f)[0].payload;assert.equal(result.permitId,permit(f,2));assert.equal(result.outcome,'completed');assert.equal(result.text,'Planned for Lisbon');
  assert.deepEqual(result.usage,{status:'partial',inputTokens:17,outputTokens:8});
  assert.deepEqual(await f.privateStore.executions('owner'),[]);assert.deepEqual(await f.privateStore.deliveries('owner'),[]);assert.ok(!existsSync(waiting.batch.path));
 });
@@ -594,7 +840,7 @@ test('an interrupted worker is continued from its checkpoint with a new permit i
  assert.deepEqual(f.sent('continueTask').map(c=>[c.payload.reason,c.payload.expectedEpoch,c.payload.dispatchedRequests]),[['recovery',1,1],['recovery',2,2]]);
  assert.deepEqual(f.launches.map(o=>[o.bootstrap.type,o.bootstrap.continuation]),[['run',undefined],['continue',{epoch:2,expected_checkpoint_digest:checkpointDigest}],['continue',{epoch:3,expected_checkpoint_digest:checkpointDigest}]]);
  assert.equal(f.sent('startTask').length,1);assert.equal(completions(f).length,1);const result=completions(f)[0].payload;
- assert.equal(result.permitId,'permit00003');assert.equal(result.outcome,'completed');assert.equal(result.text,'Recovered answer');
+ assert.equal(result.permitId,permit(f,3));assert.equal(result.outcome,'completed');assert.equal(result.text,'Recovered answer');
  // The interrupted attempts reported no usage, so the total is not complete.
  assert.deepEqual(result.usage,{status:'partial',inputTokens:7,outputTokens:3});assert.deepEqual(await f.privateStore.executions('owner'),[]);
 });
@@ -602,24 +848,24 @@ test('a task whose worker keeps dying, or whose checkpoint cannot be continued, 
  const f=durable(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint():interrupted());
  await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await finished(f);await quiet(f);
  assert.equal(f.launches.length,3);assert.equal(f.sent('continueTask').length,2);assert.equal(completions(f).length,1);
- assert.equal(completions(f)[0].payload.outcome,'failed');assert.equal(completions(f)[0].payload.permitId,'permit00003');assert.deepEqual(await f.privateStore.executions('owner'),[]);
+ assert.equal(completions(f)[0].payload.outcome,'failed');assert.equal(completions(f)[0].payload.permitId,permit(f,3));assert.deepEqual(await f.privateStore.executions('owner'),[]);
  const g=durable(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint({continuable:false,reason:'pending_write_tool'}):interrupted());
  await g.connector.publishLocalBot('owner',g.input);g.mock.tasks.push(queued());g.mock.wake();await finished(g);
- assert.equal(g.launches.length,1);assert.equal(g.sent('continueTask').length,0);assert.equal(completions(g)[0].payload.outcome,'failed');assert.equal(completions(g)[0].payload.permitId,'permit00001');
+ assert.equal(g.launches.length,1);assert.equal(g.sent('continueTask').length,0);assert.equal(completions(g)[0].payload.outcome,'failed');assert.equal(completions(g)[0].payload.permitId,permit(g,1));
 });
 test('a refused continue closes the running attempt with its own permit and never starts a worker',async t=>{
  const f=durable(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint():interrupted());
  await f.connector.publishLocalBot('owner',f.input);const original=f.mock.service.hostMessages;
  f.mock.service.hostMessages=async(c,command)=>{if(command.action!=='continueTask')return original(c,command);f.mock.commands.push(command);return {execute:false,taskId:'task00001'} as any;};
  f.mock.tasks.push(queued());f.mock.wake();await finished(f);await quiet(f);
- assert.equal(f.launches.length,1);assert.equal(f.sent('continueTask').length,1);assert.equal(completions(f).length,1);assert.equal(completions(f)[0].payload.permitId,'permit00001');assert.equal(completions(f)[0].payload.outcome,'failed');
+ assert.equal(f.launches.length,1);assert.equal(f.sent('continueTask').length,1);assert.equal(completions(f).length,1);assert.equal(completions(f)[0].payload.permitId,permit(f,1));assert.equal(completions(f)[0].payload.outcome,'failed');
 });
 test('a cancelled task stops at the next authorization and is closed once, without recovery',async t=>{
  const f=durable(t,async o=>{if(o.bootstrap.type==='inspect_task')return checkpoint();await o.authorize!();return done();});
  await f.connector.publishLocalBot('owner',f.input);f.failures.validateTask=[new TeamsApiError('TASK_CANCELLED',409)];
  f.mock.tasks.push(queued());f.mock.wake();await finished(f);await quiet(f);
  assert.equal(f.launches.length,1);assert.equal(f.sent('continueTask').length,0);assert.equal(completions(f).length,1);
- assert.equal(completions(f)[0].payload.outcome,'failed');assert.equal(completions(f)[0].payload.permitId,'permit00001');assert.deepEqual(await f.privateStore.executions('owner'),[]);
+ assert.equal(completions(f)[0].payload.outcome,'failed');assert.equal(completions(f)[0].payload.permitId,permit(f,1));assert.deepEqual(await f.privateStore.executions('owner'),[]);
 });
 test('a question is sent again unchanged after a transient failure, and a cancelled one closes the task instead',async t=>{
  const f=durable(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint({wait:theWait}):asked());
@@ -630,7 +876,7 @@ test('a question is sent again unchanged after a transient failure, and a cancel
  const g=durable(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint({wait:theWait}):asked());
  await g.connector.publishLocalBot('owner',g.input);g.failures.pauseTask=[new TeamsApiError('TASK_CANCELLED',409)];
  g.mock.tasks.push(queued());g.mock.wake();await finished(g);await quiet(g);
- assert.equal(g.sent('pauseTask').length,1);assert.equal(completions(g)[0].payload.outcome,'failed');assert.equal(completions(g)[0].payload.permitId,'permit00001');assert.deepEqual(await g.privateStore.executions('owner'),[]);
+ assert.equal(g.sent('pauseTask').length,1);assert.equal(completions(g)[0].payload.outcome,'failed');assert.equal(completions(g)[0].payload.permitId,permit(g,1));assert.deepEqual(await g.privateStore.executions('owner'),[]);
 });
 test('a host that stopped before reporting a question reports it from the checkpoint on its next start',async t=>{
  const f=durable(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint({wait:theWait,dispatchesObserved:4}):interrupted());
@@ -649,11 +895,12 @@ test('an attempt that died while continuing with an answer is recovered with the
  assert.deepEqual(f.sent('continueTask').map(c=>[c.payload.reason,c.payload.expectedEpoch]),[['answer',1],['recovery',2]]);assert.equal(f.sent('pauseTask').length,1);
  const answer={wait_id:waitId,message_id:'answer000001',text:'Lisbon'};
  assert.deepEqual(f.launches.slice(1).map(o=>o.bootstrap.continuation),[{epoch:2,expected_checkpoint_digest:checkpointDigest,answer},{epoch:3,expected_checkpoint_digest:checkpointDigest,answer}]);
- assert.equal(completions(f)[0].payload.permitId,'permit00003');
+ assert.equal(completions(f)[0].payload.permitId,permit(f,3));
 });
 test('an unanswered question is forgotten after its expiry, and an answer for a wait this host does not hold starts nothing',async t=>{
  let clock=Date.now();const f=durable(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint({wait:theWait}):asked());(f.connector as any).options.now=()=>clock;
  await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await settle(()=>f.sent('pauseTask').length===1);await f.connector.idle();
+ for(let n=0;n<100&&!(await f.privateStore.executions('owner'))[0]?.wait;n++)await new Promise(resolve=>setTimeout(resolve,5));
  const record=(await f.privateStore.executions('owner'))[0]!;clock=record.wait!.expiresAt+60000;await quiet(f);assert.equal((await f.privateStore.executions('owner')).length,1);
  clock=record.wait!.expiresAt+8*60000;await quiet(f);assert.deepEqual(await f.privateStore.executions('owner'),[]);assert.ok(!existsSync(record.batch.path));
  f.answer();await quiet(f);assert.equal(f.sent('continueTask').length,0);assert.equal(f.launches.length,1);assert.equal(completions(f).length,0);
@@ -674,7 +921,7 @@ test('the private process reads a checkpoint and a waiting result only for the b
  const boot=(type:any,extra:Record<string,unknown>={})=>({version:3 as const,type,storageRoot:'/private-root',workerExecutable:'/worker',scope,taskId:'task00001',...extra});
  const report={version:3,type:'result',status:'task_checkpoint',taskId:'task00001',phase:'in_flight',cursor:{sessionRevision:1,lastMessageSeq:2,lastChangeSeq:2},attempts:1,dispatchesObserved:1,
   pendingToolCalls:[{logicalStepId:'task00001/t0/c0',toolName:'TeamAskRequester',readOnly:false}],continuable:true,wait:theWait,checkpointDigest};
- assert.deepEqual(await runTeamHost({...base,bootstrap:boot('inspect_task'),spawnProcess:frames([report])}),{status:'task_checkpoint',taskId:'task00001',phase:'in_flight',attempts:1,dispatchesObserved:1,continuable:true,wait:theWait,checkpointDigest});
+ assert.deepEqual(await runTeamHost({...base,bootstrap:boot('inspect_task'),spawnProcess:frames([report])}),{status:'task_checkpoint',taskId:'task00001',phase:'in_flight',cursor:report.cursor,attempts:1,dispatchesObserved:1,continuable:true,wait:theWait,checkpointDigest});
  await assert.rejects(runTeamHost({...base,bootstrap:boot('inspect_result'),spawnProcess:frames([report])}),/TEAM_HOST_PROTOCOL/);
  await assert.rejects(runTeamHost({...base,bootstrap:boot('inspect_task',{taskId:'task00002'}),spawnProcess:frames([report])}),/TEAM_HOST_PROTOCOL/);
  await assert.rejects(runTeamHost({...base,bootstrap:boot('inspect_task'),spawnProcess:frames([{...report,wait:{...theWait,waitId:'other'}}])}),/TEAM_HOST_PROTOCOL/);
@@ -711,7 +958,7 @@ test('a Bot reads its shared list and changes it through the ledger: recorded fi
  await f.connector.publishLocalBot('owner',f.input);const published=f.sent('publishSharedBot')[0].payload;
  assert.deepEqual(published.sharedList,groceries);assert.deepEqual(published.deployment.capabilities,{durableWait:true,writeOperations:true,delegation:false});
  f.mock.tasks.push(queued());f.mock.wake();await finished(f);
- const b=(await f.privateStore.bindings('owner'))[0]!,host={deploymentId:b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',permitId:'permit00001'};
+ const b=(await f.privateStore.bindings('owner'))[0]!,host={deploymentId:b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',permitId:permit(f,1)};
  assert.deepEqual(f.launches[0]!.bootstrap.sharedList,groceries);
  assert.deepEqual(outcomes[0],{established:true,succeeded:true,result:{dataRevision:1,items:[milk]}});
  assert.deepEqual(outcomes[1],{established:true,succeeded:true,result:{dataRevision:2,items:[milk,bread]}});
@@ -734,8 +981,8 @@ test('a write nobody can vouch for is not answered; the continued attempt repeat
  f.mock.tasks.push(queued());f.mock.wake();await finished(f);
  assert.deepEqual(outcomes,[{established:false,succeeded:false,result:{}},{established:true,succeeded:true,result:{dataRevision:2,items:[milk,bread]}}]);
  const records=f.sent('recordOperation'),writes=f.sent('writeTaskList');
- assert.deepEqual(records.map(c=>[c.payload.operationId,c.payload.permitId]),[[stepId(),'permit00001'],[stepId(),'permit00002']]);assert.notEqual(records[0].commandId,records[1].commandId);
- assert.deepEqual(writes.map(c=>[c.payload.operationId,c.payload.permitId]),[[stepId(),'permit00002']]);
+ assert.deepEqual(records.map(c=>[c.payload.operationId,c.payload.permitId]),[[stepId(),permit(f,1)],[stepId(),permit(f,2)]]);assert.notEqual(records[0].commandId,records[1].commandId);
+ assert.deepEqual(writes.map(c=>[c.payload.operationId,c.payload.permitId]),[[stepId(),permit(f,2)]]);
  assert.deepEqual(f.sent('continueTask').map(c=>c.payload.reason),['recovery']);
  assert.deepEqual(f.launches.map(o=>[o.bootstrap.type,o.bootstrap.sharedList]),[['run',groceries],['continue',groceries]]);
  assert.equal(completions(f)[0].payload.text,'Bread is on the list');
@@ -773,6 +1020,19 @@ function conversing(request:unknown,result:unknown,answered=true){const child=ne
  child.stdin.on('data',(data:Buffer)=>{for(const line of data.toString().split('\n').filter(Boolean))written.push(JSON.parse(line));
   if(written.length===1)setImmediate(()=>{emit(request);if(!answered)setTimeout(end,20);});else if(written.length===2)setImmediate(end);});
  return {spawn:()=>child,written};}
+test('a worker list read crosses the real TeamsService boundary and returns its actual API result',async t=>{
+ const service=new TeamsService({snapshot:()=>({user:{uid:'owner'}}),getIdToken:async()=>'synthetic-token',onChanged:()=>()=>{}},{});t.after(()=>service.close());
+ (service as any).connect=async()=>({db:{}});(service as any).sdk={};const context=service.hostContext()!,actions:string[]=[];
+ const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});const list={dataRevision:1,items:[milk]};
+ globalThis.fetch=(async(_url,init)=>{const command=JSON.parse(String(init?.body));actions.push(command.action);return new Response(JSON.stringify(command.action==='readTaskList'?list:{}),{status:200});}) as typeof fetch;
+ const scope={teamId,sharedBotId,conversationId,sessionEpoch:1},live={scope,sessionRevision:1,lastMessageSeq:2,lastChangeSeq:2,bootstrapFromSeq:0};
+ const result={version:3,type:'result',status:'completed',cursor:live,text:'Done',finishedAt:1,dispatchedRequests:1,deniedTools:0,usage:{status:'missing'}};
+ const process=conversing({version:3,type:'operation',id:'operation-1',tool:'list_read',arguments:{}},result),command=(action:string)=>service.hostMessages<any>(context,{schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload:{}});
+ const output=await runTeamHost({executable:'/mock',home:'/private-home',tmp:'/private-tmp',signal:new AbortController().signal,assertCurrent:()=>service.assertHostContext(context),spawnProcess:process.spawn,
+  bootstrap:{version:3,type:'run',storageRoot:'/private-root',workerExecutable:'/worker',scope,taskId:'task00001',sharedList:groceries},authorize:async()=>{await command('validateTask');},
+  operate:async()=>({established:true,succeeded:true,result:await command('readTaskList')})});
+ assert.equal(output.status,'completed');assert.deepEqual(actions,['validateTask','readTaskList']);assert.deepEqual(process.written[1],{version:3,type:'operation_result',id:'operation-1',established:true,succeeded:true,result:list});
+});
 test('the private process serves list operations only to a run that was offered the list, and says when an outcome is not established',async()=>{
  const scope={teamId,sharedBotId,conversationId,sessionEpoch:1},live={scope,sessionRevision:1,lastMessageSeq:2,lastChangeSeq:2,bootstrapFromSeq:0};
  const result={version:3,type:'result',status:'completed',cursor:live,text:'Done',finishedAt:1,dispatchedRequests:2,attemptDispatchedRequests:1,deniedTools:0,usage:{status:'missing'}};
@@ -816,7 +1076,7 @@ test('a proposed list change waits for the requester as an approval of exactly t
  const b=(await f.privateStore.bindings('owner'))[0]!,first=f.launches[0]!.bootstrap;
  assert.deepEqual(first.sharedList,asking);assert.equal(first.askRequester,true);
  // The request carries the change itself and the ledger id its write will have; it has no free-text question.
- assert.deepEqual({...f.sent('pauseTask')[0].payload,pausedAt:0},{deploymentId:b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',permitId:'permit00001',inputGrantIds:b.grantIds,waitId,kind:'tool_approval',
+ assert.deepEqual({...f.sent('pauseTask')[0].payload,pausedAt:0},{deploymentId:b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',permitId:permit(f,1),inputGrantIds:b.grantIds,waitId,kind:'tool_approval',
   approval:{operationId:stepId(),logicalStepId:step,...addBread},requestDigest:proposed.requestDigest,checkpointDigest,pausedAt:0,expiresInMs:86400000,dispatchedRequests:1,outputAudience:{mode:'published_inputs'}});
  await quiet(f);assert.equal(f.sent('recordOperation').length,0);assert.equal(f.sent('writeTaskList').length,0);assert.equal(f.launches.length,1);
  // A reply in words is not a decision: nothing continues.
@@ -825,7 +1085,7 @@ test('a proposed list change waits for the requester as an approval of exactly t
  assert.deepEqual(f.launches[1]!.bootstrap.continuation,{epoch:2,expected_checkpoint_digest:checkpointDigest,answer:{wait_id:waitId,message_id:'answer000001',text:'Lisbon',approved:true}});
  assert.deepEqual(f.launches[1]!.bootstrap.sharedList,asking);
  const records=f.sent('recordOperation');assert.equal(records.length,1);
- assert.deepEqual({...records[0].payload,dispatchedAt:0},{deploymentId:b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',permitId:'permit00002',operationId:stepId(),logicalStepId:step,
+ assert.deepEqual({...records[0].payload,dispatchedAt:0},{deploymentId:b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',permitId:permit(f,2),operationId:stepId(),logicalStepId:step,
   category:'store_idempotent',tool:{name:'TeamListWrite',version:'1'},approvalRef:waitId,digest:digest(JSON.stringify({changes:[{op:'add',text:'Bread'}],expectedDataRevision:1})),dispatchedAt:0});
  assert.equal(f.sent('writeTaskList').length,1);assert.deepEqual(outcomes,[{established:true,succeeded:true,result:{dataRevision:2,items:[milk,bread]}}]);
  assert.equal(completions(f)[0].payload.text,'Bread is on the list');
@@ -929,7 +1189,7 @@ test('the Mac is kept awake while a task runs and, on mains power, for as long a
 });
 test('sleep and quit say at once that the Bots are offline, nothing is served while resting, and waking serves again (M3-2)',async t=>{
  const m=mac(),f=fixture(t,undefined,m.options);await f.connector.publishLocalBot('owner',f.input);f.mock.wake();await settle(()=>beats(f).at(-1)===true&&m.state.holds===1);
- await f.connector.rest();assert.equal(beats(f).at(-1),false,'offline is said before the Mac sleeps');assert.equal(m.state.holds,0);assert.equal((await f.connector.status('owner')).bots[0]!.state,'checking');
+ await f.connector.rest();assert.equal(beats(f).at(-1),false,'offline is said before the Mac sleeps');assert.equal('healthReason' in f.mock.commands.filter(command=>command.action==='heartbeatDeployment').at(-1).payload,false,'intentional rest is offline rather than a health fault');assert.equal(m.state.holds,0);assert.equal((await f.connector.status('owner')).bots[0]!.state,'checking');
  const sent=f.mock.commands.length;f.mock.wake();await f.connector.idle();await new Promise(done=>setTimeout(done,20));assert.equal(f.mock.commands.length,sent,'no pass and no heartbeat while resting');
  f.connector.awake();await settle(()=>beats(f).at(-1)===true&&m.state.holds===1);assert.equal((await f.connector.status('owner')).bots[0]!.state,'ready');
  // A service that does not answer cannot hold up the exit.
@@ -950,11 +1210,22 @@ test('the host status names what stands between a published Bot and an answer (M
  f.mock.service.hostMessages=answer;assert.deepEqual(await state(),['ready',undefined]);
  f.store.trash(f.bot.bot_id);assert.deepEqual(await state(),['not_ready','bot']);assert.equal(beats(f).at(-1),false);
 });
+test('unready heartbeats report only the repair category and a ready heartbeat clears it immediately',async t=>{
+ let model=true,runtime=true;const f=fixture(t,undefined,{now:()=>1800000000000,modelAccounts:async()=>model?accounts():undefined,
+  binaries:()=>{if(!runtime)throw Error('PRIVATE_RUNTIME_PATH');return {host:'/mock/host',worker:'/mock/worker'};}});
+ await f.connector.publishLocalBot('owner',f.input);const last=()=>f.mock.commands.filter(command=>command.action==='heartbeatDeployment').at(-1)!.payload;
+ const check=async()=>{f.mock.wake();await f.connector.idle();};await check();assert.equal(last().ready,true);assert.equal('healthReason' in last(),false);
+ model=false;await check();assert.deepEqual([last().ready,last().healthReason],[false,'model']);
+ model=true;await check();assert.equal(last().ready,true);assert.equal('healthReason' in last(),false);
+ runtime=false;await check();assert.deepEqual([last().ready,last().healthReason],[false,'runtime']);assert.doesNotMatch(JSON.stringify(last()),/PRIVATE_RUNTIME_PATH|credential|synthetic/);
+ runtime=true;await check();assert.equal(last().ready,true);assert.equal('healthReason' in last(),false);
+ f.store.trash(f.bot.bot_id);await check();assert.deepEqual([last().ready,last().healthReason],[false,'bot']);
+});
 /** What the service keeps of a handover, between the computer that offers a Bot (`from`, signed in as `owner`) and the one that takes it over (`to`, as `other`). */
 function handoverService(from:ReturnType<typeof fixture>,to:ReturnType<typeof fixture>,card:Record<string,unknown>={}){
  const parts=new Map<number,string>(),receipts=new Map<string,any>();let transfer:any;
  const published=()=>from.mock.commands.filter(c=>c.action==='publishSharedBot').at(-1).payload;
- const listed=()=>({sharedBotId,state:'published',...(transfer?.state==='completed'?{revision:transfer.botRevision+1,maintainer:{uid:'other',generation:1}}:{revision:published().expectedRevision+1,maintainer:{uid:'owner',generation:1}}),...card});
+ const listed=()=>({sharedBotId,state:'published',examples:published().examples,...(transfer?.state==='completed'?{revision:transfer.botRevision+1,maintainer:{uid:'other',generation:1}}:{revision:published().expectedRevision+1,maintainer:{uid:'owner',generation:1}}),...card});
  for(const [f,uid] of [[from,'owner'],[to,'other']] as const){const original=f.mock.service.hostMessages.bind(f.mock.service);
   f.mock.service.hostMessages=(async(c:any,command:any)=>{const p=command.payload,action=command.action as string;
    if(!['listSharedBots','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer'].includes(action)&&!(action==='activateDeployment'&&uid==='other'))return original(c,command);
@@ -977,7 +1248,7 @@ const loseOnce=(f:ReturnType<typeof fixture>,action:string)=>{const answer=f.moc
 test('a Bot is handed over with its published role and files and nothing else, and the new maintainer answers with their own Bot and model (M3-3)',async t=>{
  const f=fixture(t),g=fixture(t,undefined,{modelRoute:async()=>({route:{...route(),model_id:'their-model'},profiles:[route().model_profile],assertCurrent:async()=>{}})});g.mock.switch('other',0);
  const path=join(f.root,'prices.md');writeFileSync(path,'Shared prices 价格');f.select([path]);const [file]=await f.connector.selectSharedFiles('owner',f.bot.bot_id);
- await f.connector.publishLocalBot('owner',{...f.input,fileTokens:[file!.token]});const h=handoverService(f,g);
+ const examples=['Maintainer confirmed example'];await f.connector.publishLocalBot('owner',{...f.input,fileTokens:[file!.token],examples});const h=handoverService(f,g);
  await assert.rejects(f.connector.offerSharedBot('owner',{...offered,to:{uid:'owner',generation:1}}),/INVALID_INPUT/);
  await assert.rejects(f.connector.offerSharedBot('owner',{...offered,expectedRevision:2}),/BOT_REVISION_CONFLICT/);
  await assert.rejects(g.connector.offerSharedBot('other',offered),/INVALID_INPUT|BOT_REVISION_CONFLICT/,'only the computer that publishes the Bot holds what goes with it');
@@ -992,6 +1263,8 @@ test('a Bot is handed over with its published role and files and nothing else, a
  assert.deepEqual([binding.ownerUid,binding.revision,binding.instanceId,binding.publicationId],['other',2,g.bot.bot_id,'transfer00001']);
  assert.deepEqual(theirs.documents,published.documents);assert.equal(theirs.instructions,published.instructions);assert.equal(theirs.model_id,'their-model','their own model answers');
  const complete=g.mock.commands.find(c=>c.action==='completeTransfer'),deployment=complete.payload.deployment;
+ assert.equal('examples' in complete.payload,false,'handover keeps the service revision examples rather than replacing them with local defaults');
+ assert.deepEqual((await g.mock.service.hostMessages<any>(g.mock.service.hostContext()!,{teamId,generation:1,action:'listSharedBots',payload:{}})).bots[0].examples,examples);
  assert.deepEqual([complete.commandId,deployment.owner,deployment.hostId,deployment.instanceId,deployment.definitionDigest,deployment.revision],['transfer00001',{uid:'other',generation:1},g.privateStore.hostId,g.bot.bot_id,binding.snapshot,2]);
  assert.notEqual(g.privateStore.hostId,f.privateStore.hostId);assert.notEqual(deployment.deploymentId,(await f.privateStore.bindings('owner'))[0]!.deploymentId);
  assert.deepEqual(complete.payload.inputs,published.documents.map(d=>({resourceId:d.resourceId,revision:d.revision,digest:d.digest,kind:d.kind})));

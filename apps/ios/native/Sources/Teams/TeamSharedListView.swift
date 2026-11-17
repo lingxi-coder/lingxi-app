@@ -43,8 +43,8 @@ struct TeamSharedListSheet: View {
                             TextField("teams_list_add_placeholder", text: $text)
                                 .submitLabel(.done).onSubmit(add)
                                 .accessibilityIdentifier("teams.list.new")
-                            Button("teams_list_add", action: add)
-                                .buttonStyle(.borderedProminent).controlSize(.small)
+                            Button(action: add) { Text("teams_list_add").minimumHitTarget(minWidth: 0) }
+                                .buttonStyle(.borderedProminent)
                                 .disabled(busy || !TeamSharedListRules.usable(text))
                                 .accessibilityIdentifier("teams.list.add")
                         }
@@ -99,12 +99,11 @@ struct TeamSharedListSheet: View {
                     .accessibilityIdentifier("teams.list.edit.\(item.itemId)")
                 if !TeamSharedListRules.fits(edit.text) { Text("teams_list_too_long").font(.footnote).foregroundStyle(.red) }
                 HStack(spacing: 10) {
-                    Button("common_save") { write([.setText(itemId: item.itemId, text: next)]) { editing = nil } }
+                    Button { write([.setText(itemId: item.itemId, text: next)]) { editing = nil } } label: { Text("common_save").minimumHitTarget(minWidth: 0) }
                         .buttonStyle(.borderedProminent)
                         .disabled(busy || !TeamSharedListRules.usable(edit.text) || next == item.text)
-                    Button("common_cancel") { editing = nil }.buttonStyle(.bordered)
+                    Button { editing = nil } label: { Text("common_cancel").minimumHitTarget(minWidth: 0) }.buttonStyle(.bordered)
                 }
-                .controlSize(.small)
             }
         } else {
             HStack(spacing: 10) {
@@ -124,7 +123,7 @@ struct TeamSharedListSheet: View {
                     Button("teams_list_edit", systemImage: "pencil") { editing = Edit(itemId: item.itemId, text: item.text) }
                     Button("teams_list_remove", systemImage: "trash", role: .destructive) { write([.remove(itemId: item.itemId)]) }
                 } label: {
-                    Image(systemName: "ellipsis").frame(width: 44, height: 32).contentShape(Rectangle())
+                    Image(systemName: "ellipsis").minimumHitTarget()
                 }
                 .accessibilityLabel(Text("teams_list_item_options \(item.text)"))
             }

@@ -3,9 +3,12 @@ package com.lingxi.code.teams
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -32,7 +35,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -47,6 +53,7 @@ import java.time.ZoneId
  * is known to have happened or not; the Bot's maintainer says which, after checking where the action took place. The requester sees the
  * same list without the choice.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun TeamOperationsDialog(taskId: String, model: TeamMessagingModel, canResolve: Boolean, members: List<TeamMember>, onClose: () -> Unit) {
     val scope = rememberCoroutineScope()
@@ -78,9 +85,9 @@ internal fun TeamOperationsDialog(taskId: String, model: TeamMessagingModel, can
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize().testTag("teams.ops.$taskId"), color = MaterialTheme.colorScheme.surface) {
             Column(Modifier.fillMaxSize().systemBarsPadding()) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onClose) { Icon(Icons.Outlined.Close, stringResource(R.string.common_close)) }
-                    Text(stringResource(R.string.teams_ops_title), Modifier.weight(1f), style = MaterialTheme.typography.titleLarge, maxLines = 1)
+                    Text(stringResource(R.string.teams_ops_title), Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleLarge, maxLines = 1)
                     IconButton(enabled = !busy, onClick = { attempt { load() } }, modifier = Modifier.testTag("teams.ops.refresh")) { Icon(Icons.Outlined.Refresh, stringResource(R.string.teams_list_refresh)) }
                 }
                 if (busy) LinearProgressIndicator(Modifier.fillMaxWidth()) else Box(Modifier.padding(top = 4.dp))
@@ -96,12 +103,15 @@ internal fun TeamOperationsDialog(taskId: String, model: TeamMessagingModel, can
                         items(shown, key = { it.operationId }) { operation ->
                             val by = operation.resolvedBy?.let { ref -> members.firstOrNull { it.uid == ref.uid }?.displayName.orEmpty().ifEmpty { strings.member } }
                             Column(Modifier.fillMaxWidth().testTag("teams.ops.row.${operation.operationId}"), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text(operation.toolName, style = MaterialTheme.typography.titleSmall)
-                                Text(stringResource(TeamOperationRules.stateRes(operation)), style = MaterialTheme.typography.bodyMedium,
-                                    color = if (operation.unverified) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant)
-                                Text(formatDate(operation.dispatchedAt, zone, locale, "yMMMdjm") + if (by != null) " · " + stringResource(R.string.teams_ops_confirmed_by_fmt, by) else "",
-                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                if (canResolve && operation.unverified) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                // What the action was, where it stands and when: one element for a screen reader. The choice below stays its own buttons.
+                                Column(Modifier.semantics(mergeDescendants = true) {}, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(operation.toolName, style = MaterialTheme.typography.titleSmall)
+                                    Text(stringResource(TeamOperationRules.stateRes(operation)), style = MaterialTheme.typography.bodyMedium,
+                                        color = if (operation.unverified) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(formatDate(operation.dispatchedAt, zone, locale, "yMMMdjm") + if (by != null) " · " + stringResource(R.string.teams_ops_confirmed_by_fmt, by) else "",
+                                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                if (canResolve && operation.unverified) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     val happened = stringResource(R.string.teams_ops_happened_label_fmt, operation.toolName)
                                     val not = stringResource(R.string.teams_ops_not_happened_label_fmt, operation.toolName)
                                     OutlinedButton(enabled = !busy, onClick = { resolve(operation, true) }, modifier = Modifier.semantics { contentDescription = happened }.testTag("teams.ops.happened.${operation.operationId}")) { Text(stringResource(R.string.teams_ops_happened)) }
@@ -110,7 +120,7 @@ internal fun TeamOperationsDialog(taskId: String, model: TeamMessagingModel, can
                             }
                         }
                     }
-                    if (error.isNotEmpty()) item("error") { Text(stringResource(TeamOperationRules.errorRes(error)), Modifier.testTag("teams.ops.error"), color = MaterialTheme.colorScheme.error) }
+                    if (error.isNotEmpty()) item("error") { Text(stringResource(TeamOperationRules.errorRes(error)), Modifier.testTag("teams.ops.error").semantics { liveRegion = LiveRegionMode.Polite }, color = MaterialTheme.colorScheme.error) }
                 }
             }
         }

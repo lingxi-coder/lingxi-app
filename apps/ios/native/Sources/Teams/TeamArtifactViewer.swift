@@ -52,6 +52,7 @@ struct TeamArtifactViewer: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 Text(shown.document.title).font(.title2.weight(.semibold)).foregroundStyle(theme.text)
+                    .accessibilityAddTraits(.isHeader)
                 Text(shown.old ? String(localized: "teams_doc_revision_old \(shown.revision) \(shown.currentRevision)") : String(localized: "teams_doc_revision \(shown.revision)"))
                     .font(.caption).foregroundStyle(.secondary)
                     .accessibilityIdentifier("teams.artifact.revision")

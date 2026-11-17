@@ -5,7 +5,7 @@ import { parseDeepLink } from '../deep-links/index';
 import { friendsErrorText, offerErrorText } from './errors';
 import {
   badgeCount, badgeText, BADGE_CAP, canInviteFriends, chatEnded, classifyQuery, compareCards, compareFriends, compareOffers, compareRequests, confirmBody, definitive, FRIEND_CHAT,
-  friendCodeOf, friendCollator, friendLink, friendsErrorKey, handleValid, invitePicker, lookupBody, matchesFilter, NAME_MAX, nameValid, newRequestId, nextOfferExpiry, NOTE_MAX,
+  DEFAULT_MEMBER_NAME, friendCodeOf, friendCollator, friendLink, friendsErrorKey, handleValid, invitePicker, lookupBody, matchesFilter, NAME_MAX, nameValid, newRequestId, nextOfferExpiry, NOTE_MAX,
   noteValid, offerErrorKey, offerExpiry, offerLive, relationAction, SECTION_ROWS, sectionCards, unreadOf,
   type FriendCard, type OfferAction, type Proof, type TeamOffer,
 } from './friends';
@@ -131,8 +131,8 @@ test('errors: the code -> key map, which are definitive, and the English and Chi
   for (const row of vectors.errors) {
     assert.equal(friendsErrorKey(row.code), row.key, row.code);
     assert.equal(definitive(row.code), row.definitive, row.code);
-    assert.equal(friendsErrorText(row.code, false), en[row.key], row.code);
-    assert.equal(friendsErrorText(row.code, true), zh[row.key], row.code);
+    assert.equal(friendsErrorText(row.code, 'en'), en[row.key], row.code);
+    assert.equal(friendsErrorText(row.code, 'zh-Hans'), zh[row.key], row.code);
     assert.equal(chatEnded(row.code), row.key === 'friends_chat_unavailable', row.code);
   }
 });
@@ -212,11 +212,19 @@ test('offers.errors: the action\'s key, else the common one, else generic; the E
     const label = `${row.action} ${row.code}`;
     assert.equal(offerErrorKey(row.action as OfferAction, row.code), row.key, label);
     assert.equal(definitive(row.code), row.definitive, label);
-    assert.equal(offerErrorText(row.action as OfferAction, row.code, false), en[row.key], label);
-    assert.equal(offerErrorText(row.action as OfferAction, row.code, true), zh[row.key], label);
+    assert.equal(offerErrorText(row.action as OfferAction, row.code, 'en'), en[row.key], label);
+    assert.equal(offerErrorText(row.action as OfferAction, row.code, 'zh-Hans'), zh[row.key], label);
   }
   // D30: the chat's ended-friendship reading must not leak into the offer actions.
   assert.equal(friendsErrorKey('MEMBERSHIP_REQUIRED'), 'friends_chat_unavailable');
   assert.notEqual(offerErrorKey('offerTeam', 'MEMBERSHIP_REQUIRED'), 'friends_chat_unavailable');
   assert.notEqual(offerErrorKey('acceptOffer', 'STALE_MEMBERSHIP'), 'friends_chat_unavailable');
+});
+
+test('the name that means "no name yet" is the one the service gives a new account, and the views never compare it as text', () => {
+  const service = readFileSync(new URL('../../apps/firebase/src/teams.mjs', import.meta.url), 'utf8');
+  assert.match(service, new RegExp(`\\.slice\\(0, 80\\) : '${DEFAULT_MEMBER_NAME}';`), 'the client\'s constant follows the service\'s default');
+  for (const file of ['FriendsSidebar.tsx', 'FriendChatView.tsx', 'FriendsMain.tsx', 'AddFriendView.tsx', 'FriendProfileSettings.tsx']) {
+    assert.doesNotMatch(readFileSync(new URL(`./${file}`, import.meta.url), 'utf8'), /['"]Member['"]/, `${file} reads FriendsSnapshot.profileNameUnset, not an English word`);
+  }
 });

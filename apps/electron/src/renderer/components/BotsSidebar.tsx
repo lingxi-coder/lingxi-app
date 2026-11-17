@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FocusEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import type { SessionRowDto } from '@lingxi/bridge-client';
 import type { BotUi } from '../../shared/bots';
@@ -15,6 +15,8 @@ import { activityLabel } from './BotDetail';
 import { useObservable } from './BotFields';
 import { DesktopIcon } from './DesktopIcon';
 import { Icon } from './Icon';
+import { rovingIndex } from './rovingIndex';
+import './BotsSidebar.css';
 
 /** How many chats of a Bot are listed before "Show more". */
 const FIRST_CHATS = 5;
@@ -54,6 +56,35 @@ export interface BotsSidebarProps {
 
 const titleOf = (session: Pick<SessionRowDto, 'title'>) => session.title.trim() || tr('remote_untitled');
 
+/** What names a row in the list the arrow keys move through: a Bot, or one of its chats. */
+const botRowKey = (botId: string) => `bot/${encodeURIComponent(botId)}`;
+const chatRowKey = (botId: string, sessionId: string) => `chat/${encodeURIComponent(botId)}/${encodeURIComponent(sessionId)}`;
+
+type Chat = Pick<SessionRowDto, 'uuid' | 'title' | 'modified_rfc3339' | 'message_count'> & { path?: string };
+
+/**
+ * The chats of one open Bot: what was read of them, newest first; the ones a search keeps; and of those the first few
+ * unless all are asked for. The list draws `listed`, and the sidebar names the rows from the same.
+ */
+function chatsOf({ bot, entry, query, all, matches, visibleChat }: {
+  bot: BotUi;
+  entry: BotSessionsEntry | undefined;
+  query: string;
+  all: boolean;
+  matches(value: string): boolean;
+  visibleChat: string | undefined;
+}): { chats: Chat[]; searched: Chat[]; listed: Chat[] } {
+  const read = entry?.sessions;
+  // A chat just started has no transcript yet, so it is not in what was read: it stands in the list until it is.
+  const pending = read !== undefined && visibleChat !== undefined && !visibleChat.startsWith('pending-new:') && !read.some((row) => row.uuid === visibleChat);
+  const chats: Chat[] = [
+    ...(pending ? [{ uuid: visibleChat, title: tr('bots_new_chat'), modified_rfc3339: '', message_count: 0 }] : []),
+    ...(read ?? []).map((row) => ({ ...row, title: row.title.trim() })),
+  ];
+  const searched = query === '' ? chats : matches(bot.name) ? chats : chats.filter((chat) => matches(titleOf(chat)));
+  return { chats, searched, listed: query !== '' || all ? searched : searched.slice(0, FIRST_CHATS) };
+}
+
 /** The sidebar in Bots mode: each Bot, and under the ones that are open, its chats. */
 export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpenChat, onLeave, onOpenBot, onCreateBot }: BotsSidebarProps) {
   const t = useT();
@@ -67,6 +98,8 @@ export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpen
   const [opening, setOpening] = useState<string>();
   const [problem, setProblem] = useState<string>();
   const [menu, setMenu] = useState<OpenMenu | null>(null);
+  /** The row that last had the focus: the one Tab comes back to. */
+  const [focusedRow, setFocusedRow] = useState<string>();
 
   const runtimes = botRuntimes(bridge.bootstrap?.runtimes ?? [], bridge.sessionRuntimeStatus);
   const runtimeKey = runtimes.map((runtime) => `${runtime.sessionId}\t${runtime.botId}\t${runtime.turnActive ? 1 : 0}`).join('\n');
@@ -121,32 +154,59 @@ export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpen
     ? ordered
     : ordered.filter((bot) => matches(bot.name) || (expanded.has(bot.botId) && (entries[bot.botId]?.sessions ?? []).some((session) => matches(titleOf(session)))));
 
+  // The chat of a Bot that the chat view shows, if it shows one.
+  const visibleChatOf = (botId: string) => chatVisible && activeBotId === botId ? activeSession?.sessionId : undefined;
+  const listedOf = (bot: BotUi) => chatsOf({ bot, entry: entries[bot.botId], query, all: showAll.has(bot.botId), matches, visibleChat: visibleChatOf(bot.botId) }).listed;
+  // The rows, in the order they are drawn, are one list for the arrow keys; Tab reaches one of them: the row that last had
+  // the focus, else the chat on screen, else the first.
+  const rows = visible.flatMap((bot) => [botRowKey(bot.botId), ...(expanded.has(bot.botId) ? listedOf(bot).map((chat) => chatRowKey(bot.botId, chat.uuid)) : [])]);
+  const shownRow = activeBotId !== undefined && visibleChatOf(activeBotId) !== undefined ? chatRowKey(activeBotId, visibleChatOf(activeBotId)!) : undefined;
+  const tabStop = focusedRow !== undefined && rows.includes(focusedRow) ? focusedRow : shownRow !== undefined && rows.includes(shownRow) ? shownRow : rows[0];
+  const noteFocus = (event: FocusEvent<HTMLElement>) => {
+    const row = event.target as HTMLElement;
+    if (row.matches?.('[data-row]')) setFocusedRow(row.dataset.row);
+  };
+  const moveFocus = (event: KeyboardEvent<HTMLElement>) => {
+    const target = event.target as HTMLElement;
+    if (event.altKey || event.ctrlKey || event.metaKey || !target.matches?.('[data-row]')) return;
+    const list = [...event.currentTarget.querySelectorAll<HTMLElement>('[data-row]')];
+    const to = rovingIndex(list.length, list.indexOf(target), event.key);
+    const next = to === undefined ? undefined : list[to];
+    if (next === undefined) return;
+    event.preventDefault();
+    // The stop for Tab goes where the arrow key took the focus, without waiting for the focus event to say so.
+    setFocusedRow(next.dataset.row);
+    next.focus();
+  };
+  const style = {
+    '--bots-sidebar-text': t.text, '--bots-sidebar-text2': t.text2, '--bots-sidebar-text3': t.text3, '--bots-sidebar-text4': t.text4,
+    '--bots-sidebar-accent': t.accent, '--bots-sidebar-danger': t.danger, '--bots-sidebar-ok': t.ok, '--bots-sidebar-warn': t.warn, '--bots-sidebar-line': t.border,
+  } as CSSProperties;
+
   return (
-    <nav className="no-drag desktop-sidebar-list" aria-label={tr('bots_title')} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 10px 12px' }}>
+    <nav className="no-drag desktop-sidebar-list bots-sidebar" aria-label={tr('bots_title')} style={style} onFocus={noteFocus} onKeyDown={moveFocus}>
       <section className="projects-sidebar-section" aria-labelledby="bots-sidebar-heading">
-        <div className="projects-sidebar-heading" style={{ minHeight: 35, padding: '3px 4px 5px 8px', display: 'flex', alignItems: 'center' }}>
-          <h2 id="bots-sidebar-heading" style={{ flex: 1, color: t.text4, fontSize: 12.5, fontWeight: 500, letterSpacing: '.01em' }}>{tr('bots_title')}</h2>
+        <div className="projects-sidebar-heading bots-sidebar-heading">
+          <h2 id="bots-sidebar-heading">{tr('bots_title')}</h2>
           <div className="projects-sidebar-actions">
-            <button type="button" className="sidebar-header-action projects-sidebar-action" aria-label={tr('bots_new')} title={tr('bots_new')} onClick={onCreateBot}
-              style={{ width: 28, height: 28, display: 'grid', placeItems: 'center', border: 0, borderRadius: 7, background: 'transparent', color: t.text3, cursor: 'pointer' }}>
+            <button type="button" className="sidebar-header-action projects-sidebar-action bots-sidebar-add" aria-label={tr('bots_new')} title={tr('bots_new')} onClick={onCreateBot}>
               <Icon name="plus" size={17} stroke={1.8} />
             </button>
           </div>
         </div>
 
-        {problem !== undefined ? <p role="alert" style={noteStyle(t.danger)}>{problem}</p> : null}
-        {loading ? <p role="status" style={noteStyle(t.text4)}>{tr('bots_loading')}</p> : null}
-        {state.error !== undefined ? <p role="alert" style={noteStyle(t.danger)}>
-          {tr('bots_load_failed')} {state.error} <button type="button" onClick={() => void controller.reload()} style={linkButtonStyle(t.accent)}>{tr('common_retry')}</button>
+        {problem !== undefined ? <p role="alert" className="bots-sidebar-note" data-tone="danger">{problem}</p> : null}
+        {loading ? <p role="status" className="bots-sidebar-note">{tr('bots_loading')}</p> : null}
+        {state.error !== undefined ? <p role="alert" className="bots-sidebar-note" data-tone="danger">
+          {tr('bots_load_failed')} {state.error} <button type="button" className="bots-sidebar-link" onClick={() => void controller.reload()}>{tr('common_retry')}</button>
         </p> : null}
-        {empty ? <div style={{ ...noteStyle(t.text4), display: 'grid', justifyItems: 'start', gap: 8 }}>
+        {empty ? <div className="bots-sidebar-note bots-sidebar-empty">
           <span>{tr('bots_empty_title')}</span>
-          <button type="button" className="sidebar-primary-action" onClick={onCreateBot}
-            style={{ minHeight: 32, padding: '5px 10px', border: `0.5px solid ${t.border}`, borderRadius: 8, background: 'transparent', color: t.text, cursor: 'pointer', fontSize: 12.5, fontWeight: 500 }}>
+          <button type="button" className="sidebar-primary-action bots-sidebar-create" onClick={onCreateBot}>
             {tr('bots_create_first')}
           </button>
         </div> : null}
-        {query !== '' && visible.length === 0 && state.bots.length > 0 ? <p style={noteStyle(t.text4)}>{tr('bots_sidebar_no_results')}</p> : null}
+        {query !== '' && visible.length === 0 && state.bots.length > 0 ? <p className="bots-sidebar-note">{tr('bots_sidebar_no_results')}</p> : null}
 
         {visible.map((bot) => {
           const open = expanded.has(bot.botId);
@@ -156,55 +216,61 @@ export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpen
           const menuTrigger = menu?.trigger !== undefined && menu.target.kind === 'bot' && menu.target.botId === bot.botId;
           const target: MenuTarget = { kind: 'bot', botId: bot.botId, name: bot.name };
           const openingNew = opening === `${bot.botId}\0`;
-          const actionStyle: CSSProperties = { position: 'absolute', top: 5, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' };
+          const rowKey = botRowKey(bot.botId);
+          // The row that Tab reaches takes its two buttons with it; the others are reached by the arrow keys.
+          const rowTab = rowKey === tabStop ? 0 : -1;
           return (
-            <div key={bot.botId} style={{ position: 'relative', marginBottom: 2 }}>
-              <div className="sidebar-tree-row" style={{ position: 'relative' }}>
+            <div key={bot.botId} className="bots-sidebar-bot">
+              <div className="sidebar-tree-row bots-sidebar-row">
                 <button
                   type="button"
+                  className="bots-sidebar-toggle"
                   aria-expanded={open}
                   aria-controls={open ? groupId : undefined}
+                  data-row={rowKey}
+                  tabIndex={rowTab}
                   title={bot.name}
                   onClick={() => toggle(bot.botId)}
                   onContextMenu={(event) => {
                     event.preventDefault();
                     openMenu(target, { left: event.clientX, top: event.clientY }, event.currentTarget);
                   }}
-                  style={{ width: '100%', minHeight: 37, display: 'flex', alignItems: 'center', gap: 8, padding: '7px 62px 7px 8px', border: 0, borderRadius: 8, background: 'transparent', color: t.text2, cursor: 'pointer', textAlign: 'left' }}
                 >
-                  <Icon name="chevron" size={13} stroke={1.7} style={{ flexShrink: 0, color: t.text4, transform: open ? 'none' : 'rotate(-90deg)' }} />
+                  <Icon name="chevron" size={13} stroke={1.7} />
                   <AgentAvatar agentId={bot.botId} size={20} />
-                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13, fontWeight: 500 }}>{bot.name}</span>
+                  <span className="bots-sidebar-name">{bot.name}</span>
                   <ActivityDot activity={activity} />
                 </button>
                 <button
                   type="button"
                   className="sidebar-row-action"
+                  data-slot="new-chat"
                   data-visible={openingNew || undefined}
                   disabled={bridge.sessionLoading || opening !== undefined}
                   aria-busy={openingNew || undefined}
                   aria-label={tr('bots_sidebar_new_chat_named', bot.name)}
                   title={tr('bots_new_chat')}
+                  tabIndex={rowTab}
                   onClick={() => void openChat(bot.botId)}
-                  style={{ ...actionStyle, right: 32, cursor: bridge.sessionLoading || opening !== undefined ? 'wait' : 'pointer' }}
                 >
                   <DesktopIcon name="compose" size={14} />
                 </button>
                 <button
                   type="button"
                   className="sidebar-row-action"
+                  data-slot="menu"
                   data-visible={menuTrigger || undefined}
                   aria-haspopup="menu"
                   aria-expanded={menuTrigger}
                   aria-label={tr('desktop_chat_session_actions', bot.name)}
                   title={tr('desktop_chat_session_actions', bot.name)}
+                  tabIndex={rowTab}
                   onClick={(event) => {
                     const button = event.currentTarget;
                     if (menuTrigger) { closeMenu(); return; }
                     const rect = button.getBoundingClientRect();
                     openMenu(target, { left: rect.left, top: rect.bottom + 4 }, button, button);
                   }}
-                  style={{ ...actionStyle, right: 4 }}
                 >
                   <Icon name="more" size={14} stroke={1.9} />
                 </button>
@@ -218,7 +284,8 @@ export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpen
                     query={query}
                     all={showAll.has(bot.botId)}
                     matches={matches}
-                    visibleChat={chatVisible && activeBotId === bot.botId ? activeSession?.sessionId : undefined}
+                    visibleChat={visibleChatOf(bot.botId)}
+                    tabStop={tabStop}
                     opening={opening}
                     bridge={bridge}
                     onOpen={(sessionId, transcriptPath) => void openChat(bot.botId, sessionId, transcriptPath)}
@@ -248,25 +315,18 @@ export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpen
   );
 }
 
-function noteStyle(color: string): CSSProperties {
-  return { margin: 0, padding: '8px 10px 8px 9px', color, fontSize: 11.5, lineHeight: 1.5 };
-}
-
-function linkButtonStyle(color: string): CSSProperties {
-  return { padding: 0, border: 0, background: 'transparent', color, cursor: 'pointer', font: 'inherit', textDecoration: 'underline' };
-}
-
-/** A small mark at the end of a Bot's row while it is at work or waiting for the owner; a Bot at rest has none. */
+/**
+ * A small mark at the end of a Bot's row while it is at work (a filled dot) or waiting for the owner (a ring); a Bot at
+ * rest has none. The two differ in shape as well as in color, and the label says which.
+ */
 function ActivityDot({ activity }: { activity: BotActivity }) {
-  const t = useT();
   if (activity === 'idle') return null;
   const label = activityLabel(activity);
-  return <span role="img" aria-label={label} title={label} data-state={activity}
-    style={{ flexShrink: 0, width: 6, height: 6, borderRadius: 99, background: activity === 'working' ? t.ok : t.warn }} />;
+  return <span role="img" aria-label={label} title={label} data-state={activity} className="bots-sidebar-activity" />;
 }
 
 /** The chats of one open Bot: what was read of them, newest first, the first few unless all are asked for. */
-export function BotChatList({ bot, entry, query, all, matches, visibleChat, opening, bridge, onOpen, onMenu, onToggleAll, onRetry }: {
+export function BotChatList({ bot, entry, query, all, matches, visibleChat, tabStop, opening, bridge, onOpen, onMenu, onToggleAll, onRetry }: {
   bot: BotUi;
   entry: BotSessionsEntry | undefined;
   query: string;
@@ -274,6 +334,8 @@ export function BotChatList({ bot, entry, query, all, matches, visibleChat, open
   matches(value: string): boolean;
   /** The chat of this Bot that the chat view shows, if it shows one. */
   visibleChat: string | undefined;
+  /** The row of the sidebar that Tab reaches. Given, the chats are rows of the list the arrow keys move through; not given, they are reached by Tab each. */
+  tabStop?: string;
   opening: string | undefined;
   bridge: Pick<UseBridge, 'sessionRuntimeStatus'>;
   onOpen(sessionId: string, transcriptPath?: string): void;
@@ -281,25 +343,18 @@ export function BotChatList({ bot, entry, query, all, matches, visibleChat, open
   onToggleAll(): void;
   onRetry(): void;
 }) {
-  const t = useT();
   const read = entry?.sessions;
-  // A chat just started has no transcript yet, so it is not in what was read: it stands in the list until it is.
-  const pending = read !== undefined && visibleChat !== undefined && !visibleChat.startsWith('pending-new:') && !read.some((row) => row.uuid === visibleChat);
-  const chats: Array<Pick<SessionRowDto, 'uuid' | 'title' | 'modified_rfc3339' | 'message_count'> & { path?: string }> = [
-    ...(pending ? [{ uuid: visibleChat, title: tr('bots_new_chat'), modified_rfc3339: '', message_count: 0 }] : []),
-    ...(read ?? []).map((row) => ({ ...row, title: row.title.trim() })),
-  ];
-  const searched = query === '' ? chats : matches(bot.name) ? chats : chats.filter((chat) => matches(titleOf(chat)));
-  const listed = query !== '' || all ? searched : searched.slice(0, FIRST_CHATS);
+  const { chats, searched, listed } = chatsOf({ bot, entry, query, all, matches, visibleChat });
   const failed = entry?.error;
   return <>
-    {read === undefined && failed === undefined ? <p role="status" style={{ ...noteStyle(t.text4), paddingLeft: 30 }}>{tr('bots_chats_loading')}</p> : null}
-    {failed !== undefined ? <p role="alert" style={{ ...noteStyle(t.danger), paddingLeft: 30 }}>
-      {tr('bots_chats_failed', failed)} <button type="button" onClick={onRetry} style={linkButtonStyle(t.accent)}>{tr('common_retry')}</button>
+    {read === undefined && failed === undefined ? <p role="status" className="bots-sidebar-note" data-nested>{tr('bots_chats_loading')}</p> : null}
+    {failed !== undefined ? <p role="alert" className="bots-sidebar-note" data-tone="danger" data-nested>
+      {tr('bots_chats_failed', failed)} <button type="button" className="bots-sidebar-link" onClick={onRetry}>{tr('common_retry')}</button>
     </p> : null}
-    {read !== undefined && chats.length === 0 && failed === undefined ? <p style={{ ...noteStyle(t.text4), paddingLeft: 30 }}>{tr('bots_no_chats_yet')}</p> : null}
+    {read !== undefined && chats.length === 0 && failed === undefined ? <p className="bots-sidebar-note" data-nested>{tr('bots_no_chats_yet')}</p> : null}
     {listed.map((chat) => {
       const key = `${bot.botId}\0${chat.uuid}`;
+      const rowKey = chatRowKey(bot.botId, chat.uuid);
       return <SessionRow
         key={chat.uuid}
         projectPath={pendingBotPath(bot.botId)}
@@ -309,12 +364,13 @@ export function BotChatList({ bot, entry, query, all, matches, visibleChat, open
         pinned={false}
         opening={opening === key}
         status={bridge.sessionRuntimeStatus(chat.uuid)}
+        roving={tabStop === undefined ? undefined : { id: rowKey, tabStop: rowKey === tabStop }}
         onClick={() => onOpen(chat.uuid, chat.path)}
         onMenu={(at, opener) => onMenu(chat.uuid, titleOf(chat), chat.path, at, opener)}
       />;
     })}
     {query === '' && searched.length > FIRST_CHATS ? (
-      <button type="button" onClick={onToggleAll} style={{ minHeight: 32, marginLeft: 30, padding: '5px 8px', border: 0, borderRadius: 7, background: 'transparent', color: t.text4, cursor: 'pointer', fontSize: 11.5 }}>
+      <button type="button" className="bots-sidebar-more" onClick={onToggleAll}>
         {all ? tr('chat_tool_show_less') : tr('desktop_chat_show_more', searched.length - FIRST_CHATS)}
       </button>
     ) : null}

@@ -47,6 +47,27 @@ scenario('A member example opens the correct existing DM and appends to its draf
   workspace.selectTeam('team-other'); assert.equal(workspace.draft('bot-chat'), ''); workspace.selectTeam('team-test'); assert.equal(workspace.draft('bot-chat'), 'Existing draft\n\nPlan groceries\n\nPlan groceries');
 });
 
+scenario('Repeated example intent updates the composer after local edits even when the last published draft has the same text', async context => {
+  const { fake, workspace, cleanup } = await open(context); workspace.selectConversation('bot-chat');
+  workspace.setDraft('other-chat', 'Unrelated draft');
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en' })); cleanup(() => page.unmount());
+  const box = () => page.find(node => node.type === 'textarea')[0];
+  for (const original of ['', 'Keep my local draft']) {
+    await page.type(box(), original);
+    await page.click(page.button('Plan groceries'));
+    const expected = original ? `${original}\n\nPlan groceries` : 'Plan groceries';
+    assert.equal(box().props.value, expected);
+    // Return to the local text without publishing a workspace snapshot, then repeat the same intent.
+    await page.type(box(), original);
+    assert.equal(box().props.value, original);
+    await page.click(page.button('Plan groceries'));
+    assert.equal(box().props.value, expected, 'the fill is applied once even if its result equals the previous published value');
+    assert.equal(workspace.draft('bot-chat'), expected);
+  }
+  assert.equal(workspace.draft('other-chat'), 'Unrelated draft');
+  assert.equal(fake.commands.some(command => command.action === 'submit' || command.action === 'mutate'), false);
+});
+
 scenario('Explicit unavailable health blocks a new request while preserving history, examples and the draft; missing projections stay Unknown', async context => {
   const { fake, workspace, cleanup } = await open(context); fake.bots = [botCard({ examples: ['Try a question'], availability: 'quota_exhausted', ready: true, dailyRemaining: 0 })]; await workspace.refreshBots(); workspace.selectConversation('bot-chat');
   const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en' })); cleanup(() => page.unmount());

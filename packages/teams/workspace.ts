@@ -231,6 +231,8 @@ export interface TeamsSnapshot {
   /** Files of the open conversation's unsent message, in the order they were added. */
   readonly draftFiles: DraftFile[];
   readonly draftText: string;
+  /** Each explicit example fill is observable even when its text matches the previous snapshot. */
+  readonly draftFillRevision: number;
   readonly bots: SharedBotCard[];
   /** A known refusal stays blocked through status expiry/network failure until a fresh Ready projection. */
   readonly blockedBotIds: readonly string[];
@@ -373,6 +375,7 @@ export class TeamsWorkspace {
   private botsError = '';
   private readonly conversationByTeam = new Map<string, string>();
   private readonly drafts = new Map<string, string>();
+  private draftFillRevision = 0;
   // Files of unsent messages, kept like the text drafts. Each upload is for one conversation of one membership and ends there.
   private readonly draftFileLists = new Map<string, DraftFile[]>();
   private readonly uploads = new Map<string, AbortController>();
@@ -427,6 +430,7 @@ export class TeamsWorkspace {
     if (this.closed || this.messaging?.selected !== conversationId || !example.trim()) return;
     const old = this.draft(conversationId);
     this.setDraft(conversationId, old ? `${old}\n\n${example}` : example);
+    this.draftFillRevision++;
     this.publish();
   };
 
@@ -777,6 +781,7 @@ export class TeamsWorkspace {
       messagingConnecting: model?.connecting ?? !!this.selection, messagingError: model?.error ?? '',
       draftFiles: this.draftFileLists.get(this.draftKey(selected)) ?? EMPTY_FILES,
       draftText: this.draft(selected),
+      draftFillRevision: this.draftFillRevision,
       bots: this.bots, blockedBotIds: this.blockedBotIds, botsLoaded: this.botsLoaded, botsUnverified: this.botsUnverified, botsError: this.botsError,
       unreadByTeam, totalUnread: Object.values(unreadByTeam).reduce((sum, value) => sum + value, 0),
     };

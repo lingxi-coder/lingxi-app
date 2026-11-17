@@ -98,11 +98,11 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
   const bytes = byteLength(text);
   const botName = (key: string) => snapshot.bots.find(bot => bot.sharedBotId === key)?.name ?? t('teams_bot_tag');
 
-  // A member-home example may arrive just after the DM mounted. Read the scoped draft again.
+  // Observe each example intent, including identical text after a local edit or after the DM mounted.
   useEffect(() => {
     const draft = workspace.draft(conversation.id);
     if (!editing && !answering && draft !== latest.current) { setText(draft); caretTo.current = draft.length; input.current?.focus(); }
-  }, [workspace, conversation.id, snapshot.draftText, editing?.id, answering?.waitId]);
+  }, [workspace, conversation.id, snapshot.draftText, snapshot.draftFillRevision, editing?.id, answering?.waitId]);
 
   // An edit borrows the box: the draft is set aside and comes back when the edit ends.
   useEffect(() => {

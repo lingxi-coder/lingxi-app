@@ -68,12 +68,15 @@ test('handbook distinguishes unpublished commits from dirty files and recognizes
       run('git', ['config', 'user.email', 'docs@example.invalid'], directory);
       run('git', ['remote', 'add', 'origin', `https://github.com/lingxi-coder/${repo}.git`], directory);
       writeFileSync(path.join(directory, 'config.toml'), 'enabled = true\n');
+      if (repo === 'llm-client') writeFileSync(path.join(directory, 'stable.toml'), 'public = true\n');
       if (repo === 'lingxi-app') writeFileSync(path.join(directory, 'Cargo.toml'), '[workspace.dependencies]\n');
       run('git', ['add', '.'], directory);
       run('git', ['commit', '-qm', 'published baseline'], directory);
       run('git', ['update-ref', 'refs/remotes/origin/main', 'HEAD'], directory);
     }
-    const pages = JSON.stringify([{ id: 'example', sources: repos.map((repo) => ({ repo, path: 'config.toml' })) }]);
+    const pages = JSON.stringify([{ id: 'example', sources: [
+      ...repos.map((repo) => ({ repo, path: 'config.toml' })), { repo: 'llm-client', path: 'stable.toml' },
+    ] }]);
     const generate = () => {
       run('python3', [script, '--workspace', root, '--output', output], root, pages);
       return JSON.parse(readFileSync(output, 'utf8'));
@@ -90,6 +93,9 @@ test('handbook distinguishes unpublished commits from dirty files and recognizes
     assert.equal(repository.dirty, false);
     assert.equal(baseline.pages.example[2].sourceState, 'unpublished');
     assert.equal(baseline.pages.example[2].url, undefined);
+    const publicRevision = run('git', ['rev-parse', 'origin/main'], local).trim();
+    assert.equal(baseline.pages.example[4].sourceState, 'committed');
+    assert.ok(baseline.pages.example[4].url.endsWith(`/blob/${publicRevision}/stable.toml`));
     assert.ok(baseline.pages.example.filter((source: { repo: string }) => source.repo !== 'llm-client').every((source: { url?: string }) => source.url));
 
     writeFileSync(path.join(local, 'config.toml'), 'enabled = "working"\n');

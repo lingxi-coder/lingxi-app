@@ -72,13 +72,14 @@ internal fun FriendChatScreen(
     showBack: Boolean,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    initialConversation: String? = null,
 ) {
     val card = state.friendCard(friendUid)
     val pair = card?.pair
     when {
         !state.cardsLoaded -> Box(modifier.fillMaxSize().testTag(FriendsTags.LOADING), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         card == null || pair == null -> ChatUnavailable(showBack, onBack, modifier)
-        else -> FriendChat(workspace, state, uid, card, pair, showBack, onBack, modifier)
+        else -> FriendChat(workspace, state, uid, card, pair, showBack, onBack, modifier, initialConversation)
     }
 }
 
@@ -92,6 +93,7 @@ private class PinnedChat(val workspace: TeamsWorkspace) : RememberObserver {
 @Composable
 private fun FriendChat(
     workspace: FriendsWorkspace, state: FriendsState, uid: String, card: FriendCard, pair: PairRef, showBack: Boolean, onBack: () -> Unit, modifier: Modifier,
+    initialConversation: String?,
 ) {
     val context = LocalContext.current
     val friendUid = card.uid
@@ -108,9 +110,9 @@ private fun FriendChat(
     // What the area shows (D21, D22): the chat itself (empty), its Bots ("bots") or one Bot DM ("dm:<conversationId>"). One pinned workspace serves
     // all three, so a Bot command the server refuses because the friendship ended revokes the messaging of all of them at once (D25), and Back from
     // the Bots or from a Bot DM returns to the chat.
-    var view by rememberSaveable(friendUid) { mutableStateOf("") }
+    var view by rememberSaveable(friendUid, initialConversation) { mutableStateOf(initialConversation?.let { "dm:$it" }.orEmpty()) }
     val inChat = view.isEmpty()
-    BackHandler(enabled = !inChat && !messaging.revoked) { view = "" }
+    BackHandler(enabled = !inChat && !messaging.revoked) { if (initialConversation != null) onBack() else view = "" }
 
     // While the chat is open and in front it counts as read in the list and the badge (D13), which the Bots and a Bot DM do not; the name is
     // refreshed once per open (D10).
@@ -140,7 +142,7 @@ private fun FriendChat(
         )
         view.startsWith("dm:") -> TeamConversationScreen(
             workspace = chat, uid = uid, team = summary, teams = teams, messaging = messaging,
-            conversationId = view.removePrefix("dm:"), showBack = true, onBack = { view = "" }, modifier = modifier,
+            conversationId = view.removePrefix("dm:"), showBack = true, onBack = { if (initialConversation != null) onBack() else view = "" }, modifier = modifier,
         )
         else -> Box(modifier.fillMaxSize().testTag(FriendsTags.CHAT)) {
             TeamConversationScreen(

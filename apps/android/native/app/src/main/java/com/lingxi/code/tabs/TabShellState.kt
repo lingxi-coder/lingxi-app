@@ -122,6 +122,20 @@ class TabShellState(selected: AppTab = AppTab.Chats, settingsOrigin: AppTab? = n
         selected = AppTab.Teams
     }
 
+    internal data class InboxTeamRequest(val id: Long, val teamId: String, val conversationId: String, val generation: Long)
+
+    internal var inboxTeamRequest: InboxTeamRequest? by mutableStateOf(null)
+        private set
+
+    internal fun openInboxTeam(teamId: String, conversationId: String, generation: Long) {
+        inboxTeamRequest = InboxTeamRequest(nextId(), teamId, conversationId, generation)
+        selected = AppTab.Teams
+    }
+
+    internal fun onInboxTeamHandled(id: Long) {
+        if (inboxTeamRequest?.id == id) inboxTeamRequest = null
+    }
+
     fun onTeamsJoinCodeHandled() {
         teamsJoinCode = null
     }

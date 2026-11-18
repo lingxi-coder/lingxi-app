@@ -140,6 +140,7 @@ body {
 .desktop-rail-settings { margin-top: auto; }
 .desktop-rail-button:disabled { opacity: .45; cursor: default; }
 .desktop-rail-changes,
+.desktop-rail-home,
 .desktop-rail-teams,
 .desktop-rail-friends { position: relative; }
 .desktop-rail-count {

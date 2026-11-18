@@ -1,3 +1,6 @@
+import {SourceNoticePreview} from '../inbox/SourceNoticePreview';
+import type {InboxNoticeTarget} from '../inbox/contracts';
+import { observeTranscript, VisibleReadFrontier } from '../inbox/visibility.js';
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import type { LocalPublishableBot, SharedHostBot, TeamTaskView } from './execution.js';
 import { availabilityText, newServiceId, serviceCommand, serviceErrorText, serviceIdFrom, type HostedServicesApi, type PublishedService,
@@ -11,11 +14,13 @@ import { intlTag, useTeamsText } from './i18n.js';
  * sessions with it, and what its publisher said about cost, visibility and retention before they agreed to enter.
  */
 export interface HostedServicesProps {
+  notificationTarget?:InboxNoticeTarget;
   api: HostedServicesApi; uid: string; locale: string;
   /** Renders the Bot's answers as Markdown, with the same renderer the Team chat uses. What a person types stays plain text. */
   renderMarkdown?: RenderMarkdown;
   /** A service to look up at once: the one a link named. */
   initialServiceId?: string;
+  initialSessionId?: string;
   /** The link a publisher gives to people, for a service id. Without it the id itself is shown. */
   link?(serviceId: string): string;
   /** People the publisher can offer a service to by name (their friends). Without it a service is offered to anyone with the link. */
@@ -26,7 +31,7 @@ export interface HostedServicesProps {
 const code = (error: unknown) => error instanceof Error ? error.message : 'SERVICE_UNAVAILABLE';
 const LIVE = ['queued', 'running', 'waiting'];
 
-export function HostedServices({ api, uid, locale, renderMarkdown, initialServiceId, link, people, refreshMs = { answering: 2000, idle: 10000 } }: HostedServicesProps): ReactElement {
+export function HostedServices({ notificationTarget,api, uid, locale, renderMarkdown, initialServiceId, initialSessionId, link, people, refreshMs = { answering: 2000, idle: 10000 } }: HostedServicesProps): ReactElement {
   const t = useTeamsText(locale);
   const [list, setList] = useState<ServiceList>(), [status, setStatus] = useState(''), [busy, setBusy] = useState(false);
   const [lookup, setLookup] = useState(''), [candidate, setCandidate] = useState<ServiceView>(), [open, setOpen] = useState<ServiceView>();
@@ -44,7 +49,10 @@ export function HostedServices({ api, uid, locale, renderMarkdown, initialServic
     if (view.entered) { setCandidate(undefined); setOpen(view); } else { setOpen(undefined); setCandidate(view); }
   }, [api, locale]);
   useEffect(() => { void attempt(async () => { await refresh(); if (initialServiceId) await find(initialServiceId); }); }, [attempt, refresh, find, initialServiceId]);
-  if (open) return <ServiceSessions api={api} uid={uid} locale={locale} service={open} renderMarkdown={renderMarkdown} refreshMs={refreshMs}
+  const [dismissed,setDismissed]=useState('');
+  const token=notificationTarget?JSON.stringify([notificationTarget.key,notificationTarget.generation,notificationTarget.through,notificationTarget.messageId,notificationTarget.taskId]):'';
+  if(open && initialSessionId && open.serviceId===initialServiceId && notificationTarget && token!==dismissed)return <SourceNoticePreview api={api} kind="service" sourceId={open.serviceId} generation={open.generation??1} conversationId={initialSessionId} locale={locale} target={notificationTarget} onReturn={()=>setDismissed(token)}/>;
+  if (open) return <ServiceSessions api={api} uid={uid} locale={locale} service={open} initialSessionId={initialServiceId === open.serviceId ? initialSessionId : undefined} renderMarkdown={renderMarkdown} refreshMs={refreshMs}
     onBack={() => { setOpen(undefined); void attempt(refresh); }} onLeft={() => { setOpen(undefined); void attempt(refresh); }} />;
   return <section className="tw-scope tw-embed hosted-services" aria-label={t('services_title')}>
     <h2>{t('services_title')}</h2>
@@ -90,20 +98,44 @@ function ServiceTerms({ service, locale, busy, onEnter, onCancel }: { service: S
 }
 
 /** A caller's sessions with a service's Bot. Everything is read through the API on a timer: a service's records cannot be watched. */
-function ServiceSessions({ api, uid, locale, service, renderMarkdown, refreshMs, onBack, onLeft }: {
-  api: HostedServicesApi; uid: string; locale: string; service: ServiceView; renderMarkdown?: RenderMarkdown; refreshMs: { answering: number; idle: number }; onBack(): void; onLeft(): void;
+function ServiceSessions({ api, uid, locale, service, initialSessionId, renderMarkdown, refreshMs, onBack, onLeft }: {
+  api: HostedServicesApi; uid: string; locale: string; service: ServiceView; initialSessionId?:string; renderMarkdown?: RenderMarkdown; refreshMs: { answering: number; idle: number }; onBack(): void; onLeft(): void;
 }): ReactElement {
   const t = useTeamsText(locale);
   const scope: ServiceScope = { serviceId: service.serviceId, generation: service.generation ?? 1 }, scopeKey = `${scope.serviceId}:${scope.generation}`;
-  const [view, setView] = useState(service), [sessions, setSessions] = useState<ServiceSession[]>(), [sessionId, setSessionId] = useState<string>();
+  const [view, setView] = useState(service), [sessions, setSessions] = useState<ServiceSession[]>(), [sessionId, setSessionId] = useState<string|undefined>(initialSessionId);
   const [messages, setMessages] = useState<ServiceMessage[]>([]), [tasks, setTasks] = useState<TeamTaskView[]>([]);
   const [text, setText] = useState(''), [status, setStatus] = useState(''), [busy, setBusy] = useState(false);
   const [reporting, setReporting] = useState(false), [leaving, setLeaving] = useState(false), [tick, setTick] = useState(0);
-  const cursor = useRef({ key: '', after: 0, byId: new Map<string, ServiceMessage>() }), end = useRef<HTMLLIElement>(null);
+  const scroller=useRef<HTMLDivElement>(null);
+  const [older,setOlder]=useState<number|null>(null);
+  const cursor = useRef({ historical:false, initialized:false,verifiedAt:0,key: '', after: 0, byId: new Map<string, ServiceMessage>() }), end = useRef<HTMLLIElement>(null);
   const attempt = async (action: () => Promise<unknown>) => {
     setBusy(true); setStatus('');
     try { await action(); return true; } catch (error) { setStatus(serviceErrorText(code(error), locale)); return false; } finally { setBusy(false); }
   };
+  async function loadOlder(){
+    const at=cursor.current;
+    if(!sessionId || !older || busy)return;
+    await attempt(async()=>{
+      const page=await api.serviceMessages<{messages:ServiceMessage[];next:number|null}>({action:'history',...scope,conversationId:sessionId,before:older});
+      if(cursor.current!==at)return;
+      const byId=new Map([...page.messages,...at.byId.values()].map(m=>[m.id,m]));
+      const values=[...byId.values()].sort((a,b)=>a.seq-b.seq);
+      if(values.length>200)at.historical=true;
+      const visible=values.slice(0,200);at.byId=new Map(visible.map(m=>[m.id,m]));
+      setMessages(visible);setOlder(page.next);
+    });
+  }
+  const currentRead=sessions?.find(s=>s.id===sessionId)?.lastReadSeq;
+  useEffect(()=>{
+    if(!sessionId || currentRead===undefined || !scroller.current)return;
+    const frontier=new VisibleReadFrontier(currentRead,0,(through,revision)=>{
+      const read=api.readVisible?.(scope,sessionId,through,revision) ?? api.serviceMessages({action:'read',...scope,conversationId:sessionId,lastReadSeq:through});
+      void read.catch(e=>setStatus(serviceErrorText(code(e),locale)));
+    });
+    return observeTranscript(scroller.current,frontier);
+  },[api,scopeKey,sessionId,currentRead]);
   const loadSessions = useCallback(async () => {
     const found = (await api.serviceMessages<{ conversations: ServiceSession[] }>({ action: 'list', ...scope })).conversations;
     setSessions(found); return found;
@@ -116,17 +148,37 @@ function ServiceSessions({ api, uid, locale, service, renderMarkdown, refreshMs,
     if (!sessionId) { setMessages([]); setTasks([]); return; }
     let closed = false, running = false;
     const key = `${scopeKey}:${sessionId}`;
-    if (cursor.current.key !== key) { cursor.current = { key, after: 0, byId: new Map() }; setMessages([]); setTasks([]); }
+    if (cursor.current.key !== key) { cursor.current = { key, historical:false, initialized:false,verifiedAt:0,after: 0, byId: new Map() };setOlder(null); setMessages([]); setTasks([]); }
     const pass = async () => {
       if (closed || running || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) return;
       running = true;
       try {
         const at = cursor.current;
+        async function history() {
+          const previous=[...at.byId.values()].sort((a,b)=>a.seq-b.seq);
+          const recent=at.historical && previous.length ? previous[previous.length-1]!.seq+1 : undefined;
+          let before=recent,remaining=Math.max(1,Math.ceil(previous.length/50)), high:number|undefined;
+          const rebased=new Map<string,ServiceMessage>();
+          do {
+            const page=await api.serviceMessages<{messages:ServiceMessage[];next:number|null;lastChangeSeq:number}>({action:'history',...scope,conversationId:sessionId,...(before?{before}:{})});
+            if(closed || at!==cursor.current)return;
+            high??=page.lastChangeSeq;
+            for(const m of page.messages)rebased.set(m.id,m);
+            before=page.next??undefined;
+          }while(before && --remaining>0);
+          at.byId=rebased;at.after=high??0;at.initialized=true;at.verifiedAt=Date.now();setOlder(before??null);
+        }
+        if(!at.initialized || Date.now()-at.verifiedAt>30*86400000) await history();
         for (;;) {
-          const page = await api.serviceMessages<ServiceSync>({ action: 'sync', ...scope, conversationId: sessionId, after: at.after });
+          if(closed || cursor.current!==at)return;
+          const page = await api.serviceMessages<ServiceSync>({ action: 'sync', ...scope, conversationId: sessionId, after: at.after,limit:50 });
           if (closed || cursor.current !== at) return;
-          for (const message of page.messages) at.byId.set(message.id, message);
-          at.after += page.changes.length;
+          if(page.conversation.lastChangeSeq-at.after>1000 || page.changes.some((c,i)=>c.seq!==at.after+i+1)) {await history();break;}
+          const tail=Math.max(0,...[...at.byId.values()].map(m=>m.seq));
+          for (const message of page.messages) if(!at.historical || at.byId.has(message.id) || message.seq<=tail && message.seq>=(messages[0]?.seq??0)) at.byId.set(message.id, message);
+          const sorted=[...at.byId.values()].sort((a,b)=>a.seq-b.seq);
+          if(sorted.length>200){at.byId=new Map(sorted.slice(-200).map(m=>[m.id,m]));setOlder(sorted.at(-200)!.seq);}
+          at.after += page.changes.length;at.verifiedAt=Date.now();
           if (!page.hasMore || !page.changes.length) break;
         }
         const listed = await api.serviceMessages<{ tasks: TeamTaskView[] }>(serviceCommand(scope, 'listTasks', { conversationId: sessionId }));
@@ -189,11 +241,13 @@ function ServiceSessions({ api, uid, locale, service, renderMarkdown, refreshMs,
     </header>
     <p className="hosted-service-note">{t('services_note_fmt', view.publisherName)}
       {view.limits.userDailyLeft !== undefined ? ` ${t('services_left_today_fmt', view.limits.userDailyLeft)}` : ''}</p>
-    <div className="tw-stream-wrap"><div className="tw-stream" role="log" aria-label={t('tw_messages')} tabIndex={0}>
+    <div className="tw-stream-wrap"><div ref={scroller} className="tw-stream" role="log" aria-label={t('tw_messages')} tabIndex={0}>
+      {older?<button type="button" disabled={busy} onClick={()=>void loadOlder()}>{t('teams_messages_earlier')}</button>:null}
+      {cursor.current.historical?<button type="button" onClick={()=>{cursor.current.key='';setTick(n=>n+1);}}>{t('tw_conv_latest')}</button>:null}
       {!messages.length && !tasks.length ? <p className="tw-empty-line" role="status">{t('services_empty')}</p> : null}
       <ol className="tw-messages">
       {messages.map(message => { const bot = message.author.kind === 'shared_bot';
-        return <li key={message.id} className="tw-msg" data-grouped="false" data-mine={!bot} data-kind={bot ? 'bot' : 'user'} data-message-id={message.id}>
+        return <li key={message.id} className="tw-msg" data-grouped="false" data-mine={!bot} data-kind={bot ? 'bot' : 'user'} data-message-id={message.id} data-message-seq={message.seq}>
           <div className="tw-msg-lead"><Avatar identity={bot ? { kind: 'bot', id: view.sharedBotId, name: view.name } : { kind: 'user', id: uid, name: t('teams_you') }} size={32} /></div>
           <div className="tw-msg-main">
             <div className="tw-msg-head"><b className="tw-msg-author">{bot ? view.name : t('teams_you')}</b>{bot ? <span className="tw-tag">{t('teams_bot_tag')}</span> : null}

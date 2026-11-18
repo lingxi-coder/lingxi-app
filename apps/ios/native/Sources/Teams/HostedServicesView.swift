@@ -8,8 +8,11 @@ struct HostedServicesView: View {
     @State private var model = HostedServicesModel()
     @State private var link = ""
     @State private var path: [String] = []
+    @State private var openedInboxService = false
+    @State private var openedInboxSession = false
     /// A link the person followed into the app; looked up once, never entered by itself.
     var initialLink: String?
+    var inboxDestination: InboxRef?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -49,6 +52,19 @@ struct HostedServicesView: View {
             }
         }
         .onAppear { model.start(link: initialLink) }
+        .onChange(of: model.entered, initial: true) { _, services in
+            guard !openedInboxService, path.isEmpty, let destination = inboxDestination,
+                  let service = services.first(where: { $0.serviceId == destination.sourceId && $0.generation == destination.generation }) else { return }
+            openedInboxService = true
+            model.show(service)
+            path = [service.serviceId]
+        }
+        .onChange(of: model.sessions, initial: true) { _, sessions in
+            guard !openedInboxSession, let destination = inboxDestination, model.open?.serviceId == destination.sourceId,
+                  sessions.contains(where: { $0.id == destination.conversationId }) else { return }
+            openedInboxSession = true
+            model.select(destination.conversationId)
+        }
         .onDisappear { model.stop() }
         .onChange(of: scenePhase) { _, phase in if phase == .active { model.start() } else { model.pause() } }
         .onChange(of: path) { _, value in if value.isEmpty { model.closeService() } }
@@ -132,12 +148,17 @@ private struct HostedServiceTermsSheet: View {
 /// An open service: its sessions, the open one's messages and requests, and the box to ask or answer.
 private struct HostedServiceSessionView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(InboxStore.self) private var inbox
     /// The scale of the avatars, so that the lines under the messages stay under their text.
     @ScaledMetric(relativeTo: .body) private var percent: CGFloat = 100
     @Bindable var model: HostedServicesModel
     @State private var text = ""
     @State private var reporting = false
     @State private var leaving = false
+    @State private var visibleIDs: Set<Int> = []
+    @State private var seen = InboxReadVisibility()
+    @State private var savedDraftKey: String?
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -160,12 +181,23 @@ private struct HostedServiceSessionView: View {
                                 TeamsStateView(systemImage: "bubble.left.and.bubble.right", title: "teams_preview_none", message: "services_empty")
                                     .frame(maxWidth: .infinity).padding(.vertical, 24)
                             }
-                            ForEach(model.messages) { message in HostedServiceMessageCell(message: message, service: service, uid: model.viewer) }
+                            if model.hasOlder {
+                                Button("Load earlier messages") { Task { await model.loadOlder() } }
+                                    .disabled(model.loadingOlder).padding()
+                            }
+                            ForEach(model.messages) { message in
+                                HostedServiceMessageCell(message: message, service: service, uid: model.viewer)
+                                    .id(message.seq)
+                            }
                             ForEach(model.tasks.filter { $0.state != "completed" }) { task in taskLine(task) }
                             Color.clear.frame(height: 1).id("end")
                         }
+                        .scrollTargetLayout()
                     }
-                    .onChange(of: model.messages.count + model.tasks.count) { _, _ in withAnimation(.lxMotion(reduceMotion)) { proxy.scrollTo("end", anchor: .bottom) } }
+                    .onScrollTargetVisibilityChange(idType: Int.self, threshold: 0.1) { ids in visibleIDs = Set(ids) }
+                    .onChange(of: model.messages.last?.seq) { _, _ in
+                        withAnimation(.lxMotion(reduceMotion)) { proxy.scrollTo("end", anchor: .bottom) }
+                    }
                 }
                 if !model.error.isEmpty {
                     Text(LocalizedStringKey(HostedService.errorKey(model.error))).font(.footnote).foregroundStyle(.red)
@@ -176,6 +208,29 @@ private struct HostedServiceSessionView: View {
             }
             .navigationTitle(service.name)
             .navigationBarTitleDisplayMode(.inline)
+            .onChange(of: activeRef, initial: true) { previous, next in
+                if let next { inbox.setCurrent(next) }
+                else if let previous { inbox.setCurrent(nil, replacing: previous) }
+                seen = InboxReadVisibility()
+            }
+            .onDisappear { if let ref { inbox.setCurrent(nil, replacing: ref) } }
+            .task(id: Exposure(ref: activeRef, ids: visibleIDs, readThrough: inbox.activeRow?.readThrough)) {
+                guard let ref = activeRef, let row = inbox.row(ref), !visibleIDs.isEmpty else { return }
+                try? await Task.sleep(for: .milliseconds(300))
+                guard !Task.isCancelled, activeRef == ref else { return }
+                inbox.sawContent(row, through: seen.observe(Array(visibleIDs), after: row.readThrough))
+            }
+            .onChange(of: inbox.storageAvailable ? ref : nil, initial: true) { _, value in
+                savedDraftKey = value.map { "\($0.generation):\($0.key)" }
+                if let key = savedDraftKey, let data = inbox.draft(for: key, uid: model.viewer) {
+                    text = String(decoding: data, as: UTF8.self)
+                } else { text = "" }
+            }
+            .onChange(of: text) { _, value in
+                if let key = savedDraftKey, key == ref.map({ "\($0.generation):\($0.key)" }) {
+                    inbox.saveDraft(value.isEmpty ? nil : Data(value.utf8), for: key, uid: model.viewer)
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
@@ -203,6 +258,20 @@ private struct HostedServiceSessionView: View {
             } message: { Text("services_leave_body") }
         }
     }
+
+    private struct Exposure: Equatable {
+        let ref: InboxRef?
+        let ids: Set<Int>
+        let readThrough: Int?
+    }
+
+    private var ref: InboxRef? {
+        guard inbox.uid == model.viewer, let service = model.open, let generation = service.generation,
+              let session = model.session else { return nil }
+        return InboxRef(kind: .service, sourceId: service.serviceId, conversationId: session, generation: generation)
+    }
+
+    private var activeRef: InboxRef? { scenePhase == .active ? ref : nil }
 
     @ViewBuilder
     private func taskLine(_ task: TeamTask) -> some View {

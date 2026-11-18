@@ -129,6 +129,7 @@ data class SessionRow(
     val modifiedAtEpochSeconds: Long? = null,
     val transcriptPath: String? = null,
     val workspaceDirectory: String? = null,
+    val inboxActivityJson: String? = null,
 )
 
 /**

@@ -1,4 +1,4 @@
-import type { MessageApi, MessageCommand } from './messages';
+import type { MessageApi, MessageCommand, MessageScope, TeamMessage } from './messages';
 import type { LocalPublishableBot, SelectedSharedFile, PublishLocalBotInput, PublishedKnowledge, SharedHostStatus, OfferSharedBotInput, AcceptSharedBotInput } from './execution';
 export * from './execution';
 export type TeamRole = 'owner' | 'admin' | 'member';
@@ -58,6 +58,7 @@ export interface DesktopTeamsApi {
   execute(uid: string, command: TeamCommand): Promise<TeamResult>;
   onChanged: TeamsApi['onChanged'];
   messages<T>(uid: string, command: MessageCommand): Promise<T>;
+  historyPage?(uid:string,scope:MessageScope,conversationId:string,beforeSeq:number):Promise<TeamMessage[]>;
   services<T>(uid: string, command: import('./hosted-service.js').ServiceCommand): Promise<T>;
   serviceMessages<T>(uid: string, command: Record<string, unknown> & { serviceId: string; generation: number; action: string }): Promise<T>;
   onMessagesChanged: MessageApi['onMessagesChanged'];

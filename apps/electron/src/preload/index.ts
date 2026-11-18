@@ -1,3 +1,5 @@
+import { inboxApi } from './inbox.js';
+import type { DesktopInboxApi } from '../shared/inbox.js';
 import { CH_BOTS_MARKET } from '../shared/botMarket.js';
 import { CH_DECISION, CH_DECISION_CHANGED, type DecisionApi } from '../shared/decision.js';
 import { DESKTOP_BRIDGE_GLOBAL } from '../shared/desktopBridge.js';
@@ -283,6 +285,7 @@ export interface LingxiApi {
   platform: NodeJS.Platform;
   isElectron: true;
   account: AccountApi;
+  inbox: DesktopInboxApi;
   teams: DesktopTeamsApi;
   friends: DesktopFriendsApi;
   bootstrap(): Promise<BootstrapState>;
@@ -526,6 +529,7 @@ const api: LingxiApi = {
       return () => { ipcRenderer.removeListener('lingxi:account:changed', listener); };
     },
   },
+  inbox: inboxApi,
   teams: {
     openBotMarket: () => ipcRenderer.invoke(CH_BOTS_MARKET, {action: 'browse'}),
     localBots: uid => teamsRequest({ type: 'localBots', uid }),
@@ -537,6 +541,7 @@ const api: LingxiApi = {
     acceptSharedBot: (uid, input) => teamsRequest({ type: 'acceptSharedBot', uid, input }),
     list: uid => teamsRequest({ type: 'list', uid }),
     detail: (uid, teamId) => teamsRequest({ type: 'detail', uid, teamId }),
+    historyPage: (uid,scope,conversationId,beforeSeq) => teamsRequest({type:'historyPage',uid,scope,conversationId,beforeSeq}),
     messages: (uid, command) => teamsRequest({ type: 'messages', uid, command }),
     services: (uid, command) => teamsRequest({ type: 'services', uid, command }),
     serviceMessages: (uid, command) => teamsRequest({ type: 'serviceMessages', uid, command }),

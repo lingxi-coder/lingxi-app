@@ -75,6 +75,8 @@ export interface SessionGatewayDeps {
   files?: RemoteFileStore;
   /** The session's title, from the persisted transcript. */
   titleOf(ref: SessionRef): Promise<string | undefined>;
+  activityOf?(ref: SessionRef): Promise<string | undefined>;
+  activityPage?(ref: SessionRef, after: number): Promise<import('../../shared/inbox.js').AssistantActivityPage>;
   /** The model a session that is not open will use. */
   modelOf?(ref: SessionRef): string | undefined;
   clock: Clock;
@@ -195,6 +197,18 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
         return undefined;
       case 'session.history':
         return this.deps.commands.history(this.attachedRuntime(state, params), params);
+      case 'session.activity': {
+        const runtime = this.attachedRuntime(state, params);
+        const attachment = state.attached.get(runtime.sessionId);
+        const after = (params as Json)?.['after'];
+        if (typeof after !== 'number' || !Number.isSafeInteger(after) || after < 0) throw new RemoteRpcError('invalid_params', 'invalid activity cursor');
+        if (!this.deps.activityPage) throw new RemoteRpcError('invalid_params', 'activity positions unavailable');
+        const ref = this.requireEnabled(viewer, runtime.sessionId);
+        const result = await this.deps.activityPage(ref, after);
+        if (this.disposed || state.closed || state.attached.get(runtime.sessionId) !== attachment
+          || this.attachedRuntime(state, params) !== runtime) throw new RemoteRpcError('not_approved', 'session attachment changed');
+        return result;
+      }
       case 'image.get':
         return this.deps.commands.imageGet(this.imageRuntime(viewer, params), params);
       case 'file.offer':
@@ -774,12 +788,13 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     const entries = await Promise.all(this.deps.policy.enabledSessions().map(async (ref) => ({
       ref,
       title: await this.titleFor(ref),
+      activityJson: await this.deps.activityOf?.(ref).catch(() => undefined),
     })));
     // Title I/O may outlive sharing withdrawal. Recheck all references after
     // every title has settled, before exposing the list to a viewer.
-    return entries.flatMap(({ ref, title }) => {
+    return entries.flatMap(({ ref, title, activityJson }) => {
       const current = this.deps.policy.find(ref.sessionId);
-      return current === undefined ? [] : [this.summary(current, title)];
+      return current === undefined ? [] : [{ ...this.summary(current, title), ...(activityJson ? { activityJson } : {}) }];
     });
   }
 

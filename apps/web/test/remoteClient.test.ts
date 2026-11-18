@@ -68,6 +68,8 @@ class SessionScript {
         this.sendSnapshot(conn);
         return { mode: 'snapshot', epoch: this.epoch };
       }
+      case 'session.activity':
+        return {cursor:3,baselineCursor:1,hasMore:false,items:[{cursor:3,resultUuids:['00000000-0000-4000-8000-000000000003'],kind:'reply',at:123}]};
       case 'session.history':
         return { messages: this.history, first_index: 0, has_more: false };
       case 'models.list':
@@ -326,7 +328,7 @@ test('older messages are fetched in a page and the transcript is rebuilt around 
   const texts = controller.getState().transcript.conversation.items.map((i) => (i as any).text);
   assert.deepEqual(texts, ['older', 'oldest reply', 'hi', 'hello']);
   assert.equal(controller.getState().hasOlder, false);
-  assert.deepEqual(script.calls.find((c) => c.method === 'session.history')!.params, { session_id: SESSION, before_index: 2, limit: 100 });
+  assert.deepEqual(script.calls.find((c) => c.method === 'session.history')!.params, { session_id: SESSION, before_index: 2, limit: 50 });
 });
 
 test('controls: bypassPermissions is neither offered nor sent', async () => {
@@ -366,4 +368,15 @@ test('image-only prompts get a row, and image URLs are told apart from reference
   assert.equal(imageRefOf(row.images[0].url), 'abc');
   assert.equal(imageRefOf('data:image/png;base64,AAAA'), undefined);
   assert.equal(imageRefOf('https://tracker.example/x.png'), 'https://tracker.example/x.png', 'a URL is never loaded, only sent back to the desktop as a reference');
+});
+
+test('semantic activity pages require attachment and preserve source cursors and result UUIDs',async()=>{
+ const h=await harness(),{controller,client,script}=await open(h);
+ try{
+   await assert.rejects(client.activity(SESSION,2));
+   controller.activate();await live(controller);
+   const page=await client.activity(SESSION,2);
+   assert.deepEqual(script.calls.find(c=>c.method==='session.activity')?.params,{session_id:SESSION,after:2});
+   assert.deepEqual(page.items[0]?.resultUuids,['00000000-0000-4000-8000-000000000003']);assert.equal(page.items[0]?.cursor,3);
+ }finally{client.dispose();}
 });

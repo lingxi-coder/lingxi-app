@@ -122,6 +122,10 @@ internal class FriendsWorkspace(
     val state: StateFlow<FriendsState> = mutable.asStateFlow()
 
     /** The Friends tab badge (D14, D28): incoming requests, the unread of every friend and every live team offer; 0 while signed out. */
+    val requestsBadge: StateFlow<Int> = mutable.map { state ->
+        state.cards.count { it.state == FriendState.Incoming } + FriendsLogic.liveOffers(state.offers, state.nowMs)
+    }.stateIn(scope, SharingStarted.Eagerly, 0)
+
     val badge: StateFlow<Int> = mutable.map { FriendsLogic.badgeCount(it.cards, it.offers, it.nowMs, it.openChatUid) }.stateIn(scope, SharingStarted.Eagerly, 0)
 
     /** The Add friend screen's lookup, a friend link opened from outside, and a Team member's Add friend (D6, D8, D15). */

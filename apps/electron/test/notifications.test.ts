@@ -44,7 +44,7 @@ function harness(initial: Partial<NotificationPreferences> = {}, deps: Partial<H
     unschedule: ((handle: unknown) => { timers.delete(handle as number); }) as never,
     ...deps,
   });
-  notifier.setPreferences({ ...defaultNotificationPreferences(), ...initial });
+  notifier.setPreferences({ ...defaultNotificationPreferences(), showPreviews: true, ...initial });
 
   return {
     notifier,
@@ -62,7 +62,7 @@ function harness(initial: Partial<NotificationPreferences> = {}, deps: Partial<H
       clock = target;
     },
     focus(value) { focused = value; },
-    prefs(patch) { notifier.setPreferences({ ...defaultNotificationPreferences(), ...initial, ...patch }); },
+    prefs(patch) { notifier.setPreferences({ ...defaultNotificationPreferences(), showPreviews: true, ...initial, ...patch }); },
   };
 }
 
@@ -207,6 +207,7 @@ test('a question in a session that is doing a task says whose task it is', () =>
   const h = harness({}, inTask({ current: { receiver: 'Bob', sender: 'Alice' } }));
   h.notifier.askUserQuestion(SESSION, 3, REF);
   h.notifier.askUserQuestion(SESSION, 3, REF);
+  h.advance(PERMISSION_PROMPT_NOTIFY_DELAY_MS);
   assert.equal(h.shown.length, 1);
   assert.equal(h.shown[0]?.title, 'Bob needs your answer for a task from Alice');
   assert.equal(h.shown[0]?.body, 'It is waiting for your reply to a question.');
@@ -225,6 +226,7 @@ test('whose task it is, is read when the notification goes out, and a session th
   h.notifier.permissionRequested(SESSION, 2, 'Write', REF);
   h.advance(PERMISSION_PROMPT_NOTIFY_DELAY_MS + 1);
   h.notifier.askUserQuestion(SESSION, 4, REF);
+  h.advance(PERMISSION_PROMPT_NOTIFY_DELAY_MS);
   assert.equal(h.shown[1]?.title, NOTIFICATION_COPY.permissionTitle);
   assert.equal(h.shown[1]?.body, NOTIFICATION_COPY.permissionBody('Write'));
   assert.equal(h.shown[2]?.title, NOTIFICATION_COPY.idleTitle);
@@ -244,21 +246,51 @@ test('the wording of a task is in every language, with the Bots in the places th
 
 // ── immediate kinds ──────────────────────────────────────────────────────────
 
-test('AskUserQuestion notifies immediately and only once per request', () => {
+test('a question remaining pending for six seconds notifies once per request', () => {
   const h = harness();
   h.notifier.askUserQuestion(SESSION, 3, REF);
   h.notifier.askUserQuestion(SESSION, 3, REF);
+  h.advance(PERMISSION_PROMPT_NOTIFY_DELAY_MS);
   assert.equal(h.shown.length, 1);
 });
 
-test('a finished task is named by its label, and failure reads differently', () => {
+test('a failure appears immediately and completions in the same five seconds produce one generic banner', () => {
   const h = harness();
   h.notifier.taskFinished(SESSION, 'task-1', 'Reindex the docs', false, REF);
   h.notifier.taskFinished(SESSION, 'task-2', undefined, true, REF);
-  assert.equal(h.shown.length, 2);
-  assert.match(h.shown[0]?.body ?? '', /Reindex the docs/);
-  assert.match(h.shown[1]?.body ?? '', /task-2/, 'the bare id is the fallback, not a blank');
-  assert.equal(h.shown[1]?.title, NOTIFICATION_COPY.failedTitle);
+  h.notifier.taskFinished(SESSION, 'task-3', 'private', false, REF);
+  assert.deepEqual(h.shown.map(n=>n.title),[NOTIFICATION_COPY.failedTitle]);
+  h.advance(5000);
+  assert.deepEqual(h.shown.map(n=>n.body),[NOTIFICATION_COPY.failedBody,NOTIFICATION_COPY.completedBody]);
+  h.notifier.taskFinished(SESSION, 'task-3', 'private', false, REF);
+  h.advance(5000);
+  assert.equal(h.shown.length,2);
+});
+
+test('current conversation stays inline, another focused conversation receives only an in-app banner', () => {
+  const banners:string[]=[];
+  let visible=true;
+  const h=harness({}, {isConversationVisible:()=>visible,inApp:(_title,body)=>banners.push(body)});
+  h.focus(true);
+  h.notifier.permissionRequested(SESSION,7,'Bash',REF);
+  h.advance(6000);
+  assert.deepEqual(banners,[]);
+  visible=false;
+  h.notifier.askUserQuestion(SESSION,2,REF);
+  h.notifier.questionSettled(SESSION,2);
+  h.advance(6000);
+  assert.deepEqual(banners,[]);
+  h.notifier.permissionRequested(SESSION,8,'Write',REF);
+  h.advance(6000);
+  assert.equal(banners.length,1);
+  assert.deepEqual(h.shown,[]);
+});
+
+test('generic OS preview hides tool and Bot names', () => {
+  const h=harness({showPreviews:false},inTask({current:{receiver:'Private Bot',sender:'Private Sender'}}));
+  h.notifier.permissionRequested(SESSION,1,'Private Tool',REF);
+  h.advance(6000);
+  assert.deepEqual(h.shown,[{title:NOTIFICATION_COPY.permissionTitle,body:NOTIFICATION_COPY.idleBody,ref:REF}]);
 });
 
 // ── preference gates ─────────────────────────────────────────────────────────
@@ -290,6 +322,7 @@ test('taskCompleteNotifEnabled gates only finished tasks', () => {
   h.notifier.taskFinished(SESSION, 'task-1', 'x', false, REF);
   assert.deepEqual(h.shown, []);
   h.notifier.askUserQuestion(SESSION, 1, REF);
+  h.advance(PERMISSION_PROMPT_NOTIFY_DELAY_MS);
   assert.equal(h.shown.length, 1);
 });
 
@@ -336,4 +369,12 @@ test('isKindEnabled maps every kind to a gate', () => {
     assert.equal(isKindEnabled(off, kind), false, `${kind} must respect the master switch`);
     assert.equal(isKindEnabled(defaultNotificationPreferences(), kind), true, `${kind} defaults on`);
   }
+});
+
+test('account changes cancel the old account’s delayed notifications',()=>{
+  const h=harness();
+  h.notifier.permissionRequested(SESSION,2,'Write',REF);
+  h.notifier.taskFinished(SESSION,'t','task',false,REF);
+  h.notifier.accountChanged();h.advance(6001);
+  assert.deepEqual(h.shown,[]);
 });

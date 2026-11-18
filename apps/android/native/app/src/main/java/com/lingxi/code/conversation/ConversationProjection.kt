@@ -103,7 +103,11 @@ fun reduceSessionEvent(
                     modifiedRfc3339 = dto.modifiedRfc3339,
                     nowEpochSeconds = nowEpochSeconds,
                     strings = strings,
-                ).copy(transcriptPath = dto.path, workspaceDirectory = dto.workspacePath)
+                ).copy(
+                    transcriptPath = dto.path,
+                    workspaceDirectory = dto.workspacePath,
+                    inboxActivityJson = com.lingxi.code.inbox.AssistantActivityBinding.activity(dto),
+                )
             },
         )
         else -> prev

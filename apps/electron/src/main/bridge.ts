@@ -1288,6 +1288,9 @@ export class SessionRuntime {
    * later and only if the user never came back.
    */
   private updateNotifier(event: ClientEvent): void {
+    if (['turn_started', 'turn_ended', 'session_ended', 'assistant_transcript_row_uuids', 'assistant_block_identity'].includes(event.type)) {
+      this.opts.onInboxActivity?.();
+    }
     const notifier = this.opts.notifier;
     if (!notifier) return;
     const ref = this.notificationRef;
@@ -1450,6 +1453,7 @@ export class SessionRuntime {
 
   /** Tell observers the pending set changed. Coalesced into one notification per tick; the set is read when they handle it. */
   private notifyRemotePending(): void {
+    this.opts.onInboxActivity?.();
     this.queueReplayCheckpoint();
     if (this.remotePendingNotified || this.remoteObservers.size === 0) return;
     this.remotePendingNotified = true;
@@ -1594,6 +1598,7 @@ export class SessionRuntime {
   }
 
   private clearPendingAskUserQuestion(requestId: number): void {
+    this.opts.notifier?.questionSettled(this.sessionId, requestId);
     this.pendingAskUserQuestionRequests.delete(requestId);
     this.pendingAskUserQuestionIds.delete(requestId);
     this.notifyRemotePending();

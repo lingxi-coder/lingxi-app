@@ -83,6 +83,8 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
     }
     val collapsed by workspace.collapsed.collectAsStateWithLifecycle()
     val unreadByTeam by workspace.unreadByTeam.collectAsStateWithLifecycle()
+    val inboxProjection by workspace.inbox.projectedRows.collectAsStateWithLifecycle()
+    val inboxState by workspace.inbox.state.collectAsStateWithLifecycle()
     val host = LocalTabHost.current
     val wide = LocalWideLayout.current
     val listState = rememberLazyListState()
@@ -110,6 +112,28 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
     DisposableEffect(botEntryLease) { onDispose { botEntryLease.active = false } }
     val entryIsCurrent = { botEntryLease.active && entryLifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED) }
     val uid = teams.uid
+    val shell = host as? com.lingxi.code.tabs.TabShellState
+    val inboxRequest = shell?.inboxTeamRequest
+    var fromInbox by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(inboxRequest, uid, teams.loaded, teams.selectedId, teams.teams, messaging.cache?.teamId, messaging.cache?.generation) {
+        val request = inboxRequest ?: return@LaunchedEffect
+        if (uid == null || !teams.loaded) return@LaunchedEffect
+        if (teams.teams.none { it.id == request.teamId && it.generation == request.generation }) {
+            shell?.onInboxTeamHandled(request.id)
+            shell?.select(AppTab.Chats)
+        } else if (teams.selectedId != request.teamId) {
+            workspace.selectTeam(request.teamId)
+        } else if (messaging.cache?.teamId == request.teamId && messaging.cache?.generation == request.generation) {
+            fromInbox = true
+            setStack(listOf("c:${request.conversationId}"))
+            shell?.onInboxTeamHandled(request.id)
+        }
+    }
+    fun dismissTop() {
+        val next = stack.dropLast(1)
+        setStack(next)
+        if (next.isEmpty() && fromInbox) { fromInbox = false; host.select(AppTab.Chats) }
+    }
     LaunchedEffect(joinCode, uid) {
         if (joinCode != null && uid != null) { joinPrefill = joinCode; sheet = "join"; onJoinCodeHandled() }
     }
@@ -121,7 +145,7 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
     }
     val depth = stack.size
     LaunchedEffect(depth) { host.reportDepth(AppTab.Teams, depth) }
-    BackHandler(enabled = stack.isNotEmpty()) { setStack(stack.dropLast(1)) }
+    BackHandler(enabled = stack.isNotEmpty()) { dismissTop() }
     // Re-tapping the tab pops to the list, then scrolls it to the top.
     OnTabReselected(AppTab.Teams) { if (stack.isNotEmpty()) setStack(emptyList()) else scrollTop++ }
     LaunchedEffect(scrollTop) { if (scrollTop > 0) { if (reduceMotion) listState.scrollToItem(0) else listState.animateScrollToItem(0) } }
@@ -152,11 +176,15 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                 action = { Button(onClick = { sheet = "switcher" }) { Text(stringResource(R.string.teams_switch_team)) } },
             )
             else -> {
+                val projectedUnread = remember(team.id, team.generation, inboxProjection, inboxState.rows) {
+                    (inboxProjection.values + inboxState.rows).filter { it.ref.sourceId == team.id && it.ref.generation == team.generation }
+                        .associate { item -> item.ref.conversationId to maxOf(item.unreadCount, if (item.manualUnread) 1 else 0) }
+                }
                 val conversationId = stack.lastOrNull { it.startsWith("c:") }?.removePrefix("c:").orEmpty()
                 val list: @Composable (Modifier) -> Unit = { m ->
                     TeamsListScreen(
                         uid = uid, teams = teams, messaging = messaging, collapsed = collapsed, unreadByTeam = unreadByTeam,
-                        openConversationId = if (wide) conversationId else "", listState = listState,
+                        openConversationId = if (wide) conversationId else "", listState = listState, projectedUnread = projectedUnread,
                         onOpenConversation = ::openConversation, onSwitchTeam = { sheet = "switcher" }, onNew = { sheet = it },
                         onToggleSection = workspace::toggleSection,
                         onMarkRead = { workspace.messagingModel.markRead(it.id, it.lastSeq) },
@@ -173,7 +201,7 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                 val conversation: @Composable (String, Modifier) -> Unit = { id, m ->
                     TeamConversationScreen(
                         workspace = workspace, uid = uid, team = team, teams = teams, messaging = messaging, conversationId = id,
-                        showBack = !wide, onBack = { setStack(stack.dropLast(1)) }, modifier = m,
+                        showBack = !wide || fromInbox, onBack = ::dismissTop, modifier = m,
                     )
                 }
                 val details: @Composable (Modifier) -> Unit = { m ->

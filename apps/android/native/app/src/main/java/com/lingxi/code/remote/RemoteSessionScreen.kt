@@ -209,6 +209,24 @@ internal fun RemoteSessionScreen(
             strings = strings,
         )
     }
+    val inbox = remember(context) { com.lingxi.code.inbox.InboxController.get(context.applicationContext) }
+    val inboxState by inbox.state.collectAsState()
+    val inboxRow = inboxState.rows.let { inbox.remoteAssistant(hostId, sessionId) }
+    com.lingxi.code.inbox.InboxPresence(inbox, inboxRow?.ref)
+    LaunchedEffect(key) {
+        val uid = ownerUid ?: return@LaunchedEffect
+        if (remote.savedDraft.isEmpty()) {
+            val saved = inbox.restoreRemoteDraft(uid, hostId, sessionId)
+            if (remote.savedDraft.isEmpty()) remote.updateDraft(saved)
+        }
+        androidx.compose.runtime.snapshotFlow { remote.savedDraft }.collect { inbox.saveRemoteDraft(uid, hostId, sessionId, it) }
+    }
+    val remoteSessions by manager.sessions.collectAsState()
+    val assistantActivity = remember(remoteSessions, hostId, sessionId) {
+        remoteSessions.sessions?.firstOrNull { it.sessionId == sessionId && remoteSessions.hostId == hostId }?.let {
+            com.lingxi.code.inbox.AssistantActivity.parse(com.lingxi.code.inbox.AssistantActivityBinding.activity(it))
+        }
+    }
     val draft = remote.savedDraft
     val attachments = remote.attachments
     val activity = context as? Activity
@@ -365,6 +383,18 @@ internal fun RemoteSessionScreen(
             ChatScreen(
                 modifier = Modifier.weight(1f),
                 state = state,
+                inboxActivityCursor = inboxRow?.sourceCursor ?: 0,
+                onInboxVisibleMessages = if (inboxRow != null && !state.streaming) { rendered ->
+                    val current = maxOf(inboxRow.baselineCursor, inboxRow.readThrough, assistantActivity?.baseline ?: 0)
+                    val through = if (assistantActivity != null && assistantActivity.cursor == inboxRow.sourceCursor &&
+                        inboxRow.sourceCursor == current + 1 && assistantActivity.headMessageId in rendered) {
+                        inboxRow.sourceCursor
+                    } else {
+                        com.lingxi.code.inbox.visibleRemoteAssistantThrough(current, inboxRow.sourceCursor, rendered, remote.source::sessionActivityPage)
+                    }
+                    if (through > current) inbox.mutate(com.lingxi.code.inbox.InboxOperation.read(inboxRow, through), inboxRow, automatic = true)
+                } else null,
+                onInboxJumpLatest = { inboxRow?.let { inbox.mutate(com.lingxi.code.inbox.InboxOperation.read(it), it) } },
                 onSend = { chat.send(it) },
                 onSendWithAttachment = { text, _ ->
                     chat.send(text, images = attachments.map { ImageRefDto(it.mediaType, it.base64) })

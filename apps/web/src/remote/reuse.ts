@@ -20,7 +20,7 @@ export {
 } from '@lingxi/electron/renderer/bridge/conversation';
 export type { ConversationState } from '@lingxi/electron/renderer/bridge/conversation';
 
-export { toolDisplayHeader, toolHasBody, toolTruncationNotice } from '@lingxi/electron/renderer/model/runItem';
+export { transcriptRowUuids,toolDisplayHeader, toolHasBody, toolTruncationNotice } from '@lingxi/electron/renderer/model/runItem';
 export type {
   CommandRunItem,
   CompactionRunItem,

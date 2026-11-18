@@ -9,6 +9,7 @@ import SwiftUI
 /// header is the friend, and the details button and the platform notice are left out. Everything else is the same.
 struct TeamConversationView: View {
     @Environment(TeamsWorkspace.self) private var workspace
+    @Environment(InboxStore.self) private var inbox
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
     @Environment(\.locale) private var locale
@@ -24,6 +25,9 @@ struct TeamConversationView: View {
     /// `lastReadSeq` as it was when the conversation opened: the "new messages" divider stays where it was
     /// even though reading moves the mark. `Int.max` = no divider (the mark never arrived).
     @State private var anchorSeq: Int?
+    @State private var visibleMessageIDs: Set<String> = []
+    @State private var seenMessages = InboxReadVisibility()
+    @State private var peerRead: Int?
     /// The oldest message the reader asked for with "show earlier messages".
     @State private var startID: String?
     @State private var atBottom = true
@@ -54,7 +58,10 @@ struct TeamConversationView: View {
         .navigationBarTitleDisplayMode(.inline)
         .hidesTabBarWhenPushed(in: workspace.pair == nil ? .teams : .friends)
         // The model is replaced when the team or its membership generation changes; the new one must open this thread.
-        .task(id: workspace.messaging.map(ObjectIdentifier.init)) { workspace.openConversation(conversationID) }
+        .task(id: ThreadVisibility(model: workspace.messaging.map(ObjectIdentifier.init), visible: selectedTabIsVisible)) {
+            if selectedTabIsVisible { workspace.openConversation(conversationID) }
+            else if workspace.messaging?.selected == conversationID { workspace.openConversation("") }
+        }
         .onAppear {
             if !draftLoaded || ownedDraftKey != workspace.draftKey(conversationID) { loadDraft() }
             showNotice = workspace.pair == nil && !workspace.platformNoticeShown
@@ -63,7 +70,13 @@ struct TeamConversationView: View {
         .onChange(of: draft) { _, value in
             if draftLoaded, editing == nil, ownedDraftKey == workspace.draftKey(conversationID) { workspace.setDraft(value, for: conversationID) }
         }
+        .onChange(of: activeInboxRef, initial: true) { old, next in
+            if let next { inbox.setCurrent(next) }
+            else if let old { inbox.setCurrent(nil, replacing: old) }
+            seenMessages = InboxReadVisibility()
+        }
         .onDisappear {
+            if let ref = inboxRef { inbox.setCurrent(nil, replacing: ref) }
             if draftLoaded, editing == nil, ownedDraftKey == workspace.draftKey(conversationID) { workspace.setDraft(draft, for: conversationID) }
             voice?.close()
         }
@@ -79,6 +92,25 @@ struct TeamConversationView: View {
         // Without `.contain` the identifier is copied onto every child (composer input, send, rows).
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.conversation.\(conversationID)")
+    }
+
+    private var inboxRef: InboxRef? {
+        guard workspace.uid == inbox.uid, let team = workspace.messagingTeam else { return nil }
+        let ref = InboxRef(kind: .team, sourceId: team.id, conversationId: conversationID, generation: team.generation)
+        return ref.valid ? ref : nil
+    }
+
+    private struct ThreadVisibility: Equatable {
+        let model: ObjectIdentifier?
+        let visible: Bool
+    }
+
+    private var selectedTabIsVisible: Bool { navigation.tabs.selected == (workspace.pair == nil ? .teams : .friends) }
+
+    private var activeInboxRef: InboxRef? {
+        guard selectedTabIsVisible,
+              scenePhase == .active, workspace.messaging?.selected == conversationID else { return nil }
+        return inboxRef
     }
 
     private func loadDraft() {
@@ -130,6 +162,12 @@ struct TeamConversationView: View {
         let carrying = carriesFiles(context)
         return VStack(spacing: 0) {
             banners(context)
+            if let notice = inbox.inlineNotice, notice.ref == activeInboxRef {
+                Label("Conversation update", systemImage: "bell").font(.caption).padding(5)
+            }
+            if let peerRead, let lastSent = messages.last(where: context.isMine), peerRead >= lastSent.seq {
+                Text("Read").font(.caption).foregroundStyle(.secondary)
+            }
             if conversation.kind == "bot_dm", let bot = context.bots.first(where: { conversation.participants.contains("shared_bot:\($0.sharedBotId)") }) {
                 TeamBotMemberInfo(bot: bot, unverified: model.botsUnverified).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal).padding(.vertical, 6)
             }
@@ -197,28 +235,39 @@ struct TeamConversationView: View {
                 if anchorSeq == nil { anchorSeq = Int.max }
             }
         }
-        // Automatic mark-read (D12): the newest message has been in view long enough, online, in the foreground.
-        .task(id: AutoReadKey(
-            ready: placed && model.readsReady, atBottom: atBottom, newest: messages.last?.seq ?? 0, lastRead: conversation.lastReadSeq,
-            offline: model.offline, fromCache: model.fromCache, foreground: scenePhase == .active)) {
-            guard placed, model.readsReady, atBottom, let threshold = TeamsReadLogic.autoMarkReadMs else { return }
-            do { try await Task.sleep(for: .milliseconds(threshold)) } catch { return }
-            if let seq = TeamsReadLogic.autoMarkReadSeq(
-                online: !model.offline, fromCache: model.fromCache, foreground: scenePhase == .active, atBottomMs: threshold,
-                newestRenderedSeq: messages.last?.seq ?? 0, lastReadSeq: conversation.lastReadSeq) {
-                await workspace.autoMarkRead(conversationID: conversation.id, lastReadSeq: seq)
+        .task(id: ReadVisibilityKey(ref: activeInboxRef, ids: visibleMessageIDs,
+                                   lastRead: conversation.lastReadSeq, canRead: placed && model.readsReady && !model.fromCache)) {
+            guard let ref = activeInboxRef, placed, model.readsReady, !model.fromCache,
+                  let row = inbox.row(ref) else { return }
+            let visible = messages.filter { visibleMessageIDs.contains("message:" + $0.id) }.map(\.seq)
+            guard !visible.isEmpty else { return }
+            do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+            guard activeInboxRef == ref, !Task.isCancelled else { return }
+            let baseline = max(row.readThrough, conversation.lastReadSeq)
+            let through = seenMessages.observe(visible, after: baseline)
+            inbox.sawContent(row, through: through)
+        }
+        .task(id: PeerReceiptKey(ref: activeInboxRef, sourceRevision: inbox.activeRow?.sourceRevision, enabled: inbox.dmReceipts)) {
+            peerRead = nil
+            guard conversation.kind == "dm" || conversation.kind == "friend_chat", let ref = activeInboxRef else { return }
+            while inbox.dmReceipts, !Task.isCancelled {
+                peerRead = await inbox.peerReceipt(ref)
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
             }
         }
     }
 
-    private struct AutoReadKey: Equatable {
-        let ready: Bool
-        let atBottom: Bool
-        let newest: Int
+    private struct ReadVisibilityKey: Equatable {
+        let ref: InboxRef?
+        let ids: Set<String>
         let lastRead: Int
-        let offline: Bool
-        let fromCache: Bool
-        let foreground: Bool
+        let canRead: Bool
+    }
+
+    private struct PeerReceiptKey: Equatable {
+        let ref: InboxRef?
+        let sourceRevision: Int?
+        let enabled: Bool
     }
 
     private func banners(_ context: TeamConversationContext) -> some View {
@@ -263,9 +312,19 @@ struct TeamConversationView: View {
                     TeamsNote(text: "teams_disclosure", systemImage: "lock.shield")
                         .padding(.horizontal, 16).padding(.vertical, 10)
                 }
-                if start > 0 {
+                if start > 0 || context.model.hasOlderMessages {
                     Button {
-                        showEarlier(messages: messages, start: start, rows: rows)
+                        if start > 0 {
+                            showEarlier(messages: messages, start: start, rows: rows)
+                        } else {
+                            Task {
+                                if let previous = await context.model.loadOlder() {
+                                    startID = context.model.cache?.threads[conversationID]?.messages.first?.id
+                                    await Task.yield()
+                                    position.scrollTo(id: "message:" + previous, anchor: .top)
+                                }
+                            }
+                        }
                     } label: {
                         Text("teams_messages_earlier").font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity).minimumHitTarget(minWidth: 0)
                     }
@@ -307,6 +366,10 @@ struct TeamConversationView: View {
             .scrollTargetLayout()
         }
         .scrollPosition($position)
+        .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.1) { ids in
+            let next = Set(ids.filter { $0.hasPrefix("message:") })
+            if visibleMessageIDs != next { visibleMessageIDs = next }
+        }
         .scrollDismissesKeyboard(.interactively)
         .onScrollGeometryChange(for: ScrollMetrics.self) { geometry in
             ScrollMetrics(nearBottom: geometry.contentSize.height - geometry.visibleRect.maxY < 48, container: geometry.containerSize.height)
@@ -355,6 +418,7 @@ struct TeamConversationView: View {
             if placed && !atBottom {
                 Button {
                     withAnimation(.lxMotion(reduceMotion)) { position.scrollTo(edge: .bottom) }
+                    if let ref = activeInboxRef, let row = inbox.row(ref) { inbox.markRead([row]) }
                     seenSeq = newest
                 } label: {
                     HStack(spacing: 6) {

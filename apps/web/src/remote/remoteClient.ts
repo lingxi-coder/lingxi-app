@@ -74,7 +74,7 @@ export interface SessionState {
 }
 
 const NO_PENDING: RemotePending = { permissions: [], questions: [], computer_access: [] };
-const HISTORY_PAGE = 100;
+const HISTORY_PAGE = 50;
 const ATTACH_TIMEOUT_MS = 60_000;
 /** After `session.reset` the desktop sends a new snapshot by itself; if none comes, ask for one. */
 const RESET_SNAPSHOT_WAIT_MS = 3000;
@@ -923,7 +923,18 @@ function activityChanged(was: RemoteBotSummary | undefined, now: RemoteBotSummar
  * life of the tab so a session's `(epoch, seq)` survives going back to the list
  * and a reconnect), and the routing of host notifications to them.
  */
+export interface RemoteActivityPage {
+  items:{cursor:number;resultUuids:string[];kind:string;at:number}[];
+  cursor:number;
+  baselineCursor:number;
+  hasMore:boolean;
+}
 export class RemoteClient {
+  async activity(sessionId:string,after:number):Promise<RemoteActivityPage>{
+    this.session(sessionId).requireConversation();
+    return this.connection.request('session.activity',{session_id:sessionId,after});
+  }
+
   private current: RemoteClientState = { sessions: undefined, bots: undefined };
   private readonly listeners = new Set<() => void>();
   private readonly controllers = new Map<string, SessionController>();

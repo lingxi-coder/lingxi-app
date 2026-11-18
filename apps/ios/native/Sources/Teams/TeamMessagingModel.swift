@@ -44,7 +44,15 @@ final class TeamMessagingModel {
     @ObservationIgnored private var messageListener: ListenerRegistration?
     @ObservationIgnored private var memberListener: ListenerRegistration?
     @ObservationIgnored private var signalListener: ListenerRegistration?
-    @ObservationIgnored private var readListeners: [String: ListenerRegistration] = [:]
+    @ObservationIgnored private var readListener: ListenerRegistration?
+    @ObservationIgnored private var changesListener: ListenerRegistration?
+    @ObservationIgnored private var applyingChanges: Task<Void, Never>?
+    @ObservationIgnored private var liveIDs: Set<String> = []
+    @ObservationIgnored private var selectedRevision = 0
+    private(set) var loadingOlder = false
+    private(set) var hasOlderMessages = false
+    private static let messagePageSize = 50
+    private static let messageWindowSize = 200
     @ObservationIgnored private var directoryCached = true
     @ObservationIgnored private var messagesCached = true
     private var membershipReady = false
@@ -136,23 +144,7 @@ final class TeamMessagingModel {
                     let ids = Set(conversations.map(\.id))
                     let retainedThreads = self.cache?.threads.filter { ids.contains($0.key) } ?? [:]
                     self.cache?.threads = retainedThreads
-                    for id in Array(self.readListeners.keys) where !ids.contains(id) { self.readListeners.removeValue(forKey: id)?.remove() }
                     self.readsPending.formIntersection(ids)
-                    for id in ids.sorted() where self.readListeners[id] == nil {
-                        self.readsPending.insert(id)
-                        self.readListeners[id] = root.collection("conversations").document(id).collection("reads").document(uid).addSnapshotListener(includeMetadataChanges: true) { [weak self] mark, error in
-                            Task { @MainActor in
-                                guard let self, self.active, self.lifecycle == life, self.watchGeneration == watch, self.auth.currentUser?.uid == self.uid else { return }
-                                self.readsPending.remove(id)
-                                if let error { self.listenerFailed(error); return }
-                                let data = mark?.data()
-                                let seq = (data?["generation"] as? NSNumber)?.intValue == self.generation ? (data?["lastReadSeq"] as? NSNumber)?.intValue ?? 0 : 0
-                                // A read mark only ever moves forward (Desktop: `Math.max`): an older cached snapshot after an
-                                // acknowledged `read` must not make messages unread again.
-                                if let index = self.cache?.conversations.firstIndex(where: { $0.id == id }), let current = self.cache?.conversations[index].lastReadSeq, seq > current { self.cache?.conversations[index].lastReadSeq = seq }
-                            }
-                        }
-                    }
                     self.directoryReady = true
                     self.directoryCached = snapshot.metadata.isFromCache; self.updateOffline()
                     if !snapshot.metadata.isFromCache {
@@ -190,7 +182,8 @@ final class TeamMessagingModel {
         watchGeneration += 1
         listener?.remove(); messageListener?.remove(); memberListener?.remove(); signalListener?.remove()
         listener = nil; messageListener = nil; memberListener = nil; signalListener = nil
-        readListeners.values.forEach { $0.remove() }; readListeners = [:]; membershipReady = false
+        closeSelectedListeners()
+        membershipReady = false
     }
     /// Opens the listeners again after they stopped (invalid data, a failed listener, a lost connection) and
     /// retries what is pending.
@@ -249,38 +242,151 @@ final class TeamMessagingModel {
         guard active, life == lifecycle, auth.currentUser?.uid == uid else { throw CancellationError() }
         value.conversations = cache?.conversations ?? []; value.threads = cache?.threads ?? [:]; cache = value
     }
+    private func closeSelectedListeners() {
+        selectedRevision &+= 1
+        readListener?.remove(); readListener = nil
+        changesListener?.remove(); changesListener = nil
+        messageListener?.remove(); messageListener = nil
+        applyingChanges?.cancel(); applyingChanges = nil
+        readsPending = []
+        liveIDs = []
+        loadingOlder = false
+        hasOlderMessages = false
+    }
+
+    private func selectedThread(_ id: String) -> DocumentReference {
+        db.collection("teams").document(teamId).collection("conversations").document(id)
+    }
+
     func select(_ id: String) {
-        let retainedThreads = cache?.threads.filter { $0.key == id } ?? [:]
-        selected = id; messagesCached = true; updateOffline(); cache?.threads = retainedThreads; tasks = []; artifact = nil; messageListener?.remove(); messageListener = nil
-        guard !id.isEmpty, cache?.conversations.contains(where: { $0.id == id }) == true else { refresh(); return }
-        let life = lifecycle, watch = watchGeneration
-        var firstSnapshot = true
-        messageListener = db.collection("teams").document(teamId).collection("conversations").document(id).collection("messages").order(by: "seq")
+        let retained = cache?.threads.filter { $0.key == id } ?? [:]
+        closeSelectedListeners()
+        selected = id; messagesCached = true; updateOffline(); cache?.threads = retained; tasks = []; artifact = nil
+        guard !id.isEmpty, let conversation = cache?.conversations.first(where: { $0.id == id }) else { refresh(); return }
+        let revision = selectedRevision, thread = selectedThread(id)
+        readsPending.insert(id)
+        readListener = thread.collection("reads").document(uid).addSnapshotListener(includeMetadataChanges: true) { [weak self] mark, error in
+            Task { @MainActor in
+                guard let self, self.admitsThread(id, revision: revision) else { return }
+                if let error { self.listenerFailed(error); return }
+                guard let mark else { return }
+                self.readsPending.remove(id)
+                let data = mark.data()
+                let seq = (data?["generation"] as? NSNumber)?.intValue == self.generation
+                    ? (data?["lastReadSeq"] as? NSNumber)?.intValue ?? 0 : 0
+                if let index = self.cache?.conversations.firstIndex(where: { $0.id == id }),
+                   let current = self.cache?.conversations[index].lastReadSeq, seq > current {
+                    self.cache?.conversations[index].lastReadSeq = seq
+                }
+            }
+        }
+        messageListener = thread.collection("messages").order(by: "seq", descending: true).limit(to: Self.messagePageSize)
             .addSnapshotListener(includeMetadataChanges: true) { [weak self] snapshot, error in
                 Task { @MainActor in
-                    guard let self, self.active, self.lifecycle == life, self.watchGeneration == watch, self.selected == id, self.auth.currentUser?.uid == self.uid else { return }
+                    guard let self, self.admitsThread(id, revision: revision) else { return }
                     if let error { self.listenerFailed(error); return }
                     guard let snapshot else { return }
                     do {
-                        let reset = firstSnapshot; firstSnapshot = false
-                        if reset || !snapshot.documentChanges.isEmpty {
-                            var messages: [String: TeamMessage] = reset ? [:] : Dictionary(uniqueKeysWithValues: (self.cache?.threads[id]?.messages ?? []).map { ($0.id, $0) })
-                            for change in snapshot.documentChanges {
-                                let key = change.document.documentID
-                                if change.type == .removed { messages.removeValue(forKey: key) }
-                                else {
-                                    var data = change.document.data().filter { Self.messageFields.contains($0.key) }; data["id"] = key
-                                    let message: TeamMessage = try self.decode(data); messages[key] = message
-                                }
-                            }
-                            self.cache?.threads[id] = TeamMessageProjection.Thread(messages: messages.values.sorted { $0.seq < $1.seq })
-                        }
-                            self.messagesCached = snapshot.metadata.isFromCache; self.updateOffline()
+                        let page = try snapshot.documents.map { try self.decodeMessage($0) }
+                        let initialPage = self.liveIDs.isEmpty
+                        self.liveIDs = Set(page.map(\.id))
+                        // A removed change in a limit query can be window
+                        // eviction. Explicit recall/change records own removal.
+                        self.merge(id, page: page, retainingOlder: false)
+                        if initialPage { self.hasOlderMessages = page.count == Self.messagePageSize && (page.last?.seq ?? 0) > 1 }
+                        self.messagesCached = snapshot.metadata.isFromCache
+                        self.updateOffline()
                         if !snapshot.metadata.isFromCache { self.error = ""; self.refresh() }
                     } catch { self.error = "INVALID_MESSAGE_SNAPSHOT" }
                 }
             }
+        watchChanges(id, after: conversation.lastChangeSeq, revision: revision)
         refresh()
+    }
+
+    private func decodeMessage(_ document: DocumentSnapshot) throws -> TeamMessage {
+        guard var data = document.data()?.filter({ Self.messageFields.contains($0.key) }) else {
+            throw TeamMessageFailure(code: "INVALID_MESSAGE_SNAPSHOT")
+        }
+        data["id"] = document.documentID
+        return try decode(data)
+    }
+
+    private func admitsThread(_ id: String, revision: Int) -> Bool {
+        active && !revoked && selectedRevision == revision && selected == id && auth.currentUser?.uid == uid
+    }
+
+    private func merge(_ id: String, page: [TeamMessage], retainingOlder: Bool) {
+        let existing = cache?.threads[id]?.messages ?? []
+        let merged = Dictionary((existing + page).map { ($0.id, $0) }, uniquingKeysWith: { old, new in
+            new.changeSeq >= old.changeSeq ? new : old
+        }).values.sorted { $0.seq < $1.seq }
+        let window: [TeamMessage]
+        if retainingOlder {
+            // Keep the page just requested and the tail used by live updates.
+            let older = merged.filter { !liveIDs.contains($0.id) }.prefix(Self.messageWindowSize - liveIDs.count)
+            window = (Array(older) + merged.filter { liveIDs.contains($0.id) }).sorted { $0.seq < $1.seq }
+        } else {
+            window = Array(merged.suffix(Self.messageWindowSize))
+        }
+        cache?.threads[id] = TeamMessageProjection.Thread(messages: window)
+    }
+
+    func loadOlder() async -> String? {
+        guard !loadingOlder, hasOlderMessages, !selected.isEmpty, let oldest = cache?.threads[selected]?.messages.first else { return nil }
+        let id = selected, revision = selectedRevision
+        loadingOlder = true
+        defer { if admitsThread(id, revision: revision) { loadingOlder = false } }
+        do {
+            let snapshot = try await selectedThread(id).collection("messages").whereField("seq", isLessThan: oldest.seq)
+                .order(by: "seq", descending: true).limit(to: Self.messagePageSize).getDocuments()
+            guard admitsThread(id, revision: revision) else { return nil }
+            let page = try snapshot.documents.map(decodeMessage)
+            hasOlderMessages = page.count == Self.messagePageSize && (page.last?.seq ?? 0) > 1
+            merge(id, page: page, retainingOlder: true)
+            return oldest.id
+        } catch {
+            if admitsThread(id, revision: revision) { self.error = "SERVICE_UNAVAILABLE" }
+            return nil
+        }
+    }
+
+    private func watchChanges(_ id: String, after cursor: Int, revision: Int) {
+        changesListener?.remove()
+        let root = selectedThread(id)
+        changesListener = root.collection("changes").whereField("seq", isGreaterThan: cursor)
+            .order(by: "seq").limit(to: Self.messagePageSize).addSnapshotListener { [weak self] snapshot, error in
+                Task { @MainActor in
+                    guard let self, self.admitsThread(id, revision: revision), self.applyingChanges == nil else { return }
+                    if let error { self.listenerFailed(error); return }
+                    guard let docs = snapshot?.documents, !docs.isEmpty else { return }
+                    self.applyingChanges = Task { [weak self] in
+                        guard let self else { return }
+                        defer { if self.admitsThread(id, revision: revision) { self.applyingChanges = nil } }
+                        var next = cursor
+                        for doc in docs {
+                            guard self.admitsThread(id, revision: revision), !Task.isCancelled else { return }
+                            let data = doc.data()
+                            guard let seq = (data["seq"] as? NSNumber)?.intValue, seq == next + 1,
+                                  let messageID = data["messageId"] as? String, InboxRef.safe(messageID) else { break }
+                            if self.cache?.threads[id]?.messages.contains(where: { $0.id == messageID }) == true {
+                                do {
+                                    let snapshot = try await root.collection("messages").document(messageID).getDocument()
+                                    guard self.admitsThread(id, revision: revision) else { return }
+                                    if snapshot.exists { self.merge(id, page: [try self.decodeMessage(snapshot)], retainingOlder: false) }
+                                } catch {
+                                    if self.admitsThread(id, revision: revision) { self.listenerFailed(error) }
+                                    return
+                                }
+                            }
+                            next = seq
+                        }
+                        if next > cursor, self.admitsThread(id, revision: revision) {
+                            self.watchChanges(id, after: next, revision: revision)
+                        }
+                    }
+                }
+            }
     }
     func refreshTasks() { refresh() }
     func refresh() {
@@ -586,7 +692,9 @@ final class TeamMessagingModel {
     /// Unread messages of one conversation; 0 until its read mark is known (a mark that has not arrived yet must
     /// not make the whole conversation look unread).
     func unread(of conversation: TeamMessageConversation) -> Int {
-        directoryReady && !readsPending.contains(conversation.id) ? TeamsListLogic.unreadCount(conversation) : 0
+        let ref = InboxRef(kind: .team, sourceId: teamId, conversationId: conversation.id, generation: generation)
+        if let row = InboxStore.shared.row(ref) { return max(row.manualUnread ? 1 : 0, row.unreadCount) }
+        return 0
     }
     /// Every listed conversation has delivered its read mark.
     var readsReady: Bool { directoryReady && readsPending.isEmpty }

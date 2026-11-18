@@ -48,6 +48,7 @@ fake.threads.set('chan-general', [
 
 const calls: unknown[][] = [];
 (window as any).fixtureCalls = calls;
+(window as any).fixtureWatchedTeams = () => [...new Set(fake.watches.filter(watch => watch.open).map(watch => watch.scope.teamId))];
 // Like the service: a message that is sent joins its thread, and every open watch of the conversation is told.
 const baseMessages = fake.messages;
 fake.messages = async <T,>(command: any): Promise<T> => {

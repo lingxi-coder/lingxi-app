@@ -97,6 +97,7 @@ internal fun FriendsListScreen(
     onJoinOffer: (String) -> Unit,
     onDeclineOffer: (String) -> Unit,
     modifier: Modifier = Modifier,
+    projectedUnread: Map<String, Int>? = null,
 ) {
     val locale = LocalConfiguration.current.locales[0]
     val collator = remember(locale) { FriendsLogic.friendCollator(locale) }
@@ -213,7 +214,7 @@ internal fun FriendsListScreen(
                             Text(stringResource(R.string.friends_filter_empty), Modifier.fillMaxWidth().padding(24.dp).testTag(FriendsTags.FILTER_EMPTY), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         else -> items(shown, key = { "friend-${it.uid}" }) { card ->
-                            val unread = FriendsLogic.unreadShown(card, state.openChatUid)
+                            val unread = projectedUnread?.get(card.uid) ?: if (projectedUnread == null) FriendsLogic.unreadShown(card, state.openChatUid) else 0
                             FriendRow(
                                 card, TeamsListLogic.pointerPreview(card.lastMessage, uid, strings), listTimeText(card.lastAtMs, now), unread,
                                 selected = card.uid == openChatUid, onClick = { onOpenChat(card.uid) },

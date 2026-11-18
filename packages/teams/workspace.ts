@@ -12,7 +12,7 @@ import { teamsText } from './i18n.js';
 export interface Identity { kind: 'user' | 'bot'; id: string; name: string }
 
 /** `max(0, lastSeq - lastReadSeq)`; edits and recalls never advance `lastSeq`. */
-export const unreadCount = (conversation: Pick<TeamConversation, 'lastSeq' | 'lastReadSeq'>): number => Math.max(0, conversation.lastSeq - conversation.lastReadSeq);
+export const unreadCount = (conversation: Pick<TeamConversation, 'lastSeq' | 'lastReadSeq' | 'unreadCount'>): number => conversation.unreadCount ?? Math.max(0, conversation.lastSeq - conversation.lastReadSeq);
 const totalUnreadOf = (conversations: readonly TeamConversation[]): number => conversations.reduce((sum, conversation) => sum + unreadCount(conversation), 0);
 
 const activity = (conversation: TeamConversation): number | undefined => {
@@ -254,6 +254,7 @@ export interface TeamsWorkspaceOptions {
   environment?: Pick<EventTarget, 'addEventListener' | 'removeEventListener'>;
   /** Team to open first when it is in the list. */
   initialTeamId?: string;
+  initialConversationId?: string;
   /** Delay between a change notification and the refetch it causes. */
   refreshDelay?: number;
   /** Teams (other than the selected one) that get a directory-only unread listener. */
@@ -388,8 +389,9 @@ export class TeamsWorkspace {
     this.storage = options.storage ?? indexedDbCommandStorage;
     this.environment = options.environment ?? (typeof window === 'undefined' ? undefined : window);
     this.refreshDelay = options.refreshDelay ?? 80;
-    this.maxWatchedTeams = options.maxWatchedTeams ?? 20;
+    this.maxWatchedTeams = options.maxWatchedTeams ?? 0;
     this.initialTeamId = options.initialTeamId ?? '';
+    if (this.initialTeamId && options.initialConversationId) this.conversationByTeam.set(this.initialTeamId,options.initialConversationId);
     this.pair = options.pair;
     if (this.pair) {
       const { team, members, conversationId } = this.pair;
@@ -413,11 +415,19 @@ export class TeamsWorkspace {
 
   // ── Reading ──
 
-  /** Drafts survive switching conversations (not reloads). */
-  draft = (conversationId: string): string => this.drafts.get(this.draftKey(conversationId)) ?? '';
+  /** Drafts are scoped by account and source membership, outside disposable transcript caches. */
+  draft = (conversationId:string):string => {
+    const key=this.draftKey(conversationId);
+    if(this.drafts.has(key)) return this.drafts.get(key)!;
+    try {return globalThis.localStorage?.getItem('lingxi.teamDraft.'+key)??'';} catch {return '';}
+  };
   setDraft = (conversationId: string, text: string): void => {
     const key = this.draftKey(conversationId);
     if (text) this.drafts.set(key, text); else this.drafts.delete(key);
+    try {
+      if(text) globalThis.localStorage?.setItem('lingxi.teamDraft.'+key,text);
+      else globalThis.localStorage?.removeItem('lingxi.teamDraft.'+key);
+    } catch {this.actionError='STORAGE_FAILED';this.publish();}
   };
   private draftKey(conversationId: string): string { return `${this.uid}:${this.selection}:${this.messagingTeam?.generation ?? 0}:${conversationId}`; }
 
@@ -628,7 +638,9 @@ export class TeamsWorkspace {
     if (!model || !conversationId) return;
     if (conversationId === model.selected) { await model.markRead(); return; }
     const row = model.state.conversations.find(value => value.id === conversationId);
-    if (!row || model.offline || unreadCount(row) === 0) return;
+    if (!row || unreadCount(row) === 0) return;
+    if(this.api.readVisible) {await this.api.readVisible(model.scope,conversationId,row.lastSeq,row.manualUnreadRevision??0);return;}
+    if(model.offline)return;
     await this.api.messages({ action: 'read', ...model.scope, conversationId, lastReadSeq: row.lastSeq });
   });
 

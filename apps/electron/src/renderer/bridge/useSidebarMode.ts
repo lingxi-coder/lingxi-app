@@ -6,7 +6,7 @@ import { pageForMode, reconcileSidebarMode, SidebarModeSync, type AppPage } from
  * The sidebar mode of the window: what the sidebar lists, kept in step with the
  * page, saved when it changes, and brought back when the window opens.
  */
-export function useSidebarMode({ page, setPage, botsAvailable, botsKnown, settings, save }: {
+export function useSidebarMode({ page, setPage, botsAvailable, botsKnown, settings, save, unifiedInbox = false }: {
   page: AppPage;
   setPage(page: AppPage): void;
   /** Bots can be used on this computer. */
@@ -16,6 +16,7 @@ export function useSidebarMode({ page, setPage, botsAvailable, botsKnown, settin
   /** Absent until the host has handed the window its settings. */
   settings: Pick<PublicSettings, 'sidebar'> | undefined;
   save(preferences: Partial<SidebarPreferences>): Promise<void>;
+  unifiedInbox?: boolean;
 }): { mode: SidebarMode; setMode(mode: SidebarMode): void } {
   const [mode, setModeState] = useState<SidebarMode>('home');
   const [sync] = useState(() => new SidebarModeSync());
@@ -42,9 +43,9 @@ export function useSidebarMode({ page, setPage, botsAvailable, botsKnown, settin
   }, [sync, settings, botsKnown, botsAvailable, saved, page, mode, setPage]);
 
   useLayoutEffect(() => {
-    const next = reconcileSidebarMode(mode, page, botsAvailable);
+    const next = reconcileSidebarMode(mode, page, botsAvailable, unifiedInbox);
     if (next !== mode) setMode(next);
-  }, [mode, page, botsAvailable, setMode]);
+  }, [mode, page, botsAvailable, setMode, unifiedInbox]);
 
   useEffect(() => {
     const next = sync.toSave(mode);

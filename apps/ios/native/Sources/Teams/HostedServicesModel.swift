@@ -19,6 +19,8 @@ final class HostedServicesModel {
     private(set) var session: String?
     private(set) var messages: [TeamMessage] = []
     private(set) var tasks: [TeamTask] = []
+    private(set) var hasOlder = false
+    private(set) var loadingOlder = false
     /// The last refusal, as a code (`HostedService.errorKey` gives its words).
     var error = ""
     private(set) var busy = false
@@ -107,6 +109,7 @@ final class HostedServicesModel {
     }
     func closeService() {
         pause(); open = nil; sessions = []; session = nil; messages = []; tasks = []; log = HostedServiceLog()
+        hasOlder = false; loadingOlder = false
     }
     func leave() async -> Bool {
         guard let open else { return false }
@@ -135,6 +138,7 @@ final class HostedServicesModel {
     func select(_ id: String) {
         guard id != session else { return }
         session = id; log = HostedServiceLog(); messages = []; tasks = []
+        hasOlder = false; loadingOlder = false
         watch()
     }
     func newSession(title: String) async -> Bool {
@@ -193,18 +197,45 @@ final class HostedServicesModel {
             }
         }
     }
+    func loadOlder() async {
+        guard !loadingOlder, let open, let generation = open.generation,
+              let session, let before = log.next else { return }
+        loadingOlder = true
+        defer { if self.session == session { loadingOlder = false } }
+        do {
+            let page = try await history(serviceID: open.serviceId, generation: generation, session: session, before: before)
+            guard self.session == session, self.open?.serviceId == open.serviceId else { return }
+            try log.load(page, uid: uid, bot: open.sharedBotId)
+            messages = log.messages
+            hasOlder = log.next != nil
+        } catch { fail(error) }
+    }
+
+    private func history(serviceID: String, generation: Int, session: String, before: Int? = nil) async throws -> HostedServiceHistory {
+        var body: [String: Any] = ["action": "history", "serviceId": serviceID, "generation": generation, "conversationId": session]
+        if let before { body["before"] = before }
+        return try await call("/v1/teams/messages", body)
+    }
+
     private func readNow() async { await read() }
     private func read() async {
         guard let open, let generation = open.generation else { return }
         do {
             if let session {
                 var next = log
-                while try await next.apply(call("/v1/teams/messages", try HostedServiceCommands.sync(serviceId: open.serviceId, generation: generation, sessionId: session, after: next.after)),
-                                           uid: uid, sharedBotId: open.sharedBotId) {}
+                if !next.initialized {
+                    try await next.seed(history(serviceID: open.serviceId, generation: generation, session: session),
+                                        uid: uid, bot: open.sharedBotId)
+                } else {
+                    _ = try await next.apply(call("/v1/teams/messages", try HostedServiceCommands.sync(serviceId: open.serviceId, generation: generation, sessionId: session, after: next.after)),
+                                              uid: uid, sharedBotId: open.sharedBotId)
+                }
                 let listed: HostedServiceTasks = try await call("/v1/teams/messages", try HostedServiceCommands.task(serviceId: open.serviceId, generation: generation, action: "listTasks",
                                                                                                                   payload: ["conversationId": session]))
                 guard self.open?.serviceId == open.serviceId, self.session == session else { return }
+                guard !Task.isCancelled, !loadingOlder, next.after >= log.after else { return }
                 log = next; messages = next.messages; tasks = listed.tasks.sorted { $0.createdAt < $1.createdAt }
+                hasOlder = next.next != nil
             }
             switch try await call("/v1/services", try HostedServiceCommands.service("getService", serviceId: open.serviceId)) as HostedServiceLookup {
             case let .service(now) where self.open?.serviceId == open.serviceId:

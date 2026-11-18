@@ -66,6 +66,13 @@ internal fun FriendsTab(
     val workspace = workspaceOverride ?: remember(context) { FriendsWorkspace.get(context.applicationContext) }
     val refreshTeams = onTeamJoined ?: { TeamsWorkspace.get(context.applicationContext).teamsModel.refresh() }
     val state by workspace.state.collectAsStateWithLifecycle()
+    val inbox = if (workspaceOverride == null) remember(context) { com.lingxi.code.inbox.InboxController.get(context.applicationContext) } else null
+    val inboxProjection = inbox?.projectedRows?.collectAsStateWithLifecycle()?.value.orEmpty()
+    val inboxRows = inbox?.state?.collectAsStateWithLifecycle()?.value?.rows.orEmpty()
+    val projectedUnread = remember(inboxProjection, inboxRows, inbox) {
+        if (inbox == null) null else (inboxProjection.values + inboxRows).filter { it.category == "friend" && !it.archived }
+            .mapNotNull { row -> row.peerUid?.let { it to maxOf(row.unreadCount, if (row.manualUnread) 1 else 0) } }.toMap()
+    }
     val link by workspace.link.state.collectAsStateWithLifecycle()
     val search by workspace.search.state.collectAsStateWithLifecycle()
     val host = LocalTabHost.current
@@ -77,12 +84,26 @@ internal fun FriendsTab(
 
     // The pushed screens, newest last: "add", "profile", "blocked" or "chat:<uid>". Saved as text so it survives the tab leaving composition.
     var stackText by rememberSaveable { mutableStateOf("") }
+    var inboxConversation by rememberSaveable { mutableStateOf<String?>(null) }
+    var fromInbox by rememberSaveable { mutableStateOf(false) }
     val stack = stackText.split('\n').filter { it.isNotEmpty() }
     fun setStack(next: List<String>) { stackText = next.joinToString("\n") }
     fun openPage(page: String) = setStack(if (wide) listOf(page) else if (page in stack) stack else stack + page)
     // A chat replaces Add friend, which led to it; beside the list (wide) it replaces whatever is in the pane.
-    fun openChat(friendUid: String) = setStack(if (wide) listOf("chat:$friendUid") else stack.filterNot { it == "add" || it.startsWith("chat:") } + "chat:$friendUid")
-    fun close(page: String) = setStack(stack.filterNot { it == page })
+    fun openChat(friendUid: String) {
+        inboxConversation = null
+        fromInbox = false
+        setStack(if (wide) listOf("chat:$friendUid") else stack.filterNot { it == "add" || it.startsWith("chat:") } + "chat:$friendUid")
+    }
+    fun close(page: String) {
+        val next = stack.filterNot { it == page }
+        setStack(next)
+        if (page.startsWith("chat:") && fromInbox) {
+            inboxConversation = null
+            fromInbox = false
+            host.select(AppTab.Chats)
+        }
+    }
 
     val uid = state.uid
     LaunchedEffect(uid) {
@@ -103,7 +124,18 @@ internal fun FriendsTab(
             FriendLink.Requests -> { setStack(emptyList()); scrollToRequests++ }
             is FriendLink.Chat -> {
                 if (!state.cardsLoaded) return@LaunchedEffect
-                if (state.friendCard(target.uid) != null) openChat(target.uid) else { setStack(emptyList()); workspace.chatUnavailable() }
+                if (target.expectedTeam != null && state.cards.none { card ->
+                    card.uid == target.uid && card.pair?.teamId == target.expectedTeam && card.pair?.generation == target.expectedGeneration
+                }) {
+                    onRequestHandled(pending.id)
+                    host.select(AppTab.Chats)
+                    return@LaunchedEffect
+                }
+                if (state.friendCard(target.uid) != null) {
+                    openChat(target.uid)
+                    fromInbox = target.expectedTeam != null
+                    inboxConversation = target.conversationId?.takeUnless { it == FriendsLogic.CHAT_CONVERSATION_ID }
+                } else { setStack(emptyList()); workspace.chatUnavailable() }
             }
         }
         onRequestHandled(pending.id)
@@ -116,7 +148,7 @@ internal fun FriendsTab(
 
     val depth = stack.size
     LaunchedEffect(depth) { host.reportDepth(AppTab.Friends, depth) }
-    BackHandler(enabled = stack.isNotEmpty()) { setStack(stack.dropLast(1)) }
+    BackHandler(enabled = stack.isNotEmpty()) { stack.lastOrNull()?.let(::close) }
     // Re-tapping the tab pops to the list, then scrolls it to the top.
     OnTabReselected(AppTab.Friends) { if (stack.isNotEmpty()) setStack(emptyList()) else scrollTop++ }
     LaunchedEffect(scrollTop) { if (scrollTop > 0) { if (reduceMotion) listState.scrollToItem(0) else listState.animateScrollToItem(0) } }
@@ -132,7 +164,7 @@ internal fun FriendsTab(
             val chatUid = stack.lastOrNull { it.startsWith("chat:") }?.removePrefix("chat:").orEmpty()
             val list: @Composable (Modifier) -> Unit = { m ->
                 FriendsListScreen(
-                    state = state, uid = uid, openChatUid = if (wide) chatUid else "", listState = listState, scrollToRequests = scrollToRequests,
+                    state = state, uid = uid, projectedUnread = projectedUnread, openChatUid = if (wide) chatUid else "", listState = listState, scrollToRequests = scrollToRequests,
                     onOpenChat = ::openChat, onAdd = { openPage("add") }, onProfile = { openPage("profile") }, onBlocked = { openPage("blocked") },
                     onRetry = workspace::retry, onRetryProfile = workspace::loadProfile,
                     onAccept = workspace::accept, onDecline = workspace::decline, onCancel = workspace::cancel,
@@ -152,7 +184,7 @@ internal fun FriendsTab(
                     entry == "blocked" -> BlockedPeopleScreen(
                         state, showBack = !wide, onClose = { close(entry) }, onRetry = workspace::retry, onUnblock = workspace::unblock, modifier = m,
                     )
-                    entry.startsWith("chat:") -> FriendChatScreen(workspace, state, uid, entry.removePrefix("chat:"), showBack = !wide, onBack = { close(entry) }, modifier = m)
+                    entry.startsWith("chat:") -> FriendChatScreen(workspace, state, uid, entry.removePrefix("chat:"), showBack = !wide || fromInbox, onBack = { close(entry) }, modifier = m, initialConversation = inboxConversation)
                 }
             }
             if (wide) {

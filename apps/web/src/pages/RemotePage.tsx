@@ -149,6 +149,7 @@ function SignedIn({ uid, locale, route }: { uid: string; locale: Locale; route: 
         locale={locale}
         client={remote.client}
         sessionId={target.sessionId}
+        hostId={hostId}
         connection={state}
         deviceName={deviceName}
         onBack={() => {

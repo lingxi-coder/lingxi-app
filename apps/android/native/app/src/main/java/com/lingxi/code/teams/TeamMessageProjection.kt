@@ -103,7 +103,7 @@ internal data class TeamMessage(val id: String, val seq: Long, val authorUid: St
             TeamReadFile.list(v.optJSONArray("readFiles")))
     } }
 }
-internal data class TeamMessageThread(val messages: List<TeamMessage> = emptyList())
+internal data class TeamMessageThread(val messages: List<TeamMessage> = emptyList(), val hasEarlier: Boolean = false, val hasLater: Boolean = false)
 internal data class TeamMessageCache(val uid: String, val teamId: String, val generation: Long,
     val conversations: List<TeamMessageConversation> = emptyList(), val threads: Map<String, TeamMessageThread> = emptyMap(), val outbox: List<JSONObject> = emptyList(), val creation: JSONObject? = null, val commands: List<JSONObject> = emptyList()) {
     fun json(): JSONObject {
@@ -116,7 +116,7 @@ internal data class TeamMessageCache(val uid: String, val teamId: String, val ge
         }
     }
 }
-internal class TeamMessageFailure(val code: String) : Exception(code)
+internal class TeamMessageFailure(val code: String, val status: Int? = null) : Exception(code)
 internal fun JSONArray.objects() = (0 until length()).map { getJSONObject(it) }
 internal fun JSONArray.strings() = (0 until length()).map { getString(it) }
 internal fun JSONObject.stringOrNull(key: String) = if (isNull(key)) null else getString(key)

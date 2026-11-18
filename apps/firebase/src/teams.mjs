@@ -247,7 +247,7 @@ export class TeamsStore {
 }
 
 /** HTTP authorization is deliberately independent from owner-only Remote Control. */
-export function createTeamsHandler({ store, friends, verifyToken, createCustomToken, origins = [] }) {
+export function createTeamsHandler({ store, friends, inbox, verifyToken, createCustomToken, origins = [] }) {
   return async request => {
     const headers = new Headers({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
       'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', Vary: 'Origin' });
@@ -267,6 +267,18 @@ export function createTeamsHandler({ store, friends, verifyToken, createCustomTo
       let user;
       try { user = await verifyToken(bearer[1]); } catch { fail(401, 'INVALID_SESSION'); }
       if (!uid.safeParse(user?.uid).success) fail(401, 'INVALID_SESSION');
+      if (inbox) {
+        if (!['/','/v1/inbox','/inboxApi'].includes(path) || request.method !== 'POST') fail(404, 'NOT_FOUND');
+        const raw = await request.text();
+        if (Buffer.byteLength(raw) > 32768) fail(413,'REQUEST_TOO_LARGE');
+        let body;
+        try { body = JSON.parse(raw); } catch { fail(400,'INVALID_JSON'); }
+        try { return reply(await inbox.execute(user.uid,body)); }
+        catch (error) {
+          if (Number.isInteger(error.status) && error.status >= 400 && error.status <= 599 && typeof error.code === 'string') return reply({error:{code:error.code}},error.status);
+          throw error;
+        }
+      }
       if (path === '/v1/teams' && request.method === 'GET') return reply(await store.list(user.uid));
       if (friends && path === '/v1/friends/profile' && request.method === 'GET') return reply(await friends.profile(user));
       const detail = /^\/v1\/teams\/([A-Za-z0-9_-]{8,64})$/u.exec(path);

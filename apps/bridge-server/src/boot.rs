@@ -2497,6 +2497,9 @@ pub async fn assemble_with_account_credentials(
         .await
         .map_err(|e| e.to_string())?,
     );
+    if let Some(writer) = runtime.orchestrator.session_transcript_writer() {
+        ask_user_question_broker.bind_inbox(&writer);
+    }
     // Replace the lazy placeholder with the exact session used by desktop
     // discovery and PluginManager before the context is attached to the Router.
     settings_context.plugin_archive_session = runtime.plugin_archive_session.clone();

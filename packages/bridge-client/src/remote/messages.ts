@@ -118,6 +118,8 @@ export type RemotePendingAction = 'permission' | 'question' | 'computer_access';
 
 /** One remote-enabled session in `sessions.list` / `sessions.changed`. */
 export interface RemoteSessionSummary {
+  /** Present for shared sessions whose host supports semantic inbox activity. */
+  activityJson?: string;
   session_id: string;
   title: string;
   /** Basename of the project directory. */
@@ -308,6 +310,15 @@ export interface SessionHistoryResult {
   has_more: boolean;
 }
 
+/** Source-owned semantic positions, authorized by the current session attachment. */
+export interface SessionActivityParams { session_id: string; after: number }
+export interface SessionActivityResult {
+  items: { cursor: number; resultUuids: string[]; kind: string; at: number }[];
+  cursor: number;
+  baselineCursor: number;
+  hasMore: boolean;
+}
+
 /** `image.get` (request): fetch an image by the ref a record carries. */
 export interface ImageGetParams {
   ref: string;
@@ -476,6 +487,7 @@ export interface ViewerRequests {
   'session.attach': { params: SessionAttachParams; result: SessionAttachResult };
   'session.detach': { params: SessionDetachParams; result: EmptyResult };
   'session.history': { params: SessionHistoryParams; result: SessionHistoryResult };
+  'session.activity': { params: SessionActivityParams; result: SessionActivityResult };
   'image.get': { params: ImageGetParams; result: ImageGetResult };
   'prompt.send': { params: PromptSendParams; result: PromptSendResult };
   'turn.cancel': { params: TurnCancelParams; result: EmptyResult };

@@ -96,6 +96,7 @@ internal fun TeamsListScreen(
     onReviewTask: (String) -> Unit = {},
     onDiscardCommand: (String) -> Unit = {},
     modifier: Modifier = Modifier,
+    projectedUnread: Map<String, Int>? = null,
 ) {
     val team = teams.teams.firstOrNull { it.id == teams.selectedId }
     val members = teams.detail?.members.orEmpty()
@@ -110,7 +111,7 @@ internal fun TeamsListScreen(
     val labels = remember(conversations, members, bots, uid, strings) { conversations.associate { it.id to TeamsListLogic.conversationLabel(it, members, uid, bots, strings) } }
     val visible = remember(conversations, labels, query) { conversations.filter { TeamsListLogic.conversationMatches(labels[it.id].orEmpty(), query) } }
     val groups = remember(visible, uid) { TeamsListLogic.groupConversations(visible, uid) }
-    val unreadOf = { c: TeamMessageConversation -> if (messaging.readsReady) TeamsListLogic.unreadCount(c) else 0 }
+    val unreadOf = { c: TeamMessageConversation -> projectedUnread?.get(c.id) ?: if (projectedUnread == null && messaging.readsReady) TeamsListLogic.unreadCount(c) else 0 }
     val online = !messaging.offline
     val otherTeamsUnread = unreadByTeam.filterKeys { it != teams.selectedId }.values.sum()
     val invalid = messaging.error == "INVALID_DATA" || messaging.error == "INVALID_MESSAGE_SNAPSHOT"

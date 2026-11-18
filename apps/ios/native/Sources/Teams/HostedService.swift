@@ -132,6 +132,11 @@ struct HostedServiceSync: Decodable, Sendable {
     let messages: [TeamMessage]
     let hasMore: Bool
 }
+struct HostedServiceHistory: Decodable, Sendable {
+    let messages: [TeamMessage]
+    let next: Int?
+    let lastChangeSeq: Int
+}
 struct HostedServiceTasks: Decodable, Sendable { let tasks: [TeamTask] }
 struct HostedServiceAck: Decodable, Sendable {}
 
@@ -140,6 +145,32 @@ struct HostedServiceLog: Equatable, Sendable {
     private(set) var after = 0
     private var byId: [String: TeamMessage] = [:]
     var messages: [TeamMessage] { byId.values.sorted { $0.seq < $1.seq } }
+    private(set) var next: Int?
+    private(set) var initialized = false
+
+    mutating func seed(_ page: HostedServiceHistory, uid: String, bot: String) throws {
+        try load(page, uid: uid, bot: bot)
+        after = page.lastChangeSeq
+        initialized = true
+    }
+
+    mutating func load(_ page: HostedServiceHistory, uid: String, bot: String) throws {
+        guard page.messages.allSatisfy({ Self.authorized($0, uid: uid, bot: bot) }) else {
+            throw TeamMessageFailure(code: "INVALID_DATA")
+        }
+        for message in page.messages where (byId[message.id]?.changeSeq ?? -1) <= message.changeSeq {
+            byId[message.id] = message
+        }
+        next = page.next
+        let sorted = messages
+        if sorted.count > 200 {
+            byId = Dictionary(uniqueKeysWithValues: (Array(sorted.prefix(150)) + sorted.suffix(50)).map { ($0.id, $0) })
+        }
+    }
+
+    private static func authorized(_ message: TeamMessage, uid: String, bot: String) -> Bool {
+        message.author.kind == "user" ? message.author.uid == uid : message.author.sharedBotId == bot
+    }
     /// Takes one page read from `after`. Returns whether more is to be read. A page that does not continue the log,
     /// names a message it does not carry, or carries a message of someone else is refused whole.
     mutating func apply(_ page: HostedServiceSync, uid: String, sharedBotId: String) throws -> Bool {
@@ -148,10 +179,12 @@ struct HostedServiceLog: Equatable, Sendable {
         for (index, change) in page.changes.enumerated() {
             guard change.seq == after + index + 1, let message = carried[change.messageId] else { throw TeamMessageFailure(code: "CHANGE_GAP") }
             // A session holds what its one person and the service's one Bot wrote.
-            guard message.author.kind == "user" ? message.author.uid == uid : message.author.sharedBotId == sharedBotId else { throw TeamMessageFailure(code: "INVALID_DATA") }
+            guard Self.authorized(message, uid: uid, bot: sharedBotId) else { throw TeamMessageFailure(code: "INVALID_DATA") }
             next[message.id] = message
         }
-        byId = next; after += page.changes.count
+        let retained = next.values.sorted { $0.seq < $1.seq }.suffix(200)
+        byId = Dictionary(uniqueKeysWithValues: retained.map { ($0.id, $0) })
+        after += page.changes.count
         return page.hasMore && !page.changes.isEmpty
     }
 }
@@ -173,7 +206,7 @@ enum HostedServiceCommands {
     }
     static func sync(serviceId: String, generation: Int, sessionId: String, after: Int) throws -> [String: Any] {
         guard HostedService.isServiceId(serviceId), generation >= 1, after >= 0 else { throw TeamMessageFailure(code: "INVALID_INPUT") }
-        return ["action": "sync", "serviceId": serviceId, "generation": generation, "conversationId": sessionId, "after": after]
+        return ["action": "sync", "serviceId": serviceId, "generation": generation, "conversationId": sessionId, "after": after, "limit": 50]
     }
     /// What a typed message is: the answer to the Bot's question when a request of this session waits for one from the
     /// viewer, else a new request.

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 private final class SessionScopeRegistryObservation: @unchecked Sendable {
@@ -14,6 +15,20 @@ private final class SessionScopeRegistryObservation: @unchecked Sendable {
     }
 }
 
+private final class DraftAccountNamespace: @unchecked Sendable {
+    private let lock = NSLock()
+    private var suffix = ""
+
+    func use(_ uid: String?) {
+        let value = uid.map {
+            "." + SHA256.hash(data: Data($0.utf8)).map { String(format: "%02x", $0) }.joined()
+        } ?? ""
+        lock.withLock { suffix = value }
+    }
+
+    func key(_ name: String) -> String { lock.withLock { name + suffix } }
+}
+
 /// Persists user-editable conversation state under an explicit conversation
 /// scope. The global scope is a real scope of its own; it never shares keys
 /// with a managed project, so switching workspaces cannot leak
@@ -21,6 +36,7 @@ private final class SessionScopeRegistryObservation: @unchecked Sendable {
 struct ProjectScopedPreferences {
     private let defaults: UserDefaults
     private let scopeRegistryObservation: SessionScopeRegistryObservation
+    private let draftAccount = DraftAccountNamespace()
     private static let workspacePinnedAtKey = "conversation.workspace.pinned-at"
     private static let sessionPinnedAtKey = "conversation.session.pinned-at"
     private static let cronResultsSeenAtKey = "conversation.cron.results-seen-at"
@@ -80,12 +96,14 @@ struct ProjectScopedPreferences {
         }
     }
 
+    func setDraftAccountUID(_ uid: String?) { draftAccount.use(uid) }
+
     func draft(scope: ConversationScope, mode: SessionMode) -> String {
-        defaults.string(forKey: key("draft", scope: scope, mode: mode)) ?? ""
+        defaults.string(forKey: draftAccount.key(key("draft", scope: scope, mode: mode))) ?? ""
     }
 
     func setDraft(_ value: String, scope: ConversationScope, mode: SessionMode) {
-        defaults.set(value, forKey: key("draft", scope: scope, mode: mode))
+        defaults.set(value, forKey: draftAccount.key(key("draft", scope: scope, mode: mode)))
     }
 
     /// A session UUID owns one draft. The mode-scoped slot is used before a
@@ -93,15 +111,15 @@ struct ProjectScopedPreferences {
     func draft(scope: ConversationScope, mode: SessionMode, ownerSessionID: String) -> String {
         let owner = canonicalSessionID(ownerSessionID)
         guard !owner.isEmpty else { return draft(scope: scope, mode: mode) }
-        return (defaults.dictionary(forKey: key("session-drafts", scope: scope)) as? [String: String])?[owner] ?? ""
+        return (defaults.dictionary(forKey: draftAccount.key(key("session-drafts", scope: scope))) as? [String: String])?[owner] ?? ""
     }
 
     /// Distinguish a deliberately cleared draft from a draft that has never
     /// been saved for this owner.
     func hasDraft(scope: ConversationScope, mode: SessionMode, ownerSessionID: String) -> Bool {
         let owner = canonicalSessionID(ownerSessionID)
-        if owner.isEmpty { return defaults.object(forKey: key("draft", scope: scope, mode: mode)) != nil }
-        return (defaults.dictionary(forKey: key("session-drafts", scope: scope)) as? [String: String])?[owner] != nil
+        if owner.isEmpty { return defaults.object(forKey: draftAccount.key(key("draft", scope: scope, mode: mode))) != nil }
+        return (defaults.dictionary(forKey: draftAccount.key(key("session-drafts", scope: scope))) as? [String: String])?[owner] != nil
     }
 
     func setDraft(_ value: String, scope: ConversationScope, mode: SessionMode, ownerSessionID: String) {
@@ -110,7 +128,7 @@ struct ProjectScopedPreferences {
             setDraft(value, scope: scope, mode: mode)
             return
         }
-        let draftsKey = key("session-drafts", scope: scope)
+        let draftsKey = draftAccount.key(key("session-drafts", scope: scope))
         var drafts = defaults.dictionary(forKey: draftsKey) as? [String: String] ?? [:]
         drafts[owner] = value
         defaults.set(drafts, forKey: draftsKey)
@@ -119,7 +137,7 @@ struct ProjectScopedPreferences {
     /// Store the original UTF-16 alongside its display draft so a restored
     /// handoff or suggestion does not normalize otherwise unrepresentable units.
     func draftSourceCodeUnits(scope: ConversationScope, mode: SessionMode, ownerSessionID: String) -> [UInt16]? {
-        let storageKey = key("draft-source-units", scope: scope, mode: mode)
+        let storageKey = draftAccount.key(key("draft-source-units", scope: scope, mode: mode))
         let owner = canonicalSessionID(ownerSessionID)
         guard let values = defaults.dictionary(forKey: storageKey) as? [String: Data],
               let data = values[owner],
@@ -132,7 +150,7 @@ struct ProjectScopedPreferences {
 
     func setDraftSourceCodeUnits(_ units: [UInt16]?, scope: ConversationScope,
                                  mode: SessionMode, ownerSessionID: String) {
-        let storageKey = key("draft-source-units", scope: scope, mode: mode)
+        let storageKey = draftAccount.key(key("draft-source-units", scope: scope, mode: mode))
         let owner = canonicalSessionID(ownerSessionID)
         var values = defaults.dictionary(forKey: storageKey) as? [String: Data] ?? [:]
         if let units, let data = try? JSONEncoder().encode(units) {

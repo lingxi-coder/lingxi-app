@@ -30,6 +30,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
@@ -64,6 +65,11 @@ import com.lingxi.code.theme.AppearanceStore
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.theme.LocaleWrapper
 import com.lingxi.code.theme.ThemeMode
+import com.lingxi.code.inbox.InboxAlert
+import com.lingxi.code.inbox.InboxController
+import com.lingxi.code.inbox.InboxItem
+import com.lingxi.code.inbox.InboxScreen
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
@@ -84,7 +90,16 @@ class MainActivity : ComponentActivity() {
     private val locationResultKey = java.util.UUID.randomUUID().toString()
     private lateinit var deviceReadPermissions: DeviceReadPermissionController
     private val linkInbox: com.lingxi.code.navigation.DeepLinkInbox by viewModels()
+    private val pendingInboxLaunch = kotlinx.coroutines.flow.MutableStateFlow<Pair<String, Long>?>(null)
     private fun enqueueCanonicalLink(intent: Intent, restoringActivity: Boolean = false) {
+        if (intent.action == InboxAlert.OPEN_ACTION) {
+            if (!restoringActivity) {
+                val key = intent.getStringExtra(InboxAlert.EXTRA_KEY).orEmpty()
+                val generation = intent.getLongExtra(InboxAlert.EXTRA_GENERATION, -1)
+                if (com.lingxi.code.inbox.InboxRef.fromKey(key, generation) != null) pendingInboxLaunch.value = key to generation
+            }
+            return
+        }
         if (intent.getBooleanExtra(com.lingxi.code.conversation.ConversationNotificationRoute.EXTRA_NOTIFICATION_OWNER, false)) {
             if (!restoringActivity) {
                 com.lingxi.code.conversation.ConversationNotificationRoute.parse(intent)?.let {
@@ -115,7 +130,13 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         com.lingxi.code.remote.RemoteControl.foreground()
+        InboxController.cached()?.setForeground(true)
         com.lingxi.code.push.PushRegistration.enqueue(applicationContext)
+    }
+
+    override fun onPause() {
+        InboxController.cached()?.setForeground(false)
+        super.onPause()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -239,6 +260,7 @@ class MainActivity : ComponentActivity() {
         ) {
             notificationPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+        val inbox = InboxController.get(applicationContext)
         setContent {
             val store = remember { AppearanceStore(applicationContext) }
             val settingsStore: SettingsStore =
@@ -268,6 +290,54 @@ class MainActivity : ComponentActivity() {
             // other. Links and shortcuts drive it; the terminal, onboarding and the import preview
             // stay overlays above it.
             val tabState = rememberTabShellState()
+            var inboxOpen by rememberSaveable { mutableStateOf(true) }
+            var inboxNewRequest by rememberSaveable { mutableIntStateOf(0) }
+            val requestedInboxLaunch by pendingInboxLaunch.collectAsState()
+            val inboxBanner by inbox.banner.collectAsState()
+            var inboxService by remember { mutableStateOf<com.lingxi.code.inbox.InboxRef?>(null) }
+            val openInboxRow: (InboxItem) -> Unit = { row ->
+                when (row.category) {
+                    "team" -> tabState.openInboxTeam(row.ref.sourceId, row.ref.conversationId, row.ref.generation)
+                    "friend" -> {
+                        val peer = row.peerUid ?: com.lingxi.code.friends.FriendsWorkspace.get(applicationContext).state.value.cards
+                            .firstOrNull { it.pair?.teamId == row.ref.sourceId && it.pair?.generation == row.ref.generation }?.uid
+                        if (peer != null) tabState.requestFriends(com.lingxi.code.friends.FriendLink.Chat(peer, row.ref.sourceId, row.ref.generation, row.ref.conversationId))
+                        else android.widget.Toast.makeText(applicationContext, getString(R.string.inbox_source_unavailable), android.widget.Toast.LENGTH_LONG).show()
+                    }
+                    "assistant" -> {
+                        val route = inbox.assistantRoute(row.key)
+                        if (route?.local != null) {
+                            pendingConversationLaunch.value = route.local
+                            inboxOpen = false
+                        } else {
+                            val host = route?.hostId ?: com.lingxi.code.remote.RemoteControl.manager(applicationContext).hosts.value.hosts
+                                .firstOrNull { it.hostId == (row.remoteHostId ?: row.ref.sourceId) && it.paired }?.hostId
+                            if (host != null) tabState.requestBots(host, route?.sessionId ?: row.ref.conversationId)
+                            else android.widget.Toast.makeText(applicationContext, getString(R.string.inbox_source_unavailable), android.widget.Toast.LENGTH_LONG).show()
+                        }
+                    }
+                    "service" -> inboxService = row.ref
+                }
+            }
+            LaunchedEffect(requestedInboxLaunch, prefs.setupDone) {
+                val launch = requestedInboxLaunch ?: return@LaunchedEffect
+                if (!prefs.setupDone) return@LaunchedEffect
+                tabState.select(AppTab.Chats)
+                inboxOpen = true
+                val row = try {
+                    if (launch.second == 0L) kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                        inbox.state.first { state -> state.rows.any { it.key == launch.first && it.ref.generation == launch.second } }
+                    }
+                    inbox.findCloud(launch.first, launch.second)
+                } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                catch (_: Exception) { null }
+                if (row != null) openInboxRow(row)
+                if (pendingInboxLaunch.value == launch) pendingInboxLaunch.value = null
+            }
+            LaunchedEffect(tabState) {
+                tabState.reselects.collect { event -> if (event.tab == AppTab.Chats && event.depth == 0) inboxOpen = true }
+            }
+
             // Monotonic across configuration changes: rotation must not turn a
             // prior reconnect generation back into zero and rebuild a live engine.
             var engineReconnect by rememberSaveable { mutableIntStateOf(0) }
@@ -375,6 +445,7 @@ class MainActivity : ComponentActivity() {
             }
             LaunchedEffect(requestedConversationLaunch) {
                 if (requestedConversationLaunch != null) {
+                    inboxOpen = false
                     tabState.select(AppTab.Chats)
                     terminalOpen = false
                 }
@@ -438,13 +509,21 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            LaunchedEffect(requestedFeatureLink, pendingProjectSwitch) {
+                if (requestedFeatureLink != null || pendingProjectSwitch != null) inboxOpen = false
+            }
+            LaunchedEffect(inboxOpen) {
+                if (inboxOpen) tabState.reportChatsChrome(0, drawerOpen = false, fullScreenOverlay = false)
+            }
             LingXiTheme(darkTheme = darkTheme, accentId = prefs.accentId) {
                 Box(Modifier.fillMaxSize().background(LingXiTheme.palette.windowBg)) {
                     MainTabShell(
                         state = tabState,
+                        chatsBadge = inbox.badge,
                         // Full-screen overlays drawn above the shell cover its bar (and rail).
                         overlayOpen = !prefs.setupDone || terminalOpen || pendingImport != null || botMarketHandoff != null,
                         chats = {
+                            com.lingxi.code.tabs.ChatsHost(active = !inboxOpen) {
                             RootScreen(
                                 isDark = darkTheme,
                                 tabState = tabState,
@@ -478,7 +557,11 @@ class MainActivity : ComponentActivity() {
                                 onOpenTerminal = openTerminal,
                                 onOpenBotsTab = { tabState.select(AppTab.Bots) },
                                 onOpenScheduledSession = openScheduledSession,
-                                onChromeChanged = tabState::reportChatsChrome,
+                                onChromeChanged = { pages, drawer, overlay -> if (!inboxOpen) tabState.reportChatsChrome(pages, drawer, overlay) },
+                                inbox = inbox,
+                                inboxOpen = inboxOpen || terminalOpen || !prefs.setupDone || pendingImport != null || botMarketHandoff != null,
+                                inboxNewRequest = inboxNewRequest,
+                                onOpenInbox = { inboxOpen = true },
                                 modelSetupRequired = settingsState.needsLlmSetup,
                                 assistantName = prefs.assistantName,
                                 inputDialog = prefs.inputDialog,
@@ -503,6 +586,14 @@ class MainActivity : ComponentActivity() {
                                 requestedConversationLaunch = requestedConversationLaunch,
                                 onConversationLaunchHandled = { pendingConversationLaunch.value = null },
                             )
+                            }
+                            val canCloseThread = !inboxOpen && tabState.depthOf(AppTab.Chats) == 0 && !tabState.chatsDrawerOpen &&
+                                !tabState.chatsFullScreenOverlay && !terminalOpen && prefs.setupDone && !deepLinkBlocked
+                            androidx.activity.compose.BackHandler(enabled = canCloseThread) { inboxOpen = true }
+                            if (inboxOpen) InboxScreen(inbox, openInboxRow, onNew = {
+                                inboxOpen = false
+                                inboxNewRequest++
+                            })
                         },
                         settings = { body ->
                             SettingsTab(
@@ -559,6 +650,25 @@ class MainActivity : ComponentActivity() {
                             )
                         },
                     )
+
+                    inboxService?.let { ref ->
+                        key(ref) { com.lingxi.code.teams.HostedServicesScreen(onClose = { inboxService = null }, inboxTarget = ref) }
+                    }
+
+                    inboxBanner?.let { alert ->
+                        androidx.compose.material3.Snackbar(
+                            modifier = Modifier.align(androidx.compose.ui.Alignment.TopCenter).statusBarsPadding(),
+                            action = {
+                                androidx.compose.material3.TextButton(onClick = {
+                                    inbox.dismissBanner()
+                                    pendingInboxLaunch.value = alert.ref.key to alert.ref.generation
+                                }) { androidx.compose.material3.Text(getString(R.string.inbox_title)) }
+                            },
+                        ) { androidx.compose.material3.Text(alert.title.ifBlank { getString(R.string.inbox_notification_title) }) }
+                    }
+                    LaunchedEffect(inboxBanner) {
+                        if (inboxBanner != null) { kotlinx.coroutines.delay(5_000); inbox.dismissBanner() }
+                    }
 
                     botMarketHandoff?.let { handoff ->
                         androidx.activity.compose.BackHandler { botMarketHandoffRaw = null }

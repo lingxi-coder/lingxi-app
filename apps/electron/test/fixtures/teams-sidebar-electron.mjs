@@ -66,16 +66,18 @@ async function assertDialogCentered() {
 }
 const result = {};
 try {
-  // The rail counts the unread messages of every team, before Teams is open: the number for the eye, the label for the rest.
+  // This fixture has no Inbox preload. The Teams rail reports the selected team's unread directory.
+  // The unified Inbox fixture covers the account-wide Home badge across sources.
   await load();
   await configureFixtureWindow(win);
   await setViewport(1280, 850);
-  await wait(`document.querySelector('${railTeams}[aria-label="Teams, 7 unread"]')`);
-  assert.equal(await run(`document.querySelector('${railTeams} .desktop-rail-count').textContent`), '7');
+  await wait(`document.querySelector('${railTeams}[aria-label="Teams, 4 unread"]')`);
+  assert.equal(await run(`document.querySelector('${railTeams} .desktop-rail-count').textContent`), '4');
+  assert.deepEqual(await run('window.fixtureWatchedTeams()'), ['team-aaaa'], 'no directory listener for the unselected team');
   assert.equal(await run(`document.querySelector('${railTeams} .desktop-rail-count').getAttribute('aria-hidden')`), 'true', 'the digits are not read out as well');
-  assert.equal(await run(`document.querySelector('${railTeams}').title`), 'Teams, 7 unread');
+  assert.equal(await run(`document.querySelector('${railTeams}').title`), 'Teams, 4 unread');
   assert.deepEqual(await run(`Array.from(document.querySelectorAll('.desktop-nav-rail button')).map(button => button.getAttribute('aria-label'))`),
-    ['Home', 'Bots', 'Teams, 7 unread', 'Friends', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
+    ['Home', 'Bots', 'Teams, 4 unread', 'Friends', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
   result.railBadge = true;
 
   // Teams mode: the workspace's own sidebar, the Teams page beside it, and the mode saved.
@@ -207,13 +209,13 @@ try {
   assert.equal(await run(`Boolean(document.querySelector('.desktop-sidebar .scheduled-master'))`), false);
   result.pageForward = true;
 
-  // Reading a conversation takes its messages off the rail's count.
+  // Reading Acme's only unread conversation clears the selected team's count.
   await click(row('chan-general'));
   await wait(`document.querySelector('${row('chan-general')}[aria-current="page"]')`);
   const read = await run(`Array.from(document.querySelectorAll('.teams-conversation button')).find(button => /^Mark as read$/.test(button.textContent.trim()))?.disabled === false`);
   if (read) await run(`Array.from(document.querySelectorAll('.teams-conversation button')).find(button => /^Mark as read$/.test(button.textContent.trim())).click()`);
-  await wait(`document.querySelector('${railTeams}').getAttribute('aria-label') === 'Teams, 3 unread'`);
-  assert.equal(await run(`document.querySelector('${railTeams} .desktop-rail-count').textContent`), '3');
+  await wait(`document.querySelector('${railTeams}').getAttribute('aria-label') === 'Teams'`);
+  assert.equal(await run(`Boolean(document.querySelector('${railTeams} .desktop-rail-count'))`), false);
   result.badgeFollowsReading = true;
 
   // The View menu's Teams (the key ⌘3) takes the keyboard to the open conversation in the sidebar, and leaves it where it is when it is in Teams already.
@@ -298,9 +300,14 @@ try {
   assert.equal(await run(`Boolean(document.querySelector('${railTeams} .desktop-rail-count'))`), false);
   result.signedOut = true;
 
-  // Past 99 the rail says 99+ and the label still has the number.
-  await load('?many=1');
-  await wait(`document.querySelector('${railTeams}[aria-label="Teams, 253 unread"]')`);
+  // Selecting Beta pivots the watched directory. Past 99 the rail caps the visible badge only.
+  await load('?many=1&saved=teams');
+  await wait(`document.querySelector('${sidebar} .tw-switcher-name')?.textContent === 'Acme'`);
+  await click(`${sidebar} .tw-switcher`);
+  await wait(`document.querySelector('${sidebar} [role="menu"]')`);
+  await run(`Array.from(document.querySelectorAll('${sidebar} [role="menuitemradio"]')).find(item => item.textContent.trim() === 'Beta').click()`);
+  await wait(`document.querySelector('${railTeams}[aria-label="Teams, 249 unread"]')`);
+  assert.deepEqual(await run('window.fixtureWatchedTeams()'), ['team-bbbb']);
   assert.equal(await run(`document.querySelector('${railTeams} .desktop-rail-count').textContent`), '99+');
   result.cappedBadge = true;
 

@@ -18,6 +18,7 @@ export const appRoutes = [
   '/docs',
   '/remote',
   '/login/remote',
+  '/inbox',
   '/teams',
   '/teams/join',
   '/friends',
@@ -27,6 +28,7 @@ export const appRoutes = [
 
 export type AppRoute =
   | (typeof appRoutes)[number]
+  | `/inbox/${string}`
   | `/open/${string}`
   | `/services/${string}`
   | `/remote/${string}/${string}`
@@ -107,12 +109,20 @@ export function parseServiceRoute(path: string): string | null {
 export type SecurityZone = 'remote' | 'sign-in' | 'site' | 'teams';
 
 export function securityZone(route: string): SecurityZone {
-  if (route === '/teams' || route.startsWith('/teams/') || route === '/friends' || route.startsWith('/friends/') || route === '/services' || route.startsWith('/services/')) return 'teams';
+  if (route === '/inbox' || route.startsWith('/inbox/') || route === '/teams' || route.startsWith('/teams/') || route === '/friends' || route.startsWith('/friends/') || route === '/services' || route.startsWith('/services/')) return 'teams';
   if (isRemoteRoute(route)) return 'remote';
   return route === '/login/remote' ? 'sign-in' : 'site';
 }
 
 export function resolveRoute(path: string): AppRoute {
+  const inbox = /^\/inbox\/([^/?#]+)\/?$/u.exec(path.split(/[?#]/u)[0] ?? '');
+  if(inbox) {
+    try {
+      const key=decodeURIComponent(inbox[1]!);
+      if(/^(?:assistant|team|service):[A-Za-z0-9_-]{1,128}:[A-Za-z0-9_-]{1,128}$/u.test(key))return `/inbox/${encodeURIComponent(key)}`;
+    } catch {return '/inbox';}
+    return '/inbox';
+  }
   if (path.split(/[?#]/u)[0]?.startsWith("/open/")) return path.split(/[?#]/u)[0] as AppRoute;
   if (parseRemoteRoute(path) || parseRemoteBotRoute(path)) return path.split(/[?#]/u)[0]!.replace(/\/$/u, '') as AppRoute;
   const serviceId = parseServiceRoute(path);

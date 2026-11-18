@@ -24,6 +24,25 @@ function fakeChild(stdoutBody: string) {
   return child;
 }
 
+test('catalog carries source activity and explicit user title without deriving either from display metadata', async () => {
+  const project = mkdtempSync(join(tmpdir(), 'lingxi-inbox-catalog-'));
+  const id = '11111111-2222-4333-8444-555555555555';
+  const activity = JSON.stringify({ sourceId: 'device', cursor: 3, baselineCursor: 2, latestResultUuids: [id] });
+  const catalog = new ProjectSessionCatalog({ catalogWorker: false, serverBin: '/bridge-server',
+    spawnProcess: (() => fakeChild(JSON.stringify({ version: 1, sessions: [{ uuid: id, title: 'inferred local-only title',
+      modified_rfc3339: '', message_count: 700, mode: 'chat', path: join(project, `${id}.jsonl`), empty_session: false,
+      activity_json: activity, user_title: 'Explicit name' }] }))) as any });
+  try {
+    const [row] = (await catalog.list(project)).sessions;
+    assert.equal(row?.activity_json, activity);
+    assert.equal(row?.user_title, 'Explicit name');
+    let invalidations = 0;
+    const unsubscribe = catalog.onInvalidated(() => invalidations++);
+    catalog.invalidate(project); assert.equal(invalidations, 1);
+    unsubscribe(); catalog.invalidate(project); assert.equal(invalidations, 1);
+  } finally { catalog.dispose(); rmSync(project, { recursive: true, force: true }); }
+});
+
 test('exact selections pass their path to separate catalog queries without a UUID fallback', async () => {
   const project = mkdtempSync(join(tmpdir(), 'lingxi-catalog-source-'));
   const id = '11111111-2222-4333-8444-555555555555';

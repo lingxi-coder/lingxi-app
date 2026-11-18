@@ -253,6 +253,15 @@ impl IosRemoteControlClient {
         self.inner.load_older_messages(session_id).await
     }
 
+    /// The committed Assistant results after an inbox cursor on this attached session.
+    pub async fn session_activity_page(
+        &self,
+        session_id: String,
+        after: u64,
+    ) -> Result<String, RemoteFfiError> {
+        self.inner.session_activity_page(session_id, after).await
+    }
+
     /// The bytes of an image a record refers to.
     pub async fn fetch_image(
         &self,

@@ -14,6 +14,7 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
     var alignShortContentToTop = false
     var requestedRowID: String? = nil
     var requestedScrollRevision: UInt64 = 0
+    var onJumpToLatest: (() -> Void)?
     @ViewBuilder var content: () -> Content
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -121,6 +122,7 @@ struct TranscriptScroll<Follow: Equatable, Content: View>: View {
             if !followState.followsLatest {
                 Button {
                     requestLatest(animated: true)
+                    onJumpToLatest?()
                 } label: {
                     Image(systemName: "chevron.down")
                         .font(.footnote.weight(.semibold))

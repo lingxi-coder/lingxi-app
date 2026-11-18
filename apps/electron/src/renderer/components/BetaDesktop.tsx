@@ -450,7 +450,7 @@ export function SessionRow({ projectPath, session, active, pinned, opening, stat
   );
 }
 
-export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, botsAvailable = false, teamsUnread = 0, friendsUnread = 0, sidebarMode = 'home', localAppProjects = [], onSelectSidebarMode, modePanel, sidebarCollapsed: collapsedByParent, onSidebarCollapsedChange, onOpenChat, children, topbar, pageSidebarRef }: {
+export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, botsAvailable = false, teamsUnread = 0, friendsUnread = 0, sidebarMode = 'home', localAppProjects = [], onSelectSidebarMode, modePanel, homePanel, homeToolbar, inboxBadge = 0, sidebarCollapsed: collapsedByParent, onSidebarCollapsedChange, onOpenChat, children, topbar, pageSidebarRef }: {
   bridge: UseBridge;
   activityView?: boolean;
   onToggleActivityView?(): void;
@@ -472,6 +472,9 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   onSelectSidebarMode?(mode: SidebarMode): void;
   /** The sidebar's content in the modes other than Home, given what the search box holds (trimmed, in lower case). */
   modePanel?(mode: Exclude<SidebarMode, 'home'>, search: string): ReactNode;
+  homePanel?: ReactNode;
+  homeToolbar?: ReactNode;
+  inboxBadge?: number;
   /** Whether the sidebar is hidden, when the parent keeps that (the View menu toggles it); absent, the sidebar keeps it itself. */
   sidebarCollapsed?: boolean;
   onSidebarCollapsedChange?(collapsed: boolean): void;
@@ -483,7 +486,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   const t = useT();
   const homePage = sidebarMode === 'home' && !apps && !scheduled && !changes;
   // Every sidebar mode (Home, Bots, Teams, Apps) narrows its list with the sidebar's search box (`modePanel(mode, search)`); a page that replaces the sidebar has none, and Friends has a filter field of its own.
-  const searchable = !apps && !scheduled && !changes && sidebarMode !== 'friends';
+  const searchable = !apps && !scheduled && !changes && sidebarMode !== 'friends' && !(sidebarMode === 'home' && homePanel);
   const asideRef = useRef<HTMLElement>(null);
   const railRef = useRef<HTMLElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
@@ -956,7 +959,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       </div>
       <div className="desktop-body">
       <nav ref={railRef} className="desktop-nav-rail no-drag" aria-label={tr('desktop_main_navigation')} aria-disabled={bridge.projectCreationOpen || undefined} onClickCapture={blockNavigation}>
-        <button type="button" className="desktop-rail-button" data-active={modeMarked('home') || undefined} aria-current={modeMarked('home') ? 'page' : undefined} aria-label={tr('desktop_home')} title={tr('desktop_home')} onClick={() => selectMode('home')}><DesktopIcon name="home" size={20} /></button>
+        <button type="button" className="desktop-rail-button desktop-rail-home" data-active={modeMarked('home') || undefined} aria-current={modeMarked('home') ? 'page' : undefined} aria-label={inboxBadge > 0 ? `${tr('desktop_home')} (${inboxBadge})` : tr('desktop_home')} title={tr('desktop_home')} onClick={() => selectMode('home')}><DesktopIcon name="home" size={20} />{inboxBadge > 0 ? <span className="desktop-rail-count" aria-hidden="true">{unreadBadgeText(inboxBadge)}</span> : null}</button>
         {botsAvailable && <button type="button" className="desktop-rail-button" data-active={modeMarked('bots') || undefined} aria-current={modeMarked('bots') ? 'page' : undefined} aria-label={tr('bots_title')} title={tr('bots_title')} onClick={() => selectMode('bots')}><Icon name="bot" size={21} stroke={1.7} /></button>}
         <button type="button" className="desktop-rail-button desktop-rail-teams" data-active={modeMarked('teams') || undefined} aria-current={modeMarked('teams') ? 'page' : undefined} aria-label={teamsRailLabel} title={teamsRailLabel} onClick={() => selectMode('teams')}>
           <Icon name="users" size={21} stroke={1.7} />
@@ -987,7 +990,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       {scheduled ? <div ref={pageSidebarRef} className="desktop-page-sidebar" /> : <>
       {searchOpen && sidebarMode !== 'friends' && <div className="sidebar-search"><DesktopIcon name="search" size={15} /><input ref={searchInputRef} type="search" aria-label={tr('desktop_search_chats_projects')} placeholder={tr('desktop_search_chats_projects')} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setSearchQuery(''); setSearchOpen(false); } }} /><button type="button" aria-label={tr('desktop_close_search')} onClick={() => { setSearchQuery(''); setSearchOpen(false); }}><Icon name="x" size={15} /></button></div>}
 
-      {sidebarMode === 'home' && <div style={{ padding: '16px 12px 14px' }}>
+      {sidebarMode === 'home' && !homePanel && <div style={{ padding: '16px 12px 14px' }}>
         <button
           className="sidebar-primary-action sidebar-new-chat"
           type="button"
@@ -1013,7 +1016,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
         sensors={(defaults) => defaults.map((sensor) => sensor === PointerSensor ? SESSION_POINTER_SENSOR : sensor)}
         onDragEnd={handleSessionDragEnd}
       >
-      {sidebarMode !== 'home' ? modePanel?.(sidebarMode, normalizedSearch) ?? null : (
+      {sidebarMode === 'home' ? homeToolbar : null}
+      {sidebarMode !== 'home' ? modePanel?.(sidebarMode, normalizedSearch) ?? null : homePanel ?? (
       <nav className="no-drag desktop-sidebar-list" aria-label={tr('desktop_projects_sessions')} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 10px 12px' }}>
         {pinnedSessions.length > 0 ? (
           <section aria-labelledby="pinned-sessions-heading" style={{ marginBottom: 24 }}>

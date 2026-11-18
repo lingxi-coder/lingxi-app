@@ -17,7 +17,7 @@ const renderMarkdown: RenderMarkdown = text => <Markdown text={text} />;
 function SignedIn({ user, locale, serviceId }: { user: User; locale: string; serviceId?: string }) {
   const api = useMemo(() => webServicesApi(user, () => auth.currentUser?.uid), [user]);
   useEffect(() => () => api.close(), [api]);
-  return <div className="teams-web-services"><HostedServices api={api} uid={user.uid} locale={locale} renderMarkdown={renderMarkdown} initialServiceId={serviceId}
+  return <div className="teams-web-services"><HostedServices api={api} uid={user.uid} locale={locale} renderMarkdown={renderMarkdown} initialServiceId={serviceId} initialSessionId={new URLSearchParams(location.search).get('session') ?? undefined}
     link={id => serviceLink(location.origin, id)} /></div>;
 }
 
@@ -27,7 +27,7 @@ export default function ServicesPage({ locale, serviceId }: { locale: Locale; se
   const [user, setUser] = useState<User | null | undefined>(undefined), [busy, setBusy] = useState(false);
   useEffect(() => onAuthStateChanged(auth, setUser), []);
   const signOutNow = async () => { setBusy(true); try { await signOut(auth); } catch { /* The person stays signed in. */ } finally { setBusy(false); } };
-  return <main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><a href="/teams">{t('teams_title')}</a><a href="/friends">{t('friends_title')}</a><h1>{t('services_title')}</h1>
+  return <main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><a href="/inbox">{locale === 'zh' ? '收件箱' : 'Inbox'}</a><a href="/teams">{t('teams_title')}</a><a href="/friends">{t('friends_title')}</a><h1>{t('services_title')}</h1>
       <span>{user?.displayName || user?.email}</span>{user ? <button disabled={busy} onClick={() => void signOutNow()}>{t('tw_sign_out')}</button> : null}</header>
     {user === undefined ? <p role="status" className="teams-web-note">{t('teams_loading')}</p>
       : user ? <SignedIn key={user.uid} user={user} locale={locale} serviceId={serviceId} />

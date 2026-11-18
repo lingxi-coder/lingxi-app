@@ -362,10 +362,19 @@ struct RemoteSessionView: View {
     let title: String
     let manager: RemoteControlManager
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(InboxStore.self) private var inbox
+    @Environment(AppNavigationModel.self) private var navigation
     @State private var source: RemoteConversationSource
     @State private var draft: RemoteDraftOwner
     @State private var voice = VoiceInteractionController()
+    @State private var visibleResults: [String: UUID] = [:]
+    @State private var readWindow = InboxAssistantReadWindow()
+    @State private var draftRestored = false
 
+    private struct SavedDraft: Codable {
+        let text: String
+        let sourceCodeUnits: [UInt16]?
+    }
     init(hostID: String, sessionID: String, title: String, uid: String, manager: RemoteControlManager) {
         self.title = title
         self.manager = manager
@@ -385,6 +394,9 @@ struct RemoteSessionView: View {
             if source.phase != .live {
                 Text(source.phase == .closed ? "remote_session_closed" : source.phase == .loading ? "remote_session_loading" : "remote_session_offline")
                     .font(.caption).foregroundStyle(.secondary).padding(8)
+            }
+            if let notice = inbox.inlineNotice, notice.ref == activeRef {
+                Label("Conversation update", systemImage: "bell").font(.caption).padding(5)
             }
             if source.hasOmittedContent { Text("remote_omitted_note").font(.caption).padding(8) }
             RemoteSessionModeLabel(model: source.model)
@@ -410,7 +422,14 @@ struct RemoteSessionView: View {
                     draftSourceCodeUnits: Binding(get: { owner.draft.sourceCodeUnits }, set: { owner.draft.sourceCodeUnits = $0 }),
                     attachmentBinding: Binding(get: { owner.draft.attachment }, set: { owner.draft.attachment = $0 }),
                     sessionMode: source.sessionMode, workspaceName: title,
-                    workspaceKey: ConversationScope.remote(hostID: source.hostID, sessionID: source.sessionID).workspaceKey)
+                    workspaceKey: ConversationScope.remote(hostID: source.hostID, sessionID: source.sessionID).workspaceKey,
+                    onInboxResultVisibility: { rowID, uuid, visible in
+                        if visible { visibleResults[rowID] = uuid }
+                        else if visibleResults[rowID] == uuid { visibleResults.removeValue(forKey: rowID) }
+                    },
+                    onInboxJumpToLatest: {
+                        if let ref = activeRef, let row = inbox.row(ref) { inbox.markRead([row]) }
+                    })
                     .disabled(source.phase != .live || !source.hasReadyConnection)
                     .background {
                         if source.phase == .live && source.hasReadyConnection {
@@ -452,12 +471,76 @@ struct RemoteSessionView: View {
         .clipped()
         .navigationTitle(title)
         .task { await source.start() }
-        .onDisappear { Task { await source.stop() } }
+        .onChange(of: activeRef, initial: true) { old, next in
+            readWindow = InboxAssistantReadWindow()
+            if let next { inbox.setCurrent(next) }
+            else if let old { inbox.setCurrent(nil, replacing: old) }
+        }
+        .onDisappear {
+            if let ref = activeRef { inbox.setCurrent(nil, replacing: ref) }
+            Task { await source.stop() }
+        }
+        .task(id: visibleRead) { await commitRemoteExposure() }
+        .onChange(of: inbox.storageAvailable, initial: true) { _, available in
+            guard available, inbox.uid == source.uid, !draftRestored else { return }
+            if draft.draft.text.isEmpty, draft.draft.sourceCodeUnits == nil,
+               let data = inbox.draft(for: draftKey, uid: source.uid), let saved = try? JSONDecoder().decode(SavedDraft.self, from: data) {
+                draft.draft.text = saved.text
+                draft.draft.sourceCodeUnits = saved.sourceCodeUnits
+            }
+            draftRestored = true
+        }
+        .onChange(of: draft.draftRevision) { _, _ in
+            guard draftRestored else { return }
+            let value = SavedDraft(text: draft.draft.text, sourceCodeUnits: draft.draft.sourceCodeUnits)
+            inbox.saveDraft(value.text.isEmpty && value.sourceCodeUnits == nil ? nil : try? JSONEncoder().encode(value),
+                            for: draftKey, uid: source.uid)
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { source.handleForeground() }
             else if phase == .background { source.handleBackground() }
         }
     }
+
+    private var activeRef: InboxRef? {
+        guard scenePhase == .active, navigation.tabs.selected == .bots, source.phase == .live,
+              source.uid == inbox.uid, source.hasReadyConnection, !source.isApprovalCapability else { return nil }
+        return inbox.remoteAssistantRef(host: source.hostID, session: source.sessionID)
+    }
+
+    private var visibleRead: InboxAssistantExposure? {
+        guard let ref = activeRef, !visibleResults.isEmpty, !source.model.streaming,
+              let row = inbox.row(ref), row.sourceCursor > row.readThrough else { return nil }
+        return InboxAssistantExposure(ref: ref, sourceCursor: row.sourceCursor, sourceRevision: row.sourceRevision,
+                                      readThrough: row.readThrough, visible: Set(visibleResults.values))
+    }
+
+    private func commitRemoteExposure() async {
+        guard let exposure = visibleRead, let frozen = inbox.row(exposure.ref) else { return }
+        do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+        guard exposure == visibleRead else { return }
+        readWindow.confirm(exposure.visible)
+        while max(exposure.readThrough, readWindow.through) < exposure.sourceCursor {
+            let start = max(exposure.readThrough, readWindow.through)
+            guard let ticket = manager.connectionTicket(hostID: source.hostID, uid: source.uid) else { return }
+            let page: InboxAssistantReadPage
+            do {
+                let session = source.sessionID
+                let json = try await manager.withSessionClient(hostID: source.hostID, uid: source.uid, ticket: ticket) {
+                    try await $0.sessionActivityPage(sessionId: session, after: UInt64(start))
+                }
+                page = try JSONDecoder().decode(InboxAssistantReadPage.self, from: Data(json.utf8))
+            } catch { return }
+            guard !Task.isCancelled, exposure == visibleRead else { return }
+            let entries = page.items.prefix(50).filter { $0.cursor <= exposure.sourceCursor }
+            let baseline = max(start, min(page.baselineCursor, exposure.sourceCursor))
+            let next = readWindow.advance(entries, after: baseline)
+            if next > baseline { inbox.sawContent(frozen, through: next) }
+            guard page.hasMore, next > baseline, next == entries.last?.cursor else { break }
+        }
+    }
+
+    private var draftKey: String { "remote:\(source.hostID):\(canonicalSessionID(source.sessionID))" }
 
     private func restoreUnsent(_ prompt: RemoteUnsentPrompt) {
         if draft.draft.restore(prompt) { source.removeUnsentPrompt(prompt.id) }

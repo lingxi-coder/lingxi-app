@@ -800,6 +800,9 @@ pub enum RemotePendingActionFfi {
 /// One session the desktop shares.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct RemoteSessionSummaryFfi {
+    /// Content-free activity projection supplied by a compatible source host.
+    #[uniffi(default = None)]
+    pub activity_json: Option<String>,
     /// Session id.
     pub session_id: String,
     /// Title.
@@ -1167,6 +1170,7 @@ fn connection_state_to_ffi(state: &ConnectionState) -> RemoteConnectionStateFfi 
 
 fn session_summary_to_ffi(summary: &RemoteSessionSummary) -> RemoteSessionSummaryFfi {
     RemoteSessionSummaryFfi {
+        activity_json: summary.activity_json.clone(),
         session_id: summary.session_id.clone(),
         title: summary.title.clone(),
         project_label: summary.project_label.clone(),
@@ -2417,6 +2421,40 @@ impl RemoteControlCore {
     pub async fn load_older_messages(&self, session_id: String) -> Result<(), RemoteFfiError> {
         self.controller(&session_id)?.load_older().await;
         Ok(())
+    }
+
+    /// Bounded source positions for viewport read acknowledgement. A changed
+    /// host or detached watcher must never deliver positions to a new screen.
+    pub async fn session_activity_page(
+        &self,
+        session_id: String,
+        after: u64,
+    ) -> Result<String, RemoteFfiError> {
+        let (controller, watcher, generation) = {
+            let active = self.core.active.lock().expect("active");
+            let active = active.as_ref().ok_or(RemoteFfiError::NotConnected)?;
+            let (watcher, _) = active
+                .watchers
+                .get(&session_id)
+                .ok_or(RemoteFfiError::NotConnected)?;
+            (
+                active.client.session(&session_id),
+                watcher.clone(),
+                self.core.current.load(Ordering::SeqCst),
+            )
+        };
+        let page = controller
+            .session_activity_page(after)
+            .await
+            .map_err(rpc_error)?;
+        if generation != self.core.current.load(Ordering::SeqCst)
+            || !watcher.attached.load(Ordering::SeqCst)
+        {
+            return Err(RemoteFfiError::NotConnected);
+        }
+        serde_json::to_string(&page).map_err(|e| RemoteFfiError::Internal {
+            message: e.to_string(),
+        })
     }
 
     /// The bytes of an image a record refers to.

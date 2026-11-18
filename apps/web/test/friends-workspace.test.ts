@@ -101,7 +101,7 @@ test('the friend link: a new one replaces the old, turning it off clears it', as
 
 // ── Unread and the badge (D13, D14) ──
 
-test('the badge is the incoming requests plus the unread of the friends; an open chat counts as read and the card\'s value returns when it closes', async context => {
+test('the badge is the incoming requests plus the unread of the friends; opening a chat preserves the source cursor', async context => {
   const { workspace, snapshot } = friendsFixture(f => {
     f.cards = [card('bob', { lastSeq: 5, lastReadSeq: 2, lastMessage: pointer(5) }), card('carol', { lastSeq: 2, lastReadSeq: 2 }), card('dave', { state: 'incoming' }), card('erin', { state: 'outgoing' }), card('finn', { lastSeq: 9 })];
   });
@@ -109,20 +109,20 @@ test('the badge is the incoming requests plus the unread of the friends; an open
   await ready(snapshot);
   assert.equal(snapshot().badge, 1 + 3 + 9);
   workspace.openChat('bob');
-  assert.equal(snapshot().cards.find(value => value.uid === 'bob')?.lastReadSeq, 5, 'the chat on screen is read');
+  assert.equal(snapshot().cards.find(value => value.uid === 'bob')?.lastReadSeq, 2, 'navigation alone leaves reads unchanged');
   assert.equal(snapshot().cards.find(value => value.uid === 'finn')?.lastReadSeq, undefined, 'others are the card\'s own');
-  assert.equal(snapshot().badge, 1 + 9);
+  assert.equal(snapshot().badge, 1 + 3 + 9);
   workspace.show('profile');
   assert.equal(snapshot().badge, 1 + 3 + 9, 'leaving the chat gives the card\'s value back');
 });
 
-test('a message that arrives in the open chat leaves its unread at zero', async context => {
+test('new arrivals stay unread until visible content is acknowledged', async context => {
   const { fake, workspace, snapshot } = friendsFixture(f => { f.cards = [card('bob', { lastSeq: 1, lastReadSeq: 1 })]; });
   context.after(() => workspace.close());
   await ready(snapshot);
   workspace.openChat('bob');
   fake.emitCards([card('bob', { lastSeq: 4, lastReadSeq: 1, lastMessage: pointer(4) })]);
-  assert.equal(snapshot().badge, 0);
+  assert.equal(snapshot().badge, 3);
   assert.equal(snapshot().cards[0]!.lastSeq, 4);
 });
 

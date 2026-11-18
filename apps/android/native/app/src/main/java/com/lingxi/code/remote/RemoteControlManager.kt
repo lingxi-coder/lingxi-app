@@ -129,6 +129,7 @@ interface RemoteClientPort {
     suspend fun detachSession(sessionId: String)
     suspend fun setSessionForeground(sessionId: String, foreground: Boolean)
     suspend fun loadOlderMessages(sessionId: String)
+    suspend fun sessionActivityPage(sessionId: String, after: ULong): String = error("remote activity unavailable")
     suspend fun fetchImage(sessionId: String, imageRef: String): com.lingxi.code.bindings.android.RemoteImageFfi
     suspend fun sendPrompt(sessionId: String, text: String, images: List<com.lingxi.code.bindings.android.RemotePromptImageFfi>)
     suspend fun retryPrompt(sessionId: String, promptId: String)
@@ -895,6 +896,7 @@ private class ManagerSessionPort(
     override fun follow() = manager.followSession(hostId, sessionId, ownerUid)
     override suspend fun setForeground(foreground: Boolean) = operation { it.setSessionForeground(sessionId, foreground) }
     override suspend fun loadOlder() = operation { it.loadOlderMessages(sessionId) }
+    override suspend fun sessionActivityPage(after: ULong) = operation { it.sessionActivityPage(sessionId, after) }
     override suspend fun fetchImage(imageRef: String) = operation { it.fetchImage(sessionId, imageRef) }
     override suspend fun sendPrompt(text: String, images: List<RemotePromptImageFfi>) =
         operation { it.sendPrompt(sessionId, text, images) }
@@ -1020,6 +1022,7 @@ internal class FfiRemoteClientPort(private val client: AndroidRemoteControlClien
     override suspend fun setSessionForeground(sessionId: String, foreground: Boolean) =
         client.setSessionForeground(sessionId, foreground)
     override suspend fun loadOlderMessages(sessionId: String) = client.loadOlderMessages(sessionId)
+    override suspend fun sessionActivityPage(sessionId: String, after: ULong) = client.sessionActivityPage(sessionId, after)
     override suspend fun fetchImage(sessionId: String, imageRef: String) = client.fetchImage(sessionId, imageRef)
     override suspend fun sendPrompt(
         sessionId: String,

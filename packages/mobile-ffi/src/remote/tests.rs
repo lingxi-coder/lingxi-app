@@ -449,6 +449,7 @@ fn every_failure_kind_has_a_counterpart() {
 #[test]
 fn session_summaries_map_status_and_pending_action() {
     let summary = RemoteSessionSummary {
+        activity_json: None,
         session_id: "s1".into(),
         title: "Fix".into(),
         project_label: "app".into(),
@@ -545,6 +546,7 @@ fn the_bots_state_keeps_unknown_unsupported_and_no_bots_apart() {
 #[test]
 fn a_bots_chats_map_like_sessions_and_keep_why_a_listing_failed() {
     let chat = RemoteSessionSummary {
+        activity_json: None,
         session_id: "t1".into(),
         title: "Reading list".into(),
         project_label: "Researcher".into(),

@@ -96,7 +96,12 @@ import java.util.UUID
  * entered by itself. The model reads nothing while the app is in the background.
  */
 @Composable
-internal fun HostedServicesScreen(onClose: () -> Unit, link: String? = null, modelOverride: HostedServicesModel? = null) {
+internal fun HostedServicesScreen(
+    onClose: () -> Unit,
+    link: String? = null,
+    modelOverride: HostedServicesModel? = null,
+    inboxTarget: com.lingxi.code.inbox.InboxRef? = null,
+) {
     val scope = rememberCoroutineScope()
     val model = modelOverride ?: remember { HostedServicesModel.create(scope) }
     val state by model.state.collectAsStateWithLifecycle()
@@ -104,6 +109,16 @@ internal fun HostedServicesScreen(onClose: () -> Unit, link: String? = null, mod
     val lifecycleState by lifecycle.currentStateFlow.collectAsState()
     val foreground = lifecycleState.isAtLeast(Lifecycle.State.STARTED)
     var followed by rememberSaveable { mutableStateOf(false) }
+    var inboxTargetOpened by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(inboxTarget, state.listed, state.entered, foreground) {
+        if (foreground && inboxTarget != null && state.listed && !inboxTargetOpened) {
+            val service = state.entered.firstOrNull { it.serviceId == inboxTarget.sourceId && it.generation == inboxTarget.generation }
+            if (service != null) {
+                inboxTargetOpened = true
+                model.show(service, inboxTarget.conversationId)
+            } else onClose()
+        }
+    }
     LaunchedEffect(foreground) {
         if (foreground) { model.start(if (followed) null else link); followed = true } else model.pause()
     }
@@ -113,7 +128,7 @@ internal fun HostedServicesScreen(onClose: () -> Unit, link: String? = null, mod
         Surface(Modifier.fillMaxSize().testTag("services.screen"), color = MaterialTheme.colorScheme.surface) {
             Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
                 val open = state.open
-                if (open == null) ServiceList(model, state, onClose) else ServiceSession(model, state, open)
+                if (open == null) ServiceList(model, state, onClose) else ServiceSession(model, state, open, if (inboxTarget != null) onClose else model::closeService)
             }
         }
     }
@@ -186,7 +201,7 @@ private fun ServiceTerms(service: HostedServiceView, busy: Boolean, onDismiss: (
 }
 
 @Composable
-private fun ColumnScope.ServiceSession(model: HostedServicesModel, state: HostedServicesState, service: HostedServiceView) {
+private fun ColumnScope.ServiceSession(model: HostedServicesModel, state: HostedServicesState, service: HostedServiceView, onClose: () -> Unit) {
     val scope = rememberCoroutineScope()
     val reduceMotion = rememberReduceMotion()
     var text by rememberSaveable(service.serviceId) { mutableStateOf("") }
@@ -194,9 +209,30 @@ private fun ColumnScope.ServiceSession(model: HostedServicesModel, state: Hosted
     var reporting by remember { mutableStateOf(false) }
     var leaving by remember { mutableStateOf(false) }
     var choosing by remember { mutableStateOf(false) }
-    BackHandler { model.closeService() }
+    val list = rememberLazyListState()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val inbox = remember(context) { com.lingxi.code.inbox.InboxController.get(context.applicationContext) }
+    val ref = state.session?.let { session -> service.generation?.let { com.lingxi.code.inbox.InboxRef("service", service.serviceId, session, it) } }
+    com.lingxi.code.inbox.InboxPresence(inbox, ref)
+    LaunchedEffect(ref) { if (ref != null) inbox.prime(ref) }
+    val inboxState by inbox.state.collectAsStateWithLifecycle()
+    val projection by inbox.projectedRows.collectAsStateWithLifecycle()
+    val readThrough = ref?.let { candidate -> inboxState.rows.firstOrNull { it.ref == candidate } ?: projection[candidate.key] }?.readThrough ?: 0
+    val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
+    val visible by androidx.compose.runtime.remember(list) {
+        androidx.compose.runtime.derivedStateOf { list.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }.toSet() }
+    }
+    LaunchedEffect(ref, visible, state.messages, readThrough, lifecycle) {
+        if (ref == null || !lifecycle.isAtLeast(Lifecycle.State.RESUMED)) return@LaunchedEffect
+        val through = com.lingxi.code.inbox.contiguousVisibleRead(readThrough, state.messages.filter { it.id in visible }.map { it.seq })
+        if (through > readThrough) {
+            kotlinx.coroutines.delay(300)
+            inbox.mutate(com.lingxi.code.inbox.InboxOperation.read(ref, through, inbox.snapshot(ref)?.manualUnreadRevision ?: 0, inbox.snapshot(ref)?.pendingActionRevision), automatic = true)
+        }
+    }
+    BackHandler(onBack = onClose)
     Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = model::closeService) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.remote_back)) }
+        IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.remote_back)) }
         Column(Modifier.weight(1f)) {
             Text(service.name, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(stringResource(HostedService.availabilityRes(service.availability)), style = MaterialTheme.typography.labelSmall,
@@ -206,6 +242,10 @@ private fun ColumnScope.ServiceSession(model: HostedServicesModel, state: Hosted
             IconButton(onClick = { menu = true }, modifier = Modifier.testTag("services.menu")) { Icon(Icons.Outlined.MoreVert, stringResource(R.string.services_menu)) }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 if (state.sessions.isNotEmpty()) DropdownMenuItem(text = { Text(stringResource(R.string.services_sessions)) }, onClick = { menu = false; choosing = true })
+                DropdownMenuItem(text = { Text(stringResource(R.string.inbox_mark_read)) }, enabled = ref != null, onClick = {
+                    menu = false
+                    ref?.let { inbox.mutate(com.lingxi.code.inbox.InboxOperation.read(it, state.lastSeq, inbox.snapshot(it)?.manualUnreadRevision ?: 0, inbox.snapshot(it)?.pendingActionRevision)) }
+                })
                 DropdownMenuItem(text = { Text(stringResource(R.string.services_new_session)) }, enabled = !state.busy, onClick = {
                     menu = false; scope.launch { model.newSession(java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT).format(java.util.Date())) }
                 })
@@ -218,10 +258,10 @@ private fun ColumnScope.ServiceSession(model: HostedServicesModel, state: Hosted
     if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth()) else Box(Modifier.padding(top = 4.dp))
     if (!service.available) Text(stringResource(HostedService.availabilityRes(service.availability)) + if (service.withdrawn) "" else " · " + stringResource(R.string.services_cannot_answer),
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    val list = rememberLazyListState()
     val unanswered = state.tasks.filter { it.state != "completed" }
-    LaunchedEffect(state.messages.size + unanswered.size) {
-        val count = 1 + state.messages.size + unanswered.size
+    LaunchedEffect(state.lastSeq, unanswered.size, state.olderWindow) {
+        if (state.olderWindow) return@LaunchedEffect
+        val count = 1 + state.messages.size + unanswered.size + if (state.earlier != null) 1 else 0
         if (count > 0) { if (reduceMotion) list.scrollToItem(count - 1) else list.animateScrollToItem(count - 1) }
     }
     LazyColumn(Modifier.weight(1f).fillMaxWidth().testTag("services.stream"), state = list) {
@@ -233,8 +273,17 @@ private fun ColumnScope.ServiceSession(model: HostedServicesModel, state: Hosted
         }
         // Nothing here yet: the box below is the action (U9).
         if (state.messages.isEmpty() && state.tasks.isEmpty()) item("empty") { TeamsMessageState(stringResource(R.string.teams_preview_none), body = stringResource(R.string.services_empty), fill = false) }
+        if (state.earlier != null) item("earlier") {
+            TextButton(onClick = model::loadEarlier, enabled = !state.loadingHistory) { Text(stringResource(R.string.teams_messages_earlier)) }
+        }
         items(state.messages, key = { it.id }) { message -> ServiceMessage(message, service, state.uid) }
         items(unanswered, key = { "task:" + it.taskId }) { task -> ServiceTaskLine(task, state, model) }
+    }
+    if (state.olderWindow && ref != null) {
+        TextButton(onClick = {
+            inbox.mutate(com.lingxi.code.inbox.InboxOperation.read(ref, state.lastSeq, inbox.snapshot(ref)?.manualUnreadRevision ?: 0, inbox.snapshot(ref)?.pendingActionRevision))
+            model.jumpToLatest()
+        }) { Text(stringResource(R.string.inbox_jump_latest)) }
     }
     state.error?.let { Text(stringResource(HostedService.errorRes(it)), Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).testTag("services.session.error").semantics { liveRegion = LiveRegionMode.Polite },
         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }

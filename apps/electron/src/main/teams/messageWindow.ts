@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { app, BrowserWindow, MessageChannelMain, type Event, type MessagePortMain } from 'electron';
-import type { MessageScope, MessageSnapshot } from '../../../../../packages/teams/messages.js';
+import type { MessageScope, MessageSnapshot, TeamMessage } from '../../../../../packages/teams/messages.js';
 import type { TeamsFirestoreOptions } from './firestore.js';
 import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source.js';
 
 export interface TeamsMessageSession {
   watch(id: string, scope: MessageScope, conversationId: string, next: (snapshot: MessageSnapshot) => void): () => void;
+  historyPage(scope:MessageScope,conversationId:string,beforeSeq:number):Promise<TeamMessage[]>;
   read(request: ChatReadRequest): Promise<ChatReadResult>;
   close(clearAuthentication?: boolean): Promise<void>;
 }
@@ -35,8 +36,18 @@ export async function openTeamsMessageSession(options: Omit<TeamsFirestoreOption
   let closed = false;
   let closing: Promise<void> | undefined;
   const listeners = new Map<string, (snapshot: MessageSnapshot) => void>();
-  const reads = new Map<string, { resolve(value: ChatReadResult): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
+  const reads = new Map<string, { type:'read-result'|'history-result';resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
   let readSequence = 0;
+  function requestRead<T>(command:object,type:'read-result'|'history-result',valid:(result:unknown)=>result is T):Promise<T> {
+    if(closed||closing)return Promise.reject(new Error('INVALID_SESSION'));
+    if(reads.size>=64)return Promise.reject(new Error('MESSAGE_READ_BUSY'));
+    const id='read-'+ ++readSequence;
+    return new Promise<T>((resolve,reject)=>{
+      const timer=setTimeout(()=>{reads.delete(id);reject(new Error('MESSAGE_READ_TIMEOUT'));},30000);
+      reads.set(id,{type,timer,reject,resolve:value=>valid(value)?resolve(value):reject(new Error('INVALID_DATA'))});
+      try {port!.postMessage({...command,id});}catch(error){clearTimeout(timer);reads.delete(id);reject(error);}
+    });
+  }
   function rejectReads(): void {
     for (const value of reads.values()) { clearTimeout(value.timer); value.reject(new Error('INVALID_SESSION')); }
     reads.clear();
@@ -79,12 +90,12 @@ export async function openTeamsMessageSession(options: Omit<TeamsFirestoreOption
       if (closed || !message || typeof message !== 'object') return;
       if (message.type === 'ready') ready?.();
       else if (message.type === 'error') fail();
-      else if (message.type === 'read-result' && typeof message.id === 'string') {
+      else if ((message.type === 'read-result' || message.type==='history-result') && typeof message.id === 'string') {
         const pending = reads.get(message.id);
         if (pending) {
           reads.delete(message.id); clearTimeout(pending.timer);
           if (typeof message.error === 'string') pending.reject(new Error(message.error));
-          else if (message.uid === options.uid && message.result && Array.isArray(message.result.messages)) pending.resolve(message.result as ChatReadResult);
+          else if (message.uid === options.uid && pending.type===message.type) pending.resolve(message.result);
           else pending.reject(new Error('INVALID_DATA'));
         }
       }
@@ -97,13 +108,12 @@ export async function openTeamsMessageSession(options: Omit<TeamsFirestoreOption
     try { await initialized; } finally { clearTimeout(timeout); ready = undefined; rejectReady = undefined; }
     return {
       read(request) {
-        if (closed || closing) return Promise.reject(new Error('INVALID_SESSION'));
-        const id = `read-${++readSequence}`;
-        return new Promise<ChatReadResult>((resolve, reject) => {
-          const timer = setTimeout(() => { reads.delete(id); reject(new Error('MESSAGE_READ_TIMEOUT')); }, 30000);
-          reads.set(id, { resolve, reject, timer });
-          port!.postMessage({ type: 'read', id, request });
-        });
+        return requestRead({type:'read',request},'read-result',(v):v is ChatReadResult=>!!v && typeof v==='object' && 'messages' in v && Array.isArray(v.messages));
+      },
+      historyPage(scope,conversationId,beforeSeq) {
+        return requestRead({type:'history-page',scope,conversationId,beforeSeq},'history-result',(v):v is TeamMessage[]=>
+          Array.isArray(v) && v.length<=50 && v.every((m,i)=>m && typeof m.id==='string' && Number.isSafeInteger(m.seq)
+            && m.seq>0 && m.seq<beforeSeq && (!i || v[i-1].seq<m.seq)));
       },
       watch(id, scope, conversationId, next) {
         if (closed) throw new Error('INVALID_SESSION');

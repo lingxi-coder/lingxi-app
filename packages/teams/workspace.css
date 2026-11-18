@@ -485,3 +485,5 @@
   .tw-bot-member-details button, .tw-task-export button { min-height: 44px; }
   .tw-task-export a { display: inline-flex; align-items: center; min-height: 44px; }
 }
+
+.tw-stream [data-unread-divider] { scroll-initial-target: nearest; }

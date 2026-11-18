@@ -81,6 +81,10 @@ import { audioConfigurationDefaults } from '../shared/generatedAudioConfiguratio
 import { TerminalManager } from './terminal.js';
 import { HostController, resolveSavedConversationTranscript } from './host.js';
 import { HostNotifier } from './notifications.js';
+import { InboxService } from './inbox/service.js';
+import { installInboxIpc } from './inbox/ipc.js';
+import { NotificationDeliveryLedger } from './inbox/deliveryLedger.js';
+import { hostname as inboxSourceName } from 'node:os';
 import { notificationPresentation } from './notificationPresentation.js';
 import { BOT_PERMISSION_TIMEOUT_SECS, DiagnosticBuffer, diagnosticEvent, sanitizeDiagnostic, resolveModBunExecutable } from './host-utils.js';
 import { SettingsStore } from './settings.js';
@@ -138,6 +142,9 @@ let git: GitService | null = null;
 let terminals: TerminalManager | null = null;
 let nativeAudio: NativeAudioManager | null = null;
 let notifier: HostNotifier | null = null;
+let inboxService: InboxService | null = null;
+let notificationAccountUid: string | null = null;
+let notificationAccountEpoch = 0;
 let quitting = false;
 let shutdownDiagnostics: DiagnosticBuffer | undefined;
 let disposeProviderAccounts: (() => Promise<void>) | undefined;
@@ -557,7 +564,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   const showNotification = (title: string, body: string, ref?: SessionRef): void => {
     if (!Notification.isSupported()) return;
     // A Bot's workspace is a folder nobody named; the notification names the Bot.
-    const notification = new Notification(notificationPresentation(title, body, ref, process.platform, ref ? bots?.nameFor(ref.projectPath) : undefined));
+    const notification = new Notification(notificationPresentation(title, body, undefined, process.platform));
     notification.on('click', () => {
       const shown = ref ? host?.showNotifiedSession(ref).catch((error) => diagnostics.add('error', 'host', sanitizeDiagnostic(error))) : undefined;
       const window = getMainWindow();
@@ -575,6 +582,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   notifier = new HostNotifier({
     show: showNotification,
     isWindowFocused: () => windowFocused,
+    ledger: new NotificationDeliveryLedger(userData, () => notificationAccountUid),
+    isConversationVisible: (sessionId, ref) => inboxService?.isVisible(ref?.sessionId ?? sessionId) ?? false,
+    conversationNotificationsEnabled: (sessionId, kind) => inboxService?.allowsNotifications(sessionId, kind) ?? true,
+    hasCommittedActivity: sessionId => inboxService?.hasLocalSource(sessionId) ?? false,
+    inApp: (title, body, ref) => inboxService?.notifyInApp({ title, body, ref }),
     // Remote Control is built after the notifier; both are looked up when used.
     remote: (kind, sessionId) => remotePush?.notify(kind, sessionId),
     systemIdleSeconds: () => powerMonitor.getSystemIdleTime(),
@@ -608,6 +620,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       return host.rememberCreatedSessionSource(ref, runtime, scheduled);
     },
     notifier,
+    onInboxActivity: (ref) => { sessionCatalog.invalidate(ref.projectPath); },
     onCronRunRequested: (runtime, event) => scheduled ? scheduled.run(runtime, event.run_id, event.task) : Promise.reject(new Error('Scheduled task service unavailable')),
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
@@ -787,10 +800,63 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
   host.attachAccount(account);
   const teamsService = new TeamsService(account, firebaseConfig);
+  notificationAccountUid = account.snapshot().user?.uid ?? null;
+  notificationAccountEpoch = account.sessionEpoch();
+  const stopInboxAccount = account.onChanged(() => {
+    const uid = account.snapshot().user?.uid ?? null, epoch = account.sessionEpoch();
+    if (uid === notificationAccountUid && epoch === notificationAccountEpoch) return;
+    notificationAccountUid = uid; notificationAccountEpoch = epoch;
+    notifier?.accountChanged();
+  });
+  inboxService = new InboxService({
+    account, teams: teamsService, userData,
+    sourceCredentials: accountSessionStore(join(userData, 'inbox', 'source-credentials.enc')),
+    isFocused: () => windowFocused,
+    notificationsEnabled: () => settings.getPublic().notifications?.enabled !== false,
+    localSessions: async () => {
+      const spaces = settings.conversationSpaces.snapshot();
+      const { sessions } = await sessionCatalog.listComplete(spaces.globalWorkspaces.chat, 'all');
+      const archived = settings.getPublic().archivedSessions ?? [];
+      return sessions.flatMap(row => {
+        const owner = settings.conversationSpaces.findBySessionId(row.uuid);
+        const projectPath = owner?.projectPath ?? row.workspace_path;
+        if (!projectPath) return [];
+        const ref: SessionRef = { projectPath, sessionId: row.uuid, mode: owner?.mode ?? row.mode,
+          ...(owner ? { projectId: owner.projectId } : {}) };
+        const runtime = bridge?.get(row.uuid);
+        const pending = runtime?.remotePending();
+        const state = pending && (pending.permissions.length > 0 || pending.computer_access.length > 0) ? 'waiting_for_approval' as const
+          : pending && pending.questions.length > 0 ? 'waiting_for_input' as const : runtime?.turnActive ? 'running' as const : undefined;
+        const remoteHostId = remotePolicy?.find(row.uuid) ? remoteControl?.status().host_id : undefined;
+        return [{ row, ref, state, remoteHostId, cloudTitle: row.user_title ?? undefined,
+          sourceLabel: inboxSourceName(), archived: archived.some(item => item.sessionId === row.uuid && item.projectPath === projectPath) }];
+      });
+    },
+    activityPage: async (ref, after) => {
+      const row = await sessionCatalog.find(ref.projectPath, ref.sessionId);
+      if (!row) throw new Error('SOURCE_ACCESS_REQUIRED');
+      return sessionCatalog.readActivity(ref.projectPath, ref.sessionId, row.path, after);
+    },
+    notify: notice => {
+      if (!Notification.isSupported()) return;
+      const notification = new Notification({ title: notice.title, body: notice.body });
+      notification.on('click', () => {
+        const current = getMainWindow();
+        if (current) { current.show(); current.focus(); inboxService?.notifyInApp({ ...notice, activate: true }); }
+        else {
+          const opened = createWindow();
+          opened.once('ready-to-show', () => { opened.show(); opened.focus(); inboxService?.notifyInApp({ ...notice, activate: true }); });
+        }
+      });
+      notification.show();
+    },
+  });
+  const stopInboxIpc = installInboxIpc(inboxService, () => [...mainWindows], rendererTarget().url);
+  const stopInboxInvalidation = sessionCatalog.onInvalidated(() => inboxService?.invalidateLocal());
   // Friends listens in the Teams service's Firestore session, so it stops first.
   const stopFriendsIpc = installFriendsIpc(new FriendsService(account, teamsService), () => [...mainWindows]);
   const stopTeamsIpc = installTeamsIpc(teamsService, () => [...mainWindows]);
-  stopTeams = () => { stopFriendsIpc(); stopTeamsIpc(); };
+  stopTeams = () => { stopInboxInvalidation(); stopInboxAccount(); stopInboxIpc(); inboxService = null; stopFriendsIpc(); stopTeamsIpc(); };
   // Off unless the user (or, unpackaged, LINGXI_REMOTE_CONTROL=1) turns it on.
   const remoteDiagnostics = (level: 'info' | 'warn' | 'error', message: string): void => {
     diagnostics.add(level, 'host', `remote control: ${message}`);
@@ -817,6 +883,12 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       clock: systemClock,
     }),
     titleOf: async (ref) => (await sessionCatalog.find(ref.projectPath, ref.sessionId))?.title,
+    activityOf: async (ref) => (await sessionCatalog.find(ref.projectPath, ref.sessionId))?.activity_json ?? undefined,
+    activityPage: async (ref, after) => {
+      const row = await sessionCatalog.find(ref.projectPath, ref.sessionId);
+      if (!row) throw new Error('SOURCE_ACCESS_REQUIRED');
+      return sessionCatalog.readActivity(ref.projectPath, ref.sessionId, row.path, after);
+    },
     modelOf: (ref) => settings.getSessionModel(ref),
     clock: systemClock,
     diagnostics: remoteDiagnostics,

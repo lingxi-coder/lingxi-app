@@ -36,7 +36,7 @@ export default function TeamsPage({ locale }: { locale: Locale }) {
     // denying storage can still recover it from the URL after a refresh.
     let retained = !code;
     if (code) retained = retainInviteIntent(code, inviteStorage);
-    if (retained && (location.search || location.hash)) history.replaceState(null, '', location.pathname);
+    if (code && retained && (location.search || location.hash)) history.replaceState(null, '', location.pathname);
     return onAuthStateChanged(auth, setUser);
   }, []);
   const signOutNow = async () => {
@@ -44,7 +44,7 @@ export default function TeamsPage({ locale }: { locale: Locale }) {
     try { await signOut(auth); } catch { /* The person stays signed in. */ }
     finally { setBusy(false); }
   };
-  return <main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><a href="/friends">{t('friends_title')}</a><h1>{t('teams_title')}</h1><a href="/remote">{t('tw_nav_remote')}</a><span>{user?.displayName || user?.email}</span>{user ? <button disabled={busy} onClick={() => void signOutNow()}>{t('tw_sign_out')}</button> : null}</header>
+  return <main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><a href="/inbox">{locale === 'zh' ? '收件箱' : 'Inbox'}</a><a href="/friends">{t('friends_title')}</a><h1>{t('teams_title')}</h1><a href="/remote">{t('tw_nav_remote')}</a><span>{user?.displayName || user?.email}</span>{user ? <button disabled={busy} onClick={() => void signOutNow()}>{t('tw_sign_out')}</button> : null}</header>
     {user === undefined ? <p role="status" className="teams-web-note">{t('teams_loading')}</p> : user ? <SignedIn key={user.uid} user={user} locale={locale} invite={code} onInviteHandled={() => setCode('')} onInviteResolved={() => { clearInviteIntent(inviteStorage, handledInvite.current); setCode(''); history.replaceState(null, '', location.pathname); }} /> : <SignInCard auth={auth} locale={locale} note={code ? t('tw_signin_note_invite') : t('tw_signin_note_teams')} />}
   </main>;
 }

@@ -5,7 +5,7 @@ import test from 'node:test';
 import { initializeApp, deleteApp } from 'firebase/app';
 import { initializeAuth, inMemoryPersistence, connectAuthEmulator, signInWithCustomToken } from 'firebase/auth';
 import { getFirestore, connectFirestoreEmulator, disableNetwork, enableNetwork, terminate } from 'firebase/firestore';
-import { watchFirestoreMessages } from '../../../packages/teams/firestore.js';
+import { readFirestoreMessagePage, watchFirestoreMessages } from '../../../packages/teams/firestore.js';
 import { emptyProjection, applyMessageSnapshot, type MessageSnapshot } from '../../../packages/teams/messages.js';
 
 const enabled = !!process.env.FIRESTORE_EMULATOR_HOST && !!process.env.FIREBASE_AUTH_EMULATOR_HOST;
@@ -34,13 +34,22 @@ test('SDK stream: cached metadata, reconnect, old edits/recalls, read marks, gen
     await batch.commit();
     await signInWithCustomToken(auth, await backend('firebase-admin/auth').getAuth(adminApp).createCustomToken(uid));
     stop = watchFirestoreMessages(firestore, db, uid, { teamId, generation: 1 }, conversationId, value => { if (value.kind === 'messages') view = applyMessageSnapshot(view, value); snapshots.push(value); }, () => auth.currentUser?.uid === uid);
-    await until(() => latestMessages()?.messages.length === 125 && latestMessages()?.fromCache === false);
+    await until(() => latestMessages()?.messages.length === 50 && latestMessages()?.fromCache === false);
+    for(const before of [76,26]) {
+      const messages=await readFirestoreMessagePage(firestore,db,{teamId,generation:1},conversationId,before);
+      assert.ok(messages.length<=50);
+      view=applyMessageSnapshot(view,{kind:'messages',uid,teamId,generation:1,conversationId,fromCache:false,replace:false,older:true,messages});
+    }
+    assert.equal(view.threads[conversationId]?.messages.length,125);
     // The directory row carries the conversation's newest message: real Timestamps arrive as ISO strings.
     await until(() => pointer()?.preview === 'Body 125');
     assert.deepEqual(pointer(), { id: 'message-125', seq: 125, at: '2026-11-02T10:00:00.000Z', preview: 'Body 125', author: { kind: 'user', uid } });
     await disableNetwork(db); await until(() => latestMessages()?.fromCache === true);
     await conversation.collection('messages').doc('message-1').update({ text: 'Edited oldest', changeSeq: 126 });
     await conversation.collection('messages').doc('message-2').update({ text: '', recalled: true, changeSeq: 127 });
+    await conversation.collection('changes').doc('change-126').set({seq:126,messageId:'message-1',operation:'edit',at:new Date()});
+    await conversation.collection('changes').doc('change-127').set({seq:127,messageId:'message-2',operation:'recall',at:new Date()});
+    await conversation.update({lastChangeSeq:127});
     assert.equal(latestMessages()!.messages[0]!.text, 'Body 1');
     await enableNetwork(db); await until(() => latestMessages()?.fromCache === false && latestMessages()?.messages[0]?.text === 'Edited oldest');
     assert.equal(latestMessages()!.messages[1]!.text, ''); assert.equal(latestMessages()!.messages[1]!.recalled, true);

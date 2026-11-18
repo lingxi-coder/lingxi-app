@@ -39,6 +39,10 @@ class LingxiApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         com.lingxi.code.diagnostics.CrashReporting.initialize()
+        val firestore = com.google.firebase.firestore.FirebaseFirestore.getInstance()
+        firestore.firestoreSettings = com.google.firebase.firestore.FirebaseFirestoreSettings.Builder(firestore.firestoreSettings)
+            .setLocalCacheSettings(com.google.firebase.firestore.PersistentCacheSettings.newBuilder().setSizeBytes(16L * 1024 * 1024).build())
+            .build()
         PushRegistration.initialize(this)
     }
 }
@@ -59,6 +63,7 @@ object PushRegistration {
         if (listener != null) return
         listener = FirebaseAuth.AuthStateListener {
             PushNotifications.clear(context)
+            com.lingxi.code.inbox.AssistantInboxAlerts.clear(context)
             enqueue(context)
         }.also { FirebaseAuth.getInstance().addAuthStateListener(it) }
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(

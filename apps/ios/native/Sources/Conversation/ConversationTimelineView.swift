@@ -23,12 +23,13 @@ struct ConversationTimelineView: View {
     var visualizationSessionId: String = ""
     var highlightedRowID: String? = nil
     var onVisualizationFollowup: (VisualizationFollowup) -> Void = { _ in }
+    var onResultVisibility: ((String, UUID, Bool) -> Void)?
 
     var body: some View {
         let segments = timelineSegments
         LazyVStack(alignment: .leading, spacing: 0) {
             ForEach(Array(segments.enumerated()), id: \.element.id) { index, segment in
-                segmentView(segment)
+                visibleSegment(segment)
                     .background(t.accent.opacity(highlightedRowID == segment.id ? 0.12 : 0), in: .rect(cornerRadius: 10))
                     .padding(.top, index == 0 ? 0 : Self.spacing(before: segments[index - 1], current: segment) * spacingScale)
             }
@@ -69,6 +70,20 @@ struct ConversationTimelineView: View {
             streaming: streaming,
             showThinking: showThinking
         )
+    }
+
+    @ViewBuilder
+    private func visibleSegment(_ segment: Segment) -> some View {
+        if let onResultVisibility, case let .message(_, message) = segment, message.role == .ai,
+           let uuid = message.transcriptUUID {
+            segmentView(segment)
+                .onScrollVisibilityChange(threshold: 0.01) { visible in
+                    onResultVisibility(segment.id, uuid, visible)
+                }
+                .onDisappear { onResultVisibility(segment.id, uuid, false) }
+        } else {
+            segmentView(segment)
+        }
     }
 
     @ViewBuilder

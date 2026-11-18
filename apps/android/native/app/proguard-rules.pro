@@ -13,3 +13,11 @@
 
 -dontwarn uniffi.**
 -dontwarn com.sun.jna.**
+
+# Optional activity descriptors also work with a legacy generated SDK.
+-keepclassmembers class com.lingxi.code.bindings.client.SessionRowDto {
+    java.lang.String getActivityJson();
+}
+-keepclassmembers class com.lingxi.code.bindings.android.RemoteSessionSummaryFfi {
+    java.lang.String getActivityJson();
+}

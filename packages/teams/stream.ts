@@ -136,9 +136,9 @@ export function placeTasks<T extends { createdAt: number; state: TaskState }>(vi
 }
 
 /** Messages rendered at once: the newest `WINDOW_SIZE`, more on request. */
-export const WINDOW_SIZE = 100;
+export const WINDOW_SIZE = 50;
 /** The most the window grows by itself (to include unread messages). A reader can always ask for more. */
-export const WINDOW_MAX = 400;
+export const WINDOW_MAX = 200;
 /** Context shown above the first unread message when the window is widened to include it. */
 export const UNREAD_CONTEXT = 3;
 

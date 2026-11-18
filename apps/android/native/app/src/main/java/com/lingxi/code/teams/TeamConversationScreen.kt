@@ -110,10 +110,19 @@ internal fun TeamConversationScreen(
     workspace: TeamsWorkspace, uid: String, team: TeamSummary, teams: TeamsState, messaging: TeamMessagingState,
     conversationId: String, showBack: Boolean, onBack: () -> Unit, modifier: Modifier = Modifier, friend: FriendChatHeader? = null,
 ) {
-    DisposableEffect(conversationId) {
+    val inboxRef = remember(team.id, conversationId, team.generation) { com.lingxi.code.inbox.InboxRef("team", team.id, conversationId, team.generation) }
+    com.lingxi.code.inbox.InboxPresence(workspace.inbox, inboxRef)
+    DisposableEffect(workspace, team.id, conversationId, team.generation) {
         workspace.openConversation(conversationId)
-        onDispose { if (workspace.messagingModel.state.value.selected == conversationId) workspace.openConversation("") }
+        onDispose {
+            workspace.inbox.flushRead(inboxRef.key)
+            if (workspace.messagingModel.state.value.selected == conversationId) workspace.openConversation("")
+        }
     }
+    val inboxProjection by workspace.inbox.projectedRows.collectAsState()
+    val inboxRows by workspace.inbox.state.collectAsState()
+    val unread = (inboxRows.rows.firstOrNull { it.ref == inboxRef } ?: inboxProjection[inboxRef.key])
+        ?.takeIf { it.ref == inboxRef }?.let { maxOf(it.unreadCount, if (it.manualUnread) 1 else 0) } ?: 0
     val cache = messaging.cache
     val conversation = cache?.conversations?.firstOrNull { it.id == conversationId }
     val creation = cache?.creation?.takeIf { (it.optJSONObject("payload") ?: it).optString("conversationId") == conversationId }
@@ -152,7 +161,6 @@ internal fun TeamConversationScreen(
                 }
                 var menu by remember { mutableStateOf(false) }
                 IconButton(onClick = { showDetails = true }, modifier = Modifier.testTag(TeamsTags.INFO)) { Icon(Icons.Outlined.Info, stringResource(R.string.teams_conversation_details)) }
-                val unread = if (messaging.readsReady) TeamsListLogic.unreadCount(conversation) else 0
                 if (unread > 0 && online) Box {
                     IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, stringResource(R.string.teams_conversation_menu)) }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -174,7 +182,7 @@ internal fun TeamConversationScreen(
 
     if (showDetails && conversation != null) ConversationDetailsSheet(
         conversation = conversation, label = label, members = members, bots = bots, uid = uid, strings = strings,
-        unread = if (messaging.readsReady) TeamsListLogic.unreadCount(conversation) else 0, online = online,
+        unread = unread, online = online,
         onMarkRead = { workspace.messagingModel.markRead(conversation.id, conversation.lastSeq) }, onDismiss = { showDetails = false },
         onAutoReply = { targets -> workspace.messagingModel.setConversationAutoReply(conversation.id, conversation.autoReply?.revision ?: 0, targets) },
     )
@@ -226,6 +234,26 @@ private fun ConversationBody(
     val bots = messaging.bots
     val thread = cache?.threads?.get(conversationId)
     val messages = thread?.messages.orEmpty()
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val lifecycleState by lifecycle.currentStateFlow.collectAsState()
+    val foreground = lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
+    val inboxRef = remember(team.id, conversationId, team.generation) { com.lingxi.code.inbox.InboxRef("team", team.id, conversationId, team.generation) }
+    val inboxState by workspace.inbox.state.collectAsState()
+    val row = inboxState.rows.firstOrNull { it.ref == inboxRef }
+    val readThrough = maxOf(row?.readThrough ?: 0, conversation.lastReadSeq)
+    var receipt by remember(uid, inboxRef) { mutableStateOf<Long?>(null) }
+    LaunchedEffect(uid, inboxRef, inboxState.dmReceipts, conversation.lastSeq, messaging.offline, foreground) {
+        receipt = null
+        if (!foreground || !inboxState.dmReceipts || messaging.offline || conversation.kind != "dm" ||
+            conversation.participants.size != 2 || conversation.participants.any { !it.startsWith("user:") }) return@LaunchedEffect
+        while (true) {
+            receipt = try { workspace.inbox.peerReceipt(inboxRef) }
+            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) { null }
+            delay(10_000)
+        }
+    }
+    val receiptMessage = messages.lastOrNull { it.authorKind == "user" && it.authorUid == uid && it.seq <= (receipt ?: -1) && !it.recalled }?.id
     val zone = remember { ZoneId.systemDefault() }
     val minute by rememberNowState(60_000L)
     val tick = rememberNowState(1_000L)
@@ -238,16 +266,24 @@ private fun ConversationBody(
         }
     }
     var startId by remember(conversationId) { mutableStateOf<String?>(null) }
+    var loadOlderAt by remember(conversationId) { mutableStateOf<Long?>(null) }
+    LaunchedEffect(messages.firstOrNull()?.seq, messaging.loadingHistory) {
+        val before = loadOlderAt ?: return@LaunchedEffect
+        if (!messaging.loadingHistory) {
+            messages.firstOrNull()?.let { if (it.seq < before) startId = it.id }
+            loadOlderAt = null
+        }
+    }
     val streamMessages = remember(messages) { messages.map(StreamMessage::of) }
     val effectiveAnchor = anchor ?: Long.MAX_VALUE
     val start = TeamsStreamLogic.visibleStart(streamMessages, startId, effectiveAnchor, uid)
     val rows = remember(streamMessages, start, effectiveAnchor, uid, minute) { TeamsStreamLogic.buildStreamRows(streamMessages.drop(start), effectiveAnchor, uid, minute, zone) }
     val byId = remember(messages) { messages.associateBy { it.id } }
     val outbox = cache?.outbox.orEmpty().filter { (it.optJSONObject("payload") ?: it).optString("conversationId") == conversationId }
-    val stream: List<StreamItem> = remember(rows, byId, outbox, start, disclosure) {
+    val stream: List<StreamItem> = remember(rows, byId, outbox, start, disclosure, thread?.hasEarlier) {
         buildList {
             // A friend chat omits the Teams disclosure, as on iOS and Web.
-            if (start > 0) add(StreamItem.Earlier) else if (disclosure) add(StreamItem.Notice)
+            if (start > 0 || thread?.hasEarlier == true) add(StreamItem.Earlier) else if (disclosure) add(StreamItem.Notice)
             for (row in rows) when (row) {
                 is StreamRow.Date -> add(StreamItem.Day(row))
                 StreamRow.Unread -> add(StreamItem.NewMessages)
@@ -282,18 +318,29 @@ private fun ConversationBody(
         knownSeq = newestSeq
         if (wasAtBottom) { listState.scrollToItem(maxOf(0, stream.lastIndex)); unseen = 0 } else unseen += arrived
     }
-    LaunchedEffect(atBottom) { if (atBottom) unseen = 0 }
+    LaunchedEffect(atBottom) { if (atBottom && thread?.hasLater != true) unseen = 0 }
 
-    // Automatic mark-read (D12): the newest message stays in view for AUTO_MARK_READ_MS while the app is in front, online and not on cache.
-    val lifecycle = LocalLifecycleOwner.current.lifecycle
-    val lifecycleState by lifecycle.currentStateFlow.collectAsState()
-    val foreground = lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
-    val threshold = TeamsReadLogic.AUTO_MARK_READ_MS
-    LaunchedEffect(atBottom, initial, newestSeq, conversation.lastReadSeq, messaging.offline, messaging.directoryCached, foreground, messaging.readsReady) {
-        if (threshold == null || !atBottom || !initial || !messaging.readsReady) return@LaunchedEffect
-        delay(threshold)
-        val seq = TeamsReadLogic.autoMarkReadSeq(!messaging.offline, messaging.directoryCached, foreground, threshold, newestSeq, conversation.lastReadSeq, threshold)
-        if (seq != null) workspace.messagingModel.markRead(conversationId, seq)
+    val visibleKeys by remember(listState) {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            info.visibleItemsInfo.filter { it.offset < info.viewportEndOffset && it.offset + it.size > info.viewportStartOffset }
+                .mapNotNull { it.key as? String }.toSet()
+        }
+    }
+    val visibleSeq = remember(messages, visibleKeys) { messages.filter { "message:${it.id}" in visibleKeys }.map { it.seq } }
+    LaunchedEffect(initial, visibleSeq, readThrough, foreground, messaging.readsReady) {
+        if (!initial || !foreground || !messaging.readsReady) return@LaunchedEffect
+        val through = com.lingxi.code.inbox.contiguousVisibleRead(readThrough, visibleSeq)
+        if (through <= readThrough) return@LaunchedEffect
+        delay(300)
+        workspace.messagingModel.markRead(conversationId, through, automatic = true)
+    }
+    var jumpAfterLoad by remember(conversationId) { mutableStateOf(false) }
+    LaunchedEffect(jumpAfterLoad, messaging.loadingHistory, stream.lastOrNull()?.key) {
+        if (jumpAfterLoad && !messaging.loadingHistory && thread?.hasLater != true) {
+            listState.scrollToItem(maxOf(0, stream.lastIndex))
+            jumpAfterLoad = false
+        }
     }
 
     // Reply and edit targets; the unsent text lives in the workspace draft of this conversation.
@@ -335,24 +382,49 @@ private fun ConversationBody(
                 items(stream, key = { it.key }) { item ->
                     when (item) {
                         StreamItem.Notice -> Text(stringResource(R.string.teams_disclosure), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        StreamItem.Earlier -> TextButton(onClick = { startId = messages.getOrNull(maxOf(0, start - TeamsStreamLogic.WINDOW_SIZE))?.id; workspace.messagingModel.refreshTasks() }, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.teams_messages_earlier)) }
+                        StreamItem.Earlier -> TextButton(
+                            onClick = {
+                                if (start > 0) startId = messages.getOrNull(maxOf(0, start - 50))?.id
+                                else { loadOlderAt = messages.firstOrNull()?.seq; workspace.messagingModel.loadEarlier(conversationId) }
+                            },
+                            enabled = !messaging.loadingHistory,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text(stringResource(R.string.teams_messages_earlier)) }
                         is StreamItem.Day -> Text(dayLabelText(item.row.kind, item.row.atMs), Modifier.fillMaxWidth().padding(vertical = 8.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
                         StreamItem.NewMessages -> NewMessagesDivider()
-                        is StreamItem.Msg -> MessageCell(
-                            item, uid, viewer, pendingWaits, ::personName, conversation, bots, members, strings, messaging, tick, byId, ::authorOf, workspace, pictures,
-                            onReply = { setDraft(draft.copy(replyToId = it.id)); editingId = null },
-                            onEdit = { editingId = it.id; setDraft(draft.copy(replyToId = null)) },
-                            onRecall = onRecall, onCopy = { copyText(it.text) }, onArtifact = { workspace.messagingModel.openArtifact(it) }, onRefreshTask = { workspace.messagingModel.refreshTask(it) }, onCancelTask = { workspace.messagingModel.cancelTask(it) }, onReviewTask = { reviewing = it },
-                            onDecideWait = { waitId, taskId, approve, ids -> workspace.messagingModel.decideWait(waitId, taskId, approve, ids) },
-                        )
+                        is StreamItem.Msg -> Column {
+                            MessageCell(
+                                item, uid, viewer, pendingWaits, ::personName, conversation, bots, members, strings, messaging, tick, byId, ::authorOf, workspace, pictures,
+                                onReply = { setDraft(draft.copy(replyToId = it.id)); editingId = null },
+                                onEdit = { editingId = it.id; setDraft(draft.copy(replyToId = null)) },
+                                onRecall = onRecall, onCopy = { copyText(it.text) }, onArtifact = { workspace.messagingModel.openArtifact(it) }, onRefreshTask = { workspace.messagingModel.refreshTask(it) }, onCancelTask = { workspace.messagingModel.cancelTask(it) }, onReviewTask = { reviewing = it },
+                                onDecideWait = { waitId, taskId, approve, ids -> workspace.messagingModel.decideWait(waitId, taskId, approve, ids) },
+                            )
+                            if (item.message.id == receiptMessage) Text(
+                                stringResource(R.string.inbox_read_receipt),
+                                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                                style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.End,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                         is StreamItem.Local -> LocalCommandRow(item, tick, onDiscard = {
                             workspace.messagingModel.discard((item.intent.optJSONObject("payload") ?: item.intent).getString("changeId"))
                         })
                     }
                 }
             }
-            if (initial && !atBottom) Surface(
-                onClick = { scope.launch { if (reduceMotion) listState.scrollToItem(maxOf(0, stream.lastIndex)) else listState.animateScrollToItem(maxOf(0, stream.lastIndex)); unseen = 0 } },
+            if (initial && (!atBottom || thread?.hasLater == true)) Surface(
+                onClick = {
+                    workspace.messagingModel.markRead(conversationId, conversation.lastSeq)
+                    if (thread?.hasLater == true) {
+                        workspace.messagingModel.jumpLatest(conversationId)
+                        jumpAfterLoad = true
+                        startId = null
+                    } else scope.launch {
+                        if (reduceMotion) listState.scrollToItem(maxOf(0, stream.lastIndex)) else listState.animateScrollToItem(maxOf(0, stream.lastIndex))
+                        unseen = 0
+                    }
+                },
                 modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp).testTag(TeamsTags.PILL),
                 shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer, shadowElevation = 4.dp,
             ) { JumpPill(unseen) }

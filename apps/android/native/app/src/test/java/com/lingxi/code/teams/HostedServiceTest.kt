@@ -102,7 +102,7 @@ class HostedServiceTest {
         assertThrows(TeamMessageFailure::class.java) { HostedServiceCommands.task(serviceId, 0, "cancelTask", JSONObject().put("taskId", "task_0001")) }
         assertThrows(TeamMessageFailure::class.java) { HostedServiceCommands.send(serviceId, 2, sharedBotId, "chat_0001", "", emptyList(), uid) }
         assertThrows(TeamMessageFailure::class.java) { HostedServiceCommands.sessions("team_0001", 2) }
-        assertEquals("""{"action":"sync","serviceId":"$serviceId","generation":2,"conversationId":"chat_0001","after":4}""".let(::JSONObject).toString(), HostedServiceCommands.sync(serviceId, 2, "chat_0001", 4).toString())
+        assertEquals("""{"action":"sync","serviceId":"$serviceId","generation":2,"conversationId":"chat_0001","after":4,"limit":50}""".let(::JSONObject).toString(), HostedServiceCommands.sync(serviceId, 2, "chat_0001", 4).toString())
     }
 
     @Test fun serviceCommandsCarryTheAcknowledgementAndAReportOnlyWhatWasChosen() {
@@ -240,11 +240,22 @@ class HostedServiceTest {
             val p = body.optJSONObject("payload") ?: JSONObject()
             return when (action) {
                 "list" -> JSONObject().put("conversations", JSONArray().also { a -> sessions.forEach { (id, title) -> a.put(JSONObject().put("id", id).put("title", title)) } })
+                "history" -> {
+                    val all = messages[body.getString("conversationId")].orEmpty()
+                    val before = body.optLong("before", Long.MAX_VALUE)
+                    val older = all.filter { it.getLong("seq") < before }
+                    val page = older.takeLast(50)
+                    JSONObject().put("messages", JSONArray(page))
+                        .put("lastSeq", all.lastOrNull()?.getLong("seq") ?: 0)
+                        .put("lastChangeSeq", all.lastOrNull()?.getLong("changeSeq") ?: 0)
+                        .put("next", if (older.size > page.size) page.first().getLong("seq") else JSONObject.NULL)
+                }
                 "sync" -> {
                     val list = messages[body.getString("conversationId")].orEmpty(); val after = body.getLong("after")
                     val fresh = list.filter { it.getLong("changeSeq") > after }
                     JSONObject().put("changes", JSONArray().also { a -> fresh.forEach { a.put(JSONObject().put("seq", it.getLong("changeSeq")).put("messageId", it.getString("id"))) } })
                         .put("messages", JSONArray().also { a -> fresh.forEach(a::put) }).put("hasMore", false)
+                        .put("conversation", JSONObject().put("lastSeq", list.lastOrNull()?.getLong("seq") ?: 0))
                 }
                 "createConversation" -> { sessions += p.getString("conversationId") to p.getString("title"); messages[p.getString("conversationId")] = mutableListOf(); JSONObject() }
                 "listTasks" -> JSONObject().put("tasks", JSONArray().also { a -> tasks.filter { it.getString("conversationId") == p.getString("conversationId") }.forEach(a::put) })

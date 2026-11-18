@@ -61,7 +61,7 @@ scenario('the root: requests first, then friends by last activity with their pre
   assert.equal(page.byClass('tw-row').length, 3);
 });
 
-scenario('a friend opens its chat; the open friend is marked and its unread badge goes', async context => {
+scenario('a friend opens its chat; its unread badge survives navigation until validated exposure', async context => {
   const { workspace, snapshot } = friendsFixture(f => { f.cards = [card('bob', { lastSeq: 5, lastReadSeq: 3, lastMessage: pointer(5) }), card('carol')]; });
   context.after(() => workspace.close());
   await ready(snapshot);
@@ -70,7 +70,7 @@ scenario('a friend opens its chat; the open friend is marked and its unread badg
   await page.click(bob);
   assert.equal(snapshot().page, 'chat'); assert.equal(snapshot().chat?.uid, 'bob');
   const selected = page.byClass('tw-row-main').find(node => textOf(node).includes('Bob'))!;
-  assert.equal(selected.props['aria-current'], 'page'); assert.equal(page.byClass('tw-badge').length, 0, 'the chat on screen is read');
+  assert.equal(selected.props['aria-current'], 'page'); assert.equal(page.byClass('tw-badge').length, 1, 'navigation cannot read unseen content');
 });
 
 scenario('requests: Accept, Decline and Cancel act on their row only, a failure is told on the row, and 20 rows show at a time', async context => {
@@ -448,15 +448,15 @@ scenario('a friend\'s chat is the Team conversation with the friend in the heade
   assert.deepEqual(fake.commands, [], 'opening a chat writes nothing to Friends');
 });
 
-scenario('the chat reads itself while its newest message is in view, with the Teams read command on the pair team', async context => {
+scenario('a friend chat mounted without a visible DOM does not emit a read command', async context => {
   const { workspace, snapshot, teams } = friendsFixture(chatSetup);
   context.after(() => workspace.close());
   await ready(snapshot);
   workspace.openChat('bob');
   const page = await mount(workspace, view(workspace, FriendsMain)); context.after(() => page.unmount());
-  await until(() => teams.commands.some(command => command.action === 'read'), 'the read mark');
-  const read = teams.commands.find(command => command.action === 'read') as { teamId: string; conversationId: string; lastReadSeq: number };
-  assert.deepEqual([read.teamId, read.conversationId, read.lastReadSeq], [pairTeamId('bob'), 'friend_chat', 2]);
+  await until(()=>!!snapshot().chat?.workspace?.getSnapshot().conversation,'the chat');
+  assert.equal(teams.commands.some(command=>command.action==='read'),false);
+
 });
 
 scenario('the friend menu: View profile, Remove friend and Block, the last two behind a confirmation that tells a failure', async context => {

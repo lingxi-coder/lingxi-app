@@ -25,6 +25,7 @@ struct TeamsTab: View {
 
     @State private var path: [TeamsRoute] = []
     @State private var sheet: TeamsSheet?
+    @State private var inboxService: InboxRef?
     /// What the join sheet starts with: the code of a `team/join` link, else nothing. A link never joins by itself.
     @State private var joinPrefill = ""
     @State private var scrollToTop = 0
@@ -51,13 +52,25 @@ struct TeamsTab: View {
                 restoreOpenConversation()
             }.frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true))
             .sheet(item: $sheet) { sheetContent($0) }
+            .sheet(item: $inboxService) { ref in HostedServicesView(inboxDestination: ref) }
+            .onChange(of: tabs.teamInboxRequest, initial: true) { _, _ in consumeInbox() }
+            .onChange(of: tabs.teamServiceInboxRequest, initial: true) { _, value in
+                guard let value else { return }
+                tabs.teamServiceInboxRequest = nil
+                sheet = nil
+                inboxService = value
+            }
+            .onChange(of: workspace.teams) { _, _ in consumeInbox() }
             .onChange(of: tabs.teamsJoinCode, initial: true) { _, _ in consumeJoinCode() }
             .onChange(of: workspace.uid) { _, uid in
                 resetNavigation()
                 sheet = nil
                 if uid != nil { consumeJoinCode() }
             }
-            .onChange(of: workspace.selectedTeamID) { _, _ in resetNavigation() }
+            .onChange(of: workspace.selectedTeamID) { _, _ in
+                resetNavigation()
+                consumeInbox()
+            }
             .onChange(of: path) { _, routes in
                 reportDepth()
                 guard !wide else { return }
@@ -276,6 +289,17 @@ struct TeamsTab: View {
     }
 
     // MARK: Navigation
+
+    private func consumeInbox() {
+        guard workspace.uid != nil, let ref = tabs.teamInboxRequest else { return }
+        guard let team = workspace.teams.first(where: { $0.id == ref.sourceId && $0.generation == ref.generation }) else { return }
+        if workspace.selectedTeamID != team.id {
+            workspace.selectTeam(team.id)
+            return
+        }
+        tabs.teamInboxRequest = nil
+        open(ref.conversationId)
+    }
 
     private func open(_ id: String) {
         if wide { paneConversation = id } else { path = [.conversation(id)] }

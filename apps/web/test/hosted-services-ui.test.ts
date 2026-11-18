@@ -43,6 +43,10 @@ function fake(host = false) {
       const command: any = raw;
       state.sent.push(command); const p = command.payload;
       if (command.action === 'list') return { conversations: state.sessions.map(session => ({ ...session, kind: 'bot_dm', lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0 })) } as T;
+      if(command.action==='history'){
+        const list=state.messages.get(command.conversationId)??[], changes=state.changes.get(command.conversationId)??[];
+        return {messages:list.filter(m=>m.seq<(command.before??Infinity)).slice(-50),next:null,lastChangeSeq:changes.length} as T;
+      }
       if (command.action === 'sync') { const list = state.messages.get(command.conversationId) ?? [], changes = (state.changes.get(command.conversationId) ?? []).slice(command.after);
         return { conversation: { id: command.conversationId }, changes: changes.map((messageId, index) => ({ seq: command.after + index + 1, messageId })), messages: list.filter(message => changes.includes(message.id)), hasMore: false } as T; }
       if (command.action === 'createConversation') { state.sessions.push({ id: p.conversationId, title: p.title }); state.messages.set(p.conversationId, []); state.changes.set(p.conversationId, []); return { conversationId: p.conversationId } as T; }
@@ -77,7 +81,7 @@ async function open(context: TestContext, f: ReturnType<typeof fake>, more: Reco
   const tick = async () => { await page.during(async () => { await new Promise(resolve => setTimeout(resolve, 60)); }); };
   return { page, field, tick };
 }
-const sentActions = (f: ReturnType<typeof fake>) => f.state.sent.filter(c => !['list', 'sync', 'listTasks'].includes(c.action)).map(c => c.action);
+const sentActions = (f: ReturnType<typeof fake>) => f.state.sent.filter(c => !['list', 'sync', 'history','listTasks'].includes(c.action)).map(c => c.action);
 
 scenario('a link names a service; anything else is not looked up', async () => {
   assert.equal(serviceIdFrom(` https://lingxios.net/services/${serviceId} `), serviceId);

@@ -63,6 +63,10 @@ export function installTeamsIpc(service: TeamsService, windows: () => readonly B
           if (typeof command.teamId !== 'string') throw new Error('INVALID_INPUT');
           value = await service.detail(command.teamId, command.uid);
           break;
+        case 'historyPage':
+          value = await service.historyPage(command.uid,command.scope as Parameters<TeamsService['historyPage']>[1],
+            command.conversationId as string, command.beforeSeq as number);
+          break;
         case 'messages':
           if (!command.command || typeof command.command !== 'object') throw new Error('INVALID_INPUT');
           value = await service.messages(command.command as Parameters<TeamsService['messages']>[0], command.uid);

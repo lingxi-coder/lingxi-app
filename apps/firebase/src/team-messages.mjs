@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { mirrorHttpRead } from './inbox-store.mjs';
 import { createTeamConversation } from './team-conversations.mjs';
 import { SharedBotsStore } from './shared-bots.mjs';
 import { messagePreview } from './team-message-preview.mjs';
@@ -16,7 +17,8 @@ export const messageCommand = z.discriminatedUnion('action', [
   z.object({ action: z.literal('list'), ...scope, after: id.optional() }).strict(),
   z.object({ action: z.literal('create'), ...thread, kind: z.enum(['dm', 'group', 'channel']),
     title: z.string().trim().min(1).max(120), participantUids: z.array(uid).min(1).max(200) }).strict(),
-  z.object({ action: z.literal('sync'), ...thread, after: cursor }).strict(),
+  z.object({ action: z.literal('sync'), ...thread, after: cursor, limit: z.number().int().min(1).max(100).optional() }).strict(),
+  z.object({ action: z.literal('history'), ...thread, before: cursor.optional() }).strict(),
   z.object({ action: z.literal('mutate'), ...thread, messageId: id, changeId: id,
     operation: z.enum(['create', 'edit', 'recall']), text: z.string(), replyTo: id.optional() }).strict()
     .refine(value => value.operation === 'recall' ? value.text === '' : text.safeParse(value.text).success)
@@ -82,14 +84,23 @@ export class TeamMessagesStore {
         const read = (await tx.get(readRef)).data();
         if (input.lastReadSeq > c.lastSeq) fail(409, 'INVALID_READ_CURSOR');
         const lastReadSeq = Math.max(read?.generation === input.generation ? read.lastReadSeq : 0, input.lastReadSeq);
+        await mirrorHttpRead(tx,this.db,user.uid,{kind:service?'service':'team',sourceId:service?serviceId:input.teamId,
+          conversationId:input.conversationId,generation:input.generation},lastReadSeq,this.clock(),self.data().joinedAt);
         if (read?.generation !== input.generation || read.lastReadSeq !== lastReadSeq) {
           tx.set(readRef, { lastReadSeq, generation: input.generation });
         }
         return { lastReadSeq };
       }
+      if (input.action === 'history') {
+        let q = ref.collection('messages').orderBy('seq', 'desc');
+        if (input.before !== undefined) q = q.startAfter(input.before);
+        const page = await tx.get(q.limit(51)), docs = page.docs.slice(0,50);
+        return { messages: docs.map(message).reverse(), next: page.size > 50 ? docs.at(-1).data().seq : null,
+          lastSeq: c.lastSeq, lastChangeSeq: c.lastChangeSeq };
+      }
       if (input.action === 'sync') {
         if (input.after > c.lastChangeSeq) fail(409, 'INVALID_CHANGE_CURSOR');
-        const page = await tx.get(ref.collection('changes').where('seq', '>', input.after).orderBy('seq').limit(100));
+        const page = await tx.get(ref.collection('changes').where('seq', '>', input.after).orderBy('seq').limit(input.limit ?? 100));
         const ids = [...new Set(page.docs.map(doc => doc.data().messageId))];
         const snapshots = ids.length ? await tx.getAll(...ids.map(id => ref.collection('messages').doc(id))) : [];
         if (page.docs.some((doc, index) => doc.data().seq !== input.after + index + 1) || snapshots.some(doc => !doc.exists)

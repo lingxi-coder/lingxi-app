@@ -3,6 +3,7 @@ import { EMPTY_TRANSCRIPT_HISTORY, type TranscriptHistoryState } from '../../sha
 import { crossSessionMessage } from './messageOrigin';
 import { goalMessageObjective } from './goalPresentation';
 import { readingTextAnchor } from './transcriptReadingAnchor';
+import type { AssistantReadingPosition } from '../bridge/inboxAssistantReading';
 import { transcriptRowGap, useTranscriptWindow } from './useTranscriptWindow';
 import './TranscriptWindow.css';
 import { TranscriptLeafWindowScope } from './TranscriptLeafWindow';
@@ -309,6 +310,9 @@ interface StageProps {
   onLoadMoreHistory?(): Promise<void>;
   messageTarget?: string | null;
   onMessageLocated?(found: boolean): void;
+  onReadingPosition?(position: AssistantReadingPosition): void;
+  readingPreview?: boolean;
+  readingOwner?: string | null;
   activityView?: boolean;
   onReviewFiles?(id: string, files: readonly TurnFileChange[], path?: string): void;
   submittedPlans?: readonly SubmittedPlan[];
@@ -367,13 +371,17 @@ interface StageProps {
 const BOTTOM_SLACK = 24;
 const EMPTY_SUBMITTED_PLANS: readonly SubmittedPlan[] = [];
 
-export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, messageTarget, onMessageLocated, activityView = false, onReviewFiles, submittedPlans = EMPTY_SUBMITTED_PLANS, onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [], visualizationSessionId, onVisualizationFollowup }: StageProps) {
+export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, messageTarget, onMessageLocated, onReadingPosition, readingPreview, readingOwner, activityView = false, onReviewFiles, submittedPlans = EMPTY_SUBMITTED_PLANS, onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [], visualizationSessionId, onVisualizationFollowup }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
   useEffect(() => setLocalPlan(null), [sessionKey]);
   const stageRef = useRef<HTMLDivElement>(null);
   const feedRef = useRef<HTMLDivElement>(null);
   const historyTailSpace = useRef<HTMLDivElement>(null);
+  const explicitReadingLatest = useRef(false);
+  const readingLatestIntent = useRef(0);
+  const reportReading = useRef<() => void>();
+  useEffect(() => { explicitReadingLatest.current = false; }, [sessionKey, messageTarget, readingOwner]);
   /**
    * Whether the reader is parked at the tail. Kept in a ref because the scroll
    * path must read and write it without a re-render; `atTail` mirrors it purely
@@ -773,6 +781,31 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
   const leafScope = useMemo(() => ({ sessionKey, viewport: stageRef, following: followTail,
     targetId: targetLeafId, targetPending: leafTargetPending, readingId: readingLeafId, onLayout: reportLayout }), [sessionKey, targetLeafId, leafTargetPending, readingLeafId, reportLayout]);
 
+  useEffect(() => {
+    const root = stageRef.current;
+    if (!root || !onReadingPosition || typeof IntersectionObserver === 'undefined') return;
+    const shown = new Map<Element, string[]>();
+    const report = () => onReadingPosition({ sessionKey,
+      visibleMessageUuids: [...new Set([...shown.values()].flat())],
+      preview: readingPreview ?? Boolean(messageTarget), explicitLatest: explicitReadingLatest.current,
+      latestIntent: explicitReadingLatest.current ? readingLatestIntent.current : undefined });
+    reportReading.current = report;
+    const observer = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        const ids = (entry.target as HTMLElement).dataset.messageUuids?.split(' ').filter(Boolean) ?? [];
+        if (entry.isIntersecting && entry.intersectionRect.height > 0) shown.set(entry.target, ids);
+        else shown.delete(entry.target);
+      }
+      report();
+    }, { root, threshold: [0, 0.01] });
+    for (const node of root.querySelectorAll('[data-message-uuids]')) observer.observe(node);
+    return () => {
+      observer.disconnect();
+      if (reportReading.current === report) reportReading.current = undefined;
+      onReadingPosition({ sessionKey, visibleMessageUuids: [], preview: readingPreview ?? Boolean(messageTarget) });
+    };
+  }, [sessionKey, onReadingPosition, readingPreview, messageTarget, presentationRows, windowing.start, windowing.end]);
+
   return (
     <TranscriptLeafWindowScope.Provider value={leafScope}>
     <div ref={stageRef} className={activityView ? "desktop-stage activity-view" : "desktop-stage"} tabIndex={windowing.enabled ? 0 : -1} onPointerDown={() => { pointerHeld.current = true; }} onKeyDown={(event) => {
@@ -1056,7 +1089,10 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
               aria-label={tr('desktop_stage_scroll_bottom')}
               title={tr('desktop_stage_scroll_bottom')}
               onClick={(event) => {
+                explicitReadingLatest.current = true;
+                readingLatestIntent.current++;
                 armTail();
+                reportReading.current?.();
                 // Activating this unmounts it. A keyboard user would be left
                 // with focus on the document, so hand it to the transcript they
                 // just jumped to. `detail === 0` means the click came from the

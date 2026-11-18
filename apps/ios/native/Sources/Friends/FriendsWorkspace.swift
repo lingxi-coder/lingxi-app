@@ -159,12 +159,19 @@ final class FriendsWorkspace {
     var blockedPeople: [FriendBlock] { FriendsLogic.sortedBlocks(blocks) }
     /// The Friends tab badge (D14, D28): incoming requests, the unread of every friend and every live team offer; the chat on screen
     /// counts as read.
-    var badge: Int { uid == nil ? 0 : FriendsLogic.badgeCount(cards, offers: offers, nowMs: clockMs, reading: readingUID) }
+    var badge: Int {
+        uid == nil ? 0 : FriendsLogic.badgeCount(cards.filter { $0.state != .friends }, offers: offers, nowMs: clockMs, reading: nil)
+    }
     /// The team offers in the order of D27: live before expired, the newest first, then the team id.
     var sortedOffers: [TeamOffer] { FriendsLogic.sortedOffers(offers, nowMs: clockMs) }
     func isBusy(offer: TeamOffer) -> Bool { offerBusy.contains(offer.teamId) }
     /// The unread count a row shows (D13): the card's, except for the chat on screen.
-    func unread(of card: FriendCard) -> Int { card.uid == readingUID ? 0 : card.unread }
+    func unread(of card: FriendCard) -> Int {
+        guard uid == InboxStore.shared.uid, let team = card.teamId, let generation = card.generation else { return 0 }
+        let ref = InboxRef(kind: .team, sourceId: team, conversationId: FriendsLogic.chatConversationID, generation: generation)
+        guard let row = InboxStore.shared.row(ref) else { return 0 }
+        return max(row.manualUnread ? 1 : 0, row.unreadCount)
+    }
     func isBusy(_ uid: String) -> Bool { busy.contains(uid) }
 
     // MARK: Lifecycle

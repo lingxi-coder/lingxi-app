@@ -70,13 +70,14 @@ struct FriendsTab: View {
             .sheet(item: $sheet) { sheetContent($0) }
             // The profile is read on the first open per account (D2): it names the viewer's friend link and tells whether the name is still `Member`.
             .task(id: friends.uid) { if friends.uid != nil { await friends.loadProfile() } }
+            .onChange(of: tabs.friendsInboxRequest, initial: true) { _, _ in consumeInbox() }
             .onChange(of: tabs.friendsRequest, initial: true) { _, _ in consume() }
             .onChange(of: friends.uid) { _, uid in
                 resetNavigation()
                 sheet = nil
                 if uid != nil { consume() }
             }
-            .onChange(of: friends.cardsLoaded) { _, _ in consume() }
+            .onChange(of: friends.cardsLoaded) { _, _ in consume(); consumeInbox() }
             .onChange(of: friends.cardsFailed) { _, _ in consume() }
             .onChange(of: path) { _, _ in
                 reportDepth()
@@ -244,6 +245,21 @@ struct FriendsTab: View {
 
     /// A `friend/*` link or push, once someone is signed in (D8, D16). It never redeems by itself: `friend/add` only
     /// opens the confirmation.
+    private func consumeInbox() {
+        guard friends.uid != nil, friends.cardsLoaded, let request = tabs.friendsInboxRequest else { return }
+        tabs.friendsInboxRequest = nil
+        guard let card = friends.friend(request.peer), card.teamId == request.ref.sourceId,
+              card.generation == request.ref.generation else {
+            friends.show(notice: String(localized: "friends_chat_unavailable"))
+            return
+        }
+        if request.ref.conversationId == FriendsLogic.chatConversationID {
+            open(.chat(request.peer))
+        } else {
+            open(.botChat(uid: request.peer, conversationID: request.ref.conversationId))
+        }
+    }
+
     private func consume() {
         guard friends.uid != nil, let request = tabs.friendsRequest else { return }
         switch request {

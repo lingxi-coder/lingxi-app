@@ -7,6 +7,9 @@ export interface TeamConversation {
   id: string; kind: 'dm' | 'group' | 'channel' | 'bot_dm'; title: string; participants: string[];
   /** Who can read it, as written when it was made: its people and the maintainers its Bots had then. Absent when the source does not say. */
   readers?: string[];
+  unreadCount?: number;
+  manualUnreadRevision?:number;
+  pendingActionRevision?:number;
   lastSeq: number; lastChangeSeq: number; lastReadSeq: number;
   /** Newest message for conversation lists. Absent until the conversation has a message; then always the full pointer. */
   lastMessage?: { id: string; seq: number; at: string | null; author: MessageAuthor; preview: string; recalled?: true };
@@ -38,17 +41,21 @@ export type MessageMutation = MessageScope & { action: 'mutate'; conversationId:
   operation: 'create' | 'edit' | 'recall'; text: string; replyTo?: string };
 export type MessageCommand = MessageMutation | MemberExecutionCommand
   | MessageScope & { action: 'create'; conversationId: string; kind: TeamConversation['kind']; title: string; participantUids: string[];  }
+  | MessageScope & { action:'history';conversationId:string;before?:number }
   | MessageScope & { action: 'read'; conversationId: string; lastReadSeq: number };
 export interface MessageSignal { bots?: boolean; conversationId?: string }
 export interface MessageApi {
   messages<T>(command: MessageCommand): Promise<T>;
+  historyPage?(scope: MessageScope, conversationId: string, beforeSeq:number):Promise<TeamMessage[]>;
+  peerReceipt?(scope:MessageScope,id:string):Promise<{readThrough:number|null}>;
+  readVisible?(scope:MessageScope,conversationId:string,through:number,manualUnreadRevision:number,observedPendingActionRevision?:number):Promise<unknown>;
   onMessagesChanged(callback: (signal?: MessageSignal) => void): () => void;
   watchMessages(scope: MessageScope, conversationId: string, next: (snapshot: MessageSnapshot) => void): () => void;
 }
 export type MessageSnapshot = MessageScope & { uid: string; fromCache: boolean } & (
   | { kind: 'directory'; conversations: TeamConversation[] }
-  | { kind: 'messages'; conversationId: string; messages: TeamMessage[]; removed?: string[]; replace?: boolean }
-  | { kind: 'read'; conversationId: string; lastReadSeq: number }
+  | { kind: 'messages'; conversationId: string; messages: TeamMessage[]; removed?: string[]; replace?: boolean; older?:boolean; rebase?:boolean; updatedIds?:string[] }
+  | { kind: 'read'; conversationId: string; lastReadSeq: number; unreadCount?:number; manualUnreadRevision?:number;pendingActionRevision?:number }
   | { kind: 'signal'; signal?: MessageSignal }
   | { kind: 'error'; error: string }
 );
@@ -88,7 +95,7 @@ export function mergeConversation(old: TeamConversation | undefined, value: Team
   const merged = { ...value, lastSeq: Math.max(old?.lastSeq ?? 0, value.lastSeq), lastChangeSeq: Math.max(old?.lastChangeSeq ?? 0, value.lastChangeSeq), lastReadSeq: Math.max(old?.lastReadSeq ?? 0, value.lastReadSeq),
     ...(lastMessage ? { lastMessage } : {}) };
   if (old && old.kind === merged.kind && old.title === merged.title
-    && old.lastSeq === merged.lastSeq && old.lastChangeSeq === merged.lastChangeSeq && old.lastReadSeq === merged.lastReadSeq
+    && old.unreadCount === merged.unreadCount && old.manualUnreadRevision === merged.manualUnreadRevision && old.pendingActionRevision === merged.pendingActionRevision && old.lastSeq === merged.lastSeq && old.lastChangeSeq === merged.lastChangeSeq && old.lastReadSeq === merged.lastReadSeq
     && sameLastMessage(old.lastMessage, merged.lastMessage)
     && old.participants.length === merged.participants.length && old.participants.every((value, index) => value === merged.participants[index])
     && (old.readers ?? []).join('\n') === (merged.readers ?? []).join('\n')
@@ -111,9 +118,15 @@ export function applyMessageSnapshot(state: MessageProjection, snapshot: Extract
   if (snapshot.replace === false) {
     const records = new Map((old?.messages ?? []).map(value => [value.id, value]));
     for (const id of snapshot.removed ?? []) records.delete(id);
-    for (const value of snapshot.messages) records.set(value.id, value);
+    const updates = new Set(snapshot.updatedIds);
+    for (const value of snapshot.messages) {
+      const prior = records.get(value.id);
+      if (updates.has(value.id) && !prior) continue;
+      if (!prior || prior.changeSeq <= value.changeSeq) records.set(value.id, value);
+    }
     messages = [...records.values()].sort((a, b) => a.seq - b.seq);
   }
+  messages = snapshot.older ? messages.slice(0,200) : messages.slice(-200);
   return { ...state, threads: { ...state.threads, [snapshot.conversationId]: { messages } } };
 }
 function failedCommand<T extends CommandMetadata>(intent: T, error: unknown, permanent: boolean): T {
@@ -136,6 +149,9 @@ export class TeamMessaging {
   private messagesCached = true;
   private closed = false;
   private revoked = false;
+  private pageRevision=0;
+  private pageBusy=false;
+  private historicalWindow=false;
   private running?: Promise<void>;
   private again = false;
   private stops: (() => void)[] = [];
@@ -198,10 +214,16 @@ export class TeamMessaging {
       this.directoryCached = snapshot.fromCache;
     } else if (snapshot.kind === 'messages') {
       if (snapshot.conversationId !== this.selected) return;
-      this.state = applyMessageSnapshot(this.state, snapshot);
+      const previous=this.state.threads[this.selected]?.messages;
+      if(snapshot.rebase && previous?.length && this.historicalWindow) {
+        void this.reloadWindow(previous[previous.length-1]!.seq+1,previous.length);
+      } else {
+        const through=this.historicalWindow ? previous?.[previous.length-1]?.seq : undefined;
+        this.state = applyMessageSnapshot(this.state, through===undefined ? snapshot : {...snapshot,replace:false,messages:snapshot.messages.filter(row=>row.seq<=through)});
+      }
       this.messagesCached = snapshot.fromCache;
     } else if (snapshot.kind === 'read') {
-      this.state = { ...this.state, conversations: this.state.conversations.map(value => value.id === snapshot.conversationId ? { ...value, lastReadSeq: Math.max(value.lastReadSeq, snapshot.lastReadSeq) } : value) };
+      this.state = { ...this.state, conversations: this.state.conversations.map(value => value.id === snapshot.conversationId ? { ...value, lastReadSeq: Math.max(value.lastReadSeq, snapshot.lastReadSeq), ...(snapshot.unreadCount===undefined?{}:{unreadCount:snapshot.unreadCount}), ...(snapshot.pendingActionRevision===undefined?{}:{pendingActionRevision:snapshot.pendingActionRevision}), ...(snapshot.manualUnreadRevision===undefined?{}:{manualUnreadRevision:snapshot.manualUnreadRevision}) } : value) };
     }
     this.offline = this.directoryCached || (!!this.selected && this.messagesCached);
     if (!this.offline) this.finishConnecting();
@@ -228,7 +250,44 @@ export class TeamMessaging {
     if (!this.closed) void this.refresh();
   }
   reconnect(): void { if (this.closed) return; this.error = ''; this.watch(); this.emit(); void this.refresh(); }
-  select(id: string) { this.selected = id; this.messagesCached = true; this.offline = this.directoryCached || !!id; this.state = { ...this.state, threads: this.state.threads[id] ? { [id]: this.state.threads[id]! } : {} }; this.watch(); this.error = ''; this.emit(); void this.refresh(); }
+  select(id: string) { this.pageRevision++; this.pageBusy=false; this.historicalWindow=false; this.selected = id; this.messagesCached = true; this.offline = this.directoryCached || !!id; this.state = { ...this.state, threads: this.state.threads[id] ? { [id]: this.state.threads[id]! } : {} }; this.watch(); this.error = ''; this.emit(); void this.refresh(); }
+  async older():Promise<string|undefined> {
+    const thread=this.state.threads[this.selected]?.messages, before=thread?.[0]?.seq;
+    if(!this.api.historyPage || this.pageBusy || !before || before<=1 || this.closed) return;
+    const id=this.selected, revision=this.pageRevision;
+    this.pageBusy=true;
+    try {
+      const messages=await this.api.historyPage(this.scope,id,before);
+      if(this.closed || revision!==this.pageRevision) return;
+      this.historicalWindow=this.historicalWindow || (thread?.length??0)+messages.length>200;
+      this.state=applyMessageSnapshot(this.state,{kind:'messages',uid:this.uid,...this.scope,conversationId:id,fromCache:false,messages,replace:false,older:true});
+      this.emit();
+      return messages[0]?.id;
+    } finally {if(revision===this.pageRevision)this.pageBusy=false;}
+  }
+  private async reloadWindow(before:number,count:number) {
+    if(!this.api.historyPage)return;
+    const revision=++this.pageRevision,id=this.selected;
+    this.pageBusy=true;
+    try {
+      const messages:TeamMessage[]=[];
+      while(messages.length<count) {
+        const page=await this.api.historyPage(this.scope,id,before);
+        if(this.closed || revision!==this.pageRevision) return;
+        messages.unshift(...page);
+        if(page.length<50 || !page[0] || page[0].seq>=before) break;
+        before=page[0].seq;
+      }
+      this.state=applyMessageSnapshot(this.state,{kind:'messages',uid:this.uid,...this.scope,conversationId:id,fromCache:false,messages,replace:true});
+      this.emit();
+    } catch(error) {if(revision===this.pageRevision){this.error=error instanceof Error?error.message:'MESSAGE_LISTENER_FAILED';this.emit();}}
+    finally {if(revision===this.pageRevision)this.pageBusy=false;}
+  }
+  async visibleRead(id:string,through:number,revision:number,pendingRevision?:number) {
+    if(this.closed || this.selected!==id)return;
+    if(this.api.readVisible) return this.api.readVisible(this.scope,id,through,revision,pendingRevision);
+    await this.markRead(through);
+  }
   async create(kind: TeamConversation['kind'], title: string, participantUids: string[], sharedBotIds: string[] = []) {
     if (this.closed) throw new Error('INVALID_SESSION');
     if (sharedBotIds.length > 8 || new Set(sharedBotIds).size !== sharedBotIds.length || (kind === 'dm' && sharedBotIds.length)
@@ -285,11 +344,15 @@ export class TeamMessaging {
     if (!this.closed) void this.refresh();
   }
   async discardCreation() { await this.commit(old => { if ((old.creation?.attempted && !old.creation.error) || (old.creation?.leaseUntil ?? 0) > Date.now()) throw new Error('MESSAGE_IN_FLIGHT'); return { ...old, creation: undefined }; }); }
-  async markRead() {
+  async markRead(through?:number) {
     const id = this.selected, thread = this.state.threads[id];
-    if (!thread || this.offline || this.closed) return;
-    let seq = 0;
-    for (const message of thread.messages) seq = Math.max(seq, message.seq);
+    if (!thread || this.closed || this.offline && !this.api.readVisible) return;
+    const seq = through ?? this.state.conversations.find(row=>row.id===id)?.lastSeq ?? thread.messages.at(-1)?.seq ?? 0;
+    if(this.api.readVisible) {
+      const revision=this.state.conversations.find(row=>row.id===id)?.manualUnreadRevision ?? 0;
+      await this.api.readVisible(this.scope,id,seq,revision,this.state.conversations.find(row=>row.id===id)?.pendingActionRevision);
+      return;
+    }
     let value: { lastReadSeq: number };
     try { value = await this.api.messages<{ lastReadSeq: number }>({ action: 'read', ...this.scope, conversationId: id, lastReadSeq: seq }); } catch (error) { await this.deny(error); throw error; }
     if (this.closed) return;

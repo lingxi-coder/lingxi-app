@@ -23,6 +23,7 @@ const DocsPage = lazy(async () => {
 });
 const RemotePage = lazy(() => import('../pages/RemotePage'));
 const RemoteSignInPage = lazy(() => import('../pages/RemoteSignInPage'));
+const InboxPage = lazy(() => import('../pages/InboxPage'));
 const TeamsPage = lazy(() => import('../pages/TeamsPage'));
 const FriendsPage = lazy(() => import('../pages/FriendsPage'));
 const ServicesPage = lazy(() => import('../pages/ServicesPage'));
@@ -38,7 +39,9 @@ export function App() {
   useEffect(() => {
     document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
     document.documentElement.dataset.theme = theme;
-    if (route === '/services' || route.startsWith('/services/')) {
+    if (route === '/inbox' || route.startsWith('/inbox/')) {
+      document.title = locale === 'zh' ? '收件箱 — 灵犀 LingXi' : 'Inbox — LingXi';
+    } else if (route === '/services' || route.startsWith('/services/')) {
       document.title = locale === 'zh' ? 'Bot 服务 — 灵犀 LingXi' : 'Bot services — LingXi';
     } else if (route === '/teams' || route === '/teams/join') {
       document.title = locale === 'zh' ? '团队 — 灵犀 LingXi' : 'Teams — LingXi';
@@ -75,6 +78,7 @@ export function App() {
     onRegionChange: setRegion,
   };
 
+  if (route === '/inbox' || route.startsWith('/inbox/')) return <Suspense fallback={null}><InboxPage locale={locale} focusKey={route.startsWith('/inbox/')?decodeURIComponent(route.slice(7)):undefined} /></Suspense>;
   if (route.startsWith('/open/')) return <OpenLinkPage locale={locale} />;
   if (route === '/teams' || route === '/teams/join') return <Suspense fallback={<main role="status">{locale === 'zh' ? '正在加载团队…' : 'Loading teams…'}</main>}><TeamsPage locale={locale} /></Suspense>;
 

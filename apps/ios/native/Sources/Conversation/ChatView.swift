@@ -107,6 +107,8 @@ struct ChatView: View {
     var onOpenSessionDetails: () -> Void = {}
     var onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil
     var onRetryAuthoringBinding: () -> Void = {}
+    var onInboxResultVisibility: ((String, UUID, Bool) -> Void)?
+    var onInboxJumpToLatest: (() -> Void)?
     @ObservedObject private var convo: ConversationModel
     private var displayedSessionMode: SessionMode { source.isTemporaryConversation ? convo.sessionMode : sessionMode }
     private var usesLocalAccountCatalog: Bool {
@@ -206,7 +208,9 @@ struct ChatView: View {
          onOpenVoiceSettings: @escaping () -> Void = {},
          onOpenSessionDetails: @escaping () -> Void = {},
          onOpenShellTask: ((ConversationShellLaunchRequest) -> Void)? = nil,
-         onRetryAuthoringBinding: @escaping () -> Void = {}) {
+         onRetryAuthoringBinding: @escaping () -> Void = {},
+         onInboxResultVisibility: ((String, UUID, Bool) -> Void)? = nil,
+         onInboxJumpToLatest: (() -> Void)? = nil) {
         self.session = session
         self.projectName = projectName
         self.sessionMode = sessionMode
@@ -236,6 +240,8 @@ struct ChatView: View {
         self.onOpenSessionDetails = onOpenSessionDetails
         self.onOpenShellTask = onOpenShellTask
         self.onRetryAuthoringBinding = onRetryAuthoringBinding
+        self.onInboxResultVisibility = onInboxResultVisibility
+        self.onInboxJumpToLatest = onInboxJumpToLatest
         self.convo = source.model
     }
 
@@ -808,7 +814,8 @@ struct ChatView: View {
             scrollScope: "\(session.id):\(showsSelectedAgent ? convo.selectedAgentID : ConversationModel.mainAgentID)",
             alignShortContentToTop: true,
             requestedRowID: showsSelectedAgent ? nil : convo.deepLinkScrollRowID,
-            requestedScrollRevision: showsSelectedAgent ? 0 : convo.deepLinkScrollRevision
+            requestedScrollRevision: showsSelectedAgent ? 0 : convo.deepLinkScrollRevision,
+            onJumpToLatest: showsSelectedAgent ? nil : onInboxJumpToLatest
         ) {
             if !showsSelectedAgent {
                 if visibleRenderItems.isEmpty,
@@ -833,7 +840,9 @@ struct ChatView: View {
                     // An agent's widgets live in its origin session's store.
                     visualizationSessionId: convo.activeSessionId,
                     highlightedRowID: convo.deepLinkScrollRowID,
-                    onVisualizationFollowup: { convo.visualizationFollowup = $0 }
+                    onVisualizationFollowup: { convo.visualizationFollowup = $0 },
+                    onResultVisibility: pendingAgentDetailID == nil && convo.deepLinkRuntimeTarget == nil
+                        ? onInboxResultVisibility : nil
                 )
             } else if convo.isAgentTranscriptLoading {
                 childAgentLoadingState

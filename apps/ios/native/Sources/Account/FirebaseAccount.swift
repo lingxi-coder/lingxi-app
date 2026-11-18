@@ -1,6 +1,7 @@
 import AuthenticationServices
 import CryptoKit
 import FirebaseAuth
+import FirebaseFirestore
 import FirebaseCore
 import GoogleSignIn
 import Observation
@@ -35,6 +36,10 @@ final class FirebaseAccount {
         guard !IsolatedSimulatorTesting.enabled else { return }
         guard FirebaseApp.app() == nil else { return }
         FirebaseApp.configure()
+        let database = Firestore.firestore()
+        let settings = database.settings
+        settings.cacheSettings = PersistentCacheSettings(sizeBytes: NSNumber(value: 28 * 1024 * 1024))
+        database.settings = settings
         CrashReporting.configure()
     }
     private init() {

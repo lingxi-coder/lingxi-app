@@ -107,10 +107,12 @@ fun MainTabShell(
     botsBadge: StateFlow<Int> = BotsBadge.count,
     teamsBadge: StateFlow<Int> = TeamsBadge.count,
     friendsBadge: StateFlow<Int> = FriendsBadge.count,
+    chatsBadge: StateFlow<Int> = emptyChatBadge,
 ) {
     val botsCount by botsBadge.collectAsState()
     val teamsCount by teamsBadge.collectAsState()
     val friendsCount by friendsBadge.collectAsState()
+    val chatsCount by chatsBadge.collectAsState()
     BoxWithConstraints(modifier.fillMaxSize()) {
         val wide = maxWidth >= WideBreakpoint
         val density = LocalDensity.current
@@ -152,7 +154,7 @@ fun MainTabShell(
             }
             Row(Modifier.fillMaxSize()) {
                 if (wide && barVisible) {
-                    TabRail(selected, botsCount, teamsCount, friendsCount, state::onTabClick)
+                    TabRail(selected, botsCount, teamsCount, friendsCount, chatsCount, state::onTabClick)
                 }
                 Column(Modifier.weight(1f).fillMaxHeight()) {
                     TabBodies(
@@ -176,6 +178,7 @@ fun MainTabShell(
                             botsCount = botsCount,
                             teamsCount = teamsCount,
                             friendsCount = friendsCount,
+                            chatsCount = chatsCount,
                             onSelect = state::onTabClick,
                             onHeightChanged = { barHeightPx = it },
                         )
@@ -233,7 +236,7 @@ private fun TabBodies(
  * navigation dispatcher is disabled while hidden, so Back never closes a Chats page the user cannot see.
  */
 @Composable
-private fun ChatsHost(active: Boolean, content: @Composable () -> Unit) {
+internal fun ChatsHost(active: Boolean, content: @Composable () -> Unit) {
     val navigation = rememberNavigationEventDispatcherOwner(enabled = active)
     // Keep a real Layout parent so its measure policy resets the Box child's measuredByParent
     // even after Chats was visible. Hidden streaming updates cannot schedule independent remeasure.
@@ -290,6 +293,7 @@ private fun PhoneBar(
     botsCount: Int,
     teamsCount: Int,
     friendsCount: Int,
+    chatsCount: Int,
     onSelect: (AppTab) -> Unit,
     onHeightChanged: (Int) -> Unit,
 ) {
@@ -308,10 +312,10 @@ private fun PhoneBar(
                     NavigationBarItem(
                         selected = tab == selected,
                         onClick = { onSelect(tab) },
-                        icon = { TabIcon(tab, badgeCount(tab, botsCount, teamsCount, friendsCount)) },
+                        icon = { TabIcon(tab, badgeCount(tab, botsCount, teamsCount, friendsCount, chatsCount)) },
                         label = { TabLabel(tab) },
                         alwaysShowLabel = true,
-                        modifier = Modifier.testTag(UiTags.tab(tab.key)).tabBadgeState(tab, badgeCount(tab, botsCount, teamsCount, friendsCount)),
+                        modifier = Modifier.testTag(UiTags.tab(tab.key)).tabBadgeState(tab, badgeCount(tab, botsCount, teamsCount, friendsCount, chatsCount)),
                     )
                 }
             }
@@ -320,17 +324,17 @@ private fun PhoneBar(
 }
 
 @Composable
-private fun TabRail(selected: AppTab, botsCount: Int, teamsCount: Int, friendsCount: Int, onSelect: (AppTab) -> Unit) {
+private fun TabRail(selected: AppTab, botsCount: Int, teamsCount: Int, friendsCount: Int, chatsCount: Int, onSelect: (AppTab) -> Unit) {
     val label = stringResource(R.string.tabs_navigation_a11y)
     NavigationRail(Modifier.width(80.dp).testTag(UiTags.TABS_RAIL).semantics { contentDescription = label }) {
         AppTab.entries.forEach { tab ->
             NavigationRailItem(
                 selected = tab == selected,
                 onClick = { onSelect(tab) },
-                icon = { TabIcon(tab, badgeCount(tab, botsCount, teamsCount, friendsCount)) },
+                icon = { TabIcon(tab, badgeCount(tab, botsCount, teamsCount, friendsCount, chatsCount)) },
                 label = { TabLabel(tab) },
                 alwaysShowLabel = true,
-                modifier = Modifier.testTag(UiTags.tab(tab.key)).tabBadgeState(tab, badgeCount(tab, botsCount, teamsCount, friendsCount)),
+                modifier = Modifier.testTag(UiTags.tab(tab.key)).tabBadgeState(tab, badgeCount(tab, botsCount, teamsCount, friendsCount, chatsCount)),
             )
         }
     }
@@ -342,12 +346,14 @@ private fun TabLabel(tab: AppTab) {
         maxLines = 2, overflow = TextOverflow.Ellipsis)
 }
 
-/** Teams shows the unread total, Friends its requests plus unread, Bots the chats waiting for the user; Chats and Settings never badge. */
-private fun badgeCount(tab: AppTab, botsCount: Int, teamsCount: Int, friendsCount: Int): Int = when (tab) {
+private val emptyChatBadge: StateFlow<Int> = kotlinx.coroutines.flow.MutableStateFlow(0)
+
+private fun badgeCount(tab: AppTab, botsCount: Int, teamsCount: Int, friendsCount: Int, chatsCount: Int): Int = when (tab) {
     AppTab.Bots -> botsCount
     AppTab.Teams -> teamsCount
     AppTab.Friends -> friendsCount
-    AppTab.Chats, AppTab.Settings -> 0
+    AppTab.Chats -> chatsCount
+    AppTab.Settings -> 0
 }
 
 @Composable
@@ -355,8 +361,9 @@ private fun Modifier.tabBadgeState(tab: AppTab, badge: Int): Modifier {
     if (badge <= 0) return this
     val description = when (tab) {
         AppTab.Teams, AppTab.Friends -> stringResource(R.string.tabs_badge_unread_fmt, badge)
+        AppTab.Chats -> stringResource(R.string.inbox_badge, badge)
         AppTab.Bots -> stringResource(R.string.remote_bot_waiting_fmt, badge)
-        AppTab.Chats, AppTab.Settings -> ""
+        AppTab.Settings -> ""
     }
     return semantics { stateDescription = description }
 }

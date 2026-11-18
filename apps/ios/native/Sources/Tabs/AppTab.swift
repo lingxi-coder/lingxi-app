@@ -15,6 +15,11 @@ extension EnvironmentValues {
 }
 
 /// A request to open a computer, or one of its chats, in the Bots tab (deep link, push notification).
+struct FriendsInboxRoute: Equatable {
+    let ref: InboxRef
+    let peer: String
+}
+
 struct BotsRequest: Equatable {
     var hostID: String
     var sessionID: String?
@@ -38,6 +43,9 @@ final class TabCoordinator {
     /// The invite code of a `team/join` link; `TeamsTab` consumes it and sets it back to nil. It only
     /// fills the join form: a link never joins by itself.
     var teamsJoinCode: String?
+    var teamInboxRequest: InboxRef?
+    var teamServiceInboxRequest: InboxRef?
+    var friendsInboxRequest: FriendsInboxRoute?
     /// A `friend/*` link or push; `FriendsTab` consumes it (once someone is signed in) and sets it back to nil. A
     /// friend link never redeems by itself: `friend/add` only starts the confirmation (D8).
     var friendsRequest: FriendLink?

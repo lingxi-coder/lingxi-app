@@ -47,6 +47,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.lifecycle.Lifecycle
@@ -233,6 +234,10 @@ fun ChatScreen(
     onLinkedDetailHandled: () -> Unit = {},
     linkedMessageUuid: String? = null,
     onMessageLinkHandled: (Boolean) -> Unit = {},
+    onOpenInbox: (() -> Unit)? = null,
+    onInboxVisibleMessages: (suspend (Set<String>) -> Unit)? = null,
+    onInboxJumpLatest: () -> Unit = {},
+    inboxActivityCursor: Long = 0,
 ) {
     val suggestionLifecycle = LocalLifecycleOwner.current.lifecycle
     val suggestionInputEmpty = draft.isEmpty() && attachment == null && state.visualizationChip == null
@@ -387,6 +392,25 @@ fun ChatScreen(
     }
 
     ConversationDetailHost(state, linkedDetailKey, onLinkedDetailHandled, modifier = modifier) {
+    val inboxLifecycle by suggestionLifecycle.currentStateFlow.collectAsState()
+    val latestVisibleInboxCallback by rememberUpdatedState(onInboxVisibleMessages)
+    val visibleInboxRows by remember(listState) {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            info.visibleItemsInfo.filter { it.offset < info.viewportEndOffset && it.offset + it.size > info.viewportStartOffset }
+                .mapNotNull { it.key as? String }.toSet()
+        }
+    }
+    val renderedInboxIdentities = if (onInboxVisibleMessages != null) {
+        renderItems.asSequence().filterIsInstance<ChatRenderItem.Message>().filter { it.key in visibleInboxRows }
+            .flatMap { (listOfNotNull(it.message.transcriptUuid) + it.message.transcriptAliases).asSequence() }.toSet()
+    } else emptySet()
+    LaunchedEffect(state.session.id, renderedInboxIdentities, onInboxVisibleMessages != null, inboxActivityCursor, inboxLifecycle, linkedMessageUuid) {
+        if (renderedInboxIdentities.isNotEmpty() && inboxLifecycle.isAtLeast(Lifecycle.State.RESUMED) && linkedMessageUuid == null) {
+            kotlinx.coroutines.delay(300)
+            latestVisibleInboxCallback?.invoke(renderedInboxIdentities)
+        }
+    }
     Box(modifier = Modifier.fillMaxSize().background(t.windowBg)) {
         Column(modifier = Modifier.fillMaxSize()) {
             val isNewChat = renderItems.any { it is ChatRenderItem.Empty }
@@ -408,6 +432,7 @@ fun ChatScreen(
                         .joinToString(" · "),
                     subtitleColor = t.modeColor(sessionMode),
                     onOpenDrawer = onOpenDrawer,
+                    onOpenInbox = onOpenInbox,
                     onTitleClick = onOpenSessionPanel?.takeIf { !isNewChat && state.session.id != "new" },
                     onNewChat = onNewChat,
                     onOpenSideChats = onOpenSideChats,
@@ -456,7 +481,7 @@ fun ChatScreen(
                 // nothing to jump to, even when its hero overflows a short screen.
                 if (!followState.followsLatest && !isAtBottom && renderItems.none { it is ChatRenderItem.Empty }) {
                     JumpToLatestButton(
-                        onClick = rearmTail,
+                        onClick = { rearmTail(); onInboxJumpLatest() },
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
                             .padding(end = 16.dp, bottom = 16.dp),
@@ -659,6 +684,7 @@ private fun TopBar(
     title: String, subtitle: String, subtitleColor: Color,
     onOpenDrawer: () -> Unit, onTitleClick: (() -> Unit)?, onNewChat: () -> Unit,
     onOpenSideChats: (() -> Unit)?,
+    onOpenInbox: (() -> Unit)?,
     onOpenFiles: (() -> Unit)?,
     state: ChatState,
     onResumeWorkflow: (String) -> Unit,
@@ -680,8 +706,11 @@ private fun TopBar(
             }
         },
         navigationIcon = {
-            IconButton(LXIconName.Menu, t.text, 22.dp, onOpenDrawer,
-                stringResource(R.string.chat_open_side_drawer), Modifier.testTag(UiTags.OPEN_DRAWER))
+            Row {
+                onOpenInbox?.let { open -> IconButton(LXIconName.Message, t.text, 20.dp, open, stringResource(R.string.inbox_back)) }
+                IconButton(LXIconName.Menu, t.text, 22.dp, onOpenDrawer,
+                    stringResource(R.string.chat_open_side_drawer), Modifier.testTag(UiTags.OPEN_DRAWER))
+            }
         },
         actions = {
             onOpenSideChats?.let { open ->

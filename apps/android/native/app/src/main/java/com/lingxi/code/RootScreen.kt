@@ -295,7 +295,7 @@ internal fun shouldTransferNewDraft(
  */
 @Composable
 @OptIn(ExperimentalCoroutinesApi::class)
-fun RootScreen(
+internal fun RootScreen(
     isDark: Boolean,
     tabState: com.lingxi.code.tabs.TabShellState? = null,
     modifier: Modifier = Modifier,
@@ -346,6 +346,10 @@ fun RootScreen(
     // RootScreen 消费后回调清除」形状，而不是另起一套只给设置页用的切换逻辑。
     requestedProjectSwitch: String? = null,
     onProjectSwitchHandled: () -> Unit = {},
+    inbox: com.lingxi.code.inbox.InboxController? = null,
+    inboxOpen: Boolean = false,
+    inboxNewRequest: Int = 0,
+    onOpenInbox: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val resources by rememberUpdatedState(androidx.compose.ui.platform.LocalResources.current)
@@ -838,6 +842,69 @@ fun RootScreen(
             catalogOwners?.get(canonicalSessionId(row.uuid)) == ScopeStateStore.SessionOwner(sourceScope.persistenceKey(), row.mode)
         },
     )
+    val initialInboxEntries = remember(inbox, projectState, rawSessionState.rows, catalogOwners, sourceScope) {
+        if (inbox == null || projectState.storageUnavailable || catalogOwners == null) emptyList()
+        else buildList {
+            val indexed = rawSessionState.rows.associateBy { canonicalSessionId(it.uuid) }
+            fun collectRows(rows: List<com.lingxi.code.project.ProjectSessionSummary>, workspace: String, label: String) {
+                for (row in rows) {
+                    val id = canonicalSessionId(row.sessionId)
+                    if (row.isArchived || row.pendingCatalogConfirmation || catalogOwners?.get(id) != ScopeStateStore.SessionOwner(workspace, row.mode)) continue
+                    val dto = indexed[id].takeIf { workspace == sourceScope.persistenceKey() }
+                    val path = row.transcriptPath ?: dto?.transcriptPath ?: continue
+                    val route = com.lingxi.code.inbox.InboxAssistantRoute(
+                        local = ConversationLaunchRequest(id, null, workspace, row.mode, transcriptPath = path), sessionId = id,
+                    )
+                    com.lingxi.code.inbox.assistantEntry(route, row.title, label, inbox.localSourceId,
+                        row.updatedAtEpochMillis, dto?.inboxActivityJson, offline = false)?.let { add(it) }
+                }
+            }
+            collectRows(projectState.globalSessions, "global", "")
+            for (project in projectState.projects) {
+                collectRows(project.sessions, ConversationScope.Project(project.record.id).persistenceKey(), project.record.name)
+            }
+        }
+    }
+    val inboxActivityHome = remember(inbox, appContext) {
+        if (inbox == null) null else runCatching { java.io.File(com.lingxi.code.project.MobileUserStorage.directories(appContext).configHome) }.getOrNull()
+    }
+    var hydratedInboxEntries by remember { mutableStateOf<List<com.lingxi.code.inbox.AssistantCatalogEntry>?>(null) }
+    LaunchedEffect(initialInboxEntries, inboxActivityHome) {
+        hydratedInboxEntries = null
+        val home = inboxActivityHome ?: return@LaunchedEffect
+        val collected = mutableListOf<com.lingxi.code.inbox.AssistantCatalogEntry>()
+        for (batch in initialInboxEntries.chunked(50)) {
+            val entries = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                batch.map { entry ->
+                    if (entry.publishable) entry else {
+                        val json = com.lingxi.code.inbox.LocalAssistantActivity.summary(home, entry.route.sessionId)
+                        com.lingxi.code.inbox.assistantEntry(entry.route, entry.item.title, entry.item.context, entry.item.ref.sourceId,
+                            entry.item.lastActivityAt, json, offline = false) ?: entry
+                    }
+                }
+            }
+            collected += entries
+        }
+        hydratedInboxEntries = collected
+    }
+    val inboxLocalEntries = hydratedInboxEntries ?: initialInboxEntries
+    val remoteInboxManager = remember(inbox) { inbox?.let { com.lingxi.code.remote.RemoteControl.manager(appContext) } }
+    if (remoteInboxManager != null) {
+        val remoteSessions by remoteInboxManager.sessions.collectAsState()
+        val remoteHosts by remoteInboxManager.hosts.collectAsState()
+        val remoteUid by remoteInboxManager.uid.collectAsState()
+        LaunchedEffect(inboxLocalEntries, remoteSessions, remoteHosts, remoteUid) {
+            val host = remoteHosts.hosts.firstOrNull { it.hostId == remoteSessions.hostId && it.paired }
+            val remoteEntries = if (host == null) emptyList() else remoteSessions.sessions.orEmpty().mapNotNull { row ->
+                com.lingxi.code.inbox.assistantEntry(
+                    com.lingxi.code.inbox.InboxAssistantRoute(hostId = host.hostId, sessionId = row.sessionId),
+                    row.title, listOf(row.projectLabel, host.name).filter(String::isNotBlank).joinToString(" · "),
+                    host.hostId, 0, com.lingxi.code.inbox.AssistantActivityBinding.activity(row), offline = !host.online,
+                )
+            }
+            inbox?.assistantCatalog(inboxLocalEntries, remoteUid, remoteEntries)
+        }
+    }
     // Durable per-scope conversation state (last-active session + draft),
     // keyed `global` / `scheduled` / `project.<id>`. Project/global last-active
     // stays with ProjectStore; this store records which scope was active
@@ -2661,6 +2728,15 @@ fun RootScreen(
         }
     }
 
+    var handledInboxNew by rememberSaveable { mutableIntStateOf(0) }
+    LaunchedEffect(inboxNewRequest) {
+        if (inboxNewRequest != handledInboxNew) {
+            handledInboxNew = inboxNewRequest
+            val (targetScope, targetMode) = com.lingxi.code.model.defaultNewChatTarget(activeSessionMode)
+            startNewSessionIn(targetScope, targetMode)
+        }
+    }
+
     /** Start a new conversation in a project, in the current or explicitly selected mode. */
     fun startProjectSession(projectId: String, mode: SessionMode = activeSessionMode) =
         startNewSessionIn(ConversationScope.Project(projectId), mode)
@@ -3019,7 +3095,7 @@ fun RootScreen(
         localAppDetailsId != null, runtimeAppId != null, cronPage != null,
     ).count { it }
     val latestOnChromeChanged by rememberUpdatedState(onChromeChanged)
-    LaunchedEffect(pushedPages, drawerOpenOrOpening, runtimeAppId != null, voiceActive) {
+    LaunchedEffect(pushedPages, drawerOpenOrOpening, runtimeAppId != null, voiceActive, inboxOpen) {
         latestOnChromeChanged(pushedPages, drawerOpenOrOpening, runtimeAppId != null || voiceActive)
     }
     // Tapping the Chats tab again with pages pushed (the wide rail stays reachable) pops back to the chat.
@@ -3028,6 +3104,19 @@ fun RootScreen(
             projectsPageOpen = false; projectPageId = null; appsPageOpen = false; marketInstallId = null
             localAppDetailsId = null; runtimeAppId = null; cronPage = null
         }
+    }
+
+    val inboxState = inbox?.state?.collectAsState()
+    val localInboxEntry = inboxLocalEntries.firstOrNull { it.route.sessionId == canonicalSessionId(state.session.id) }
+    val inboxRow = inboxState?.value?.rows?.firstOrNull { it.key == localInboxEntry?.item?.key }
+    val currentInboxRef = inboxRow?.ref ?: localInboxEntry?.item?.ref
+    val inboxForeground = !inboxOpen && tabState?.selected == AppTab.Chats && pushedPages == 0 &&
+        !drawerOpenOrOpening && !voiceActive && requestedDeepLink == null && linkedMessageUuid == null
+    com.lingxi.code.inbox.InboxPresence(inbox, currentInboxRef.takeIf { inboxForeground })
+    val activityHead = inboxRow?.let {
+        rawSessionState.rows.firstOrNull { row -> canonicalSessionId(row.uuid) == it.ref.conversationId }
+    }?.inboxActivityJson?.let { raw ->
+        com.lingxi.code.inbox.AssistantActivity.parse(raw)?.takeIf { it.cursor == inboxRow?.sourceCursor }?.headMessageId
     }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -3141,6 +3230,21 @@ fun RootScreen(
                 val requestedMessageUuid = linkedMessageUuid.takeIf { linkedSessionId == state.session.id.removePrefix("sess:") }
                 val messageRequest = linkedMessageRequest
                 ChatScreen(
+                    onOpenInbox = onOpenInbox,
+                    onInboxVisibleMessages = if (inboxForeground && inboxRow != null && !state.streaming) { visible ->
+                        val current = maxOf(inboxRow.readThrough, inboxRow.baselineCursor)
+                        val verified = if (activityHead != null && inboxRow.sourceCursor == current + 1 &&
+                            activityHead in visible) inboxRow.sourceCursor
+                        else if (inboxActivityHome != null && inboxRow.sourceCursor > current) {
+                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                com.lingxi.code.inbox.LocalAssistantActivity.through(inboxActivityHome, inboxRow.ref.conversationId,
+                                    inboxRow.ref.sourceId, current, inboxRow.sourceCursor, visible)
+                            }
+                        } else current
+                        if (verified > current) inbox?.mutate(com.lingxi.code.inbox.InboxOperation.read(inboxRow, verified), inboxRow, automatic = true)
+                    } else null,
+                    inboxActivityCursor = inboxRow?.sourceCursor ?: 0,
+                    onInboxJumpLatest = { inboxRow?.let { inbox?.mutate(com.lingxi.code.inbox.InboxOperation.read(it), it) } },
                     onOpenFiles = { filesBrowserOpen = true },
                     linkedDetailKey = linkedDetailKey,
                     onLinkedDetailHandled = { linkedDetailKey = null },

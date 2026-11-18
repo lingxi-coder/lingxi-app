@@ -6,9 +6,8 @@ import Observation
 private struct TeamsList: Decodable { let teams: [TeamSummary] }
 private struct TeamCommandResult: Decodable { let teamId: String?; let code: String? }
 
-/// Unsent composer state of one conversation. Kept in memory by the workspace only, as on Desktop: it
-/// survives switching conversations and tabs, not a restart (spec §6.3, §11).
-struct TeamComposerDraft: Equatable, Sendable {
+/// Unsent composer state of one account and conversation.
+struct TeamComposerDraft: Codable, Equatable, Sendable {
     var text = ""
     var replyToID: String?
     /// Bot keys chosen with `@`, in the order they were chosen.
@@ -35,11 +34,8 @@ struct TeamComposerDraft: Equatable, Sendable {
 ///   `/v1/teams/{id}`) and are authoritative; SDK listeners (`users/{uid}/teams`, `teams/{id}/members`) only
 ///   invalidate what is shown, and a response is applied only if no newer request or invalidation
 ///   superseded it (the `revision` / `authority` / `lifecycle` guards).
-/// - The selected team has one full `TeamMessagingModel` (directory, reads, signals, the open thread, command
-///   journals, Bot cards). Switching teams makes a fresh one for the new team and remembers the old team's
-///   unread count.
-/// - Every other team (at most `maxWatchedTeams`) has a directory-only `TeamsUnreadWatcher`; they feed the
-///   switcher and the tab badge.
+/// The selected team has one `TeamMessagingModel` for the directory, open thread,
+/// command journals, and Bot cards. The account inbox supplies unread badges.
 ///
 /// With a `PairTeam` it is the workspace of one friend chat instead (docs/FRIENDS-CLIENTS.md D9): pinned to that
 /// team, whose summary and two people come from the friend's card. It makes no `GET /v1/teams` and no team-detail
@@ -47,8 +43,6 @@ struct TeamComposerDraft: Equatable, Sendable {
 /// Teams tab's workspace never sees the pair. The owner starts and stops it.
 @MainActor @Observable
 final class TeamsWorkspace {
-    /// Teams other than the selected one that get a directory-only unread listener.
-    static let maxWatchedTeams = 20
     /// Delay between a change notification and the refetch it causes.
     static let refreshDelay: Duration = .milliseconds(80)
 
@@ -87,7 +81,6 @@ final class TeamsWorkspace {
     /// The platform notice (`teams_disclosure`) is shown once per run, under the first conversation that loads.
     private(set) var platformNoticeShown = false
     private var refreshing = 0
-    private var unreadOthers: [String: Int] = [:]
     private var directories: [String: [TeamMember]] = [:]
 
     // MARK: Bookkeeping
@@ -110,7 +103,6 @@ final class TeamsWorkspace {
     @ObservationIgnored private var indexListener: ListenerRegistration?
     @ObservationIgnored private var memberListener: (teamID: String, registration: ListenerRegistration)?
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
-    @ObservationIgnored private var watchers: [String: TeamsUnreadWatcher] = [:]
     @ObservationIgnored private var conversationByTeam: [String: String] = [:]
     private var drafts: [String: TeamComposerDraft] = [:]
     /// The files of unsent messages and what was last refused when files were chosen, by the same key as `drafts`. Observed:
@@ -155,11 +147,10 @@ final class TeamsWorkspace {
     /// Unread messages per team: the selected team from its open directory (once its read marks are known),
     /// every other team from its directory-only watcher.
     var unreadByTeam: [String: Int] {
-        var values = unreadOthers
-        if let model = messaging, let team = messagingTeam, model.readsReady { values[team.id] = model.unreadTotal }
-        return values
+        guard uid == InboxStore.shared.uid else { return [:] }
+        return InboxStore.shared.unreadByTeam
     }
-    /// The Teams tab badge.
+
     var totalUnread: Int { unreadByTeam.values.reduce(0, +) }
 
     // MARK: Lifecycle
@@ -195,8 +186,7 @@ final class TeamsWorkspace {
         indexListener?.remove(); indexListener = nil
         memberListener?.registration.remove(); memberListener = nil
         closeMessaging()
-        for watcher in watchers.values { watcher.stop() }
-        watchers = [:]; unreadOthers = [:]; directories = [:]; conversationByTeam = [:]; drafts = [:]
+        directories = [:]; conversationByTeam = [:]; drafts = [:]
         draftFiles = [:]; fileRefusals = [:]
         TeamFileStore.purge()
         teams = []; selectedTeamID = ""; detail = nil; listed = false; invitationLink = ""
@@ -234,10 +224,7 @@ final class TeamsWorkspace {
         guard started, life == lifecycle else { return }
         if invalidated {
             revision += 1; authority += 1
-            // Open conversations keep their own access checks; the unread counts stay until the list says otherwise.
             teams = []; detail = nil; invitationLink = ""; listed = false
-            for watcher in watchers.values { watcher.stop() }
-            watchers = [:]
         }
         scheduleRefresh()
     }
@@ -309,7 +296,6 @@ final class TeamsWorkspace {
         detail = nil; invitationLink = ""; error = ""
         openMessaging(summary)
         watchSelectedMembers()
-        reconcileWatchers()
         scheduleRefresh()
     }
 
@@ -378,7 +364,6 @@ final class TeamsWorkspace {
             closeMessaging()
         }
         watchSelectedMembers()
-        reconcileWatchers()
         return chose
     }
 
@@ -423,7 +408,6 @@ final class TeamsWorkspace {
         uploads = [:]
         draftFiles = draftFiles.compactMapValues { files in let kept = files.filter { $0.state == .ready }; return kept.isEmpty ? nil : kept }
         if let model = messaging, let team = messagingTeam {
-            if model.readsReady { unreadOthers[team.id] = model.unreadTotal }
             if !model.selected.isEmpty { conversationByTeam[team.id] = model.selected }
             model.onRevoked = nil
             model.stop()
@@ -449,9 +433,6 @@ final class TeamsWorkspace {
         scheduleRefresh()
         // A revoked model never reopens; the list says whether the team is still ours.
         if let model = messaging, model.revoked, let team = messagingTeam { openMessaging(team) } else { messaging?.reconnect() }
-        for watcher in watchers.values { watcher.stop() }
-        watchers = [:]
-        reconcileWatchers()
     }
 
     /// The app came back to the foreground: retry what is pending and refetch after a failure.
@@ -459,36 +440,6 @@ final class TeamsWorkspace {
         guard started else { return }
         messaging?.refresh()
         if !error.isEmpty || !loadError.isEmpty { scheduleRefresh() }
-    }
-
-    // MARK: Unread of the other teams
-
-    private func reconcileWatchers() {
-        guard started, let uid else { return }
-        let wanted = Array(teams.filter { $0.id != selectedTeamID }.prefix(Self.maxWatchedTeams))
-        let wantedByID = Dictionary(wanted.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        for (id, watcher) in Array(watchers) where wantedByID[id]?.generation != watcher.generation {
-            watcher.stop(); watchers.removeValue(forKey: id)
-        }
-        for team in wanted where watchers[team.id] == nil { watch(team, uid: uid) }
-        for id in Array(unreadOthers.keys) where id != selectedTeamID && wantedByID[id] == nil { unreadOthers.removeValue(forKey: id) }
-    }
-
-    private func watch(_ team: TeamSummary, uid: String) {
-        let watcher = TeamsUnreadWatcher(
-            uid: uid, team: team, auth: auth, db: db,
-            onUnread: { [weak self] id, count in
-                guard let self, self.started, self.watchers[id]?.generation == team.generation else { return }
-                if self.unreadOthers[id] != count { self.unreadOthers[id] = count }
-            },
-            onStopped: { [weak self] id in
-                // Revoked or failed: stop counting; the next list refresh restarts it if the team is still there.
-                guard let self else { return }
-                self.watchers.removeValue(forKey: id)
-                self.unreadOthers.removeValue(forKey: id)
-            })
-        watchers[team.id] = watcher
-        watcher.start()
     }
 
     // MARK: List sections and drafts
@@ -500,11 +451,18 @@ final class TeamsWorkspace {
     }
 
     func draft(for conversationID: String) -> TeamComposerDraft {
-        drafts[draftKey(conversationID)] ?? TeamComposerDraft()
+        let key = draftKey(conversationID)
+        if let uid, let data = InboxStore.shared.draft(for: key, uid: uid),
+           let draft = try? JSONDecoder().decode(TeamComposerDraft.self, from: data) { return draft }
+        return drafts[key] ?? TeamComposerDraft()
     }
 
     func setDraft(_ draft: TeamComposerDraft, for conversationID: String) {
-        if draft.isEmpty { drafts.removeValue(forKey: draftKey(conversationID)) } else { drafts[draftKey(conversationID)] = draft }
+        let key = draftKey(conversationID)
+        if draft.isEmpty { drafts.removeValue(forKey: key) } else { drafts[key] = draft }
+        if let uid {
+            InboxStore.shared.saveDraft(draft.isEmpty ? nil : try? JSONEncoder().encode(draft), for: key, uid: uid)
+        }
     }
 
     /// What an unsent message belongs to: the account, the team as the viewer is in it now, and the conversation.
@@ -659,21 +617,13 @@ final class TeamsWorkspace {
         return done ? opened : nil
     }
 
-    /// Marks a conversation read (the header action and the row swipe). The open conversation is read up to
-    /// its newest loaded message, any other up to its `lastSeq`. Nothing happens offline.
     @discardableResult
     func markRead(_ conversationID: String) async -> Bool {
-        await run {
-            guard let model = self.messaging, !conversationID.isEmpty else { return }
-            if conversationID == model.selected { try await model.markRead(); return }
-            guard let row = model.cache?.conversations.first(where: { $0.id == conversationID }), !model.offline, model.unread(of: row) > 0 else { return }
-            try await model.markRead(conversationId: conversationID, lastReadSeq: row.lastSeq)
-        }
-    }
-
-    /// The automatic mark-read of an open conversation (decision D12). It takes no lock and says nothing when it fails.
-    func autoMarkRead(conversationID: String, lastReadSeq seq: Int) async {
-        try? await messaging?.markRead(conversationId: conversationID, lastReadSeq: seq)
+        guard let team = messagingTeam else { return false }
+        let ref = InboxRef(kind: .team, sourceId: team.id, conversationId: conversationID, generation: team.generation)
+        guard let row = InboxStore.shared.row(ref) else { return false }
+        InboxStore.shared.markRead([row])
+        return true
     }
 
     // MARK: HTTP

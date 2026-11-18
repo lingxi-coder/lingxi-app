@@ -1027,6 +1027,49 @@ impl SessionController {
             .map(drop)
     }
 
+    /// Fetch a semantic activity page only while the original attachment is live.
+    pub async fn session_activity_page(
+        &self,
+        after: u64,
+    ) -> Result<crate::messages::SessionActivityPage, RpcError> {
+        let attach_id = {
+            let core = self.inner.core.lock().expect("core");
+            require_writable(&core, self.inner.io.connected())?;
+            if !core.active {
+                return Err(RpcError::new(
+                    RemoteErrorCode::Closed,
+                    "Session is detached",
+                ));
+            }
+            core.attach_id
+        };
+        let params = crate::messages::SessionActivityParams {
+            session_id: self.inner.session_id.clone(),
+            after,
+        };
+        let page = self
+            .inner
+            .io
+            .request(methods::SESSION_ACTIVITY, Some(json!(params)), None)
+            .await
+            .and_then(parse::<crate::messages::SessionActivityPage>)?;
+        let core = self.inner.core.lock().expect("core");
+        require_writable(&core, self.inner.io.connected())?;
+        if !core.active || core.attach_id != attach_id {
+            return Err(RpcError::new(
+                RemoteErrorCode::Closed,
+                "Session attachment changed",
+            ));
+        }
+        if !page.covers_after(after) {
+            return Err(RpcError::new(
+                RemoteErrorCode::Internal,
+                "Invalid semantic activity page",
+            ));
+        }
+        Ok(page)
+    }
+
     /// Fetch the page of messages before the ones held.
     pub async fn load_older(&self) {
         let (first, epoch) = {

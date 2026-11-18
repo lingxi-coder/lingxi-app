@@ -50,7 +50,17 @@ final class AppNotificationDelegate: NSObject, UIApplicationDelegate, UNUserNoti
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        if PushMessagePolicy.isRemote(notification.request.content.userInfo) {
+        let payload = notification.request.content.userInfo
+        if payload["kind"] as? String == "inbox" {
+            await MainActor.run {
+                guard !IsolatedSimulatorTesting.enabled,
+                      let push = InboxPush.parse(payload, currentUID: Auth.auth().currentUser?.uid,
+                                                enabled: NotificationPreferencesStore.load().enabled) else { return }
+                Task { await InboxStore.shared.receive(push) }
+            }
+            return []
+        }
+        if PushMessagePolicy.isRemote(payload) {
             return await MainActor.run {
                 PushMessagePolicy.accepts(notification.request.content.userInfo,
                     uid: Auth.auth().currentUser?.uid, enabled: NotificationPreferencesStore.load().enabled)
@@ -67,6 +77,15 @@ final class AppNotificationDelegate: NSObject, UIApplicationDelegate, UNUserNoti
         didReceive response: UNNotificationResponse
     ) async {
         let userInfo = response.notification.request.content.userInfo
+        if userInfo["kind"] as? String == "inbox" {
+            await MainActor.run {
+                guard !IsolatedSimulatorTesting.enabled,
+                      let push = InboxPush.parse(userInfo, currentUID: Auth.auth().currentUser?.uid,
+                                                enabled: NotificationPreferencesStore.load().enabled) else { return }
+                Task { await InboxStore.shared.open(push) }
+            }
+            return
+        }
         if PushMessagePolicy.isRemote(userInfo) {
             let action = await MainActor.run {
                 PushMessagePolicy.remoteControlAction(userInfo, uid: Auth.auth().currentUser?.uid,

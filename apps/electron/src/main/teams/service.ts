@@ -1,8 +1,9 @@
+import { validateHistoryPage } from './historyPage.js';
 import { EventEmitter } from 'node:events';
 import type { FirebaseOptions } from 'firebase/app';
 import type { Firestore } from 'firebase/firestore';
 import { TeamsApiError, teamsTransport, type TeamCommand, type TeamDetail, type TeamResult, type TeamSummary } from '../../../../../packages/teams';
-import type { MessageSignal, MessageSnapshot, MessageCommand } from '../../../../../packages/teams/messages';
+import type { MessageSignal, MessageSnapshot, MessageCommand, MessageScope, TeamMessage } from '../../../../../packages/teams/messages';
 import type { AcceptSharedBotInput, LocalPublishableBot, OfferSharedBotInput, PublishLocalBotInput, PublishedKnowledge, SharedHostStatus, SelectedSharedFile } from '../../../../../packages/teams/execution';
 import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source';
 import { createServiceChatReader, isServiceId, isServiceMessageCommand, servicesTransport, type ServiceCommand } from '../../../../../packages/teams/hosted-service';
@@ -207,6 +208,16 @@ export class TeamsService {
     await this.connect(expectedUid);
     const result = await this.checked<T>(expectedUid, '/messages', command);
     if (['create','mutate','createConversation','submit','pauseSharedBot','answerWait','cancelTask','setConversationPolicy','setConversationAutoReply','endTransfer','revokeAttachment'].includes(command.action)) this.events.emit('messages');
+    return result;
+  }
+  async historyPage(uid:string,scope:MessageScope,conversationId:string,beforeSeq:number):Promise<TeamMessage[]> {
+    validateHistoryPage(scope,conversationId,beforeSeq);
+    const context=this.hostContext();
+    if(!context || context.uid!==uid)throw new Error('INVALID_SESSION');
+    const session=await this.connectMessages(uid);
+    this.assertHostContext(context);
+    const result=await session.historyPage(scope,conversationId,beforeSeq);
+    this.assertHostContext(context);
     return result;
   }
   async watchMessages(leaseId: string, uid: string, scope: { teamId: string; generation: number }, conversationId: string): Promise<void> {

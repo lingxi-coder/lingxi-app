@@ -1,3 +1,4 @@
+import { transcriptRowUuids } from './reuse';
 import { useMemo, useState } from 'react';
 import type { SessionAgentSummaryDto, StructuredDiffDto } from '@lingxi/bridge-client';
 import type { Locale } from '../utils/locale';
@@ -90,12 +91,12 @@ function Narration({ locale, item, meta, deviceName, fetchImage }: { locale: Loc
   }
   if (item.role === 'assistant') {
     return (
-      <div className="rc-assistant">
+      <div className="rc-assistant" data-inbox-uuids={transcriptRowUuids(item).join(' ') || undefined}>
         <Markdown text={item.text} />
       </div>
     );
   }
-  return <p className={`rc-note${item.tone === 'danger' ? ' rc-danger' : ''}`}>{item.text}</p>;
+  return <p data-inbox-uuids={transcriptRowUuids(item).join(' ') || undefined} className={`rc-note${item.tone === 'danger' ? ' rc-danger' : ''}`}>{item.text}</p>;
 }
 
 function Images({ images, locale, fetchImage }: { images: readonly { media_type: string; url: string }[]; locale: Locale; fetchImage(ref: string): Promise<string> }) {

@@ -107,7 +107,14 @@ internal data class HostedServiceSession(val id: String, val title: String) {
 }
 
 /** An open session as far as it has been read: its messages by id, and how much of the change log they include. */
-internal data class HostedServiceLog(val after: Long = 0, private val byId: Map<String, TeamMessage> = emptyMap()) {
+internal data class HostedServiceLog(
+    val after: Long = 0,
+    private val byId: Map<String, TeamMessage> = emptyMap(),
+    val before: Long? = null,
+    val earlier: Long? = null,
+    val lastSeq: Long = 0,
+    val olderWindow: Boolean = false,
+) {
     val messages: List<TeamMessage> get() = byId.values.sortedBy { it.seq }
     /**
      * Takes one `sync` page read from [after]: the next log and whether more is to be read. A page that does not continue
@@ -124,9 +131,36 @@ internal data class HostedServiceLog(val after: Long = 0, private val byId: Map<
             // A session holds what its one person and the service's one Bot wrote.
             val own = if (message.authorKind == "user") message.authorUid == uid else message.sharedBotId == sharedBotId
             if (!own) throw TeamMessageFailure("INVALID_DATA")
-            next[message.id] = message
+            if (message.id in next || !olderWindow && (before == null || message.seq >= (byId.values.minOfOrNull { it.seq } ?: 0))) {
+                next[message.id] = message
+            }
         }
-        return HostedServiceLog(after + changes.length(), next) to (page.getBoolean("hasMore") && changes.length() > 0)
+        val ordered = next.values.sortedBy { it.seq }
+        val window = if (olderWindow) ordered.take(200) else ordered.takeLast(200)
+        return copy(
+            after = after + changes.length(), byId = window.associateBy { it.id },
+            earlier = if (!olderWindow && ordered.size > 200) window.first().seq else earlier,
+            lastSeq = maxOf(lastSeq, page.optJSONObject("conversation")?.optLong("lastSeq") ?: 0),
+        ) to (page.getBoolean("hasMore") && changes.length() > 0)
+    }
+
+    fun appendOlder(page: JSONObject, uid: String, bot: String): HostedServiceLog {
+        val merged = (history(page, uid, bot) + messages).distinctBy { it.id }.sortedBy { it.seq }
+        return copy(byId = merged.take(200).associateBy { it.id },
+            earlier = page.optLong("next").takeUnless { page.isNull("next") }, olderWindow = merged.size > 200 || olderWindow)
+    }
+
+    companion object {
+        fun fromHistory(page: JSONObject, uid: String, bot: String): HostedServiceLog = HostedServiceLog(
+            after = page.getLong("lastChangeSeq"), byId = history(page, uid, bot).associateBy { it.id },
+            before = page.getLong("lastSeq"), earlier = page.optLong("next").takeUnless { page.isNull("next") },
+            lastSeq = page.getLong("lastSeq"),
+        )
+
+        private fun history(page: JSONObject, uid: String, bot: String): List<TeamMessage> =
+            page.getJSONArray("messages").objects().map(TeamMessage::parse).onEach {
+                if (if (it.authorKind == "user") it.authorUid != uid else it.sharedBotId != bot) throw TeamMessageFailure("INVALID_DATA")
+            }
     }
 }
 
@@ -150,8 +184,12 @@ internal object HostedServiceCommands {
     }
     fun sync(serviceId: String, generation: Long, sessionId: String, after: Long): JSONObject {
         if (!HostedService.isServiceId(serviceId) || generation < 1 || after < 0) fail()
-        return JSONObject().put("action", "sync").put("serviceId", serviceId).put("generation", generation).put("conversationId", sessionId).put("after", after)
+        return JSONObject().put("action", "sync").put("serviceId", serviceId).put("generation", generation).put("conversationId", sessionId).put("after", after).put("limit", 50)
     }
+    fun history(serviceId: String, generation: Long, sessionId: String, before: Long? = null): JSONObject =
+        JSONObject().put("action", "history").put("serviceId", serviceId).put("generation", generation)
+            .put("conversationId", sessionId).apply { before?.let { put("before", it) } }
+
     /** What a typed message is: the answer to the Bot's question when a request of this session waits for one from the viewer, else a new request. */
     fun send(serviceId: String, generation: Long, sharedBotId: String, sessionId: String, text: String, tasks: List<TeamTask>, uid: String,
              messageId: String = uuid(), changeId: String = uuid(), commandId: String = uuid()): JSONObject {

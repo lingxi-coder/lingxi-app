@@ -4,7 +4,11 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
-import com.google.firebase.firestore.DocumentChange
+import com.google.firebase.firestore.DocumentSnapshot
+import com.google.firebase.firestore.Query
+import com.lingxi.code.inbox.InboxController
+import com.lingxi.code.inbox.InboxOperation
+import com.lingxi.code.inbox.InboxRef
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.MetadataChanges
 import kotlinx.coroutines.CancellationException
@@ -26,17 +30,17 @@ import java.util.UUID
 /**
  * [offline] = the SDK serves the directory or the open thread from its cache, or an HTTP step failed; [directoryCached] is the
  * directory snapshot alone (it gates automatic mark-read) and [directoryReady] says the first one has arrived. [readsReady] = every listed conversation has delivered its first
- * `reads` document, so [TeamMessageConversation.lastReadSeq] is real. [botsLoaded] / [botsFailed] feed `composerLock`.
+ * open thread has a private read mark. [botsLoaded] / [botsFailed] feed `composerLock`.
  */
 internal data class TeamMessagingState(val cache: TeamMessageCache? = null, val selected: String = "", val offline: Boolean = true, val error: String = "", val revoked: Boolean = false, val submitting: Boolean = false, val bots: List<TeamBotCard> = emptyList(), val tasks: List<TeamTask> = emptyList(), val artifact: TeamArtifact? = null,
     val directoryCached: Boolean = true, val directoryReady: Boolean = false, val readsReady: Boolean = false, val botsLoaded: Boolean = false, val botsFailed: Boolean = false,
     /** Counts the service's Bot change signals (a Bot, its tasks or its shared list changed). An open list reads itself again on each. */
-    val botSignals: Long = 0)
+    val botSignals: Long = 0, val loadingHistory: Boolean = false)
 /**
  * The selected team's full messaging: directory, reads, signals, the open thread, the HTTP command journal and the Bot
  * cards and runs. Owned by [TeamsWorkspace], which starts and stops it; [scope] runs on the main thread.
  */
-internal class TeamMessagingModel @JvmOverloads constructor(private val scope: CoroutineScope, storageDirectory: File, private val apiRoot: String = TEAMS_API_ROOT, private val auth: FirebaseAuth = FirebaseAuth.getInstance(), private val db: FirebaseFirestore = FirebaseFirestore.getInstance()) {
+internal class TeamMessagingModel @JvmOverloads constructor(private val scope: CoroutineScope, storageDirectory: File, private val apiRoot: String = TEAMS_API_ROOT, private val auth: FirebaseAuth = FirebaseAuth.getInstance(), private val db: FirebaseFirestore = FirebaseFirestore.getInstance(), private val inbox: InboxController? = null) {
     private val storage = TeamCommandStorage(storageDirectory)
     private val mutable = MutableStateFlow(TeamMessagingState())
     val state = mutable.asStateFlow()
@@ -55,19 +59,21 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
     private var retryDelay = 1000L
     private var deadline: Job? = null
     private var listener: ListenerRegistration? = null
-    private var messageListener: ListenerRegistration? = null
+    private var readListener: ListenerRegistration? = null
+    private var historyJob: Job? = null
+    private var syncJob: Job? = null
+    private var lastChange = 0L
+    private var selectionEpoch = 0L
     private var memberListener: ListenerRegistration? = null
     private var signalListener: ListenerRegistration? = null
-    private val readListeners = mutableMapOf<String, ListenerRegistration>()
     private var membershipReady = false
-    private val pendingReads = mutableSetOf<String>()
     private var directoryCached = true
     private var messagesCached = true
     private var botsDirty = true
     private val authListener = FirebaseAuth.AuthStateListener { if (active && it.currentUser?.uid != uid) invalidate() }
     fun start(uid: String, team: TeamSummary) {
         stop(); active = true; lifecycle++; this.uid = uid; teamId = team.id; generation = team.generation
-        botsDirty = true; directoryCached = true; messagesCached = true; pendingReads.clear()
+        botsDirty = true; directoryCached = true; messagesCached = true
         mutable.value = TeamMessagingState()
         auth.addAuthStateListener(authListener)
         val life = lifecycle
@@ -98,21 +104,10 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
                 }
                 val ids = conversations.map { it.id }.toSet()
                 directoryCached = snapshot.metadata.isFromCache
-                pendingReads.retainAll(ids)
-                mutable.update { it.copy(cache = it.cache?.copy(conversations = conversations, threads = it.cache.threads.filterKeys(ids::contains)), offline = sdkOffline(), directoryCached = directoryCached, directoryReady = true, readsReady = pendingReads.isEmpty() && it.readsReady) }
-                if (messageListener == null && mutable.value.selected in ids) select(mutable.value.selected)
-                for (id in readListeners.keys.toList()) if (id !in ids) readListeners.remove(id)?.remove()
-                for (id in ids) if (id !in readListeners) {
-                    pendingReads += id
-                    readListeners[id] = root.collection("conversations").document(id).collection("reads").document(uid).addSnapshotListener(MetadataChanges.INCLUDE) { mark, failure ->
-                        if (!active || lifecycle != life || auth.currentUser?.uid != uid) return@addSnapshotListener
-                        pendingReads -= id
-                        if (failure != null) { listenerFailed(failure); mutable.update { it.copy(readsReady = pendingReads.isEmpty()) }; return@addSnapshotListener }
-                        val seq = if (mark?.getLong("generation") == generation) mark.getLong("lastReadSeq") ?: 0 else 0
-                        mutable.update { it.copy(cache = it.cache?.copy(conversations = it.cache.conversations.map { c -> if (c.id == id) c.copy(lastReadSeq = seq) else c }), readsReady = pendingReads.isEmpty()) }
-                    }
-                }
-                mutable.update { it.copy(readsReady = pendingReads.isEmpty()) }
+                mutable.update { it.copy(cache = it.cache?.copy(conversations = conversations, threads = it.cache.threads.filterKeys(ids::contains)), offline = sdkOffline(), directoryCached = directoryCached, directoryReady = true) }
+                val selectedId = mutable.value.selected
+                if (selectedId in ids && readListener == null) select(selectedId)
+                syncChanges()
                 if (!snapshot.metadata.isFromCache) {
                     val selected = mutable.value.selected
                     if (selected.isNotEmpty() && selected !in ids && mutable.value.cache?.creation?.optString("conversationId") != selected) select("")
@@ -138,12 +133,18 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         stop()
     }
     /** The banner's Reconnect: ask the server again (Bot cards and runs included); the SDK listeners reconnect on their own. */
-    fun reconnect() { botsDirty = true; refresh() }
+    fun reconnect() {
+        botsDirty = true
+        val id = mutable.value.selected
+        if (id.isNotEmpty() && mutable.value.cache?.threads?.get(id) == null && historyJob?.isActive != true) select(id)
+        else syncChanges()
+        refresh()
+    }
     fun stop() {
         active = false; lifecycle++; job?.cancel(); retry?.cancel(); deadline?.cancel(); deadline = null; job = null; retry = null
-        listener?.remove(); messageListener?.remove(); memberListener?.remove(); signalListener?.remove()
-        listener = null; messageListener = null; memberListener = null; signalListener = null
-        readListeners.values.forEach { it.remove() }; readListeners.clear(); membershipReady = false
+        listener?.remove(); readListener?.remove(); memberListener?.remove(); signalListener?.remove()
+        listener = null; readListener = null; memberListener = null; signalListener = null
+        historyJob?.cancel(); syncJob?.cancel(); membershipReady = false; selectionEpoch++
         auth.removeAuthStateListener(authListener); running = false; again = false
     }
     /** Sign-out or account change: stop everything and forget the team. */
@@ -169,36 +170,135 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         mutable.update { it.copy(cache = cache.copy(conversations = it.cache?.conversations ?: emptyList(), threads = it.cache?.threads ?: emptyMap())) }
     }
     fun select(id: String) {
-        messagesCached = true
-        mutable.update { it.copy(selected = id, offline = sdkOffline(id), tasks = emptyList(), artifact = null, cache = it.cache?.copy(threads = it.cache.threads.filterKeys { key -> key == id })) }; messageListener?.remove(); messageListener = null
-        if (id.isEmpty() || mutable.value.cache?.conversations?.none { it.id == id } != false) { refresh(); return }
+        val conversation = mutable.value.cache?.conversations?.firstOrNull { it.id == id }
+        val epoch = ++selectionEpoch
         val life = lifecycle
-        var firstSnapshot = true
-        messageListener = db.collection("teams").document(teamId).collection("conversations").document(id).collection("messages").orderBy("seq").addSnapshotListener(MetadataChanges.INCLUDE) { snapshot, error ->
-            if (!active || lifecycle != life || auth.currentUser?.uid != uid || mutable.value.selected != id) return@addSnapshotListener
+        messagesCached = true
+        lastChange = conversation?.lastChangeSeq ?: 0
+        readListener?.remove()
+        readListener = null
+        historyJob?.cancel()
+        syncJob?.cancel()
+        mutable.update { it.copy(selected = id, offline = sdkOffline(id), tasks = emptyList(), artifact = null,
+            readsReady = false, loadingHistory = false, cache = it.cache?.copy(threads = emptyMap())) }
+        if (id.isEmpty() || conversation == null) { refresh(); return }
+        val thread = db.collection("teams").document(teamId).collection("conversations").document(id)
+        readListener = thread.collection("reads").document(uid).addSnapshotListener(MetadataChanges.INCLUDE) { snapshot, error ->
+            if (!selectionCurrent(life, epoch, id)) return@addSnapshotListener
             if (error != null) { listenerFailed(error); return@addSnapshotListener }
             if (snapshot == null) return@addSnapshotListener
+            val seq = if (snapshot.getLong("generation") == generation) snapshot.getLong("lastReadSeq") ?: 0 else 0
+            mutable.update { it.copy(readsReady = true,
+                cache = it.cache?.copy(conversations = it.cache.conversations.map { c -> if (c.id == id) c.copy(lastReadSeq = maxOf(c.lastReadSeq, seq)) else c })) }
+        }
+        scope.launch { inbox?.prime(InboxRef("team", teamId, id, generation)) }
+        loadHistory(id, older = false)
+        refresh()
+    }
+
+    private fun selectionCurrent(life: Long, epoch: Long, id: String) =
+        active && lifecycle == life && epoch == selectionEpoch && mutable.value.selected == id && auth.currentUser?.uid == uid
+
+    private fun loadHistory(id: String, older: Boolean) {
+        historyJob?.cancel()
+        val life = lifecycle
+        val epoch = selectionEpoch
+        val prior = mutable.value.cache?.threads?.get(id)
+        val before = if (older) prior?.messages?.firstOrNull()?.seq ?: return else null
+        mutable.update { it.copy(loadingHistory = true) }
+        historyJob = scope.launch {
+            val messages = db.collection("teams").document(teamId).collection("conversations").document(id).collection("messages")
+            var query = messages.orderBy("seq", Query.Direction.DESCENDING).limit(50)
+            if (before != null) query = query.startAfter(before)
             try {
-                val reset = firstSnapshot; firstSnapshot = false
-                if (reset || snapshot.documentChanges.isNotEmpty()) {
-                    val messages: MutableMap<String, TeamMessage> = if (reset) mutableMapOf() else (mutable.value.cache?.threads?.get(id)?.messages ?: emptyList()).associateBy { it.id }.toMutableMap()
-                    for (change in snapshot.documentChanges) {
-                        if (change.type == DocumentChange.Type.REMOVED) messages.remove(change.document.id)
-                        else {
-                            val data = JSONObject(change.document.data).put("id", change.document.id)
-                            for (key in listOf("createdAt", "editedAt")) (change.document.get(key) as? Timestamp)?.let { data.put(key, java.time.Instant.ofEpochMilli(it.toDate().time).toString()) }
-                            val message = TeamMessage.parse(data); messages[message.id] = message
+                val snapshot = query.get().await()
+                if (!selectionCurrent(life, epoch, id)) return@launch
+                val page = snapshot.documents.map(::parseMessage).sortedBy { it.seq }
+                val latestWindow = mutable.value.cache?.threads?.get(id)
+                val merged = if (older) (page + latestWindow?.messages.orEmpty()).distinctBy { it.id }.sortedBy { it.seq } else page
+                val window = TeamMessageThread(
+                    messages = if (older) merged.take(200) else merged.takeLast(200),
+                    hasEarlier = page.size == 50 && (page.firstOrNull()?.seq ?: 0) > 1,
+                    hasLater = older && (merged.size > 200 || latestWindow?.hasLater == true),
+                )
+                messagesCached = snapshot.metadata.isFromCache
+                mutable.update { it.copy(cache = it.cache?.copy(threads = mapOf(id to window)), offline = sdkOffline()) }
+                if (!messagesCached) syncChanges()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                if (selectionCurrent(life, epoch, id)) {
+                    if (failure is FirebaseFirestoreException) listenerFailed(failure)
+                    else mutable.update { it.copy(error = "INVALID_MESSAGE_SNAPSHOT") }
+                }
+            } finally {
+                if (selectionCurrent(life, epoch, id)) mutable.update { it.copy(loadingHistory = false) }
+            }
+        }
+    }
+
+    fun loadEarlier(id: String) {
+        if (mutable.value.selected == id && historyJob?.isActive != true) loadHistory(id, older = true)
+    }
+
+    fun jumpLatest(id: String) {
+        if (mutable.value.selected == id) loadHistory(id, older = false)
+    }
+
+    private fun parseMessage(doc: DocumentSnapshot): TeamMessage {
+        val data = JSONObject(doc.data ?: throw TeamMessageFailure("INVALID_DATA")).put("id", doc.id)
+        for (key in listOf("createdAt", "editedAt")) {
+            (doc.get(key) as? Timestamp)?.let { data.put(key, java.time.Instant.ofEpochMilli(it.toDate().time).toString()) }
+        }
+        return TeamMessage.parse(data)
+    }
+
+    private fun syncChanges() {
+        val id = mutable.value.selected
+        val initial = mutable.value.cache?.threads?.get(id) ?: return
+        if (!active || id.isEmpty() || syncJob?.isActive == true || directoryCached) return
+        if (initial.messages.isEmpty() && historyJob?.isActive == true) return
+        val life = lifecycle
+        val epoch = selectionEpoch
+        syncJob = scope.launch {
+            try {
+                while (selectionCurrent(life, epoch, id)) {
+                    val conversation = mutable.value.cache?.conversations?.firstOrNull { it.id == id } ?: return@launch
+                    if (conversation.lastChangeSeq <= lastChange) break
+                    val request = JSONObject().put("action", "sync").put("conversationId", id).put("after", lastChange).put("limit", 50)
+                    val response = call(request, life)
+                    if (!selectionCurrent(life, epoch, id)) return@launch
+                    val changes = response.getJSONArray("changes").objects()
+                    if (changes.isEmpty() || changes.withIndex().any { (index, change) -> change.getLong("seq") != lastChange + index + 1 }) {
+                        throw TeamMessageFailure("CHANGE_GAP")
+                    }
+                    val updated = response.getJSONArray("messages").objects().map(TeamMessage::parse)
+                    val current = mutable.value.cache?.threads?.get(id) ?: return@launch
+                    val byId = current.messages.associateBy { it.id }.toMutableMap()
+                    val first = current.messages.firstOrNull()?.seq
+                    for (message in updated) {
+                        val previous = byId[message.id]
+                        if (previous != null && previous.changeSeq < message.changeSeq ||
+                            previous == null && !current.hasLater && (first == null || message.seq >= first)) {
+                            byId[message.id] = message
                         }
                     }
-                    val thread = TeamMessageThread(messages = messages.values.sortedBy { it.seq })
-                    mutable.update { it.copy(cache = it.cache?.copy(threads = it.cache.threads + (id to thread))) }
+                    val merged = byId.values.sortedBy { it.seq }
+                    val window = current.copy(messages = merged.takeLast(200), hasEarlier = current.hasEarlier || merged.size > 200)
+                    lastChange = changes.last().getLong("seq")
+                    messagesCached = false
+                    mutable.update { it.copy(cache = it.cache?.copy(threads = mapOf(id to window)), offline = sdkOffline()) }
                 }
-                messagesCached = snapshot.metadata.isFromCache
-                mutable.update { it.copy(offline = sdkOffline()) }
-                if (!snapshot.metadata.isFromCache) { mutable.update { it.copy(error = "") }; refresh() }
-            } catch (_: Exception) { mutable.update { it.copy(error = "INVALID_MESSAGE_SNAPSHOT") } }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                if (selectionCurrent(life, epoch, id)) {
+                    val code = (failure as? TeamMessageFailure)?.code ?: "SERVICE_UNAVAILABLE"
+                    if (code in setOf("STALE_MEMBERSHIP", "MEMBERSHIP_REQUIRED", "CONVERSATION_REQUIRED", "INVALID_SESSION")) invalidate()
+                    else mutable.update { it.copy(offline = true, error = code) }
+                }
+            }
         }
-        refresh()
     }
     fun refreshTasks() { refresh() }
     fun refresh() {
@@ -421,10 +521,19 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         for (uploadId in files) cancelUpload(uploadId)
     }
     fun discardCreation() = launchOperation { commit(lifecycle) { if ((it.creation?.optBoolean("attempted") == true && !it.creation.has("error")) || (it.creation?.optLong("leaseUntil") ?: 0) > System.currentTimeMillis()) throw TeamMessageFailure("MESSAGE_IN_FLIGHT"); it.copy(creation = null) } }
-    /** HTTP `read`: the list action sends the row's `lastSeq`, automatic mark-read the newest rendered `seq`. */
-    fun markRead(conversationId: String, seq: Long) = launchOperation {
-        val value = call(JSONObject().put("action", "read").put("conversationId", conversationId).put("lastReadSeq", seq), lifecycle).getLong("lastReadSeq")
-        mutable.update { it.copy(cache = it.cache?.copy(conversations = it.cache.conversations.map { c -> if (c.id == conversationId) c.copy(lastReadSeq = maxOf(c.lastReadSeq, value)) else c })) }
+    fun markRead(conversationId: String, seq: Long, automatic: Boolean = false) {
+        val ref = InboxRef("team", teamId, conversationId, generation)
+        if (!active || !ref.isValid()) return
+        if (inbox != null) {
+            val row = inbox.snapshot(ref)
+            val manualRevision = row?.manualUnreadRevision ?: 0L
+            inbox.mutate(InboxOperation.read(ref, seq, manualRevision, row?.pendingActionRevision), automatic = automatic)
+            return
+        }
+        launchOperation {
+            val value = call(JSONObject().put("action", "read").put("conversationId", conversationId).put("lastReadSeq", seq), lifecycle).getLong("lastReadSeq")
+            mutable.update { it.copy(cache = it.cache?.copy(conversations = it.cache.conversations.map { c -> if (c.id == conversationId) c.copy(lastReadSeq = maxOf(c.lastReadSeq, value)) else c })) }
+        }
     }
     private fun launchOperation(block: suspend () -> Unit) { val life = lifecycle; scope.launch { try { block() } catch (error: CancellationException) { throw error } catch (error: Exception) { if (active && life == lifecycle) { val code = (error as? TeamMessageFailure)?.code ?: "STORAGE_FAILED"; mutable.update { it.copy(error = code) }; if (code in setOf("MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP", "INVALID_SESSION", "SIGN_IN_REQUIRED", "CONVERSATION_REQUIRED")) invalidate() } } } }
     private fun scheduleDeadline() {

@@ -15,15 +15,16 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
+import com.lingxi.code.inbox.InboxController
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import org.json.JSONArray
+import org.json.JSONObject
 
 private val Context.teamsDataStore: DataStore<Preferences> by preferencesDataStore(name = "teams")
 
@@ -49,9 +50,8 @@ internal data class PairTeam(val uid: String, val summary: TeamSummary)
  * It composes what already existed and adds the app-level parts:
  * 1. [teamsModel]: the teams list, the selected team's members and invites, and the team commands.
  * 2. [messagingModel]: full messaging (directory, reads, signals, the open thread, command journal, Bots) of the selected team.
- * 3. Directory-only [TeamsUnreadWatcher]s for every other team (at most [MAX_WATCHED_TEAMS]) so the switcher and the tab badge
- *    know every team's unread count.
- * 4. The persisted selected team and collapsed sections ([TeamsPrefs]) and the in-memory composer drafts.
+ * 3. The account inbox's projected unread state.
+ * 4. The persisted selected team, collapsed sections and account-owned composer drafts.
  *
  * With a [pair] it is a friend chat's workspace instead (see [pinned]): only [messagingModel] runs, on the pair team. [teamsModel]
  * is never started, so nothing lists teams, selects one, watches the others or persists a selection.
@@ -65,29 +65,21 @@ internal class TeamsWorkspace(
     apiRoot: String = TEAMS_API_ROOT,
     private val pair: PairTeam? = null,
 ) {
+    val inbox = InboxController.get(context)
     val teamsModel = TeamsViewModel(scope, apiRoot, auth, db)
-    val messagingModel = TeamMessagingModel(scope, File(context.noBackupFilesDir, "team-messages"), apiRoot, auth, db)
+    val messagingModel = TeamMessagingModel(scope, File(context.noBackupFilesDir, "team-messages"), apiRoot, auth, db, inbox)
     /** Where a file being opened is written for the app that shows it; emptied before each open and when the account changes. */
     val openedFiles = File(context.cacheDir, TEAM_FILES_DIRECTORY)
 
     val teams: StateFlow<TeamsState> get() = teamsModel.state
     val messaging: StateFlow<TeamMessagingState> get() = messagingModel.state
 
-    private val watchers = mutableMapOf<String, TeamsUnreadWatcher>()
-    private val watched = MutableStateFlow<Map<String, Int>>(emptyMap())
     private val mutableCollapsed = MutableStateFlow<Set<String>>(emptySet())
     /** Collapsed list sections of the selected team ([SECTION_CHANNELS], [SECTION_DIRECT], [SECTION_BOTS]). */
     val collapsed: StateFlow<Set<String>> = mutableCollapsed
 
-    /** Unread messages per team: the selected team from its full model, every other team from its watcher. */
-    val unreadByTeam: StateFlow<Map<String, Int>> = combine(teams, messaging, watched) { teamsState, messagingState, others ->
-        teamsState.teams.associate { team ->
-            team.id to if (team.id == teamsState.selectedId && messagingState.readsReady && messagingState.cache?.teamId == team.id) selectedUnread(messagingState) else others[team.id] ?: 0
-        }
-    }.stateIn(scope, SharingStarted.Eagerly, emptyMap())
-
-    /** The Teams tab badge. */
-    val totalUnread: StateFlow<Int> = unreadByTeam.map { values -> values.values.sum() }.stateIn(scope, SharingStarted.Eagerly, 0)
+    val unreadByTeam: StateFlow<Map<String, Int>> = inbox.teamUnread
+    val totalUnread: StateFlow<Int> = inbox.teamBadge
 
     private var started = false
     private var currentUid: String? = null
@@ -95,8 +87,9 @@ internal class TeamsWorkspace(
     private var persistedSelection: String? = null
     private var autoSelecting = false
     private var wasRevoked = false
-    private var lastSelectedUnread: Pair<String, Int>? = null
     private val drafts = androidx.compose.runtime.mutableStateMapOf<String, ComposerDraft>()
+    private val loadedDrafts = mutableSetOf<String>()
+    private val editedDrafts = mutableSetOf<String>()
     private var botEntryEpoch = 0L
     private val mutableDraftFiles = MutableStateFlow<Map<String, List<TeamDraftFile>>>(emptyMap())
     private val mutableFileRefusals = MutableStateFlow<Map<String, List<TeamFileRefusal>>>(emptyMap())
@@ -131,9 +124,8 @@ internal class TeamsWorkspace(
         val selected = state.teams.firstOrNull { it.id == state.selectedId }
         val running = startedTeam
         if (selected == null) {
-            if (running != null) { botEntryEpoch++; rememberUnread(running); endUploads(); messagingModel.reset(); startedTeam = null; mutableCollapsed.value = emptySet() }
+            if (running != null) { botEntryEpoch++; endUploads(); messagingModel.reset(); startedTeam = null; mutableCollapsed.value = emptySet() }
         } else if (running?.id != selected.id || running.generation != selected.generation) {
-            if (running != null) rememberUnread(running)
             endUploads()
             botEntryEpoch++
             messagingModel.start(uid, selected)
@@ -157,12 +149,9 @@ internal class TeamsWorkspace(
                 if (now.uid == uid && now.selectedId.isEmpty() && now.teams.isNotEmpty()) teamsModel.select((now.teams.firstOrNull { it.id == saved } ?: now.teams.first()).id)
             }
         }
-        syncWatchers(uid, state)
     }
 
     private fun onMessaging(state: TeamMessagingState) {
-        val team = startedTeam
-        if (team != null && state.readsReady && state.cache?.teamId == team.id) lastSelectedUnread = team.id to selectedUnread(state)
         // Membership was revoked under us: the teams list is the authority on what is left.
         if (state.revoked && !wasRevoked) teamsModel.refresh()
         wasRevoked = state.revoked
@@ -170,33 +159,12 @@ internal class TeamsWorkspace(
 
     private fun accountChanged(uid: String?) {
         botEntryEpoch++
-        currentUid = uid; startedTeam = null; persistedSelection = null; autoSelecting = false; wasRevoked = false; lastSelectedUnread = null
+        currentUid = uid; startedTeam = null; persistedSelection = null; autoSelecting = false; wasRevoked = false
         endUploads()
         messagingModel.reset()
-        watchers.values.forEach { it.stop() }; watchers.clear(); watched.value = emptyMap()
-        drafts.clear(); mutableCollapsed.value = emptySet()
+        drafts.clear(); loadedDrafts.clear(); editedDrafts.clear(); mutableCollapsed.value = emptySet()
         mutableDraftFiles.value = emptyMap(); mutableFileRefusals.value = emptyMap()
         scope.launch(Dispatchers.IO) { openedFiles.deleteRecursively() }
-    }
-
-    private fun rememberUnread(team: TeamSummary) {
-        lastSelectedUnread?.takeIf { it.first == team.id }?.let { (id, unread) -> watched.update { it + (id to unread) } }
-    }
-
-    private fun selectedUnread(state: TeamMessagingState): Int =
-        (state.cache?.conversations ?: emptyList()).sumOf { TeamsListLogic.unreadCount(it).toLong() }.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-
-    private fun syncWatchers(uid: String, state: TeamsState) {
-        val wanted = state.teams.filter { it.id != state.selectedId }.take(MAX_WATCHED_TEAMS).associateBy { it.id }
-        for ((id, watcher) in watchers.toList()) if (wanted[id]?.generation != watcher.generation) { watcher.stop(); watchers.remove(id) }
-        for ((id, team) in wanted) if (id !in watchers) {
-            lateinit var watcher: TeamsUnreadWatcher
-            watcher = TeamsUnreadWatcher(db, uid, id, team.generation) { unread -> if (watchers[id] === watcher) watched.update { it + (id to unread) } }
-            watchers[id] = watcher
-            watcher.start()
-        }
-        val known = state.teams.map { it.id }.toSet()
-        watched.update { values -> if (values.keys.all { it in known }) values else values.filterKeys { it in known } }
     }
 
     // --- what the screens call -----------------------------------------------------------------------
@@ -207,7 +175,10 @@ internal class TeamsWorkspace(
     fun selectTeam(teamId: String) { if (teamsModel.state.value.selectedId != teamId) teamsModel.select(teamId) }
 
     /** Opens a conversation's thread (its messages listener); "" closes it. */
-    fun openConversation(conversationId: String) = messagingModel.select(conversationId)
+    fun openConversation(conversationId: String) {
+        messagingModel.select(conversationId)
+        if (conversationId.isNotEmpty()) restoreDraft(conversationId)
+    }
 
     /** The banner's Reconnect: ask again, restart what stopped, and let the SDK reconnect. */
     fun reconnect() {
@@ -216,8 +187,7 @@ internal class TeamsWorkspace(
         val state = messagingModel.state.value
         val team = startedTeam
         if (team != null && (state.revoked || state.error == "INVALID_DATA")) { endUploads(); messagingModel.start(uid, team) } else messagingModel.reconnect()
-        watchers.values.forEach { it.stop() }; watchers.clear()
-        syncWatchers(uid, teamsModel.state.value)
+        inbox.retry()
     }
 
     fun toggleSection(section: String) {
@@ -229,9 +199,35 @@ internal class TeamsWorkspace(
     }
 
     /** What a conversation's unsent state is kept under: the account, the team, its generation and the conversation. */
-    fun draftKey(conversationId: String) = "${currentUid}:${teamsModel.state.value.selectedId}:${startedTeam?.generation ?: 0}:$conversationId"
+    fun draftKey(conversationId: String) = "${currentUid}:${startedTeam?.id}:${startedTeam?.generation ?: 0}:$conversationId"
     fun draft(conversationId: String): ComposerDraft = drafts[draftKey(conversationId)] ?: ComposerDraft()
-    fun setDraft(conversationId: String, draft: ComposerDraft) { if (draft == ComposerDraft()) drafts.remove(draftKey(conversationId)) else drafts[draftKey(conversationId)] = draft }
+    fun setDraft(conversationId: String, draft: ComposerDraft) {
+        val owner = currentUid ?: return
+        val key = draftKey(conversationId)
+        editedDrafts.add(key)
+        if (draft == ComposerDraft()) drafts.remove(key) else drafts[key] = draft
+        val value = if (draft == ComposerDraft()) null else JSONObject().put("text", draft.text)
+            .put("replyTo", draft.replyToId).put("editingId", draft.editingId).put("targets", JSONArray(draft.targets.toList())).toString()
+        draftWrites.launch {
+            draftLock.withLock {
+                runCatching { kotlinx.coroutines.withContext(Dispatchers.IO) { inbox.store.setValue(owner, "draft:$key", value) } }
+            }
+        }
+    }
+
+    private fun restoreDraft(conversationId: String) {
+        val owner = currentUid ?: return
+        val key = draftKey(conversationId)
+        if (!loadedDrafts.add(key)) return
+        scope.launch {
+            val restored = runCatching { kotlinx.coroutines.withContext(Dispatchers.IO) {
+                draftLock.withLock { inbox.store.value(owner, "draft:$key") }?.let { JSONObject(it) }
+            } }.getOrNull() ?: return@launch
+            if (currentUid != owner || key in editedDrafts) return@launch
+            drafts[key] = ComposerDraft(restored.optString("text"), restored.stringOrNull("replyTo"),
+                restored.stringOrNull("editingId"), restored.optJSONArray("targets")?.strings()?.toSet().orEmpty())
+        }
+    }
 
     /** Freeze the identity before asynchronous conversation creation; changing away and back invalidates it too. */
     fun botEntryContext(uid: String): TeamBotEntryContext? {
@@ -310,7 +306,8 @@ internal class TeamsWorkspace(
     }
 
     companion object {
-        const val MAX_WATCHED_TEAMS = 20
+        private val draftLock = Mutex()
+        private val draftWrites = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         /** Under the cache directory; the app's file provider shares it (`res/xml/file_paths.xml`). */
         const val TEAM_FILES_DIRECTORY = "team-files"
         const val SECTION_CHANNELS = "channels"

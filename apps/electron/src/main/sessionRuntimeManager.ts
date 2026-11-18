@@ -1013,6 +1013,7 @@ export class SessionRuntimeManager {
       onFastModeSelected,
       onFirstPromptSent,
       onPromptAdmitted,
+      onInboxActivity,
       maxCachedRuntimes: _maxCachedRuntimes,
       workspaceSettings,
       ...base
@@ -1058,6 +1059,7 @@ export class SessionRuntimeManager {
         if (this.sourceCaptureWanted.has(ref.sessionId)) this.captureSessionSource(ref);
       },
       onDurableSessionActivity: () => this.wantSessionSource(ref, true),
+      onInboxActivity: () => onInboxActivity?.(ref),
       onPromptAdmitted: () => onPromptAdmitted?.(ref),
       onFirstPromptSent: () => {
         this.wantSessionSource(ref, false);

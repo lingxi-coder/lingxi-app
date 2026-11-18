@@ -1204,6 +1204,10 @@ export type SessionModeDto = 'chat' | 'code';
 
 /** One resumable-session row (listings.rs `SessionRowDto`). */
 export interface SessionRowDto {
+  /** Exact persisted label confirmed by a user rename. */
+  user_title?: string | null;
+  /** Optional source-owned semantic activity descriptor, encoded as JSON. */
+  activity_json?: string | null;
   uuid: string;
   title: string;
   modified_rfc3339: string;

@@ -61,13 +61,14 @@ test('the sign-in page has its own, lighter policy and the strict one does not a
 
 test('security zones have disjoint policy patterns', () => {
   const withPolicy = config.hosting.headers.filter((entry) => entry.headers.some((header) => header.key === 'Content-Security-Policy')).map((entry) => entry.source);
-  assert.deepEqual(withPolicy, ['/remote', '/remote/**', '/login/remote', '/teams', '/teams/**', '/friends', '/friends/**', '/services', '/services/**']);
+  assert.deepEqual(withPolicy, ['/inbox{,/**}', '/remote', '/remote/**', '/login/remote', '/teams', '/teams/**', '/friends', '/friends/**', '/services', '/services/**']);
 });
 
 test('Teams and Friends alone get Firestore connectivity and invitation and friend links suppress referrers', () => {
   const teamPolicy = policyFor('/teams');
   assert.ok(teamPolicy);
   assert.equal(policyFor('/teams/**'), teamPolicy);
+  assert.ok(directives(policyFor('/inbox{,/**}')!).get('connect-src')!.includes('https://firestore.googleapis.com'));
   // Friends is in the teams security zone: the same policy, never cached, never leaking a friend code in a referrer (D1).
   assert.equal(policyFor('/friends'), teamPolicy);
   assert.equal(policyFor('/friends/**'), teamPolicy);

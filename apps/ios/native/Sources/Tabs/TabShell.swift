@@ -18,6 +18,7 @@ import UIKit
 ///   the setter runs for the already-selected tab.
 struct TabShell<ChatsContent: View, SettingsContent: View>: View {
     @Environment(AppState.self) private var app
+    @Environment(InboxStore.self) private var inbox
     @Environment(BotsBadge.self) private var botsBadge
     @Environment(TeamsWorkspace.self) private var teamsWorkspace
     @Environment(FriendsWorkspace.self) private var friendsWorkspace
@@ -122,6 +123,7 @@ struct TabShell<ChatsContent: View, SettingsContent: View>: View {
         }
     }
     private func badge(for tab: AppTab) -> String? {
+        if tab == .chats { return TabLogic.tabBadgeText(inbox.unreadBadge) }
         guard FirebaseAccount.shared.user != nil else { return nil }
         let count = switch tab {
         case .bots: botsBadge.count
@@ -156,6 +158,7 @@ struct TabShell<ChatsContent: View, SettingsContent: View>: View {
                 chats()
                     .toolbar(barVisibility(for: .chats), for: .tabBar)
             }
+            .badge(TabLogic.tabBadgeText(inbox.unreadBadge).map { Text($0) })
             .accessibilityIdentifier("tab.chats")
 
             Tab("remote_bots", systemImage: "cpu", value: AppTab.bots) {

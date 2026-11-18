@@ -3,6 +3,13 @@ import test from 'node:test';
 
 import { modeForSettledChat, pageForMode, reconcileSidebarMode, restoredSidebarMode, SidebarModeSync, type AppPage } from '../src/renderer/bridge/sidebarMode';
 
+test('unified Chats keeps its inbox beside human conversations while explicit workspaces remain selectable', () => {
+  assert.equal(reconcileSidebarMode('home', 'teams', true, true), 'home');
+  assert.equal(reconcileSidebarMode('home', 'friends', true, true), 'home');
+  assert.equal(reconcileSidebarMode('teams', 'teams', true, true), 'teams');
+  assert.equal(reconcileSidebarMode('friends', 'friends', true, true), 'friends');
+});
+
 test('Apps is a first-level workspace and retains its own development chat', () => {
   assert.equal(pageForMode('apps', { page: 'chat', botChat: false, appChat: true }), 'chat');
   assert.equal(pageForMode('apps', { page: 'chat', botChat: false }), 'apps');

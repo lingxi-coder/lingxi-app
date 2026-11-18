@@ -30,7 +30,8 @@ export const renderTeamMarkdown: RenderMarkdown = text => <MarkdownContent text=
  * A member of the team can be added as a friend (D15) and, by a manager, friends can be invited to it (D26) once the window has a
  * Friends workspace. `locale` orders the friends of the picker as the Friends list is ordered (D5).
  */
-export function TeamsMain({ teams, friends, locale, drawer, services, onCloseServices }: { teams: UseTeams; friends: UseFriends; locale: string; drawer: TeamsDrawer;
+export function TeamsMain({ teams, friends, locale, drawer, services, inboxTarget, onCloseServices }: { teams: UseTeams; friends: UseFriends; locale: string; drawer: TeamsDrawer;
+  inboxTarget?: { serviceId: string; sessionId: string };
   /** Bot services are shown in place of the Team. */ services: boolean; onCloseServices(): void }) {
   const t = useTeamsText(locale);
   const { workspace, snapshot, signedIn } = teams;
@@ -50,6 +51,7 @@ export function TeamsMain({ teams, friends, locale, drawer, services, onCloseSer
         <button type="button" className="tw-link" style={{ alignSelf: 'flex-start', margin: '10px 20px 0' }} onClick={onCloseServices}>{t('tw_back_team')}</button>
         <div style={{ flex: 1, minHeight: 0 }}>
           <HostedServices key={snapshot.uid} api={servicesApi} uid={snapshot.uid} locale={locale}
+            initialServiceId={inboxTarget?.serviceId} initialSessionId={inboxTarget?.sessionId}
             renderMarkdown={renderTeamMarkdown} link={id => serviceLink('https://lingxios.net', id)} />
         </div>
       </div>

@@ -30,7 +30,8 @@ interface LayoutProps {
 
 /** The Teams workspace of a signed-in account, opened with it and closed when the account or the page goes. */
 export function TeamsWorkspaceView({ api, uid, ...layout }: LayoutProps & { api: TeamsApi; uid: string }) {
-  const teams = useTeamsWorkspace(api, uid);
+  const query = new URLSearchParams(location.search);
+  const teams = useTeamsWorkspace(api, uid, {initialTeamId: query.get('team') ?? undefined, initialConversationId: query.get('chat') ?? undefined});
   return <TeamsWorkspaceLayout teams={teams} {...layout} />;
 }
 

@@ -1,3 +1,4 @@
+import type { DesktopInboxApi } from '../../shared/inbox.js';
 import type { ProviderAccountSnapshot } from '../../shared/providerAccounts.js';
 import type { TranscriptHistoryCursor, TranscriptHistoryPage } from '../../shared/sessionHistory.js';
 import type { ProviderAccountsApi } from '../../shared/providerAccounts.js';
@@ -192,6 +193,7 @@ export interface LingxiApi {
   platform: NodeJS.Platform;
   isElectron: true;
   account: AccountApi;
+  inbox: DesktopInboxApi;
   teams: DesktopTeamsApi;
   friends: DesktopFriendsApi;
   bootstrap(): Promise<BootstrapState>;

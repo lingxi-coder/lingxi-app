@@ -2,13 +2,21 @@ import { botMarketLink } from './market-link';
 import * as firestore from 'firebase/firestore';
 import { collection, onSnapshot, type Firestore } from 'firebase/firestore';
 import { teamsTransport, type TeamsApi, type TeamCommand, type TeamDetail, type TeamResult, type TeamSummary } from '../../../../packages/teams';
-import { watchFirestoreMessages } from '../../../../packages/teams/firestore.js';
+import { InboxController } from '../../../../packages/inbox/controller';
+import { createInboxRequest } from '../../../../packages/inbox/client';
+import { readFirestoreMessagePage, watchFirestoreMessages } from '../../../../packages/teams/firestore.js';
 import type { MessageSignal, MessageCommand } from '../../../../packages/teams/messages';
 import { getAuth, type User } from 'firebase/auth';
 
 export function webTeamsApi(user: User, db: Firestore, currentUid: () => string | undefined = () => getAuth(db.app).currentUser?.uid): TeamsApi & { close(): void } {
   let closed = false;
   const request = teamsTransport('', async () => { if (currentUid() !== user.uid) throw new Error('INVALID_SESSION'); const token = await user.getIdToken(); if (closed || currentUid() !== user.uid) throw new Error('INVALID_SESSION'); return token; });
+  const inboxRequest=createInboxRequest('/v1/inbox',async()=>{
+    if(closed || currentUid()!==user.uid) throw new Error('INVALID_SESSION');
+    const token=await user.getIdToken();if(closed || currentUid()!==user.uid) throw new Error('INVALID_SESSION');
+    return token;
+  });
+  const inbox = new InboxController({uid:user.uid,request:inboxRequest});
   const callbacks = new Set<(event: { invalidated?: boolean }) => void>();
   const messageCallbacks = new Set<(signal?: MessageSignal) => void>();
   const messageStops = new Map<string, () => void>();
@@ -40,6 +48,14 @@ export function webTeamsApi(user: User, db: Firestore, currentUid: () => string 
     },
     execute: (command: TeamCommand) => checked<TeamResult>('', command),
     messages: <T>(command: MessageCommand) => checked<T>('/messages', command),
+    async historyPage(scope,conversationId,beforeSeq) {
+      if(closed || currentUid()!==user.uid) throw new Error('INVALID_SESSION');
+      const rows=await readFirestoreMessagePage(firestore,db,scope,conversationId,beforeSeq,user.uid);
+      if(closed || currentUid()!==user.uid) throw new Error('INVALID_SESSION');
+      return rows;
+    },
+    peerReceipt:(scope,id)=>inboxRequest({action:'peerReceipt',key:'team:'+scope.teamId+':'+id,generation:scope.generation}),
+    readVisible:(scope,id,through,manualUnreadRevision,observedPendingActionRevision)=>inbox.mutate({action:'markRead',key:'team:'+scope.teamId+':'+id,generation:scope.generation,through,manualUnreadRevision,...(observedPendingActionRevision===undefined?{}:{observedPendingActionRevision})}),
     watchMessages(scope, conversationId, next) {
       if (closed || currentUid() !== user.uid) throw new Error('INVALID_SESSION');
       const key = crypto.randomUUID();
@@ -53,6 +69,6 @@ export function webTeamsApi(user: User, db: Firestore, currentUid: () => string 
     },
     onMessagesChanged(callback) { messageCallbacks.add(callback); return () => { messageCallbacks.delete(callback); if (!messageCallbacks.size) { for (const stop of messageStops.values()) stop(); messageStops.clear(); } }; },
     onChanged(callback) { callbacks.add(callback); return () => { callbacks.delete(callback); }; },
-    close() { closed = true; for (const stop of stops.values()) stop(); stops.clear(); callbacks.clear(); for (const stop of messageStops.values()) stop(); messageStops.clear(); messageCallbacks.clear(); },
+    close() { closed = true; inbox.close(); for (const stop of stops.values()) stop(); stops.clear(); callbacks.clear(); for (const stop of messageStops.values()) stop(); messageStops.clear(); messageCallbacks.clear(); },
   };
 }

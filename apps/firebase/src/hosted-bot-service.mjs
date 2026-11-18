@@ -65,7 +65,7 @@ const publisherLimit = 20, reportsPerDay = 5, sessionLimit = 50;
  * authority (design 17).
  */
 /** Reading a session's messages (`team-messages.mjs`): the caller reads their own, the publisher every one, as each caller was told on entering. */
-export const serviceMessageActions = new Set(['list', 'sync', 'read']);
+export const serviceMessageActions = new Set(['list', 'sync', 'history', 'read']);
 const callerActions = new Set(['createConversation', 'submit', 'answerWait', 'decideWait', 'cancelTask', 'getTask', 'listTasks']);
 const publisherActions = new Set(['publishSharedBot', 'pauseSharedBot', 'listSharedBots', 'heartbeatDeployment', 'activateDeployment', 'listHostTasks',
   'prepareTask', 'validateTask', 'startTask', 'continueTask', 'pauseTask', 'completeTask',

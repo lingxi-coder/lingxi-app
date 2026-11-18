@@ -158,6 +158,8 @@ export interface BridgeManagerOptions {
   notifier?: HostNotifier;
   /** Internal cache hook used by SessionRuntimeManager; never exposed to renderer IPC. */
   onActivityChanged?: () => void;
+  /** A durable result or interaction changed the source-owned inbox projection. */
+  onInboxActivity?: () => void;
   /** Invalidate Electron-main launch material after a credential/config mutation. */
   onFirstPromptSent?: () => boolean | void;
   /** A user prompt crossed the authenticated bridge boundary. */
@@ -204,7 +206,8 @@ export interface SessionRuntimeSummary {
   runtimeVersions?: BridgeRuntimeVersions;
 }
 
-export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'getSavedPermissionMode' | 'onPermissionModeSelected' | 'getSavedFastMode' | 'onFastModeSelected' | 'onFirstPromptSent' | 'onPromptAdmitted' | 'onDurableSessionActivity' | 'onActivityChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
+export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'getSavedPermissionMode' | 'onPermissionModeSelected' | 'getSavedFastMode' | 'onFastModeSelected' | 'onFirstPromptSent' | 'onPromptAdmitted' | 'onDurableSessionActivity' | 'onActivityChanged' | 'onInboxActivity' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
+  onInboxActivity?: (ref: SessionRef) => void;
   /** What a session of a working directory is launched with; it is told which session, for settings that belong to the one. */
   workspaceSettings?: (projectPath: string, ref: SessionRef) => Promise<WorkspaceLaunchSettings>;
   launchConfig: (ref: SessionRef, resumeModel?: string) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;

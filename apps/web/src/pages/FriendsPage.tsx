@@ -53,7 +53,7 @@ export default function FriendsPage({ locale, route, badge, onBadge }: { locale:
     finally { setBusy(false); }
   };
   const done = () => { clearAddIntent(intentStorage, handled.current); setCode(''); };
-  return <main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><h1>{t('friends_title')}{badge ? <b className="teams-web-badge" role="img" aria-label={t('tw_unread_fmt', badge)}>{badge}</b> : null}</h1><a href="/teams">{t('teams_title')}</a><a href="/remote">{t('tw_nav_remote')}</a><span>{user?.displayName || user?.email}</span>{user ? <button disabled={busy} onClick={() => void signOutNow()}>{t('tw_sign_out')}</button> : null}</header>
+  return <main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><a href="/inbox">{locale === 'zh' ? '收件箱' : 'Inbox'}</a><h1>{t('friends_title')}{badge ? <b className="teams-web-badge" role="img" aria-label={t('tw_unread_fmt', badge)}>{badge}</b> : null}</h1><a href="/teams">{t('teams_title')}</a><a href="/remote">{t('tw_nav_remote')}</a><span>{user?.displayName || user?.email}</span>{user ? <button disabled={busy} onClick={() => void signOutNow()}>{t('tw_sign_out')}</button> : null}</header>
     {user === undefined ? <p role="status" className="teams-web-note">{t('teams_loading')}</p> : user
       ? <SignedIn key={user.uid} user={user} locale={locale} route={route} chat={chat.current} code={code} onCodeHandled={done} onBadge={onBadge} />
       : <SignInCard auth={auth} locale={locale} note={t('friends_signin')} />}

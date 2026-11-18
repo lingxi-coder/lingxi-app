@@ -1,3 +1,5 @@
+import {lazy,Suspense} from 'react';
+const RemoteRead=lazy(()=>import('../inbox/RemoteRead').then(m=>({default:m.RemoteRead})));
 import { Files } from './Files';
 import type { FileReceipt } from '@lingxi/bridge-client/remote';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -16,6 +18,7 @@ import type { ConnectionState } from './viewerConnection';
 interface SessionViewProps {
   locale: Locale;
   client: RemoteClient;
+  hostId?:string;
   sessionId: string;
   connection: ConnectionState;
   deviceName: string;
@@ -26,7 +29,7 @@ function errorText(locale: Locale, state: SessionState): string {
   return t(locale, requestErrorStringKey(state.error?.code ?? ''));
 }
 
-export function SessionView({ locale, client, sessionId, connection, deviceName, onBack }: SessionViewProps) {
+export function SessionView({ locale, client, sessionId, hostId, connection, deviceName, onBack }: SessionViewProps) {
   const controller = useMemo(() => client.session(sessionId), [client, sessionId]);
   const state = useStore(controller)!;
   const list = useStore(client)!;
@@ -78,6 +81,7 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
           <h1>{displayText(summary?.title ?? '', 120) || t(locale, 'untitled')}</h1>
           {summary?.project_label || botName ? <p>{summary?.project_label || botName}</p> : null}
         </div>
+        {hostId && (summary?.activityJson || new URLSearchParams(location.search).has('inbox'))?<Suspense fallback={null}><RemoteRead client={client} scroller={scroller} activityJson={summary?.activityJson} hostId={hostId} sessionId={sessionId} live={live} locale={locale}/></Suspense>:null}
         <TransportBadge locale={locale} transport={connection.transport} />
       </header>
 

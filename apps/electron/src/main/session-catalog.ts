@@ -197,6 +197,7 @@ interface CatalogWorkerQuery {
   scope?: SessionCatalogScope;
   transcriptPath?: string;
   historyBefore?: TranscriptHistoryCursor;
+  activityAfter?: number;
 }
 
 /** One request at a time bounds worker IO; catalog callers retain their own deduplication. */
@@ -361,6 +362,8 @@ function sessionRow(value: unknown): ProjectSessionCatalogRow | null {
   const resumeModel = row['resume_model'];
   const workspace = row['workspace_path'];
   const resumeTitle = row['resume_title'];
+  const activity = row['activity_json'];
+  const userTitle = row['user_title'];
   if (
     !isSessionId(row['uuid'])
     || typeof row['title'] !== 'string'
@@ -371,6 +374,8 @@ function sessionRow(value: unknown): ProjectSessionCatalogRow | null {
     || typeof row['path'] !== 'string'
     || typeof row['empty_session'] !== 'boolean'
     || (resumeTitle !== undefined && (typeof resumeTitle !== 'string' || resumeTitle.includes('\0')))
+    || (activity !== undefined && activity !== null && (typeof activity !== 'string' || activity.length > 16_384 || activity.includes('\0')))
+    || (userTitle !== undefined && userTitle !== null && (typeof userTitle !== 'string' || userTitle.length > 4096 || userTitle.includes('\0')))
     || (workspace !== undefined && (typeof workspace !== 'string' || !isAbsolute(workspace)
       || workspace.length > 32_768 || workspace.includes('\0')))
     || (resumeModel !== undefined && (
@@ -391,6 +396,8 @@ function sessionRow(value: unknown): ProjectSessionCatalogRow | null {
     ...(typeof resumeModel === 'string' ? { resume_model: resumeModel } : {}),
     ...(typeof workspace === 'string' ? { workspace_path: workspace } : {}),
     ...(typeof resumeTitle === 'string' ? { resume_title: resumeTitle } : {}),
+    ...(typeof activity === 'string' ? { activity_json: activity } : {}),
+    ...(typeof userTitle === 'string' ? { user_title: userTitle } : {}),
   };
 }
 
@@ -416,6 +423,7 @@ function parseCatalog(output: string, maxSessions?: number): ProjectSessionCatal
 
 /** Reads persisted sessions without assembling an engine or touching credentials. */
 export class ProjectSessionCatalog {
+  private readonly invalidated = new Set<() => void>();
   private readonly cache = new Map<string, CatalogCacheEntry>();
   private readonly pending = new Map<string, Promise<ProjectSessionCatalogResult>>();
   private readonly pendingSessions = new Map<string, Promise<ProjectSessionCatalogResult>>();
@@ -428,6 +436,32 @@ export class ProjectSessionCatalog {
   private disposed = false;
 
   constructor(private readonly options: ProjectSessionCatalogOptions = {}) {}
+
+  onInvalidated(callback: () => void): () => void {
+    this.invalidated.add(callback);
+    return () => { this.invalidated.delete(callback); };
+  }
+
+  async readActivity(projectPath: string, sessionId: string, transcriptPath: string, after: number): Promise<import('../shared/inbox.js').AssistantActivityPage> {
+    if (!isSessionId(sessionId) || !isAbsolute(transcriptPath) || transcriptPath.includes('\0')
+      || basename(transcriptPath).toLowerCase() !== `${sessionId.toLowerCase()}.jsonl`
+      || !Number.isSafeInteger(after) || after < 0) throw new Error('Invalid activity source.');
+    const output = await this.runWorker({ cwd: realpathSync.native(projectPath), sessionId: sessionId.toLowerCase(), transcriptPath, activityAfter: after }, this.historyLane);
+    const page = JSON.parse(output) as import('../shared/inbox.js').AssistantActivityPage;
+    if (!page || !Array.isArray(page.items) || page.items.length > 50 || typeof page.hasMore !== 'boolean'
+      || !Number.isSafeInteger(page.cursor) || page.cursor < after
+      || !Number.isSafeInteger(page.baselineCursor) || page.baselineCursor < 0 || page.baselineCursor > page.cursor) throw new Error('Invalid activity page.');
+    let previous = after;
+    for (const item of page.items) {
+      if (!Number.isSafeInteger(item.cursor) || item.cursor <= previous || item.cursor > page.cursor
+        || !Array.isArray(item.resultUuids) || item.resultUuids.length > 16
+        || item.resultUuids.some(id => !isSessionId(id)) || !Number.isFinite(item.at)
+        || typeof item.kind !== 'string') throw new Error('Invalid activity entry.');
+      previous = item.cursor;
+    }
+    if (page.hasMore && page.items.length === 0) throw new Error('Activity cursor did not advance.');
+    return page;
+  }
 
   async captureMetadataSource(projectPath: string, sessionId: string, transcriptPath: string, sessionMode: 'chat' | 'code'): Promise<string> {
     if (!isSessionId(sessionId) || !isAbsolute(transcriptPath) || transcriptPath.includes('\0')) throw new Error('Invalid metadata source.');
@@ -659,6 +693,7 @@ export class ProjectSessionCatalog {
       lane.key = undefined;
     }
     void projectPath;
+    for (const callback of this.invalidated) callback();
   }
 
   /** Release metadata resources when the owning Host is disposed. */

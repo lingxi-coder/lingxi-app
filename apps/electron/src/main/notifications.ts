@@ -1,35 +1,5 @@
-/**
- * OS notifications for the desktop shell.
- *
- * The POLICY here is Claude Code 2.1.270's, copied rather than invented, so
- * that the three GUI clients and the CLI do not end up with four different
- * ideas of when a notification is warranted. Two things follow from that and
- * are worth stating, because both are counter-intuitive:
- *
- * 1. **There is no "the turn finished" notification.** Upstream fires
- *    `idle_prompt` ("waiting for your input") only once the session has sat
- *    idle for `messageIdleNotifThresholdMs` AFTER the turn ended, and only if
- *    the user has not come back in the meantime. A turn that finishes while
- *    you are looking at something else and that you return to within the
- *    threshold notifies nothing, deliberately.
- * 2. **A permission prompt answered quickly notifies nothing.** Upstream arms
- *    a 6s timer when the prompt appears and clears it in a `finally` when the
- *    prompt settles.
- *
- * The one adaptation: upstream's "local" channel is a terminal bell / OSC
- * escape, which is harmless to emit at a terminal you are staring at, so it
- * has no foreground suppression. A banner over the window you are actively
- * using is not harmless, so delivery here also requires the main window to be
- * unfocused. iOS already behaves this way for its own reasons
- * (`AppNotificationDelegate.willPresent` returns `[]` for conversation routes
- * while foregrounded).
- *
- * Everything runs in the MAIN process. It has to: the renderer's session
- * denies every Web permission but `media` (`main/index.ts`'s
- * `setPermissionRequestHandler`), and `scripts/packaged-app-smoke.mjs` pins
- * that by asserting `Notification.requestPermission()` resolves `'denied'`.
- */
-
+/** Notification delivery policy for the Desktop main process. */
+import type { DeliveryLedger } from './inbox/deliveryLedger.js';
 import { nativeTr } from '../shared/nativeLocale.js';
 import {
   PERMISSION_PROMPT_NOTIFY_DELAY_MS,
@@ -83,6 +53,12 @@ export interface DelegatedTask {
 export interface HostNotifierDeps {
   /** Raises the actual OS notification. Injected so tests never touch Electron. */
   show(title: string, body: string, ref?: SessionRef): void;
+  /** The foreground renderer reports the session whose content is actually visible. */
+  isConversationVisible?(sessionKey: string, ref?: SessionRef): boolean;
+  inApp?(title: string, body: string, ref?: SessionRef): void;
+  ledger?: DeliveryLedger;
+  conversationNotificationsEnabled?(sessionKey: string,kind:NotificationKind): boolean;
+  hasCommittedActivity?(sessionKey: string): boolean;
   /** True while the main window has OS focus. */
   isWindowFocused(): boolean;
   /**
@@ -117,6 +93,9 @@ interface SessionNotificationState {
   dialogsOnScreen: number;
   /** request_id -> armed 6s permission timer. */
   permissionTimers: Map<number, TimerHandle>;
+  questionTimers: Map<number, TimerHandle>;
+  completions: Set<string>;
+  completionTimer?: TimerHandle;
   ref?: SessionRef;
 }
 
@@ -184,6 +163,8 @@ export class HostNotifier {
     if (!state) return;
     this.disarmIdle(state);
     for (const timer of state.permissionTimers.values()) this.unschedule(timer);
+    for (const timer of state.questionTimers.values()) this.unschedule(timer);
+    if (state.completionTimer !== undefined) this.unschedule(state.completionTimer);
     this.sessions.delete(sessionKey);
   }
 
@@ -203,7 +184,7 @@ export class HostNotifier {
     const timer = this.schedule(() => {
       state.permissionTimers.delete(requestId);
       const task = this.deps.delegation?.(sessionKey);
-      this.post('permission_prompt', sessionKey, `${sessionKey}:permission:${requestId}`,
+      this.post('permission_prompt', sessionKey, [`${sessionKey}:permission:${requestId}`],
         task ? nativeTr('native_task_input_title', task.receiver, task.sender) : NOTIFICATION_COPY.permissionTitle,
         task ? nativeTr('native_task_input_permission', toolName) : NOTIFICATION_COPY.permissionBody(toolName), state.ref);
     }, PERMISSION_PROMPT_NOTIFY_DELAY_MS);
@@ -219,25 +200,41 @@ export class HostNotifier {
     state.permissionTimers.delete(requestId);
   }
 
-  /** `agent_needs_input`. Upstream fires this on the band transition with no
-   * debounce — unlike a permission prompt, a questionnaire has no "answered
-   * in the next six seconds" case worth waiting out. */
   askUserQuestion(sessionKey: string, requestId: number, ref?: SessionRef): void {
     const state = this.stateFor(sessionKey, ref);
-    const task = this.deps.delegation?.(sessionKey);
-    this.post('agent_needs_input', sessionKey, `${sessionKey}:question:${requestId}`,
-      task ? nativeTr('native_task_input_title', task.receiver, task.sender) : NOTIFICATION_COPY.idleTitle,
-      task ? nativeTr('native_task_input_question') : NOTIFICATION_COPY.idleBody, state.ref);
+    if (!isKindEnabled(this.prefs, 'agent_needs_input') || state.questionTimers.has(requestId)) return;
+    const timer = this.schedule(() => {
+      state.questionTimers.delete(requestId);
+      const task = this.deps.delegation?.(sessionKey);
+      this.post('agent_needs_input', sessionKey, [`${sessionKey}:question:${requestId}`],
+        task ? nativeTr('native_task_input_title', task.receiver, task.sender) : NOTIFICATION_COPY.idleTitle,
+        task ? nativeTr('native_task_input_question') : NOTIFICATION_COPY.idleBody, state.ref);
+    }, PERMISSION_PROMPT_NOTIFY_DELAY_MS);
+    state.questionTimers.set(requestId, timer);
   }
 
-  /** `agent_completed`. `label` is the task's human description when the row
-   * list supplied one; the bare id is the last resort, not the default. */
-  taskFinished(sessionKey: string, taskId: string, label: string | undefined, failed: boolean, ref?: SessionRef): void {
+  questionSettled(sessionKey: string, requestId: number): void {
+    const timers = this.sessions.get(sessionKey)?.questionTimers;
+    const timer = timers?.get(requestId);
+    if (timer !== undefined) { this.unschedule(timer); timers?.delete(requestId); }
+  }
+
+  taskFinished(sessionKey: string, taskId: string, _label: string | undefined, failed: boolean, ref?: SessionRef): void {
+    if (!isKindEnabled(this.prefs, 'agent_completed') || this.deps.hasCommittedActivity?.(sessionKey)) return;
     const state = this.stateFor(sessionKey, ref);
-    const name = label?.trim() || taskId;
-    this.post('agent_completed', sessionKey, `${sessionKey}:task:${taskId}:${failed ? 'failed' : 'done'}`,
-      failed ? NOTIFICATION_COPY.failedTitle : NOTIFICATION_COPY.completedTitle,
-      failed ? `${name} 执行失败` : `${name} 已完成`, state.ref);
+    const key = `${sessionKey}:task:${taskId}:${failed ? 'failed' : 'done'}`;
+    if (failed) {
+      this.post('agent_completed', sessionKey, [key], NOTIFICATION_COPY.failedTitle, NOTIFICATION_COPY.failedBody, state.ref);
+      return;
+    }
+    state.completions.add(key);
+    if (state.completionTimer !== undefined) return;
+    state.completionTimer = this.schedule(() => {
+      state.completionTimer = undefined;
+      const keys = [...state.completions];
+      state.completions.clear();
+      this.post('agent_completed', sessionKey, keys, NOTIFICATION_COPY.completedTitle, NOTIFICATION_COPY.completedBody, state.ref);
+    }, 5_000);
   }
 
   /**
@@ -262,6 +259,14 @@ export class HostNotifier {
     return true;
   }
 
+  accountChanged(): void {
+    this.disarmAll();
+    this.sessions.clear();
+    this.delivered.clear();
+    this.deliveredRemote.clear();
+    this.lastInteractionAt = 0;
+  }
+
   dispose(): void {
     this.disposed = true;
     this.disarmAll();
@@ -273,7 +278,7 @@ export class HostNotifier {
   private stateFor(sessionKey: string, ref?: SessionRef): SessionNotificationState {
     let state = this.sessions.get(sessionKey);
     if (!state) {
-      state = { turnActive: false, dialogsOnScreen: 0, permissionTimers: new Map() };
+      state = { turnActive: false, dialogsOnScreen: 0, permissionTimers: new Map(), questionTimers: new Map(), completions: new Set() };
       this.sessions.set(sessionKey, state);
     }
     if (ref) state.ref = ref;
@@ -292,49 +297,40 @@ export class HostNotifier {
     if (this.lastInteractionAt > state.turnEndedAt) return;           // the user came back
     if (state.dialogsOnScreen > 0) return;                            // !isDialogOnScreen()
     if (this.now() - state.turnEndedAt < threshold) return;           // elapsed >= threshold
-    this.post('idle_prompt', sessionKey, `${sessionKey}:idle:${state.turnEndedAt}`,
+    this.post('idle_prompt', sessionKey, [`${sessionKey}:idle:${state.turnEndedAt}`],
       NOTIFICATION_COPY.idleTitle, NOTIFICATION_COPY.idleBody, state.ref);
   }
 
-  private canDeliver(kind: NotificationKind): boolean {
-    if (this.disposed) return false;
-    if (!isKindEnabled(this.prefs, kind)) return false;
-    // The GUI adaptation: no banner for the window the user is already in.
-    return !this.deps.isWindowFocused();
+  private fresh(prefix: string, keys: string[], memory: Set<string>): string[] {
+    return keys.map(key => prefix + key).filter(key => this.deps.ledger
+      ? !this.deps.ledger.has(key, this.now()) : !memory.has(key));
   }
 
-  /** Whether Remote Control should hear of this kind: it is enabled and the user is away from the computer. */
-  private canDeliverRemote(kind: NotificationKind): boolean {
-    if (this.disposed || !this.deps.remote) return false;
-    if (!isKindEnabled(this.prefs, kind)) return false;
-    return !this.deps.isWindowFocused() || (this.deps.systemIdleSeconds?.() ?? 0) >= REMOTE_PUSH_IDLE_SECONDS;
+  private remember(keys: string[], memory: Set<string>): void {
+    if (this.deps.ledger) { this.deps.ledger.remember(keys, this.now()); return; }
+    for (const key of keys) memory.add(key);
+    while (memory.size > MAX_DELIVERED_KEYS) memory.delete(memory.values().next().value!);
   }
 
-  private postRemote(kind: NotificationKind, sessionKey: string, dedupeKey: string): void {
+  private post(kind: NotificationKind, sessionKey: string, keys: string[], title: string, body: string, ref?: SessionRef): void {
+    if (this.disposed || !isKindEnabled(this.prefs, kind) || this.deps.conversationNotificationsEnabled?.(sessionKey,kind) === false) return;
+    const focused = this.deps.isWindowFocused();
     const remoteKind = REMOTE_PUSH_KINDS[kind];
-    if (remoteKind === undefined || !this.canDeliverRemote(kind) || this.deliveredRemote.has(dedupeKey)) return;
-    this.deliveredRemote.add(dedupeKey);
-    if (this.deliveredRemote.size > MAX_DELIVERED_KEYS) {
-      for (const key of this.deliveredRemote) {
-        this.deliveredRemote.delete(key);
-        if (this.deliveredRemote.size <= MAX_DELIVERED_KEYS) break;
+    if (remoteKind && this.deps.remote && (!focused || (this.deps.systemIdleSeconds?.() ?? 0) >= REMOTE_PUSH_IDLE_SECONDS)) {
+      const remote = this.fresh('remote:', keys, this.deliveredRemote);
+      if (remote.length) {
+        try { this.deps.remote(remoteKind, sessionKey); this.remember(remote, this.deliveredRemote); }
+        catch { /* A remote push failure never prevents local delivery. */ }
       }
     }
-    try { this.deps.remote?.(remoteKind, sessionKey); } catch { /* A push that cannot be asked for changes nothing here. */ }
-  }
-
-  private post(kind: NotificationKind, sessionKey: string, dedupeKey: string, title: string, body: string, ref?: SessionRef): void {
-    this.postRemote(kind, sessionKey, dedupeKey);
-    if (!this.canDeliver(kind)) return;
-    if (this.delivered.has(dedupeKey)) return;
-    this.delivered.add(dedupeKey);
-    if (this.delivered.size > MAX_DELIVERED_KEYS) {
-      for (const key of this.delivered) {
-        this.delivered.delete(key);
-        if (this.delivered.size <= MAX_DELIVERED_KEYS) break;
-      }
-    }
-    this.deps.show(title, body, ref);
+    if (focused && (this.deps.isConversationVisible?.(sessionKey, ref) || !this.deps.inApp)) return;
+    const fresh = this.fresh('local:', keys, this.delivered);
+    if (!fresh.length) return;
+    if (focused) this.deps.inApp!(title, body, ref);
+    else if (!this.prefs.showPreviews && (kind === 'permission_prompt' || kind === 'agent_needs_input')) {
+      this.deps.show(kind === 'permission_prompt' ? NOTIFICATION_COPY.permissionTitle : NOTIFICATION_COPY.idleTitle, NOTIFICATION_COPY.idleBody, ref);
+    } else this.deps.show(title, body, ref);
+    this.remember(fresh, this.delivered);
   }
 
   private disarmIdle(state: SessionNotificationState): void {
@@ -348,6 +344,11 @@ export class HostNotifier {
       this.disarmIdle(state);
       for (const timer of state.permissionTimers.values()) this.unschedule(timer);
       state.permissionTimers.clear();
+      for (const timer of state.questionTimers.values()) this.unschedule(timer);
+      state.questionTimers.clear();
+      if (state.completionTimer !== undefined) this.unschedule(state.completionTimer);
+      state.completionTimer = undefined;
+      state.completions.clear();
     }
   }
 }

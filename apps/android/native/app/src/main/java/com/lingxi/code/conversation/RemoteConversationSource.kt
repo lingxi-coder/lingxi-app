@@ -47,6 +47,7 @@ interface RemoteSessionPort {
     fun follow(): Flow<RemoteSessionUpdateFfi>
     suspend fun setForeground(foreground: Boolean)
     suspend fun loadOlder()
+    suspend fun sessionActivityPage(after: ULong): String = error("remote activity unavailable")
     suspend fun fetchImage(imageRef: String): RemoteImageFfi
     suspend fun sendPrompt(text: String, images: List<RemotePromptImageFfi>)
     suspend fun retryPrompt(promptId: String)
@@ -398,6 +399,11 @@ class RemoteConversationSource(
     }
 
     suspend fun loadOlder() { requireConversation(); port.loadOlder() }
+
+    internal suspend fun sessionActivityPage(after: ULong): String {
+        requireConversation()
+        return port.sessionActivityPage(after)
+    }
 
     suspend fun setForeground(foreground: Boolean) = port.setForeground(foreground)
 

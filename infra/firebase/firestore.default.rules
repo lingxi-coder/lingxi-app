@@ -140,6 +140,21 @@ service cloud.firestore {
         && r.lastReadSeq <= getAfter(convPath(tid, cid)).data.lastSeq;
     }
 
+    function activeInboxSource(uid,r) {
+      let tid = r.sourceId;
+      let cid = r.conversationId;
+      return (r.kind == 'team' && inConversation(tid,cid)
+          && get(memberPath(tid,uid)).data.generation == r.generation)
+        || (r.kind == 'assistant'
+          && get(/databases/$(database)/documents/users/$(uid)/inboxSources/$(tid)).data.enabled
+          && get(/databases/$(database)/documents/users/$(uid)/inboxSources/$(tid)).data.generation == r.generation);
+    }
+    // Collection lists and service sessions use inboxApi, which checks every
+    // source at the same snapshot. Watchers subscribe to opaque change signals.
+    match /users/{uid}/inbox/{key} { allow get: if isSelf(uid) && activeInboxSource(uid,resource.data.ref); }
+    match /users/{uid}/inboxBadges/{shard} { allow read: if isSelf(uid); }
+    match /users/{uid}/inboxSignals/{shard} { allow read: if isSelf(uid); }
+
     match /users/{uid}/teams/{tid} { allow get, list: if isSelf(uid); }
     match /users/{uid}/friends/{other} { allow get, list: if isSelf(uid); }
     match /users/{uid}/blocks/{other} { allow get, list: if isSelf(uid); }

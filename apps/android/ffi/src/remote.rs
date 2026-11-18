@@ -254,6 +254,15 @@ impl AndroidRemoteControlClient {
         self.inner.load_older_messages(session_id).await
     }
 
+    /// Fetch up to 50 committed semantic activity positions for a followed session.
+    pub async fn session_activity_page(
+        &self,
+        session_id: String,
+        after: u64,
+    ) -> Result<String, RemoteFfiError> {
+        self.inner.session_activity_page(session_id, after).await
+    }
+
     /// The bytes of an image a record refers to.
     pub async fn fetch_image(
         &self,

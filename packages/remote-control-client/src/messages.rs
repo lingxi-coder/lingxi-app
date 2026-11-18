@@ -51,6 +51,8 @@ pub mod methods {
     pub const SESSION_PRESENCE: &str = "session.presence";
     /// Viewer request: older messages.
     pub const SESSION_HISTORY: &str = "session.history";
+    /// Bounded semantic activity positions of an attached session.
+    pub const SESSION_ACTIVITY: &str = "session.activity";
     /// Viewer request: fetch an image.
     pub const IMAGE_GET: &str = "image.get";
     /// Viewer request: send a prompt.
@@ -195,6 +197,13 @@ pub enum RemotePendingAction {
 /// One remote-enabled session in `sessions.list` / `sessions.changed`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteSessionSummary {
+    /// Content-free activity projection supplied by a compatible source host.
+    #[serde(
+        rename = "activityJson",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub activity_json: Option<String>,
     /// Session id.
     pub session_id: String,
     /// Title.
@@ -733,6 +742,65 @@ pub struct SessionHistoryResult {
     pub has_more: bool,
 }
 
+/// Semantic result positions strictly after the caller's acknowledged cursor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionActivityParams {
+    pub session_id: String,
+    pub after: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionActivityEntry {
+    pub cursor: u64,
+    pub result_uuids: Vec<String>,
+    pub kind: SessionActivityKind,
+    pub at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionActivityKind {
+    Reply,
+    TaskResult,
+    Failure,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionActivityPage {
+    pub items: Vec<SessionActivityEntry>,
+    pub cursor: u64,
+    pub baseline_cursor: u64,
+    pub has_more: bool,
+}
+
+impl SessionActivityPage {
+    /// Reject a discontinuous or unbounded source response before exposing any
+    /// positions to the personal read cursor.
+    pub(crate) fn covers_after(&self, after: u64) -> bool {
+        let start = after.max(self.baseline_cursor);
+        let count = self.cursor.saturating_sub(start).min(50);
+        self.baseline_cursor <= self.cursor
+            && self.items.len() == count as usize
+            && self.has_more == (self.cursor.saturating_sub(start) > count)
+            && self.items.iter().enumerate().all(|(index, item)| {
+                item.cursor == start + (index as u64) + 1
+                    && (1..=16).contains(&item.result_uuids.len())
+                    && item.result_uuids.iter().all(|id| {
+                        id.len() == 36
+                            && id.bytes().enumerate().all(|(offset, byte)| {
+                                if matches!(offset, 8 | 13 | 18 | 23) {
+                                    byte == b'-'
+                                } else {
+                                    byte.is_ascii_hexdigit()
+                                }
+                            })
+                    })
+            })
+    }
+}
+
 /// `image.get` (request).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageGetParams {
@@ -980,4 +1048,29 @@ pub struct BotThreadCreateParams {
 pub struct BotThreadCreateResult {
     /// The new chat's session id.
     pub session_id: String,
+}
+
+#[cfg(test)]
+mod activity_page_tests {
+    use super::*;
+
+    #[test]
+    fn activity_pages_follow_semantic_ordinals_and_reject_gaps_and_oversized_ids() {
+        let mut page: SessionActivityPage = serde_json::from_value(serde_json::json!({
+            "cursor": 4, "baselineCursor": 3, "hasMore": false,
+            "items": [{"cursor":4, "at":17,"kind":"taskResult","resultUuids":["3b8d33b8-4f4c-4659-b676-390a52c8daed"]}]
+        })).unwrap();
+        assert!(page.covers_after(0));
+        page.items[0].cursor = 3;
+        assert!(!page.covers_after(0));
+        page.items[0].cursor = 4;
+        page.items[0]
+            .result_uuids
+            .resize(17, "3b8d33b8-4f4c-4659-b676-390a52c8daed".into());
+        assert!(!page.covers_after(0));
+        page.items.clear();
+        assert!(page.covers_after(u64::MAX));
+        page.has_more = true;
+        assert!(!page.covers_after(4));
+    }
 }

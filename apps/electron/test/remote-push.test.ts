@@ -55,7 +55,9 @@ test('each notification kind that needs the user is passed to Remote Control wit
   h.notifier.permissionRequested(SESSION, 1, 'Bash', REF);
   h.advance(PERMISSION_PROMPT_NOTIFY_DELAY_MS + 1);
   h.notifier.askUserQuestion(SESSION, 2, REF);
+  h.advance(6000);
   h.notifier.taskFinished(SESSION, 't', 'x', false, REF);
+  h.advance(5000);
   assert.deepEqual(h.remote, [['permission', SESSION], ['question', SESSION], ['task', SESSION]]);
 });
 
@@ -64,6 +66,7 @@ test('with the window focused and the system not idle, Remote Control hears noth
   h.focus(true);
   h.idle(59);
   h.notifier.askUserQuestion(SESSION, 2, REF);
+  h.advance(6000);
   assert.deepEqual(h.remote, []);
   assert.deepEqual(h.shown, []);
 });
@@ -73,6 +76,7 @@ test('a focused window with the system idle for 60 s or more still reaches Remot
   h.focus(true);
   h.idle(60);
   h.notifier.askUserQuestion(SESSION, 2, REF);
+  h.advance(6000);
   assert.deepEqual(h.remote, [['question', SESSION]]);
   assert.deepEqual(h.shown, [], 'the desktop banner is still for an unfocused window');
 });
@@ -80,6 +84,7 @@ test('a focused window with the system idle for 60 s or more still reaches Remot
 test('an unfocused window reaches both, whatever the idle time', () => {
   const h = notifierHarness();
   h.notifier.askUserQuestion(SESSION, 2, REF);
+  h.advance(6000);
   assert.equal(h.remote.length, 1);
   assert.equal(h.shown.length, 1);
 });
@@ -101,6 +106,7 @@ test('the idle prompt is a remote push too, and the same prompt is not pushed tw
   assert.deepEqual(h.remote, [['idle', SESSION]]);
   h.notifier.askUserQuestion(SESSION, 9, REF);
   h.notifier.askUserQuestion(SESSION, 9, REF);
+  h.advance(6000);
   assert.equal(h.remote.length, 2);
 });
 
@@ -118,7 +124,7 @@ test('a remote sink that throws changes nothing for the desktop', () => {
     remote: () => { throw new Error('boom'); },
   });
   notifier.setPreferences(defaultNotificationPreferences());
-  notifier.askUserQuestion(SESSION, 1, REF);
+  notifier.taskFinished(SESSION, 'failed', undefined, true, REF);
   assert.equal(shown.length, 1);
 });
 

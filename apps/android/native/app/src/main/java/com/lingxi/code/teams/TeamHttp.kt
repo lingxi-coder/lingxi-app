@@ -59,10 +59,18 @@ internal object TeamHttp {
                         socket.requestMethod = "POST"; socket.doOutput = true; socket.setRequestProperty("Content-Type", "application/json")
                         socket.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
                     }
-                    val success = socket.responseCode in 200..299
+                    val status = socket.responseCode
+                    val success = status in 200..299
                     val stream = if (success) socket.inputStream else socket.errorStream
-                    val value = JSONObject(stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: "{}")
-                    if (!success) throw TeamMessageFailure(value.optJSONObject("error")?.optString("code") ?: "SERVICE_UNAVAILABLE")
+                    val bodyText = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: "{}"
+                    if (!success) {
+                        val error = runCatching { JSONObject(bodyText) }.getOrNull()
+                        val code = error?.optJSONObject("error")?.optString("code")?.takeIf(String::isNotBlank)
+                            ?: error?.optString("code")?.takeIf(String::isNotBlank)
+                            ?: when (status) { 401 -> "UNAUTHENTICATED"; 403 -> "PERMISSION_DENIED"; else -> "SERVICE_UNAVAILABLE" }
+                        throw TeamMessageFailure(code, status)
+                    }
+                    val value = JSONObject(bodyText)
                     if (finished.compareAndSet(false, true)) continuation.resume(value)
                 } catch (error: Exception) {
                     if (finished.compareAndSet(false, true)) continuation.resumeWithException(error)

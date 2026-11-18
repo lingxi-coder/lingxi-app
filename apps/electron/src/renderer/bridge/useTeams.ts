@@ -1,38 +1,10 @@
 import { DESKTOP_BRIDGE_GLOBAL } from '../../shared/desktopBridge';
 import { useMemo } from 'react';
-import type { DesktopTeamsApi, TeamsApi } from '../../../../../packages/teams';
 import { useTeamsWorkspace, type UseTeams } from '../../../../../packages/teams/useTeamsWorkspace';
 import type { TeamsWorkspaceOptions } from '../../../../../packages/teams/workspace';
 import { useAccountState } from './useAccountState';
-
-/** The two switches of the Bots page that keep this Mac serving, as the Teams pages change them. */
-export interface HostBackground { setKeepAwake(enabled: boolean): Promise<unknown>; setOpenAtLogin(enabled: boolean): Promise<unknown>; openLoginItems(): Promise<unknown> }
-
-/** The renderer's `TeamsApi` over the preload bridge, for one account. */
-export function desktopTeamsApi(desktop: DesktopTeamsApi, uid: string, background?: HostBackground): TeamsApi {
-  return {
-    hostStatus: () => desktop.hostStatus(uid),
-    ...(background ? {
-      setHostBackground: async change => {
-        if (change.openAtLogin !== undefined) await background.setOpenAtLogin(change.openAtLogin);
-        if (change.keepAwake !== undefined) await background.setKeepAwake(change.keepAwake);
-      },
-      openLoginItems: async () => { await background.openLoginItems(); },
-    } : {}),
-    localBots: () => desktop.localBots(uid),
-    selectSharedFiles: instanceId => desktop.selectSharedFiles(uid, instanceId),
-    publishedKnowledge: (teamId, sharedBotId) => desktop.publishedKnowledge(uid, teamId, sharedBotId),
-    publishLocalBot: input => desktop.publishLocalBot(uid, input),
-    offerSharedBot: input => desktop.offerSharedBot(uid, input),
-    acceptSharedBot: input => desktop.acceptSharedBot(uid, input),
-    openBotMarket: () => desktop.openBotMarket(uid),
-    list: () => desktop.list(uid), detail: teamId => desktop.detail(uid, teamId), execute: command => desktop.execute(uid, command),
-    watchMessages: (scope, conversationId, next) => desktop.watchMessages(uid, scope, conversationId, next),
-    services: command => desktop.services(uid, command), serviceMessages: command => desktop.serviceMessages(uid, command),
-    messages: command => desktop.messages(uid, command), onMessagesChanged: callback => desktop.onMessagesChanged(callback),
-    onChanged: callback => desktop.onChanged(callback),
-  };
-}
+import { desktopTeamsApi, type HostBackground } from './desktopTeamsApi';
+export { desktopTeamsApi, registerDesktopInboxReads, type HostBackground } from './desktopTeamsApi';
 
 /** The Teams workspace of the signed-in LingXi account on this Desktop. */
 export function useTeams(options: TeamsWorkspaceOptions = {}, setKeepAwake?: (enabled: boolean) => Promise<unknown>): UseTeams {

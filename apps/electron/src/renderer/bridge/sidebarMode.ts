@@ -22,7 +22,8 @@ export function pageForMode(mode: SidebarMode, current: { page: AppPage; botChat
  * one: the Apps, Teams, Friends and Bots pages select their corresponding workspaces. Every
  * other page keeps the mode as it is. Bots that cannot run here are not a mode.
  */
-export function reconcileSidebarMode(mode: SidebarMode, page: AppPage, botsAvailable: boolean): SidebarMode {
+export function reconcileSidebarMode(mode: SidebarMode, page: AppPage, botsAvailable: boolean, unifiedInbox = false): SidebarMode {
+  if (unifiedInbox && mode === 'home' && (page === 'teams' || page === 'friends')) return mode;
   if (page === 'apps') return 'apps';
   if (page === 'teams') return 'teams';
   if (page === 'friends') return 'friends';

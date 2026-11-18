@@ -14,7 +14,7 @@ export interface FriendCard {
   /** Both only when `friends`; the generation is read from the card, never assumed. */
   teamId?: string; generation?: number;
   /** The chat summary, only when `friends`. Each part is absent until the first message or read mark. */
-  lastSeq?: number; lastReadSeq?: number; lastChangeSeq?: number; lastMessage?: Pointer;
+  lastSeq?: number; lastReadSeq?: number; unreadCount?:number; lastChangeSeq?: number; lastMessage?: Pointer;
 }
 /** `users/{uid}/blocks/{other}`; `at` in epoch milliseconds. The name is the one the person had when blocked. */
 export interface BlockEntry { uid: string; at: number; displayName: string; handle?: string }
@@ -163,10 +163,10 @@ export function matchesFilter(card: Pick<FriendCard, 'displayName' | 'handle'>, 
 // ─── Unread and badge (D13, D14) ────────────────────────────────────────────
 
 /** `max(0, lastSeq - lastReadSeq)`; a missing counter is 0 and `lastChangeSeq` never counts. */
-export const unreadOf = (card: Pick<FriendCard, 'lastSeq' | 'lastReadSeq'>): number => Math.max(0, (card.lastSeq ?? 0) - (card.lastReadSeq ?? 0));
+export const unreadOf = (card: Pick<FriendCard, 'lastSeq' | 'lastReadSeq' | 'unreadCount'>): number => card.unreadCount ?? Math.max(0, (card.lastSeq ?? 0) - (card.lastReadSeq ?? 0));
 /** Incoming requests, the unread of the friends cards and the live team offers (D28). `unread` lets a host count an open chat as read. */
-export const badgeCount = (cards: readonly Pick<FriendCard, 'state' | 'lastSeq' | 'lastReadSeq'>[], offers: readonly Pick<TeamOffer, 'expiresAt'>[], nowMs: number,
-  unread: (card: Pick<FriendCard, 'lastSeq' | 'lastReadSeq'>) => number = unreadOf): number =>
+export const badgeCount = (cards: readonly Pick<FriendCard, 'state' | 'lastSeq' | 'lastReadSeq' | 'unreadCount'>[], offers: readonly Pick<TeamOffer, 'expiresAt'>[], nowMs: number,
+  unread: (card: Pick<FriendCard, 'lastSeq' | 'lastReadSeq' | 'unreadCount'>) => number = unreadOf): number =>
   cards.reduce((sum, card) => sum + (card.state === 'incoming' ? 1 : card.state === 'friends' ? unread(card) : 0), 0) + offers.filter(offer => offerLive(offer, nowMs)).length;
 /** Nothing at 0, the number up to 99, `99+` from 100. */
 export const badgeText = (count: number): string | null => count <= 0 ? null : count > BADGE_CAP ? `${BADGE_CAP}+` : String(count);

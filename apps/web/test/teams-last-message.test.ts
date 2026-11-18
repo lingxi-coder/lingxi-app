@@ -85,7 +85,7 @@ function watch() {
     collection: (_db: unknown, ...path: string[]) => target('collection', path),
     doc: (_db: unknown, ...path: string[]) => target('doc', path),
     query: (source: { path: string }) => ({ ...source, kind: 'query' }),
-    where: () => ({}), orderBy: () => ({}),
+    where: () => ({}), limit: () => ({}), orderBy: () => ({}),
     onSnapshot: (source: { kind: string; path: string }, _options: unknown, next: (snapshot: unknown) => void) => { listeners.push({ path: `${source.kind}:${source.path}`, next }); return () => { stopped++; }; },
   } as unknown as typeof import('firebase/firestore');
   const received: MessageSnapshot[] = [];

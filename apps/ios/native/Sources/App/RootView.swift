@@ -214,6 +214,19 @@ struct RootView: View {
     #endif
     @State private var botsBadge = BotsBadge()
     @State private var teamsWorkspace = TeamsWorkspace()
+    @State private var inbox = InboxStore.shared
+    @State private var showsInbox = Self.startsInInbox
+
+    private static var startsInInbox: Bool {
+        #if DEBUG
+        // Existing composer-focused fixtures enter their subject directly.
+        let env = ProcessInfo.processInfo.environment
+        if env["LINGXI_UI_TESTING"] == "1" { return env["LINGXI_UI_TEST_INBOX"] == "1" }
+        #endif
+        return true
+    }
+    @State private var inboxPreviewSession: String?
+    @State private var localInboxRows: [String: InboxLocalSession] = [:]
     @State private var friendsWorkspace = FriendsWorkspace()
     @State private var externalImport: CanonicalDeepLink?
     @State private var externalLinkError: String?
@@ -285,6 +298,7 @@ struct RootView: View {
 
         let snapshot = providers.makeLaunchSnapshot()
         let preferences = ProjectScopedPreferences.forRuntime()
+        preferences.setDraftAccountUID(FirebaseAccount.shared.user?.uid)
         #if canImport(harness_runtimeFFI)
         let cronStorageRoot = ProcessInfo.processInfo.environment["LINGXI_UI_TESTING"] == "1" ? root + "/ui-test-cron" : root
         #else
@@ -805,7 +819,7 @@ struct RootView: View {
     private var rootStack: some View {
         ZStack {
             TabShell(navigation: navigation) {
-                ShellWideLayout { chatsTab(wide: $0) }
+                ShellWideLayout { width in chatsTab(wide: width) }
             } settings: {
                 settingsTab
             }
@@ -833,12 +847,40 @@ struct RootView: View {
         .environment(botsBadge)
         .environment(teamsWorkspace)
         .environment(friendsWorkspace)
+        .environment(inbox)
+        .task(id: FirebaseAccount.shared.user?.uid) {
+            let uid = FirebaseAccount.shared.user?.uid
+            switchInboxDraftAccount(uid)
+            await inbox.configure(uid)
+            await refreshLocalInbox()
+        }
+        .task(id: inboxCatalog) { await refreshLocalInbox() }
+        .onChange(of: source.model.streaming) { _, streaming in
+            if !streaming { Task { await refreshLocalInbox() } }
+        }
+        .onChange(of: scenePhase, initial: true) { _, phase in inbox.setForeground(phase == .active) }
+        .onChange(of: inbox.route) { _, row in
+            if let row { openInboxRow(row); inbox.clearRoute() }
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let notice = inbox.notice {
+                HStack {
+                    Button("Conversation update", systemImage: "bell") { Task { await inbox.open(notice) } }
+                    Spacer()
+                    Button("Dismiss", systemImage: "xmark") { inbox.clearNotice() }.labelStyle(.iconOnly)
+                }
+                .padding(.horizontal).padding(.vertical, 8)
+                .background(.regularMaterial)
+            }
+        }
         #if canImport(harness_runtimeFFI)
         .environment(remoteManager)
         .task(id: FirebaseAccount.shared.user?.uid) {
             await remoteManager.configure(uid: FirebaseAccount.shared.user?.uid, watchHosts: false)
         }
         .onChange(of: remoteManager.waitingChats, initial: true) { _, count in botsBadge.count = count }
+        .onChange(of: remoteManager.sessions, initial: true) { _, _ in refreshRemoteInbox() }
+        .onChange(of: remoteManager.connectedHostID) { _, _ in refreshRemoteInbox() }
         .onChange(of: navigation.tabs.selected) { _, selected in
             remoteManager.setSelected(selected == .bots)
         }
@@ -847,6 +889,161 @@ struct RootView: View {
 
     /// The Chats tab: the conversation, its drawer and the pages pushed above it.
     private func chatsTab(wide: Bool) -> some View {
+        Group {
+            if showsInbox && navigation.path.isEmpty {
+                NavigationStack {
+                    UnifiedInboxView(open: openInboxRow, newConversation: {
+                        showsInbox = false
+                        inboxPreviewSession = nil
+                        startNewChat(in: .global, mode: activeMode)
+                    }, resumeConversation: {
+                        showsInbox = false
+                    })
+                }
+            } else {
+                assistantChatsTab(wide: wide)
+            }
+        }
+        .onChange(of: navigation.tabs.scrollToTopRequests[.chats]) { _, _ in
+            guard Self.startsInInbox, navigation.path.isEmpty else { return }
+            showsInbox = true
+        }
+        .onChange(of: localInboxContext, initial: true) { old, new in
+            assistantReadWindow = InboxAssistantReadWindow()
+            if let new { inbox.setCurrent(new) }
+            else if let old { inbox.setCurrent(nil, replacing: old) }
+        }
+        .task(id: localInboxVisibleRead) { await commitLocalInboxExposure() }
+    }
+
+    private var inboxCatalog: [InboxLocalSession] {
+        let global = projectStore.globalSessions.map { InboxLocalSession(session: $0, scope: .global, context: nil) }
+        let projects = projectStore.projects.flatMap { project in
+            project.sessions.map { InboxLocalSession(session: $0, scope: .project(project.id), context: project.record.name) }
+        }
+        return global + projects
+    }
+
+    @State private var assistantVisibleResults: [String: UUID] = [:]
+    @State private var assistantReadWindow = InboxAssistantReadWindow()
+
+    private var localInboxContext: InboxRef? {
+        guard scenePhase == .active, !showsInbox, navigation.tabs.selected == .chats, navigation.path.isEmpty,
+              navigation.runningAppID == nil, externalImport == nil, externalActionApproval == nil,
+              !navigation.drawerOpenOrOpening, app.setupDone, !source.model.sessionTransitionPending else { return nil }
+        return localInboxRows.values.first { local in
+            local.sessionID == canonicalSessionID(source.model.activeSessionId) && local.scope == activeScope
+        }?.ref.map(inbox.localAssistantRef)
+    }
+
+    private var localInboxVisibleRead: InboxAssistantExposure? {
+        guard let ref = localInboxContext, !assistantVisibleResults.isEmpty, !source.model.streaming,
+              inboxPreviewSession != ref.conversationId,
+              let row = inbox.row(ref), row.sourceCursor > row.readThrough else { return nil }
+        return InboxAssistantExposure(ref: ref, sourceCursor: row.sourceCursor, sourceRevision: row.sourceRevision,
+                                      readThrough: row.readThrough, visible: Set(assistantVisibleResults.values))
+    }
+
+    private func commitLocalInboxExposure() async {
+        guard let exposure = localInboxVisibleRead, let frozen = inbox.row(exposure.ref) else { return }
+        do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+        guard exposure == localInboxVisibleRead else { return }
+        assistantReadWindow.confirm(exposure.visible)
+        let ref = exposure.ref
+        let upper = exposure.sourceCursor
+        while max(exposure.readThrough, assistantReadWindow.through) < upper {
+            let start = max(exposure.readThrough, assistantReadWindow.through)
+            let page = await Task.detached(priority: .utility) {
+                InboxLocalSession.readActivity(ref, after: start, through: upper)
+            }.value
+            guard !Task.isCancelled, exposure == localInboxVisibleRead else { return }
+            let next = assistantReadWindow.advance(page, after: start)
+            if next > start { inbox.sawContent(frozen, through: next) }
+            guard page.count == 50, next == page.last?.cursor else { break }
+        }
+    }
+
+    private func switchInboxDraftAccount(_ uid: String?) {
+        scopedPreferences.setDraftAccountUID(uid)
+        guard inbox.uid != uid else { return }
+        for entry in sessionHost.entries {
+            entry.draft = scopedPreferences.draft(scope: entry.scope, mode: entry.mode, ownerSessionID: entry.sessionID)
+            entry.draftSourceCodeUnits = scopedPreferences.draftSourceCodeUnits(
+                scope: entry.scope, mode: entry.mode, ownerSessionID: entry.sessionID)
+            entry.attachment = nil
+        }
+        draft = sessionHost.entry(for: source)?.draft ?? ""
+        hasUnsavedConversationMedia = false
+    }
+
+    private func refreshLocalInbox() async {
+        let catalog = inboxCatalog
+        let account = inbox.uid
+        let projection = await Task.detached(priority: .utility) { InboxLocalSession.load(catalog) }.value
+        guard catalog == inboxCatalog, !Task.isCancelled, account == inbox.uid else { return }
+        localInboxRows = projection.sessions
+        inbox.updateLocal(rows: projection.rows, activity: projection.activity)
+    }
+
+    #if canImport(harness_runtimeFFI)
+    private func refreshRemoteInbox() {
+        guard remoteManager.uid == inbox.uid, let host = remoteManager.connectedHostID,
+              remoteManager.connection?.phase == .ready else {
+            inbox.updateRemoteAssistant(rows: [], activity: [:])
+            return
+        }
+        var rows: [InboxRow] = []
+        var activityByKey: [String: InboxAssistantActivity] = [:]
+        for session in remoteManager.sessions {
+            guard let json = session.activityJson, let activity = try? JSONDecoder().decode(InboxAssistantActivity.self, from: Data(json.utf8)) else { continue }
+            let ref = InboxRef(kind: .assistant, sourceId: activity.sourceId, conversationId: canonicalSessionID(session.sessionId), generation: 1)
+            guard ref.valid, activity.cursor >= 0, (0...activity.cursor).contains(activity.baselineCursor) else { continue }
+            let row = InboxRow(key: ref.key, ref: ref, category: .assistant, title: session.title, context: session.projectLabel, remoteHostId: host)
+            rows.append(InboxAssistantSummary(activity: activity).updating(row))
+            activityByKey[ref.key] = activity
+        }
+        inbox.updateRemoteAssistant(rows: rows, activity: activityByKey)
+    }
+    #endif
+
+    private func openInboxRow(_ row: InboxRow) {
+        navigation.closeSidebar()
+        switch row.ref.kind {
+        case .assistant:
+            if let local = localInboxRows[row.key] {
+                navigation.path = []
+                navigation.tabs.select(.chats)
+                inboxPreviewSession = nil
+                showsInbox = false
+                openRecentSession(scope: local.scope, mode: local.session.mode, sessionID: local.session.sessionId,
+                                  transcriptPath: local.session.transcriptPath)
+            } else if let host = row.remoteHostId, !row.offline, InboxRef.safe(host) {
+                navigation.tabs.botsRequest = BotsRequest(hostID: host, sessionID: row.ref.conversationId)
+                navigation.tabs.select(.bots)
+            } else {
+                externalLinkError = String(localized: "The source device is unavailable")
+            }
+        case .team:
+            if row.category == .friend {
+                guard let peer = row.peerUid ?? friendsWorkspace.list.first(where: {
+                    $0.teamId == row.ref.sourceId && $0.generation == row.ref.generation
+                })?.uid, InboxRef.safe(peer) else {
+                    externalLinkError = String(localized: "This friendship is unavailable")
+                    return
+                }
+                navigation.tabs.friendsInboxRequest = FriendsInboxRoute(ref: row.ref, peer: peer)
+                navigation.tabs.select(.friends)
+            } else {
+                navigation.tabs.teamInboxRequest = row.ref
+                navigation.tabs.select(.teams)
+            }
+        case .service:
+            navigation.tabs.teamServiceInboxRequest = row.ref
+            navigation.tabs.select(.teams)
+        }
+    }
+
+    private func assistantChatsTab(wide: Bool) -> some View {
         @Bindable var navigation = navigation
         return GeometryReader { geometry in
           ZStack {
@@ -894,6 +1091,15 @@ struct RootView: View {
                         }
                     }
                         .toolbar {
+                            if navigation.path.isEmpty {
+                                ToolbarItem(placement: .topBarLeading) {
+                                    Button("Inbox", systemImage: "tray") {
+                                        navigation.closeSidebar()
+                                        showsInbox = true
+                                    }
+                                    .accessibilityIdentifier("inbox.back")
+                                }
+                            }
                             if !wide && navigation.path.isEmpty {
                                 ToolbarItem(placement: .topBarLeading) {
                                     Button(action: navigation.showSidebar) {
@@ -1506,8 +1712,22 @@ struct RootView: View {
                         sessionID: request.taskId
                     )
                 },
-                onRetryAuthoringBinding: { if let owner { retryAuthoringBinding(for: owner) } }
+                onRetryAuthoringBinding: { if let owner { retryAuthoringBinding(for: owner) } },
+                onInboxResultVisibility: { rowID, uuid, visible in
+                    if visible { assistantVisibleResults[rowID] = uuid }
+                    else if assistantVisibleResults[rowID] == uuid { assistantVisibleResults.removeValue(forKey: rowID) }
+                },
+                onInboxJumpToLatest: {
+                    guard let ref = localInboxContext, let row = inbox.row(ref) else { return }
+                    inboxPreviewSession = nil
+                    inbox.markRead([row])
+                }
             )
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if let notice = inbox.inlineNotice, notice.ref == localInboxContext {
+                    Label("Conversation update", systemImage: "bell").font(.caption).padding(5)
+                }
+            }
             .environment(\.openLocalApp, { id in
                 navigation.runApp(id)
                 Task { await LocalApps.library.refresh() }
@@ -3483,7 +3703,7 @@ struct RootView: View {
     }
 
     private var isConversationSurfaceVisible: Bool {
-        navigation.path.isEmpty && navigation.tabs.selected == .chats && navigation.runningAppID == nil && externalImport == nil && externalActionApproval == nil
+        !showsInbox && navigation.path.isEmpty && navigation.tabs.selected == .chats && navigation.runningAppID == nil && externalImport == nil && externalActionApproval == nil
     }
 
     private func markHandoffNavigationChanged() {
@@ -3648,7 +3868,10 @@ struct RootView: View {
         // The action opens in its own tab (§2.6); each tab keeps its stack, so only Chats is unwound.
         let landing = landingTab(for: action)
         if let landing { navigation.selectedTab = landing }
-        if landing == .chats { navigation.path.removeAll() }
+        if landing == .chats {
+            navigation.path.removeAll()
+            if action != .openApp { showsInbox = false }
+        }
 
         switch action {
         case let .canonical(target):
@@ -3755,6 +3978,7 @@ struct RootView: View {
                     externalLinkError = String(localized: "deep_link_conversation_workspace_missing"); return true
                 }
             }
+            inboxPreviewSession = target.params["message"] == nil ? nil : canonicalSessionID(id)
             let applied = applyAppAction(.openConversation(sessionID: id, turnID: nil, workspaceKey: target.params["workspace"], mode: mode), approvedDraftChange: true)
             if applied { pendingLinkedSessionID = id }
             if applied, let raw = target.params["message"], let uuid = UUID(uuidString: raw) {

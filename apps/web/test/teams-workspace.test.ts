@@ -174,7 +174,7 @@ test('initialTeamId picks the team to open when it is listed', async context => 
   assert.equal(snapshot().team?.generation, 2);
 });
 
-test('switching teams closes the previous controller and hands it a directory-only unread listener', async context => {
+test('switching teams closes the previous controller and leaves no listeners on the inactive team', async context => {
   const { fake, workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
   await until(() => snapshot().conversations.length === 2, 'team A');
   workspace.selectConversation('chan-a'); await until(() => snapshot().messages.length === 5, 'the open thread');
@@ -186,18 +186,18 @@ test('switching teams closes the previous controller and hands it a directory-on
   await assert.rejects(first.queue('create', 'late'), /INVALID_INPUT/, 'the previous controller is closed');
   assert.equal(fake.open('team-aaaa', 'chan-a').length, 0, 'its message listener is released');
   assert.equal(fake.open('team-bbbb').length, 1, 'team B has one listener: its controller');
-  await until(() => fake.open('team-aaaa', '').length === 1, 'team A\'s unread listener');
+  assert.equal(fake.open('team-aaaa', '').length,0);
   assert.equal(snapshot().selectedTeamId, 'team-bbbb'); assert.equal(snapshot().team?.generation, 2);
   assert.equal(snapshot().detail?.team.id, 'team-bbbb');
   // Back to A: the conversation that was open is open again, and B is counted by a listener.
   workspace.selectTeam('team-aaaa');
   await until(() => snapshot().selectedConversationId === 'chan-a' && snapshot().messages.length === 5, 'the remembered conversation');
   assert.equal(fake.open('team-aaaa', '').length, 0, 'the selected team does not also keep an unread listener');
-  assert.ok(fake.open('team-bbbb', '').length === 1);
+  assert.equal(fake.open('team-bbbb', '').length,0);
 });
 
-test('unread: the selected team counts its open directory, the others a directory-only listener', async context => {
-  const { fake, workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
+test('legacy explicit directory watching respects monotonic reads and membership fencing', async context => {
+  const { fake, workspace, snapshot } = workspaceFixture(()=>{}, {maxWatchedTeams:1}); context.after(() => workspace.close());
   await until(() => snapshot().unreadByTeam['team-aaaa'] === 3 && snapshot().unreadByTeam['team-bbbb'] === 2, 'both counts');
   assert.equal(snapshot().totalUnread, 5);
   const [light] = fake.open('team-bbbb');
@@ -379,7 +379,7 @@ test('an older refresh that finishes last never overwrites a newer one', async c
 
 test('an invalidating change hides teams and detail at once, then refetches', async context => {
   const { fake, workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
-  await until(() => snapshot().unreadByTeam['team-bbbb'] === 2, 'load');
+  await until(() => snapshot().unreadByTeam['team-aaaa'] === 3 && !!snapshot().detail, 'load');
   const before = snapshot();
   fake.invalidate();
   const during = snapshot();
@@ -392,7 +392,7 @@ test('an invalidating change hides teams and detail at once, then refetches', as
   assert.equal(fake.open('team-bbbb').length, 0);
   await until(() => snapshot().teams.length === 2 && snapshot().detail !== null && !snapshot().loading, 'the refetch');
   assert.equal(snapshot().messaging, before.messaging, 'refetching the same generation keeps the controller');
-  await until(() => snapshot().unreadByTeam['team-bbbb'] === 2, 'the other team\'s count again');
+  assert.equal(fake.open('team-bbbb').length,0);
   // A change that is not an invalidation refetches without hiding anything.
   const listed = fake.listCalls;
   fake.invalidate(false);
@@ -445,9 +445,9 @@ test('a new membership generation replaces the controller; the same generation k
 
 test('close releases every listener and the workspace stops reacting', async context => {
   const { fake, workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
-  await until(() => snapshot().unreadByTeam['team-bbbb'] === 2 && !!snapshot().messaging, 'load');
+  await until(() => snapshot().unreadByTeam['team-aaaa'] === 3 && !!snapshot().messaging, 'load');
   workspace.selectConversation('chan-a'); await settle();
-  assert.ok(fake.openWatches >= 2); assert.ok(fake.changed.size >= 1); assert.ok(fake.signals.size >= 2);
+  assert.equal(fake.openWatches,1); assert.ok(fake.changed.size >= 1); assert.ok(fake.signals.size >= 2);
   let notified = 0; workspace.subscribe(() => { notified++; });
   const listed = fake.listCalls;
   workspace.close();

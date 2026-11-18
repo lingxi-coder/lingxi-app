@@ -5,7 +5,11 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 import { onRequest } from 'firebase-functions/v2/https';
 import { onDocumentCreated, onDocumentUpdated, onDocumentWritten } from 'firebase-functions/v2/firestore';
-import { onTeamMessageCreated } from './team-message-push.mjs';
+import { getFunctions } from 'firebase-admin/functions';
+import { onTaskDispatched } from 'firebase-functions/v2/tasks';
+import { InboxStore } from './inbox-store.mjs';
+import { InboxDelivery } from './inbox-delivery.mjs';
+import { InboxJobs } from './inbox-jobs.mjs';
 import { mirrorFriendChat, mirrorFriendRead } from './friend-summary.mjs';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { defineSecret } from 'firebase-functions/params';
@@ -81,10 +85,160 @@ export const teamsApi = onRequest({ region: 'us-central1', minInstances: 0, maxI
   res.status(output.status).send(Buffer.from(await output.arrayBuffer()));
 });
 
-// Deployment requires the separately approved default-db/Eventarc IAM preflight.
-export const onTeamMessage = onDocumentCreated({ document: 'teams/{teamId}/conversations/{conversationId}/messages/{messageId}',
-  database: '(default)', region: 'us-central1', memory: '256MiB', maxInstances: 2, serviceAccount: pushServiceAccount,
-}, event => onTeamMessageCreated({ db: getFirestore(app), pushStore, messaging: getMessaging(app), ...event.params, original: event.data?.data() }));
+// The source change receipts are committed with the conversation transaction by
+// both SDK and HTTP writers. Eventarc and Cloud Tasks use the same ordered fold.
+const enqueue = async (payload, id, delay = 0) => {
+  const opts = { scheduleDelaySeconds: delay, dispatchDeadlineSeconds: 540, ...(id ? { id } : {}) };
+  try {
+    await getFunctions(app).taskQueue('locations/us-central1/functions/inboxWork').enqueue(payload, opts);
+  } catch (e) {
+    if (e.code !== 'functions/task-already-exists') throw e;
+  }
+};
+const inbox = new InboxStore(teamsDb, Date.now, enqueue);
+const delivery = new InboxDelivery({ db: teamsDb, pushStore, messaging: getMessaging(app), enqueue });
+const jobs = new InboxJobs(inbox, delivery, enqueue);
+const triggerOpts = {
+  database: '(default)',
+  region: 'us-central1',
+  memory: '256MiB',
+  maxInstances: 4,
+  timeoutSeconds: 540,
+  serviceAccount: pushServiceAccount,
+  retry: true
+};
+export const inboxWork = onTaskDispatched(
+  {
+    region: 'us-central1',
+    memory: '512MiB',
+    timeoutSeconds: 540,
+    serviceAccount: pushServiceAccount,
+    invoker: [pushServiceAccount],
+    retryConfig: { maxAttempts: 20, minBackoffSeconds: 2, maxBackoffSeconds: 120 },
+    rateLimits: { maxConcurrentDispatches: 16 }
+  },
+  req => jobs.run(req.data)
+);
+const inboxHandler = createTeamsHandler({
+  inbox: {
+    execute: async (uid, p) => {
+      if (p?.action === 'list' && !p.after) await jobs.bootstrap(uid);
+      return inbox.execute(uid, p);
+    }
+  },
+  verifyToken: token => getAuth(app).verifyIdToken(token, true),
+  origins: [
+    'https://lingxios.net',
+    'https://lingxi-5e4b2.web.app',
+    'https://lingxi-5e4b2.firebaseapp.com',
+    'http://localhost:5173',
+    'http://127.0.0.1:5173'
+  ]
+});
+export const inboxApi = onRequest(
+  {
+    region: 'us-central1',
+    memory: '256MiB',
+    maxInstances: 4,
+    timeoutSeconds: 60,
+    invoker: 'public',
+    serviceAccount: pushServiceAccount
+  },
+  async (req, res) => {
+    const headers = new Headers();
+    for (const [key, value] of Object.entries(req.headers))
+      if (value) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
+    const response = await inboxHandler(
+      new Request(new URL(req.url, 'https://inbox.internal'), {
+        method: req.method,
+        headers,
+        ...(!['GET', 'HEAD'].includes(req.method) ? { body: req.rawBody } : {})
+      })
+    );
+    response.headers.forEach((value, key) => res.set(key, value));
+    res.status(response.status).send(Buffer.from(await response.arrayBuffer()));
+  }
+);
+const refOf = (kind, { sourceId, teamId, conversationId }) => ({
+  kind,
+  sourceId: sourceId ?? teamId,
+  conversationId
+});
+export const onTeamMessage = onDocumentCreated(
+  { ...triggerOpts, maxInstances: 2, document: 'teams/{teamId}/conversations/{conversationId}/messages/{messageId}' },
+  e => jobs.wake(refOf('team', e.params))
+);
+const conversationTrigger = (collection, kind) =>
+  onDocumentWritten({ ...triggerOpts, document: collection + '/{sourceId}/conversations/{conversationId}' }, e =>
+    jobs.conversation(refOf(kind, e.params), e.data.before.data(), e.data.after.data())
+  );
+export const onInboxTeamConversation = conversationTrigger('teams', 'team');
+export const onInboxServiceConversation = conversationTrigger('services', 'service');
+const readTrigger = (collection, kind) =>
+  onDocumentWritten(
+    { ...triggerOpts, document: collection + '/{sourceId}/conversations/{conversationId}/reads/{uid}' },
+    async e => {
+      const ref = refOf(kind, e.params),
+        uid = e.params.uid;
+      if (await inbox.fold(uid, ref)) await jobs.wake(ref);
+
+    }
+  );
+export const onInboxTeamRead = readTrigger('teams', 'team');
+export const onInboxServiceRead = readTrigger('services', 'service');
+const membershipTrigger = (collection, kind) =>
+  onDocumentWritten({ ...triggerOpts, document: collection + '/{sourceId}/members/{uid}' }, async e => {
+    const { uid, sourceId } = e.params;
+    if (e.data.before.data()?.generation === e.data.after.data()?.generation) return;
+    await enqueue({type:'reconcile',uid,kind,sourceId});
+    if (e.data.after.exists) await enqueue({type:'scanConversations',uid,kind,sourceId});
+  });
+export const onInboxTeamMember = membershipTrigger('teams', 'team');
+export const onInboxServiceMember = membershipTrigger('services', 'service');
+const taskTrigger = (collection, kind) =>
+  onDocumentWritten({ ...triggerOpts, document: collection + '/{sourceId}/tasks/{taskId}' }, e => {
+    const task = e.data.after.data() ?? e.data.before.data();
+    if (!task?.requester || !task.conversationId) return;
+    const ref = {
+      kind,
+      sourceId: e.params.sourceId,
+      conversationId: task.conversationId,
+      generation: task.requester.generation
+    };
+    return jobs.run({ type: 'task', uid: task.requester.uid, ref, taskId: e.params.taskId });
+  });
+export const onInboxTeamTask = taskTrigger('teams', 'team');
+export const onInboxServiceTask = taskTrigger('services', 'service');
+export const onInboxNotice = onDocumentCreated({ ...triggerOpts, document: 'users/{uid}/inboxNotices/{id}' }, e =>
+  delivery.onNotice(e.params.uid, e.params.id)
+);
+export const onInboxReadBatch = onDocumentCreated({...triggerOpts,document:'users/{uid}/inboxReadBatches/{id}'},
+  e=>enqueue({type:'readBatch',uid:e.params.uid,id:e.params.id}));
+export const onInboxBootstrap = onDocumentCreated(
+  { ...triggerOpts, document: 'users/{uid}/inboxJobs/bootstrap' },
+  e => enqueue({ type: 'bootstrap', uid: e.params.uid })
+);
+export const onInboxSourceBinding = onDocumentWritten(
+  { ...triggerOpts, document: 'users/{uid}/inboxSources/{sourceId}' },
+  e => {
+    if (!e.data.after.data()?.enabled) return enqueue({type:'reconcile',uid:e.params.uid,kind:'assistant',sourceId:e.params.sourceId});
+  }
+);
+const scopePolicyTrigger = (collection, kind) =>
+  onDocumentUpdated(
+    {
+      ...triggerOpts,
+      document: collection + '/{sourceId}'
+    },
+    async e => {
+      const before = e.data.before.data(),
+        after = e.data.after.data();
+      if (before.state === after.state && JSON.stringify(before.audience) === JSON.stringify(after.audience)) return;
+      await enqueue({type:'scanMembers',kind,sourceId:e.params.sourceId});
+    }
+  );
+export const onInboxServicePolicy = scopePolicyTrigger('services', 'service');
+export const onInboxTeamPolicy = scopePolicyTrigger('teams', 'team');
 
 // Friend list summaries: a pair team's chat pointer and the owner's read mark are copied onto the friend cards, so clients
 // need no per-friend listener. The document paths name the pair chat itself, so ordinary Team conversations never invoke

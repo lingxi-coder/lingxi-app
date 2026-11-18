@@ -326,8 +326,7 @@ export class FriendsWorkspace {
   private settle(): void {
     this.cards = this.raw.map(card => {
       const named = this.names.get(card.uid);
-      const open = this.chat?.uid === card.uid;
-      return named || open ? { ...card, ...named, ...(open ? { lastReadSeq: card.lastSeq } : {}) } : card;
+      return named ? { ...card, ...named } : card;
     });
     this.syncChat();
     this.publish();

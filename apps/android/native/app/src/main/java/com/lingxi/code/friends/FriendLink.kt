@@ -15,7 +15,7 @@ sealed interface FriendLink {
     data object Requests : FriendLink
 
     /** `friend/chat?uid=<1-128 URL-safe characters>`: the chat with one friend. */
-    data class Chat(val uid: String) : FriendLink
+    data class Chat(val uid: String, val expectedTeam: String? = null, val expectedGeneration: Long? = null, val conversationId: String? = null) : FriendLink
 
     companion object {
         /** The Friends destination of an already parsed link, or null for any other route. */

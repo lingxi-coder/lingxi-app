@@ -154,6 +154,7 @@ export interface ServiceMessage {
 export interface ServiceSync { conversation: ServiceSession; changes: Array<{ seq: number; messageId: string }>; messages: ServiceMessage[]; hasMore: boolean }
 /** What a client needs to use services. The last three exist only where Bots are hosted (Desktop), for the publisher. */
 export interface HostedServicesApi {
+  readVisible?(scope:ServiceScope,id:string,through:number,manualUnreadRevision:number):Promise<unknown>;
   services<T>(command: ServiceCommand): Promise<T>;
   /** A session or task command in a service's scope: the Team message route with `serviceId`. */
   serviceMessages<T>(command: Record<string, unknown> & { serviceId: string; generation: number; action: string }): Promise<T>;
@@ -162,7 +163,7 @@ export interface HostedServicesApi {
   hostStatus?(): Promise<SharedHostStatus>;
 }
 /** The caller's actions in a service's scope; the service refuses every other one. */
-export const SERVICE_READ_ACTIONS = ['list', 'sync', 'read'] as const;
+export const SERVICE_READ_ACTIONS = ['list', 'sync', 'history', 'read'] as const;
 export const SERVICE_TASK_ACTIONS = ['createConversation', 'submit', 'answerWait', 'decideWait', 'cancelTask', 'getTask', 'listTasks'] as const;
 /** Whether a value is a command a caller may send in a service's scope. Hosts check this before sending what a page asked for. */
 export function isServiceMessageCommand(value: unknown): value is Record<string, unknown> & { serviceId: string; generation: number; action: string } {

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { deleteApp, initializeApp, type FirebaseOptions } from 'firebase/app';
 import { connectAuthEmulator, initializeAuth, inMemoryPersistence, signInWithCustomToken, signOut, type Auth } from 'firebase/auth';
-import { collection, connectFirestoreEmulator, getFirestore, onSnapshot, orderBy, query, terminate, where,
+import { collection, connectFirestoreEmulator, initializeFirestore, memoryLocalCache, memoryLruGarbageCollector, onSnapshot, orderBy, query, terminate, where,
   type DocumentData, type Firestore, type FirestoreError, type QuerySnapshot } from 'firebase/firestore';
 
 export interface TeamsFirestoreOptions {
@@ -40,7 +40,7 @@ export async function openTeamsFirestoreSession(options: TeamsFirestoreOptions):
   }
   try {
     auth = initializeAuth(app, { persistence: inMemoryPersistence });
-    db = getFirestore(app);
+    db = initializeFirestore(app, { localCache: memoryLocalCache({ garbageCollector: memoryLruGarbageCollector({ cacheSizeBytes: 32 * 1024 * 1024 }) }) });
     const firestore = db;
     if (options.emulator) {
       connectAuthEmulator(auth, `http://${options.emulator.host}:${options.emulator.authPort}`, { disableWarnings: true });

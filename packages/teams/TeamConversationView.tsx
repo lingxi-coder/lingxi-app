@@ -1,3 +1,6 @@
+import {SourceNoticePreview} from '../inbox/SourceNoticePreview';
+import type {InboxNoticeTarget} from '../inbox/contracts';
+import { durableReadFrontier,observeTranscript,type VisibleReadFrontier } from '../inbox/visibility.js';
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
 import { useTeamTasks } from './bot-runs.js';
 import type { TeamTaskView } from './execution.js';
@@ -14,7 +17,7 @@ import { pendingPayload, type TeamConversation, type TeamMessage } from './messa
 import { ArtifactButton, BotRun } from './BotRunCards';
 import { AutoReplyDialog, autoReplyBots } from './AutoReplyDialog';
 import { buildStreamRows, formatClock, placeTasks, visibleStart, WINDOW_SIZE } from './stream.js';
-import { Avatar, ConversationLead, Dialog, Icon, platformChip, platformNotice, useDocumentShown, useIsoLayoutEffect, type RenderAvatar, type RenderMarkdown } from './ui';
+import { Avatar, ConversationLead, Dialog, Icon, platformChip, platformNotice, useIsoLayoutEffect, type RenderAvatar, type RenderMarkdown } from './ui';
 import { conversationLabel, unreadCount, type Identity, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';
 import { intlTag, teamsText, useTeamsText } from './i18n.js';
 
@@ -29,6 +32,7 @@ export interface FriendHeader {
 }
 
 export interface TeamConversationViewProps {
+  notificationTarget?:InboxNoticeTarget;
   workspace: TeamsWorkspace;
   snapshot: TeamsSnapshot;
   /** Whether the details drawer is open. With `onToggleDetails` the header shows a button for it. */
@@ -79,7 +83,9 @@ function emptyState(snapshot: TeamsSnapshot, locale: string): { title: string; b
  * and is rebuilt (drafts aside) whenever another one is opened.
  */
 export function TeamConversationView(props: TeamConversationViewProps): ReactElement {
-  const { snapshot, locale } = props;
+  const { snapshot, locale,notificationTarget } = props;
+  const [dismissed,setDismissed]=useState('');
+  const token=notificationTarget?JSON.stringify([notificationTarget.key,notificationTarget.generation,notificationTarget.through,notificationTarget.messageId,notificationTarget.taskId]):'';
   const t = useTeamsText(locale);
   const conversation = snapshot.conversation, model = snapshot.messaging, team = snapshot.team;
   if (!conversation || !model || !team) {
@@ -91,6 +97,7 @@ export function TeamConversationView(props: TeamConversationViewProps): ReactEle
       {snapshot.creation ? <CreationBanner workspace={props.workspace} snapshot={snapshot} locale={locale} /> : null}
     </section>;
   }
+  if(notificationTarget && token!==dismissed)return <SourceNoticePreview api={props.workspace.api} kind="team" sourceId={team.id} generation={team.generation} conversationId={conversation.id} locale={locale} target={notificationTarget} onReturn={()=>setDismissed(token)} />;
   return <ConversationPane key={`${snapshot.uid}:${team.id}:${team.generation}:${conversation.id}`} {...props} conversation={conversation} model={model} team={team} />;
 }
 
@@ -117,6 +124,19 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   const [autoReplyOpen, setAutoReplyOpen] = useState(false);
   const [answerWait, setAnswerWait] = useState<string>();
   const [focusToken, setFocusToken] = useState(0);
+  const [peerRead,setPeerRead]=useState<number|null>(null);
+  useEffect(()=>{
+    if(conversation.kind!=='dm' || snapshot.offline || !workspace.api.peerReceipt) {setPeerRead(null);return;}
+    let live=true,run=0;
+    const load=()=>{
+      const version=++run;
+      if(document.visibilityState!=='visible'){setPeerRead(null);return;}
+      void workspace.api.peerReceipt!({teamId:team.id,generation:team.generation},conversation.id)
+        .then(value=>{if(live && version===run)setPeerRead(value.readThrough);}).catch(()=>{if(live && version===run)setPeerRead(null);});
+    };
+    load();const timer=setInterval(load,30000);document.addEventListener('visibilitychange',load);
+    return ()=>{live=false;clearInterval(timer);document.removeEventListener('visibilitychange',load);};
+  },[workspace,conversation.id,conversation.kind,snapshot.offline,team.id,team.generation]);
   const [pinned, setPinned] = useState(true);
   const [seen, setSeen] = useState(() => messages[messages.length - 1]?.seq ?? 0);
   const scroller = useRef<HTMLDivElement>(null), content = useRef<HTMLOListElement>(null);
@@ -193,7 +213,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
     if (!node || placed.current || !rows.length) return;
     placed.current = true;
     const divider = node.querySelector<HTMLElement>('[data-unread-divider]');
-    if (divider) node.scrollTop = Math.max(0, divider.offsetTop - 56); else toBottom();
+    if (divider) { if (typeof CSS === 'undefined' || !CSS.supports('scroll-initial-target','nearest')) node.scrollTop = Math.max(0, divider.offsetTop - 56); } else toBottom();
     measure();
   // Placed once, when the first rows arrive.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -211,15 +231,20 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
     if (!node || !saved) return;
     anchor.current = undefined;
     node.scrollTop = saved.top + (node.scrollHeight - saved.height);
-  }, [start]);
+  }, [start,startId]);
   useEffect(() => { if (pinned) setSeen(tail?.seq ?? 0); }, [pinned, tail?.seq]);
-  // A friend chat reads itself while it is shown and its newest message is in view (D13); a lost mark is retried by the next change.
-  const shown = useDocumentShown();
-  useEffect(() => {
-    if (friend && shown && pinned && unread > 0 && !snapshot.offline) void workspace.markRead();
-  // The mark depends on what is in view, not on the workspace object or the busy flag.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [friend, shown, pinned, unread, tail?.seq, snapshot.offline]);
+  const readFrontier=useRef<VisibleReadFrontier>();
+  const [readError,setReadError]=useState(false);
+  // Capture the manual flag only on entry. A later flag set on another device survives old exposure callbacks.
+  useEffect(()=>{
+    const node=scroller.current;
+    if(!node || typeof IntersectionObserver==='undefined')return;
+    const frontier=durableReadFrontier(uid,'team:'+team.id+':'+conversation.id,team.generation,conversation.lastReadSeq,conversation.manualUnreadRevision??0,
+      (through,revision)=>{void model.visibleRead(conversation.id,through,revision,conversation.pendingActionRevision).then(()=>setReadError(false)).catch(()=>setReadError(true));},()=>setReadError(true));
+    readFrontier.current=frontier;
+    return observeTranscript(node,frontier);
+  },[model,conversation.id]);
+  useEffect(()=>readFrontier.current?.advance(conversation.lastReadSeq),[conversation.lastReadSeq]);
   useEffect(() => {
     const node = content.current, box = scroller.current;
     if (!node || !box || typeof ResizeObserver === 'undefined') return;
@@ -228,10 +253,11 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
-  const showEarlier = () => {
+  const showEarlier = async () => {
     const node = scroller.current;
     if (node) anchor.current = { height: node.scrollHeight, top: node.scrollTop };
-    setStartId(messages[Math.max(0, start - WINDOW_SIZE)]?.id);
+    if(start>0) setStartId(messages[Math.max(0,start-WINDOW_SIZE)]?.id);
+    else await workspace.attempt(async()=>{const id=await model.older();if(id)setStartId(id);});
   };
 
   const answer = (message: TeamMessage) => { setReply(message); setEditing(undefined); setAnswerWait(undefined); setFocusToken(token => token + 1); };
@@ -267,6 +293,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
       {auto.bots.length ? <button type="button" className="tw-icon-btn" aria-pressed={auto.on.length > 0} aria-label={t('teams_auto_reply_title')} title={t('teams_auto_reply_title')} onClick={() => setAutoReplyOpen(true)}><Icon name="bot" /></button> : null}
       {onToggleDetails && !friend ? <button type="button" className="tw-icon-btn" aria-pressed={!!detailsOpen} aria-label={t('teams_team_details')} title={t('teams_team_details')} onClick={onToggleDetails}><Icon name="panel" /></button> : null}
     </header>
+    {readError?<p role="status">{locale.startsWith('zh')?'已读状态暂时无法同步':'Read status could not sync'}</p>:null}
     {snapshot.messagingError
       ? <div className="tw-banner" role="alert" data-kind="error"><span>{messageErrorText(snapshot.messagingError, locale)}</span><button type="button" className="tw-link" onClick={() => workspace.reconnect()}>{t('teams_reconnect')}</button></div>
       : snapshot.messagingConnecting
@@ -280,7 +307,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
 
     <div className="tw-stream-wrap">
       <div ref={scroller} className="tw-stream" role="log" aria-label={t('tw_messages')} tabIndex={0} onScroll={measure}>
-        {start > 0 ? <div className="tw-earlier"><button type="button" onClick={showEarlier}>{t('teams_messages_earlier')} ({start})</button></div> : null}
+        {start > 0 || (messages[0]?.seq ?? 0) > 1 && workspace.api.historyPage ? <div className="tw-earlier"><button type="button" onClick={()=>void showEarlier()}>{t('teams_messages_earlier')}</button></div> : null}
         {!messages.length && !snapshot.pending.length && !runs.tasks.length ? loadingMessages
           ? <p className="tw-empty-line" role="status">{t('teams_loading_messages')}</p>
           : <div className="tw-empty" role="status"><h3>{t('teams_preview_none')}</h3><p>{t('teams_empty_thread_hint')}</p></div> : null}
@@ -301,6 +328,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
             return <Fragment key={row.key}><MessageItem message={localized(message)} grouped={grouped} author={author} mine={mine} owner={message.author.kind === 'shared_bot' ? nameOf(snapshot.bots.find(bot => bot.sharedBotId === (message.author as Extract<TeamMessage['author'], { kind: 'shared_bot' }>).sharedBotId)?.maintainer.uid ?? '') : ''}
               quote={quoteOf(message)} locale={tag} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} question={question && !approval} approval={!!approval}
               onReply={lock ? undefined : answering ? () => startAnswer(answering) : answer} onEdit={mine && participant && !message.decision ? edit : undefined} onRecall={mine && participant && !message.decision ? setRecall : undefined}>
+              {mine && peerRead!==null && peerRead>=message.seq && message===tail?<small>{locale.startsWith('zh')?'已读':'Read'}</small>:null}
               {message.readFiles?.length && !message.recalled ? <p className="tw-msg-sources" title={message.readFiles.map(file => file.name).join('\n')}>
                 <Icon name="clip" size={12} /> {t('tw_conv_read_files_fmt', message.readFiles.map(file => file.name).join(t('tw_list_separator')))}</p> : null}
               {message.attachments?.length && !message.recalled ? <MessageFiles api={workspace.api} scope={scope} files={message.attachments} locale={locale} onRevoke={mine && participant ? file => setTakeBack(file) : undefined} /> : null}
@@ -331,7 +359,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
           })}
         </ol>
       </div>
-      {!pinned ? <button type="button" className="tw-jump" onClick={() => { toBottom(); pinnedRef.current = true; setPinned(true); }}>
+      {!pinned || (tail && tail.seq < conversation.lastSeq) ? <button type="button" className="tw-jump" onClick={() => { if(tail && tail.seq<conversation.lastSeq) model.select(conversation.id); void workspace.markRead(); toBottom(); pinnedRef.current = true; setPinned(true); }}>
         <Icon name="arrowDown" />{unseen > 0 ? t('teams_new_messages_pill_fmt', unseen) : t('tw_conv_latest')}
       </button> : null}
     </div>

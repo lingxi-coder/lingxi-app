@@ -66,6 +66,8 @@ const MAX_IDLE_THRESHOLD_MS = 3_600_000;
 
 export interface NotificationPreferences {
   schemaVersion: typeof NOTIFICATION_SCHEMA_VERSION;
+  /** Include Bot and tool details in native notification text when explicitly enabled. */
+  showPreviews?: boolean;
   /** Master switch. GUI equivalent of `preferredNotifChannel !== 'notifications_disabled'`. */
   enabled: boolean;
   /** Gates `idle_prompt`. Upstream has no per-type toggle for this one (the
@@ -89,6 +91,7 @@ export function defaultNotificationPreferences(): NotificationPreferences {
   return {
     schemaVersion: NOTIFICATION_SCHEMA_VERSION,
     enabled: true,
+    showPreviews: false,
     idlePromptNotifEnabled: true,
     inputNeededNotifEnabled: true,
     taskCompleteNotifEnabled: true,
@@ -117,6 +120,7 @@ export function parseNotificationPreferences(value: unknown): NotificationPrefer
   return {
     schemaVersion: NOTIFICATION_SCHEMA_VERSION,
     enabled: bool('enabled'),
+    showPreviews: bool('showPreviews'),
     idlePromptNotifEnabled: bool('idlePromptNotifEnabled'),
     inputNeededNotifEnabled: bool('inputNeededNotifEnabled'),
     taskCompleteNotifEnabled: bool('taskCompleteNotifEnabled'),

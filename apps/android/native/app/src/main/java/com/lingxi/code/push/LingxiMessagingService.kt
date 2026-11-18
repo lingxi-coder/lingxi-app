@@ -25,6 +25,15 @@ internal object PushMessagePolicy {
 class LingxiMessagingService : FirebaseMessagingService() {
     override fun onRegistered(installationId: String) { PushRegistration.registered(this, installationId) }
     override fun onMessageReceived(message: RemoteMessage) {
+        if (message.data["kind"] == "inbox") {
+            val uid = FirebaseAuth.getInstance().currentUser?.uid
+            if (uid != null && message.data["recipientUid"] == uid) {
+                com.lingxi.code.inbox.InboxAlert.fromPush(message.data)?.let {
+                    com.lingxi.code.inbox.AssistantInboxAlerts.receive(this, uid, it)
+                }
+            }
+            return
+        }
         val enabled = NotificationPrefsStore(this).load().enabled && NotificationManagerCompat.from(this).areNotificationsEnabled()
         val accepted = PushMessagePolicy.accepts(message.data, FirebaseAuth.getInstance().currentUser?.uid, enabled, System.currentTimeMillis())
         // Correlate opt-in device checks without logging users, content or FIDs.

@@ -25,6 +25,10 @@ internal data class HostedServicesState(
     val sessions: List<HostedServiceSession> = emptyList(),
     val session: String? = null,
     val messages: List<TeamMessage> = emptyList(),
+    val lastSeq: Long = 0,
+    val earlier: Long? = null,
+    val loadingHistory: Boolean = false,
+    val olderWindow: Boolean = false,
     val tasks: List<TeamTask> = emptyList(),
     /** The last refusal, as a code ([HostedService.errorRes] gives its words). */
     val error: String? = null,
@@ -107,15 +111,23 @@ internal class HostedServicesModel(
             runCatching { refresh() }
         }
     }
-    fun show(view: HostedServiceView) {
+    fun show(view: HostedServiceView, selectedSession: String? = null) {
         closeService()
         mutableState.update { it.copy(open = view) }
-        scope.launch { attempt { loadSessions(selectLast = true) } }
+        scope.launch {
+            attempt {
+                loadSessions(selectLast = selectedSession == null)
+                if (selectedSession != null && current.open?.serviceId == view.serviceId) {
+                    if (current.sessions.any { it.id == selectedSession }) select(selectedSession)
+                    else throw TeamMessageFailure("CONVERSATION_REQUIRED")
+                }
+            }
+        }
         watch()
     }
     fun closeService() {
         pause(); log = HostedServiceLog()
-        mutableState.update { it.copy(open = null, sessions = emptyList(), session = null, messages = emptyList(), tasks = emptyList()) }
+        mutableState.update { it.copy(open = null, sessions = emptyList(), session = null, messages = emptyList(), lastSeq = 0, earlier = null, loadingHistory = false, olderWindow = false, tasks = emptyList()) }
     }
     suspend fun leave(): Boolean {
         val open = current.open ?: return false
@@ -143,7 +155,7 @@ internal class HostedServicesModel(
     fun select(id: String) {
         if (id == current.session) return
         log = HostedServiceLog()
-        mutableState.update { it.copy(session = id, messages = emptyList(), tasks = emptyList()) }
+        mutableState.update { it.copy(session = id, messages = emptyList(), lastSeq = 0, earlier = null, loadingHistory = false, olderWindow = false, tasks = emptyList()) }
         watch()
     }
     suspend fun newSession(title: String): Boolean = attempt { makeSession(title) }
@@ -207,7 +219,12 @@ internal class HostedServicesModel(
         val session = current.session
         try {
             if (session != null) {
-                var next = log
+                val initial = log.before == null
+                var next = if (initial) {
+                    val history = call("/v1/teams/messages", HostedServiceCommands.history(open.serviceId, generation, session))
+                    if (current.open?.serviceId != open.serviceId || current.session != session) return
+                    HostedServiceLog.fromHistory(history, current.uid, open.sharedBotId)
+                } else log
                 while (true) {
                     val (read, more) = next.apply(call("/v1/teams/messages", HostedServiceCommands.sync(open.serviceId, generation, session, next.after)), current.uid, open.sharedBotId)
                     next = read
@@ -217,7 +234,7 @@ internal class HostedServicesModel(
                 val tasks = (0 until listed.length()).map { TeamTask.parse(listed.getJSONObject(it)) }.sortedBy { it.createdAt }
                 if (current.open?.serviceId != open.serviceId || current.session != session) return
                 log = next
-                mutableState.update { it.copy(messages = next.messages, tasks = tasks) }
+                mutableState.update { it.copy(messages = next.messages, lastSeq = next.lastSeq, earlier = next.earlier, olderWindow = next.olderWindow, tasks = tasks) }
             }
             val now = HostedServiceView.lookup(call("/v1/services", HostedServiceCommands.service("getService", open.serviceId)))
             if (now != null && current.open?.serviceId == open.serviceId) mutableState.update { it.copy(open = now.copy(generation = now.generation ?: generation)) }
@@ -225,6 +242,36 @@ internal class HostedServicesModel(
             // A broken page is read again from the start next time.
             if (failure.code == "CHANGE_GAP" || failure.code == "INVALID_DATA") log = HostedServiceLog()
             throw failure
+        }
+    }
+
+    fun jumpToLatest() {
+        log = HostedServiceLog()
+        watch()
+    }
+
+    fun loadEarlier() {
+        val open = current.open ?: return
+        val session = current.session ?: return
+        val generation = open.generation ?: return
+        val before = log.earlier ?: return
+        if (current.loadingHistory) return
+        pause()
+        mutableState.update { it.copy(loadingHistory = true) }
+        scope.launch {
+            try {
+                attempt {
+                    val response = call("/v1/teams/messages", HostedServiceCommands.history(open.serviceId, generation, session, before))
+                    if (current.open?.serviceId != open.serviceId || current.session != session) return@attempt
+                    log = log.appendOlder(response, current.uid, open.sharedBotId)
+                    mutableState.update { it.copy(messages = log.messages, earlier = log.earlier, olderWindow = log.olderWindow) }
+                }
+            } finally {
+                if (current.open?.serviceId == open.serviceId && current.session == session) {
+                    mutableState.update { it.copy(loadingHistory = false) }
+                    watch()
+                }
+            }
         }
     }
 

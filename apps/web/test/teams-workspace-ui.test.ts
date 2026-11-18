@@ -156,16 +156,16 @@ test('visibleStart: the newest window, widened for unread messages and for what 
   assert.equal(visibleStart(list(30), { lastReadSeq: 30, uid }), 0);
   assert.equal(visibleStart(all, { lastReadSeq: 250, uid }), 250 - WINDOW_SIZE, 'the newest hundred');
   assert.equal(visibleStart(all, { lastReadSeq: 100, uid }), 100 - UNREAD_CONTEXT, 'back to the first unread, with context');
-  assert.equal(visibleStart(all, { lastReadSeq: 0, uid }), 0, 'all unread and within the cap: everything');
+  assert.equal(visibleStart(all, { lastReadSeq: 0, uid }), 250-WINDOW_MAX, 'unread rows stay within the active cap');
   const big = list(600);
   assert.equal(visibleStart(big, { lastReadSeq: 0, uid }), 600 - WINDOW_MAX, 'but never past the cap by itself');
   assert.equal(visibleStart(big, { lastReadSeq: 600, uid, startId: 'message-10' }), 9, 'what the reader asked for is honored, even past the cap');
   assert.equal(visibleStart(big, { lastReadSeq: 0, uid, startId: 'message-10' }), 9);
-  assert.equal(visibleStart(all, { lastReadSeq: 250, uid, startId: 'message-240' }), 150, 'asking for less than the default changes nothing');
-  assert.equal(visibleStart(all, { lastReadSeq: 250, uid, startId: 'gone' }), 150, 'an unknown anchor is ignored');
+  assert.equal(visibleStart(all, { lastReadSeq: 250, uid, startId: 'message-240' }), 250-WINDOW_SIZE, 'asking for less than the default changes nothing');
+  assert.equal(visibleStart(all, { lastReadSeq: 250, uid, startId: 'gone' }), 250-WINDOW_SIZE, 'an unknown anchor is ignored');
   assert.equal(visibleStart(all, { lastReadSeq: 250, uid, size: 20 }), 230);
   const mine = all.map(value => ({ ...value, author: { kind: 'user' as const, uid } }));
-  assert.equal(visibleStart(mine, { lastReadSeq: 0, uid }), 150, 'unread messages written by the reader do not widen the window');
+  assert.equal(visibleStart(mine, { lastReadSeq: 0, uid }), 250-WINDOW_SIZE, 'unread messages written by the reader do not widen the window');
   // New messages leave the start where it is, so the reader is not moved.
   const grown = [...all, message(251), message(252)];
   assert.equal(visibleStart(grown, { lastReadSeq: 252, uid, startId: 'message-100' }), 99);
@@ -322,7 +322,7 @@ test('sidebar: team switcher, three sections with their add buttons, rows with p
   const markup = html(sidebar(workspace, snapshot()));
   assert.match(markup, /<nav class="tw-scope tw-sidebar" aria-label="Teams">/);
   assert.match(markup, /class="tw-switcher" aria-haspopup="menu" aria-expanded="false"/); assert.match(markup, /Acme/);
-  assert.match(markup, /class="tw-switcher"[^]*?aria-label="3 unread"[^]*?<\/button>/, 'Beta has 3 unread messages, which the switcher points out');
+  assert.doesNotMatch(markup, /class="tw-switcher"[^>]*aria-label="3 unread"/, 'inactive teams use the unified inbox badge');
   for (const heading of ['Channels', 'Direct messages', 'Bot chats']) assert.match(markup, new RegExp(`<h3 id="tw-section-[a-zA-Z]+">${heading}</h3>`));
   for (const add of ['New channel', 'New message', 'Message a Bot']) assert.match(markup, new RegExp(`aria-label="${add}"`));
   assert.match(markup, /class="tw-row-title">general</); assert.match(markup, /class="tw-row-title">Bob</, 'a dm is named after the other person, not its stored title');

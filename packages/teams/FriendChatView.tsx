@@ -10,7 +10,9 @@ import { Icon, PopupMenu, type MenuItem, type RenderMarkdown } from './ui';
 import type { TeamsWorkspace } from './workspace.js';
 import { useTeamsText } from './i18n.js';
 
+import type {InboxNoticeTarget} from '../inbox/contracts';
 export interface FriendChatViewProps extends FriendsViewProps {
+  notificationTarget?:InboxNoticeTarget;
   renderMarkdown?: RenderMarkdown;
   /** The current time for "Today" and "Yesterday". Defaults to now. */
   now?: number | Date;
@@ -42,7 +44,7 @@ function Unavailable({ locale, onBack }: { locale: string; onBack(): void }): Re
   </section>;
 }
 
-function PairChat({ workspace, snapshot, renderAvatar, renderMarkdown, locale, now, chat, pair }: FriendChatViewProps & { chat: FriendChat; pair: TeamsWorkspace }): ReactElement {
+function PairChat({ notificationTarget,workspace, snapshot, renderAvatar, renderMarkdown, locale, now, chat, pair }: FriendChatViewProps & { chat: FriendChat; pair: TeamsWorkspace }): ReactElement {
   const t = useTeamsText(locale);
   const view = useSyncExternalStore(pair.subscribe, pair.getSnapshot);
   const [welcome, setWelcome] = useState(chat.joined);
@@ -79,7 +81,7 @@ function PairChat({ workspace, snapshot, renderAvatar, renderMarkdown, locale, n
   </>;
   return <div className="tw-friends-chat">
     {welcome ? <p className="tw-banner" role="status">{nowFriends(chat.name, locale)}</p> : null}
-    <TeamConversationView workspace={pair} snapshot={view} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} locale={locale} now={now}
+    <TeamConversationView notificationTarget={notificationTarget} workspace={pair} snapshot={view} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} locale={locale} now={now}
       friend={friendChat ? { uid: chat.uid, name: chat.name, handle: chat.handle, actions } : undefined} onBack={friendChat ? undefined : toChat} />
     {panel && friendChat ? <FriendBotsPanel id={botsId} pair={pair} view={view} chat={chat} locale={locale} onClose={close} /> : null}
   </div>;

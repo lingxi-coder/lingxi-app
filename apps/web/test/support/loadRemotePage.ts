@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { JsxEmit, ModuleKind, ScriptTarget, transpileModule } from 'typescript';
 import type { ReactElement } from 'react';
+import { loadTeamsModule } from './loadTeamsModule';
 
 /**
  * The routing component of the remote page, `src/pages/RemotePage.tsx` as it
@@ -22,6 +23,9 @@ export function loadRemotePage(modules: Record<string, unknown>): (props: Record
     if (specifier === '../remote/remote.css') return {};
     if (specifier === '../app/router') return require('../../src/app/router.ts');
     if (specifier === '../remote/strings') return require('../../src/remote/strings.ts');
+    // A shared component whose `react` imports resolve through this Web package, as Vite does. The test renderer cannot
+    // portal into the page's topbar slot, so the page provides none and the views keep their headers inline.
+    if (specifier === '../../../../packages/teams/ChatTopbar') return { ...loadTeamsModule<Record<string, unknown>>('ChatTopbar'), ChatTopbarTarget: { Provider: ({ children }: { children: unknown }) => children } };
     return pageRequire(specifier);
   };
   new Function('require', 'module', 'exports', transpiled)(substitute, module, module.exports);

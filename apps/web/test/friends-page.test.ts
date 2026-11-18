@@ -30,7 +30,8 @@ function pageFixture() {
     '../app/firebase': { auth }, '../teams/firestore': { teamsDatabase: () => ({}) }, '../friends/add-intent': intent,
     '../friends/api': { webFriendsApi: () => ({ ...friends.api, close() {} }) }, '../teams/api': { webTeamsApi: () => ({ ...teams.api, close() {} }) },
     '../friends/FriendsWorkspaceView': { FriendsWorkspaceView }, '../teams/SignInCard': { SignInCard },
-    '../../../../packages/teams/i18n': i18n,
+    '../../../../packages/teams/i18n': i18n, // The test renderer cannot portal into the page's topbar slot: the page provides no slot, so the views keep their headers inline.
+    '../../../../packages/teams/ChatTopbar': { ...loadTeamsModule<Record<string, unknown>>('ChatTopbar'), ChatTopbarTarget: { Provider: ({ children }: { children: unknown }) => children } },
   };
   new Function('require', 'module', 'exports', compiled.outputText)((id: string) => id in mocks ? mocks[id] : require(id), module, module.exports);
   return { Page: module.exports.default, friends, teams, signIn() { const user = { uid, email: 'fixture@example.invalid' } as User; listeners.forEach(next => next(user)); } };

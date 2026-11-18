@@ -912,6 +912,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
         */}
         {windowing.enabled && <div ref={windowing.beforeRef} className="transcript-window-spacer" aria-hidden="true" style={{ height: windowing.before }} />}
         {presentationRows.slice(windowing.start, windowing.end).map((item, mountedIndex) => {
+          const planDocument = item.type === 'narration' ? submittedPlans.find(plan => plan.id === item.id) : undefined;
           const content = (() => {
           if (item.type === 'meta' && item.files?.length) return <TurnFileSummary key={item.id} files={item.files} onReview={onReviewFiles ? path => onReviewFiles(item.id, item.files!, path) : undefined} />;
           if (item.type === 'agents') return <TranscriptAgents key={item.id} id={item.id} open={collapseOpen(visible, sessionKey, item.id) ?? false} onSetOpen={setOpen} agents={item.agents} launches={item.launches} onOpenAgent={onOpenAgent} activeAgentId={activeAgentId} />;
@@ -920,8 +921,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
               open={collapseOpen(visible, sessionKey, item.id) ?? false} onSetOpen={setOpen} />
           </div>;
           if (item.type === 'narration') {
-            const document = submittedPlans.find(plan => plan.id === item.id);
-            if (document) return <PlanPreview key={item.id} content={document.content} status={document.status} writing={running && item.streamed === true && item.text.trimStart().startsWith('<proposed_plan>') && !item.text.includes('</proposed_plan>')} onOpen={() => onOpenPlan ? onOpenPlan(document.id) : setLocalPlan(document)}/>;
+            if (planDocument) return <PlanPreview key={item.id} content={planDocument.content} status={planDocument.status} writing={running && item.streamed === true && item.text.trimStart().startsWith('<proposed_plan>') && !item.text.includes('</proposed_plan>')} onOpen={() => onOpenPlan ? onOpenPlan(planDocument.id) : setLocalPlan(planDocument)}/>;
             const user = item.role === 'user';
             const peer = user ? crossSessionMessage(item.text) : null;
             const displayItem = peer ? { ...item, text: peer.text } : item;
@@ -1064,11 +1064,12 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
           }))];
           const uuid = messageTarget && uuids.includes(messageTarget) ? messageTarget : uuids[0];
           const index = windowing.start + mountedIndex;
+          const isChatMessage = item.type === 'narration' && (item.role === 'user' || item.role === 'assistant') && !planDocument;
           return <div className="transcript-row" data-row-type={item.type} data-message-role={item.type === 'narration' ? item.role : undefined} key={item.id} data-transcript-id={windowing.enabled ? item.id : undefined} data-transcript-index={windowing.enabled ? index : undefined}
             role={windowing.enabled ? 'listitem' : undefined} aria-posinset={windowing.enabled ? index + 1 : undefined} aria-setsize={windowing.enabled ? presentationRows.length : undefined}
             data-message-uuid={uuid} data-message-uuids={uuids.length ? uuids.join(' ') : undefined}
             style={{ ...(windowing.enabled && mountedIndex === 0 ? { marginTop: `${transcriptRowGap(presentationRows[index - 1], item)}rem` } : {}),
-              ...(uuid && uuid === messageTarget ? { outline: `2px solid ${t.text3}`, outlineOffset: 4, borderRadius: 8 } : {}) }}>{content}</div>;
+              ...(uuid && uuid === messageTarget && !isChatMessage ? { outline: `2px solid ${t.text3}`, outlineOffset: 4, borderRadius: 8 } : {}) }}>{content}</div>;
         })}
         {windowing.enabled && <div className="transcript-window-spacer" aria-hidden="true" style={{ height: windowing.after }} />}
         <div ref={historyTailSpace} className="transcript-history-tail-space" aria-hidden="true" />

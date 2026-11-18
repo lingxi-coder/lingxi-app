@@ -25,7 +25,7 @@ function anchorContents(html: string, uuid: string): string {
 }
 const tool: ToolRunItem = { type: 'tool', id: 'read', tool: 'Read', status: 'done', view: { verb: 'read', label: 'Read', title: 'Read file' } };
 
-test('DOM transcript rows retain UUIDs and highlights on spacing wrappers without altering content', () => {
+test('DOM transcript rows retain UUIDs on spacing wrappers without outlining targeted chat messages', () => {
   const items: RunItem[] = [
     { type: 'narration', id: 'user', role: 'user', text: 'Build an app' },
     { type: 'narration', id: 'assistant', role: 'assistant', text: 'Building it' },
@@ -42,9 +42,9 @@ test('DOM transcript rows retain UUIDs and highlights on spacing wrappers withou
     assert.match(tag, new RegExp(`data-row-type="${item.type === 'tool' ? 'tool-group' : item.type}"`));
     assert.match(anchorContents(html, item.id), /^<div class="transcript-run-item(?: [^"]*)?"/);
   }
-  const highlighted = anchorTag(html, 'assistant');
-  assert.match(highlighted, /outline:2px solid/);
-  assert.match(highlighted, /outline-offset:4px/);
+  assert.doesNotMatch(anchorTag(html, 'assistant'), /outline/);
+  const userTargetHtml = render({ liveItems: items, messageTarget: 'user' });
+  assert.doesNotMatch(anchorTag(userTargetHtml, 'user'), /outline/);
   assert.match(anchorContents(html, 'assistant'), /^<div[^>]*style="[^"]*display:flex[^"]*width:100%/);
   assert.match(html, /class="desktop-stage-feed"[^>]*><div class="transcript-row" data-row-type="narration"[^>]*><div class="transcript-run-item transcript-user-message"/);
   assert.equal((html.match(/class="local-app-chat-card"/g) ?? []).length, 1);

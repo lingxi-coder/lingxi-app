@@ -1,5 +1,5 @@
 import { KeyboardEvent, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { docGroups, getDocPage, searchDocs } from '../data/docs';
+import { docGroups, getDocPage, searchDocs, type DocSearchResult } from '../data/docs';
 import { Locale } from '../utils/locale';
 import { IconArrowRight, IconClose, IconDocs, IconSearch } from './Icons';
 import { RouteLink } from './RouteLink';
@@ -23,7 +23,7 @@ export function DocsSearch({ locale, open, onClose, focus = 'product' }: DocsSea
   const instructionsId = useId();
   const countId = useId();
   const suggestedPages = focus === 'sdk' ? sdkSuggestions : productSuggestions;
-  const results = useMemo(() => query.trim() ? searchDocs(query, locale) : suggestedPages.flatMap((id) => {
+  const results = useMemo<DocSearchResult[]>(() => query.trim() ? searchDocs(query, locale) : suggestedPages.flatMap((id) => {
     const page = getDocPage(id);
     return page ? [{ page, excerpt: page.description[locale] }] : [];
   }), [query, locale, suggestedPages]);
@@ -90,9 +90,9 @@ export function DocsSearch({ locale, open, onClose, focus = 'product' }: DocsSea
     </div>
     <div ref={resultsRef} className="developer-search-results">
       <p id={countId} className="developer-search-caption" role="status" aria-live="polite">{query.trim() ? t(`${results.length} results`, `${results.length} 条结果`) : (focus === 'sdk' ? t('Explore the SDKs', '探索开发者文档') : t('Suggested guides', '推荐阅读'))}</p>
-      {results.length ? results.map(({ page, excerpt }, index) => <RouteLink
+      {results.length ? results.map(({ page, excerpt, sectionId }, index) => <RouteLink
         key={page.id}
-        href={page.id === 'overview' ? '/docs' : `/docs/${page.id}`}
+        href={page.id === 'overview' ? '/docs' : `/docs/${page.id}${sectionId ? '#' + sectionId : ''}`}
         className={`developer-search-result${index === activeIndex ? ' is-selected' : ''}`}
         data-doc-result=""
         onFocus={() => setActiveIndex(index)}

@@ -9,7 +9,7 @@ Create a team, start a conversation, send a message or work with a shared Bot.
 1. Sign in and open Teams. From the team switcher choose Create a team.
 2. Enter a name and confirm. The new team opens under your account.
 
-- [Open Teams](/teams)
+- [Open Teams](https://lingxios.net/teams)
 
 <a id="invite"></a>
 
@@ -36,7 +36,7 @@ To chat privately with the LingXi assistant, use New Chat in the main workspace.
 
 In the team, choose Direct messages → New message → Direct message and select one current member. An existing DM with that person opens again. For a friend outside the team, open the conversation in Friends. To start a personal conversation with the LingXi assistant, use New Chat.
 
-- [Open Friends](/friends)
+- [Open Friends](https://lingxios.net/friends)
 
 <a id="send-message"></a>
 
@@ -44,7 +44,7 @@ In the team, choose Direct messages → New message → Direct message and selec
 
 Open the intended DM, group or channel. Type a message or attach a file, wait for any uploads and choose Send. On Web and Desktop, Enter sends and Shift+Enter inserts a new line. For a reply to a particular message use Reply on that message.
 
-If the message is pending, reconnect and check the original entry before retrying. A delivered message and a completed Bot task have separate statuses.
+If a message is pending, reconnect and check the original entry. Web and Desktop retry temporary failures automatically. If the entry shows Retry, use that button. A delivered message and a completed Bot task have separate statuses.
 
 <a id="bot-chat"></a>
 
@@ -75,14 +75,14 @@ Use the + beside Bot chats, select an available shared Bot and open the chat. A 
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/packages/teams/TeamSidebar.tsx](https://github.com/lingxi-coder/lingxi-app/blob/59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c/packages/teams/TeamSidebar.tsx) — Committed source (59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c)
-- [lingxi-app/packages/teams/NewConversationDialog.tsx](https://github.com/lingxi-coder/lingxi-app/blob/59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c/packages/teams/NewConversationDialog.tsx) — Committed source (59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c)
-- [lingxi-app/packages/teams/Composer.tsx](https://github.com/lingxi-coder/lingxi-app/blob/59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c/packages/teams/Composer.tsx) — Committed source (59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c)
-- [lingxi-app/packages/teams/BotDirectory.tsx](https://github.com/lingxi-coder/lingxi-app/blob/59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c/packages/teams/BotDirectory.tsx) — Committed source (59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c)
-- [lingxi-app/packages/teams/AutoReplyDialog.tsx](https://github.com/lingxi-coder/lingxi-app/blob/59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c/packages/teams/AutoReplyDialog.tsx) — Committed source (59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c)
-- [lingxi-app/apps/firebase/src/shared-bots.mjs](https://github.com/lingxi-coder/lingxi-app/blob/59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c/apps/firebase/src/shared-bots.mjs) — Committed source (59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c)
-- [lingxi-app/apps/electron/src/main/teams/replyTriage.ts](https://github.com/lingxi-coder/lingxi-app/blob/59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c/apps/electron/src/main/teams/replyTriage.ts) — Committed source (59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c)
+- [lingxi-app/packages/teams/TeamSidebar.tsx](https://github.com/lingxi-coder/lingxi-app/blob/12ec044a7f3f16f78b9098f14f07feff9f519e76/packages/teams/TeamSidebar.tsx) — Committed source (12ec044a7f3f16f78b9098f14f07feff9f519e76)
+- [lingxi-app/packages/teams/NewConversationDialog.tsx](https://github.com/lingxi-coder/lingxi-app/blob/a3ecab5a900bae02175bfc9c2bc4507d8f2e6659/packages/teams/NewConversationDialog.tsx) — Committed source (a3ecab5a900bae02175bfc9c2bc4507d8f2e6659)
+- [lingxi-app/packages/teams/Composer.tsx](https://github.com/lingxi-coder/lingxi-app/blob/12ec044a7f3f16f78b9098f14f07feff9f519e76/packages/teams/Composer.tsx) — Committed source (12ec044a7f3f16f78b9098f14f07feff9f519e76)
+- [lingxi-app/packages/teams/BotDirectory.tsx](https://github.com/lingxi-coder/lingxi-app/blob/c0eeb5af8aad9e218c510597a301176cf8db53e2/packages/teams/BotDirectory.tsx) — Committed source (c0eeb5af8aad9e218c510597a301176cf8db53e2)
+- [lingxi-app/packages/teams/AutoReplyDialog.tsx](https://github.com/lingxi-coder/lingxi-app/blob/c00607ed4841d7d032a571105471e9c8b7c0b6ce/packages/teams/AutoReplyDialog.tsx) — Committed source (c00607ed4841d7d032a571105471e9c8b7c0b6ce)
+- [lingxi-app/apps/firebase/src/shared-bots.mjs](https://github.com/lingxi-coder/lingxi-app/blob/a57345ae28ffedd218cd6bd3570c25d5c6eb5944/apps/firebase/src/shared-bots.mjs) — Committed source (a57345ae28ffedd218cd6bd3570c25d5c6eb5944)
+- [lingxi-app/apps/electron/src/main/teams/replyTriage.ts](https://github.com/lingxi-coder/lingxi-app/blob/c00607ed4841d7d032a571105471e9c8b7c0b6ce/apps/electron/src/main/teams/replyTriage.ts) — Committed source (c00607ed4841d7d032a571105471e9c8b7c0b6ce)
 
-- lingxi-app: HEAD 59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c; Referenced input fingerprint sha256:bd99061fca730ba5fef162e15fa304f6074d4919ebd2ed565e7276696ef00cea
+- lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; Referenced input fingerprint sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

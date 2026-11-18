@@ -13,26 +13,39 @@
 
 ## 选择 Local App 的共享方式
 
-让别人安装副本，可以分享对方有权访问的市场条目。要从自己另一台设备继续使用同一份运行数据，可以用远程控制。市场链接可以发到团队群或私信，接收者自行审核安装。加入团队本身不会获得你电脑上运行实例的访问权。
+- 要让大家都能安装副本，在市场上架应用后分享详情页链接。
+- 只想把源码给指定的人，可以从 iOS 或 Android 导出源码 ZIP，直接发给对方。
+- 要从自己的另一台设备继续使用电脑上的应用，通过已配对设备打开，就能继续使用应用后端保存的记录。
 
-- [分享可安装版本](local-apps.md#market)
+- [上架应用并分享链接](local-apps.md#market)
+- [单独分享源码 ZIP](local-apps.md#source-zip)
 - [访问正在运行的应用](local-apps.md#paired-devices)
 
 <a id="market"></a>
 
 ## 发布到市场并发送链接
 
-1. 在桌面版 Code 模式下登录，打开「应用 → 目标应用的 ••• → Publish to market」。填写条目和版本说明，点「Review source and publish」，核对要上传的源码文件并确认。
-2. 在「Manage publications」核对提交状态。确认对方能访问条目后，把市场详情页链接复制到目标私信或群聊并发送。接收者在支持的设备上打开条目、审核版本并确认安装，使用自己的权限和数据。
+1. 在保存这个版本的设备上登录并切到 Code 模式。桌面版从「应用 → 目标应用的 ••• → Publish to market」进入，填写条目与版本说明，点「Review source and publish」。iOS 和 Android 从「应用 → 应用详情 → 发布到市场」进入。核对要上传的源码文件后确认提交。
+2. 新条目默认隐藏。在发布设备上打开市场管理页查看版本状态。桌面版入口是「Manage publications」，iOS 是「管理市场发行与审核」，Android 是「管理市场发布」。审核通过后点「上架应用」。此时所有人都可以打开该条目。
+3. 打开已上架应用的市场详情页，把链接发到目标私信或群聊。接收者查看版本并在兼容设备上安装，使用自己的权限和数据。
 
 - [发送团队消息](teams.md#send-message)
+
+<a id="source-zip"></a>
+
+## 单独分享源码 ZIP
+
+1. 在保存该版本的 iOS 或 Android 设备上进入「应用 → 应用详情」，导出当前版本的源码 ZIP 并保存文件。压缩包包含发布版本的源码。运行数据库、浏览器数据和授权保存在原设备上。
+2. 通过隔空投送或邮件等支持 ZIP 的方式单独发送。要在灵犀团队私信里分享，可以发送仅接收者可访问的下载链接。团队附件支持 PNG、JPEG、PDF 和纯文本。
+3. 接收者在 iOS 的 Code 模式打开「应用 → + → 导入源码文件夹」并选择 ZIP。在 Android 的 Code 模式打开「应用 → 导入源码」，选择 ZIP。导入完成后，在应用详情打开本机副本。
 
 <a id="paired-devices"></a>
 
 ## 在自己的设备访问同一运行实例
 
 1. 先在桌面版配置远程应用网关并开启远控。在「应用」中打开目标应用的 •••，勾选允许已配对设备访问。
-2. 在自己的另一台设备用同一账号打开远控，完成配对，在所连电脑的「应用」里打开它。后端和业务数据留在电脑上。启动链接绑定这次打开操作和设备。要停止共享，在桌面版关闭该应用的远程访问。
+2. 在自己的另一台设备用同一账号打开远控，完成配对，在所连电脑的「应用」里打开它。访问的是同一后端，可以继续使用后端保存的记录。要停止访问，在桌面版关闭该应用的远程访问。
+3. 每次远程打开都会获得新的浏览器源。Cookie、localStorage 和 IndexedDB 都按这次打开隔离。如果应用只把计数存在浏览器里，在同一手机上重新打开也会看到初始值。
 
 - [配对设备](remote-control.md#same-account)
 
@@ -40,12 +53,17 @@
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app)
 
-- [harness-runtime/crates/local-app/assets/skill/SKILL.md](https://github.com/lingxi-coder/harness-runtime/blob/c5fcd20fad3839b3685497c8e5ebb7c34b47e658/crates/local-app/assets/skill/SKILL.md) — 已提交源码 (c5fcd20fad3839b3685497c8e5ebb7c34b47e658)
-- [lingxi-app/apps/electron/src/renderer/components/LocalApps.tsx](https://github.com/lingxi-coder/lingxi-app/blob/59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c/apps/electron/src/renderer/components/LocalApps.tsx) — 已提交源码 (59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c)
-- [lingxi-app/apps/electron/src/renderer/components/LocalAppPublish.tsx](https://github.com/lingxi-coder/lingxi-app/blob/59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c/apps/electron/src/renderer/components/LocalAppPublish.tsx) — 已提交源码 (59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c)
-- [lingxi-app/apps/electron/src/main/local-apps/remoteGateway.ts](https://github.com/lingxi-coder/lingxi-app/blob/59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c/apps/electron/src/main/local-apps/remoteGateway.ts) — 已提交源码 (59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c)
+- [harness-runtime/crates/local-app/assets/skill/SKILL.md](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/local-app/assets/skill/SKILL.md) — 已提交源码 (f50814ec8381f10756f66eadf457474d90bcc69a)
+- [harness-runtime/crates/skill/src/builtin/lingxi-api/references/local-app.md](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/skill/src/builtin/lingxi-api/references/local-app.md) — 已提交源码 (f50814ec8381f10756f66eadf457474d90bcc69a)
+- [lingxi-app/apps/electron/src/renderer/components/LocalApps.tsx](https://github.com/lingxi-coder/lingxi-app/blob/6502b4ba25c522c2b14707840593380c774ef2f7/apps/electron/src/renderer/components/LocalApps.tsx) — 已提交源码 (6502b4ba25c522c2b14707840593380c774ef2f7)
+- [lingxi-app/apps/electron/src/renderer/components/LocalAppPublish.tsx](https://github.com/lingxi-coder/lingxi-app/blob/a3e7d1af2991e7021dc8de0be5ec3e23794c7875/apps/electron/src/renderer/components/LocalAppPublish.tsx) — 已提交源码 (a3e7d1af2991e7021dc8de0be5ec3e23794c7875)
+- [lingxi-app/apps/electron/src/main/local-apps/remoteGateway.ts](https://github.com/lingxi-coder/lingxi-app/blob/b416a80e4556f326ea306b3d737527e250b37bd7/apps/electron/src/main/local-apps/remoteGateway.ts) — 已提交源码 (b416a80e4556f326ea306b3d737527e250b37bd7)
+- [lingxi-app/apps/ios/native/Sources/Apps/AppsPages.swift](https://github.com/lingxi-coder/lingxi-app/blob/8c3c1f06998e32297aef756212338cc0d021bd31/apps/ios/native/Sources/Apps/AppsPages.swift) — 已提交源码 (8c3c1f06998e32297aef756212338cc0d021bd31)
+- [lingxi-app/apps/android/native/app/src/main/java/com/lingxi/code/apps/UnifiedAppsPages.kt](https://github.com/lingxi-coder/lingxi-app/blob/8c3c1f06998e32297aef756212338cc0d021bd31/apps/android/native/app/src/main/java/com/lingxi/code/apps/UnifiedAppsPages.kt) — 已提交源码 (8c3c1f06998e32297aef756212338cc0d021bd31)
+- [lingxi-app/packages/teams/attachments.ts](https://github.com/lingxi-coder/lingxi-app/blob/9bc44029fff2b34f963cc1b386ed6a7080cab90b/packages/teams/attachments.ts) — 已提交源码 (9bc44029fff2b34f963cc1b386ed6a7080cab90b)
+- [lingxi-app/docs/LOCAL_APP_REMOTE_ACCESS.md](https://github.com/lingxi-coder/lingxi-app/blob/07c2dc030fe6e5e77a435479a302d9522d3965cd/docs/LOCAL_APP_REMOTE_ACCESS.md) — 已提交源码 (07c2dc030fe6e5e77a435479a302d9522d3965cd)
 
-- lingxi-app: HEAD 59ccc4ee7d5fa3350268d7c05f5c1ce4da16670c; 所据文件指纹 sha256:bd99061fca730ba5fef162e15fa304f6074d4919ebd2ed565e7276696ef00cea
-- harness-runtime: HEAD c5fcd20fad3839b3685497c8e5ebb7c34b47e658; 所据文件指纹 sha256:65fece4e523e42368b8fcbcd809331db857f0ea76748c3b02d75d9ce81d658aa; 产品固定版本 c5fcd20fad3839b3685497c8e5ebb7c34b47e658
+- lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; 所据文件指纹 sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
+- harness-runtime: HEAD f50814ec8381f10756f66eadf457474d90bcc69a; 所据文件指纹 sha256:6fe1d28e55bd5b9d72e3fe6ee54f892c7efe64b640840a407ccee12dcef85567; 产品固定版本 f50814ec8381f10756f66eadf457474d90bcc69a
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

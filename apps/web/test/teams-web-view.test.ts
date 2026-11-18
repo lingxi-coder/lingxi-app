@@ -64,7 +64,10 @@ scenario('layout: on a phone the sidebar and the conversation take turns, and th
   await page.click(page.oneByClass('teams-web-back')); assert.equal(body().props['data-pane'], 'list');
   await page.click(page.find(node => node.props['data-row'] === 'chan-general')[0]);
   assert.equal(snapshot().selectedConversationId, 'chan-general'); assert.equal(body().props['data-pane'], 'conversation');
+  await page.click(page.oneByLabel('Team details'));
+  assert.equal(page.find(node => node.type === 'aside').length, 1);
   await page.click(page.oneByClass('teams-web-back')); assert.equal(body().props['data-pane'], 'list');
+  assert.equal(page.find(node => node.type === 'aside').length, 0, 'the details do not cover the list');
   assert.equal(snapshot().selectedConversationId, 'chan-general', 'going back leaves the conversation open for the wide layout');
 });
 

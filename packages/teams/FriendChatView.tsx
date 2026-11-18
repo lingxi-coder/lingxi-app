@@ -49,6 +49,7 @@ function PairChat({ notificationTarget,workspace, snapshot, renderAvatar, render
   const view = useSyncExternalStore(pair.subscribe, pair.getSnapshot);
   const [welcome, setWelcome] = useState(chat.joined);
   const [panel, setPanel] = useState(false);
+  const [profile, setProfile] = useState(false);
   const botsRef = useRef<HTMLButtonElement>(null), botsId = useId();
   // The friend's row menu asks for the Shared Bots with the chat (`FriendChat.botsRequest`).
   useEffect(() => { if (chat.botsRequest) setPanel(true); }, [chat.botsRequest]);
@@ -77,25 +78,29 @@ function PairChat({ notificationTarget,workspace, snapshot, renderAvatar, render
   const actions = <>
     <button ref={botsRef} type="button" className="tw-icon-btn" aria-expanded={panel} aria-controls={botsId} aria-label={t('friends_bots_title')} title={t('friends_bots_title')}
       onClick={() => setPanel(open => !open)}><Icon name="bot" /></button>
-    <FriendMenu workspace={workspace} snapshot={snapshot} chat={chat} locale={locale} renderAvatar={renderAvatar} />
+    <FriendMenu workspace={workspace} chat={chat} locale={locale} onProfile={() => setProfile(true)} />
   </>;
   return <div className="tw-friends-chat">
-    {welcome ? <p className="tw-banner" role="status">{nowFriends(chat.name, locale)}</p> : null}
-    <TeamConversationView notificationTarget={notificationTarget} workspace={pair} snapshot={view} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} locale={locale} now={now}
-      friend={friendChat ? { uid: chat.uid, name: chat.name, handle: chat.handle, actions } : undefined} onBack={friendChat ? undefined : toChat} />
-    {panel && friendChat ? <FriendBotsPanel id={botsId} pair={pair} view={view} chat={chat} locale={locale} onClose={close} /> : null}
+    <div className="tw-friends-thread">
+      {welcome ? <p className="tw-banner" role="status">{nowFriends(chat.name, locale)}</p> : null}
+      <TeamConversationView notificationTarget={notificationTarget} workspace={pair} snapshot={view} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} locale={locale} now={now}
+        friend={friendChat ? { uid: chat.uid, name: chat.name, handle: chat.handle, actions, onOpenProfile: () => setProfile(true) } : undefined}
+        onBack={friendChat ? undefined : toChat} />
+    </div>
+    {panel && friendChat ? <FriendBotsPanel id={botsId} pair={pair} view={view} chat={chat} locale={locale} renderAvatar={renderAvatar} onClose={close} /> : null}
+    {profile && friendChat ? <FriendProfileDialog workspace={workspace} uid={chat.uid} name={chat.name} handle={chat.handle}
+      since={snapshot.cards.find(value => value.uid === chat.uid)?.since} locale={locale} renderAvatar={renderAvatar} onClose={() => setProfile(false)} /> : null}
   </div>;
 }
 
 /** D10: View profile, Remove friend, Block. */
-function FriendMenu({ workspace, snapshot, chat, locale, renderAvatar }: FriendsViewProps & { chat: FriendChat }): ReactElement {
+function FriendMenu({ workspace, chat, locale, onProfile }: Pick<FriendsViewProps, 'workspace' | 'locale'> & { chat: FriendChat; onProfile(): void }): ReactElement {
   const t = useTeamsText(locale);
   const [menu, setMenu] = useState(false);
-  const [dialog, setDialog] = useState<'profile' | 'remove' | 'block'>();
+  const [dialog, setDialog] = useState<'remove' | 'block'>();
   const moreRef = useRef<HTMLButtonElement>(null);
-  const card = snapshot.cards.find(value => value.uid === chat.uid);
   const items: MenuItem[] = [
-    { id: 'profile', label: t('friends_menu_view_profile'), onSelect: () => setDialog('profile') },
+    { id: 'profile', label: t('friends_menu_view_profile'), onSelect: onProfile },
     { id: 'remove', label: t('friends_menu_remove'), danger: true, separated: true, onSelect: () => setDialog('remove') },
     { id: 'block', label: t('friends_menu_block'), danger: true, onSelect: () => setDialog('block') },
   ];
@@ -104,8 +109,6 @@ function FriendMenu({ workspace, snapshot, chat, locale, renderAvatar }: Friends
     <button ref={moreRef} type="button" className="tw-icon-btn" aria-haspopup="menu" aria-expanded={menu} aria-label={t('tw_more')} title={t('tw_more')}
       onClick={() => setMenu(value => !value)}><Icon name="more" /></button>
     {menu ? <PopupMenu label={chat.name} items={items} anchor={moreRef} align="end" onClose={restore => { setMenu(false); if (restore) moreRef.current?.focus(); }} /> : null}
-    {dialog === 'profile' ? <FriendProfileDialog workspace={workspace} uid={chat.uid} name={chat.name} handle={chat.handle} since={card?.since}
-      locale={locale} renderAvatar={renderAvatar} onClose={close} /> : null}
     {dialog === 'remove' || dialog === 'block' ? <FriendLeaveDialog workspace={workspace} locale={locale} uid={chat.uid} name={chat.name} action={dialog} onClose={close} /> : null}
   </div>;
 }

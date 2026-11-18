@@ -148,7 +148,7 @@ private fun FriendChat(
             TeamConversationScreen(
                 workspace = chat, uid = uid, team = summary, teams = teams, messaging = messaging,
                 conversationId = FriendsLogic.CHAT_CONVERSATION_ID, showBack = showBack, onBack = onBack,
-                friend = FriendChatHeader(friendUid, card.displayName, card.handle) {
+                friend = FriendChatHeader(friendUid, card.displayName, card.handle, onOpenProfile = { dialog = "profile" }) {
                     IconButton(onClick = { view = "bots" }, modifier = Modifier.testTag(FriendsTags.BOTS)) {
                         Icon(LXIconName.Bot.materialIcon, stringResource(R.string.friends_bots_title))
                     }

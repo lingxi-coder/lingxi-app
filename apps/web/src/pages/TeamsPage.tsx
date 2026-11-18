@@ -7,6 +7,7 @@ import { webTeamsApi } from '../teams/api';
 import { SignInCard } from '../teams/SignInCard';
 import { TeamsWorkspaceView } from '../teams/TeamsWorkspaceView';
 import { clearInviteIntent, readInviteIntent, retainInviteIntent } from '../teams/invite-intent';
+import { ChatTopbarTarget } from '../../../../packages/teams/ChatTopbar';
 import { useTeamsText } from '../../../../packages/teams/i18n';
 import type { Locale } from '../utils/locale';
 
@@ -30,6 +31,7 @@ export default function TeamsPage({ locale }: { locale: Locale }) {
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [code, setCode] = useState(() => readInviteIntent(`https://lingxios.net${location.pathname}${location.search}${location.hash}`, inviteStorage));
   const handledInvite = useRef(code);
+  const [chatTopbar, setChatTopbar] = useState<HTMLDivElement | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     // Strip the link only after the continuation intent is retained. A browser
@@ -44,7 +46,7 @@ export default function TeamsPage({ locale }: { locale: Locale }) {
     try { await signOut(auth); } catch { /* The person stays signed in. */ }
     finally { setBusy(false); }
   };
-  return <main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><a href="/inbox">{locale === 'zh' ? '收件箱' : 'Inbox'}</a><a href="/friends">{t('friends_title')}</a><h1>{t('teams_title')}</h1><a href="/remote">{t('tw_nav_remote')}</a><span>{user?.displayName || user?.email}</span>{user ? <button disabled={busy} onClick={() => void signOutNow()}>{t('tw_sign_out')}</button> : null}</header>
+  return <ChatTopbarTarget.Provider value={chatTopbar}><main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><a href="/inbox">{locale === 'zh' ? '收件箱' : 'Inbox'}</a><a href="/friends">{t('friends_title')}</a><h1>{t('teams_title')}</h1><a href="/remote">{t('tw_nav_remote')}</a><div ref={setChatTopbar} className="teams-web-chat-slot" /><span>{user?.displayName || user?.email}</span>{user ? <button disabled={busy} onClick={() => void signOutNow()}>{t('tw_sign_out')}</button> : null}</header>
     {user === undefined ? <p role="status" className="teams-web-note">{t('teams_loading')}</p> : user ? <SignedIn key={user.uid} user={user} locale={locale} invite={code} onInviteHandled={() => setCode('')} onInviteResolved={() => { clearInviteIntent(inviteStorage, handledInvite.current); setCode(''); history.replaceState(null, '', location.pathname); }} /> : <SignInCard auth={auth} locale={locale} note={code ? t('tw_signin_note_invite') : t('tw_signin_note_teams')} />}
-  </main>;
+  </main></ChatTopbarTarget.Provider>;
 }

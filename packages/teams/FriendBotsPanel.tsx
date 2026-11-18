@@ -2,7 +2,7 @@ import { useEffect, useRef, type KeyboardEvent, type ReactElement } from 'react'
 import { BotDirectory } from './BotDirectory';
 import { messageErrorText } from './errors.js';
 import type { FriendChat } from './friends-workspace.js';
-import { Icon } from './ui';
+import { Avatar, Icon, type RenderAvatar } from './ui';
 import type { TeamsSnapshot, TeamsWorkspace } from './workspace.js';
 import { useTeamsText } from './i18n.js';
 
@@ -10,9 +10,9 @@ import { useTeamsText } from './i18n.js';
  * The Bots of a friendship (D21), a panel over the friend chat: the Bot cards the chat's pair workspace fetched, Message to open a Bot DM
  * (D22) and, on Desktop, sharing and Stop sharing (D23). All of it is the Teams Bot directory in its `friend` mode.
  */
-export function FriendBotsPanel({ id, pair, view, chat, locale, onClose }: {
+export function FriendBotsPanel({ id, pair, view, chat, locale, renderAvatar, onClose }: {
   /** The id the header's Shared Bots button names in `aria-controls`. */
-  id: string; pair: TeamsWorkspace; view: TeamsSnapshot; chat: FriendChat; locale: string; onClose(): void;
+  id: string; pair: TeamsWorkspace; view: TeamsSnapshot; chat: FriendChat; locale: string; renderAvatar?: RenderAvatar; onClose(): void;
 }): ReactElement | null {
   const t = useTeamsText(locale);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -24,8 +24,9 @@ export function FriendBotsPanel({ id, pair, view, chat, locale, onClose }: {
     if (event.key === 'Escape' && !event.defaultPrevented && !(event.target as HTMLElement).closest('dialog')) { event.stopPropagation(); onClose(); }
   };
   return <section id={id} className="tw-scope tw-friends-bots" aria-label={t('friends_bots_title')} onKeyDown={escape}>
-    <header className="tw-conv-head">
-      <div className="tw-conv-title"><h2>{t('friends_bots_title')}</h2></div>
+    <header className="tw-drawer-head">
+      <Avatar identity={{ kind: 'user', id: chat.uid, name: chat.name }} size={40} render={renderAvatar} />
+      <div className="tw-drawer-title"><h2>{t('friends_bots_title')}</h2><p>{chat.name}</p></div>
       <button ref={closeRef} type="button" className="tw-icon-btn" aria-label={t('common_close')} title={t('common_close')} onClick={onClose}><Icon name="x" /></button>
     </header>
     <div className="tw-friends-bots-body tw-embed">

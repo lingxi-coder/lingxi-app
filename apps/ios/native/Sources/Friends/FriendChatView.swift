@@ -73,7 +73,7 @@ struct FriendChatView: View {
     private var content: some View {
         switch phase {
         case let .chat(friend, chat):
-            TeamConversationView(conversationID: FriendsLogic.chatConversationID, onGone: { gone = true })
+            TeamConversationView(conversationID: FriendsLogic.chatConversationID, onGone: { gone = true }, onShowProfile: { viewing = true })
                 .environment(chat.workspace)
                 .id(chat.teamID + ":" + String(chat.generation))
                 .toolbar { toolbar(friend) }

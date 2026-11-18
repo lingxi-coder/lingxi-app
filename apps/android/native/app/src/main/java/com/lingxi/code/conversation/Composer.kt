@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -33,6 +34,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
@@ -220,8 +222,6 @@ fun Composer(
     }
     BackHandler(enabled = commandResult != null || commandSuggestions.isNotEmpty()) { dismissCommandSurface() }
     val commandPanelHeight = (LocalConfiguration.current.screenHeightDp.dp * .3f).coerceIn(100.dp, 260.dp)
-    val shape = RoundedCornerShape(16.dp)
-
     Column(
         modifier = modifier
             .onPreviewKeyEvent { event ->
@@ -243,15 +243,7 @@ fun Composer(
         } else if (commandResult != null) {
             SlashCommandResultPanel(commandResult, commandPanelHeight, onClose = onDismissCommandResult)
         }
-        Column(
-            modifier = Modifier
-                .clip(shape)
-                .background(t.composerBg)
-                .border(0.5.dp, t.borderStrong, shape)
-                .padding(horizontal = 12.dp)
-                .padding(top = 10.dp, bottom = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
+        ComposerInputSurface {
             // Captured-photo attachment chip (the device-vision analog of how a
             // voice transcript lands in the draft): a thumbnail + remove button,
             // shown only once a camera capture has surfaced an image.
@@ -428,19 +420,12 @@ fun Composer(
                             )
                         }
                         // Idle with text: the accent Send button.
-                        hasText -> Box(
-                            modifier = Modifier
-                                .size(48.dp)
-                                .clip(CircleShape)
-                                .background(if (enabled) t.accent else t.accent.copy(alpha = 0.45f))
-                                .clickable(enabled = enabled) {
-                                    if (modelSetupRequired) onOpenModelSettings() else onSend()
-                                }
-                                .testTag(UiTags.COMPOSER_SEND),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            LXIcon(name = LXIconName.ArrowUp, size = 16.dp, color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary, contentDescription = sendDescription)
-                        }
+                        hasText -> ComposerSendButton(
+                            label = sendDescription,
+                            enabled = enabled,
+                            modifier = Modifier.testTag(UiTags.COMPOSER_SEND),
+                            onClick = { if (modelSetupRequired) onOpenModelSettings() else onSend() },
+                        )
                         // Idle, empty: separate ordinary recording and Flow Mode.
                         else -> Row(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -498,6 +483,41 @@ fun Composer(
                 turnActions()
             }
         }
+    }
+}
+
+@Composable
+internal fun ComposerInputSurface(
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val palette = LingXiTheme.palette
+    val shape = RoundedCornerShape(16.dp)
+    Column(
+        modifier = modifier.fillMaxWidth().clip(shape).background(palette.composerBg)
+            .border(0.5.dp, palette.borderStrong, shape).padding(horizontal = 12.dp)
+            .padding(top = 10.dp, bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        content = content,
+    )
+}
+
+@Composable
+internal fun ComposerSendButton(
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    icon: LXIconName = LXIconName.ArrowUp,
+) {
+    val accent = LingXiTheme.palette.accent
+    Box(
+        modifier.size(48.dp).clip(CircleShape)
+            .background(if (enabled) accent else accent.copy(alpha = 0.45f))
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        LXIcon(icon, size = 16.dp, color = MaterialTheme.colorScheme.onPrimary, contentDescription = label)
     }
 }
 

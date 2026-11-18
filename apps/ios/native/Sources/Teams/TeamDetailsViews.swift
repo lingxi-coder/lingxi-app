@@ -84,6 +84,15 @@ struct TeamConversationDetailsSheet: View {
                 .padding(.vertical, 4)
                 .accessibilityElement(children: .combine)
             }
+            if unread > 0 {
+                Section {
+                    Button("teams_mark_read", systemImage: "checkmark.circle") {
+                        Task { await workspace.markRead(conversation.id) }
+                    }
+                    .disabled(model.offline || workspace.messageBusy)
+                    .accessibilityIdentifier("teams.conversation.details.markread")
+                }
+            }
             if conversation.kind == "bot_dm" {
                 Section { TeamsNote(text: "teams_composer_note_bot_dm", systemImage: "eye") }
             } else if people.contains(where: { $0.identity.kind == .bot }) {
@@ -126,15 +135,7 @@ struct TeamConversationDetailsSheet: View {
                     Text("teams_auto_reply_note")
                 }
             }
-            if unread > 0 {
-                Section {
-                    Button("teams_mark_read", systemImage: "checkmark.circle") {
-                        Task { await workspace.markRead(conversation.id) }
-                    }
-                    .disabled(model.offline || workspace.messageBusy)
-                    .accessibilityIdentifier("teams.conversation.details.markread")
-                }
-            }
+
         }
     }
 

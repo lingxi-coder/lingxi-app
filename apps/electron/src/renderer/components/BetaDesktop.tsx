@@ -1,3 +1,4 @@
+import { ComposerEditor, ComposerSurface, ComposerToolbar } from '../../../../../packages/chat-ui/ComposerSurface';
 import { CommandResultPanel } from './CommandResultPanel';
 import './CommandResultPanel.css';
 import { providerAccountSummary } from '../../shared/providerAccounts';
@@ -3672,12 +3673,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   };
   const draftCommand = parseSlashCommandPrefix(text);
   const decorateCommand = Boolean(draftCommand && !promptComposing && !hasMentionTokens);
-  const promptTextStyle: CSSProperties = {
-    display: 'block', width: '100%', minHeight: 56, maxHeight: 'min(144px, 24vh)', overflowY: 'auto',
-    border: 0, outline: 0, background: 'transparent', lineHeight: 1.6, fontSize: 14,
-    padding: draftCommand ? '10px 12px 8px 50px' : '10px 12px 8px',
-    fontWeight: 400, letterSpacing: 'normal', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
-  };
+  const promptTextStyle: CSSProperties = draftCommand ? { paddingLeft: 50 } : {};
   const copyDecoratedPrompt = (event: ClipboardEvent<HTMLDivElement>) => {
     const selection = window.getSelection();
     if (!selection?.rangeCount || selection.isCollapsed
@@ -3732,7 +3728,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
         onRetry={() => bridge.sendPrompt('继续之前因磁盘空间不足而暂停的任务，沿用此会话和已有历史。')} /> : null}
       {goalActive && <GoalStatus key={`${activeSessionId}:${goal.objective}`} objective={goal.objective} disabled={!ready || bridge.sessionLoading} running={bridge.running} cancelling={bridge.isCancelling} onClear={async () => { await bridge.runSlashCommand('/goal clear', []); }} onPause={() => bridge.cancel()} onResume={() => bridge.sendPrompt('Continue pursuing the current goal.')} />}
       {!ready && accountUnavailableReason && <div className="provider-account-unavailable" role="status" aria-live="polite" style={{ color: t.warn, fontSize: 12, padding: '4px 2px 8px' }}>{accountUnavailableReason}</div>}
-      <div
+      <ComposerSurface
         className="beta-composer"
         onDragOver={(event) => {
           if (!ready || !event.dataTransfer.types.includes('Files')) return;
@@ -3748,7 +3744,10 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
           setImageDragActive(false);
           void addFiles([...event.dataTransfer.files]);
         }}
-        style={{ position: 'relative', maxWidth: 'var(--conversation-width)', margin: '0 auto', borderRadius: 20, border: `1px solid ${imageDragActive ? t.accent : t.borderStrong}`, background: imageDragActive ? t.accentBg : t.surface, boxShadow: '0 4px 20px rgba(0,0,0,.05), 0 1px 3px rgba(0,0,0,.03)', overflow: 'visible', transition: 'border-color 0.16s ease, background-color 0.16s ease, box-shadow 0.16s ease' }}
+        style={{
+          '--composer-border': imageDragActive ? t.accent : t.borderStrong,
+          '--composer-surface': imageDragActive ? t.accentBg : t.surface,
+        } as CSSProperties}
       >
         {!bridge.sessionLoading && bridge.conversation.commandResult && !slashMenuOpen && !fileMenuOpen && !previewPath && !modelOpen && !permissionOpen && (
           <CommandResultPanel
@@ -3778,10 +3777,10 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
           value={typedFusion ?? selectedFusion} explicit={Boolean(typedFusion)} disabled={!ready || bridge.running}
           onChange={(reference) => setFusionChoice({ sessionId: activeSessionId, reference })}
           onSettings={() => onOpenSettingsPage('fusion')} />}
-        <div className="composer-input-view">
+        <ComposerEditor>
           <div
             ref={input}
-            className="beta-rich-prompt"
+            className="beta-rich-prompt composer-editor-control"
             role="textbox"
             contentEditable
             suppressContentEditableWarning
@@ -3845,7 +3844,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
             <span className="composer-command-marker"><CommandIcon command={draftCommand.name} size={28} /></span>
           )}
           {draftCommand && decorateCommand && (
-            <div ref={commandMirror} className="composer-command-mirror" aria-hidden="true" style={{
+            <div ref={commandMirror} className="composer-command-mirror composer-editor-control" aria-hidden="true" style={{
               ...promptTextStyle, color: t.text,
               '--command-identity-color': commandPaletteColor(draftCommand.name, t.dark),
             } as CSSProperties}>
@@ -3855,7 +3854,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
             </div>
           )}
           {argumentHint && <ComposerSlashArgumentHint editor={input} text={text} hint={argumentHint} color={t.text4} />}
-        </div>
+        </ComposerEditor>
         {previewPath && <FileMentionPreview key={`${activeSessionId}:${previewPath}`} path={previewPath} bridge={bridge} onClose={() => { setPreviewPath(null); focusPrompt(); }} />}
         {slashMenuOpen && (
           <div ref={slashControl} className="slash-command-menu" style={commandMenuStyle(t)}>
@@ -3927,7 +3926,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
             onFinish={() => { void finishStandardListening(); }}
           />
         ) : (
-        <div className="composer-toolbar" style={{ display: 'flex', alignItems: 'center', gap: 4, minHeight: 48, padding: '0 8px 8px' }}>
+        <ComposerToolbar>
           <input ref={imageFileInput} type="file" multiple onChange={(event) => { void addFiles(event.target.files ? [...event.target.files] : []); event.currentTarget.value = ''; }} style={{ display: 'none' }} />
           <button type="button" disabled={!ready} className="composer-icon-action" aria-label={tr('desktop_attach_files')} title={tr('desktop_attach_files_images')} onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
           <button ref={fileButton} type="button" disabled={!ready} className="composer-icon-action" aria-label={tr('desktop_add_context')} aria-expanded={fileMenuOpen} title={tr('desktop_add_context_shortcut')} onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 40, height: 40 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
@@ -4284,9 +4283,9 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
               ><Icon name="arrowU" size={18} color="currentColor" /></button>
             </span>
           </div>
-        </div>
+        </ComposerToolbar>
         )}
-      </div>
+      </ComposerSurface>
     </div>
   );
 }

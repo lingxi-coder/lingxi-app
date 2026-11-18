@@ -49,6 +49,9 @@ fake.threads.set('chan-general', [
 const calls: unknown[][] = [];
 (window as any).fixtureCalls = calls;
 (window as any).fixtureWatchedTeams = () => [...new Set(fake.watches.filter(watch => watch.open).map(watch => watch.scope.teamId))];
+(window as any).cacheOnlyTeams = () => {
+  for (const watch of fake.open('team-aaaa')) fake.deliver(watch, true);
+};
 // Like the service: a message that is sent joins its thread, and every open watch of the conversation is told.
 const baseMessages = fake.messages;
 fake.messages = async <T,>(command: any): Promise<T> => {
@@ -72,6 +75,10 @@ fake.execute = async command => { calls.push(['execute', command]); return baseE
 
 const desktopTeams = {
   localBots: async () => [],
+  hostStatus: async () => ({
+    bots: [], openAtLogin: { available: false, enabled: false, needsApproval: false },
+    keepAwake: false, onBattery: false, decisionConfigured: false,
+  }),
   list: async () => fake.api.list(),
   detail: async (_uid: string, teamId: string) => fake.api.detail(teamId),
   execute: async (_uid: string, command: any) => fake.api.execute(command),

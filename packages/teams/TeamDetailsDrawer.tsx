@@ -3,8 +3,9 @@ import { messageErrorText, teamsErrorText } from './errors.js';
 import type { TeamCommand, TeamMember, TeamRole } from './index.js';
 import { BotDirectory } from './BotDirectory';
 import { canInviteFriends } from './friends.js';
-import { Avatar, Dialog, Icon, platformNotice, rovingIndex, TeamMark, type DrawerTab, type RenderAvatar } from './ui';
+import { Avatar, ConversationLead, Dialog, Icon, platformNotice, rovingIndex, TeamMark, type DrawerTab, type RenderAvatar } from './ui';
 import type { TeamsSnapshot, TeamsWorkspace } from './workspace.js';
+import { conversationLabel } from './workspace.js';
 import { intlTag, useTeamsText } from './i18n.js';
 
 export const DRAWER_MIN = 280;
@@ -55,8 +56,8 @@ export interface TeamDetailsDrawerProps {
 interface Confirmation { command: TeamCommand; title: string; body: string; confirm: string; /** A destructive act gets the danger button; a change of role the primary one. */ danger: boolean }
 
 /**
- * The right column: the open team's members, invitations and Bots. Leaving or deleting the team is
- * at the top, behind a confirmation. The left edge is a resize handle (280 to 480 pixels); Escape closes.
+ * The right column: the active chat, the team's member directory and settings.
+ * The left edge is a resize handle (280 to 480 pixels). Escape closes the panel.
  */
 export function TeamDetailsDrawer({ workspace, snapshot, tab, onTabChange, width: controlledWidth, defaultWidth, onWidthChange, onClose, renderAvatar, locale, onAddFriend, onInviteFriends }: TeamDetailsDrawerProps): ReactElement | null {
   const t = useTeamsText(locale);
@@ -145,6 +146,8 @@ export function TeamDetailsDrawer({ workspace, snapshot, tab, onTabChange, width
     if (!navigator.clipboard) { fail(); return; }
     navigator.clipboard.writeText(link).then(done, fail);
   };
+  const conversation = snapshot.conversation;
+  const chatLabel = conversation ? conversationLabel(conversation, snapshot.directory, uid, { bots: snapshot.bots, locale }) : undefined;
   const members = detail?.members ?? [];
   const invites = detail?.invites ?? [];
   const body = (): ReactElement => {
@@ -163,29 +166,39 @@ export function TeamDetailsDrawer({ workspace, snapshot, tab, onTabChange, width
     }
     if (current === 'members') {
       return <ul className="tw-people" aria-label={t('teams_members')}>
-        {members.map(member => <li key={member.uid}>
-          <Avatar identity={{ kind: 'user', id: member.uid, name: member.displayName }} size={40} render={renderAvatar} />
-          <div className="tw-person-text"><b>{member.displayName}</b><small>{member.uid === uid ? `${t('teams_you')} · ` : ''}{role(member.role)}</small></div>
-          {onAddFriend && member.uid !== uid || canManageMember(team.role, uid, member) ? <div className="tw-person-actions">
-            {onAddFriend && member.uid !== uid ? <button type="button" onClick={() => onAddFriend(member)}>{t('friends_add')}</button> : null}
-            {canManageMember(team.role, uid, member) ? <>
-              {team.role === 'owner' ? <button type="button" disabled={snapshot.busy}
-                onClick={() => ask({ action: 'role', teamId: team.id, uid: member.uid, generation: member.generation, role: member.role === 'admin' ? 'member' : 'admin' },
-                  member.role === 'admin' ? t('teams_confirm_demote_title_fmt', member.displayName) : t('teams_confirm_promote_title_fmt', member.displayName),
-                  member.role === 'admin' ? t('teams_confirm_demote_body') : t('teams_confirm_promote_body'),
-                  member.role === 'admin' ? t('teams_demote') : t('teams_promote'), false)}>
-                {member.role === 'admin' ? t('teams_demote') : t('teams_promote')}</button> : null}
-              {team.role === 'owner' ? <button type="button" disabled={snapshot.busy}
-                onClick={() => ask({ action: 'handOver', teamId: team.id, uid: member.uid, generation: member.generation }, t('tw_team_owner_title_fmt', member.displayName, team.name),
-                  t('tw_team_owner_body'),
-                  t('teams_make_owner'), false)}>
-                {t('teams_make_owner')}</button> : null}
-              <button type="button" className="tw-danger-btn" disabled={snapshot.busy}
-                onClick={() => ask({ action: 'remove', teamId: team.id, uid: member.uid, generation: member.generation }, t('teams_confirm_remove_title_fmt', member.displayName),
-                  t('teams_confirm_remove_body'), t('teams_confirm_remove_button'))}>{t('teams_confirm_remove_button')}</button>
-            </> : null}
-          </div> : null}
-        </li>)}
+        {members.map(member => {
+          const person = <>
+            <Avatar identity={{ kind: 'user', id: member.uid, name: member.displayName }} size={40} render={renderAvatar} />
+            <div className="tw-person-text"><b>{member.displayName}</b><small>{member.uid === uid ? `${t('teams_you')} · ` : ''}{role(member.role)}</small></div>
+          </>;
+          if (!(onAddFriend && member.uid !== uid) && !canManageMember(team.role, uid, member)) {
+            return <li key={member.uid}><div className="tw-person-row">{person}</div></li>;
+          }
+          return <li key={member.uid}><details className="tw-member-actions">
+            <summary className="tw-person-row" aria-label={`${member.displayName} · ${t('tw_more')}`}>
+              {person}<span className="tw-person-more" title={t('tw_more')}><Icon name="more" /></span>
+            </summary>
+            <div className="tw-person-actions">
+              {onAddFriend && member.uid !== uid ? <button type="button" onClick={() => onAddFriend(member)}>{t('friends_add')}</button> : null}
+              {canManageMember(team.role, uid, member) ? <>
+                {team.role === 'owner' ? <button type="button" disabled={snapshot.busy}
+                  onClick={() => ask({ action: 'role', teamId: team.id, uid: member.uid, generation: member.generation, role: member.role === 'admin' ? 'member' : 'admin' },
+                    member.role === 'admin' ? t('teams_confirm_demote_title_fmt', member.displayName) : t('teams_confirm_promote_title_fmt', member.displayName),
+                    member.role === 'admin' ? t('teams_confirm_demote_body') : t('teams_confirm_promote_body'),
+                    member.role === 'admin' ? t('teams_demote') : t('teams_promote'), false)}>
+                  {member.role === 'admin' ? t('teams_demote') : t('teams_promote')}</button> : null}
+                {team.role === 'owner' ? <button type="button" disabled={snapshot.busy}
+                  onClick={() => ask({ action: 'handOver', teamId: team.id, uid: member.uid, generation: member.generation }, t('tw_team_owner_title_fmt', member.displayName, team.name),
+                    t('tw_team_owner_body'),
+                    t('teams_make_owner'), false)}>
+                  {t('teams_make_owner')}</button> : null}
+                <button type="button" className="tw-danger-btn" disabled={snapshot.busy}
+                  onClick={() => ask({ action: 'remove', teamId: team.id, uid: member.uid, generation: member.generation }, t('teams_confirm_remove_title_fmt', member.displayName),
+                    t('teams_confirm_remove_body'), t('teams_confirm_remove_button'))}>{t('teams_confirm_remove_button')}</button>
+              </> : null}
+            </div>
+          </details></li>;
+        })}
       </ul>;
     }
     return <div className="tw-invites">
@@ -232,20 +245,27 @@ export function TeamDetailsDrawer({ workspace, snapshot, tab, onTabChange, width
       <TeamMark id={team.id} name={team.name} size={56} />
       <div className="tw-drawer-title">
         <h2 ref={heading} tabIndex={-1}>{team.name}</h2>
-        <p>{role(team.role)} · {t('teams_members_count_fmt', team.memberCount)} · {t('tw_team_platform_readable')}</p>
+        <p>{role(team.role)} · {t('teams_members_count_fmt', team.memberCount)}</p>
       </div>
       <button type="button" className="tw-icon-btn" aria-label={t('tw_team_close_details')} title={t('tw_team_close_details')} onClick={onClose}><Icon name="x" /></button>
     </header>
-    <div className="tw-drawer-danger">
-      <button type="button" className="tw-danger-btn" disabled={snapshot.busy} onClick={leaveOrDelete}>{team.role === 'owner' ? t('teams_delete') : t('teams_leave')}</button>
-      <p className="tw-hint">{platformNotice(locale)}</p>
-    </div>
+    {conversation && chatLabel ? <div className="tw-drawer-chat">
+      <ConversationLead conversation={conversation} label={chatLabel} snapshot={snapshot} locale={locale} size={32} render={renderAvatar} />
+      <div className="tw-drawer-title"><p>{t('teams_conversation_details')}</p><strong>{chatLabel}</strong></div>
+    </div> : null}
     {snapshot.error ? <p role="alert" className="tw-error tw-drawer-error">{teamsErrorText(snapshot.error, locale)}</p> : null}
     <div className="tw-tabs" role="tablist" aria-label={t('teams_team_details')} onKeyDown={tabKey}>
       {tabs.map(value => <button key={value} type="button" role="tab" id={`${id}-tab-${value}`} aria-selected={value === current} aria-controls={`${id}-panel`} tabIndex={value === current ? 0 : -1}
         className="tw-tab" onClick={() => choose(value)}>{tabLabel(value)}</button>)}
     </div>
     <div className="tw-drawer-body" role="tabpanel" id={`${id}-panel`} aria-labelledby={`${id}-tab-${current}`} tabIndex={0}>{body()}</div>
+    <footer className="tw-drawer-footer">
+      <details className="tw-panel-disclosure">
+        <summary><Icon name="lock" size={15} />{t('tw_team_platform_readable')}</summary>
+        <p className="tw-hint">{platformNotice(locale)}</p>
+      </details>
+      <button type="button" className="tw-link tw-danger-btn" disabled={snapshot.busy} onClick={leaveOrDelete}>{team.role === 'owner' ? t('teams_delete') : t('teams_leave')}</button>
+    </footer>
     {confirmation ? <Dialog role="alertdialog" title={confirmation.title} description={confirmation.body} onClose={() => setConfirmation(undefined)}>
       <div className="tw-form">
         <div className="tw-dialog-actions">

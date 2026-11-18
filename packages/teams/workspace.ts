@@ -11,7 +11,7 @@ import { teamsText } from './i18n.js';
 /** A person or Bot, in the shape avatars take. */
 export interface Identity { kind: 'user' | 'bot'; id: string; name: string }
 
-/** `max(0, lastSeq - lastReadSeq)`; edits and recalls never advance `lastSeq`. */
+/** Prefer the projected incoming count. Older conversation rows fall back to their stored read mark. */
 export const unreadCount = (conversation: Pick<TeamConversation, 'lastSeq' | 'lastReadSeq' | 'unreadCount'>): number => conversation.unreadCount ?? Math.max(0, conversation.lastSeq - conversation.lastReadSeq);
 const totalUnreadOf = (conversations: readonly TeamConversation[]): number => conversations.reduce((sum, conversation) => sum + unreadCount(conversation), 0);
 
@@ -242,7 +242,7 @@ export interface TeamsSnapshot {
   readonly botsUnverified: boolean;
   /** Code of the failed Bot list read behind `botsUnverified`; empty otherwise. A friend chat reads an ended friendship from it (D25). */
   readonly botsError: string;
-  /** Unread messages per team. The selected team counts its open directory, others a directory-only listener. */
+  /** Unread messages per team. The selected team uses its directory. Inactive directories contribute only when requested. */
   readonly unreadByTeam: Readonly<Record<string, number>>;
   readonly totalUnread: number;
 }

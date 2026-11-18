@@ -917,19 +917,19 @@ function activityChanged(was: RemoteBotSummary | undefined, now: RemoteBotSummar
   return was === undefined || was.last_activity_at !== now.last_activity_at || was.status !== now.status || was.waiting_threads !== now.waiting_threads;
 }
 
+export type RemoteActivityPage = import('@lingxi/bridge-client/remote').SessionActivityResult;
+
 /**
  * Everything above one connection that the pages share: the list of shared
  * sessions, the Bots and their chats, the per-session controllers (kept for the
  * life of the tab so a session's `(epoch, seq)` survives going back to the list
  * and a reconnect), and the routing of host notifications to them.
  */
-export interface RemoteActivityPage {
-  items:{cursor:number;resultUuids:string[];kind:string;at:number}[];
-  cursor:number;
-  baselineCursor:number;
-  hasMore:boolean;
-}
 export class RemoteClient {
+  async activityPreview(sessionId:string,through:number){
+    this.session(sessionId).requireConversation();
+    return this.connection.request('session.activityPreview',{session_id:sessionId,through});
+  }
   async activity(sessionId:string,after:number):Promise<RemoteActivityPage>{
     this.session(sessionId).requireConversation();
     return this.connection.request('session.activity',{session_id:sessionId,after});

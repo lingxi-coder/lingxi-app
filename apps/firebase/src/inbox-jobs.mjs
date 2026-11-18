@@ -1,7 +1,7 @@
 import { runReadBatch } from './inbox-batch.mjs';
 import { projectTask } from './inbox-tasks.mjs';
 import { owner, pooled } from './inbox-store.mjs';
-import { digest, makeKey } from './inbox-model.mjs';
+import { digest } from './inbox-model.mjs';
 
 export class InboxJobs {
   constructor(store, delivery, enqueue) {
@@ -28,7 +28,7 @@ export class InboxJobs {
     }
   }
   async run(p) {
-    if(p.type==='readBatch') return runReadBatch(this.store,p.uid,p.id,this.enqueue);
+    if (p.type === 'readBatch') return runReadBatch(this.store, p.uid, p.id, this.enqueue);
     if (p.type === 'reconcile') return this.store.reconcileOwner(p.uid, p.kind, p.sourceId, p.after);
     if (p.type === 'scanMembers' || p.type === 'scanConversations') {
       const root = this.store.db.collection(p.kind === 'service' ? 'services' : 'teams').doc(p.sourceId);

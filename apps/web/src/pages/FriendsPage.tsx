@@ -1,3 +1,5 @@
+import {noticeTargetFromSearch} from '../inbox/route';
+import {type InboxNoticeTarget} from '../../../../packages/inbox/contracts';
 import { useEffect, useRef, useState } from 'react';
 import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import { auth } from '../app/firebase';
@@ -19,14 +21,14 @@ const intentStorage = {
 
 type Page = { route: '/friends' | '/friends/add'; badge: string | null; onBadge(text: string | null): void };
 
-function SignedIn({ user, locale, route, chat, code, onCodeHandled, onBadge }: { user: User; locale: string; chat?: string; code: string; onCodeHandled(): void } & Pick<Page, 'route' | 'onBadge'>) {
+function SignedIn({ target,user, locale, route, chat, code, onCodeHandled, onBadge }: {target?:InboxNoticeTarget; user: User; locale: string; chat?: string; code: string; onCodeHandled(): void } & Pick<Page, 'route' | 'onBadge'>) {
   const [apis, setApis] = useState<{ friends: ReturnType<typeof webFriendsApi>; teams: ReturnType<typeof webTeamsApi> }>();
   useEffect(() => {
     const db = teamsDatabase(auth.app), current = { friends: webFriendsApi(user, db), teams: webTeamsApi(user, db) };
     setApis(current);
     return () => { current.friends.close(); current.teams.close(); };
   }, [user]);
-  return apis ? <FriendsWorkspaceView friends={apis.friends} teams={apis.teams} uid={user.uid} locale={locale} route={route} chat={chat} code={code} onCodeHandled={onCodeHandled} onBadge={onBadge} /> : null;
+  return apis ? <FriendsWorkspaceView notificationTarget={target} friends={apis.friends} teams={apis.teams} uid={user.uid} locale={locale} route={route} chat={chat} code={code} onCodeHandled={onCodeHandled} onBadge={onBadge} /> : null;
 }
 
 /** A friend to open from `/friends?chat=<uid>`; the same shape the deep link allows. */
@@ -39,7 +41,7 @@ export default function FriendsPage({ locale, route, badge, onBadge }: { locale:
   const t = useTeamsText(locale);
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [code, setCode] = useState(() => readAddIntent(`https://lingxios.net${location.pathname}${location.search}${location.hash}`, intentStorage));
-  const handled = useRef(code), chat = useRef(chatParameter());
+  const handled = useRef(code), chat = useRef(chatParameter()), target=useRef(noticeTargetFromSearch(location.search));
   const [chatTopbar, setChatTopbar] = useState<HTMLDivElement | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
@@ -57,7 +59,7 @@ export default function FriendsPage({ locale, route, badge, onBadge }: { locale:
   const done = () => { clearAddIntent(intentStorage, handled.current); setCode(''); };
   return <ChatTopbarTarget.Provider value={chatTopbar}><main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><a href="/inbox">{locale === 'zh' ? '收件箱' : 'Inbox'}</a><h1>{t('friends_title')}{badge ? <b className="teams-web-badge" role="img" aria-label={t('tw_unread_fmt', badge)}>{badge}</b> : null}</h1><a href="/teams">{t('teams_title')}</a><a href="/remote">{t('tw_nav_remote')}</a><div ref={setChatTopbar} className="teams-web-chat-slot" /><span>{user?.displayName || user?.email}</span>{user ? <button disabled={busy} onClick={() => void signOutNow()}>{t('tw_sign_out')}</button> : null}</header>
     {user === undefined ? <p role="status" className="teams-web-note">{t('teams_loading')}</p> : user
-      ? <SignedIn key={user.uid} user={user} locale={locale} route={route} chat={chat.current} code={code} onCodeHandled={done} onBadge={onBadge} />
+      ? <SignedIn target={target.current} key={user.uid} user={user} locale={locale} route={route} chat={chat.current} code={code} onCodeHandled={done} onBadge={onBadge} />
       : <SignInCard auth={auth} locale={locale} note={t('friends_signin')} />}
   </main></ChatTopbarTarget.Provider>;
 }

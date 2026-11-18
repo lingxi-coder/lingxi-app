@@ -37,6 +37,7 @@ async function main() {
       button.click();
       return activatedAt;
     })()`);
+    const openMore = () => run("document.querySelector('.lx-inbox-more summary').click()");
     const current = name => `${row(name)}?.getAttribute('aria-current') === 'page'`;
     const hasMainText = text => `document.querySelector('.desktop-main')?.innerText.includes(${JSON.stringify(text)})`;
     const rowCount = count => `document.querySelectorAll('.lx-inbox-row').length === ${count}`;
@@ -64,7 +65,7 @@ async function main() {
         && badge.top >= button.top - 1 && badge.bottom <= button.bottom;
     })()`), true, 'position the unread count on the Home button');
 
-    await clickButton('Needs attention');
+    await clickButton('Attention');
     await wait(`${rowCount(1)} && ${row('assistant')}`);
     await clickButton('Unread');
     await wait(`${rowCount(2)} && ${row('assistant')} && ${row('friend')}`);
@@ -87,11 +88,13 @@ async function main() {
       document.querySelector('.lx-inbox-row').dataset.rowKey === window.inboxFixture.friend`);
     await clickButton('Archive');
     await wait(`${rowCount(2)} && !${row('friend')}`);
+    await openMore();
     await clickButton('Archived');
     await wait(`${rowCount(1)} && ${row('friend')}`);
     await run("document.querySelector('button[aria-label=\"Actions for Bob\"]').click()");
     await clickButton('Archive');
     await wait(rowCount(0));
+    await openMore();
     await clickButton('Archived');
     await wait(rowCount(3));
 
@@ -119,9 +122,7 @@ async function main() {
     // Notification activation can show a committed result but is a preview.
     console.error('Checking Assistant route and reading');
     await run('window.inboxFixture.notifyAssistant()');
-    await wait("window.inboxFixture.selected() === 'assistant-result' && document.querySelector('.desktop-stage')");
-    await run('window.inboxFixture.resumeAssistant()');
-    await wait(`document.querySelector('[data-message-uuid="' + window.inboxFixture.resultUuid + '"]')`);
+    await wait("window.inboxFixture.selected() === 'assistant-result' && document.querySelector('.desktop-assistant-notice-preview')?.textContent.includes('The compatibility report is ready.')");
     await delay(450);
     assert.equal(Boolean(await run(request('markRead', 'assistant'))), false, 'notification preview must preserve unread');
 
@@ -133,7 +134,7 @@ async function main() {
     const elapsed = await run(`${request('markRead', 'assistant')}.at - ${activatedAt}`);
     assert.ok(elapsed >= 295, `committed result became read after only ${elapsed}ms`);
     await wait(`!${row('assistant')}.querySelector('b[aria-label]')`);
-    assert.match(await run(`${row('assistant')}.textContent`), /Needs attention/);
+    assert.match(await run(`${row('assistant')}.textContent`), /Approval needed/);
     await waitHome();
 
     // Leaving the live transcript cancels pending browser timers without throwing during Stage cleanup.

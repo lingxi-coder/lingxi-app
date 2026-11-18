@@ -143,7 +143,7 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
   const { collection, doc, onSnapshot, orderBy, query, where } = sdk;
   let closed = false;
   const stops: (() => void)[] = [];
-  const personal = new Map<string,{unreadCount:number;manualUnreadRevision:number;pendingActionRevision?:number}>();
+  const personal = new Map<string,{unreadCount:number;manualUnreadRevision:number;pendingActionRevision?:number;failureRevision?:number}>();
   const readSeq = new Map<string, number>();
   let authorized = false;
   let offlineExpiry:ReturnType<typeof setTimeout>|undefined;
@@ -189,7 +189,7 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
     const own=sdk.onSnapshot(doc(db,'users',uid,'inbox','team:'+scope.teamId+':'+conversationId),mark=>{
       const row=mark.data();
       if(!current() || row?.ref?.generation!==scope.generation) return;
-      const value={unreadCount:count(row.unreadCount)??0,manualUnreadRevision:count(row.manualUnreadRevision)??0,pendingActionRevision:count(row.pendingActionRevision)};
+      const value={unreadCount:count(row.unreadCount)??0,manualUnreadRevision:count(row.manualUnreadRevision)??0,pendingActionRevision:count(row.pendingActionRevision),failureRevision:count(row.failureRevision)};
       personal.set(conversationId,value);
       emit({kind:'read',conversationId,lastReadSeq:count(row.readThrough)??0,fromCache:mark.metadata.fromCache,...value});
     },()=>{/* Existing installations may only expose the source read mark. */});

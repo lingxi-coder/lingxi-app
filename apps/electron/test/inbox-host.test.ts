@@ -213,7 +213,13 @@ test('legacy archive migrates once and a unified unarchive survives repeated cat
   const f = fixture(null, [r], dir);
   t.after(() => f.service.close());
   assert.equal((await f.service.request<InboxPage>(null, { action: 'list' })).items.length, 0);
-  await f.service.request(null, { action: 'preferences', expectedPreferencesRevision:1,key, generation: 1, patch: { archived: false } });
+  await f.service.request(null, {
+    action: 'preferences',
+    expectedPreferencesRevision: 1,
+    key,
+    generation: 1,
+    patch: { archived: false },
+  });
   f.service.invalidateLocal();
   assert.equal((await f.service.request<InboxPage>(null, { action: 'list' })).items.length, 1);
 });
@@ -388,7 +394,8 @@ test('pin order and archived views paginate the same composite ordering as cloud
   t.after(() => f.service.close());
   for (let i = 0; i < 51; i++)
     await f.service.request(null, {
-      action: 'preferences',expectedPreferencesRevision:0,
+      action: 'preferences',
+      expectedPreferencesRevision: 0,
       key: 'assistant:source:s' + i,
       generation: 1,
       patch: { pinOrder: i },
@@ -401,7 +408,8 @@ test('pin order and archived views paginate the same composite ordering as cloud
     ['s50', 's51'],
   );
   await f.service.request(null, {
-    action: 'preferences',expectedPreferencesRevision:1,
+    action: 'preferences',
+    expectedPreferencesRevision: 1,
     key: 'assistant:source:s0',
     generation: 1,
     patch: { archived: true },
@@ -451,7 +459,13 @@ test('local result notifications require a new committed unread ordinal, honor m
   await f.service.request(null, { action: 'markRead', key, generation: 1, through: 13, manualUnreadRevision: 0 });
   await new Promise((resolve) => setTimeout(resolve, 360));
   assert.deepEqual(received, [key]);
-  await f.service.request(null, { action: 'preferences',expectedPreferencesRevision:0, key, generation: 1, patch: { notificationMode: 'none' } });
+  await f.service.request(null, {
+    action: 'preferences',
+    expectedPreferencesRevision: 0,
+    key,
+    generation: 1,
+    patch: { notificationMode: 'none' },
+  });
   update(14, Date.now() - 5100);
   await new Promise((resolve) => setTimeout(resolve, 400));
   assert.deepEqual(received, [key]);
@@ -582,6 +596,7 @@ test('global job freezes unpaged local rows at admission, never absorbs later ro
   const f = fixture('owner', rows, dir, { fetcher: server });
   const start = f.service.request<{ processed: number; changed: number }>('owner', {
     action: 'markAllReadSnapshot',
+    requestedAt: Date.now(),
     operationId: id,
     filter: 'unread',
   });
@@ -613,7 +628,227 @@ test('global job freezes unpaged local rows at admission, never absorbs later ro
   assert.equal(status.processed, 123);
   assert.equal((await get(g.service, 'new')).readThrough, 10);
   await assert.rejects(
-    g.service.request('owner', { action: 'markAllReadSnapshot', operationId: id, category: 'team' }),
+    g.service.request('owner', {
+      action: 'markAllReadSnapshot',
+      requestedAt: Date.now(),
+      operationId: id,
+      category: 'team',
+    }),
     /OPERATION_CONFLICT/,
   );
+});
+
+test('personal preferences reject stale or blind edits while reads and refreshes preserve the observed revision', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'inbox-preferences-cas-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const r = row(),
+    f = fixture(null, [r], dir);
+  const pref = {
+    action: 'preferences' as const,
+    key,
+    generation: 1,
+    patch: { notificationMode: 'none' as const },
+    expectedPreferencesRevision: 0,
+  };
+  const first = await f.service.request<{ item: InboxItem }>(null, pref);
+  assert.equal(first.item.preferencesRevision, 1);
+  await f.service.request(null, { action: 'markRead', key, generation: 1, through: 12, manualUnreadRevision: 0 });
+  f.service.invalidateLocal();
+  const after = await f.service.request<{ item: InboxItem }>(null, { action: 'get', key });
+  assert.equal(after.item.preferencesRevision, 1);
+  assert.equal(after.item.notificationMode, 'none');
+  await assert.rejects(f.service.request(null, { ...pref, patch: { pinOrder: 5 } }), /PREFERENCE_REVISION_CONFLICT/);
+  await assert.rejects(
+    f.service.request(null, { ...pref, expectedPreferencesRevision: undefined }),
+    /PREFERENCE_REVISION_CONFLICT/,
+  );
+  f.service.close();
+  const g = fixture(null, [r], dir);
+  t.after(() => g.service.close());
+  const current = await g.service.request<{ item: InboxItem }>(null, {
+    ...pref,
+    expectedPreferencesRevision: 1,
+    patch: { pinOrder: 0 },
+  });
+  assert.equal(current.item.preferencesRevision, 2);
+  assert.equal(current.item.notificationMode, 'none');
+});
+
+test('global local batch refuses an expired initial click and cannot create a missing job through status', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'inbox-batch-expiry-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const f = fixture(null, [row()], dir);
+  t.after(() => f.service.close());
+  await assert.rejects(
+    f.service.request(null, {
+      action: 'markAllReadSnapshot',
+      operationId: 'offline-click',
+      requestedAt: Date.now() - 310000,
+    }),
+    /BATCH_REQUEST_EXPIRED/,
+  );
+  await assert.rejects(
+    f.service.request(null, { action: 'readBatchStatus', jobId: 'offline-click' }),
+    /INBOX_JOB_MISSING/,
+  );
+  const fresh = { action: 'markAllReadSnapshot' as const, operationId: 'fresh-click', requestedAt: Date.now() };
+  assert.deepEqual(await f.service.request(null, fresh), {
+    jobId: 'fresh-click',
+    state: 'complete',
+    processed: 1,
+    changed: 1,
+  });
+  const newer = await f.service.request(null, {
+    action: 'markUnread',
+    key,
+    generation: 1,
+    operationId: 'later-flag',
+    expectedManualUnreadRevision: 0,
+  });
+  assert.ok(newer);
+  await f.service.request(null, { ...fresh, requestedAt: Date.now() - 310000 });
+  assert.equal((await f.service.request<{ item: InboxItem }>(null, { action: 'get', key })).item.manualUnread, true);
+});
+
+test('exact local preview stays source-scoped, bounded and read-only and fences an in-flight account switch', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'inbox-exact-preview-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const r = row();
+  let size = 4,
+    invalidate = false;
+  const f = fixture('owner', [r], dir, {
+    activityPreview: async (ref, through) => {
+      assert.deepEqual(ref, r.ref);
+      assert.equal(through, 11);
+      if (invalidate) f.setUid('next');
+      return {
+        available: true,
+        messages: [
+          { role: 'assistant', transcript_uuid: 'result', blocks: [{ type: 'text', text: 'x'.repeat(size) }] },
+        ],
+      };
+    },
+  });
+  t.after(() => f.service.close());
+  assert.ok((await f.service.activityPreview(key, 11)).available);
+  assert.equal((await f.service.request<{ item: InboxItem }>('owner', { action: 'get', key })).item.readThrough, 10);
+  size = 32769;
+  assert.deepEqual(await f.service.activityPreview(key, 11), { available: false, messages: [] });
+  await assert.rejects(f.service.activityPreview('assistant:remote:session', 11), /SOURCE_ACCESS_REQUIRED/);
+  invalidate = true;
+  await assert.rejects(f.service.activityPreview(key, 11), /INVALID_SESSION/);
+});
+
+test('acknowledging exactly the observed failure suppresses its reminder and never clears failed attention', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'inbox-observed-failure-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const r = row(),
+    notices: string[] = [];
+  const a = {
+    sourceId: 'source',
+    cursor: 0,
+    baselineCursor: 0,
+    lastMeaningfulAt: 0,
+    previewKind: null,
+    pendingActionCount: 0,
+    failed: true,
+    sourceRevision: 2,
+    failureAt: Date.now(),
+    failureRevision: 2,
+  };
+  r.row.activity_json = JSON.stringify(a);
+  const f = fixture(null, [r], dir, { notify: (n) => notices.push(n.key) });
+  const read = { action: 'markRead' as const, key, generation: 1, through: 0, manualUnreadRevision: 0 };
+  await f.service.request(null, { ...read, observedFailureRevision: 2 });
+  f.service.close();
+  const g = fixture(null, [r], dir, { notify: (n) => notices.push(n.key) });
+  t.after(() => g.service.close());
+  g.service.start();
+  await new Promise((r) => setTimeout(r, 220));
+  const page = await g.service.request<InboxPage>(null, { action: 'list', filter: 'attention' });
+  assert.equal(page.items[0].failureRevision, 2);
+  assert.deepEqual(notices, []);
+  assert.equal(page.items[0].unreadCount, 0);
+  r.row.activity_json = JSON.stringify({ ...a, sourceRevision: 4, failureRevision: 4, failureAt: Date.now() });
+  g.service.invalidateLocal();
+  await g.service.request(null, read);
+  await g.service.request(null, { ...read, observedFailureRevision: 2 });
+  await new Promise((r) => setTimeout(r, 420));
+  assert.deepEqual(notices, [key]);
+});
+
+test('a private row promoted during a global read receives the frozen cursor without clearing a newer cloud manual mark', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'inbox-promoted-batch-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  let start!: () => void, release!: () => void;
+  const started = new Promise<void>((r) => (start = r)),
+    hold = new Promise<void>((r) => (release = r));
+  const calls: Record<string, unknown>[] = [];
+  const f = fixture('owner', [row()], dir, {
+    fetcher: async (_, init) => {
+      const c = JSON.parse(String(init?.body));
+      calls.push(c);
+      if (c.action === 'markAllReadSnapshot') {
+        start();
+        await hold;
+        return Response.json({ jobId: c.operationId, state: 'complete', processed: 0 });
+      }
+      if (c.action === 'assistantSource') return Response.json({ generation: 1, enabled: true });
+      return Response.json({ ok: true });
+    },
+  });
+  t.after(() => f.service.close());
+  const batch = f.service.request('owner', {
+    action: 'markAllReadSnapshot',
+    operationId: 'promote-test',
+    requestedAt: Date.now(),
+  });
+  await started;
+  await f.service.setSummarySync('owner', true);
+  release();
+  await batch;
+  for (let i = 0; i < 50 && !calls.some((c) => c.action === 'markRead'); i++)
+    await new Promise((r) => setTimeout(r, 10));
+  const read = calls.find((c) => c.action === 'markRead');
+  assert.equal(read?.through, 12);
+  assert.equal(read?.manualUnreadRevision, 0);
+  assert.ok(read?.operationId);
+});
+
+test('Unread and Needs attention include muted archived chats, while All, badges and preferences retain archive behavior', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'inbox-archived-filters-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const f = fixture(null, [row(), row('active')], dir);
+  t.after(() => f.service.close());
+  await f.service.request(null, {
+    action: 'preferences',
+    key,
+    generation: 1,
+    expectedPreferencesRevision: 0,
+    patch: { archived: true, notificationMode: 'none' },
+  });
+  const list = async (filter: 'all' | 'unread' | 'attention', archived?: boolean) =>
+    (await f.service.request<InboxPage>(null, { action: 'list', filter, archived })).items
+      .map((r) => r.ref.conversationId)
+      .sort();
+  assert.deepEqual(await list('all'), ['active']);
+  for (const filter of ['unread', 'attention'] as const) {
+    assert.deepEqual(await list(filter), ['active', 'session']);
+    assert.deepEqual(await list(filter, false), ['active', 'session']);
+    assert.deepEqual(await list(filter, true), ['session']);
+  }
+  assert.equal(await f.service.badge(null), 1);
+  await f.service.request(null, {
+    action: 'markAllReadSnapshot',
+    operationId: 'archived-unread',
+    requestedAt: Date.now(),
+    filter: 'unread',
+    archived: false,
+  });
+  assert.deepEqual(await list('unread'), []);
+  assert.deepEqual(await list('attention'), ['active', 'session']);
+  const { item } = await f.service.request<{ item: InboxItem }>(null, { action: 'get', key });
+  assert.equal(item.archived, true);
+  assert.equal(item.notificationMode, 'none');
+  assert.equal(item.pendingActionCount, 1);
 });

@@ -54,7 +54,7 @@ import type { RemoteCommands } from './remoteCommands.js';
 import type { RemoteRuntime, RemoteRuntimes, RuntimeLease } from './remoteRuntime.js';
 import { SessionAttachment } from './sessionAttachment.js';
 import type { PromptFileReference, RemoteFileStore } from './fileStore.js';
-import { parseImageRef } from './snapshot.js';
+import { activityPreview, parseImageRef } from './snapshot.js';
 import { RemoteMediaRoutes } from './mediaRoutes.js';
 
 /** A session stays open this long after its last viewer detached. */
@@ -197,17 +197,24 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
         return undefined;
       case 'session.history':
         return this.deps.commands.history(this.attachedRuntime(state, params), params);
-      case 'session.activity': {
+      case 'session.activity':
+      case 'session.activityPreview': {
         const runtime = this.attachedRuntime(state, params);
         const attachment = state.attached.get(runtime.sessionId);
-        const after = (params as Json)?.['after'];
+        const preview = method === 'session.activityPreview';
+        const through = (params as Json)?.['through'];
+        if (preview && (typeof through !== 'number' || !Number.isSafeInteger(through) || through < 1))
+          throw new RemoteRpcError('invalid_params', 'invalid activity cursor');
+        const after = preview ? (through as number) - 1 : (params as Json)?.['after'];
         if (typeof after !== 'number' || !Number.isSafeInteger(after) || after < 0) throw new RemoteRpcError('invalid_params', 'invalid activity cursor');
         if (!this.deps.activityPage) throw new RemoteRpcError('invalid_params', 'activity positions unavailable');
         const ref = this.requireEnabled(viewer, runtime.sessionId);
         const result = await this.deps.activityPage(ref, after);
         if (this.disposed || state.closed || state.attached.get(runtime.sessionId) !== attachment
           || this.attachedRuntime(state, params) !== runtime) throw new RemoteRpcError('not_approved', 'session attachment changed');
-        return result;
+        if (!preview) return result;
+        const entry = result.items.find(item => item.cursor === through);
+        return activityPreview(runtime.remoteView(), entry?.resultUuids ?? []);
       }
       case 'image.get':
         return this.deps.commands.imageGet(this.imageRuntime(viewer, params), params);

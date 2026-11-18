@@ -1,3 +1,4 @@
+import {noticeTargetFromSearch} from '../inbox/route';
 import { useState } from 'react';
 import { Markdown } from '../remote/markdown';
 import type { TeamMember, TeamsApi } from '../../../../packages/teams';
@@ -31,7 +32,7 @@ interface LayoutProps {
 
 /** The Teams workspace of a signed-in account, opened with it and closed when the account or the page goes. */
 export function TeamsWorkspaceView({ api, uid, ...layout }: LayoutProps & { api: TeamsApi; uid: string }) {
-  const query = new URLSearchParams(location.search);
+  const query = new URLSearchParams(typeof location==='undefined'?'':location.search);
   const teams = useTeamsWorkspace(api, uid, {initialTeamId: query.get('team') ?? undefined, initialConversationId: query.get('chat') ?? undefined});
   return <TeamsWorkspaceLayout teams={teams} {...layout} />;
 }
@@ -62,7 +63,7 @@ export function TeamsWorkspaceLayout({ teams: { workspace, snapshot }, locale, i
           setDrawer(current => ({ ...current, open: false }));
         }}>{t('tw_back_conversations')}</button></ChatTopbarControl> : null}
         {invited ? <InviteNotice names={invited} locale={locale} onDone={() => setInvited(undefined)} /> : null}
-        <TeamConversationView workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown} detailsOpen={drawer.open}
+        <TeamConversationView notificationTarget={noticeTargetFromSearch(typeof location==='undefined'?'':location.search)} workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown} detailsOpen={drawer.open}
           onToggleDetails={() => setDrawer(current => ({ ...current, open: !current.open }))} />
       </div>
       {drawer.open ? <TeamDetailsDrawer workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} tab={drawer.tab}

@@ -19,7 +19,7 @@ class RemoteBotsTest {
     private fun bot(id: String, waiting: UInt = 0u, status: RemoteBotStatusFfi = RemoteBotStatusFfi.IDLE) =
         RemoteBotSummaryFfi(id, "Bot $id", "does $id", status, waiting, null)
 
-    private fun chat(id: String) = RemoteSessionSummaryFfi(id, "Chat $id", "", RemoteSessionStatusFfi.IDLE, null, null, 0u)
+    private fun chat(id: String) = RemoteSessionSummaryFfi(sessionId = id, title = "Chat $id", projectLabel = "", status = RemoteSessionStatusFfi.IDLE, pendingAction = null, model = null, viewers = 0u)
 
     private fun bots(hostId: String?, vararg listed: RemoteBotSummaryFfi) = RemoteBotsState(hostId, RemoteBotsStateFfi.Bots(listed.toList()))
 

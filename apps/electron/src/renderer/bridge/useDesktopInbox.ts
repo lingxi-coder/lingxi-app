@@ -52,7 +52,10 @@ export function useAssistantInboxReading(inbox: ReturnType<typeof useDesktopInbo
   const latest = useRef({ item, page, foreground, visible, preview });
   latest.current = { item, page, foreground, visible, preview };
   const position = useRef<AssistantReadingPosition>();
-  const reader = useMemo(() => inbox.controller ? new AssistantInboxReader(command => inbox.controller!.mutate(command),
+  const reader = useMemo(() => inbox.controller ? new AssistantInboxReader(async command => {
+    await inbox.controller!.mutate(command);
+    setError('');
+  },
     () => setError('READ_STATE_NOT_SAVED')) : undefined, [inbox.controller]);
   const observe = useCallback(() => {
     const current = latest.current;

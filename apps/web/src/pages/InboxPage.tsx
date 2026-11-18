@@ -8,7 +8,8 @@ import { watchInbox } from '../../../../packages/inbox/firestore';
 import { auth } from '../app/firebase';
 import { teamsDatabase } from '../teams/firestore';
 import { SignInCard } from '../teams/SignInCard';
-import { sourceRoute } from '../inbox/route';
+import {type InboxNotice} from '../../../../packages/inbox/contracts';
+import { noticeTargetFromSearch,sourceRoute } from '../inbox/route';
 import type { Locale } from '../utils/locale';
 import '../teams/teams-web.css';
 
@@ -27,18 +28,17 @@ function SignedIn({ user, locale, focusKey }: { user: User; locale: Locale; focu
     });
     setController(model);
     void model.start();
-    if (focusKey)
-      void model
-        .get(focusKey)
-        .then((row) => {
-          if (!live) return;
-          const path = sourceRoute(row);
-          if (path) location.replace(path);
-          else setError('SOURCE_UNAVAILABLE');
-        })
-        .catch((e) => {
-          if (live) setError(e.message);
-        });
+    if(focusKey){
+      const resolve=async()=>{
+        const id=new URLSearchParams(location.search).get('notificationId');
+        const target=id?(await request<{item:InboxNotice}>({action:'notice',id})).item:noticeTargetFromSearch(location.search);
+        if(target?.key && target.key!==focusKey)throw new Error('SOURCE_ACCESS_REQUIRED');
+        const row=await model.get(focusKey,target?.generation);
+        if(!live)return;
+        const path=sourceRoute(row,target??{through:-1,key:row.key,generation:row.ref.generation});if(path)location.replace(path);else setError('SOURCE_UNAVAILABLE');
+      };
+      void resolve().catch(e=>{if(live)setError(e.message);});
+    }
     void request<{ dmReceipts: boolean }>({ action: 'accountPreferences' })
       .then((result) => {
         if (live) setReceipts(result.dmReceipts);
@@ -56,8 +56,8 @@ function SignedIn({ user, locale, focusKey }: { user: User; locale: Locale; focu
       <InboxList
         controller={controller}
         locale={locale}
-        onOpen={(row) => {
-          const route = sourceRoute(row);
+        onOpen={(row,target) => {
+          const route = sourceRoute(row,target);
           if (!route) throw new Error('SOURCE_UNAVAILABLE');
           location.assign(route);
         }}

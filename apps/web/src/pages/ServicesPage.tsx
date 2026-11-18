@@ -1,3 +1,4 @@
+import {noticeTargetFromSearch} from '../inbox/route';
 import { useEffect, useMemo, useState } from 'react';
 import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import { auth } from '../app/firebase';
@@ -17,7 +18,7 @@ const renderMarkdown: RenderMarkdown = text => <Markdown text={text} />;
 function SignedIn({ user, locale, serviceId }: { user: User; locale: string; serviceId?: string }) {
   const api = useMemo(() => webServicesApi(user, () => auth.currentUser?.uid), [user]);
   useEffect(() => () => api.close(), [api]);
-  return <div className="teams-web-services"><HostedServices api={api} uid={user.uid} locale={locale} renderMarkdown={renderMarkdown} initialServiceId={serviceId} initialSessionId={new URLSearchParams(location.search).get('session') ?? undefined}
+  return <div className="teams-web-services"><HostedServices notificationTarget={noticeTargetFromSearch(location.search)} api={api} uid={user.uid} locale={locale} renderMarkdown={renderMarkdown} initialServiceId={serviceId} initialSessionId={new URLSearchParams(location.search).get('session') ?? undefined}
     link={id => serviceLink(location.origin, id)} /></div>;
 }
 

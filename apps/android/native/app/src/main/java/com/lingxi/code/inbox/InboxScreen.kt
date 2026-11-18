@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
@@ -244,8 +245,12 @@ private fun InboxRow(
             IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, stringResource(R.string.inbox_conversation_options)) }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 fun change(operation: InboxOperation) { menu = false; onMutation(operation) }
-                DropdownMenuItem(text = { Text(stringResource(if (row.unread) R.string.inbox_mark_read else R.string.inbox_mark_unread)) },
-                    onClick = { change(if (row.unread) InboxOperation.read(row) else InboxOperation.unread(row)) })
+                if (row.unread || row.attention) {
+                    DropdownMenuItem(text = { Text(stringResource(R.string.inbox_mark_read)) }, onClick = { change(InboxOperation.read(row)) })
+                }
+                if (!row.unread) {
+                    DropdownMenuItem(text = { Text(stringResource(R.string.inbox_mark_unread)) }, onClick = { change(InboxOperation.unread(row)) })
+                }
                 DropdownMenuItem(text = { Text(stringResource(if (row.pinOrder == null) R.string.inbox_pin else R.string.inbox_unpin)) },
                     onClick = { change(InboxOperation.preferences(row, JSONObject().put("pinOrder", if (row.pinOrder == null) System.currentTimeMillis() else JSONObject.NULL))) })
                 onMoveUp?.let { move -> DropdownMenuItem(text = { Text(stringResource(R.string.inbox_pin_move_up)) }, onClick = { menu = false; move() }) }
@@ -271,4 +276,38 @@ private fun inboxCategoryRes(category: String): Int = when (category) {
     "friend" -> R.string.friends_title
     "team" -> R.string.teams_title
     else -> R.string.inbox_service
+}
+
+@Composable
+internal fun InboxNoticeDialog(
+    preview: InboxNoticePreview?,
+    loading: Boolean,
+    onDismiss: () -> Unit,
+    onOpen: (InboxNoticePreview) -> Unit,
+    onMarkRead: (InboxNoticePreview) -> Unit,
+) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(preview?.row?.title?.takeIf(String::isNotBlank) ?: stringResource(R.string.inbox_notification_title)) },
+        text = {
+            when {
+                loading -> LinearProgressIndicator(Modifier.fillMaxWidth())
+                preview == null -> Text(stringResource(R.string.inbox_notice_unavailable))
+                preview.messages.none(String::isNotBlank) -> Text(stringResource(R.string.inbox_notification_body))
+                else -> Column(
+                    Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    preview.messages.filter(String::isNotBlank).forEach { Text(it) }
+                }
+            }
+        },
+        confirmButton = {
+            if (preview != null) TextButton(onClick = { onOpen(preview) }) { Text(stringResource(R.string.inbox_open_conversation)) }
+            else TextButton(onClick = onDismiss) { Text(stringResource(R.string.inbox_dismiss)) }
+        },
+        dismissButton = {
+            if (preview != null) TextButton(onClick = { onMarkRead(preview) }) { Text(stringResource(R.string.inbox_mark_read)) }
+        },
+    )
 }

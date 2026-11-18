@@ -66,6 +66,7 @@ import { BotStore } from './bots/store.js';
 import { TaskChangeAnnouncer } from './bots/taskChanges.js';
 import { BotTasks } from './bots/taskService.js';
 import { SessionGateway } from './remoteControl/sessionGateway.js';
+import { activityPreview } from './remoteControl/snapshot.js';
 import { LocalAppsGateway } from './remoteControl/localAppsGateway.js';
 import { createRemoteLocalAppsDelegate } from './remoteControl/localAppsBindings.js';
 import { LocalAppRtc } from './local-apps/remoteRtc.js';
@@ -836,6 +837,14 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       const row = await sessionCatalog.find(ref.projectPath, ref.sessionId);
       if (!row) throw new Error('SOURCE_ACCESS_REQUIRED');
       return sessionCatalog.readActivity(ref.projectPath, ref.sessionId, row.path, after);
+    },
+    activityPreview: async (ref, through) => {
+      const row = await sessionCatalog.find(ref.projectPath, ref.sessionId);
+      if (!row) throw new Error('SOURCE_ACCESS_REQUIRED');
+      const page = await sessionCatalog.readActivity(ref.projectPath, ref.sessionId, row.path, through - 1);
+      const runtime = bridge?.get(ref.sessionId);
+      if (!runtime || runtime.projectPath !== ref.projectPath) return { available: false, messages: [] };
+      return activityPreview(runtime.remoteView(), page.items.find(item => item.cursor === through)?.resultUuids ?? []);
     },
     notify: notice => {
       if (!Notification.isSupported()) return;

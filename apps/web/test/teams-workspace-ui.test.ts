@@ -154,7 +154,7 @@ test('visibleStart: the newest window, widened for unread messages and for what 
   const list = (count: number): TeamMessage[] => Array.from({ length: count }, (_, i) => message(i + 1, { author: { kind: 'user', uid: 'bob' } }));
   const all = list(250);
   assert.equal(visibleStart(list(30), { lastReadSeq: 30, uid }), 0);
-  assert.equal(visibleStart(all, { lastReadSeq: 250, uid }), 250 - WINDOW_SIZE, 'the newest hundred');
+  assert.equal(visibleStart(all, { lastReadSeq: 250, uid }), 250 - WINDOW_SIZE, 'the newest page');
   assert.equal(visibleStart(all, { lastReadSeq: 100, uid }), 100 - UNREAD_CONTEXT, 'back to the first unread, with context');
   assert.equal(visibleStart(all, { lastReadSeq: 0, uid }), 250-WINDOW_MAX, 'unread rows stay within the active cap');
   const big = list(600);

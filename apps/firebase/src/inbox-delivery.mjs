@@ -1,3 +1,4 @@
+import { inboxNotificationEnabled } from './inbox-rollout.mjs';
 import { FieldValue } from 'firebase-admin/firestore';
 import { DAY, deliveryTime, shard, alertEnabled, digest, millis, splitKey } from './inbox-model.mjs';
 import { taskAllowed } from './inbox-tasks.mjs';
@@ -28,7 +29,12 @@ export function eligible(event, row, now) {
         row.state === (event.kind === 'input' ? 'waiting_for_input' : 'waiting_for_approval'))
     );
   }
-  if(event.failureRevision!==undefined && (row.state!=='failed' || row.failureRevision!==event.failureRevision)) return false;
+  if (
+    event.failureRevision !== undefined &&
+    (row.state !== 'failed' || row.failureRevision !== event.failureRevision)
+  )
+    return false;
+  if (event.failureRevision !== undefined && row.failureReadRevision === event.failureRevision) return false;
   const actualRead =
     row.readThrough >= event.through && (row.actualReadRevision ?? 0) > (event.createdReadRevision ?? 0);
   if (actualRead) return false;
@@ -42,30 +48,41 @@ export function eligible(event, row, now) {
     return false;
   return true;
 }
-const safeTarget=id=>typeof id==='string' && /^[A-Za-z0-9_-]{1,128}$/u.test(id);
-export async function authorizedTargets(tx,db,uid,acl,event) {
-  const target={};
-  if(!acl.thread) return target;
-  if(safeTarget(event.taskId)) {
-    const task=(await tx.get(acl.root.collection('tasks').doc(event.taskId))).data();
-    if(!await taskAllowed(tx,db,acl,task,uid)) return target;
-    target.taskId=event.taskId;
+const safeTarget = id => typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(id);
+export async function authorizedTargets(tx, db, uid, acl, event) {
+  const target = {};
+  if (!acl.thread) return target;
+  if (safeTarget(event.taskId)) {
+    const task = (await tx.get(acl.root.collection('tasks').doc(event.taskId))).data();
+    if (
+      !(await taskAllowed(tx, db, acl, task, uid)) ||
+      (['input', 'approval'].includes(event.kind) &&
+        (task.state !== 'waiting' || task.currentWaitId !== event.waitId))
+    )
+      return target;
+    target.taskId = event.taskId;
   }
-  if(safeTarget(event.messageId)) {
-    const m=(await tx.get(acl.thread.collection('messages').doc(event.messageId))).data();
-    if(m && !m.recalled) target.messageId=event.messageId;
+  if (safeTarget(event.messageId)) {
+    const m = (await tx.get(acl.thread.collection('messages').doc(event.messageId))).data();
+    if (m && !m.recalled) target.messageId = event.messageId;
   }
   return target;
 }
 export async function inspectNotice(tx, db, uid, event, now) {
-  if (!event) return false;
+  if (!event || !inboxNotificationEnabled(uid)) return false;
   const ref = splitKey(event.key),
     account = owner(db, uid);
   const [acl, doc] = await Promise.all([
     access(tx, db, uid, ref),
     tx.get(account.collection('inbox').doc(event.key))
   ]);
-  if (acl?.generation !== event.generation || !eligible(event, doc.data(), now)) return false;
+  if (
+    acl?.generation !== event.generation ||
+    (ref.kind === 'assistant' &&
+      (acl.conversationConsentRevision ?? 0) !== (event.conversationConsentRevision ?? 0)) ||
+    !eligible(event, doc.data(), now)
+  )
+    return false;
   if (!acl.thread) return true;
   const read = (await tx.get(acl.thread.collection('reads').doc(uid))).data();
   if (!event.taskId && read?.generation === event.generation && read.lastReadSeq >= event.through) return false;
@@ -229,8 +246,12 @@ export class InboxDelivery {
             through: String(event.through),
             generation: String(event.generation),
             eventKind: event.kind,
-            ...(safeTarget(event.messageId)?{messageId:event.messageId}:{}),
-            ...(safeTarget(event.taskId)?{taskId:event.taskId}:{}),
+            ...(safeTarget(event.messageId) ? { messageId: event.messageId } : {}),
+            ...(safeTarget(event.taskId) ? { taskId: event.taskId } : {}),
+            ...(event.failureRevision !== undefined ? { failureRevision: String(event.failureRevision) } : {}),
+            ...(event.pendingActionRevision !== undefined
+              ? { pendingActionRevision: String(event.pendingActionRevision) }
+              : {}),
             notificationId: id
           }
         },

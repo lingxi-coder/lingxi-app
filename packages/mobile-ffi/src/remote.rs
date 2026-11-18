@@ -1998,6 +1998,51 @@ impl RemoteControlCore {
             .ok_or(RemoteFfiError::NotConnected)
     }
 
+    async fn activity_request(
+        &self,
+        session_id: &str,
+        ordinal: u64,
+        preview: bool,
+    ) -> Result<String, RemoteFfiError> {
+        let (controller, watcher, generation) = {
+            let active = self.core.active.lock().expect("active");
+            let active = active.as_ref().ok_or(RemoteFfiError::NotConnected)?;
+            let (watcher, _) = active
+                .watchers
+                .get(session_id)
+                .ok_or(RemoteFfiError::NotConnected)?;
+            (
+                active.client.session(session_id),
+                watcher.clone(),
+                self.core.current.load(Ordering::SeqCst),
+            )
+        };
+        let output = if preview {
+            serde_json::to_string(
+                &controller
+                    .session_activity_preview(ordinal)
+                    .await
+                    .map_err(rpc_error)?,
+            )
+        } else {
+            serde_json::to_string(
+                &controller
+                    .session_activity_page(ordinal)
+                    .await
+                    .map_err(rpc_error)?,
+            )
+        }
+        .map_err(|e| RemoteFfiError::Internal {
+            message: e.to_string(),
+        })?;
+        if generation != self.core.current.load(Ordering::SeqCst)
+            || !watcher.attached.load(Ordering::SeqCst)
+        {
+            return Err(RemoteFfiError::NotConnected);
+        }
+        Ok(output)
+    }
+
     fn controller(&self, session_id: &str) -> Result<SessionController, RemoteFfiError> {
         Ok(self.client()?.session(session_id))
     }
@@ -2430,31 +2475,16 @@ impl RemoteControlCore {
         session_id: String,
         after: u64,
     ) -> Result<String, RemoteFfiError> {
-        let (controller, watcher, generation) = {
-            let active = self.core.active.lock().expect("active");
-            let active = active.as_ref().ok_or(RemoteFfiError::NotConnected)?;
-            let (watcher, _) = active
-                .watchers
-                .get(&session_id)
-                .ok_or(RemoteFfiError::NotConnected)?;
-            (
-                active.client.session(&session_id),
-                watcher.clone(),
-                self.core.current.load(Ordering::SeqCst),
-            )
-        };
-        let page = controller
-            .session_activity_page(after)
-            .await
-            .map_err(rpc_error)?;
-        if generation != self.core.current.load(Ordering::SeqCst)
-            || !watcher.attached.load(Ordering::SeqCst)
-        {
-            return Err(RemoteFfiError::NotConnected);
-        }
-        serde_json::to_string(&page).map_err(|e| RemoteFfiError::Internal {
-            message: e.to_string(),
-        })
+        self.activity_request(&session_id, after, false).await
+    }
+
+    /// Preview one committed result with no read-state side effect.
+    pub async fn session_activity_preview(
+        &self,
+        session_id: String,
+        through: u64,
+    ) -> Result<String, RemoteFfiError> {
+        self.activity_request(&session_id, through, true).await
     }
 
     /// The bytes of an image a record refers to.

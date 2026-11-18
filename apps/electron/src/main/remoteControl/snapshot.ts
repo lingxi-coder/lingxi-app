@@ -19,6 +19,7 @@ import type {
   RemoteRecord,
   RemoteSeqRecord,
   SessionHistoryResult,
+  SessionActivityPreviewResult,
   SessionSnapshotParams,
 } from '@lingxi/bridge-client/remote';
 
@@ -329,6 +330,32 @@ export function historyPage(view: RemoteRuntimeView, beforeIndex: number, limit:
   const cuts = { any: false };
   const messages = source.slice(start, end).map((message, offset) => mapMessage(message, (index) => baseImageRef(view.sessionId, start + offset, index), cuts));
   return { messages, first_index: start, has_more: start > 0 };
+}
+
+/** An exact semantic result from the already attached source, with no history replay. */
+export function activityPreview(view: RemoteRuntimeView, uuids: readonly string[]): SessionActivityPreviewResult {
+  const ids = new Set(uuids);
+  if (!ids.size || ids.size > 16) return { available: false, messages: [] };
+  const found = new Map<string, Message>();
+  const add = (message: Message) => {
+    if (message.role !== 'assistant' || !message.transcript_uuid || !ids.has(message.transcript_uuid)) return;
+    const blocks = message.blocks.filter(block => block.type === 'text');
+    if (blocks.length)
+      found.set(message.transcript_uuid, { role: 'assistant', transcript_uuid: message.transcript_uuid, blocks });
+  };
+  const base = view.base?.event;
+  if (base?.type === 'session_resumed')
+    base.messages.forEach(add);
+  for (const envelope of view.events) {
+    if (envelope.event.type === 'message_complete' && envelope.event.message)
+      add(envelope.event.message);
+  }
+  const messages = [...ids].flatMap(id => found.get(id) ?? []);
+  const blocks = messages.flatMap(message => message.blocks);
+  const characters = blocks.reduce((sum, block) => sum + (block.type === 'text' ? block.text.length : 0), 0);
+  if (found.size !== ids.size || blocks.length > 16 || characters > 32_768 || jsonBytes(messages) > PAGE_MAX_BYTES)
+    return { available: false, messages: [] };
+  return { available: true, messages };
 }
 
 /** The image a reference stands for, while the runtime still holds its bytes. */

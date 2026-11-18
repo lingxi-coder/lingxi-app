@@ -274,6 +274,8 @@ interface ConversationSource {
 
     suspend fun refreshSessions() {}
 
+    suspend fun assistantActivityPreview(sessionId: String, through: ULong): String? = null
+
     /**
      * Resume the engine session named by the REAL wire [uuid], submitting
      * `ClientCommand.ResumeSession`. The engine confirms with `SessionResumed`,

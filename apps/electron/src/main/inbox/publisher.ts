@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
-import type {InboxItem,InboxPreferences} from '../../../../../packages/inbox/contracts.js';
+import type { InboxItem, InboxPreferences } from '../../../../../packages/inbox/contracts.js';
 import type { AccountSessionStore } from '../account.js';
 import type { LocalEntry, LocalInboxStore } from './local.js';
 
@@ -11,6 +11,7 @@ export class SummaryPublisher {
   private active?: Promise<void>;
   private dirty = false;
   private stopped = false;
+  private consentEpoch = 0;
   private retry?: ReturnType<typeof setTimeout>;
   constructor(
     private readonly store: LocalInboxStore,
@@ -21,6 +22,10 @@ export class SummaryPublisher {
     private readonly changed: () => void,
     private readonly failed: (error: Error) => void,
   ) {}
+  consentChanged() {
+    this.consentEpoch++;
+    return this.request();
+  }
   request(): Promise<void> {
     clearTimeout(this.retry);
     this.dirty = true;
@@ -65,17 +70,42 @@ export class SummaryPublisher {
         .digest('base64url'),
     );
   }
-  private async preferences(uid:string,epoch:number,key:string,generation:number,expectedPreferencesRevision:number,patch:Partial<InboxPreferences>){
-    let result:{item?:InboxItem};
-    try {result=await this.post(uid,epoch,{action:'preferences',key,generation,expectedPreferencesRevision,patch});}
-    catch(error) {
-      if(!(error instanceof Error)||error.message!=='PREFERENCE_REVISION_CONFLICT')throw error;
+  private async preferences(
+    uid: string,
+    epoch: number,
+    key: string,
+    generation: number,
+    expectedPreferencesRevision: number,
+    patch: Partial<InboxPreferences>,
+  ) {
+    let result: { item?: InboxItem };
+    try {
+      result = await this.post(uid, epoch, {
+        action: 'preferences',
+        key,
+        generation,
+        expectedPreferencesRevision,
+        patch,
+      });
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== 'PREFERENCE_REVISION_CONFLICT') throw error;
       // The newer profile is authoritative; replaying a migration against its new revision would clobber an owner's edit.
-      result=await this.post(uid,epoch,{action:'get',key,generation});
+      result = await this.post(uid, epoch, { action: 'get', key, generation });
     }
-    if(result.item && !this.stopped && this.context().epoch===epoch)this.store.remember(JSON.stringify(uid),result.item);
+    if (result.item && !this.stopped && this.context().epoch === epoch)
+      this.store.remember(JSON.stringify(uid), result.item);
+  }
+  private async syncPromotedRead(uid: string, epoch: number, key: string, generation: number, ceiling: number) {
+    const through = this.store.promotedRead(uid, key);
+    if (!through || through > ceiling) return;
+    const operationId = createHash('sha256')
+      .update(JSON.stringify(['promoted', key, generation, through]))
+      .digest('hex');
+    await this.post(uid, epoch, { action: 'markRead', key, generation, through, manualUnreadRevision: 0, operationId });
+    if (!this.stopped && this.context().epoch === epoch) this.store.promotedReadSent(uid, key, through);
   }
   private async sync(uid: string, epoch: number) {
+    const consentEpoch = this.consentEpoch;
     const enabled = this.store.enabled(uid),
       consentRevision = this.store.consentRevision(uid);
     const bindings = new Map(this.store.sources(uid).map((s) => [s.source, s]));
@@ -83,6 +113,7 @@ export class SummaryPublisher {
     const check = () => {
       if (
         this.stopped ||
+        this.consentEpoch !== consentEpoch ||
         this.context().epoch !== epoch ||
         this.store.enabled(uid) !== enabled ||
         this.store.consentRevision(uid) !== consentRevision
@@ -167,7 +198,7 @@ export class SummaryPublisher {
         const prev = this.store.publication(uid, key);
         if (prev?.generation === generation && legacy.has(key)) {
           const archived = legacy.get(key)!;
-          await this.preferences(uid,epoch,key,generation,this.store.archiveExpected(scope,key),{archived});
+          await this.preferences(uid, epoch, key, generation, this.store.archiveExpected(scope, key), { archived });
           check();
           this.store.archiveSynced(scope, key, archived);
         }
@@ -175,8 +206,10 @@ export class SummaryPublisher {
           prev?.generation === generation &&
           prev.signature === signature &&
           this.store.confirmedChat(uid, key, generation, chat.revision)
-        )
+        ) {
+          await this.syncPromotedRead(uid, epoch, key, generation, entry.item.sourceCursor);
           continue;
+        }
         checkChat();
         const revision = Math.max(entry.item.sourceRevision, prev?.generation === generation ? prev.revision + 1 : 1);
         this.store.attempt(uid, key, generation);
@@ -188,7 +221,6 @@ export class SummaryPublisher {
           sourceSecret,
           generation,
         });
-        check();
         checkChat();
         if (
           prev?.generation !== generation ||
@@ -211,14 +243,17 @@ export class SummaryPublisher {
               operationId: 'migration-' + generation + '-' + personal.manualUnreadRevision,
             });
           if (personal.archived || personal.pinOrder !== null || personal.notificationMode !== 'mentions') {
-            await this.preferences(uid,epoch,key,generation,0,{archived:personal.archived,pinOrder:personal.pinOrder,notificationMode:personal.notificationMode});
-          });
+            await this.preferences(uid, epoch, key, generation, 0, {
+              archived: personal.archived,
+              pinOrder: personal.pinOrder,
+              notificationMode: personal.notificationMode,
+            });
           }
         }
-        check();
         checkChat();
         this.store.published(uid, key, generation, revision, signature);
         this.store.confirmChat(uid, key, generation, chat.revision, false);
+        await this.syncPromotedRead(uid, epoch, key, generation, entry.item.sourceCursor);
         if (legacy.has(key)) this.store.archiveSynced(scope, key, legacy.get(key)!);
         this.changed();
       }

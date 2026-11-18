@@ -89,7 +89,7 @@ export async function projectTask(store, { uid, ref, taskId }, enqueue) {
           timing: await captureTiming(tx, account, now),
           cursor,
           taskId,
-          ...(mid?{messageId:mid}:{}),
+          ...(mid ? { messageId: mid } : {}),
           waitId: task.currentWaitId ?? null,
           id: 'task:' + taskId + ':' + revision,
           at: millis(at)

@@ -61,7 +61,13 @@ internal class InboxStorage(context: Context) :
         Unit
     }
 
-    fun rememberLocal(owner: String, item: InboxItem, op: InboxOperation): InboxItem = write { db ->
+    fun rememberLocal(owner: String, item: InboxItem, op: InboxOperation): InboxItem =
+        write { db -> rememberLocal(db, owner, item, op) }
+
+    fun rememberLocalBatch(owner: String, entries: List<Pair<InboxItem, InboxOperation>>): Map<String, InboxItem> =
+        write { db -> entries.associate { (row, op) -> row.key to rememberLocal(db, owner, row, op) } }
+
+    private fun rememberLocal(db: SQLiteDatabase, owner: String, item: InboxItem, op: InboxOperation): InboxItem {
         val name = "local:${item.key}"
         val current = db.rawQuery("SELECT value FROM preferences WHERE owner = ? AND name = ?", arrayOf(owner, name)).use {
             if (it.moveToFirst()) InboxItem.parse(JSONObject(it.getString(0))) else null
@@ -71,7 +77,7 @@ internal class InboxStorage(context: Context) :
         db.replaceOrThrow("preferences", null, ContentValues().apply {
             put("owner", owner); put("name", name); put("value", changed.json().toString())
         })
-        changed
+        return changed
     }
 
     fun cache(owner: String, cacheKey: String, page: JSONObject, verifiedAt: Long) = write { db ->
@@ -169,6 +175,10 @@ internal class InboxStorage(context: Context) :
             put("owner", owner); put("event", event); put("expires", now + 7L * 24 * 60 * 60 * 1_000)
         }, SQLiteDatabase.CONFLICT_IGNORE) >= 0
     }
+
+    fun wasAdmitted(owner: String, event: String, now: Long): Boolean = readableDatabase.rawQuery(
+        "SELECT 1 FROM delivery WHERE owner = ? AND event = ? AND expires > ?", arrayOf(owner, event, now.toString()),
+    ).use { it.moveToFirst() }
 
     private fun <T> write(action: (SQLiteDatabase) -> T): T {
         val db = writableDatabase

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { InboxController } from './controller.js';
-import type { InboxCursor, InboxItem, InboxNotice,InboxNoticeTarget } from './contracts.js';
+import type { InboxCursor, InboxItem, InboxNotice, InboxNoticeTarget } from './contracts.js';
 export function NoticeHistory({
   controller,
   cn,
@@ -8,7 +8,7 @@ export function NoticeHistory({
 }: {
   controller: InboxController;
   cn: boolean;
-  onOpen: (item: InboxItem,target?:InboxNoticeTarget) => void | Promise<void>;
+  onOpen: (item: InboxItem, target?: InboxNoticeTarget) => void | Promise<void>;
 }) {
   const [rows, setRows] = useState<InboxNotice[]>([]),
     [next, setNext] = useState<InboxCursor | null>(),
@@ -69,8 +69,16 @@ export function NoticeHistory({
                 type="button"
                 onClick={() =>
                   void controller
-                    .get(n.key, n.generation)
-                    .then(item=>onOpen(item,{key:n.key,generation:n.generation,through:n.through,messageId:n.messageId,taskId:n.taskId}))
+                    .notice(n.id)
+                    .then(async (fresh) =>
+                      onOpen(await controller.get(fresh.key, fresh.generation), {
+                        key: fresh.key,
+                        generation: fresh.generation,
+                        through: fresh.through,
+                        messageId: fresh.messageId,
+                        taskId: fresh.taskId,
+                      }),
+                    )
                     .catch(() => setError(true))
                 }
               >

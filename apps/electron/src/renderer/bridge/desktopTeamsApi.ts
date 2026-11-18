@@ -65,13 +65,22 @@ export function desktopTeamsApi(
       : {}),
     ...(inbox
       ? {
-          readVisible: (scope, id, through, manualUnreadRevision) =>
+          readVisible: (
+            scope,
+            id,
+            through,
+            manualUnreadRevision,
+            observedPendingActionRevision,
+            observedFailureRevision,
+          ) =>
             recordVisible(uid, {
               action: 'markRead',
               key: inboxKey({ kind: 'team', sourceId: scope.teamId, conversationId: id }),
               generation: scope.generation,
               through,
               manualUnreadRevision,
+              ...(observedPendingActionRevision === undefined ? {} : { observedPendingActionRevision }),
+              ...(observedFailureRevision === undefined ? {} : { observedFailureRevision }),
               operationId: crypto.randomUUID(),
             }),
           peerReceipt: (scope, id) =>

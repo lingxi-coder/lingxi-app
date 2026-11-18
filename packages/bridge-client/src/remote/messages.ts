@@ -312,6 +312,11 @@ export interface SessionHistoryResult {
 
 /** Source-owned semantic positions, authorized by the current session attachment. */
 export interface SessionActivityParams { session_id: string; after: number }
+export interface SessionActivityPreviewParams { session_id: string; through: number }
+export interface SessionActivityPreviewResult {
+  available: boolean;
+  messages: MessageDto[];
+}
 export interface SessionActivityResult {
   items: { cursor: number; resultUuids: string[]; kind: string; at: number }[];
   cursor: number;
@@ -488,6 +493,7 @@ export interface ViewerRequests {
   'session.detach': { params: SessionDetachParams; result: EmptyResult };
   'session.history': { params: SessionHistoryParams; result: SessionHistoryResult };
   'session.activity': { params: SessionActivityParams; result: SessionActivityResult };
+  'session.activityPreview': { params: SessionActivityPreviewParams; result: SessionActivityPreviewResult };
   'image.get': { params: ImageGetParams; result: ImageGetResult };
   'prompt.send': { params: PromptSendParams; result: PromptSendResult };
   'turn.cancel': { params: TurnCancelParams; result: EmptyResult };

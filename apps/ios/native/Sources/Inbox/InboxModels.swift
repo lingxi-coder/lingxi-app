@@ -60,6 +60,7 @@ struct InboxRow: Codable, Equatable, Identifiable, Sendable {
     var mentionCount = 0
     var pendingActionCount = 0
     var pendingActionRevision: Int?
+    var failureRevision: Int?
     var attentionKind: String?
     var state = "idle"
     var manualUnread = false
@@ -85,7 +86,8 @@ struct InboxRow: Codable, Equatable, Identifiable, Sendable {
         InboxRead(key: key, generation: ref.generation,
                   through: min(sourceCursor, max(0, through ?? sourceCursor)),
                   manualUnreadRevision: manualUnreadRevision,
-                  observedPendingActionRevision: pendingActionRevision)
+                  observedPendingActionRevision: pendingActionRevision,
+                  observedFailureRevision: failureRevision)
     }
 
     static func ordered(_ left: Self, _ right: Self) -> Bool {
@@ -101,11 +103,12 @@ enum InboxFilter: String, CaseIterable, Identifiable {
     case all, unread, attention
     var id: Self { self }
 
-    func accepts(_ row: InboxRow) -> Bool {
+    func accepts(_ row: InboxRow, archivedOnly: Bool) -> Bool {
+        if archivedOnly && !row.archived { return false }
         switch self {
-        case .all: true
-        case .unread: row.isUnread
-        case .attention: row.needsAttention
+        case .all: return row.archived == archivedOnly
+        case .unread: return row.isUnread
+        case .attention: return row.needsAttention
         }
     }
 }
@@ -163,6 +166,7 @@ struct InboxRead: Codable, Equatable, Sendable {
     let through: Int
     let manualUnreadRevision: Int
     var observedPendingActionRevision: Int?
+    var observedFailureRevision: Int?
 }
 
 struct InboxPreferencePatch: Codable, Equatable, Sendable {
@@ -208,6 +212,7 @@ struct InboxOperation: Codable, Equatable, Identifiable, Sendable {
     var expectedManualUnreadRevision: Int?
     var expectedPreferencesRevision: Int?
     var observedPendingActionRevision: Int?
+    var observedFailureRevision: Int?
     var preferences: InboxPreferencePatch?
     var summary: InboxAssistantSummary?
     var enabled: Bool?
@@ -237,6 +242,7 @@ struct InboxOperation: Codable, Equatable, Identifiable, Sendable {
         through = read.through
         manualUnreadRevision = read.manualUnreadRevision
         observedPendingActionRevision = read.observedPendingActionRevision
+        observedFailureRevision = read.observedFailureRevision
     }
 
     init(action: Action, ref: InboxRef, preferences: InboxPreferencePatch? = nil, summary: InboxAssistantSummary? = nil) {
@@ -261,7 +267,8 @@ struct InboxOperation: Codable, Equatable, Identifiable, Sendable {
         switch action {
         case .markRead:
             guard manualUnreadRevision == newer.manualUnreadRevision,
-                  observedPendingActionRevision == newer.observedPendingActionRevision else { return nil }
+                  observedPendingActionRevision == newer.observedPendingActionRevision,
+                  observedFailureRevision == newer.observedFailureRevision else { return nil }
             result.through = max(through ?? 0, newer.through ?? 0)
         case .preferences:
             guard expectedPreferencesRevision == newer.expectedPreferencesRevision else { return nil }
@@ -415,6 +422,7 @@ struct InboxAssistantSummary: Codable, Equatable, Sendable {
         row.unreadCount = max(0, activity.cursor - read)
         row.pendingActionCount = activity.pendingActionCount
         row.pendingActionRevision = activity.pendingActionRevision
+        row.failureRevision = activity.failureRevision
         row.attentionKind = activity.failed ? "failure" : nil
         row.state = state
         return row
@@ -488,6 +496,13 @@ struct InboxAccountState: Codable, Equatable, Sendable {
         choices[key] = choice
         assistantSharing = choices
         return choice
+    }
+
+    mutating func beginReadBatch(_ batch: InboxReadBatch, localRows: [InboxRow]) {
+        for row in localRows where row.isUnread {
+            applyLocal(InboxOperation(row.frozenRead()), row: row)
+        }
+        readBatch = batch
     }
 
     mutating func applyLocal(_ operation: InboxOperation, row: InboxRow) {

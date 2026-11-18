@@ -7,7 +7,7 @@ const segment = value => typeof value === 'string' && /^[A-Za-z0-9_-]{8,64}$/u.t
 /** Push is a best-effort wake-up, never the message delivery log. A durable
  * per-recipient attempt is claimed before FCM; an ambiguous crash is not blindly
  * replayed. Reconnect always recovers messages through the immutable change log. */
-export async function onTeamMessageCreated({ db, pushStore, messaging, teamId, conversationId, messageId, original, clock = Date.now }) {
+export async function onTeamMessageCreated({ db, pushStore, messaging, teamId, conversationId, messageId, original, clock = Date.now, includeRecipient = () => true }) {
   if (![teamId, conversationId, messageId].every(segment) || !original?.author || !segment(original.changeId)) return;
   const team = db.doc(`teams/${teamId}`), thread = team.collection('conversations').doc(conversationId);
   const shared = original.author.kind === 'shared_bot' && segment(original.author.sharedBotId);
@@ -17,7 +17,7 @@ export async function onTeamMessageCreated({ db, pushStore, messaging, teamId, c
   if (!senderUid) return;
   const c = (await thread.get()).data();
   if (!c || !Array.isArray(c.memberUids)) return;
-  const recipients = c.memberUids.filter(uid => uid !== senderUid);
+  const recipients = c.memberUids.filter(uid => uid !== senderUid && includeRecipient(uid));
   let index = 0;
   async function deliver(uid) {
     const attempt = thread.collection('pushAttempts').doc(hash(JSON.stringify([messageId, uid])));

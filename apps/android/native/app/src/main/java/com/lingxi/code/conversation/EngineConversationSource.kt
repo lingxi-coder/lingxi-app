@@ -593,6 +593,9 @@ class EngineConversationSource internal constructor(
         }
     }
 
+    override suspend fun assistantActivityPreview(sessionId: String, through: ULong): String =
+        handle.assistantActivityPreview(sessionId, through)
+
     override suspend fun refreshSessions() {
         try {
             handle.submit(completeSessionListCommand())

@@ -3267,6 +3267,14 @@ final class EngineConversationSource: ConversationSource {
         }
     }
 
+    func inboxActivityPreview(sessionID: String, through: Int) async throws -> String {
+        guard through > 0 else { throw CancellationError() }
+        let engine = try await ensureHandle()
+        let page = try await engine.assistantActivityPreview(sessionId: sessionID, through: UInt64(through))
+        guard self.handle === engine, !Task.isCancelled else { throw CancellationError() }
+        return page
+    }
+
     // MARK: handle construction
 
     /// Build the engine handle once (lazily). Registers the listener so the

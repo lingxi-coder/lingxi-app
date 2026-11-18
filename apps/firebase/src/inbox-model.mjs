@@ -24,7 +24,8 @@ const read = z
     through: cursor,
     manualUnreadRevision: cursor,
     operationId: id.optional(),
-    observedPendingActionRevision: cursor.optional()
+    observedPendingActionRevision: cursor.optional(),
+    observedFailureRevision: cursor.optional()
   })
   .strict();
 const label = max =>
@@ -50,26 +51,39 @@ const preferences = z
     notificationMode: z.enum(['all', 'mentions', 'none']).optional()
   })
   .strict();
+const listScope = {
+  archived: z.boolean().optional(),
+  searchPrefix: z.string().max(120).optional(),
+  filter: z.enum(['all', 'unread', 'attention']).optional(),
+  category: z.enum(['team', 'friend', 'service', 'assistant']).optional()
+};
 export const command = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('list'), ...page, ...listScope }).strict(),
   z
-    .object({
-      action: z.literal('list'),
-      ...page,
-      archived: z.boolean().optional(),
-      searchPrefix: z.string().max(120).optional(),
-      filter: z.enum(['all', 'unread', 'attention']).optional(),
-      category: z.enum(['team', 'friend', 'service', 'assistant']).optional()
-    })
+    .object({ action: z.literal('notice'), id: z.string().regex(/^[a-f0-9]{64}$/u), deviceId: id.optional() })
     .strict(),
   z.object({ action: z.literal('notices'), deviceId: id.optional(), ...page }).strict(),
   z.object({ action: z.literal('get'), key, generation: generation.optional() }).strict(),
   z.object({ action: z.literal('markRead'), ...read.shape }).strict(),
-  z.object({action:z.literal('markAllReadSnapshot'),operationId:id,requestedAt:cursor.optional(),archived:z.boolean().optional(),
-    filter:z.enum(['all','unread','attention']).optional(),category:z.enum(['team','friend','service','assistant']).optional(),searchPrefix:z.string().max(120).optional()}).strict(),
-  z.object({action:z.literal('readBatchStatus'),jobId:id}).strict(),
+  z.object({ action: z.literal('markAllReadSnapshot'), operationId: id, requestedAt: cursor.optional(), ...listScope }).strict(),
+  z.object({ action: z.literal('readBatchStatus'), jobId: id }).strict(),
   z.object({ action: z.literal('markAllRead'), entries: z.array(read).min(1).max(50) }).strict(),
-  z.object({ action: z.literal('markUnread'), ...target, operationId: id,expectedManualUnreadRevision:cursor.optional() }).strict(),
-  z.object({ action: z.literal('preferences'), ...target, expectedPreferencesRevision:cursor.optional(),patch: preferences }).strict(),
+  z
+    .object({
+      action: z.literal('markUnread'),
+      ...target,
+      operationId: id,
+      expectedManualUnreadRevision: cursor.optional()
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal('preferences'),
+      ...target,
+      expectedPreferencesRevision: cursor.optional(),
+      patch: preferences
+    })
+    .strict(),
   z.object({ action: z.literal('accountPreferences'), dmReceipts: z.boolean().optional() }).strict(),
   z.object({ action: z.literal('peerReceipt'), ...target }).strict(),
   z
@@ -97,7 +111,8 @@ export const command = z.discriminatedUnion('action', [
       sourceSecret: secret,
       conversationId: id,
       generation,
-      sourceRevision: cursor,conversationConsentRevision:generation.optional()
+      sourceRevision: cursor,
+      conversationConsentRevision: generation.optional()
     })
     .strict(),
   z
@@ -107,7 +122,10 @@ export const command = z.discriminatedUnion('action', [
       sourceSecret: secret,
       conversationId: id,
       generation,
-      baseline: cursor,conversationConsentRevision:generation.optional(),failureAt:cursor.optional(),failureRevision:cursor.optional(),
+      baseline: cursor,
+      conversationConsentRevision: generation.optional(),
+      failureAt: cursor.optional(),
+      failureRevision: cursor.optional(),
       sourceRevision: cursor,
       sourceCursor: cursor,
       lastActivityAt: cursor,
@@ -158,7 +176,7 @@ export function emptyRow(ref) {
     pendingActionAt: 0,
     pendingActionRevision: 0,
     state: 'idle',
-    preferencesRevision:0,
+    preferencesRevision: 0,
     pinOrder: null,
     notificationMode: 'mentions',
     archived: false,
@@ -175,7 +193,7 @@ export function applyRead(row, through, manualRevision) {
     ...row,
     readThrough,
     manualUnread: clear ? false : row.manualUnread,
-    manualUnreadRevision:row.manualUnreadRevision+Number(clear),
+    manualUnreadRevision: row.manualUnreadRevision + Number(clear),
     stateRevision: row.stateRevision + Number(clear || row.readThrough !== readThrough)
   };
 }

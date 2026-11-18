@@ -10,6 +10,7 @@ import com.google.firebase.firestore.EventListener
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.MetadataChanges
+import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.QuerySnapshot
 import java.io.BufferedInputStream
 import java.net.InetAddress
@@ -321,7 +322,6 @@ class TeamMessagingQueueTest {
         lateinit var authListener: FirebaseAuth.AuthStateListener
         private lateinit var memberListener: EventListener<DocumentSnapshot>
         private lateinit var directoryListener: EventListener<QuerySnapshot>
-        private lateinit var messageListener: EventListener<QuerySnapshot>
         var conversationKind: String? = null
         @Volatile var botProjection: JSONObject? = null
         @Volatile var listBotsDelayMs: Long = 0
@@ -352,13 +352,15 @@ class TeamMessagingQueueTest {
             val registration = mock(ListenerRegistration::class.java)
             val memberDocument = root.collection("members").document(MEMBER)
             val conversations = root.collection("conversations").whereArrayContains("memberUids", MEMBER)
-            val messages = root.collection("conversations").document(CHAT).collection("messages").orderBy("seq")
+            val messages = root.collection("conversations").document(CHAT).collection("messages")
+                .orderBy("seq", Query.Direction.DESCENDING).limit(50)
             doAnswer { memberListener = it.getArgument(1); registration }.`when`(memberDocument)
                 .addSnapshotListener(anyMetadata(), anyListener())
             doAnswer { directoryListener = it.getArgument(1); registration }.`when`(conversations)
                 .addSnapshotListener(anyMetadata(), anyListener())
-            doAnswer { messageListener = it.getArgument(1); registration }.`when`(messages)
-                .addSnapshotListener(anyMetadata(), anyListener())
+            val emptyHistory = mock(QuerySnapshot::class.java, RETURNS_DEEP_STUBS)
+            doReturn(emptyList<DocumentSnapshot>()).`when`(emptyHistory).documents
+            doReturn(Tasks.forResult(emptyHistory)).`when`(messages).get()
             httpThreads.submit { while (!server.isClosed) try { server.accept().use { socket ->
                 socket.soTimeout = 5000
                 val stream = BufferedInputStream(socket.getInputStream())
@@ -428,9 +430,8 @@ class TeamMessagingQueueTest {
                 directoryListener.onEvent(snapshot, null)
                 assertEquals("Live directory error: ${model.state.value.error}", listOf(CHAT), model.state.value.cache?.conversations?.map { it.id })
                 model.select(CHAT)
-                messageListener.onEvent(mock(QuerySnapshot::class.java, RETURNS_DEEP_STUBS), null)
             }
-            eventually { model.state.value.botsLoaded }
+            eventually { model.state.value.botsLoaded && !model.state.value.loadingHistory }
         }
 
         suspend fun send(text: String) {

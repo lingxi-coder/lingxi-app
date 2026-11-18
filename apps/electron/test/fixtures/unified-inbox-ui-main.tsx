@@ -26,7 +26,7 @@ function item(ref: InboxRef, title: string, preview: string, overrides: Partial<
     schemaVersion: 1, key: inboxKey(ref), ref, category: ref.kind, title, preview, sourceCursor: 1,
     sourceRevision: 1, readThrough: 0, unreadCount: 1, mentionCount: 0, pendingActionCount: 0,
     lastActivityAt: now, state: 'idle', pinOrder: null, notificationMode: 'all', archived: false,
-    manualUnread: false, manualUnreadRevision: 0, stateRevision: 0, offline: false, ...overrides,
+    manualUnread: false, manualUnreadRevision: 0, preferencesRevision: 0, stateRevision: 0, offline: false, ...overrides,
   };
 }
 const assistant = item({ kind: 'assistant', sourceId, conversationId: assistantId, generation: 1 },
@@ -83,6 +83,7 @@ const opens: string[] = [];
 let sequence = 0;
 let summarySync = false;
 let dmReceipts = false;
+let conversationSummarySync = true;
 
 function refresh() {
   for (const listener of watch) {
@@ -118,12 +119,16 @@ function serve(uid: string | null, command: InboxCommand): unknown {
   const row = items.find(item => item.key === command.key);
   if (!row) throw new Error('INBOX_ITEM_MISSING');
   if (command.action === 'get') return { item: row };
-  if (command.action === 'preferences') Object.assign(row, command.patch);
+  if (command.action === 'preferences') {
+    if (command.expectedPreferencesRevision !== row.preferencesRevision) throw new Error('PREFERENCE_REVISION_CONFLICT');
+    Object.assign(row, command.patch); row.preferencesRevision = (row.preferencesRevision ?? 0) + 1;
+  }
   else if (command.action === 'markRead') {
     row.readThrough = Math.max(row.readThrough, command.through);
     row.unreadCount = Math.max(0, row.sourceCursor - row.readThrough);
     if (command.manualUnreadRevision === row.manualUnreadRevision) row.manualUnread = false;
   } else if (command.action === 'markUnread') {
+    if (command.expectedManualUnreadRevision !== row.manualUnreadRevision) return { item: row };
     row.manualUnread = true;
     row.manualUnreadRevision++;
   } else throw new Error(`Unsupported fixture mutation: ${command.action}`);
@@ -146,8 +151,13 @@ const inbox: DesktopInboxApi = {
     cursor: 1, baselineCursor: 0, hasMore: false,
     items: key === assistant.key && after < 1 ? [{ cursor: 1, resultUuids: [resultUuid], kind: 'reply', at: now }] : [],
   }),
+  activityPreview: async (key, through) => ({ available: key === assistant.key && through === 1,
+    messages: key === assistant.key && through === 1 ? [{ role: 'assistant', transcript_uuid: resultUuid,
+      blocks: [{ type: 'text', text: assistant.preview }] }] : [] }),
   summarySync: async () => summarySync,
   setSummarySync: async (_uid, enabled) => { summarySync = enabled; },
+  conversationSummarySync: async () => conversationSummarySync,
+  setConversationSummarySync: async (_uid, _key, enabled) => { conversationSummarySync = enabled; },
 };
 const off = () => () => {};
 Object.assign(window, {
@@ -155,7 +165,7 @@ Object.assign(window, {
     assistant: assistant.key, friend: friend.key, channel: channel.key, resultUuid, selected: () => selected.sessionId,
     opens, visible, requests, resumeAssistant,
     notifyAssistant: () => {
-      for (const callback of notifications) callback({ key: assistant.key, generation: 1, title: assistant.title, body: assistant.preview, activate: true });
+      for (const callback of notifications) callback({ key: assistant.key, generation: 1, title: assistant.title, body: assistant.preview, through: 1, activate: true });
     },
   },
   lingxi: {

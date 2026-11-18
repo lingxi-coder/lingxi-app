@@ -55,10 +55,8 @@ export function RemoteRead({
     setCurrent(undefined);
     setError(false);
     if (!live || !user || !key || !scroller.current) return;
-    const preview =
-      new URLSearchParams(location.search).has('message') ||
-      new URLSearchParams(location.search).has('preview') ||
-      !!location.hash;
+    const query = new URLSearchParams(location.search);
+    const preview = query.has('message') || query.has('preview') || !!location.hash;
     const node = scroller.current,
       controller = new InboxController({ uid: user.uid, request: webInboxRequest(user) });
     const uuids = new Map<string, number>();

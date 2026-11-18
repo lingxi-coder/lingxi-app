@@ -42,7 +42,7 @@ struct UnifiedInboxView: View {
                 .accessibilityIdentifier("inbox.row." + row.key)
                 .contextMenu { rowActions(row) }
                 .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                    if row.isUnread {
+                    if row.isUnread || row.needsAttention {
                         Button("Mark as read", systemImage: "envelope.open") { inbox.markRead([row]) }.tint(.blue)
                     } else {
                         Button("Mark as unread", systemImage: "envelope.badge") { inbox.markUnread([row]) }.tint(.blue)
@@ -122,13 +122,23 @@ struct UnifiedInboxView: View {
 
     private var batchMenu: some View {
         let selected = inbox.visible.filter { selection.contains($0.key) }
+        let archived = selected.filter(\.archived)
+        let unarchived = selected.filter { !$0.archived }
         return Menu("Actions for \(selected.count) selected", systemImage: "checkmark.circle") {
             Button("Mark as read") { inbox.markRead(selected); selection = [] }
             Button("Mark as unread") { inbox.markUnread(selected); selection = [] }
             Button("Mute") { inbox.preferences(selected, patch: .init(notificationMode: InboxNotificationMode.none)); selection = [] }
-            Button(inbox.showArchived ? "Unarchive" : "Archive") {
-                inbox.preferences(selected, patch: .init(archived: !inbox.showArchived))
-                selection = []
+            if !unarchived.isEmpty {
+                Button("Archive") {
+                    inbox.preferences(unarchived, patch: .init(archived: true))
+                    selection = []
+                }
+            }
+            if !archived.isEmpty {
+                Button("Unarchive") {
+                    inbox.preferences(archived, patch: .init(archived: false))
+                    selection = []
+                }
             }
         }
         .disabled(selected.isEmpty)
@@ -136,8 +146,8 @@ struct UnifiedInboxView: View {
 
     @ViewBuilder
     private func rowActions(_ row: InboxRow) -> some View {
-        if row.isUnread { Button("Mark as read") { inbox.markRead([row]) } }
-        else { Button("Mark as unread") { inbox.markUnread([row]) } }
+        if row.isUnread || row.needsAttention { Button("Mark as read") { inbox.markRead([row]) } }
+        if !row.isUnread { Button("Mark as unread") { inbox.markUnread([row]) } }
         if row.pinOrder == nil {
             Button("Pin") { inbox.preferences([row], patch: .init(pinOrder: InboxPush.now)) }
         } else {

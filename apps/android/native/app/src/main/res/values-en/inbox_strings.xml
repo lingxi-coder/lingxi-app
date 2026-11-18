@@ -47,4 +47,6 @@
     <string name="inbox_sync_conversation_summary">Sync this conversation summary</string>
     <string name="inbox_pin_move_up">Move pin up</string>
     <string name="inbox_pin_move_down">Move pin down</string>
+    <string name="inbox_notice_unavailable">This conversation update is no longer available.</string>
+    <string name="inbox_open_conversation">Open conversation</string>
 </resources>

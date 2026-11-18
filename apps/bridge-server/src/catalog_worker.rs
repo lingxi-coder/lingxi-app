@@ -208,16 +208,28 @@ impl CatalogWorker {
             cwd.join(&self.home)
         };
         if let Some(after) = request.activity_after {
-            let id = request.session_id.as_deref().and_then(|id| uuid::Uuid::parse_str(id).ok()).ok_or("Invalid activity session")?;
-            let source = request.transcript_path.clone().ok_or("Activity requires an exact source")?;
+            let id = request
+                .session_id
+                .as_deref()
+                .and_then(|id| uuid::Uuid::parse_str(id).ok())
+                .ok_or("Invalid activity session")?;
+            let source = request
+                .transcript_path
+                .clone()
+                .ok_or("Activity requires an exact source")?;
             super::validate_selected_transcript_identity(&source, &id.to_string())?;
-            if source.parent().and_then(std::path::Path::parent) != Some(home.join("projects").as_path()) {
+            if source.parent().and_then(std::path::Path::parent)
+                != Some(home.join("projects").as_path())
+            {
                 return Err("Activity source is outside the session catalog".into());
             }
             return tokio::task::spawn_blocking(move || {
-                let page = session::jsonl::activity::page(&source, after).map_err(|e| e.to_string())?;
+                let page =
+                    session::jsonl::activity::page(&source, after).map_err(|e| e.to_string())?;
                 serde_json::to_string(&page).map_err(|e| e.to_string())
-            }).await.map_err(|e| e.to_string())?;
+            })
+            .await
+            .map_err(|e| e.to_string())?;
         }
         if let Some(cursor) = request.history_before.clone() {
             let source = request

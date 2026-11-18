@@ -53,6 +53,8 @@ pub mod methods {
     pub const SESSION_HISTORY: &str = "session.history";
     /// Bounded semantic activity positions of an attached session.
     pub const SESSION_ACTIVITY: &str = "session.activity";
+    /// Explicit, text-only preview of a committed result.
+    pub const SESSION_ACTIVITY_PREVIEW: &str = "session.activityPreview";
     /// Viewer request: fetch an image.
     pub const IMAGE_GET: &str = "image.get";
     /// Viewer request: send a prompt.
@@ -801,6 +803,61 @@ impl SessionActivityPage {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionActivityPreviewParams {
+    pub session_id: String,
+    pub through: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionActivityPreview {
+    pub available: bool,
+    pub messages: Vec<MessageDto>,
+}
+
+impl SessionActivityPreview {
+    /// Accept only bounded user-visible text, with an exact durable UUID on
+    /// each row. Never forward tool args/results, attachments or reasoning.
+    pub(crate) fn valid(&self) -> bool {
+        if !self.available {
+            return self.messages.is_empty();
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut blocks = 0;
+        let mut units = 0;
+        (1..=16).contains(&self.messages.len())
+            && self.messages.iter().all(|message| {
+                let Some(id) = message.transcript_uuid.as_deref() else {
+                    return false;
+                };
+                message.role == "assistant"
+                    && id.len() == 36
+                    && seen.insert(id)
+                    && id.bytes().enumerate().all(|(i, b)| {
+                        if matches!(i, 8 | 13 | 18 | 23) {
+                            b == b'-'
+                        } else {
+                            b.is_ascii_hexdigit()
+                        }
+                    })
+                    && message.images.is_empty()
+                    && message.loop_wakeup.is_none()
+                    && message.visualization_context.is_none()
+                    && message.skill_name.is_none()
+                    && !message.blocks.is_empty()
+                    && message.blocks.iter().all(|block| {
+                        let client::protocol::message::MessageBlockDto::Text { text } = block
+                        else {
+                            return false;
+                        };
+                        blocks += 1;
+                        units += text.code_units.len();
+                        blocks <= 16 && units <= 32768
+                    })
+            })
+    }
+}
+
 /// `image.get` (request).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageGetParams {
@@ -1053,6 +1110,24 @@ pub struct BotThreadCreateResult {
 #[cfg(test)]
 mod activity_page_tests {
     use super::*;
+
+    #[test]
+    fn preview_accepts_exact_text_and_rejects_other_payloads() {
+        let valid = serde_json::json!({"available":true,"messages":[{"role":"assistant","transcript_uuid":"3b8d33b8-4f4c-4659-b676-390a52c8daed","blocks":[{"type":"text","text":"answer"}]}]});
+        let is_valid = |value| {
+            serde_json::from_value::<SessionActivityPreview>(value)
+                .unwrap()
+                .valid()
+        };
+        assert!(is_valid(valid.clone()));
+        let mut bad = valid.clone();
+        bad["messages"][0]["blocks"][0] =
+            serde_json::json!({"type":"thinking","thinking":"private"});
+        assert!(!is_valid(bad));
+        let mut oversized = valid;
+        oversized["messages"][0]["blocks"][0]["text"] = serde_json::json!("x".repeat(32769));
+        assert!(!is_valid(oversized));
+    }
 
     #[test]
     fn activity_pages_follow_semantic_ordinals_and_reject_gaps_and_oversized_ids() {

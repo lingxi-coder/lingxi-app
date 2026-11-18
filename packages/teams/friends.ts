@@ -162,7 +162,7 @@ export function matchesFilter(card: Pick<FriendCard, 'displayName' | 'handle'>, 
 
 // ─── Unread and badge (D13, D14) ────────────────────────────────────────────
 
-/** `max(0, lastSeq - lastReadSeq)`; a missing counter is 0 and `lastChangeSeq` never counts. */
+/** Prefer the projected incoming count. Older cards fall back to their stored sequence and read mark. */
 export const unreadOf = (card: Pick<FriendCard, 'lastSeq' | 'lastReadSeq' | 'unreadCount'>): number => card.unreadCount ?? Math.max(0, (card.lastSeq ?? 0) - (card.lastReadSeq ?? 0));
 /** Incoming requests, the unread of the friends cards and the live team offers (D28). `unread` lets a host count an open chat as read. */
 export const badgeCount = (cards: readonly Pick<FriendCard, 'state' | 'lastSeq' | 'lastReadSeq' | 'unreadCount'>[], offers: readonly Pick<TeamOffer, 'expiresAt'>[], nowMs: number,

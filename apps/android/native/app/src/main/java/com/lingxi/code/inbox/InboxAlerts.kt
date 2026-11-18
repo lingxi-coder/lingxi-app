@@ -25,12 +25,36 @@ internal enum class InboxAlertDisposition { Inline, Banner, System }
 internal data class InboxAlert(
     val ref: InboxRef, val event: String, val kind: String, val through: Long,
     val title: String, val body: String, val expiresAt: Long, val pendingActionRevision: Long? = null, val deliverAfter: Long = 0,
-    val statusFailure: Boolean = false,
+    val failureRevision: Long? = null,
+    val messageId: String? = null,
+    val taskId: String? = null,
 ) {
+    fun target() = InboxNoticeTarget(ref, event, kind, through, expiresAt, messageId, taskId)
+
     companion object {
         const val OPEN_ACTION = "com.lingxi.code.action.OPEN_INBOX_CONVERSATION"
         const val EXTRA_KEY = "inbox_key"
         const val EXTRA_GENERATION = "inbox_generation"
+        private const val EXTRA_EVENT = "inbox_event"
+        private const val EXTRA_KIND = "inbox_kind"
+        private const val EXTRA_THROUGH = "inbox_through"
+        private const val EXTRA_EXPIRY = "inbox_expires"
+        private const val EXTRA_MESSAGE = "inbox_message"
+        private const val EXTRA_TASK = "inbox_task"
+
+        fun addTarget(intent: Intent, target: InboxNoticeTarget): Intent = intent
+            .putExtra(EXTRA_KEY, target.ref.key).putExtra(EXTRA_GENERATION, target.ref.generation)
+            .putExtra(EXTRA_EVENT, target.id).putExtra(EXTRA_KIND, target.kind)
+            .putExtra(EXTRA_THROUGH, target.through).putExtra(EXTRA_EXPIRY, target.expiresAt)
+            .putExtra(EXTRA_MESSAGE, target.messageId).putExtra(EXTRA_TASK, target.taskId)
+
+        fun targetFrom(intent: Intent, now: Long): InboxNoticeTarget? {
+            val key = intent.getStringExtra(EXTRA_KEY).orEmpty()
+            val ref = InboxRef.fromKey(key, intent.getLongExtra(EXTRA_GENERATION, -1)) ?: return null
+            return InboxNoticeTarget(ref, intent.getStringExtra(EXTRA_EVENT).orEmpty(), intent.getStringExtra(EXTRA_KIND).orEmpty(),
+                intent.getLongExtra(EXTRA_THROUGH, -1), intent.getLongExtra(EXTRA_EXPIRY, 0),
+                intent.getStringExtra(EXTRA_MESSAGE), intent.getStringExtra(EXTRA_TASK)).takeIf { it.isValid(now) }
+        }
 
         fun fromPush(data: Map<String, String>): InboxAlert? {
             if (data["kind"] != "inbox") return null
@@ -39,7 +63,9 @@ internal data class InboxAlert(
             val event = data["notificationId"]?.takeIf { it.length in 1..128 } ?: return null
             val kind = data["eventKind"]?.takeIf { it in alertKinds } ?: return null
             val through = data["through"]?.toLongOrNull()?.takeIf { it >= 0 } ?: return null
-            return InboxAlert(ref, event, kind, through, "", "", expiresAt, data["pendingActionRevision"]?.toLongOrNull())
+            return InboxAlert(ref, event, kind, through, "", "", expiresAt, data["pendingActionRevision"]?.toLongOrNull(),
+                failureRevision = data["failureRevision"]?.toLongOrNull(),
+                messageId = data["messageId"], taskId = data["taskId"]).takeIf { it.target().isValid(System.currentTimeMillis()) }
         }
 
         private val alertKinds = setOf("dm", "mention", "reply", "input", "approval", "failure", "completion", "message")
@@ -68,11 +94,12 @@ internal object AssistantInboxAlerts {
         scheduled[slot] = Scheduled(alert, job)
     }
 
-    fun cancelRead(ref: InboxRef, through: Long, observedActionRevision: Long?) {
+    fun cancelRead(ref: InboxRef, through: Long, observedActionRevision: Long?, observedFailureRevision: Long?) {
         for ((key, event) in scheduled.toMap()) {
             val action = event.alert.kind in setOf("input", "approval")
             val observedAction = event.alert.pendingActionRevision?.let { observedActionRevision != null && observedActionRevision >= it } == true
-            if (event.alert.ref == ref && event.alert.through <= through && (!action || observedAction)) {
+            val observedFailure = event.alert.failureRevision?.let { observedFailureRevision == it } ?: true
+            if (event.alert.ref == ref && event.alert.through <= through && (!action || observedAction) && observedFailure) {
                 event.job.cancel()
                 scheduled.remove(key)
             }
@@ -104,8 +131,8 @@ internal object AssistantInboxAlerts {
         if (!inbox.isNotificationOwner(uid) || alert.expiresAt <= now || !prefs.enabled) return
         if (alert.kind in setOf("input", "approval") && !prefs.inputNeededNotifEnabled) return
         if (alert.kind == "completion" && !prefs.taskCompleteNotifEnabled) return
-        if (alert.kind !in setOf("input", "approval") && !alert.statusFailure && inbox.isRead(alert.ref, alert.through)) return
-        val first = runCatching { withContext(Dispatchers.IO) { inbox.store.admitDelivery(uid, alert.event, now) } }.getOrDefault(false)
+        if (alert.kind !in setOf("input", "approval") && alert.failureRevision == null && inbox.isRead(alert.ref, alert.through)) return
+        val first = runCatching { withContext(Dispatchers.IO) { inbox.store.admitDelivery(uid, alert.target().ledgerKey(), now) } }.getOrDefault(false)
         if (!first || !inbox.isNotificationOwner(uid)) return
         // The account or foreground conversation may have changed while the event was claimed.
         when (inbox.alertDisposition(alert.ref)) {
@@ -119,10 +146,12 @@ internal object AssistantInboxAlerts {
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(NotificationChannel(CHANNEL, context.getString(R.string.inbox_notification_title), NotificationManager.IMPORTANCE_DEFAULT))
         val id = alert.event.hashCode()
-        val intent = Intent(context, MainActivity::class.java).setAction(InboxAlert.OPEN_ACTION)
-            .setData(Uri.Builder().scheme("lingxi-internal").authority("inbox").appendPath(alert.ref.key).appendPath(alert.event).build())
-            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            .putExtra(InboxAlert.EXTRA_KEY, alert.ref.key).putExtra(InboxAlert.EXTRA_GENERATION, alert.ref.generation)
+        val intent = InboxAlert.addTarget(
+            Intent(context, MainActivity::class.java).setAction(InboxAlert.OPEN_ACTION)
+                .setData(Uri.Builder().scheme("lingxi-internal").authority("inbox").appendPath(alert.ref.key).appendPath(alert.event).build())
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            alert.target(),
+        )
         val open = PendingIntent.getActivity(context, id, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val title = alert.title.ifBlank { context.getString(R.string.inbox_notification_title) }
         val body = alert.body.ifBlank { context.getString(R.string.inbox_notification_body) }

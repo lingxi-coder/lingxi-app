@@ -14,6 +14,7 @@ async function call<T>(command: object): Promise<T> {
   return result.value;
 }
 export const inboxApi: DesktopInboxApi = {
+  activityPreview: (key, through) => call({ type: 'activityPreview', key, through }),
   activityPage: (key, after) => call({ type: 'activityPage', key, after }),
   request: (uid, command) => call({ type: 'request', uid, command }),
   watch(uid, dirty, badge, error) {

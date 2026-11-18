@@ -527,7 +527,7 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         if (inbox != null) {
             val row = inbox.snapshot(ref)
             val manualRevision = row?.manualUnreadRevision ?: 0L
-            inbox.mutate(InboxOperation.read(ref, seq, manualRevision, row?.pendingActionRevision), automatic = automatic)
+            inbox.mutate(InboxOperation.read(ref, seq, manualRevision, row?.pendingActionRevision, row?.failureRevision.takeUnless { automatic }), automatic = automatic)
             return
         }
         launchOperation {

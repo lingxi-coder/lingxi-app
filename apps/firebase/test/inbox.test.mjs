@@ -109,3 +109,17 @@ test('inboxApi authenticates revoked-token verifier, enforces origin, uid and pa
   assert.deepEqual(await (await handler(req('valid', 'https://allowed'))).json(), { uid: 'self', action: 'list' });
   assert.equal(invoked, 1);
 });
+
+test('operator delivery rollout uses a stable hashed cohort while preserving the unaffiliated default', async () => {
+  const { inboxNotificationEnabled } = await import('../src/inbox-rollout.mjs');
+  const { createHash } = await import('node:crypto');
+  const allowed = createHash('sha256').update('alice').digest('hex');
+  assert.equal(inboxNotificationEnabled('alice', {}), true);
+  assert.equal(inboxNotificationEnabled('bob', { INBOX_NOTIFY_ROLLOUT_PERCENT: 'bad' }), false);
+  assert.equal(inboxNotificationEnabled('alice', { INBOX_NOTIFY_ALLOW_SHA256: allowed }), true);
+  assert.equal(inboxNotificationEnabled('bob', { INBOX_NOTIFY_ALLOW_SHA256: allowed }), false);
+  assert.equal(
+    inboxNotificationEnabled('bob', { INBOX_NOTIFY_ROLLOUT_PERCENT: '20' }),
+    inboxNotificationEnabled('bob', { INBOX_NOTIFY_ROLLOUT_PERCENT: '20' })
+  );
+});

@@ -74,9 +74,16 @@ internal data class InboxItem(
     val needsBadge get() = !archived && (attention || unread)
 
     fun matches(query: InboxQuery): Boolean {
-        if (archived != (query.filter == InboxFilter.Archived) || query.category != null && query.category != category) return false
-        if (query.filter == InboxFilter.Unread && !unread || query.filter == InboxFilter.Attention && !attention) return false
-        return query.searchPrefix.isEmpty() || inboxTitleSort(title).startsWith(query.searchPrefix)
+        if (query.category != null && query.category != category) return false
+        val matchesFilter = when (query.filter) {
+            InboxFilter.All -> !archived
+            InboxFilter.Archived -> archived
+            InboxFilter.Unread -> unread
+            InboxFilter.Attention -> attention
+        }
+        if (!matchesFilter) return false
+        val searchPrefix = query.searchPrefix
+        return searchPrefix.isEmpty() || inboxTitleSort(title).startsWith(searchPrefix)
     }
 
     fun json(): JSONObject = JSONObject()
@@ -142,7 +149,8 @@ internal data class InboxOperation(val ref: InboxRef, val body: JSONObject, val 
         if (slot != new.slot) return null
         if (action == "markRead" && (
                 body.getLong("manualUnreadRevision") != new.body.getLong("manualUnreadRevision") ||
-                    body.nullableLong("observedPendingActionRevision") != new.body.nullableLong("observedPendingActionRevision")
+                    body.nullableLong("observedPendingActionRevision") != new.body.nullableLong("observedPendingActionRevision") ||
+                    body.nullableLong("observedFailureRevision") != new.body.nullableLong("observedFailureRevision")
                 )) return null
         if (action == "preferences" &&
             body.nullableLong("expectedPreferencesRevision") != new.body.nullableLong("expectedPreferencesRevision")) return null
@@ -197,14 +205,17 @@ internal data class InboxOperation(val ref: InboxRef, val body: JSONObject, val 
     }
 
     companion object {
-        fun read(item: InboxItem, through: Long = item.sourceCursor): InboxOperation =
-            read(item.ref, through, item.manualUnreadRevision, item.pendingActionRevision)
+        fun read(item: InboxItem, through: Long = item.sourceCursor, observeFailure: Boolean = true): InboxOperation =
+            read(item.ref, through, item.manualUnreadRevision, item.pendingActionRevision, item.failureRevision.takeIf { observeFailure })
 
-        fun read(ref: InboxRef, through: Long, manualRevision: Long, observedPendingActionRevision: Long? = null): InboxOperation =
-            forRef(ref, "markRead") {
-                put("through", through).put("manualUnreadRevision", manualRevision).put("operationId", UUID.randomUUID().toString())
-                observedPendingActionRevision?.let { put("observedPendingActionRevision", it) }
-            }
+        fun read(
+            ref: InboxRef, through: Long, manualRevision: Long,
+            observedPendingActionRevision: Long? = null, observedFailureRevision: Long? = null,
+        ): InboxOperation = forRef(ref, "markRead") {
+            put("through", through).put("manualUnreadRevision", manualRevision).put("operationId", UUID.randomUUID().toString())
+            observedPendingActionRevision?.let { put("observedPendingActionRevision", it) }
+            observedFailureRevision?.let { put("observedFailureRevision", it) }
+        }
         fun unread(item: InboxItem): InboxOperation = forRef(item.ref, "markUnread") {
             put("operationId", UUID.randomUUID().toString())
             put("expectedManualUnreadRevision", item.manualUnreadRevision)
@@ -218,6 +229,9 @@ internal data class InboxOperation(val ref: InboxRef, val body: JSONObject, val 
     }
 }
 
+internal fun freezeLocalAssistantReads(rows: List<InboxItem>): List<Pair<InboxItem, InboxOperation>> =
+    rows.filter { it.unread }.map { row -> row to InboxOperation.read(row) }
+
 /** The rows must contain every source position between the last read cursor and each advancement. */
 internal fun contiguousVisibleRead(readThrough: Long, visible: List<Long>): Long {
     var through = readThrough
@@ -227,3 +241,37 @@ internal fun contiguousVisibleRead(readThrough: Long, visible: List<Long>): Long
     }
     return through
 }
+
+internal data class InboxNoticeTarget(
+    val ref: InboxRef, val id: String, val kind: String, val through: Long, val expiresAt: Long,
+    val messageId: String? = null, val taskId: String? = null,
+) {
+    fun isValid(now: Long): Boolean = ref.isValid() && through in 0L..9_007_199_254_740_991L &&
+        expiresAt > now && kind in kinds &&
+        (if (ref.generation == 0L) ref.kind == "assistant" && id.startsWith("${ref.key}:") && id.length <= 512
+         else cloudNoticeId.matches(id)) &&
+        (messageId == null || safeId.matches(messageId)) && (taskId == null || safeId.matches(taskId))
+
+    fun ledgerKey(): String = if (ref.generation > 0) id else "$id|$kind|$through|$expiresAt"
+
+    fun verifiedBy(document: JSONObject, now: Long): InboxNoticeTarget? {
+        if (!isValid(now) || document.optString("id") != id || document.optString("key") != ref.key ||
+            document.optLong("generation", -1) != ref.generation || document.optLong("through", -1) != through ||
+            document.optString("kind") != kind) return null
+        val candidate = copy(messageId = document.nullableString("messageId"), taskId = document.nullableString("taskId"))
+        if (messageId != null && candidate.messageId != messageId || taskId != null && candidate.taskId != taskId) return null
+        return candidate.takeIf { it.isValid(now) }
+    }
+
+    companion object {
+        private val safeId = Regex("[A-Za-z0-9_-]{1,128}")
+        private val cloudNoticeId = Regex("[a-f0-9]{64}")
+        private val kinds = setOf("dm", "mention", "reply", "input", "approval", "failure", "completion", "message")
+    }
+}
+
+internal data class InboxNoticePreview(
+    val target: InboxNoticeTarget,
+    val row: InboxItem,
+    val messages: List<String> = emptyList(),
+)

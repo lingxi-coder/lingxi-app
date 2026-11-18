@@ -874,7 +874,7 @@ class RemoteControlManagerTest {
     private fun bot(id: String, waiting: UInt = 0u) =
         RemoteBotSummaryFfi(id, "Bot $id", "does $id", RemoteBotStatusFfi.IDLE, waiting, null)
 
-    private fun chat(id: String) = RemoteSessionSummaryFfi(id, "Chat $id", "", RemoteSessionStatusFfi.IDLE, null, null, 0u)
+    private fun chat(id: String) = RemoteSessionSummaryFfi(sessionId = id, title = "Chat $id", projectLabel = "", status = RemoteSessionStatusFfi.IDLE, pendingAction = null, model = null, viewers = 0u)
 
     @Test fun theBotsListenerIsSetOnceTheClientIsBuiltAndClearedWhenItIsReplaced() = runTest(UnconfinedTestDispatcher()) {
         val harness = Harness(this, "u1")

@@ -68,6 +68,9 @@ import com.lingxi.code.theme.ThemeMode
 import com.lingxi.code.inbox.InboxAlert
 import com.lingxi.code.inbox.InboxController
 import com.lingxi.code.inbox.InboxItem
+import com.lingxi.code.inbox.InboxNoticeTarget
+import com.lingxi.code.inbox.InboxNoticePreview
+import com.lingxi.code.inbox.InboxNoticeDialog
 import com.lingxi.code.inbox.InboxScreen
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -90,13 +93,11 @@ class MainActivity : ComponentActivity() {
     private val locationResultKey = java.util.UUID.randomUUID().toString()
     private lateinit var deviceReadPermissions: DeviceReadPermissionController
     private val linkInbox: com.lingxi.code.navigation.DeepLinkInbox by viewModels()
-    private val pendingInboxLaunch = kotlinx.coroutines.flow.MutableStateFlow<Pair<String, Long>?>(null)
+    private val pendingInboxLaunch = kotlinx.coroutines.flow.MutableStateFlow<InboxNoticeTarget?>(null)
     private fun enqueueCanonicalLink(intent: Intent, restoringActivity: Boolean = false) {
         if (intent.action == InboxAlert.OPEN_ACTION) {
             if (!restoringActivity) {
-                val key = intent.getStringExtra(InboxAlert.EXTRA_KEY).orEmpty()
-                val generation = intent.getLongExtra(InboxAlert.EXTRA_GENERATION, -1)
-                if (com.lingxi.code.inbox.InboxRef.fromKey(key, generation) != null) pendingInboxLaunch.value = key to generation
+                pendingInboxLaunch.value = InboxAlert.targetFrom(intent, System.currentTimeMillis())
             }
             return
         }
@@ -294,6 +295,10 @@ class MainActivity : ComponentActivity() {
             var inboxNewRequest by rememberSaveable { mutableIntStateOf(0) }
             val requestedInboxLaunch by pendingInboxLaunch.collectAsState()
             val inboxBanner by inbox.banner.collectAsState()
+            val inboxAccount by inbox.state.collectAsState()
+            var inboxNotice by remember(inboxAccount.uid) { mutableStateOf<InboxNoticePreview?>(null) }
+            var noticeLoading by remember { mutableStateOf(false) }
+            var noticeUnavailable by remember { mutableStateOf(false) }
             var inboxService by remember { mutableStateOf<com.lingxi.code.inbox.InboxRef?>(null) }
             val openInboxRow: (InboxItem) -> Unit = { row ->
                 when (row.category) {
@@ -319,21 +324,6 @@ class MainActivity : ComponentActivity() {
                     "service" -> inboxService = row.ref
                 }
             }
-            LaunchedEffect(requestedInboxLaunch, prefs.setupDone) {
-                val launch = requestedInboxLaunch ?: return@LaunchedEffect
-                if (!prefs.setupDone) return@LaunchedEffect
-                tabState.select(AppTab.Chats)
-                inboxOpen = true
-                val row = try {
-                    if (launch.second == 0L) kotlinx.coroutines.withTimeoutOrNull(5_000) {
-                        inbox.state.first { state -> state.rows.any { it.key == launch.first && it.ref.generation == launch.second } }
-                    }
-                    inbox.findCloud(launch.first, launch.second)
-                } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-                catch (_: Exception) { null }
-                if (row != null) openInboxRow(row)
-                if (pendingInboxLaunch.value == launch) pendingInboxLaunch.value = null
-            }
             LaunchedEffect(tabState) {
                 tabState.reselects.collect { event -> if (event.tab == AppTab.Chats && event.depth == 0) inboxOpen = true }
             }
@@ -344,8 +334,53 @@ class MainActivity : ComponentActivity() {
             val desktopProjectStore: com.lingxi.code.project.ProjectStore = viewModel(key = "projects", factory = com.lingxi.code.project.ProjectStore.factory(applicationContext))
             var activeConversationBusy by remember { mutableStateOf(false) }
             var activeConversationSource by remember { mutableStateOf<com.lingxi.code.conversation.ConversationSource?>(null) }
-            // 设置页请求的项目切换。宿主持有请求、RootScreen 消费后回调清除 ——
-            // 与下面 pendingConversationLaunch 同一个形状。
+            LaunchedEffect(requestedInboxLaunch, prefs.setupDone, inboxAccount.uid) {
+                val launch = requestedInboxLaunch ?: return@LaunchedEffect
+                if (!prefs.setupDone) return@LaunchedEffect
+                tabState.select(AppTab.Chats)
+                inboxOpen = true
+                inboxService = null
+                inboxNotice = null
+                noticeUnavailable = false
+                noticeLoading = true
+                try {
+                    if (launch.ref.generation == 0L) kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                        inbox.state.first { state -> state.rows.any { it.ref == launch.ref } }
+                    }
+                    inboxNotice = inbox.openNotice(launch) { row, target ->
+                        if (target.through == 0L || target.kind == "input" || target.kind == "approval" || target.kind == "failure") {
+                            emptyList()
+                        } else {
+                            val route = inbox.assistantRoute(row.key)
+                            val projection = if (route?.local != null) {
+                                activeConversationSource?.assistantActivityPreview(route.sessionId, target.through.toULong())
+                            } else {
+                                val manager = com.lingxi.code.remote.RemoteControl.manager(applicationContext)
+                                val host = manager.hosts.value.hosts.firstOrNull {
+                                    it.paired && it.hostId == (route?.hostId ?: row.remoteHostId ?: row.ref.sourceId)
+                                }
+                                if (host == null) null else remoteNoticePreview(manager, host.hostId, row.ref.conversationId, target.through.toULong())
+                            }
+                            projection?.let { com.lingxi.code.inbox.assistantNoticeText(it) }
+                        }
+                    }
+                    noticeUnavailable = inboxNotice == null
+                } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                catch (_: Exception) { noticeUnavailable = true }
+                finally {
+                    if (pendingInboxLaunch.value == launch) {
+                        noticeLoading = false
+                        pendingInboxLaunch.value = null
+                    }
+                }
+            }
+            LaunchedEffect(inboxNotice) {
+                val current = inboxNotice ?: return@LaunchedEffect
+                kotlinx.coroutines.delay((current.target.expiresAt - System.currentTimeMillis()).coerceAtLeast(0))
+                inboxNotice = null
+                noticeUnavailable = true
+            }
+            // The host keeps the project request until RootScreen consumes it.
             var pendingProjectSwitch by remember { mutableStateOf<String?>(null) }
             var engineRuntimeMode by rememberSaveable {
                 mutableStateOf(settingsState.linuxRuntime.selectedMode.name)
@@ -651,6 +686,26 @@ class MainActivity : ComponentActivity() {
                         },
                     )
 
+                    if (noticeLoading || noticeUnavailable || inboxNotice != null) {
+                        InboxNoticeDialog(
+                            preview = inboxNotice, loading = noticeLoading,
+                            onDismiss = {
+                                pendingInboxLaunch.value = null
+                                noticeLoading = false
+                                noticeUnavailable = false
+                                inboxNotice = null
+                            },
+                            onOpen = { preview ->
+                                inboxNotice = null
+                                openInboxRow(preview.row)
+                            },
+                            onMarkRead = { preview ->
+                                inbox.mutate(com.lingxi.code.inbox.InboxOperation.read(preview.row), preview.row)
+                                inboxNotice = null
+                            },
+                        )
+                    }
+
                     inboxService?.let { ref ->
                         key(ref) { com.lingxi.code.teams.HostedServicesScreen(onClose = { inboxService = null }, inboxTarget = ref) }
                     }
@@ -661,7 +716,7 @@ class MainActivity : ComponentActivity() {
                             action = {
                                 androidx.compose.material3.TextButton(onClick = {
                                     inbox.dismissBanner()
-                                    pendingInboxLaunch.value = alert.ref.key to alert.ref.generation
+                                    pendingInboxLaunch.value = alert.target()
                                 }) { androidx.compose.material3.Text(getString(R.string.inbox_title)) }
                             },
                         ) { androidx.compose.material3.Text(alert.title.ifBlank { getString(R.string.inbox_notification_title) }) }
@@ -766,5 +821,27 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         enqueueCanonicalLink(intent)
+    }
+}
+
+
+private suspend fun remoteNoticePreview(
+    manager: com.lingxi.code.remote.RemoteControlManager,
+    hostId: String,
+    sessionId: String,
+    through: ULong,
+): String? = kotlinx.coroutines.withTimeoutOrNull(8_000) {
+    kotlinx.coroutines.coroutineScope {
+        val port = manager.sessionPort(hostId, sessionId)
+        val attached = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val follow = launch {
+            port.follow().collect { update ->
+                if (update.phase == com.lingxi.code.bindings.android.RemoteSessionPhaseFfi.LIVE) attached.complete(Unit)
+            }
+        }
+        try {
+            attached.await()
+            port.sessionActivityPreview(through)
+        } finally { follow.cancel() }
     }
 }

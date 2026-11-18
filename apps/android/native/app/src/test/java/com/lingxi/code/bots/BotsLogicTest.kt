@@ -44,7 +44,7 @@ class BotsLogicTest {
     private fun liveBots(hostId: String, vararg bots: RemoteBotSummaryFfi) = RemoteBotsState(hostId, RemoteBotsStateFfi.Bots(bots.toList()))
 
     private fun liveChat(id: String, title: String = "Chat $id", status: RemoteSessionStatusFfi = RemoteSessionStatusFfi.IDLE, pending: RemotePendingActionFfi? = null) =
-        RemoteSessionSummaryFfi(id, title, "", status, pending, null, 0u)
+        RemoteSessionSummaryFfi(sessionId = id, title = title, projectLabel = "", status = status, pendingAction = pending, model = null, viewers = 0u)
 
     private fun heldChats(hostId: String, botId: String, threads: List<RemoteSessionSummaryFfi>?, error: RemoteSessionErrorFfi? = null) =
         RemoteBotChatsState(hostId, mapOf(botId to RemoteBotThreadsStateFfi(threads, error)))

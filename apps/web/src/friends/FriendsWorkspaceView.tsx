@@ -16,7 +16,9 @@ import '../teams/teams-web.css';
 /** A Bot's messages in a friend chat use the Markdown renderer of Web's own chat, as in a Team. */
 const renderMarkdown: RenderMarkdown = text => <Markdown text={text} />;
 
+import type {InboxNoticeTarget} from '../../../../packages/inbox/contracts';
 interface LayoutProps {
+  notificationTarget?:InboxNoticeTarget;
   locale: string;
   /** `/friends/add` opens the Add friend page. */
   route: '/friends' | '/friends/add';
@@ -30,7 +32,7 @@ interface LayoutProps {
 }
 
 /** The Friends workspace of a signed-in account, opened with it and closed when the account or the page goes (D19). */
-export function FriendsWorkspaceView({ friends, teams, uid, locale, route, chat, code, onCodeHandled, onBadge }: LayoutProps & { friends: FriendsApi; teams: TeamsApi; uid: string }) {
+export function FriendsWorkspaceView({ notificationTarget,friends, teams, uid, locale, route, chat, code, onCodeHandled, onBadge }: LayoutProps & { friends: FriendsApi; teams: TeamsApi; uid: string }) {
   const t = useTeamsText(locale);
   const { workspace, snapshot } = useFriendsWorkspace(friends, teams, uid);
   const start = useRef({ route, chat });
@@ -46,7 +48,7 @@ export function FriendsWorkspaceView({ friends, teams, uid, locale, route, chat,
       <div className="teams-web-sidebar"><FriendsSidebar workspace={workspace} snapshot={snapshot} locale={locale} /></div>
       <div className="teams-web-conversation">
         {snapshot.page !== 'home' ? <ChatTopbarControl><button type="button" className="teams-web-back" onClick={() => workspace.show('home')}>{t('tw_back_friends')}</button></ChatTopbarControl> : null}
-        <FriendsMain workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown} />
+        <FriendsMain notificationTarget={notificationTarget} workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown} />
       </div>
       {code ? <FriendLinkDialog workspace={workspace} locale={locale} code={code} onClose={onCodeHandled} /> : null}
     </div>

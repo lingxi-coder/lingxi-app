@@ -24,7 +24,8 @@ import { useTeams } from './bridge/useTeams';
 import { useFriends } from './bridge/useFriends';
 import { useDesktopInbox, useAssistantInboxReading } from './bridge/useDesktopInbox';
 import { DesktopInboxPanel } from './components/DesktopInboxPanel';
-import type { InboxItem } from '../../../../packages/inbox/contracts';
+import { AssistantNoticePreview } from './components/AssistantNoticePreview';
+import type { InboxItem, InboxNoticeTarget } from '../../../../packages/inbox/contracts';
 import type { InboxNotification } from '../shared/inbox';
 import { friendLink, type FriendLink } from '../../../../packages/teams/friends';
 import { useTeamsDrawer } from './bridge/useTeamsDrawer';
@@ -124,6 +125,7 @@ export function App() {
   const [projectBrowser, setProjectBrowser] = useState(false);
   const [notificationPreview, setNotificationPreview] = useState(false);
   const [inboxNotice, setInboxNotice] = useState<InboxNotification>();
+  const [inboxSourceTarget, setInboxSourceTarget] = useState<InboxNoticeTarget & { key: string; generation: number; uid: string | null }>();
   const [teamInvite, setTeamInvite] = useState<string>();
   const handledTeamInvite = useCallback(() => setTeamInvite(undefined), []);
   // A friend link waits here, in memory only (D8), until the Friends workspace of a signed-in account can take it.
@@ -307,10 +309,13 @@ export function App() {
   const [chatTopbar, setChatTopbar] = useState<HTMLDivElement | null>(null);
   const openBotServices = useCallback(() => setBotServices(true), []);
   const closeBotServices = useCallback(() => setBotServices(false), []);
-  const openInboxItem = useCallback(async (item: InboxItem, preview = false) => {
+  const openInboxItem = useCallback(async (item: InboxItem, target?: InboxNoticeTarget) => {
     if (sessionNavigationBlocked()) return;
+    if (target && (target.key && target.key !== item.key || target.generation !== undefined && target.generation !== item.ref.generation))
+      throw new Error('STALE_MEMBERSHIP');
     cancelLocalAppNavigation();
-    setNotificationPreview(preview);
+    setNotificationPreview(Boolean(target));
+    setInboxSourceTarget(target ? { ...target, key: item.key, generation: item.ref.generation, uid: inbox.uid } : undefined);
     setMessageTarget(null);
     setProjectBrowser(false);
     if (item.ref.kind === 'assistant') {
@@ -320,7 +325,15 @@ export function App() {
         if (!opened) throw new Error(locale.startsWith('zh') ? '暂时无法打开此会话，请重试。' : 'This conversation could not be opened. Please retry.');
         setSidebarMode('home'); setPage('chat'); setActivityView(false);
       } else if (item.remoteHostId && /^[A-Za-z0-9_-]{22}$/.test(item.remoteHostId)) {
-        window.open(`https://lingxios.net/remote/${item.remoteHostId}/${encodeURIComponent(item.ref.conversationId)}`, '_blank', 'noopener,noreferrer');
+        const url = new URL(`https://lingxios.net/remote/${item.remoteHostId}/${encodeURIComponent(item.ref.conversationId)}`);
+        url.searchParams.set('inbox', item.key);
+        if (target) {
+          url.searchParams.set('preview', '1'); url.searchParams.set('through', String(target.through));
+          url.searchParams.set('generation', String(item.ref.generation));
+          if (target.messageId) url.searchParams.set('message', target.messageId);
+          if (target.taskId) url.searchParams.set('task', target.taskId);
+        }
+        window.open(url.toString(), '_blank', 'noopener,noreferrer');
       } else throw new Error(locale.startsWith('zh') ? '请在原设备开启此会话的远程访问，并确认设备在线。' : 'Enable remote access for this conversation on its source device and make sure it is online.');
     } else if (item.category === 'friend' && item.peerUid && friends.workspace) {
       friends.workspace.openChat(item.peerUid);
@@ -334,28 +347,35 @@ export function App() {
       teams.workspace.selectConversation(item.ref.conversationId);
       setBotServices(false); setSidebarMode('home'); setPage('teams');
     } else throw new Error(locale.startsWith('zh') ? '请先登录后再打开此会话。' : 'Sign in before opening this conversation.');
-  }, [inbox.api, friends.workspace, teams.workspace, locale, setSidebarMode, cancelLocalAppNavigation, sessionNavigationBlocked]);
+  }, [inbox.api, inbox.uid, friends.workspace, teams.workspace, locale, setSidebarMode, cancelLocalAppNavigation, sessionNavigationBlocked]);
+  const openInboxNotification = useCallback(async (notice: InboxNotification) => {
+    if (notice.key && inbox.api) {
+      const { item } = await inbox.api.request<{ item: InboxItem }>(inbox.uid, { action: 'get', key: notice.key, generation: notice.generation });
+      await openInboxItem(item, { through: notice.through ?? 0, messageId: notice.messageId, taskId: notice.taskId,
+        key: notice.key, generation: notice.generation });
+    } else if (notice.ref) {
+      setInboxSourceTarget(undefined); setNotificationPreview(true); setPage('chat'); setSidebarMode('home');
+      await localAppBridge.current.openSession(notice.ref.projectPath, notice.ref.sessionId, undefined, notice.ref.mode);
+    }
+  }, [inbox.api, inbox.uid, openInboxItem, setSidebarMode]);
   useEffect(() => inbox.api?.onNotification(notice => {
     if (!notice.activate) { setInboxNotice(notice); return; }
-    if (notice.key) {
-      void inbox.api!.request<{ item: InboxItem }>(inbox.uid, { action: 'get', key: notice.key, generation: notice.generation })
-        .then(({ item }) => openInboxItem(item, true))
-        .catch(() => setLocalAppNavigationError(locale.startsWith('zh') ? '会话不可用，请确认设备在线和访问权限。' : 'This conversation is unavailable. Check its device and your access.'));
-    } else if (notice.ref) {
-      setNotificationPreview(true); setPage('chat'); setSidebarMode('home');
-      void localAppBridge.current.openSession(notice.ref.projectPath, notice.ref.sessionId, undefined, notice.ref.mode)
-        .catch(() => setLocalAppNavigationError(locale.startsWith('zh') ? '暂时无法打开此会话。' : 'This conversation could not be opened.'));
-    }
-  }), [inbox.api, inbox.uid, openInboxItem, setSidebarMode, locale, setLocalAppNavigationError]);
+    void openInboxNotification(notice)
+      .catch(() => setLocalAppNavigationError(locale.startsWith('zh') ? '会话不可用，请确认设备在线和访问权限。' : 'This conversation is unavailable. Check its device and your access.'));
+  }), [inbox.api, openInboxNotification, locale, setLocalAppNavigationError]);
   const activeInboxKey = page === 'teams' && teams.snapshot?.selectedConversationId && !botServices
     ? `team:${teams.snapshot.selectedTeamId}:${teams.snapshot.selectedConversationId}`
     : page === 'friends' && friends.snapshot?.chat?.workspace
       ? (() => { const state = friends.snapshot.chat.workspace.getSnapshot(); return `team:${state.selectedTeamId}:${state.selectedConversationId}`; })()
       : page === 'teams' && botServices && serviceInboxTarget ? `service:${serviceInboxTarget.serviceId}:${serviceInboxTarget.sessionId}` : undefined;
   const visibleInboxItem = inbox.snapshot.items.find(item => item.key === activeInboxKey);
+  const assistantNoticeTarget = page === 'chat' && inboxSourceTarget?.uid === inbox.uid
+    && inboxSourceTarget.key.split(':')[0] === 'assistant'
+    && inboxSourceTarget.key.split(':')[2] === bridge.activeSession?.sessionId ? inboxSourceTarget : undefined;
+  const conversationNoticeTarget = inboxSourceTarget?.uid === inbox.uid && inboxSourceTarget.key === activeInboxKey ? inboxSourceTarget : undefined;
   const activeActivity = bridge.activeSession ? bridge.bootstrap?.projectCatalogs?.[bridge.activeSession.projectPath]?.sessions.find(row => row.uuid === bridge.activeSession!.sessionId)?.activity_json : undefined;
   const inboxReading = useAssistantInboxReading(inbox, page === 'chat' ? bridge.activeSession?.sessionId : undefined,
-    activeActivity, page === 'chat' && !bridge.sessionLoading && !settingsRoute && !sessionPicker, notificationPreview || Boolean(messageTarget));
+    activeActivity, page === 'chat' && !assistantNoticeTarget && !bridge.sessionLoading && !settingsRoute && !sessionPicker, notificationPreview || Boolean(messageTarget));
   useEffect(() => {
     if (!inbox.api) return;
     const shown = () => {
@@ -723,7 +743,7 @@ export function App() {
             friendsUnread={friends.snapshot?.badge ?? 0}
             inboxBadge={inbox.snapshot.badge}
             homePanel={!projectBrowser && inbox.controller ? <DesktopInboxPanel inbox={inbox} locale={locale} activeKey={activeInboxKey ?? inboxReading.item?.key} onOpen={openInboxItem}
-              onNewChat={() => { setNotificationPreview(false); setPage('chat'); setSidebarMode('home'); void bridge.newSession(); }} /> : undefined}
+              onNewChat={() => { setInboxSourceTarget(undefined); setNotificationPreview(false); setPage('chat'); setSidebarMode('home'); void bridge.newSession(); }} /> : undefined}
             homeToolbar={inbox.api ? <div className="desktop-inbox-mode"><button type="button" aria-pressed={projectBrowser}
               onClick={() => setProjectBrowser(value => !value)}>{locale.startsWith('zh') ? projectBrowser ? '返回全部聊天' : '项目与工作区' : projectBrowser ? 'All chats' : 'Projects and workspaces'}</button></div> : undefined}
             sidebarMode={sidebarMode}
@@ -781,11 +801,11 @@ export function App() {
           {page === 'apps' && localAppInstallStatus && <p role="status" className="local-app-update">{localAppInstallStatus}</p>}
           <ErrorBanner bridge={{ error: localAppNavigationError, clearError: clearLocalAppNavigationError }} presentation={localAppNavigationPresentation} />
           <ErrorBanner bridge={bridge} />
-          {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} friends={friends} locale={locale} drawer={teamsDrawer} services={botServices} inboxTarget={serviceInboxTarget} onCloseServices={closeBotServices} /></Suspense>}
+          {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} friends={friends} locale={locale} drawer={teamsDrawer} services={botServices} inboxTarget={serviceInboxTarget} notificationTarget={conversationNoticeTarget} onCloseServices={closeBotServices} /></Suspense>}
           {inboxNotice ? <div className="desktop-inbox-toast" role="status"><div><strong>{inboxNotice.title}</strong><p>{inboxNotice.body}</p></div>
-            <button type="button" onClick={() => { const notice = inboxNotice; setInboxNotice(undefined); if (notice.key) void inbox.api?.request<{ item: InboxItem }>(inbox.uid, { action: 'get', key: notice.key, generation: notice.generation }).then(({ item }) => openInboxItem(item, true)).catch(() => setLocalAppNavigationError(locale.startsWith('zh') ? '此会话暂时不可用。' : 'This conversation is unavailable.')); else if (notice.ref) { setNotificationPreview(true); setPage('chat'); void bridge.openSession(notice.ref.projectPath, notice.ref.sessionId, undefined, notice.ref.mode); } }}>{locale.startsWith('zh') ? '查看' : 'View'}</button>
+            <button type="button" onClick={() => { const notice = inboxNotice; setInboxNotice(undefined); void openInboxNotification(notice).catch(() => setLocalAppNavigationError(locale.startsWith('zh') ? '此会话暂时不可用。' : 'This conversation is unavailable.')); }}>{locale.startsWith('zh') ? '查看' : 'View'}</button>
             <button type="button" aria-label={locale.startsWith('zh') ? '关闭提醒' : 'Dismiss notification'} onClick={() => setInboxNotice(undefined)}>×</button></div> : null}
-          {page === 'friends' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('friends_loading')}</p>}><FriendsPage friends={friends} locale={locale} /></Suspense>}
+          {page === 'friends' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('friends_loading')}</p>}><FriendsPage friends={friends} locale={locale} notificationTarget={conversationNoticeTarget} /></Suspense>}
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps sidebarTarget={pageSidebar} visible={page === 'apps'} onCreate={() => openLocalAppChat()} onDevelopmentBlocked={() => setLocalAppNavigationError(tr('local_app_development_requires_code'))} canDevelop={bridge.bootstrap?.conversationSpaces.activeMode === 'code' && !bridge.sessionLoading} /></div>
           {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>
             <Bots visible={page === 'bots'} bots={bots} api={botsApi} bridge={bridge}
@@ -799,7 +819,12 @@ export function App() {
           <ScheduledTasks sidebarTarget={pageSidebar} initialTarget={scheduledTarget} bridge={bridge} visible={page === 'scheduled'} onOpenChat={() => { cancelLocalAppNavigation(); setPage('chat'); setActivityView(false); }} />
           </div>
           {page === 'changes' && <GitChangesPage />}
-          <div style={{ display: page === 'chat' ? 'contents' : 'none' }}>
+          {assistantNoticeTarget && inbox.api ? <AssistantNoticePreview key={`${inbox.uid}:${assistantNoticeTarget.key}:${assistantNoticeTarget.generation}:${assistantNoticeTarget.through}`}
+            api={inbox.api} target={assistantNoticeTarget} locale={locale} onReturn={() => { setInboxSourceTarget(undefined); setNotificationPreview(false); }} /> : null}
+          {page === 'chat' && !assistantNoticeTarget && inboxReading.error ? <p className="desktop-inbox-read-status" role="status">
+            {locale.startsWith('zh') ? '阅读位置暂未同步，可稍后重试或在会话菜单中手动标记。' : 'Your reading position has not synced. Try again later or mark the conversation read from its menu.'}
+          </p> : null}
+          <div style={{ display: page === 'chat' && !assistantNoticeTarget ? 'contents' : 'none' }}>
           <div className="desktop-chat-layout" data-runtime-inspector-open={bridge.runtimeCenter.inspectorOpen ? 'true' : undefined}>
             <div className="desktop-message-list-view">
                 {/* The transcript keeps all remaining height; Todos live in Summary. */}

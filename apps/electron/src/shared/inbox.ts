@@ -22,7 +22,12 @@ export interface AssistantActivityPage {
   baselineCursor: number;
   hasMore: boolean;
 }
+export interface AssistantActivityPreview {
+  available: boolean;
+  messages: import('@lingxi/bridge-client').MessageDto[];
+}
 export interface DesktopInboxApi {
+  activityPreview(key: string, through: number): Promise<AssistantActivityPreview>;
   activityPage(key: string, after: number): Promise<AssistantActivityPage>;
   request<T>(uid: string | null, command: InboxCommand): Promise<T>;
   watch(

@@ -44,7 +44,7 @@ class RemoteBotsUiTest {
         title: String,
         status: RemoteSessionStatusFfi = RemoteSessionStatusFfi.IDLE,
         pending: RemotePendingActionFfi? = null,
-    ) = RemoteSessionSummaryFfi(id, title, "project", status, pending, null, 0u)
+    ) = RemoteSessionSummaryFfi(sessionId = id, title = title, projectLabel = "project", status = status, pendingAction = pending, model = null, viewers = 0u)
 
     private fun show(content: @Composable () -> Unit) = compose.setContent { LingXiTheme(darkTheme = false) { content() } }
 

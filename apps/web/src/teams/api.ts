@@ -55,7 +55,7 @@ export function webTeamsApi(user: User, db: Firestore, currentUid: () => string 
       return rows;
     },
     peerReceipt:(scope,id)=>inboxRequest({action:'peerReceipt',key:'team:'+scope.teamId+':'+id,generation:scope.generation}),
-    readVisible:(scope,id,through,manualUnreadRevision,observedPendingActionRevision)=>inbox.mutate({action:'markRead',key:'team:'+scope.teamId+':'+id,generation:scope.generation,through,manualUnreadRevision,...(observedPendingActionRevision===undefined?{}:{observedPendingActionRevision})}),
+    readVisible:(scope,id,through,manualUnreadRevision,observedPendingActionRevision,observedFailureRevision)=>inbox.mutate({action:'markRead',key:'team:'+scope.teamId+':'+id,generation:scope.generation,through,manualUnreadRevision,...(observedPendingActionRevision===undefined?{}:{observedPendingActionRevision}),...(observedFailureRevision===undefined?{}:{observedFailureRevision})}),
     watchMessages(scope, conversationId, next) {
       if (closed || currentUid() !== user.uid) throw new Error('INVALID_SESSION');
       const key = crypto.randomUUID();

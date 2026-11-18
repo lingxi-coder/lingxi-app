@@ -1032,6 +1032,48 @@ impl SessionController {
         &self,
         after: u64,
     ) -> Result<crate::messages::SessionActivityPage, RpcError> {
+        let params = crate::messages::SessionActivityParams {
+            session_id: self.inner.session_id.clone(),
+            after,
+        };
+        let page: crate::messages::SessionActivityPage = self
+            .attached_activity(methods::SESSION_ACTIVITY, json!(params))
+            .await?;
+        if !page.covers_after(after) {
+            return Err(RpcError::new(
+                RemoteErrorCode::Internal,
+                "Invalid semantic activity page",
+            ));
+        }
+        Ok(page)
+    }
+
+    /// Load only the selected committed result, through the current attachment.
+    pub async fn session_activity_preview(
+        &self,
+        through: u64,
+    ) -> Result<crate::messages::SessionActivityPreview, RpcError> {
+        let params = crate::messages::SessionActivityPreviewParams {
+            session_id: self.inner.session_id.clone(),
+            through,
+        };
+        let preview: crate::messages::SessionActivityPreview = self
+            .attached_activity(methods::SESSION_ACTIVITY_PREVIEW, json!(params))
+            .await?;
+        if !preview.valid() {
+            return Err(RpcError::new(
+                RemoteErrorCode::Internal,
+                "Invalid semantic result preview",
+            ));
+        }
+        Ok(preview)
+    }
+
+    async fn attached_activity<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<T, RpcError> {
         let attach_id = {
             let core = self.inner.core.lock().expect("core");
             require_writable(&core, self.inner.io.connected())?;
@@ -1043,16 +1085,7 @@ impl SessionController {
             }
             core.attach_id
         };
-        let params = crate::messages::SessionActivityParams {
-            session_id: self.inner.session_id.clone(),
-            after,
-        };
-        let page = self
-            .inner
-            .io
-            .request(methods::SESSION_ACTIVITY, Some(json!(params)), None)
-            .await
-            .and_then(parse::<crate::messages::SessionActivityPage>)?;
+        let body = self.inner.io.request(method, Some(params), None).await?;
         let core = self.inner.core.lock().expect("core");
         require_writable(&core, self.inner.io.connected())?;
         if !core.active || core.attach_id != attach_id {
@@ -1061,13 +1094,7 @@ impl SessionController {
                 "Session attachment changed",
             ));
         }
-        if !page.covers_after(after) {
-            return Err(RpcError::new(
-                RemoteErrorCode::Internal,
-                "Invalid semantic activity page",
-            ));
-        }
-        Ok(page)
+        parse(body)
     }
 
     /// Fetch the page of messages before the ones held.

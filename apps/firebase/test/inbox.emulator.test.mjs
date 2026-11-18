@@ -65,7 +65,7 @@ after(async () => {
   await db?.terminate();
   if (app) await deleteApp(app);
 });
-async function seed(n) {
+async function seed(n, foldInitial = true, fields = () => ({})) {
   const batch = db.batch();
   for (let i = 1; i <= n; i++) {
     const id = 'message_' + String(i).padStart(4, '0'),
@@ -83,7 +83,8 @@ async function seed(n) {
       kind: 'text',
       author: { uid: 'peer', kind: 'user' },
       createdAt: new Date(now),
-      text: 'synthetic'
+      text: 'synthetic',
+      ...fields(i)
     });
   }
   batch.update(db.doc(thread), {
@@ -92,7 +93,7 @@ async function seed(n) {
     lastMessage: { at: new Date(now), preview: 'synthetic' }
   });
   await batch.commit();
-  while (await store.fold('me', ref)) {}
+  if (foldInitial) while (await store.fold('me', ref)) {}
 }
 const get = async () => (await store.execute('me', { action: 'get', key })).item;
 test('ordered fold, duplicates, 99+ partial reads, frozen manual revision, and legacy healing', options, async () => {
@@ -102,7 +103,7 @@ test('ordered fold, duplicates, 99+ partial reads, frozen manual revision, and l
   assert.equal((await get()).sourceRevision, 130);
   await store.execute('me', read(20));
   assert.equal((await get()).unreadCount, 100);
-  const op = { action: 'markUnread', expectedManualUnreadRevision:0, key, generation: 1, operationId: 'read_later' };
+  const op = { action: 'markUnread', expectedManualUnreadRevision: 0, key, generation: 1, operationId: 'read_later' };
   await store.execute('me', op);
   await store.execute('me', {
     action: 'markAllRead',
@@ -176,7 +177,13 @@ test('Assistant opt-in, baseline, stale publishing, source secrecy and highwater
   await assert.rejects(store.execute('peer', publish), { code: 'SOURCE_ACCESS_REQUIRED' });
   await store.execute('me', publish);
   const k = 'assistant:host:session';
-  await store.execute('me', { action: 'preferences', expectedPreferencesRevision:0, key: k, generation: 1, patch: { pinOrder: 1 } });
+  await store.execute('me', {
+    action: 'preferences',
+    expectedPreferencesRevision: 0,
+    key: k,
+    generation: 1,
+    patch: { pinOrder: 1 }
+  });
   await store.execute('me', { ...read(10), key: k });
   await store.execute('me', {
     ...publish,
@@ -247,7 +254,13 @@ test(
     assert.equal(scheduled.find(job => job.payload.deviceId === 'second').delay, 15);
     await delivery.deliver(scheduled.find(job => job.payload.deviceId === 'first').payload);
     assert.equal(sent.length, 0);
-    await store.execute(uid, { action: 'markUnread', expectedManualUnreadRevision:0, key, generation: 1, operationId: 'later' });
+    await store.execute(uid, {
+      action: 'markUnread',
+      expectedManualUnreadRevision: 0,
+      key,
+      generation: 1,
+      operationId: 'later'
+    });
     const queued = scheduled.find(job => job.payload.deviceId === 'second').payload;
     now += 15000;
     await delivery.deliver(queued);
@@ -283,7 +296,13 @@ test(
     assert.equal(tail.items.length, 2);
     assert.equal(new Set([...page.items, ...tail.items].map(r => r.key)).size, 52);
     const row = page.items[0];
-    await store.execute(uid, { action: 'preferences', expectedPreferencesRevision:0, key: row.key, generation: 1, patch: { archived: true } });
+    await store.execute(uid, {
+      action: 'preferences',
+      expectedPreferencesRevision: 0,
+      key: row.key,
+      generation: 1,
+      patch: { archived: true }
+    });
     assert.deepEqual(
       (await store.execute(uid, { action: 'list', archived: true })).items.map(v => v.key),
       [row.key]
@@ -317,7 +336,13 @@ test(
       prev.messages.map(m => m.seq),
       [1, 2, 3, 4, 5]
     );
-    await store.execute('me', { action: 'markUnread', expectedManualUnreadRevision:0, key, generation: 1, operationId: 'later' });
+    await store.execute('me', {
+      action: 'markUnread',
+      expectedManualUnreadRevision: 0,
+      key,
+      generation: 1,
+      operationId: 'later'
+    });
     await messages.execute({ uid: 'me' }, { ...scope, action: 'read', lastReadSeq: 50 });
     const row = await get();
     assert.equal(row.manualUnread, true);
@@ -403,7 +428,11 @@ test(
     for (const uid of users) b.set(db.doc(team + '/members/' + uid), { generation: 1, joinedAt: new Date(0) });
     b.update(db.doc(thread), { kind: 'group', memberUids: users, participants: users.map(uid => 'user:' + uid) });
     await b.commit();
-    await seed(1);
+    await seed(1, false);
+    let cost;
+    store.observe = data => {
+      cost = data;
+    };
     const completed = [],
       started = performance.now(),
       fold = store.fold.bind(store);
@@ -413,6 +442,14 @@ test(
       return more;
     };
     assert.equal(await store.fanout(ref), false);
+    assert.equal(cost.normalizedEventWrites, 1);
+    assert.equal(cost.recipientCount, 200);
+    assert.equal(cost.rowWrites, 200);
+    assert.equal(cost.signalWrites, 200);
+    assert.equal(cost.badgeWrites, 199);
+    assert.equal(cost.recountQueries, 0);
+    assert.ok(cost.logicalCanonicalReads >= 800);
+    t.diagnostic(JSON.stringify(cost));
     const sorted = completed.sort((a, b) => a - b);
     t.diagnostic(
       'Cold local fold after source commit, 200 recipients, excluding queue delay: p50=' +
@@ -729,52 +766,417 @@ test('revocation cleanup paginates independently of source access checks', optio
   while (queued.length) await runner.run(queued.shift());
   assert.equal((await db.collection('users/me/inbox').get()).size, 0);
 });
-test('global batch freezes every unread row at one server snapshot and preserves new/unseen marks',options,async()=>{
-  const src={sourceId:'batch',sourceSecret:'s'.repeat(40)};
-  await store.execute('me',{action:'assistantSource',...src,enabled:true});
-  const base={action:'assistantPublish',...src,generation:1,baseline:0,sourceRevision:1,sourceCursor:1,
-    lastActivityAt:now,previewKind:'reply',pendingActionCount:0,state:'completed'};
-  for(let i=0;i<55;i++) await store.execute('me',{...base,conversationId:'item'+String(i).padStart(2,'0')});
-  const start={action:'markAllReadSnapshot',operationId:'frozen-online',requestedAt:now};
-  assert.equal((await store.execute('me',start)).state,'queued');
-  await store.execute('me',{...base,conversationId:'newborn'});
-  await store.execute('me',{...base,conversationId:'item53',sourceRevision:2,sourceCursor:4});
-  await store.execute('me',{action:'markUnread',key:'assistant:batch:item54',generation:1,expectedManualUnreadRevision:0,operationId:'later'});
-  const jobs=[], runner=new InboxJobs(store,null,async j=>jobs.push(j));
-  await runner.run({type:'readBatch',uid:'me',id:start.operationId});
-  while(jobs.length) await runner.run(jobs.shift());
-  const done=await store.execute('me',{action:'readBatchStatus',jobId:start.operationId});
-  assert.equal(done.state,'complete');assert.equal(done.processed,55);
-  const remaining=(await store.execute('me',{action:'list',filter:'unread'})).items;
-  assert.deepEqual(remaining.map(r=>[r.ref.conversationId,r.unreadCount,r.manualUnread]).sort(),[['item53',3,false],['item54',0,true],['newborn',1,false]]);
-  assert.deepEqual(await store.execute('me',start),done);
-});
-test('per-session opt-out fences stale publications and permits explicit same-revision restore; first failure alerts without a result',options,async()=>{
-  const src={sourceId:'privacy',sourceSecret:'s'.repeat(40)};
-  await store.execute('me',{action:'assistantSource',...src,enabled:true});
-  const p={action:'assistantPublish',...src,generation:1,conversationId:'private',baseline:0,sourceRevision:1,sourceCursor:0,
-    lastActivityAt:0,failureAt:now,failureRevision:1,previewKind:'failure',pendingActionCount:0,state:'failed',conversationConsentRevision:1};
-  await store.execute('me',p);
-  const k='assistant:privacy:private';
-  assert.equal((await store.execute('me',{action:'get',key:k})).item.unreadCount,0);
-  assert.ok((await store.execute('me',{action:'notices'})).items.some(n=>n.kind==='failure' && n.deliverable && n.lastActivityAt===now));
-  const remove={action:'assistantRemove',...src,generation:1,conversationId:p.conversationId,sourceRevision:1,conversationConsentRevision:2};
-  await store.execute('me',remove);
-  await assert.rejects(store.execute('me',p),{code:'STALE_CONVERSATION_CONSENT'});
-  await store.execute('me',{...p,conversationConsentRevision:3});
-  await assert.rejects(store.execute('me',remove),{code:'STALE_CONVERSATION_CONSENT'});
-  await store.execute('me',{...p,sourceRevision:2,state:'idle',failureRevision:2,conversationConsentRevision:3});
-  assert.equal((await store.execute('me',{action:'notices'})).items[0].deliverable,false);
-});
-test('capped counts share one metadata-only source index and old preferences/manual/read retries are bounded',options,async()=>{
-  await seed(130);await store.fold('peer',ref);
-  assert.equal((await db.collection(thread+'/inboxCountEvents').get()).size,130);
-  assert.equal((await db.collectionGroup('occurrences').get()).size,0);
-  const op={action:'markUnread',key,generation:1,operationId:'old',expectedManualUnreadRevision:0};
-  await store.execute('me',op);await store.execute('me',read(10,1));await store.execute('me',op);
-  for(let n=11;n<=17;n++) await store.execute('me',{...read(n,2),operationId:'read_'+n});
-  assert.equal((await db.collection('users/me/inboxOperations').get()).size,0);assert.equal((await get()).manualUnread,false);
-  await store.execute('me',{action:'preferences',key,generation:1,expectedPreferencesRevision:0,patch:{archived:true}});
-  await assert.rejects(store.execute('me',{action:'preferences',key,generation:1,expectedPreferencesRevision:0,patch:{archived:false}}),{code:'PREFERENCE_REVISION_CONFLICT'});
-  assert.equal((await get()).archived,true);
+test(
+  'global batch freezes every unread row at one server snapshot and preserves new/unseen marks',
+  options,
+  async () => {
+    const src = { sourceId: 'batch', sourceSecret: 's'.repeat(40) };
+    await store.execute('me', { action: 'assistantSource', ...src, enabled: true });
+    const base = {
+      action: 'assistantPublish',
+      ...src,
+      generation: 1,
+      baseline: 0,
+      sourceRevision: 1,
+      sourceCursor: 1,
+      lastActivityAt: now,
+      previewKind: 'reply',
+      pendingActionCount: 0,
+      state: 'completed'
+    };
+    for (let i = 0; i < 55; i++)
+      await store.execute('me', { ...base, conversationId: 'item' + String(i).padStart(2, '0') });
+    const start = { action: 'markAllReadSnapshot', operationId: 'frozen-online', requestedAt: now };
+    assert.equal((await store.execute('me', start)).state, 'queued');
+    await store.execute('me', { ...base, conversationId: 'newborn' });
+    await store.execute('me', { ...base, conversationId: 'item53', sourceRevision: 2, sourceCursor: 4 });
+    await store.execute('me', {
+      action: 'markUnread',
+      key: 'assistant:batch:item54',
+      generation: 1,
+      expectedManualUnreadRevision: 0,
+      operationId: 'later'
+    });
+    const jobs = [],
+      runner = new InboxJobs(store, null, async j => jobs.push(j));
+    await runner.run({ type: 'readBatch', uid: 'me', id: start.operationId });
+    while (jobs.length) await runner.run(jobs.shift());
+    const done = await store.execute('me', { action: 'readBatchStatus', jobId: start.operationId });
+    assert.equal(done.state, 'complete');
+    assert.equal(done.processed, 55);
+    const remaining = (await store.execute('me', { action: 'list', filter: 'unread' })).items;
+    assert.deepEqual(remaining.map(r => [r.ref.conversationId, r.unreadCount, r.manualUnread]).sort(), [
+      ['item53', 3, false],
+      ['item54', 0, true],
+      ['newborn', 1, false]
+    ]);
+    assert.deepEqual(await store.execute('me', start), done);
+  }
+);
+test(
+  'per-session opt-out fences stale publications and permits explicit same-revision restore; first failure alerts without a result',
+  options,
+  async () => {
+    const src = { sourceId: 'privacy', sourceSecret: 's'.repeat(40) };
+    await store.execute('me', { action: 'assistantSource', ...src, enabled: true });
+    const p = {
+      action: 'assistantPublish',
+      ...src,
+      generation: 1,
+      conversationId: 'private',
+      baseline: 0,
+      sourceRevision: 1,
+      sourceCursor: 0,
+      lastActivityAt: 0,
+      failureAt: now,
+      failureRevision: 1,
+      previewKind: 'failure',
+      pendingActionCount: 0,
+      state: 'failed',
+      conversationConsentRevision: 1
+    };
+    await store.execute('me', p);
+    const k = 'assistant:privacy:private';
+    assert.equal((await store.execute('me', { action: 'get', key: k })).item.unreadCount, 0);
+    assert.ok(
+      (await store.execute('me', { action: 'notices' })).items.some(
+        n => n.kind === 'failure' && n.deliverable && n.lastActivityAt === now
+      )
+    );
+    await store.execute('me', { ...read(0), key: k, operationId: 'older-failure', observedFailureRevision: 0 });
+    assert.equal((await store.execute('me', { action: 'notices' })).items[0].deliverable, true);
+    await store.execute('me', { ...read(0), key: k, operationId: 'observed-failure', observedFailureRevision: 1 });
+    assert.equal((await store.execute('me', { action: 'notices' })).items[0].deliverable, false);
+    assert.equal((await store.execute('me', { action: 'get', key: k })).item.state, 'failed');
+    const remove = {
+      action: 'assistantRemove',
+      ...src,
+      generation: 1,
+      conversationId: p.conversationId,
+      sourceRevision: 1,
+      conversationConsentRevision: 2
+    };
+    await store.execute('me', remove);
+    await assert.rejects(store.execute('me', p), { code: 'STALE_CONVERSATION_CONSENT' });
+    await store.execute('me', { ...p, conversationConsentRevision: 3 });
+    await assert.rejects(store.execute('me', remove), { code: 'STALE_CONVERSATION_CONSENT' });
+    await store.execute('me', {
+      ...p,
+      sourceRevision: 2,
+      state: 'idle',
+      failureRevision: 2,
+      conversationConsentRevision: 3
+    });
+    assert.ok(!(await store.execute('me', { action: 'notices' })).items.some(n => n.deliverable));
+  }
+);
+test(
+  'capped counts share one metadata-only source index and old preferences/manual/read retries are bounded',
+  options,
+  async () => {
+    await seed(130);
+    await store.fold('peer', ref);
+    assert.equal((await db.collection(thread + '/inboxCountEvents').get()).size, 130);
+    assert.equal((await db.collectionGroup('occurrences').get()).size, 0);
+    const op = { action: 'markUnread', key, generation: 1, operationId: 'old', expectedManualUnreadRevision: 0 };
+    await store.execute('me', op);
+    await store.execute('me', read(10, 1));
+    await store.execute('me', op);
+    for (let n = 11; n <= 17; n++) await store.execute('me', { ...read(n, 2), operationId: 'read_' + n });
+    assert.equal((await db.collection('users/me/inboxOperations').get()).size, 0);
+    assert.equal((await get()).manualUnread, false);
+    await store.execute('me', {
+      action: 'preferences',
+      key,
+      generation: 1,
+      expectedPreferencesRevision: 0,
+      patch: { archived: true }
+    });
+    await assert.rejects(
+      store.execute('me', {
+        action: 'preferences',
+        key,
+        generation: 1,
+        expectedPreferencesRevision: 0,
+        patch: { archived: false }
+      }),
+      { code: 'PREFERENCE_REVISION_CONFLICT' }
+    );
+    assert.equal((await get()).archived, true);
+  }
+);
+test(
+  'sparse shared counts stay exact through recalls at the cap, own messages, bounded mentions and legacy reads',
+  options,
+  async () => {
+    await seed(130, true, i => ({
+      ...(i >= 125 ? { mentions: ['user:me'] } : {}),
+      ...(i === 128 ? { author: { uid: 'me', kind: 'user' } } : {})
+    }));
+    assert.equal((await get()).unreadCount, 100);
+    assert.equal((await get()).mentionCount, 5);
+    const b = db.batch(),
+      target = 'message_0130',
+      change = 'recall_last';
+    b.update(db.doc(thread + '/messages/' + target), { recalled: true, text: '', changeSeq: 131, changeId: change });
+    b.set(db.doc(thread + '/changes/' + change), {
+      operation: 'recall',
+      seq: 131,
+      messageId: target,
+      actorUid: 'peer',
+      generation: 1
+    });
+    b.update(db.doc(thread), { lastChangeSeq: 131, lastMessage: { at: new Date(now), preview: '' } });
+    await b.commit();
+    await store.fold('me', ref);
+    assert.equal((await get()).unreadCount, 100);
+    assert.equal((await get()).mentionCount, 4);
+    await store.execute('me', read(33));
+    assert.equal((await get()).unreadCount, 95);
+    await store.execute('me', read(125));
+    assert.equal((await get()).unreadCount, 3);
+    assert.equal((await get()).mentionCount, 3);
+    assert.equal((await db.collection(thread + '/inboxCountEvents').get()).size, 129);
+    assert.deepEqual(Object.keys((await db.doc(thread + '/inboxCountEvents/message_0129').get()).data()).sort(), [
+      'actor',
+      'at',
+      'mentions',
+      'seq'
+    ]);
+  }
+);
+test(
+  'notice click reauthorizes exact source and target; disabled session hides history across explicit restore',
+  options,
+  async () => {
+    await seed(1);
+    const teamEvent = (await store.execute('me', { action: 'notices' })).items[0];
+    assert.equal((await store.execute('me', { action: 'notice', id: teamEvent.id })).item.messageId, 'message_0001');
+    await db.doc(thread + '/messages/message_0001').update({ recalled: true, text: '' });
+    assert.equal((await store.execute('me', { action: 'notice', id: teamEvent.id })).item.messageId, undefined);
+    const src = { sourceId: 'history', sourceSecret: 'x'.repeat(40) };
+    await store.execute('me', { action: 'assistantSource', ...src, enabled: true });
+    const p = {
+      action: 'assistantPublish',
+      ...src,
+      generation: 1,
+      conversationId: 'row',
+      baseline: 0,
+      sourceCursor: 1,
+      sourceRevision: 1,
+      lastActivityAt: now,
+      conversationConsentRevision: 1,
+      pendingActionCount: 0,
+      previewKind: 'reply',
+      state: 'completed'
+    };
+    await store.execute('me', p);
+    const earlier = (await store.execute('me', { action: 'notices' })).items.find(n =>
+      n.key.startsWith('assistant:')
+    );
+    await store.execute('me', {
+      action: 'assistantRemove',
+      ...src,
+      generation: 1,
+      conversationId: 'row',
+      sourceRevision: 1,
+      conversationConsentRevision: 2
+    });
+    await assert.rejects(store.execute('me', { action: 'notice', id: earlier.id }), { code: 'NOTICE_MISSING' });
+    await store.execute('me', { ...p, conversationConsentRevision: 3 });
+    await assert.rejects(store.execute('me', { action: 'notice', id: earlier.id }), { code: 'NOTICE_MISSING' });
+    assert.ok(!(await store.execute('me', { action: 'notices' })).items.some(n => n.key === earlier.key));
+  }
+);
+test(
+  'notice retention evicts one old slot, ignores duplicate admissions and enforces expiry at read time',
+  options,
+  async () => {
+    await seed(1);
+    const account = db.doc('users/me'),
+      rows = account.collection('inboxNotices');
+    const fresh = (await rows.get()).docs[0];
+    const old = 'f'.repeat(64),
+      batch = db.batch(),
+      ring = account.collection('inboxRetention');
+    batch.set(ring.doc('head'), { next: 1000 });
+    batch.set(ring.doc('0'), { id: old });
+    batch.set(rows.doc(old), { ...fresh.data(), id: old });
+    await batch.commit();
+    const delivery = new InboxDelivery({
+      db,
+      pushStore: { active: async () => [] },
+      messaging: {},
+      enqueue: async () => {},
+      clock: () => now
+    });
+    await delivery.onNotice('me', fresh.id);
+    await delivery.onNotice('me', fresh.id);
+    assert.equal((await ring.doc('head').get()).data().next, 1001);
+    assert.equal((await rows.doc(old).get()).exists, false);
+    now += 31 * 86400000;
+    assert.equal((await store.execute('me', { action: 'notices' })).items.length, 0);
+    await assert.rejects(store.execute('me', { action: 'notice', id: fresh.id }), { code: 'NOTICE_MISSING' });
+  }
+);
+
+test(
+  'privacy transitions preserve personal state and fence a frozen batch and delayed preferences',
+  options,
+  async () => {
+    const src = { sourceId: 'privacy-source', sourceSecret: 'z'.repeat(40) },
+      key = 'assistant:privacy-source:session';
+    await store.execute('me', { action: 'assistantSource', ...src, enabled: true });
+    const base = {
+      action: 'assistantPublish',
+      ...src,
+      conversationId: 'session',
+      generation: 1,
+      baseline: 0,
+      sourceCursor: 3,
+      sourceRevision: 1,
+      lastActivityAt: now,
+      state: 'completed',
+      pendingActionCount: 0,
+      previewKind: 'reply',
+      title: 'Private session',
+      conversationConsentRevision: 1
+    };
+    const row = async () => (await store.execute('me', { action: 'get', key })).item;
+    await store.execute('me', base);
+    await store.execute('me', {
+      action: 'markUnread',
+      key,
+      generation: 1,
+      expectedManualUnreadRevision: 0,
+      operationId: 'first'
+    });
+    assert.equal((await row()).manualUnreadRevision, 1);
+    const batch = { action: 'markAllReadSnapshot', operationId: 'frozen-before-removal', requestedAt: now };
+    await store.execute('me', batch);
+    const remove = {
+      action: 'assistantRemove',
+      ...src,
+      conversationId: 'session',
+      generation: 1,
+      sourceRevision: 1,
+      conversationConsentRevision: 2
+    };
+    await store.execute('me', remove);
+    const watermark = db.doc('users/me/inboxSources/privacy-source/checkpoints/session');
+    const first = (await watermark.get()).data();
+    assert.equal(JSON.stringify(first).includes('Private session'), false);
+    await store.execute('me', remove);
+    assert.deepEqual((await watermark.get()).data().personal, first.personal);
+    await store.execute('me', { ...base, conversationConsentRevision: 3 });
+    const restored = await row();
+    assert.equal(restored.manualUnread, true);
+    assert.ok(restored.manualUnreadRevision > 1);
+    assert.ok(restored.preferencesRevision > 0);
+    await assert.rejects(
+      store.execute('me', {
+        action: 'preferences',
+        key,
+        generation: 1,
+        expectedPreferencesRevision: 0,
+        patch: { archived: true }
+      }),
+      { code: 'PREFERENCE_REVISION_CONFLICT' }
+    );
+    await store.execute('me', {
+      action: 'markUnread',
+      key,
+      generation: 1,
+      expectedManualUnreadRevision: restored.manualUnreadRevision,
+      operationId: 'fresh'
+    });
+    const fresh = await row();
+    await new InboxJobs(store, null, async () => {}).run({ type: 'readBatch', uid: 'me', id: batch.operationId });
+    assert.equal((await store.execute('me', { action: 'readBatchStatus', jobId: batch.operationId })).processed, 1);
+    assert.deepEqual(await row(), fresh);
+    const prefs = { pinOrder: 7, archived: true, notificationMode: 'none' };
+    await store.execute('me', {
+      action: 'preferences',
+      key,
+      generation: 1,
+      expectedPreferencesRevision: fresh.preferencesRevision,
+      patch: prefs
+    });
+    const customized = await row();
+    await store.execute('me', { ...remove, conversationConsentRevision: 4 });
+    await store.execute('me', { ...base, conversationConsentRevision: 5 });
+    const final = await row();
+    for (const [name, value] of Object.entries(prefs)) assert.equal(final[name], value);
+    assert.ok(final.preferencesRevision > customized.preferencesRevision);
+    assert.ok(final.manualUnreadRevision > customized.manualUnreadRevision);
+    await assert.rejects(
+      store.execute('me', {
+        action: 'preferences',
+        key,
+        generation: 1,
+        expectedPreferencesRevision: customized.preferencesRevision,
+        patch: { notificationMode: 'all' }
+      }),
+      { code: 'PREFERENCE_REVISION_CONFLICT' }
+    );
+    await store.execute('me', { ...base, conversationConsentRevision: 7 });
+    await assert.rejects(store.execute('me', { ...remove, conversationConsentRevision: 6 }), {
+      code: 'STALE_CONVERSATION_CONSENT'
+    });
+    assert.ok((await row()).preferencesRevision > final.preferencesRevision);
+  }
+);
+test('archived muted rows remain discoverable via unread and attention without unarchiving', options, async () => {
+  const src = { sourceId: 'archive-source', sourceSecret: 'z'.repeat(40) },
+    key = 'assistant:archive-source:row';
+  await store.execute('me', { action: 'assistantSource', ...src, enabled: true });
+  await store.execute('me', {
+    action: 'assistantPublish',
+    ...src,
+    conversationId: 'row',
+    generation: 1,
+    baseline: 0,
+    sourceCursor: 2,
+    sourceRevision: 1,
+    lastActivityAt: now,
+    state: 'waiting_for_input',
+    pendingActionCount: 1,
+    pendingActionRevision: 1,
+    pendingActionAt: now,
+    previewKind: 'reply',
+    title: 'Archived chat'
+  });
+  await store.execute('me', {
+    action: 'preferences',
+    key,
+    generation: 1,
+    expectedPreferencesRevision: 0,
+    patch: { archived: true, notificationMode: 'none' }
+  });
+  const listing = async p => (await store.execute('me', { action: 'list', ...p })).items;
+  assert.deepEqual(await listing({ filter: 'all' }), []);
+  assert.deepEqual(await listing({ filter: 'all', archived: false }), []);
+  assert.equal((await listing({ filter: 'all', archived: true }))[0].key, key);
+  for (const filter of ['unread', 'attention']) {
+    for (const archive of [{}, { archived: false }, { archived: true }]) {
+      const matches = await listing({ filter, category: 'assistant', ...archive });
+      assert.equal(matches[0].key, key);
+      assert.equal(matches[0].archived, true);
+    }
+    assert.equal((await listing({ filter, category: 'assistant', searchPrefix: 'archived' }))[0].key, key);
+  }
+  await store.execute('me', {
+    action: 'markAllReadSnapshot',
+    filter: 'unread',
+    archived: false,
+    operationId: 'archived-filter-click',
+    requestedAt: now
+  });
+  await new InboxJobs(store, null, async () => {}).run({ type: 'readBatch', uid: 'me', id: 'archived-filter-click' });
+  assert.deepEqual(await listing({ filter: 'unread' }), []);
+  const row = (await listing({ filter: 'attention' }))[0];
+  assert.equal(row.key, key);
+  assert.equal(row.archived, true);
+  assert.equal(row.notificationMode, 'none');
+  assert.equal(row.pendingActionCount, 1);
 });

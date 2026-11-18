@@ -92,6 +92,42 @@ class InboxContractTest {
         assertFalse(latest.copy(archived = true).needsBadge)
     }
 
+    @Test fun mutedArchivedConversationStaysArchivedWhileUnreadOrAttentionMakesItDiscoverable() {
+        val row = InboxItem(assistant, "assistant", "Build", sourceCursor = 2, readThrough = 1,
+            unreadCount = 1, pendingActionCount = 1, archived = true, notificationMode = "none")
+
+        assertFalse(row.matches(InboxQuery(InboxFilter.All)))
+        assertTrue(row.matches(InboxQuery(InboxFilter.Archived)))
+        assertTrue(row.matches(InboxQuery(InboxFilter.Unread, "assistant", "build")))
+        assertTrue(row.matches(InboxQuery(InboxFilter.Attention, "assistant", "build")))
+        assertFalse(row.needsBadge)
+
+        val read = InboxOperation.read(row).apply(row)
+        assertFalse(read.matches(InboxQuery(InboxFilter.Unread)))
+        assertTrue(read.matches(InboxQuery(InboxFilter.Attention)))
+        assertTrue(read.matches(InboxQuery(InboxFilter.Archived)))
+        assertEquals("none", read.notificationMode)
+        assertFalse(read.copy(pendingActionCount = 0).matches(InboxQuery(InboxFilter.Attention)))
+    }
+
+    @Test fun globalReadFreezesArchivedAssistantUnreadAndLeavesNewActivityUnseen() {
+        val archived = InboxItem(assistant, "assistant", "Build", sourceCursor = 2, readThrough = 1,
+            unreadCount = 1, pendingActionCount = 1, pendingActionRevision = 3, archived = true, notificationMode = "none")
+        val alreadyRead = InboxItem(assistant.copy(conversationId = "read"), "assistant", "Read", sourceCursor = 1, readThrough = 1)
+        val (frozenRow, operation) = freezeLocalAssistantReads(listOf(archived, alreadyRead)).single()
+        assertEquals(archived, frozenRow)
+        assertEquals(2L, operation.body.getLong("through"))
+        assertEquals(3L, operation.body.getLong("observedPendingActionRevision"))
+        assertFalse(operation.apply(archived).unread)
+
+        val result = operation.apply(archived.copy(sourceCursor = 3, unreadCount = 2, pendingActionRevision = 4))
+        assertTrue(result.unread)
+        assertTrue(result.archived)
+        assertEquals("none", result.notificationMode)
+        assertEquals(1, result.pendingActionCount)
+        assertEquals(4L, result.pendingActionRevision)
+    }
+
     @Test fun runtimeOrdinalsRequireVisibleFinalIdentityWithoutSkippingUnseenMiddle() {
         val home = Files.createTempDirectory("assistant-inbox-contract").toFile()
         try {
@@ -168,5 +204,73 @@ class InboxContractTest {
         }
         assertEquals(listOf(3UL, 53UL), queries)
         assertEquals(58L, through)
+    }
+
+    @Test fun manualUnreadReplayIsRejectedByFrozenRevision() {
+        val row = InboxItem(team, "team", "Channel", manualUnreadRevision = 9)
+        val mark = InboxOperation.unread(row)
+        assertEquals(9L, mark.body.getLong("expectedManualUnreadRevision"))
+        val accepted = mark.apply(row)
+        assertEquals(10L, accepted.manualUnreadRevision)
+        assertEquals(accepted, mark.apply(accepted))
+        val later = accepted.copy(manualUnread = false, manualUnreadRevision = 11)
+        assertEquals(later, mark.apply(later))
+    }
+
+    @Test fun preferencePatchDoesNotRebaseOverAnotherDevicesUpdate() {
+        val row = InboxItem(team, "team", "Channel", preferencesRevision = 4)
+        val mute = InboxOperation.preferences(row, JSONObject().put("notificationMode", "none"))
+        assertEquals(4L, mute.body.getLong("expectedPreferencesRevision"))
+        val changed = mute.apply(row)
+        assertEquals(5L, changed.preferencesRevision)
+        val archive = InboxOperation.preferences(changed, JSONObject().put("archived", true))
+        assertNull(mute.coalesce(archive))
+        assertEquals(changed.copy(notificationMode = "all"), mute.apply(changed.copy(notificationMode = "all")))
+    }
+
+    @Test fun conversationConsentDefaultsOnAndPersistsAnIndependentTombstoneRevision() {
+        val initial = AssistantConversationConsent(assistant, sourceRevision = 10)
+        assertTrue(initial.consent.enabled)
+        val disabled = initial.change(false, 9)
+        assertFalse(disabled.consent.enabled)
+        assertEquals(10L, disabled.sourceRevision)
+        val restored = requireNotNull(AssistantConversationConsent.parse(disabled.json().toString()))
+        assertEquals(disabled, restored)
+        assertTrue(restored.change(true, 11).consent.revision > disabled.consent.revision)
+    }
+
+    @Test fun firstTurnFailureHasItsOwnIdentityBeforeAnyResult() {
+        val raw = JSONObject().put("sourceId", "host").put("cursor", 0).put("baselineCursor", 0)
+            .put("lastMeaningfulAt", 0).put("sourceRevision", 2).put("failed", true)
+            .put("failureRevision", 1).put("failureAt", 8_000).toString()
+        val activity = requireNotNull(AssistantActivity.parse(raw))
+        assertTrue(activity.failed)
+        assertEquals(0L, activity.cursor)
+        assertEquals(1L, activity.failureRevision)
+        assertEquals(8_000L, activity.failureAt)
+        val row = InboxItem(assistant, "assistant", "Assistant", failureRevision = activity.failureRevision, attentionKind = "failure")
+        assertEquals(1L, InboxOperation.read(row).body.getLong("observedFailureRevision"))
+        assertFalse(InboxOperation.read(row, observeFailure = false).body.has("observedFailureRevision"))
+        assertTrue(InboxOperation.read(row).apply(row).attention)
+    }
+
+    @Test fun notificationPreviewRequiresFreshExactTargetAndExpiry() {
+        val target = InboxNoticeTarget(team, "a".repeat(64), "mention", 12, 1_000, messageId = "message_123")
+        val verified = JSONObject().put("key", team.key).put("generation", team.generation).put("id", target.id)
+            .put("through", target.through).put("kind", target.kind).put("messageId", target.messageId)
+        assertEquals(target, target.verifiedBy(verified, 999))
+        assertNull(target.verifiedBy(verified, 1_000))
+        assertNull(target.verifiedBy(JSONObject(verified.toString()).put("through", 13), 999))
+        assertNull(target.verifiedBy(JSONObject(verified.toString()).apply { remove("messageId") }, 999))
+        val local = target.copy(ref = assistant, id = "${assistant.key}:2:reply", messageId = null)
+        assertFalse(local.ledgerKey() == local.copy(through = 13).ledgerKey())
+    }
+
+    @Test fun assistantNoticePreviewDecodesUtf16TextAndOmitsToolBlocks() {
+        val serialized = JSONObject().put("available", true).put("messages", JSONArray().put(JSONObject().put("blocks", JSONArray()
+            .put(JSONObject().put("type", "text").put("text", JSONObject().put("code_units", JSONArray(listOf(0xd83d, 0xde00)))))
+            .put(JSONObject().put("type", "tool_result").put("result_json", "private tool output")))))
+        assertEquals(listOf("😀"), assistantNoticeText(serialized.toString()))
+        assertNull(assistantNoticeText(serialized.put("available", false).toString()))
     }
 }

@@ -9,7 +9,7 @@ export interface InboxRecord {
   version: 1;
   exposure?: { revision: number; ranges: Array<[number, number]> };
   queue: QueuedIntent[];
-  batch?:{jobId:string;startedAt:number};
+  batch?: { jobId: string; startedAt: number };
   cache?: { page: InboxPage; verifiedAt: number };
 }
 export interface InboxStorage {
@@ -26,6 +26,7 @@ export function enqueue(state: InboxRecord, command: InboxMutation, id: string) 
     tail.command.key === command.key &&
     tail.command.generation === command.generation &&
     tail.command.manualUnreadRevision === command.manualUnreadRevision &&
+    tail.command.observedFailureRevision === command.observedFailureRevision &&
     tail.command.observedPendingActionRevision === command.observedPendingActionRevision
   ) {
     tail.command.through = Math.max(command.through, tail.command.through);

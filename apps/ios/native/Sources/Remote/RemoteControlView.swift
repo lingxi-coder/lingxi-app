@@ -428,6 +428,7 @@ struct RemoteSessionView: View {
                         else if visibleResults[rowID] == uuid { visibleResults.removeValue(forKey: rowID) }
                     },
                     onInboxJumpToLatest: {
+                        inbox.dismissNotificationPreview()
                         if let ref = activeRef, let row = inbox.row(ref) { inbox.markRead([row]) }
                     })
                     .disabled(source.phase != .live || !source.hasReadyConnection)
@@ -481,6 +482,14 @@ struct RemoteSessionView: View {
             Task { await source.stop() }
         }
         .task(id: visibleRead) { await commitRemoteExposure() }
+        .sheet(item: Binding(
+            get: { inbox.assistantPreview(activeRef) },
+            set: { if $0 == nil { inbox.dismissNotificationPreview() } }
+        )) { preview in
+            InboxNoticePreviewView(preview: preview, loadAssistant: { await remoteAssistantPreviewText(preview) }) {
+                inbox.dismissNotificationPreview()
+            }
+        }
         .onChange(of: inbox.storageAvailable, initial: true) { _, available in
             guard available, inbox.uid == source.uid, !draftRestored else { return }
             if draft.draft.text.isEmpty, draft.draft.sourceCodeUnits == nil,
@@ -538,6 +547,18 @@ struct RemoteSessionView: View {
             if next > baseline { inbox.sawContent(frozen, through: next) }
             guard page.hasMore, next > baseline, next == entries.last?.cursor else { break }
         }
+    }
+
+    private func remoteAssistantPreviewText(_ preview: InboxNotificationPreview) async -> [String] {
+        guard preview.row.ref == activeRef, preview.target.through > 0,
+              let ticket = manager.connectionTicket(hostID: source.hostID, uid: source.uid) else { return [] }
+        let session = source.sessionID
+        let through = UInt64(preview.target.through)
+        let raw = try? await manager.withSessionClient(hostID: source.hostID, uid: source.uid, ticket: ticket) {
+            try await $0.sessionActivityPreview(sessionId: session, through: through)
+        }
+        guard let raw, !Task.isCancelled, inbox.assistantPreview(activeRef) == preview else { return [] }
+        return InboxAssistantPreviewBody.text(from: raw, verifying: preview.target.messageId)
     }
 
     private var draftKey: String { "remote:\(source.hostID):\(canonicalSessionID(source.sessionID))" }

@@ -128,11 +128,6 @@ internal class InboxController private constructor(
         }
     }
 
-    fun itemUnread(ref: InboxRef): Int {
-        val row = snapshot(ref)?.takeUnless { it.archived } ?: return 0
-        return maxOf(row.unreadCount, if (row.manualUnread) 1 else 0)
-    }
-
     fun show(query: InboxQuery) {
         val serverQuery = query.copy(search = query.searchPrefix)
         if (cloudQuery != serverQuery) {
@@ -262,7 +257,11 @@ internal class InboxController private constructor(
                 }
                 val command = JSONObject().put("action", "list")
                     .put("filter", if (requestedQuery.filter == InboxFilter.Archived) InboxFilter.All.wire else requestedQuery.filter.wire)
-                    .put("archived", requestedQuery.filter == InboxFilter.Archived)
+                when (requestedQuery.filter) {
+                    InboxFilter.All -> command.put("archived", false)
+                    InboxFilter.Archived -> command.put("archived", true)
+                    InboxFilter.Unread, InboxFilter.Attention -> Unit
+                }
                 requestedQuery.category?.let { command.put("category", it) }
                 requestedQuery.search.takeIf(String::isNotEmpty)?.let { command.put("searchPrefix", it) }
                 cursor?.let { command.put("after", it.json()) }
@@ -294,9 +293,9 @@ internal class InboxController private constructor(
         rows.forEach { verify(it.ref, authorizedAt) }
         cloudItems = if (reset) rows else (cloudItems + rows).distinctBy { it.key }.take(10_000)
         projection.update { previous ->
-            // An authoritative unfiltered refresh does not carry obsolete pages forward.
-            val retain = unlessUnfiltered(previous, reset)
-            retain + rows.associateBy { it.key }
+            val resetUnfiltered = reset && cloudQuery == InboxQuery()
+            val pageRows = rows.associateBy { it.key }
+            if (resetUnfiltered || previous.size > 10_000) pageRows else previous + pageRows
         }
         mutable.update { it.copy(hasMore = next != null && cloudItems.size < 10_000, cached = offline, failed = false, loading = offline) }
         publishRows()
@@ -380,11 +379,6 @@ internal class InboxController private constructor(
         }
     }
 
-    private fun unlessUnfiltered(previous: Map<String, InboxItem>, reset: Boolean): Map<String, InboxItem> {
-        if (reset && cloudQuery.filter == InboxFilter.All && cloudQuery.category == null && cloudQuery.search.isEmpty()) return emptyMap()
-        return if (previous.size <= 10_000) previous else emptyMap()
-    }
-
     private fun publishRows() {
         val local = (otherAssistant.value + localAssistant.value.map { row ->
             row.copy(conversationSummarySync = conversationChoices[row.key]?.consent?.enabled ?: true)
@@ -424,9 +418,10 @@ internal class InboxController private constructor(
                         if (deviceOwner != localOwner) return@withLock
                         val changed = withContext(Dispatchers.IO) { store.rememberLocal(deviceOwner, item, operation) }
                         if (deviceOwner == localOwner) {
-                            localAssistant.update { entries -> entries.map { if (it.key == changed.key) changed else it } }
-                            otherAssistant.update { entries -> entries.map { if (it.key == changed.key) changed else it } }
-                            if (operation.action == "markRead") AssistantInboxAlerts.cancelRead(operation.ref, operation.body.getLong("through"), operation.body.nullableLong("observedPendingActionRevision"))
+                            localAssistant.update { entries -> entries.map { if (it.ref == changed.ref) it.withLocalState(changed) else it } }
+                            otherAssistant.update { entries -> entries.map { if (it.ref == changed.ref) it.withLocalState(changed) else it } }
+                            if (operation.action == "markRead") AssistantInboxAlerts.cancelRead(operation.ref, operation.body.getLong("through"), operation.body.nullableLong("observedPendingActionRevision"),
+                                operation.body.nullableLong("observedFailureRevision"))
                         }
                     }
                     return@launch
@@ -447,7 +442,8 @@ internal class InboxController private constructor(
                     return@launch
                 }
                 if (operation.action == "markRead") {
-                    AssistantInboxAlerts.cancelRead(operation.ref, operation.body.getLong("through"), operation.body.nullableLong("observedPendingActionRevision"))
+                    AssistantInboxAlerts.cancelRead(operation.ref, operation.body.getLong("through"), operation.body.nullableLong("observedPendingActionRevision"),
+                                operation.body.nullableLong("observedFailureRevision"))
                     if (automatic) pendingReadKeys += operation.ref.key
                 }
                 mutable.update { it.copy(writeError = null) }
@@ -488,8 +484,7 @@ internal class InboxController private constructor(
         if (!networkOnline || !state.value.readBatchReady || state.value.readBatchBusy || !valid(uid)) return
         val requestedAt = System.currentTimeMillis()
         val jobId = java.util.UUID.randomUUID().toString()
-        val local = localAssistant.value.filter { it.unread && !it.archived }
-            .map { row -> row to InboxOperation.read(row) }
+        val local = freezeLocalAssistantReads(localAssistant.value)
         mutable.update { it.copy(readBatchBusy = true, writeError = null) }
         readBatchJob = scope.launch {
             try {
@@ -511,7 +506,17 @@ internal class InboxController private constructor(
                     } else false
                 }
                 catch (_: Exception) { false }
-                if (valid(uid)) local.forEach { (row, read) -> mutate(read, row) }
+                if (valid(uid) && local.isNotEmpty()) {
+                    outboxLock.withLock {
+                        val saved = withContext(Dispatchers.IO) { store.rememberLocalBatch(uid, local) }
+                        if (valid(uid)) {
+                            localAssistant.update { rows -> rows.map { row -> row.withLocalState(saved[row.key]) } }
+                            local.forEach { (row, read) ->
+                                AssistantInboxAlerts.cancelRead(row.ref, read.body.getLong("through"), row.pendingActionRevision, row.failureRevision)
+                            }
+                        }
+                    }
+                }
                 if (!completed) pollReadBatch(uid, jobId)
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) {
@@ -756,7 +761,7 @@ internal class InboxController private constructor(
             AssistantInboxAlerts.local(context, localOwner, InboxAlert(item.ref, "${item.key}:$revision:$kind",
                 kind, item.sourceCursor, item.title, "", eventTime + 3_600_000, if (action) item.pendingActionRevision else null,
                 deliverAfter = eventTime + if (action) 6_000 else if (kind == "completion") 5_000 else 0,
-                statusFailure = newFailure))
+                failureRevision = item.failureRevision.takeIf { newFailure }))
         }
         if (next == assistantSources) return
         assistantSources.clear()
@@ -923,6 +928,48 @@ internal class InboxController private constructor(
             .optJSONObject("item")?.let(InboxItem::parse)?.takeIf { it.ref.generation == generation }
     }
 
+    suspend fun openNotice(target: InboxNoticeTarget, assistantPreview: suspend (InboxItem, InboxNoticeTarget) -> List<String>?): InboxNoticePreview? {
+        val now = System.currentTimeMillis()
+        if (!target.isValid(now)) return null
+        val uid = owner
+        if (target.ref.generation == 0L) {
+            val deviceOwner = localOwner
+            if (!withContext(Dispatchers.IO) { store.wasAdmitted(deviceOwner, target.ledgerKey(), now) } || localOwner != deviceOwner) return null
+            val row = findCloud(target.ref.key, 0) ?: return null
+            val bodies = assistantPreview(row, target) ?: return null
+            if (localOwner != deviceOwner || !target.isValid(System.currentTimeMillis())) return null
+            return InboxNoticePreview(target, row, bodies)
+        }
+        if (uid == null || !valid(uid)) return null
+        val doc = request(uid, JSONObject().put("action", "notice").put("id", target.id).put("deviceId", deviceIdSeed))
+            .optJSONObject("item") ?: return null
+        val verified = target.verifiedBy(doc, now) ?: return null
+        val row = findCloud(target.ref.key, target.ref.generation) ?: return null
+        if (row.sourceCursor < verified.through || !valid(uid)) return null
+        val bodies = if (row.ref.kind == "assistant") assistantPreview(row, verified) ?: return null
+        else threadPreview(uid, verified) ?: return null
+        if (!valid(uid) || !verified.isValid(System.currentTimeMillis())) return null
+        return InboxNoticePreview(verified, row, bodies)
+    }
+
+    private suspend fun threadPreview(uid: String, target: InboxNoticeTarget): List<String>? {
+        // A live task without a message ID is validated by notice lookup.
+        if (target.through == 0L || target.messageId == null && target.taskId != null) return emptyList()
+        val ref = target.ref
+        val field = if (ref.kind == "service") "serviceId" else "teamId"
+        val user = auth.currentUser?.takeIf { it.uid == uid } ?: return null
+        val token = user.getIdToken(false).await().token ?: return null
+        if (!valid(uid)) return null
+        val response = TeamHttp.request("$TEAMS_API_ROOT/v1/teams/messages", token,
+            JSONObject().put("action", "history").put(field, ref.sourceId).put("generation", ref.generation)
+                .put("conversationId", ref.conversationId).put("before", target.through + 1))
+        val raw = response.getJSONArray("messages")
+        val messages = (0 until minOf(raw.length(), 50)).map { com.lingxi.code.teams.TeamMessage.parse(raw.getJSONObject(it)) }
+        val anchor = messages.singleOrNull { it.seq == target.through && (target.messageId == null || it.id == target.messageId) && !it.recalled }
+            ?: return null
+        return listOf(anchor.text)
+    }
+
     private suspend fun request(uid: String, body: JSONObject): JSONObject {
         val epoch = authorityEpoch
         val action = body.optString("action")
@@ -950,7 +997,7 @@ internal class InboxController private constructor(
             }
             throw failure
         }
-        if (!valid(uid) || action in setOf("get", "list", "peerReceipt") && epoch != authorityEpoch) throw CancellationException()
+        if (!valid(uid) || action in setOf("get", "list", "peerReceipt", "notice") && epoch != authorityEpoch) throw CancellationException()
         return result
     }
 

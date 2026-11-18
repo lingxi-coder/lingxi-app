@@ -23,8 +23,7 @@ import { conversationLabel, unreadCount, type Identity, type TeamsSnapshot, type
 import { intlTag, teamsText, useTeamsText } from './i18n.js';
 
 /**
- * A friend chat (D9) is this view on a pair team: the header is the friend, there is no details button or platform chip, there are no
- * Bot runs, and the chat marks itself read while its newest message is in view. A Bot DM of a friendship (D22) is the plain Teams view.
+ * A friend chat (D9) uses a pair team and the friend's profile in its header. A friendship's Bot DM (D22) uses the regular Teams header.
  */
 export interface FriendHeader {
   uid: string; name: string; handle?: string;
@@ -248,7 +247,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
     const node=scroller.current;
     if(!node || typeof IntersectionObserver==='undefined')return;
     const frontier=durableReadFrontier(uid,'team:'+team.id+':'+conversation.id,team.generation,conversation.lastReadSeq,conversation.manualUnreadRevision??0,
-      (through,revision)=>{void model.visibleRead(conversation.id,through,revision,conversation.pendingActionRevision).then(()=>setReadError(false)).catch(()=>setReadError(true));},()=>setReadError(true));
+      (through,revision)=>{void model.visibleRead(conversation.id,through,revision,conversation.pendingActionRevision,conversation.failureRevision).then(()=>setReadError(false)).catch(()=>setReadError(true));},()=>setReadError(true));
     readFrontier.current=frontier;
     return observeTranscript(node,frontier);
   },[model,conversation.id]);
@@ -303,7 +302,6 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
       <div className="tw-head-actions">
         {hasTopbar ? <TopbarConnection snapshot={snapshot} workspace={workspace} locale={locale} friend={!!friend} /> : null}
         {friend ? null : <span className="tw-platform" title={platformNotice(locale)}><Icon name="lock" size={13} /><span>{platformChip(locale)}</span></span>}
-        {/* A friend chat reads itself (D13), so it has no manual mark. */}
         {unread > 0 && !friend ? <button type="button" className="tw-head-action" aria-label={t('tw_mark_as_read')} title={t('tw_mark_as_read')}
           disabled={snapshot.messageBusy || snapshot.offline} onClick={() => void workspace.markRead()}><Icon name="check" /><span>{t('tw_mark_as_read')}</span></button> : null}
         {friend?.actions}

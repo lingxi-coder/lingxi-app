@@ -392,7 +392,7 @@ internal fun RemoteSessionScreen(
                     } else {
                         com.lingxi.code.inbox.visibleRemoteAssistantThrough(current, inboxRow.sourceCursor, rendered, remote.source::sessionActivityPage)
                     }
-                    if (through > current) inbox.mutate(com.lingxi.code.inbox.InboxOperation.read(inboxRow, through), inboxRow, automatic = true)
+                    if (through > current) inbox.mutate(com.lingxi.code.inbox.InboxOperation.read(inboxRow, through, observeFailure = false), inboxRow, automatic = true)
                 } else null,
                 onInboxJumpLatest = { inboxRow?.let { inbox.mutate(com.lingxi.code.inbox.InboxOperation.read(it), it) } },
                 onSend = { chat.send(it) },

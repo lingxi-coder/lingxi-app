@@ -10,6 +10,7 @@ export interface TeamConversation {
   unreadCount?: number;
   manualUnreadRevision?:number;
   pendingActionRevision?:number;
+  failureRevision?:number;
   lastSeq: number; lastChangeSeq: number; lastReadSeq: number;
   /** Newest message for conversation lists. Absent until the conversation has a message; then always the full pointer. */
   lastMessage?: { id: string; seq: number; at: string | null; author: MessageAuthor; preview: string; recalled?: true };
@@ -48,14 +49,14 @@ export interface MessageApi {
   messages<T>(command: MessageCommand): Promise<T>;
   historyPage?(scope: MessageScope, conversationId: string, beforeSeq:number):Promise<TeamMessage[]>;
   peerReceipt?(scope:MessageScope,id:string):Promise<{readThrough:number|null}>;
-  readVisible?(scope:MessageScope,conversationId:string,through:number,manualUnreadRevision:number,observedPendingActionRevision?:number):Promise<unknown>;
+  readVisible?(scope:MessageScope,conversationId:string,through:number,manualUnreadRevision:number,observedPendingActionRevision?:number,observedFailureRevision?:number):Promise<unknown>;
   onMessagesChanged(callback: (signal?: MessageSignal) => void): () => void;
   watchMessages(scope: MessageScope, conversationId: string, next: (snapshot: MessageSnapshot) => void): () => void;
 }
 export type MessageSnapshot = MessageScope & { uid: string; fromCache: boolean } & (
   | { kind: 'directory'; conversations: TeamConversation[] }
   | { kind: 'messages'; conversationId: string; messages: TeamMessage[]; removed?: string[]; replace?: boolean; older?:boolean; rebase?:boolean; updatedIds?:string[] }
-  | { kind: 'read'; conversationId: string; lastReadSeq: number; unreadCount?:number; manualUnreadRevision?:number;pendingActionRevision?:number }
+  | { kind: 'read'; conversationId: string; lastReadSeq: number; unreadCount?:number; manualUnreadRevision?:number;pendingActionRevision?:number;failureRevision?:number }
   | { kind: 'signal'; signal?: MessageSignal }
   | { kind: 'error'; error: string }
 );
@@ -95,7 +96,7 @@ export function mergeConversation(old: TeamConversation | undefined, value: Team
   const merged = { ...value, lastSeq: Math.max(old?.lastSeq ?? 0, value.lastSeq), lastChangeSeq: Math.max(old?.lastChangeSeq ?? 0, value.lastChangeSeq), lastReadSeq: Math.max(old?.lastReadSeq ?? 0, value.lastReadSeq),
     ...(lastMessage ? { lastMessage } : {}) };
   if (old && old.kind === merged.kind && old.title === merged.title
-    && old.unreadCount === merged.unreadCount && old.manualUnreadRevision === merged.manualUnreadRevision && old.pendingActionRevision === merged.pendingActionRevision && old.lastSeq === merged.lastSeq && old.lastChangeSeq === merged.lastChangeSeq && old.lastReadSeq === merged.lastReadSeq
+    && old.unreadCount === merged.unreadCount && old.manualUnreadRevision === merged.manualUnreadRevision && old.pendingActionRevision === merged.pendingActionRevision && old.failureRevision===merged.failureRevision && old.lastSeq === merged.lastSeq && old.lastChangeSeq === merged.lastChangeSeq && old.lastReadSeq === merged.lastReadSeq
     && sameLastMessage(old.lastMessage, merged.lastMessage)
     && old.participants.length === merged.participants.length && old.participants.every((value, index) => value === merged.participants[index])
     && (old.readers ?? []).join('\n') === (merged.readers ?? []).join('\n')
@@ -223,7 +224,7 @@ export class TeamMessaging {
       }
       this.messagesCached = snapshot.fromCache;
     } else if (snapshot.kind === 'read') {
-      this.state = { ...this.state, conversations: this.state.conversations.map(value => value.id === snapshot.conversationId ? { ...value, lastReadSeq: Math.max(value.lastReadSeq, snapshot.lastReadSeq), ...(snapshot.unreadCount===undefined?{}:{unreadCount:snapshot.unreadCount}), ...(snapshot.pendingActionRevision===undefined?{}:{pendingActionRevision:snapshot.pendingActionRevision}), ...(snapshot.manualUnreadRevision===undefined?{}:{manualUnreadRevision:snapshot.manualUnreadRevision}) } : value) };
+      this.state = { ...this.state, conversations: this.state.conversations.map(value => value.id === snapshot.conversationId ? { ...value, lastReadSeq: Math.max(value.lastReadSeq, snapshot.lastReadSeq), ...(snapshot.unreadCount===undefined?{}:{unreadCount:snapshot.unreadCount}), ...(snapshot.failureRevision===undefined?{}:{failureRevision:snapshot.failureRevision}),...(snapshot.pendingActionRevision===undefined?{}:{pendingActionRevision:snapshot.pendingActionRevision}), ...(snapshot.manualUnreadRevision===undefined?{}:{manualUnreadRevision:snapshot.manualUnreadRevision}) } : value) };
     }
     this.offline = this.directoryCached || (!!this.selected && this.messagesCached);
     if (!this.offline) this.finishConnecting();
@@ -283,9 +284,9 @@ export class TeamMessaging {
     } catch(error) {if(revision===this.pageRevision){this.error=error instanceof Error?error.message:'MESSAGE_LISTENER_FAILED';this.emit();}}
     finally {if(revision===this.pageRevision)this.pageBusy=false;}
   }
-  async visibleRead(id:string,through:number,revision:number,pendingRevision?:number) {
+  async visibleRead(id:string,through:number,revision:number,pendingRevision?:number,failureRevision?:number) {
     if(this.closed || this.selected!==id)return;
-    if(this.api.readVisible) return this.api.readVisible(this.scope,id,through,revision,pendingRevision);
+    if(this.api.readVisible) return this.api.readVisible(this.scope,id,through,revision,pendingRevision,failureRevision);
     await this.markRead(through);
   }
   async create(kind: TeamConversation['kind'], title: string, participantUids: string[], sharedBotIds: string[] = []) {
@@ -347,10 +348,11 @@ export class TeamMessaging {
   async markRead(through?:number) {
     const id = this.selected, thread = this.state.threads[id];
     if (!thread || this.closed || this.offline && !this.api.readVisible) return;
-    const seq = through ?? this.state.conversations.find(row=>row.id===id)?.lastSeq ?? thread.messages.at(-1)?.seq ?? 0;
-    if(this.api.readVisible) {
-      const revision=this.state.conversations.find(row=>row.id===id)?.manualUnreadRevision ?? 0;
-      await this.api.readVisible(this.scope,id,seq,revision,this.state.conversations.find(row=>row.id===id)?.pendingActionRevision);
+    const conversation = this.state.conversations.find(row => row.id === id);
+    const seq = through ?? conversation?.lastSeq ?? thread.messages.at(-1)?.seq ?? 0;
+    if (this.api.readVisible) {
+      await this.api.readVisible(this.scope, id, seq, conversation?.manualUnreadRevision ?? 0,
+        conversation?.pendingActionRevision, conversation?.failureRevision);
       return;
     }
     let value: { lastReadSeq: number };

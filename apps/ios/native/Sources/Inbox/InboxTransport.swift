@@ -18,10 +18,10 @@ enum InboxTransportError: Error {
 struct InboxTransport {
     let uid: String
 
-    func request<T: Decodable>(_ body: [String: Any]) async throws -> T {
+    func request<T: Decodable>(_ body: [String: Any], endpoint: String = "/v1/inbox") async throws -> T {
         guard let user = Auth.auth().currentUser, user.uid == uid else { throw CancellationError() }
         let token = try await user.getIDToken()
-        var request = URLRequest(url: URL(string: "https://lingxios.net/v1/inbox")!)
+        var request = URLRequest(url: URL(string: "https://lingxios.net" + endpoint)!)
         request.httpMethod = "POST"
         request.timeoutInterval = 20
         request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
@@ -56,8 +56,24 @@ struct InboxTransport {
             let lastActivityAt: Int64
             let deliverAfter: Int64
             let deliverable: Bool
+            let messageId: String?
+            let taskId: String?
         }
         let items: [Notice]
+    }
+
+    func noticeMessage(_ preview: InboxNotificationPreview) async throws -> TeamMessage? {
+        let ref = preview.row.ref
+        guard ref.kind != .assistant, let before = preview.target.exclusiveBefore else { return nil }
+        let body: [String: Any] = [
+            "action": "history", "generation": ref.generation, "conversationId": ref.conversationId,
+            "before": before, ref.kind == .service ? "serviceId" : "teamId": ref.sourceId
+        ]
+        let history: HostedServiceHistory = try await request(body, endpoint: "/v1/teams/messages")
+        return history.messages.reversed().first { message in
+            message.recalled != true && preview.target.matches(seq: message.seq, messageID: message.id,
+                taskIDs: (message.taskIds ?? []) + (message.taskId.map { [$0] } ?? []))
+        }
     }
 
     private static let session = URLSession(configuration: .ephemeral, delegate: TeamMessageRedirectPolicy(), delegateQueue: nil)
@@ -78,6 +94,7 @@ struct InboxTransport {
             body["through"] = operation.through
             body["manualUnreadRevision"] = operation.manualUnreadRevision
             body["observedPendingActionRevision"] = operation.observedPendingActionRevision
+            body["observedFailureRevision"] = operation.observedFailureRevision
         case .markUnread:
             body["operationId"] = operation.id
             body["expectedManualUnreadRevision"] = operation.expectedManualUnreadRevision
@@ -100,14 +117,16 @@ struct InboxTransport {
                 throw InboxTransportError.invalidData
             }
             let activity = summary.activity
+            let secret = try sourceSecret(ref.sourceId)
             var registration: [String: Any] = [
-                "action": "assistantSource", "sourceId": ref.sourceId, "sourceSecret": try sourceSecret(ref.sourceId), "enabled": true
+                "action": "assistantSource", "sourceId": ref.sourceId, "sourceSecret": secret, "enabled": true
             ]
             if let revision = operation.consentRevision { registration["consentRevision"] = revision }
             let source: AssistantSource = try await request(registration)
+            guard source.enabled else { return OperationResult(source: source) }
             binding = source
             body = ["action": "assistantPublish", "sourceId": ref.sourceId,
-                    "sourceSecret": try sourceSecret(ref.sourceId), "conversationId": ref.conversationId,
+                    "sourceSecret": secret, "conversationId": ref.conversationId,
                     "generation": source.generation, "baseline": activity.baselineCursor,
                     "sourceRevision": activity.sourceRevision, "sourceCursor": activity.cursor,
                     "lastActivityAt": activity.lastMeaningfulAt, "state": summary.state,

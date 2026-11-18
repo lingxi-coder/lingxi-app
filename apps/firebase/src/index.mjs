@@ -7,6 +7,9 @@ import { onRequest } from 'firebase-functions/v2/https';
 import { onDocumentCreated, onDocumentUpdated, onDocumentWritten } from 'firebase-functions/v2/firestore';
 import { getFunctions } from 'firebase-admin/functions';
 import { onTaskDispatched } from 'firebase-functions/v2/tasks';
+import { info } from 'firebase-functions/logger';
+import { hasNotificationRollout,inboxNotificationEnabled } from './inbox-rollout.mjs';
+import { onTeamMessageCreated } from './team-message-push.mjs';
 import { InboxStore } from './inbox-store.mjs';
 import { InboxDelivery } from './inbox-delivery.mjs';
 import { InboxJobs } from './inbox-jobs.mjs';
@@ -95,7 +98,7 @@ const enqueue = async (payload, id, delay = 0) => {
     if (e.code !== 'functions/task-already-exists') throw e;
   }
 };
-const inbox = new InboxStore(teamsDb, Date.now, enqueue);
+const inbox = new InboxStore(teamsDb,Date.now,enqueue,cost=>info('inbox.fanout',cost));
 const delivery = new InboxDelivery({ db: teamsDb, pushStore, messaging: getMessaging(app), enqueue });
 const jobs = new InboxJobs(inbox, delivery, enqueue);
 const triggerOpts = {
@@ -166,7 +169,13 @@ const refOf = (kind, { sourceId, teamId, conversationId }) => ({
 });
 export const onTeamMessage = onDocumentCreated(
   { ...triggerOpts, maxInstances: 2, document: 'teams/{teamId}/conversations/{conversationId}/messages/{messageId}' },
-  e => jobs.wake(refOf('team', e.params))
+  async e=>{
+    const work=[jobs.wake(refOf('team',e.params))];
+    if(hasNotificationRollout()) work.push(onTeamMessageCreated({db:teamsDb,pushStore,messaging:getMessaging(app),...e.params,
+      original:e.data?.data(),includeRecipient:uid=>!inboxNotificationEnabled(uid)}));
+    const results=await Promise.allSettled(work),failure=results.find(r=>r.status==='rejected');
+    if(failure) throw failure.reason;
+  }
 );
 const conversationTrigger = (collection, kind) =>
   onDocumentWritten({ ...triggerOpts, document: collection + '/{sourceId}/conversations/{conversationId}' }, e =>

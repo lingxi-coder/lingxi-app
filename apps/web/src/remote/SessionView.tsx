@@ -1,8 +1,8 @@
-import {lazy,Suspense} from 'react';
-const RemoteRead=lazy(()=>import('../inbox/RemoteRead').then(m=>({default:m.RemoteRead})));
+import {noticeTargetFromSearch} from '../inbox/route';
+import {TranscriptBuilder,type Transcript} from './sessionModel';
 import { Files } from './Files';
 import type { FileReceipt } from '@lingxi/bridge-client/remote';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Locale } from '../utils/locale';
 import { Composer } from './Composer';
 import { Controls } from './Controls';
@@ -14,6 +14,8 @@ import { t } from './strings';
 import { displayText } from './text';
 import { useStore } from './useStore';
 import type { ConnectionState } from './viewerConnection';
+
+const RemoteRead = lazy(() => import('../inbox/RemoteRead').then(module => ({ default: module.RemoteRead })));
 
 interface SessionViewProps {
   locale: Locale;
@@ -41,19 +43,22 @@ export function SessionView({ locale, client, sessionId, hostId, connection, dev
   const botName = knownBots(list).find((bot) => bot.bot_id === botId)?.name;
   const scroller = useRef<HTMLDivElement>(null);
   const [attachments, setAttachments] = useState<FileReceipt[]>([]);
+  const target=useMemo(()=>noticeTargetFromSearch(typeof location==='undefined'?'':location.search),[sessionId,hostId]);
+  const [timeline,setTimeline]=useState(false);
+  const preview=!!target && !timeline;
   const stickToBottom = useRef(true);
   useEffect(() => setAttachments([]), [client, sessionId]);
 
   useEffect(() => {
     controller.activate();
-    const report = (): void => controller.setForeground(document.visibilityState === 'visible');
+    const report = (): void => controller.setForeground(!preview && document.visibilityState === 'visible');
     report();
     document.addEventListener('visibilitychange', report);
     return () => {
       document.removeEventListener('visibilitychange', report);
       controller.deactivate();
     };
-  }, [controller]);
+  }, [controller,preview]);
 
   // Keeps the chat's title current while it is open: the Bot's list is asked for again as the Bot's activity changes.
   useEffect(() => {
@@ -71,6 +76,11 @@ export function SessionView({ locale, client, sessionId, hostId, connection, dev
   const approval = isTeamApproval(sessionId);
   const running = state.turn.running || state.transcript.conversation.running;
 
+  if(preview && target)return <RemoteNoticePreview client={client} sessionId={sessionId} target={target} hostId={hostId} live={live} locale={locale} deviceName={deviceName} onReturn={()=>{
+    const url=new URL(location.href);
+    for(const key of ['through','preview','message','messageId','task','taskId','notificationId'])url.searchParams.delete(key);
+    history.replaceState(history.state,'',url);setTimeline(true);
+  }}/>;
   return (
     <div className="rc-session">
       <header className="rc-session-head">
@@ -164,4 +174,31 @@ export function TransportBadge({ locale, transport }: { locale: Locale; transpor
       {t(locale, direct ? 'directBadge' : 'tunnelBadge')}
     </span>
   );
+}
+
+function RemoteNoticePreview({client,sessionId,target,hostId,live,locale,deviceName,onReturn}:{
+  client:RemoteClient;sessionId:string;target:import('../../../../packages/inbox/contracts').InboxNoticeTarget;hostId?:string;live:boolean;locale:Locale;deviceName:string;onReturn():void;
+}){
+  const [body,setBody]=useState<Transcript|null>();
+  useEffect(()=>{
+    let mounted=true;setBody(undefined);
+    if(!live || target.through<1 || !target.key || !hostId){if(live)setBody(null);return;}
+    const key=target.key;
+    async function load(){
+      const [{auth},{webInboxRequest}]=await Promise.all([import('../app/firebase'),import('../inbox/session')]);
+      const user=auth.currentUser;if(!user)throw new Error('SIGN_IN_REQUIRED');
+      const {item}=await webInboxRequest(user)<{item:import('../../../../packages/inbox/contracts').InboxItem}>({action:'get',key,generation:target.generation});
+      if(!mounted || item.ref.kind!=='assistant' || item.ref.conversationId!==sessionId || item.remoteHostId!==hostId || auth.currentUser?.uid!==user.uid)throw new Error('SOURCE_ACCESS_REQUIRED');
+      return client.activityPreview(sessionId,target.through);
+    }
+    void load().then(result=>{
+      if(mounted)setBody(result.available && result.messages.length>0?new TranscriptBuilder(result.messages).snapshot():null);
+    }).catch(()=>{if(mounted)setBody(null);});
+    return ()=>{mounted=false;};
+  },[client,sessionId,target.through,target.key,target.generation,hostId,live]);
+  return <section className="rc-session"><header className="rc-session-head"><h1>{locale==='zh'?'通知预览':'Notification preview'}</h1></header>
+    {body?<TranscriptView locale={locale} transcript={body} running={false} deviceName={deviceName} fetchImage={ref=>client.session(sessionId).fetchImage(ref)}/>:
+     body===null?<p role="status">{locale==='zh'?'此通知的内容已不可用。':'The content of this notification is no longer available.'}</p>:null}
+    <button type="button" onClick={onReturn}>{locale==='zh'?'返回会话':'Return to conversation'}</button>
+  </section>;
 }

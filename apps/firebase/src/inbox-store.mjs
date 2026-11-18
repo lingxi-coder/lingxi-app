@@ -2,7 +2,7 @@ import { startReadBatch, readBatchStatus } from './inbox-batch.mjs';
 import { FieldValue } from 'firebase-admin/firestore';
 import { isDeepStrictEqual } from 'node:util';
 import { serviceScope } from './hosted-bot-service.mjs';
-import { authorizedTargets,inspectNotice } from './inbox-delivery.mjs';
+import { authorizedTargets, inspectNotice } from './inbox-delivery.mjs';
 import { messagePreview } from './team-message-preview.mjs';
 import {
   DAY,
@@ -33,8 +33,12 @@ export const source = (db, uid, ref) =>
 export async function access(tx, db, uid, ref) {
   const root = source(db, uid, ref);
   if (ref.kind === 'assistant') {
-    const binding = (await tx.get(root)).data();
-    return binding?.enabled ? { generation: binding.generation, root } : null;
+    const [bindingDoc, checkpoint] = await tx.getAll(root, root.collection('checkpoints').doc(ref.conversationId));
+    const binding = bindingDoc.data(),
+      state = checkpoint.data();
+    return binding?.enabled && !state?.removed
+      ? { generation: binding.generation, conversationConsentRevision: state?.conversationConsentRevision ?? 0, root }
+      : null;
   }
   const thread = root.collection('conversations').doc(ref.conversationId);
   const [s, m, c] = await tx.getAll(root, root.collection('members').doc(uid), thread);
@@ -58,6 +62,27 @@ const match = (access, generation) => {
   if (!access) deny(403, 'SOURCE_ACCESS_REQUIRED');
   if (generation !== undefined && access.generation !== generation) deny(409, 'STALE_MEMBERSHIP');
 };
+// Opt-out deletes the cloud summary, but the owner's scalars must not return
+// to an earlier CAS version when this same canonical key becomes visible again.
+// Persist only these personal values, never text, host routes or action metadata.
+function personalAfterPrivacyChange(row, floor = 0) {
+  const manualUnreadRevision = Math.max(row?.manualUnreadRevision ?? 0, floor) + 1;
+  return {
+    pinOrder: row?.pinOrder ?? null,
+    notificationMode: row?.notificationMode ?? 'mentions',
+    archived: row?.archived ?? false,
+    manualUnread: row?.manualUnread ?? false,
+    manualUnreadRevision,
+    readRevisionFloor: manualUnreadRevision,
+    preferencesRevision: Math.max(row?.preferencesRevision ?? 0, floor) + 1,
+    stateRevision: Math.max(row?.stateRevision ?? 0, floor) + 1,
+    actualReadRevision: row?.actualReadRevision ?? 0,
+    lastActualReadAt: row?.lastActualReadAt ?? 0,
+    pendingReadRevision: row?.pendingReadRevision ?? 0,
+    pendingReadThrough: row?.pendingReadThrough ?? 0,
+    failureReadRevision: row?.failureReadRevision ?? 0
+  };
+}
 function publicRow(row) {
   const {
     isUnread,
@@ -67,8 +92,10 @@ function publicRow(row) {
     baseline,
     lastActualReadAt,
     actualReadRevision,
+    readRevisionFloor,
     pendingReadRevision,
     pendingReadThrough,
+    failureReadRevision,
     completionAt,
     completionId,
     ...result
@@ -84,7 +111,7 @@ export function writeRow(tx, account, doc, before, next, now) {
       isUnread: unread(next),
       needsAttention: attention(next)
     };
-  if (isDeepStrictEqual(before, next)) return;
+  if (isDeepStrictEqual(before, next)) return null;
   const index = shard(doc.id),
     change = Number(badge(next)) - Number(badge(before));
   if (change)
@@ -105,16 +132,25 @@ export function writeRow(tx, account, doc, before, next, now) {
       expiresAt: new Date(now + 30 * DAY)
     });
   }
+  return { rowWrites: 1, signalWrites: 1, badgeWrites: Number(change !== 0) };
 }
 // This index is shared by every reader of the source. Only the cold/read/recall
 // path needs queries; the ordinary create path uses the ordered page itself.
-async function counts(tx,thread,uid,joinedAt,through,upper) {
-  if (through>=upper) return {unreadCount:0,mentionCount:0};
-  const base=thread.collection('inboxCountEvents').where('seq','>',through).where('seq','<=',upper).where('at','>=',millis(joinedAt));
-  const all=base.where('actor','!=','user:'+uid).orderBy('actor').orderBy('seq').orderBy('at');
-  const mentions=base.where('mentions','array-contains',uid).orderBy('seq').orderBy('at');
-  const pages=await Promise.all([all,mentions].map(q=>tx.get(q.limit(100).select())));
-  return {unreadCount:pages[0].size,mentionCount:pages[1].size};
+async function counts(tx, thread, uid, joinedAt, through, upper) {
+  if (through >= upper) return { unreadCount: 0, mentionCount: 0 };
+  const base = thread
+    .collection('inboxCountEvents')
+    .where('seq', '>', through)
+    .where('seq', '<=', upper)
+    .where('at', '>=', millis(joinedAt));
+  const all = base
+    .where('actor', '!=', 'user:' + uid)
+    .orderBy('actor')
+    .orderBy('seq')
+    .orderBy('at');
+  const mentions = base.where('mentions', 'array-contains', uid).orderBy('seq').orderBy('at');
+  const pages = await Promise.all([all, mentions].map(q => tx.get(q.limit(100).select())));
+  return { unreadCount: pages[0].size, mentionCount: pages[1].size };
 }
 async function friendCard(tx, account, row) {
   if (row.category !== 'friend' || !row.peerUid) return null;
@@ -148,48 +184,87 @@ async function sourcePage(tx, thread, after, head) {
   if (replies.length)
     for (const d of await tx.getAll(...replies.map(id => thread.collection('messages').doc(id))))
       byId.set(d.id, d.data());
-  return { entries, byId, head, after };
+  return { entries, byId, head, after, sourceReads: entries.length + messages.length + replies.length };
 }
-async function advanceSharedIndex(db,thread) {
-  const checkpoint=thread.collection('inboxMetadata').doc('countIndex');
-  return db.runTransaction(async tx=>{
-    const [chat,saved]=await tx.getAll(thread,checkpoint);
-    if(!chat.exists) return 0;
-    const head=chat.data().lastChangeSeq, after=saved.data()?.revision??0;
-    if(after===head) return head;
-    const page=await sourcePage(tx,thread,after,head);
-    for(const e of page.entries) {
-      if(e.operation==='edit') continue;
-      const m=page.byId.get(e.messageId);
-      if(!m) deny(503,'MESSAGE_GAP');
-      const doc=thread.collection('inboxCountEvents').doc(e.messageId);
-      if(m.recalled || e.operation==='recall') { tx.delete(doc); continue; }
-      const human=m.author?.kind==='user' && ['text','status','question','task_ref','app_ref'].includes(m.kind);
-      const result=m.author?.kind==='shared_bot' && typeof m.deliveryId==='string' && typeof m.taskId==='string';
-      if(!human && !result) continue;
-      const mentions=human && Array.isArray(m.mentions)?m.mentions.flatMap(v=>{
-        if(typeof v!=='string' || !v || v.length>133) return [];
-        return v.startsWith('user:')?[v,v.slice(5)]:[v];
-      }).filter(v=>v && v!==m.author.uid):[];
-      tx.set(doc,{seq:m.seq,at:millis(m.createdAt),actor:human?'user:'+m.author.uid:'assistant',mentions:[...new Set(mentions)]});
+async function advanceSharedIndex(db, thread, stats) {
+  let writes = 0,
+    reads = 0;
+  const checkpoint = thread.collection('inboxMetadata').doc('countIndex');
+  const result = await db.runTransaction(async tx => {
+    writes = 0;
+    reads = 1;
+    const [chat, saved] = await tx.getAll(thread, checkpoint);
+    if (!chat.exists) return 0;
+    const head = chat.data().lastChangeSeq,
+      after = saved.data()?.revision ?? 0;
+    if (after === head) return head;
+    const page = await sourcePage(tx, thread, after, head);
+    reads += page.sourceReads ?? 0;
+    for (const e of page.entries) {
+      if (e.operation === 'edit') continue;
+      const m = page.byId.get(e.messageId);
+      if (!m) deny(503, 'MESSAGE_GAP');
+      const doc = thread.collection('inboxCountEvents').doc(e.messageId);
+      if (m.recalled || e.operation === 'recall') {
+        tx.delete(doc);
+        writes++;
+        continue;
+      }
+      const human =
+        m.author?.kind === 'user' && ['text', 'status', 'question', 'task_ref', 'app_ref'].includes(m.kind);
+      const result =
+        m.author?.kind === 'shared_bot' && typeof m.deliveryId === 'string' && typeof m.taskId === 'string';
+      if (!human && !result) continue;
+      const mentions =
+        human && Array.isArray(m.mentions)
+          ? m.mentions
+              .flatMap(v => {
+                if (typeof v !== 'string' || !v || v.length > 133) return [];
+                return v.startsWith('user:') ? [v, v.slice(5)] : [v];
+              })
+              .filter(v => v && v !== m.author.uid)
+          : [];
+      writes++;
+      tx.set(doc, {
+        seq: m.seq,
+        at: millis(m.createdAt),
+        actor: human ? 'user:' + m.author.uid : 'assistant',
+        mentions: [...new Set(mentions)]
+      });
     }
-    const revision=page.entries.at(-1).seq;
-    tx.set(checkpoint,{revision});
+    const revision = page.entries.at(-1).seq;
+    tx.set(checkpoint, { revision });
     return revision;
   });
+  if (stats) {
+    stats.normalizedEventWrites += writes;
+    stats.logicalCanonicalReads += reads;
+  }
+  return result;
 }
 export async function mirrorHttpRead(tx, db, uid, ref, through, now, joinedAt) {
   const account = owner(db, uid),
     doc = account.collection('inbox').doc(makeKey(ref));
   const before = (await tx.get(doc)).data();
   const current = before?.ref.generation === ref.generation ? before : emptyRow(ref);
-  if (before && through <= current.readThrough) return;
+  if (before?.ref.generation === ref.generation && through <= current.readThrough) return;
   const row = applyRead(current, through, undefined);
   row.sourceCursor = Math.max(row.sourceCursor, through);
-  Object.assign(row, await counts(tx,source(db,uid,ref).collection('conversations').doc(ref.conversationId),uid,joinedAt,row.readThrough,current.sourceCursor), {
-    lastActualReadAt: now,
-    actualReadRevision: (current.actualReadRevision ?? 0) + 1
-  });
+  Object.assign(
+    row,
+    await counts(
+      tx,
+      source(db, uid, ref).collection('conversations').doc(ref.conversationId),
+      uid,
+      joinedAt,
+      row.readThrough,
+      current.sourceCursor
+    ),
+    {
+      lastActualReadAt: now,
+      actualReadRevision: (current.actualReadRevision ?? 0) + 1
+    }
+  );
   writeFriendCount(tx, await friendCard(tx, account, row), row);
   writeRow(tx, account, doc, before, row, now);
 }
@@ -207,7 +282,7 @@ export async function captureTiming(tx, account, now) {
 export function addNotice(tx, account, row, event, now) {
   if (event.kind === 'message' && row.notificationMode !== 'all') return;
   if (event.at < now - 30 * DAY || event.at > now + 60000) return;
-  const id = digest(account.id, row.key, row.ref.generation, event.id);
+  const id = digest(account.id, row.key, row.ref.generation, row.conversationConsentRevision ?? 0, event.id);
   if (event.kind === 'completion' && event.at >= (row.completionAt ?? 0)) {
     row.completionAt = event.at;
     row.completionId = id;
@@ -220,19 +295,23 @@ export function addNotice(tx, account, row, event, now) {
     sourceRevision: row.sourceRevision,
     kind: event.kind,
     sourceEventId: event.id,
+    conversationConsentRevision: row.conversationConsentRevision ?? 0,
     timing: event.timing,
-    ...(event.failureRevision!==undefined?{failureRevision:event.failureRevision}:{}),
+    ...(event.failureRevision !== undefined ? { failureRevision: event.failureRevision } : {}),
     lastActivityAt: event.at,
     createdReadRevision: row.actualReadRevision ?? 0,
     ...(['input', 'approval'].includes(event.kind) ? { pendingActionRevision: row.pendingActionRevision } : {}),
     expiresAt: new Date(event.at + 30 * DAY),
     deliverUntil: new Date(event.at + 3600000),
-    ...(event.messageId ? { messageId: event.messageId, ...(event.createChangeId?{createChangeId:event.createChangeId}:{}) } : {}),
+    ...(event.messageId
+      ? { messageId: event.messageId, ...(event.createChangeId ? { createChangeId: event.createChangeId } : {}) }
+      : {}),
     ...(event.taskId ? { taskId: event.taskId, waitId: event.waitId ?? null } : {})
   });
 }
 export class InboxStore {
-  constructor(db, clock = Date.now, enqueue = null) {
+  constructor(db, clock = Date.now, enqueue = null, observe = null) {
+    this.observe = observe;
     this.enqueue = enqueue;
     this.db = db;
     this.clock = clock;
@@ -241,8 +320,18 @@ export class InboxStore {
     const p = command.parse(raw),
       account = owner(this.db, uid),
       now = this.clock();
-    if(p.action==='markAllReadSnapshot') return startReadBatch(this,uid,p);
-    if(p.action==='readBatchStatus') return readBatchStatus(this,uid,p.jobId);
+    if (p.action === 'notice')
+      return this.db.runTransaction(
+        async tx => {
+          const d = await tx.get(account.collection('inboxNotices').doc(p.id));
+          const item = await this.noticeItem(tx, uid, d, p.deviceId);
+          if (!item) deny(404, 'NOTICE_MISSING');
+          return { item };
+        },
+        { readOnly: true }
+      );
+    if (p.action === 'markAllReadSnapshot') return startReadBatch(this, uid, p);
+    if (p.action === 'readBatchStatus') return readBatchStatus(this, uid, p.jobId);
     if (p.action === 'list' || p.action === 'notices') return this.list(uid, p);
     if (p.action === 'assistantSource') return this.bind(uid, p);
     if (p.action === 'assistantPublish' || p.action === 'assistantRemove') return this.publish(uid, p);
@@ -281,6 +370,30 @@ export class InboxStore {
     }
     return this.mutate(uid, p);
   }
+  async noticeItem(tx, uid, d, deviceId) {
+    const v = d.data();
+    if (!v || millis(v.expiresAt) <= this.clock()) return null;
+    const ref = splitKey(v.key),
+      acl = await access(tx, this.db, uid, ref);
+    if (
+      acl?.generation !== v.generation ||
+      (ref.kind === 'assistant' && (acl.conversationConsentRevision ?? 0) !== (v.conversationConsentRevision ?? 0))
+    )
+      return null;
+    return {
+      id: d.id,
+      key: v.key,
+      generation: v.generation,
+      through: v.through,
+      kind: v.kind,
+      ...(v.failureRevision !== undefined ? { failureRevision: v.failureRevision } : {}),
+      ...(v.pendingActionRevision !== undefined ? { pendingActionRevision: v.pendingActionRevision } : {}),
+      ...(await authorizedTargets(tx, this.db, uid, acl, v)),
+      lastActivityAt: v.lastActivityAt,
+      deliverAfter: deliveryTime(v, deviceId),
+      deliverable: await inspectNotice(tx, this.db, uid, v, this.clock())
+    };
+  }
   async list(uid, p) {
     const notices = p.action === 'notices',
       account = owner(this.db, uid);
@@ -292,7 +405,8 @@ export class InboxStore {
           if (p.category) q = q.where('category', '==', p.category);
           if (p.filter === 'unread') q = q.where('isUnread', '==', true);
           if (p.filter === 'attention') q = q.where('needsAttention', '==', true);
-          q = q.where('archived', '==', p.archived ?? false);
+          if (p.archived === true || !['unread', 'attention'].includes(p.filter))
+            q = q.where('archived', '==', p.archived ?? false);
           if (prefix) {
             q = q.where('titleSort', '>=', prefix).orderBy('titleSort', 'asc');
             const end = prefixEnd(prefix);
@@ -320,24 +434,10 @@ export class InboxStore {
           slice = docs.slice(0, 50);
         const items = await Promise.all(
           slice.map(async d => {
+            if (notices) return this.noticeItem(tx, uid, d, p.deviceId);
             const v = d.data(),
-              ref = notices ? splitKey(v.key) : v.ref;
-            if (notices && millis(v.expiresAt) <= this.clock()) return null;
-            const acl = await access(tx, this.db, uid, ref);
-            if (acl?.generation !== (notices ? v.generation : ref.generation)) return null;
-            return notices
-              ? {
-                  id: d.id,
-                  key: v.key,
-                  generation: v.generation,
-                  through: v.through,
-                  kind: v.kind,
-                  ...await authorizedTargets(tx,this.db,uid,acl,v),
-                  lastActivityAt: v.lastActivityAt,
-                  deliverAfter: deliveryTime(v, p.deviceId),
-                  deliverable: await inspectNotice(tx, this.db, uid, v, this.clock())
-                }
-              : publicRow(v);
+              acl = await access(tx, this.db, uid, v.ref);
+            return acl?.generation === v.ref.generation ? publicRow(v) : null;
           })
         );
         return {
@@ -372,19 +472,27 @@ export class InboxStore {
       if (!current && (p.action === 'get' || ref.kind === 'assistant')) deny(404, 'INBOX_ITEM_MISSING');
       let row = { ...(current ?? emptyRow({ ...ref, generation: acl.generation })) };
       if (p.action === 'get') return { item: publicRow(row) };
-      if (p.action === 'peerReceipt') return this.receipt(tx, uid, acl, row);
+      if (p.action === 'peerReceipt') return this.receipt(tx, uid, acl);
       if (p.action === 'preferences') {
-        if(p.expectedPreferencesRevision!==(row.preferencesRevision??0)) deny(409,'PREFERENCE_REVISION_CONFLICT');
-        row={...row,...p.patch,preferencesRevision:(row.preferencesRevision??0)+1,stateRevision:row.stateRevision+1};
+        if (p.expectedPreferencesRevision !== (row.preferencesRevision ?? 0))
+          deny(409, 'PREFERENCE_REVISION_CONFLICT');
+        row = {
+          ...row,
+          ...p.patch,
+          preferencesRevision: (row.preferencesRevision ?? 0) + 1,
+          stateRevision: row.stateRevision + 1
+        };
       } else if (p.action === 'markUnread') {
-        if (p.expectedManualUnreadRevision===undefined) {
+        if (p.expectedManualUnreadRevision === undefined) {
           // A previously recorded pre-release mutation can be acknowledged.
-          const old=account.collection('inboxOperations').doc(digest(p.action,p.key,acl.generation,p.operationId));
-          if ((await tx.get(old)).exists) return {item:publicRow(row)};
-          deny(409,'MANUAL_REVISION_REQUIRED');
+          const old = account
+            .collection('inboxOperations')
+            .doc(digest(p.action, p.key, acl.generation, p.operationId));
+          if ((await tx.get(old)).exists) return { item: publicRow(row) };
+          deny(409, 'MANUAL_REVISION_REQUIRED');
         }
-        if (p.expectedManualUnreadRevision<row.manualUnreadRevision) return {item:publicRow(row)};
-        if (p.expectedManualUnreadRevision!==row.manualUnreadRevision) deny(409,'MANUAL_REVISION_CONFLICT');
+        if (p.expectedManualUnreadRevision < row.manualUnreadRevision) return { item: publicRow(row) };
+        if (p.expectedManualUnreadRevision !== row.manualUnreadRevision) deny(409, 'MANUAL_REVISION_CONFLICT');
         row = {
           ...row,
           manualUnread: true,
@@ -392,13 +500,15 @@ export class InboxStore {
           stateRevision: row.stateRevision + 1
         };
       } else if (p.action === 'markRead') {
+        if (p.manualUnreadRevision < (row.readRevisionFloor ?? 0)) return { item: publicRow(row) };
         if (p.through > (acl.chat?.lastSeq ?? row.sourceCursor)) deny(409, 'INVALID_READ_CURSOR');
         let through = p.through,
-          readRef;
+          readRef,
+          previousRead;
         if (acl.thread) {
           readRef = acl.thread.collection('reads').doc(uid);
-          const read = (await tx.get(readRef)).data();
-          if (read?.generation === acl.generation) through = Math.max(through, read.lastReadSeq);
+          previousRead = (await tx.get(readRef)).data();
+          if (previousRead?.generation === acl.generation) through = Math.max(through, previousRead.lastReadSeq);
         }
         // An offline request proves observation only up to the cursor it carried.
         // A larger canonical cursor from another device cannot extend that proof.
@@ -412,26 +522,36 @@ export class InboxStore {
           row.pendingReadRevision = p.observedPendingActionRevision;
           row.pendingReadThrough = p.through;
         }
+        if (
+          p.observedFailureRevision > 0 &&
+          p.observedFailureRevision === row.failureRevision &&
+          row.state === 'failed' &&
+          p.through >= Math.max(row.sourceCursor, row.readThrough)
+        )
+          row.failureReadRevision = p.observedFailureRevision;
+        const refreshCount = through > row.readThrough;
         row = applyRead(row, through, p.manualUnreadRevision);
         row.sourceCursor = Math.max(through, row.sourceCursor);
-        Object.assign(
-          row,
-          acl.thread
-            ? await counts(tx,acl.thread,uid,acl.member.joinedAt,row.readThrough,row.sourceCursor)
-            : { unreadCount: capped(row.sourceCursor - Math.max(row.baseline, row.readThrough)) }
-        );
+        if (refreshCount)
+          Object.assign(
+            row,
+            acl.thread
+              ? await counts(tx, acl.thread, uid, acl.member.joinedAt, row.readThrough, row.sourceCursor)
+              : { unreadCount: capped(row.sourceCursor - Math.max(row.baseline, row.readThrough)) }
+          );
         if (advancing) {
           row.lastActualReadAt = now;
           row.actualReadRevision = (row.actualReadRevision ?? 0) + 1;
         }
         writeFriendCount(tx, await friendCard(tx, account, row), row);
-        if (readRef) tx.set(readRef, { lastReadSeq: row.readThrough, generation: acl.generation });
+        if (readRef && (previousRead?.generation !== acl.generation || previousRead.lastReadSeq !== row.readThrough))
+          tx.set(readRef, { lastReadSeq: row.readThrough, generation: acl.generation });
       }
       writeRow(tx, account, doc, before, row, now);
       return { item: publicRow(row) };
     });
   }
-  async receipt(tx, uid, acl, row) {
+  async receipt(tx, uid, acl) {
     if (
       !acl.chat ||
       acl.chat.kind !== 'dm' ||
@@ -500,18 +620,47 @@ export class InboxStore {
       if (p.generation !== b.generation) deny(409, 'STALE_MEMBERSHIP');
       const current = before?.ref.generation === p.generation ? before : null;
       const saved = checkpoint.data();
-      const oldConsent=saved?.conversationConsentRevision??0;
-      const newConsent=p.conversationConsentRevision??0;
-      if(oldConsent && newConsent<oldConsent) deny(409,'STALE_CONVERSATION_CONSENT');
-      if (p.action==='assistantRemove') {
-        if (p.sourceRevision<(saved?.sourceRevision??0) && newConsent<=oldConsent) deny(409,'STALE_SOURCE_REVISION');
-        tx.set(watermark,{generation:p.generation,sourceRevision:Math.max(p.sourceRevision,saved?.sourceRevision??0),
-          sourceCursor:saved?.sourceCursor??0,removed:true,conversationConsentRevision:newConsent,
-          readThrough:current?.readThrough??saved?.readThrough??0});
-        if (before) writeRow(tx,account,doc,before,null,now);
-        return {removed:true,sourceRevision:Math.max(p.sourceRevision,saved?.sourceRevision??0)};
+      const oldConsent = saved?.conversationConsentRevision ?? 0;
+      const newConsent = p.conversationConsentRevision ?? 0;
+      if (oldConsent && newConsent < oldConsent) deny(409, 'STALE_CONVERSATION_CONSENT');
+      const restoring = saved?.removed && saved.generation === p.generation;
+      // Older experimental tombstones have only a read cursor. Give those a
+      // fresh server-time version range instead of reusing zero-based revisions.
+      const restoredPersonal = restoring
+        ? (saved.personal ?? personalAfterPrivacyChange(null, millis(checkpoint.updateTime)))
+        : null;
+      if (p.action === 'assistantRemove') {
+        if (p.sourceRevision < (saved?.sourceRevision ?? 0) && newConsent <= oldConsent)
+          deny(409, 'STALE_SOURCE_REVISION');
+        tx.set(watermark, {
+          generation: p.generation,
+          sourceRevision: Math.max(p.sourceRevision, saved?.sourceRevision ?? 0),
+          sourceCursor: saved?.sourceCursor ?? 0,
+          removed: true,
+          personal: restoredPersonal ?? personalAfterPrivacyChange(current),
+          conversationConsentRevision: newConsent,
+          readThrough: current?.readThrough ?? saved?.readThrough ?? 0
+        });
+        if (before) writeRow(tx, account, doc, before, null, now);
+        return { removed: true, sourceRevision: Math.max(p.sourceRevision, saved?.sourceRevision ?? 0) };
       }
-      if(saved?.removed && (oldConsent || saved.generation===p.generation) && newConsent<=oldConsent) deny(410,'SOURCE_REMOVED');
+      if (saved?.removed && (oldConsent || saved.generation === p.generation) && newConsent <= oldConsent)
+        deny(410, 'SOURCE_REMOVED');
+      const advancedConsent = current && newConsent > oldConsent;
+      // An enable can arrive before the intervening offline disable. Commit its
+      // newer consent and fences even when the semantic snapshot is unchanged.
+      if (advancedConsent && (p.sourceRevision <= current.sourceRevision || p.sourceCursor < current.sourceCursor)) {
+        tx.set(watermark, { conversationConsentRevision: newConsent }, { merge: true });
+        writeRow(
+          tx,
+          account,
+          doc,
+          before,
+          { ...current, ...personalAfterPrivacyChange(current), conversationConsentRevision: newConsent },
+          now
+        );
+        return { sourceRevision: current.sourceRevision, sourceCursor: current.sourceCursor };
+      }
       if (saved && (p.sourceRevision < saved.sourceRevision || p.sourceCursor < saved.sourceCursor)) {
         return { sourceRevision: saved.sourceRevision, sourceCursor: saved.sourceCursor };
       }
@@ -521,24 +670,27 @@ export class InboxStore {
         p.baseline > p.sourceCursor ||
         p.sourceCursor < (current?.sourceCursor ?? 0) ||
         (current && current.baseline !== p.baseline) ||
-        p.lastActivityAt > now + 60000 || (p.failureAt??0)>now+60000 ||
-        (p.failureRevision!==undefined && p.failureRevision<(current?.failureRevision??0)) ||
+        p.lastActivityAt > now + 60000 ||
+        (p.failureAt ?? 0) > now + 60000 ||
+        (p.failureRevision !== undefined && p.failureRevision < (current?.failureRevision ?? 0)) ||
         (p.pendingActionAt ?? 0) > now + 60000 ||
         (p.pendingActionRevision !== undefined && p.pendingActionRevision < (current?.pendingActionRevision ?? 0))
       )
         deny(409, 'INVALID_SOURCE_CURSOR');
       const row = {
         ...(current ?? emptyRow(ref)),
+        ...(advancedConsent ? personalAfterPrivacyChange(current) : restoredPersonal),
         title: p.title ?? 'Assistant',
         preview: { reply: 'Reply', taskResult: 'Task completed', failure: 'Task failed' }[p.previewKind] ?? '',
         baseline: p.baseline,
-        readThrough: Math.max(p.baseline,current?.readThrough??saved?.readThrough??0),
+        readThrough: Math.max(p.baseline, current?.readThrough ?? saved?.readThrough ?? 0),
         sourceRevision: p.sourceRevision,
         sourceCursor: p.sourceCursor,
         lastActivityAt: Math.max(current?.lastActivityAt ?? 0, p.lastActivityAt),
         state: p.state,
         pendingActionCount: capped(p.pendingActionCount),
-        offline: p.state === 'offline'
+        offline: p.state === 'offline',
+        conversationConsentRevision: newConsent
       };
       delete row.attentionKind;
       delete row.remoteHostId;
@@ -557,26 +709,44 @@ export class InboxStore {
       const newAction = actionRevision !== (current?.pendingActionRevision ?? 0) || actionChanged;
       row.pendingActionRevision = actionRevision;
       row.pendingActionAt = p.pendingActionAt || (newAction ? now : (current?.pendingActionAt ?? 0));
-      const changedFailure=(current?.state==='failed')!==(p.state==='failed');
-      const failureRevision=p.failureRevision??((current?.failureRevision??0)+Number(changedFailure));
-      row.failureRevision=failureRevision;
-      row.failureAt=p.failureAt || (changedFailure?now:(current?.failureAt??0));
+      const changedFailure = (current?.state === 'failed') !== (p.state === 'failed');
+      const failureRevision = p.failureRevision ?? (current?.failureRevision ?? 0) + Number(changedFailure);
+      row.failureRevision = failureRevision;
+      row.failureAt = p.failureAt || (changedFailure ? now : (current?.failureAt ?? 0));
       let kind;
-      if(pending && newAction) kind=p.state==='waiting_for_input'?'input':'approval';
-      else if(p.state==='failed' && (changedFailure || failureRevision!==current?.failureRevision)) kind='failure';
-      else if(row.sourceCursor>(current?.sourceCursor??p.baseline)) kind=p.previewKind==='failure'?'failure':'completion';
-      if(kind) {
-        const actionNotice=kind==='approval'||kind==='input',statusFailure=kind==='failure' && row.state==='failed';
-        addNotice(tx,account,row,{kind,cursor:row.sourceCursor,timing:await captureTiming(tx,account,now),
-          id:actionNotice?'action:'+actionRevision:statusFailure?'failure:'+failureRevision:'assistant:'+p.sourceRevision,
-          at:actionNotice?row.pendingActionAt:statusFailure?row.failureAt:p.lastActivityAt,
-          ...(statusFailure?{failureRevision}:{})},now);
+      if (pending && newAction) kind = p.state === 'waiting_for_input' ? 'input' : 'approval';
+      else if (p.state === 'failed' && (changedFailure || failureRevision !== current?.failureRevision))
+        kind = 'failure';
+      else if (row.sourceCursor > (current?.sourceCursor ?? p.baseline))
+        kind = p.previewKind === 'failure' ? 'failure' : 'completion';
+      if (kind && !(saved?.removed && p.sourceRevision <= saved.sourceRevision)) {
+        const actionNotice = kind === 'approval' || kind === 'input',
+          statusFailure = kind === 'failure' && row.state === 'failed';
+        addNotice(
+          tx,
+          account,
+          row,
+          {
+            kind,
+            cursor: row.sourceCursor,
+            timing: await captureTiming(tx, account, now),
+            id: actionNotice
+              ? 'action:' + actionRevision
+              : statusFailure
+                ? 'failure:' + failureRevision
+                : 'assistant:' + p.sourceRevision,
+            at: actionNotice ? row.pendingActionAt : statusFailure ? row.failureAt : p.lastActivityAt,
+            ...(statusFailure ? { failureRevision } : {})
+          },
+          now
+        );
       }
       tx.set(watermark, {
         generation: p.generation,
         sourceRevision: p.sourceRevision,
         sourceCursor: p.sourceCursor,
-        removed: false,conversationConsentRevision:newConsent
+        removed: false,
+        conversationConsentRevision: newConsent
       });
       writeRow(tx, account, doc, before, row, now);
       return { sourceRevision: row.sourceRevision, sourceCursor: row.sourceCursor };
@@ -584,12 +754,27 @@ export class InboxStore {
   }
   // Consume the immutable source change log in sequence. Eventarc is only the wake-up:
   // concurrent folds serialize on the recipient row, and a redelivery resumes at its watermark.
-  async fold(uid, ref, prepared) {
+  async fold(uid, ref, prepared, stats) {
     const account = owner(this.db, uid),
       doc = account.collection('inbox').doc(makeKey(ref)),
       now = this.clock();
-    const indexed=ref.kind==='assistant'?0:prepared?.head??await advanceSharedIndex(this.db,source(this.db,uid,ref).collection('conversations').doc(ref.conversationId));
-    return this.db.runTransaction(async tx => {
+    const indexed =
+      ref.kind === 'assistant'
+        ? 0
+        : (prepared?.head ??
+          (await advanceSharedIndex(
+            this.db,
+            source(this.db, uid, ref).collection('conversations').doc(ref.conversationId)
+          )));
+    let cost;
+    const result = await this.db.runTransaction(async tx => {
+      cost = {
+        logicalCanonicalReads: ref.kind === 'assistant' ? 0 : 4,
+        rowWrites: 0,
+        signalWrites: 0,
+        badgeWrites: 0,
+        recountQueries: 0
+      };
       let acl, snapshot, read, checkpoint;
       if (ref.kind === 'assistant') {
         [acl, snapshot] = await Promise.all([access(tx, this.db, uid, ref), tx.get(doc)]);
@@ -609,7 +794,7 @@ export class InboxStore {
       }
       const before = snapshot.data();
       if (!acl) {
-        if (before) writeRow(tx, account, doc, before, null, now);
+        if (before) Object.assign(cost, writeRow(tx, account, doc, before, null, now));
         return false;
       }
       if (ref.kind === 'assistant') {
@@ -631,7 +816,13 @@ export class InboxStore {
       const page =
         prepared?.head === indexed && prepared.after === row.sourceRevision
           ? prepared
-          : await sourcePage(tx,acl.thread,row.sourceRevision,Math.max(row.sourceRevision,Math.min(indexed,chat.lastChangeSeq)));
+          : await sourcePage(
+              tx,
+              acl.thread,
+              row.sourceRevision,
+              Math.max(row.sourceRevision, Math.min(indexed, chat.lastChangeSeq))
+            );
+      if (page !== prepared) cost.logicalCanonicalReads += page.sourceReads ?? 0;
       const { entries, byId } = page;
       const seen = read.data();
       if (seen?.generation === acl.generation && seen.lastReadSeq > row.readThrough) {
@@ -640,15 +831,14 @@ export class InboxStore {
         row.actualReadRevision = (row.actualReadRevision ?? 0) + 1;
         row.lastActualReadAt = now;
       }
-      const added = [],
-        removed = [],
-        notices = [];
+      const added = [], notices = [];
+      let hasRecall = false;
       for (const e of entries) {
         const m = byId.get(e.messageId);
         if (!m) deny(503, 'MESSAGE_GAP');
         row.sourceRevision = e.seq;
         if (e.operation === 'recall') {
-          removed.push(String(m.seq));
+          hasRecall = true;
           continue;
         }
         if (e.operation !== 'create') continue;
@@ -673,8 +863,9 @@ export class InboxStore {
             createChangeId: e.id
           });
       }
-      if (resume || (current && row.readThrough !== current.readThrough) || (current && removed.length)) {
-        Object.assign(row, await counts(tx,acl.thread,uid,acl.member.joinedAt,row.readThrough,row.sourceCursor));
+      if (resume || (current && (row.readThrough !== current.readThrough || hasRecall))) {
+        if (row.readThrough < row.sourceCursor) cost.recountQueries += 2;
+        Object.assign(row, await counts(tx, acl.thread, uid, acl.member.joinedAt, row.readThrough, row.sourceCursor));
       } else {
         row.unreadCount = capped(row.unreadCount + added.length);
         row.mentionCount = capped(row.mentionCount + added.filter(e => e.mention).length);
@@ -701,9 +892,11 @@ export class InboxStore {
       const timing = admitted.length ? await captureTiming(tx, account, now) : null;
       writeFriendCount(tx, card, row);
       for (const e of admitted) addNotice(tx, account, row, { ...e, timing }, now);
-      writeRow(tx, account, doc, before, row, now);
+      Object.assign(cost, writeRow(tx, account, doc, before, row, now));
       return !caughtUp;
     });
+    if (stats) for (const k of Object.keys(cost)) stats[k] += cost[k];
+    return result;
   }
   async reconcileOwner(uid, kind, sourceId, after) {
     const q = owner(this.db, uid).collection('inbox').where('ref.sourceId', '==', sourceId).orderBy('__name__');
@@ -722,11 +915,24 @@ export class InboxStore {
     }
   }
   async fanout(ref, previous = []) {
+    const started = Date.now(),
+      stats = {
+        sourceKind: ref.kind,
+        sourceHash: digest(makeKey(ref)),
+        recipientCount: 0,
+        logicalCanonicalReads: 1,
+        normalizedEventWrites: 0,
+        rowWrites: 0,
+        signalWrites: 0,
+        badgeWrites: 0,
+        recountQueries: 0
+      };
     const root = source(this.db, '_', ref),
       thread = root.collection('conversations').doc(ref.conversationId);
     const conv = (await thread.get()).data();
     if ((conv?.memberUids?.length ?? 0) > 200) deny(503, 'RECIPIENT_LIMIT');
     const uids = [...new Set([...(conv?.memberUids ?? []), ...previous])];
+    stats.recipientCount = uids.length;
     if (!uids.length) return false;
     // Source pages are common to every recipient with the same watermark. Read
     // them once. Each recipient transaction rechecks both ACL and source head.
@@ -736,21 +942,26 @@ export class InboxStore {
     );
     const after = snapshots.map(d => d.data()?.sourceRevision ?? 0),
       pages = new Map();
-    const indexed=conv?await advanceSharedIndex(this.db,thread):0;
+    const indexed = conv ? await advanceSharedIndex(this.db, thread, stats) : 0;
     if (conv)
       await pooled([...new Set(after)], async revision => {
-        const page = await this.db.runTransaction(tx => sourcePage(tx, thread, revision, Math.max(indexed,revision)), {
-          readOnly: true
-        });
+        const page = await this.db.runTransaction(
+          tx => sourcePage(tx, thread, revision, Math.max(indexed, revision)),
+          {
+            readOnly: true
+          }
+        );
+        stats.logicalCanonicalReads += page.sourceReads ?? 0;
         pages.set(revision, page);
       });
     let more = false;
     await pooled(
       uids.map((uid, i) => ({ uid, page: pages.get(after[i]) })),
       async ({ uid, page }) => {
-        if (await this.fold(uid, ref, page)) more = true;
+        if (await this.fold(uid, ref, page, stats)) more = true;
       }
     );
+    this.observe?.({ ...stats, durationMs: Date.now() - started, more });
     return more;
   }
 }

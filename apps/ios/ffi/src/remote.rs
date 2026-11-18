@@ -262,6 +262,17 @@ impl IosRemoteControlClient {
         self.inner.session_activity_page(session_id, after).await
     }
 
+    /// Open an exact Assistant result preview without marking the session read.
+    pub async fn session_activity_preview(
+        &self,
+        session_id: String,
+        through: u64,
+    ) -> Result<String, RemoteFfiError> {
+        self.inner
+            .session_activity_preview(session_id, through)
+            .await
+    }
+
     /// The bytes of an image a record refers to.
     pub async fn fetch_image(
         &self,

@@ -3241,7 +3241,7 @@ internal fun RootScreen(
                                     inboxRow.ref.sourceId, current, inboxRow.sourceCursor, visible)
                             }
                         } else current
-                        if (verified > current) inbox?.mutate(com.lingxi.code.inbox.InboxOperation.read(inboxRow, verified), inboxRow, automatic = true)
+                        if (verified > current) inbox?.mutate(com.lingxi.code.inbox.InboxOperation.read(inboxRow, verified, observeFailure = false), inboxRow, automatic = true)
                     } else null,
                     inboxActivityCursor = inboxRow?.sourceCursor ?: 0,
                     onInboxJumpLatest = { inboxRow?.let { inbox?.mutate(com.lingxi.code.inbox.InboxOperation.read(it), it) } },

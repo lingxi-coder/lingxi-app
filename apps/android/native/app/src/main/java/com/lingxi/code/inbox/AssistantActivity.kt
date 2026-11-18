@@ -159,3 +159,28 @@ internal data class AssistantConversationConsent(
         }.getOrNull()
     }
 }
+
+/** Text-only rendering of the source-authorized bounded MessageDto projection. */
+internal fun assistantNoticeText(raw: String): List<String>? {
+    if (raw.toByteArray().size > 256 * 1024) return null
+    val response = runCatching { JSONObject(raw) }.getOrNull() ?: return null
+    if (!response.optBoolean("available")) return null
+    val messages = response.optJSONArray("messages") ?: return null
+    if (messages.length() !in 1..16) return null
+    return (0 until messages.length()).mapNotNull { index ->
+        val message = messages.optJSONObject(index) ?: return@mapNotNull null
+        val blocks = message.optJSONArray("blocks") ?: return@mapNotNull null
+        buildString {
+            for (blockIndex in 0 until blocks.length()) {
+                val block = blocks.optJSONObject(blockIndex) ?: continue
+                if (block.optString("type") != "text") continue
+                val text = block.optJSONObject("text") ?: continue
+                val units = text.optJSONArray("code_units") ?: continue
+                for (position in 0 until units.length()) {
+                    val unit = units.optInt(position, -1)
+                    if (unit in 0..65_535) append(unit.toChar())
+                }
+            }
+        }.takeIf(String::isNotBlank)
+    }
+}

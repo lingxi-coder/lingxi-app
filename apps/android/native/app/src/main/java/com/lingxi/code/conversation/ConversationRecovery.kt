@@ -591,6 +591,9 @@ internal class RecoveringConversationSource(
 
     override fun initialMessages(): List<Message> = emptyList()
 
+    override suspend fun assistantActivityPreview(sessionId: String, through: ULong): String? =
+        pendingSource.await()?.assistantActivityPreview(sessionId, through)
+
     override suspend fun refreshSessions() {
         pendingSource.await()?.refreshSessions()
     }

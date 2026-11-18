@@ -63,6 +63,8 @@ export function bindInboxIpc(
           c.generation as number | undefined,
         );
       } else if (c.type === 'localRef') value = await service.localRef(c.key as string);
+      else if (c.type === 'activityPreview')
+        value = await service.activityPreview(c.key as string, c.through as number);
       else if (c.type === 'activityPage') value = await service.activityPage(c.key as string, c.after as number);
       else {
         if (uid !== null && (typeof uid !== 'string' || !uid || uid.length > 128)) throw new Error('INVALID_INPUT');

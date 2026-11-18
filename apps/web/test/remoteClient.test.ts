@@ -68,6 +68,8 @@ class SessionScript {
         this.sendSnapshot(conn);
         return { mode: 'snapshot', epoch: this.epoch };
       }
+      case 'session.activityPreview':
+        return {available:true,messages:[{...message('assistant','Exact notification result'),transcript_uuid:'00000000-0000-4000-8000-000000000003'}]};
       case 'session.activity':
         return {cursor:3,baselineCursor:1,hasMore:false,items:[{cursor:3,resultUuids:['00000000-0000-4000-8000-000000000003'],kind:'reply',at:123}]};
       case 'session.history':
@@ -374,7 +376,9 @@ test('semantic activity pages require attachment and preserve source cursors and
  const h=await harness(),{controller,client,script}=await open(h);
  try{
    await assert.rejects(client.activity(SESSION,2));
+   await assert.rejects(client.activityPreview(SESSION,3));
    controller.activate();await live(controller);
+   const preview=await client.activityPreview(SESSION,3);assert.equal(preview.messages[0]?.transcript_uuid,'00000000-0000-4000-8000-000000000003');
    const page=await client.activity(SESSION,2);
    assert.deepEqual(script.calls.find(c=>c.method==='session.activity')?.params,{session_id:SESSION,after:2});
    assert.deepEqual(page.items[0]?.resultUuids,['00000000-0000-4000-8000-000000000003']);assert.equal(page.items[0]?.cursor,3);

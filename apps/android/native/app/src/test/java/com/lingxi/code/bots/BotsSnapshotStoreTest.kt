@@ -415,7 +415,7 @@ class BotsSnapshotStoreTest {
     private fun liveBots(vararg ids: String) = RemoteBotsStateFfi.Bots(ids.map { RemoteBotSummaryFfi(it, "Bot $it", "does $it", RemoteBotStatusFfi.IDLE, 2u, 77uL) })
 
     private fun threads(vararg ids: String) =
-        RemoteBotThreadsStateFfi(ids.map { RemoteSessionSummaryFfi(it, "Chat $it", "", RemoteSessionStatusFfi.IDLE, null, null, 0u) }, null)
+        RemoteBotThreadsStateFfi(ids.map { RemoteSessionSummaryFfi(sessionId = it, title = "Chat $it", projectLabel = "", status = RemoteSessionStatusFfi.IDLE, pendingAction = null, model = null, viewers = 0u) }, null)
 
     @Test fun theBotsAComputerDeliversAreSavedAsItsSnapshot() = runBlocking {
         val f = Fixture(dataStore)

@@ -12,7 +12,12 @@ import type { Account, TeamsService } from '../teams/service.js';
 import type { NotificationKind } from '../../shared/notificationPreferences.js';
 import type { SessionRef } from '../../shared/settings.js';
 import type { AccountSessionStore } from '../account.js';
-import type { AssistantActivityPage, InboxNotification, InboxSignal } from '../../shared/inbox.js';
+import type {
+  AssistantActivityPreview,
+  AssistantActivityPage,
+  InboxNotification,
+  InboxSignal,
+} from '../../shared/inbox.js';
 import {
   LocalInboxStore,
   localEntry,
@@ -33,6 +38,7 @@ export interface InboxOptions {
   userData: string;
   localSessions: () => Promise<DesktopInboxSession[]>;
   sourceCredentials: AccountSessionStore;
+  activityPreview?: (ref: SessionRef, through: number) => Promise<AssistantActivityPreview>;
   activityPage?: (ref: SessionRef, after: number) => Promise<AssistantActivityPage>;
   isFocused?: () => boolean;
   notify?: (notice: InboxNotification & { key: string; generation: number }) => void;
@@ -73,6 +79,10 @@ const byPosition = (a: Position, b: Position) =>
   (a.pinOrder ?? Number.MAX_SAFE_INTEGER) - (b.pinOrder ?? Number.MAX_SAFE_INTEGER) ||
   b.lastActivityAt - a.lastActivityAt ||
   (a.key < b.key ? -1 : Number(a.key > b.key));
+function matchesArchiveView(archived: boolean, view: { archived?: boolean; filter?: string }) {
+  if (view.archived === true) return archived;
+  return !archived || view.filter === 'unread' || view.filter === 'attention';
+}
 export class InboxService {
   private readonly events = new EventEmitter();
   private readonly store: LocalInboxStore;
@@ -216,7 +226,15 @@ export class InboxService {
       if (this.closed || uid !== this.uid || epoch !== this.epoch) return;
       this.stopWatch?.();
       this.stopWatch = undefined;
-      this.signal('error', err.message);
+      const code = (err as Error & { code?: string }).code;
+      this.signal(
+        'error',
+        code === 'permission-denied'
+          ? 'SOURCE_ACCESS_REQUIRED'
+          : code === 'unauthenticated'
+            ? 'INVALID_SESSION'
+            : err.message,
+      );
       clearTimeout(this.reconnect);
       this.reconnect = setTimeout(() => this.connect(), 5000);
       this.reconnect.unref?.();
@@ -317,6 +335,7 @@ export class InboxService {
         entry.summary.failureAt > 0 &&
         ordinal(entry.summary.failureRevision) &&
         entry.summary.failureRevision > 0;
+      if (failure && this.store.failureObserved(JSON.stringify(uid), key, entry.summary.failureRevision)) continue;
       if (!failure && (!row.unreadCount || !entry.summary.previewKind)) continue;
       const eventAt = failure ? entry.summary.failureAt : entry.summary.lastActivityAt;
       if (!eventAt || eventAt < now - 3600000 || eventAt > now + 60000) continue;
@@ -340,7 +359,9 @@ export class InboxService {
       };
       if (this.opts.isFocused?.()) this.notifyInApp(notice);
       else this.opts.notify?.(notice);
-      this.ledger.remember([id], now);
+      const delivered =
+        failure && entry.summary.previewKind === 'failure' ? [id, 'source:' + key + ':' + row.sourceCursor] : [id];
+      this.ledger.remember(delivered, now);
     }
     if (Number.isFinite(due)) this.queueLocalAlerts(Math.max(1, due - Date.now()));
   }
@@ -451,6 +472,36 @@ export class InboxService {
     this.check(uid, epoch);
     return result;
   }
+  async activityPreview(key: string, through: number): Promise<AssistantActivityPreview> {
+    const unavailable: AssistantActivityPreview = { available: false, messages: [] };
+    if (!ordinal(through) || typeof key !== 'string' || key.length > 300) throw new Error('INVALID_INPUT');
+    const uid = this.uid,
+      epoch = this.epoch;
+    const entry = (await this.catalog()).get(key);
+    this.check(uid, epoch);
+    if (!entry) throw new Error('SOURCE_ACCESS_REQUIRED');
+    if (!this.opts.activityPreview || through <= entry.item.readThrough || through > entry.item.sourceCursor)
+      return unavailable;
+    const result = await this.opts.activityPreview(entry.ref, through);
+    this.check(uid, epoch);
+    if (!result.available || !Array.isArray(result.messages) || !result.messages.length || result.messages.length > 16)
+      return unavailable;
+    let blocks = 0,
+      characters = 0;
+    for (const message of result.messages) {
+      if (
+        message.role !== 'assistant' ||
+        !Array.isArray(message.blocks) ||
+        !message.blocks.length ||
+        (blocks += message.blocks.length) > 16
+      )
+        return unavailable;
+      for (const block of message.blocks)
+        if (block.type !== 'text' || typeof block.text !== 'string' || (characters += block.text.length) > 32768)
+          return unavailable;
+    }
+    return Buffer.byteLength(JSON.stringify(result.messages)) <= 256 * 1024 ? result : unavailable;
+  }
   async conversationSummarySync(uid: string, key: string) {
     this.check(uid);
     const epoch = this.epoch;
@@ -466,7 +517,7 @@ export class InboxService {
     this.check(uid, epoch);
     this.store.setChatConsent(uid, key, enabled);
     this.changed();
-    await this.publisher.request();
+    await this.publisher.consentChanged();
   }
   summarySync(uid: string) {
     this.check(uid);
@@ -478,12 +529,33 @@ export class InboxService {
     if (enabled && !this.opts.sourceCredentials.persistent) throw new Error('SECURE_STORAGE_REQUIRED');
     this.store.setEnabled(uid, enabled);
     this.changed();
-    await this.publisher.request();
+    await this.publisher.consentChanged();
   }
   private async post<T>(uid: string, epoch: number, command: object): Promise<T> {
     this.check(uid, epoch);
     const token = await this.opts.account.getIdToken();
     this.check(uid, epoch);
+    if ('action' in command && command.action === 'assistantSource') {
+      const bind = command as { action: 'assistantSource'; enabled: boolean; consentRevision: number };
+      if (this.store.enabled(uid) !== bind.enabled || this.store.consentRevision(uid) !== bind.consentRevision)
+        throw new Error('STALE_CONSENT');
+    }
+    // Credentials can refresh asynchronously while the owner revokes a pending publication.
+    if ('action' in command && ['assistantPublish', 'assistantRemove'].includes(String(command.action))) {
+      const request = command as {
+        action: string;
+        sourceId: string;
+        conversationId: string;
+        conversationConsentRevision: number;
+      };
+      const chat = this.store.chatConsent(uid, 'assistant:' + request.sourceId + ':' + request.conversationId);
+      if (
+        !this.store.enabled(uid) ||
+        chat.revision !== request.conversationConsentRevision ||
+        chat.enabled !== (request.action === 'assistantPublish')
+      )
+        throw new Error('STALE_CONSENT');
+    }
     const response = await (this.opts.fetcher ?? fetch)(this.opts.endpoint ?? 'https://lingxios.net/v1/inbox', {
       method: 'POST',
       credentials: 'omit',
@@ -558,6 +630,12 @@ export class InboxService {
       id = starting ? c.operationId : c.jobId;
     if (!safeId(id)) throw new Error('INVALID_INPUT');
     if (starting) {
+      const now = Date.now();
+      if (
+        !this.store.batch(scope, id) &&
+        (!ordinal(c.requestedAt) || c.requestedAt < now - 300000 || c.requestedAt > now + 60000)
+      )
+        throw new Error('BATCH_REQUEST_EXPIRED');
       if (
         (c.searchPrefix !== undefined && (typeof c.searchPrefix !== 'string' || c.searchPrefix.length > 120)) ||
         (c.filter !== undefined && !['all', 'unread', 'attention'].includes(c.filter)) ||
@@ -566,7 +644,7 @@ export class InboxService {
       )
         throw new Error('INVALID_INPUT');
       const prefix = normalizeTitle(c.searchPrefix ?? '');
-      const signature = JSON.stringify([c.category ?? null, c.filter ?? 'all', c.archived ?? false, prefix]);
+      const signature = JSON.stringify([c.category ?? null, c.filter ?? 'all', c.archived ?? null, prefix]);
       const projection = await this.localProjection();
       this.check(uid, epoch);
       // Capture only this host's private rows. The server freezes all published rows, including local aliases.
@@ -576,10 +654,10 @@ export class InboxService {
         signature,
         [...projection.local.values()].filter(
           (row) =>
-            row.archived === (c.archived ?? false) &&
+            isUnread(row) &&
+            (c.archived === undefined || matchesArchiveView(row.archived, c)) &&
             (!c.category || c.category === row.category) &&
             (!prefix || titleOf(row).startsWith(prefix)) &&
-            (c.filter !== 'unread' || isUnread(row)) &&
             (c.filter !== 'attention' || needsAttention(row)),
         ),
       );
@@ -590,7 +668,7 @@ export class InboxService {
     this.check(uid, epoch);
     let batch = this.store.batch(scope, id);
     if (!batch) {
-      if (!uid) throw new Error('READ_BATCH_NOT_FOUND');
+      if (!uid) throw new Error('INBOX_JOB_MISSING');
       return cloud;
     }
     if (cloud.state === 'expired') return cloud;
@@ -598,14 +676,21 @@ export class InboxService {
     this.check(uid, epoch);
     const previous = batch.processed;
     while (batch.processed < batch.total) {
-      batch = this.store.applyBatchPage(scope, id, entries);
+      batch = this.store.applyBatchPage(scope, id, entries, uid);
       if (batch.processed < batch.total) {
         await new Promise<void>((resolve) => setImmediate(resolve));
         this.check(uid, epoch);
       }
     }
-    if (batch.processed !== previous) this.changed();
-    return { ...cloud, processed: cloud.processed + batch.processed, changed: (cloud.changed ?? 0) + batch.changed };
+    if (batch.processed !== previous) {
+      this.changed();
+      if (uid && this.store.enabled(uid)) void this.publisher.request().catch(() => {});
+    }
+    return {
+      ...cloud,
+      processed: (cloud.processed ?? 0) + batch.processed,
+      changed: (cloud.changed ?? 0) + batch.changed,
+    };
   }
   async request<T>(uid: string | null, c: InboxCommand): Promise<T> {
     this.check(uid);
@@ -700,7 +785,14 @@ export class InboxService {
     ) {
       const projection = await this.localProjection();
       this.check(uid, epoch);
-      if (projection.mirrored.has(c.key)) this.store.remember(JSON.stringify(uid), result.item as InboxItem);
+      if (projection.mirrored.has(c.key)) {
+        this.store.remember(JSON.stringify(uid), result.item as InboxItem);
+        if (c.action === 'markRead' && c.observedFailureRevision) {
+          const entry = (await this.catalog()).get(c.key);
+          this.check(uid, epoch);
+          if (entry) this.store.observeFailure(JSON.stringify(uid), entry, c.observedFailureRevision);
+        }
+      }
     }
     return result;
   }
@@ -743,7 +835,7 @@ export class InboxService {
     }
     for (const row of localRows.values()) {
       if (
-        row.archived !== (c.archived ?? false) ||
+        !matchesArchiveView(row.archived, c) ||
         (prefix && !titleOf(row).startsWith(prefix)) ||
         (c.category && c.category !== row.category) ||
         (c.filter === 'unread' && !isUnread(row)) ||

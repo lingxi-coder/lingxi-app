@@ -33,7 +33,7 @@ export interface FriendsSnapshot {
   readonly loadError: string;
   /**
    * The whole `users/{uid}/friends` collection as the views show it: unsorted (the views sort with their locale's collator),
-   * with names refreshed by D10 and the open chat counted as read (D13).
+   * with refreshed names and source-reported read state.
    */
   readonly cards: FriendCard[];
   /** `users/{uid}/blocks`, newest first. */

@@ -38,6 +38,29 @@ final class InboxContractTests: XCTestCase {
         XCTAssertTrue(row.needsAttention)
     }
 
+    func testArchivedMutedConversationsRemainDiscoverableByUnreadOrAttention() {
+        var row = friendRow()
+        row.archived = true
+        row.notificationMode = .none
+        XCTAssertFalse(InboxFilter.all.accepts(row, archivedOnly: false))
+        XCTAssertTrue(InboxFilter.all.accepts(row, archivedOnly: true))
+        XCTAssertTrue(InboxFilter.unread.accepts(row, archivedOnly: false))
+        XCTAssertTrue(InboxFilter.attention.accepts(row, archivedOnly: false))
+        XCTAssertTrue(InboxFilter.unread.accepts(row, archivedOnly: true))
+        XCTAssertTrue(InboxFilter.attention.accepts(row, archivedOnly: true))
+
+        row.unreadCount = 0
+        row.manualUnread = false
+        XCTAssertFalse(InboxFilter.unread.accepts(row, archivedOnly: false))
+        XCTAssertTrue(InboxFilter.attention.accepts(row, archivedOnly: false))
+        XCTAssertTrue(row.archived)
+        XCTAssertEqual(row.notificationMode, .none)
+
+        row.archived = false
+        XCTAssertTrue(InboxFilter.all.accepts(row, archivedOnly: false))
+        XCTAssertFalse(InboxFilter.attention.accepts(row, archivedOnly: true))
+    }
+
     func testOutboxCoalescesReadsAndKeepsOrderAcrossReminderAndInFlight() throws {
         let row = friendRow()
         let first = InboxOperation(row.frozenRead(through: 14))
@@ -204,5 +227,104 @@ final class InboxContractTests: XCTestCase {
         XCTAssertEqual(after["key"] as? String, cursor.key)
         XCTAssertNil(after["pinOrder"])
         XCTAssertTrue(InboxCursor(lastActivityAt: 27, key: cursor.key).requestValues["pinOrder"] is NSNull)
+    }
+
+    func testIdleCloudLeaseRenewsBeforeTheHardDeadline() {
+        let seenAt: Int64 = 100_000
+        let first = InboxCachedRow(row: friendRow(), verifiedAt: seenAt)
+        let renewal = InboxCachedRow.renewAt(verifiedAt: seenAt, attemptedAt: nil)
+        let deadline = seenAt + InboxCachedRow.lease
+        XCTAssertLessThan(renewal, deadline)
+        XCTAssertTrue(first.isAuthorized(at: renewal))
+        XCTAssertFalse(first.isAuthorized(at: deadline))
+        XCTAssertGreaterThan(InboxCachedRow.renewAt(verifiedAt: seenAt, attemptedAt: renewal), renewal)
+        let authenticatedAgain = InboxCachedRow(row: first.row, verifiedAt: renewal + 1)
+        XCTAssertTrue(authenticatedAgain.isAuthorized(at: deadline))
+    }
+
+    func testFrozenManualAndPreferenceCommandsRetainSeparateCASRevisions() throws {
+        var row = friendRow()
+        row.preferencesRevision = 7
+        let reminder = InboxOperation(markingUnread: row)
+        let pin = InboxOperation(preferences: .init(pinOrder: 3), row: row)
+        XCTAssertEqual(reminder.expectedManualUnreadRevision, 5)
+        XCTAssertEqual(pin.expectedPreferencesRevision, 7)
+        row.preferencesRevision = 8
+        let newer = InboxOperation(preferences: .init(archived: true), row: row)
+        XCTAssertNil(pin.coalescing(newer))
+        var state = InboxAccountState()
+        try state.enqueue([reminder, pin, newer])
+        let restored = try JSONDecoder().decode(InboxAccountState.self, from: JSONEncoder().encode(state))
+        XCTAssertEqual(restored.queue.map(\.expectedPreferencesRevision), [nil, 7, 8])
+        XCTAssertEqual(restored.queue.first?.expectedManualUnreadRevision, 5)
+    }
+
+    func testGlobalReadBatchResumesOnlyJobCreatedAtIntentAndFreezesLocalCursor() throws {
+        let assistant = InboxRef(kind: .assistant, sourceId: "device", conversationId: "session", generation: 1)
+        let row = InboxRow(key: assistant.key, ref: assistant, category: .assistant, title: "Archived Assistant",
+                           sourceCursor: 18, readThrough: 11, unreadCount: 7, pendingActionCount: 1,
+                           pendingActionRevision: 4, manualUnread: true, manualUnreadRevision: 5,
+                           notificationMode: .none, archived: true)
+        let batch = InboxReadBatch(id: "intent", requestedAt: 1234)
+        XCTAssertEqual(batch.createRequest["operationId"] as? String, "intent")
+        XCTAssertEqual(batch.createRequest["requestedAt"] as? Int64, 1234)
+        XCTAssertNil(batch.createRequest["archived"])
+
+        var state = InboxAccountState()
+        state.beginReadBatch(batch, localRows: [row])
+        let restarted = try JSONDecoder().decode(InboxAccountState.self, from: JSONEncoder().encode(state))
+        XCTAssertEqual(restarted.readBatch?.statusRequest, ["action": "readBatchStatus", "jobId": "intent"])
+        XCTAssertNil(restarted.readBatch?.statusRequest["requestedAt"])
+        var arriving = row
+        arriving.sourceCursor += 1
+        XCTAssertEqual(restarted.personal[row.key]?.readThrough, row.sourceCursor)
+        XCTAssertEqual(restarted.personal[row.key]?.archived, true)
+        XCTAssertEqual(restarted.personal[row.key]?.notificationMode, InboxNotificationMode.none)
+        XCTAssertEqual(restarted.personal[row.key]?.manualUnread, false)
+        XCTAssertLessThan(restarted.personal[row.key]?.readThrough ?? 0, arriving.sourceCursor)
+        XCTAssertTrue(arriving.needsAttention)
+    }
+
+    func testAssistantThreadSharingAndStatusOnlyFailureSurviveRoundTrip() throws {
+        let assistant = InboxRef(kind: .assistant, sourceId: "device", conversationId: "session", generation: 1)
+        var state = InboxAccountState()
+        XCTAssertTrue(state.sharesAssistant(assistant.key))
+        let privateChoice = state.setSharing(false, for: assistant.key)
+        state = try JSONDecoder().decode(InboxAccountState.self, from: JSONEncoder().encode(state))
+        XCTAssertFalse(state.sharesAssistant(assistant.key))
+        XCTAssertGreaterThan(state.setSharing(true, for: assistant.key).revision, privateChoice.revision)
+
+        let failure = InboxAssistantActivity(sourceId: assistant.sourceId, cursor: 0, baselineCursor: 0,
+            lastMeaningfulAt: 0, previewKind: nil, pendingActionCount: 0, failed: true, sourceRevision: 1,
+            failureAt: 1234, failureRevision: 1)
+        let restored = try JSONDecoder().decode(InboxAssistantActivity.self, from: JSONEncoder().encode(failure))
+        let row = InboxRow(key: assistant.key, ref: assistant, category: .assistant, title: "Assistant")
+        let failed = InboxAssistantSummary(activity: restored).updating(row)
+        XCTAssertEqual(failed.lastActivityAt, 1234)
+        XCTAssertEqual(restored.failureRevision, 1)
+        XCTAssertEqual(failed.state, "failed")
+        XCTAssertEqual(failed.frozenRead().observedFailureRevision, 1)
+        XCTAssertEqual(InboxOperation(failed.frozenRead()).observedFailureRevision, 1)
+        XCTAssertTrue(failed.needsAttention)
+        XCTAssertFalse(failed.isUnread)
+    }
+
+    func testNoticePreviewRetainsBoundedAnchorAndRejectsWrongIdentity() throws {
+        let payload: [String: String] = [
+            "kind": "inbox", "key": ref.key, "generation": "3", "through": "18", "eventKind": "reply",
+            "recipientUid": "account", "expiresAt": "3000", "route": "inbox/team%3Apair%3Afriend_chat",
+            "notificationId": "event", "messageId": "result", "taskId": "task"
+        ]
+        let push = try XCTUnwrap(InboxPush.parse(payload, currentUID: "account", enabled: true, now: 2000))
+        XCTAssertEqual(push.target.exclusiveBefore, 19)
+        XCTAssertTrue(push.target.matches(seq: 18, messageID: "result", taskIDs: ["task"]))
+        XCTAssertFalse(push.target.matches(seq: 19, messageID: "result", taskIDs: ["task"]))
+        XCTAssertFalse(push.target.matches(seq: 18, messageID: "other", taskIDs: ["task"]))
+        XCTAssertFalse(push.target.matches(seq: 18, messageID: "result", taskIDs: []))
+        XCTAssertNil(InboxPush.parse(payload.merging(["messageId": "../wrong"]) { _, new in new },
+                                     currentUID: "account", enabled: true, now: 2000))
+        let response = #"{"available":true,"messages":[{"role":"assistant","transcript_uuid":"result","blocks":[{"type":"text","text":"Committed answer"},{"type":"tool_use","input_json":"private"}]}]}"#
+        XCTAssertEqual(InboxAssistantPreviewBody.text(from: response, verifying: "result"), ["Committed answer"])
+        XCTAssertEqual(InboxAssistantPreviewBody.text(from: response, verifying: "other"), [])
     }
 }

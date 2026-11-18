@@ -226,6 +226,7 @@ struct RootView: View {
         return true
     }
     @State private var inboxPreviewSession: String?
+    @State private var inboxNoticeSheet: InboxNotificationPreview?
     @State private var localInboxRows: [String: InboxLocalSession] = [:]
     @State private var friendsWorkspace = FriendsWorkspace()
     @State private var externalImport: CanonicalDeepLink?
@@ -860,7 +861,24 @@ struct RootView: View {
         }
         .onChange(of: scenePhase, initial: true) { _, phase in inbox.setForeground(phase == .active) }
         .onChange(of: inbox.route) { _, row in
-            if let row { openInboxRow(row); inbox.clearRoute() }
+            guard let row else { return }
+            if let preview = inbox.notificationPreview, preview.row.ref == row.ref,
+               row.ref.kind != .assistant || localInboxRows[row.key] != nil {
+                inboxNoticeSheet = preview
+            } else {
+                navigateToInboxRow(row)
+            }
+            inbox.clearRoute()
+        }
+        .onChange(of: inbox.notificationPreview) { _, preview in
+            if preview == nil { inboxNoticeSheet = nil }
+        }
+        .sheet(item: $inboxNoticeSheet, onDismiss: { inbox.dismissNotificationPreview() }) { preview in
+            InboxNoticePreviewView(preview: preview, loadAssistant: { await localAssistantPreviewText(preview) }) {
+                inboxNoticeSheet = nil
+                inbox.dismissNotificationPreview()
+                openInboxRow(preview.row)
+            }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             if let notice = inbox.notice {
@@ -963,6 +981,19 @@ struct RootView: View {
         }
     }
 
+    private func localAssistantPreviewText(_ preview: InboxNotificationPreview) async -> [String] {
+        #if canImport(harness_runtimeFFI)
+        let ref = preview.row.ref
+        guard let entry = localInboxRows[ref.key], entry.ref?.sourceId == ref.sourceId,
+              preview.target.through > 0, let engine = source as? EngineConversationSource,
+              let raw = try? await engine.inboxActivityPreview(sessionID: ref.conversationId, through: preview.target.through)
+        else { return [] }
+        return InboxAssistantPreviewBody.text(from: raw, verifying: preview.target.messageId)
+        #else
+        return []
+        #endif
+    }
+
     private func switchInboxDraftAccount(_ uid: String?) {
         scopedPreferences.setDraftAccountUID(uid)
         guard inbox.uid != uid else { return }
@@ -1007,6 +1038,11 @@ struct RootView: View {
     #endif
 
     private func openInboxRow(_ row: InboxRow) {
+        inbox.dismissNotificationPreview()
+        navigateToInboxRow(row)
+    }
+
+    private func navigateToInboxRow(_ row: InboxRow) {
         navigation.closeSidebar()
         switch row.ref.kind {
         case .assistant:
@@ -1021,6 +1057,7 @@ struct RootView: View {
                 navigation.tabs.botsRequest = BotsRequest(hostID: host, sessionID: row.ref.conversationId)
                 navigation.tabs.select(.bots)
             } else {
+                inbox.dismissNotificationPreview()
                 externalLinkError = String(localized: "The source device is unavailable")
             }
         case .team:
@@ -1720,6 +1757,7 @@ struct RootView: View {
                 onInboxJumpToLatest: {
                     guard let ref = localInboxContext, let row = inbox.row(ref) else { return }
                     inboxPreviewSession = nil
+                    inbox.dismissNotificationPreview()
                     inbox.markRead([row])
                 }
             )

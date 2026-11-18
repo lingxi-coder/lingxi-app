@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react';
 import { InboxList } from '../../../../../packages/inbox/InboxList';
-import type { InboxItem } from '../../../../../packages/inbox/contracts';
+import type { InboxItem, InboxNoticeTarget } from '../../../../../packages/inbox/contracts';
 import type { useDesktopInbox } from '../bridge/useDesktopInbox';
 import './DesktopInboxPanel.css';
 
 export function DesktopInboxPanel({ inbox, locale, activeKey, onOpen, onNewChat }: {
   inbox: ReturnType<typeof useDesktopInbox>; locale: string;
   activeKey?: string;
-  onOpen(item: InboxItem): Promise<void>; onNewChat(): void;
+  onOpen(item: InboxItem, target?: InboxNoticeTarget): Promise<void>; onNewChat(): void;
 }) {
   const cn = locale.startsWith('zh');
   const [preferences, setPreferences] = useState<{ uid: string; sync: boolean; receipts: boolean }>();

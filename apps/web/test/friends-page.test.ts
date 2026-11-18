@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { createElement } from 'react';
 import { JsxEmit, ModuleKind, ScriptTarget, transpileModule } from 'typescript';
 import type { User } from 'firebase/auth';
+import * as inboxRoute from '../src/inbox/route';
 import * as intent from '../src/friends/add-intent';
 import type FriendsPageType from '../src/pages/FriendsPage';
 import { FakeFriends, card, pairTeamId, pointer, uid, until } from './support/fakeFriends';
@@ -29,7 +30,10 @@ function pageFixture() {
     'firebase/auth': { onAuthStateChanged(_auth: unknown, next: (user: User | null) => void) { listeners.add(next); next(null); return () => { listeners.delete(next); }; }, signOut: async () => undefined },
     '../app/firebase': { auth }, '../teams/firestore': { teamsDatabase: () => ({}) }, '../friends/add-intent': intent,
     '../friends/api': { webFriendsApi: () => ({ ...friends.api, close() {} }) }, '../teams/api': { webTeamsApi: () => ({ ...teams.api, close() {} }) },
+    '../inbox/route':inboxRoute,
     '../friends/FriendsWorkspaceView': { FriendsWorkspaceView }, '../teams/SignInCard': { SignInCard },
+    // react-test-renderer has no DOM portal target. Keep the shared header in the rendered tree.
+    '../../../../packages/teams/ChatTopbar':{ChatTopbarTarget:{Provider:({children}:{children:unknown})=>children}},
     '../../../../packages/teams/i18n': i18n,
   };
   new Function('require', 'module', 'exports', compiled.outputText)((id: string) => id in mocks ? mocks[id] : require(id), module, module.exports);
@@ -52,7 +56,7 @@ function browserTabs(context: TestContext, persistent: Pick<Storage, 'getItem' |
 const open = async (Page: typeof FriendsPageType, props: Record<string, unknown> = {}) => {
   const { create, act } = reactTestRenderer(); let tree: any;
   const badges: (string | null)[] = [];
-  await act(async () => { tree = create(createElement(Page, { locale: 'en', route: '/friends/add', badge: null, onBadge: (text: string | null) => badges.push(text), ...props }), { createNodeMock: hostNode }); await settle(); });
+  await act(async () => { tree = create(createElement(Page, { locale: 'en', route: '/friends/add', badge: null, onBadge: (text: string | null) => badges.push(text), ...props }), { createNodeMock: (element:any) => element.props.className === 'teams-web-chat-slot' ? null : hostNode() }); await settle(); });
   return { tree, badges, act, text: () => textOf(tree.toJSON() ?? ''), find: (match: (node: any) => boolean): any[] => tree.root.findAll((node: any) => typeof node.type === 'string' && match(node)) };
 };
 

@@ -19,6 +19,7 @@ final class InboxStore {
     private(set) var notice: InboxPush?
     private(set) var inlineNotice: InboxPush?
     private(set) var route: InboxRow?
+    private(set) var notificationPreview: InboxNotificationPreview?
     private(set) var hasMore = false
     private(set) var assistantSync = false
     private(set) var dmReceipts = false
@@ -81,8 +82,7 @@ final class InboxStore {
     @ObservationIgnored private var routeRequest = 0
 
     var activeRef: InboxRef? { current }
-    func activity(_ ref: InboxRef) -> InboxAssistantActivity? { localActivity[ref.key] ?? availableRemoteActivity[ref.key] }
-    var localSourceIDs: Set<String> { Set(local.values.map(\.ref.sourceId)) }
+    private var localSourceIDs: Set<String> { Set(local.values.map(\.ref.sourceId)) }
 
     func configure(_ account: String?) async {
         if initialized && uid == account { return }
@@ -99,7 +99,7 @@ final class InboxStore {
         local = [:]; localActivity = [:]; availableRemoteRows = []; availableRemoteActivity = [:]
         published = [:]; remote = []; cached = []; cloudVerification = [:]
         cloudAuthorityRevision &+= 1
-        route = nil; notice = nil; inlineNotice = nil; current = nil
+        route = nil; notificationPreview = nil; notice = nil; inlineNotice = nil; current = nil
         assistantSync = false; dmReceipts = false; markingAllRead = false; stagedRead = nil; issue = nil
         lastCloudRenewal = nil; loadedCloudPages = 0
         badgeFromServer = 0; unreadBadge = 0; offline = true; visible = []
@@ -200,6 +200,9 @@ final class InboxStore {
         if let expected, current != expected { return }
         guard current != ref else { return }
         leaveReadContext()
+        if let ref, let preview = notificationPreview, preview.row.ref.key != ref.key, preview.row.ref.kind == .assistant {
+            dismissNotificationPreview()
+        }
         current = ref
         verifiedActive = nil
         activeRow = ref.flatMap { row($0) }
@@ -212,6 +215,12 @@ final class InboxStore {
     func clearIssue() { issue = nil }
     func clearNotice() { notice = nil }
     func clearRoute() { route = nil }
+    func dismissNotificationPreview() { notificationPreview = nil }
+
+    func assistantPreview(_ ref: InboxRef?) -> InboxNotificationPreview? {
+        guard let ref, ref.kind == .assistant, notificationPreview?.row.ref == ref else { return nil }
+        return notificationPreview
+    }
 
     private var searchPrefix: String? { InboxTitleSearch.prefix(search) }
 
@@ -320,6 +329,7 @@ final class InboxStore {
         if let row = verifiedActive, rejected(row.ref) { verifiedActive = nil }
         if let row = activeRow, rejected(row.ref) { activeRow = nil }
         if let row = route, rejected(row.ref) { route = nil }
+        if let preview = notificationPreview, rejected(preview.row.ref) { notificationPreview = nil }
         if let notice, rejected(notice.ref) { self.notice = nil }
         if let inlineNotice, rejected(inlineNotice.ref) { self.inlineNotice = nil }
         for ref in Array(cloudVerification.keys) where rejected(ref) { cloudVerification.removeValue(forKey: ref) }
@@ -352,7 +362,8 @@ final class InboxStore {
         let pages = after == nil ? max(1, loadedCloudPages) : 1
         var more = after
         var rows = after == nil ? [] : remote
-        let priorRowCount = rows.count
+        let previous = rows.count
+        let revalidating = after == nil && !remote.isEmpty
         var failures: Error?
         var successfulPages = 0
         for _ in 0..<pages {
@@ -361,7 +372,16 @@ final class InboxStore {
             do {
                 let page: InboxPage = try await session.request(body)
                 guard epoch == life, query == expected else { return }
-                rows.append(contentsOf: page.items.filter(\.valid))
+                let confirmed = page.items.filter(\.valid)
+                rows.append(contentsOf: confirmed)
+                if revalidating {
+                    // Keep a verified page visible if rechecking a subsequent
+                    // page takes longer than the previous lease.
+                    let byKey = Dictionary(confirmed.map { ($0.key, $0) }, uniquingKeysWith: { _, last in last })
+                    remote = remote.map { byKey[$0.key] ?? $0 }
+                    verifyCloud(confirmed)
+                    rebuild()
+                }
                 successfulPages += 1
                 more = page.next
                 if more == nil { break }
@@ -387,7 +407,8 @@ final class InboxStore {
             loadedCloudPages = after == nil ? successfulPages : loadedCloudPages + successfulPages
             next = more
             // A continuation response only renewed the newly appended page.
-            verifyCloud(Array(rows.dropFirst(priorRowCount)))
+            if !revalidating { verifyCloud(Array(rows.dropFirst(previous))) }
+            else { scheduleCloudExpiration() }
 
             if filter == .all && category == nil && prefix == nil && !showArchived {
                 cached = rows
@@ -399,7 +420,7 @@ final class InboxStore {
     }
 
     private func matches(_ row: InboxRow) -> Bool {
-        filter.accepts(row) && (category == nil || row.category == category) && row.archived == showArchived
+        filter.accepts(row, archivedOnly: showArchived) && (category == nil || row.category == category)
     }
 
     private func rebuild() {
@@ -523,6 +544,8 @@ final class InboxStore {
     func remoteAssistantRef(host: String, session: String) -> InboxRef? {
         _ = visible
         let sessionID = canonicalSessionID(session)
+        if let target = notificationPreview?.row, target.remoteHostId == host,
+           target.ref.conversationId == sessionID, cloudAuthorized(target.ref) { return target.ref }
         let cloud = (remote + cached).first {
             $0.remoteHostId == host && $0.ref.conversationId == sessionID && cloudAuthorized($0.ref)
         }
@@ -659,16 +682,13 @@ final class InboxStore {
     func markAllRead() {
         guard canMarkAllRead, let uid else { return }
         let batch = InboxReadBatch(requestedAt: InboxPush.now)
-        var candidate = state
-        for localRow in local.values {
+        let localRows = local.values.map { localRow in
             var row = localRow
             row.ref = localAssistantRef(row.ref)
-            row = self.row(row.ref) ?? applyingPending(row)
-            if !row.archived && row.isUnread {
-                candidate.applyLocal(InboxOperation(row.frozenRead()), row: row)
-            }
+            return self.row(row.ref) ?? applyingPending(row)
         }
-        candidate.readBatch = batch
+        var candidate = state
+        candidate.beginReadBatch(batch, localRows: localRows)
         guard commit(candidate) else { return }
         markingAllRead = true
         rebuild()
@@ -745,6 +765,14 @@ final class InboxStore {
 
     func movePin(_ row: InboxRow, by offset: Int) {
         guard let other = adjacentPin(row, by: offset), let first = row.pinOrder, let second = other.pinOrder else { return }
+        if first == second {
+            if offset < 0, first == 0 {
+                preferences([other], patch: .init(pinOrder: 1))
+            } else {
+                preferences([row], patch: .init(pinOrder: first + Int64(offset)))
+            }
+            return
+        }
         apply([
             (row, InboxOperation(preferences: .init(pinOrder: second), row: row)),
             (other, InboxOperation(preferences: .init(pinOrder: first), row: other))
@@ -754,8 +782,7 @@ final class InboxStore {
     private func adjacentPin(_ row: InboxRow, by offset: Int) -> InboxRow? {
         let pinned = visible.filter { $0.pinOrder != nil }.sorted(by: InboxRow.ordered)
         guard let current = pinned.firstIndex(where: { $0.ref == row.ref }),
-              pinned.indices.contains(current + offset),
-              pinned[current + offset].pinOrder != row.pinOrder else { return nil }
+              pinned.indices.contains(current + offset) else { return nil }
         return pinned[current + offset]
     }
 
@@ -858,7 +885,10 @@ final class InboxStore {
                         ["MANUAL_REVISION_REQUIRED", "MANUAL_REVISION_CONFLICT"].contains(failure.code ?? "")
                     let preferenceConflict = operation.action == .preferences &&
                         ["PREFERENCE_REVISION_REQUIRED", "PREFERENCE_REVISION_CONFLICT"].contains(failure.code ?? "")
-                    if manualConflict || preferenceConflict {
+                    let consentConflict = [.assistantSummary, .assistantRemove, .assistantSync].contains(operation.action) &&
+                        ["STALE_CONVERSATION_CONSENT", "STALE_SOURCE_REVISION", "CONSENT_REVISION_CONFLICT", "CONSENT_REVISION_REQUIRED"]
+                            .contains(failure.code ?? "")
+                    if manualConflict || preferenceConflict || consentConflict {
                         var candidate = state
                         candidate.queue.removeAll { pending in
                             pending.id == operation.id || (preferenceConflict && pending.action == .preferences &&
@@ -905,7 +935,7 @@ final class InboxStore {
     /// The caller supplies a contiguous, visibly read cursor. Reference and
     /// search previews never call this method.
     func sawContent(_ row: InboxRow, through: Int) {
-        guard foreground, current == row.ref, through > row.readThrough else { return }
+        guard foreground, notificationPreview == nil, current == row.ref, through > row.readThrough else { return }
         let read = row.frozenRead(through: through)
         if let stagedRead, stagedRead.key == read.key, stagedRead.through >= read.through { return }
         stagedRead = read
@@ -980,7 +1010,8 @@ final class InboxStore {
                     continue
                 }
                 await self.receive(InboxPush(ref: ref, recipient: uid, through: item.through, eventKind: item.kind,
-                                            eventID: item.id, expiresAt: item.lastActivityAt + 3_600_000))
+                                            eventID: item.id, expiresAt: item.lastActivityAt + 3_600_000,
+                                            messageId: item.messageId, taskId: item.taskId), confirmedByServer: true)
             }
             if let next, self.epoch == life, self.foreground, !Task.isCancelled {
                 self.refreshNotices(delay: .milliseconds(max(1, next - InboxPush.now)))
@@ -988,11 +1019,20 @@ final class InboxStore {
         }
     }
 
-    func receive(_ push: InboxPush) async {
-        guard foreground, uid == push.recipient, state.delivered[push.eventID] == nil else { return }
+    func receive(_ push: InboxPush, confirmedByServer: Bool = false) async {
+        guard foreground, let uid, uid == push.recipient, state.delivered[push.eventID] == nil else { return }
         let life = epoch
-        guard let row = await authorized(push.ref), life == epoch, row.notificationMode != .none,
-              row.readThrough < push.through || push.isAction && row.pendingActionCount > 0 else { return }
+        if !confirmedByServer {
+            guard let device = PushRegistration.shared.remoteInstallationId,
+                  let page: InboxTransport.Notices = try? await InboxTransport(uid: uid).request(["action": "notices", "deviceId": device]),
+                  page.items.contains(where: { $0.id == push.eventID && $0.deliverable && $0.deliverAfter <= InboxPush.now })
+            else { return }
+        }
+        guard let row = await authorized(push.ref), life == epoch, foreground,
+              row.notificationMode != .none, !row.archived else { return }
+        if push.isAction && row.pendingActionCount == 0 { return }
+        if push.eventKind == "failure", row.ref.kind == .assistant, row.state != "failed" { return }
+        if push.eventKind != "failure", !push.isAction && row.readThrough >= push.through { return }
         var candidate = state
         guard candidate.admitDelivery(push.eventID, now: InboxPush.now, expiresAt: push.expiresAt),
               commit(candidate) else { return }
@@ -1010,7 +1050,10 @@ final class InboxStore {
         let request = routeRequest
         let life = epoch
         notice = nil
-        guard let row = await authorized(push.ref), life == epoch, routeRequest == request else { return }
+        guard let row = await authorized(push.ref), life == epoch, routeRequest == request,
+              push.through <= row.sourceCursor else { return }
+        leaveReadContext()
+        notificationPreview = InboxNotificationPreview(row: row, target: push.target, id: push.eventID)
         route = row
     }
 

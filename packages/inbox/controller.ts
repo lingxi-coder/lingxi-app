@@ -26,7 +26,7 @@ export interface InboxSnapshot {
   offline: boolean;
   error: string;
   pending: number;
-  batchBusy?:boolean;
+  batchBusy?: boolean;
 }
 interface Options {
   uid: string;
@@ -65,7 +65,7 @@ export class InboxController {
   private closed = false;
   private started = false;
   private running?: Promise<void>;
-  private batchTimer?:ReturnType<typeof setTimeout>;
+  private batchTimer?: ReturnType<typeof setTimeout>;
   private retry?: ReturnType<typeof setTimeout>;
   private expiry?: ReturnType<typeof setTimeout>;
   private refreshTimer?: ReturnType<typeof setTimeout>;
@@ -115,11 +115,14 @@ export class InboxController {
     try {
       const saved = await this.storage.update(this.options.uid, (record) => ({
         cache: record.cache,
-        batch:record.batch,
+        batch: record.batch,
         pending: record.queue.length,
       }));
       if (this.closed) return;
-      if(saved.batch){this.set({batchBusy:true});void this.followBatch(saved.batch);}
+      if (saved.batch) {
+        this.set({ batchBusy: true });
+        void this.followBatch(saved.batch);
+      }
       if (saved.cache && saved.cache.verifiedAt + LEASE_MS > Date.now()) {
         this.next = saved.cache.page.next;
         this.set({
@@ -192,6 +195,12 @@ export class InboxController {
       return '';
     }
   }
+  notice = async (id: string) => {
+    const { item } = await this.options.request<{ item: InboxNotice }>({ action: 'notice', id });
+    if (this.closed || item.id !== id || item.lastActivityAt <= Date.now() - 30 * 86400000)
+      throw new Error('NOTICE_MISSING');
+    return item;
+  };
   notices = async (after?: InboxCursor) => {
     const page = await this.options.request<{ items: InboxNotice[]; next?: InboxCursor | null }>({
       action: 'notices',
@@ -246,6 +255,18 @@ export class InboxController {
         cursor = page.next ?? null;
         if (!cursor) break;
       }
+      const queue = await this.storage
+        .update(this.options.uid, (record) => record.queue.map((q) => q.command))
+        .catch(() => []);
+      if (this.closed || version !== this.revision) return;
+      for (const command of queue) {
+        if (command.action !== 'preferences') continue;
+        const row = rows.get(command.key),
+          expected = command.expectedPreferencesRevision;
+        if (row && row.ref.generation === command.generation && (row.preferencesRevision ?? 0) === expected) {
+          rows.set(row.key, { ...row, ...command.patch, preferencesRevision: expected + 1 });
+        }
+      }
       this.next = cursor;
       if (append) this.pages++;
       this.set({
@@ -287,57 +308,158 @@ export class InboxController {
   markUnread = (row: InboxItem) =>
     this.mutate({
       action: 'markUnread',
-      expectedManualUnreadRevision:row.manualUnreadRevision,
+      expectedManualUnreadRevision: row.manualUnreadRevision,
       key: row.key,
       generation: row.ref.generation,
       operationId: crypto.randomUUID(),
     });
-  preferences = (row: InboxItem, patch: Partial<InboxPreferences>) =>
-    this.mutate({ action: 'preferences', key: row.key, generation: row.ref.generation, patch });
+  preferences = async (row: InboxItem, patch: Partial<InboxPreferences>) => {
+    if (this.closed) throw new Error('INVALID_SESSION');
+    const { pending, expected } = await this.storage.update(this.options.uid, (record) => {
+      const predecessor = [...record.queue]
+        .reverse()
+        .find(
+          (q) =>
+            q.command.action === 'preferences' &&
+            q.command.key === row.key &&
+            q.command.generation === row.ref.generation,
+        )?.command;
+      const expected = Math.max(
+        row.preferencesRevision ?? 0,
+        predecessor?.action === 'preferences' ? (predecessor.expectedPreferencesRevision ?? 0) + 1 : 0,
+      );
+      enqueue(
+        record,
+        {
+          action: 'preferences',
+          key: row.key,
+          generation: row.ref.generation,
+          expectedPreferencesRevision: expected,
+          patch,
+        },
+        crypto.randomUUID(),
+      );
+      return { pending: record.queue.length, expected };
+    });
+    this.set({
+      pending,
+      items: this.state.items
+        .map((item) =>
+          item.key === row.key && item.ref.generation === row.ref.generation
+            ? { ...item, ...patch, preferencesRevision: expected + 1 }
+            : item,
+        )
+        .sort(orderItems),
+    });
+    await this.drain();
+  };
+  async movePinned(row: InboxItem, direction: -1 | 1) {
+    const pinned = this.state.items.filter((i) => i.pinOrder !== null).sort(orderItems);
+    const index = pinned.findIndex((i) => i.key === row.key);
+    const other = pinned[index + direction];
+    if (index < 0 || !other || other.pinOrder === null || row.pinOrder === null) return;
+    const adjacent = pinned[index + direction * 2];
+    const lower = direction < 0 ? (adjacent?.pinOrder ?? -1) : other.pinOrder;
+    const upper =
+      direction < 0
+        ? other.pinOrder
+        : (adjacent?.pinOrder ?? Math.min(Number.MAX_SAFE_INTEGER, other.pinOrder + 4096));
+    if (upper - lower > 1) {
+      await this.preferences(row, { pinOrder: lower + Math.floor((upper - lower) / 2) });
+      return;
+    }
+    if (other.pinOrder !== row.pinOrder) {
+      // A full integer interval has no midpoint. Swap the two frozen ranks using each row's personal revision.
+      await this.preferences(other, { pinOrder: row.pinOrder });
+      if (this.state.error === 'PREFERENCE_REVISION_CONFLICT') return;
+      await this.preferences(row, { pinOrder: other.pinOrder });
+      return;
+    }
+    // Very old equal ranks need a little space. Assign the affected tied run distinct ranks before moving one row.
+    const reordered = [...pinned];
+    reordered.splice(index, 1);
+    reordered.splice(index + direction, 0, row);
+    let rank = 1024;
+    for (const item of reordered) {
+      if (item.pinOrder !== rank) await this.preferences(item, { pinOrder: rank });
+      if (this.state.error === 'PREFERENCE_REVISION_CONFLICT') return;
+      rank += 1024;
+    }
+  }
   /** An offline replay may resume an admitted job, but must never create a new snapshot over later arrivals. */
-  async markAllReadSnapshot(){
-    if(this.closed || this.state.offline || this.state.busy)throw new Error('INBOX_SNAPSHOT_OFFLINE');
-    if(this.state.batchBusy)return;
-    const {filter,category,archived,searchPrefix}=this.state;
-    this.set({batchBusy:true});
-    const id=crypto.randomUUID();
-    const pending=await this.storage.update(this.options.uid,record=>record.batch??={jobId:id,startedAt:Date.now()})
-      .catch(error=>{this.set({batchBusy:false});throw error;});
-    if(this.closed)return;
-    if(pending.jobId!==id){await this.followBatch(pending);return;}
-    try{
-      const job=await this.options.request<InboxReadBatch>({action:'markAllReadSnapshot',operationId:id,requestedAt:pending.startedAt,filter,archived,...(category?{category}:{}),...(searchPrefix?{searchPrefix}:{})});
-      await this.followBatch(pending,job);
-    }catch(error){
-      this.set({error:message(error)});
+  async markAllReadSnapshot() {
+    if (this.closed || this.state.offline || this.state.busy) throw new Error('INBOX_SNAPSHOT_OFFLINE');
+    if (this.state.batchBusy) return;
+    const { filter, category, archived, searchPrefix } = this.state;
+    this.set({ batchBusy: true });
+    const id = crypto.randomUUID();
+    const pending = await this.storage
+      .update(this.options.uid, (record) => (record.batch ??= { jobId: id, startedAt: Date.now() }))
+      .catch((error) => {
+        this.set({ batchBusy: false });
+        throw error;
+      });
+    if (this.closed) return;
+    if (pending.jobId !== id) {
+      await this.followBatch(pending);
+      return;
+    }
+    try {
+      const job = await this.options.request<InboxReadBatch>({
+        action: 'markAllReadSnapshot',
+        operationId: id,
+        requestedAt: pending.startedAt,
+        filter,
+        ...(archived ? { archived } : {}),
+        ...(category ? { category } : {}),
+        ...(searchPrefix ? { searchPrefix } : {}),
+      });
+      await this.followBatch(pending, job);
+    } catch (error) {
+      this.set({ error: message(error) });
       await this.followBatch(pending);
     }
   }
-  private async followBatch(pending:{jobId:string;startedAt:number},result?:InboxReadBatch){
-    if(this.closed)return;
-    const poll=(delay:number)=>{
+  private async followBatch(pending: { jobId: string; startedAt: number }, result?: InboxReadBatch) {
+    if (this.closed) return;
+    const poll = (delay: number) => {
       clearTimeout(this.batchTimer);
-      if(!this.closed)this.batchTimer=setTimeout(()=>void this.followBatch(pending),delay);
+      if (!this.closed) this.batchTimer = setTimeout(() => void this.followBatch(pending), delay);
     };
-    let failure='';
-    try{
-      const job=result??await this.options.request<InboxReadBatch>({action:'readBatchStatus',jobId:pending.jobId});
-      if(job?.jobId!==pending.jobId)throw new Error('INVALID_BATCH_STATUS');
-      if(job.state==='running' || job.state==='queued'){poll(1500);return;}
-      if(job.state!=='complete')failure='INBOX_BATCH_EXPIRED';
-    }catch(error){
-      const code=message(error);
+    let failure = '';
+    try {
+      const job =
+        result ??
+        (await this.options.request<InboxReadBatch>({ action: 'readBatchStatus', jobId: pending.jobId }));
+      if (job?.jobId !== pending.jobId) throw new Error('INVALID_BATCH_STATUS');
+      if (job.state === 'running' || job.state === 'queued') {
+        poll(1500);
+        return;
+      }
+      if (job.state !== 'complete') failure = 'INBOX_BATCH_EXPIRED';
+    } catch (error) {
+      const code = message(error);
       // A parallel tab can observe the local admission before the server transaction commits.
-      if(code==='INBOX_JOB_MISSING' && Date.now()-pending.startedAt<30000){poll(2000);return;}
-      if(code!=='INBOX_JOB_MISSING' && !forbidden(code)){poll(5000);return;}
-      failure=code;
+      if (code === 'INBOX_JOB_MISSING' && Date.now() - pending.startedAt < 30000) {
+        poll(2000);
+        return;
+      }
+      if (code !== 'INBOX_JOB_MISSING' && !forbidden(code)) {
+        poll(5000);
+        return;
+      }
+      failure = code;
     }
-    try{
-      await this.storage.update(this.options.uid,record=>{if(record.batch?.jobId===pending.jobId)delete record.batch;});
-      this.set({batchBusy:false});
+    try {
+      await this.storage.update(this.options.uid, (record) => {
+        if (record.batch?.jobId === pending.jobId) delete record.batch;
+      });
+      this.set({ batchBusy: false });
       await this.refresh();
-      if(failure)this.set({error:failure});
-    }catch{poll(5000);}
+      if (failure) this.set({ error: failure });
+    } catch {
+      poll(5000);
+    }
   }
   async markAllRead(rows: readonly InboxItem[]) {
     const entries = [...new Map(rows.map((row) => [row.key, freezeRead(row)])).values()];
@@ -396,9 +518,22 @@ export class InboxController {
         break;
       }
       try {
-        const result = await this.options.request<{ results?: Array<{ ok: boolean; code?: string }> }>(
-          head.command,
-        );
+        const result = await this.options.request<{
+          item?: InboxItem;
+          results?: Array<{ ok: boolean; code?: string }>;
+        }>(head.command);
+        if (head.command.action === 'preferences' && result?.item) {
+          const item = result.item;
+          this.set({
+            items: this.state.items.map((v) =>
+              v.key === item.key &&
+              v.ref.generation === item.ref.generation &&
+              (v.preferencesRevision ?? 0) <= (item.preferencesRevision ?? 0)
+                ? item
+                : v,
+            ),
+          });
+        }
         const refusal = result?.results?.find((entry) => !entry.ok);
         if (refusal) rejected = refusal.code ?? 'SOURCE_ACCESS_REQUIRED';
         changed = true;
@@ -410,6 +545,22 @@ export class InboxController {
           });
           this.set({ items: [], hasMore: false, badge: 0, error: reason });
           break;
+        }
+        if (reason === 'PREFERENCE_REVISION_CONFLICT' && head.command.action === 'preferences') {
+          const denied = head.command;
+          const pending = await this.storage.update(this.options.uid, (record) => {
+            record.queue = record.queue.filter(
+              (q) =>
+                q.command.action !== 'preferences' ||
+                q.command.key !== denied.key ||
+                q.command.generation !== denied.generation,
+            );
+            return record.queue.length;
+          });
+          this.set({ pending });
+          changed = true;
+          rejected = reason;
+          continue;
         }
         this.set({ error: reason, offline: !forbidden(reason) });
         if (

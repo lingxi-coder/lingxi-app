@@ -33,12 +33,14 @@ export interface InboxItem extends InboxPreferences {
   pendingActionCount: number;
   pendingActionAt?: number;
   pendingActionRevision?: number;
+  failureRevision?: number;
+  failureAt?: number;
   attentionKind?: string;
   state: string;
   manualUnread: boolean;
   manualUnreadRevision: number;
   stateRevision: number;
-  preferencesRevision?:number;
+  preferencesRevision?: number;
   offline: boolean;
 }
 export interface InboxCursor {
@@ -47,12 +49,17 @@ export interface InboxCursor {
   lastActivityAt: number;
   key: string;
 }
-export interface InboxNoticeTarget {through:number;messageId?:string;taskId?:string;key?:string;generation?:number}
+export interface InboxNoticeTarget {
+  through: number;
+  messageId?: string;
+  taskId?: string;
+  key?: string;
+  generation?: number;
+}
 export interface InboxNotice extends InboxNoticeTarget {
   id: string;
   key: string;
   generation: number;
-  through: number;
   kind: string;
   lastActivityAt: number;
   deliverAfter: number;
@@ -65,23 +72,49 @@ export interface InboxPage {
 }
 export interface FrozenRead {
   observedPendingActionRevision?: number;
+  observedFailureRevision?: number;
   operationId?: string;
   key: string;
   generation: number;
   through: number;
   manualUnreadRevision: number;
 }
-export interface InboxReadBatch {jobId:string;state:'queued'|'running'|'complete'|'expired';processed?:number;changed?:number}
+export interface InboxReadBatch {
+  jobId: string;
+  state: 'queued' | 'running' | 'complete' | 'expired';
+  processed?: number;
+  changed?: number;
+}
 export type InboxMutation =
   | ({ action: 'markRead' } & FrozenRead)
-  | { action: 'markUnread'; key: string; generation: number; operationId: string; expectedManualUnreadRevision?:number }
-  | { action: 'preferences'; key: string; generation: number; expectedPreferencesRevision?:number;patch: Partial<InboxPreferences> }
+  | {
+      action: 'markUnread';
+      key: string;
+      generation: number;
+      operationId: string;
+      expectedManualUnreadRevision?: number;
+    }
+  | {
+      action: 'preferences';
+      key: string;
+      generation: number;
+      expectedPreferencesRevision?: number;
+      patch: Partial<InboxPreferences>;
+    }
   | { action: 'markAllRead'; entries: FrozenRead[] };
 export type InboxFilter = 'all' | 'unread' | 'attention';
 export type InboxCommand =
   | InboxMutation
-  | {action:'markAllReadSnapshot';operationId:string;requestedAt:number;category?:InboxCategory;filter?:InboxFilter;archived?:boolean;searchPrefix?:string}
-  | {action:'readBatchStatus';jobId:string}
+  | {
+      action: 'markAllReadSnapshot';
+      operationId: string;
+      requestedAt: number;
+      category?: InboxCategory;
+      filter?: InboxFilter;
+      archived?: boolean;
+      searchPrefix?: string;
+    }
+  | { action: 'readBatchStatus'; jobId: string }
   | {
       action: 'list';
       searchPrefix?: string;
@@ -92,7 +125,7 @@ export type InboxCommand =
     }
   | {
       action: 'assistantRemove';
-      conversationConsentRevision?:number;
+      conversationConsentRevision?: number;
       sourceId: string;
       sourceSecret: string;
       conversationId: string;
@@ -108,9 +141,9 @@ export type InboxCommand =
     }
   | {
       action: 'assistantPublish';
-      conversationConsentRevision?:number;
-      failureAt?:number;
-      failureRevision?:number;
+      conversationConsentRevision?: number;
+      failureAt?: number;
+      failureRevision?: number;
       sourceId: string;
       sourceSecret: string;
       conversationId: string;
@@ -139,6 +172,7 @@ export type InboxCommand =
   | { action: 'peerReceipt'; key: string; generation: number }
   | { action: 'presence'; deviceId: string; key: string | null; generation?: number; foreground: boolean }
   | { action: 'get'; key: string; generation?: number }
+  | { action: 'notice'; id: string; deviceId?: string }
   | { action: 'notices'; after?: InboxCursor; deviceId?: string };
 export type InboxRequest = <T>(command: InboxCommand) => Promise<T>;
 export function inboxKey(ref: Pick<InboxRef, 'kind' | 'sourceId' | 'conversationId'>): string {
@@ -155,6 +189,7 @@ export function freezeRead(item: InboxItem, through = item.sourceCursor): Frozen
     key: item.key,
     generation: item.ref.generation,
     through,
+    ...(item.failureRevision === undefined ? {} : { observedFailureRevision: item.failureRevision }),
     ...(item.pendingActionRevision === undefined
       ? {}
       : { observedPendingActionRevision: item.pendingActionRevision }),

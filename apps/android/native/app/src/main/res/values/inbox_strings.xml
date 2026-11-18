@@ -47,4 +47,6 @@
     <string name="inbox_sync_conversation_summary">同步此对话的摘要</string>
     <string name="inbox_pin_move_up">上移置顶对话</string>
     <string name="inbox_pin_move_down">下移置顶对话</string>
+    <string name="inbox_notice_unavailable">此对话动态已无法查看。</string>
+    <string name="inbox_open_conversation">打开对话</string>
 </resources>

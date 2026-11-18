@@ -48,6 +48,7 @@ interface RemoteSessionPort {
     suspend fun setForeground(foreground: Boolean)
     suspend fun loadOlder()
     suspend fun sessionActivityPage(after: ULong): String = error("remote activity unavailable")
+    suspend fun sessionActivityPreview(through: ULong): String = error("remote activity preview unavailable")
     suspend fun fetchImage(imageRef: String): RemoteImageFfi
     suspend fun sendPrompt(text: String, images: List<RemotePromptImageFfi>)
     suspend fun retryPrompt(promptId: String)

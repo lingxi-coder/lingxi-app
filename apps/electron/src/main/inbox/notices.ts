@@ -1,20 +1,8 @@
-import type { InboxCursor } from '../../../../../packages/inbox/contracts.js';
+import type { InboxCursor, InboxNotice } from '../../../../../packages/inbox/contracts.js';
 import type { InboxNotification } from '../../shared/inbox.js';
 import type { DeliveryLedger } from './deliveryLedger.js';
 import type { CloudRequest } from './publisher.js';
-interface Notice {
-  id: string;
-  key: string;
-  generation: number;
-  kind: string;
-  lastActivityAt: number;
-  deliverAfter: number;
-  deliverable: boolean;
-  through?: number;
-  messageId?: string;
-  taskId?: string;
-}
-type NoticePage = { items: Notice[]; next?: InboxCursor | null };
+type NoticePage = { items: InboxNotice[]; next?: InboxCursor | null };
 type Alert = InboxNotification & { key: string; generation: number };
 
 /** A dirty shard wakes one bounded pass over recent notices. A delayed notice is re-authorized at its due time. */

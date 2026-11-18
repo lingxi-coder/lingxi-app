@@ -29,24 +29,30 @@ function label(s: string | undefined, max: number): string | undefined {
 }
 export function localEntry(input: DesktopInboxSession) {
   if (!input.row.activity_json || !safeId(input.ref.sessionId) || input.row.uuid !== input.ref.sessionId) return;
-  let a;
+  let activity;
   try {
-    a = JSON.parse(input.row.activity_json);
+    activity = JSON.parse(input.row.activity_json);
   } catch {
     return;
   }
   if (
-    !a ||
-    !safeId(a.sourceId) ||
-    ![a.cursor, a.baselineCursor, a.lastMeaningfulAt ?? 0, a.sourceRevision, a.pendingActionCount].every(ordinal) ||
-    a.cursor < a.baselineCursor ||
-    ![null, 'reply', 'taskResult', 'failure'].includes(a.previewKind ?? null)
+    !activity ||
+    !safeId(activity.sourceId) ||
+    ![
+      activity.cursor,
+      activity.baselineCursor,
+      activity.lastMeaningfulAt ?? 0,
+      activity.sourceRevision,
+      activity.pendingActionCount,
+    ].every(ordinal) ||
+    activity.cursor < activity.baselineCursor ||
+    ![null, 'reply', 'taskResult', 'failure'].includes(activity.previewKind ?? null)
   )
     return;
-  const pendingActionCount = a.pendingActionCount as number;
+  const pendingActionCount = activity.pendingActionCount as number;
   const ref = {
     kind: 'assistant' as const,
-    sourceId: a.sourceId as string,
+    sourceId: activity.sourceId as string,
     conversationId: input.ref.sessionId,
     generation: 1,
   };
@@ -54,14 +60,20 @@ export function localEntry(input: DesktopInboxSession) {
     input.state && input.state !== 'idle'
       ? input.state
       : pendingActionCount
-        ? a.pendingActionKind === 'approval'
+        ? activity.pendingActionKind === 'approval'
           ? 'waiting_for_approval'
           : 'waiting_for_input'
-        : a.failed
+        : activity.failed
           ? 'failed'
-          : a.cursor > a.baselineCursor
+          : activity.cursor > activity.baselineCursor
             ? 'completed'
             : 'idle';
+  const eventMetadata = {
+    ...(ordinal(activity.failureAt) ? { failureAt: activity.failureAt } : {}),
+    ...(ordinal(activity.failureRevision) ? { failureRevision: activity.failureRevision } : {}),
+    ...(ordinal(activity.pendingActionAt) ? { pendingActionAt: activity.pendingActionAt } : {}),
+    ...(ordinal(activity.pendingActionRevision) ? { pendingActionRevision: activity.pendingActionRevision } : {}),
+  };
   const item: InboxItem = {
     schemaVersion: 1,
     key: inboxKey(ref),
@@ -69,32 +81,32 @@ export function localEntry(input: DesktopInboxSession) {
     category: 'assistant',
     title: input.row.resume_title || input.row.title || 'Assistant',
     preview:
-      a.previewKind === 'reply'
+      activity.previewKind === 'reply'
         ? 'Reply'
-        : a.previewKind === 'taskResult'
+        : activity.previewKind === 'taskResult'
           ? 'Task completed'
-          : a.previewKind === 'failure'
+          : activity.previewKind === 'failure'
             ? 'Task failed'
             : '',
-    sourceCursor: a.cursor,
-    sourceRevision: a.sourceRevision,
+    sourceCursor: activity.cursor,
+    sourceRevision: activity.sourceRevision,
     lastActivityAt: Math.max(
-      a.lastMeaningfulAt ?? 0,
-      a.failed && ordinal(a.failureAt) ? a.failureAt : 0,
-      pendingActionCount && ordinal(a.pendingActionAt) ? a.pendingActionAt : 0,
+      activity.lastMeaningfulAt ?? 0,
+      activity.failed && ordinal(activity.failureAt) ? activity.failureAt : 0,
+      pendingActionCount && ordinal(activity.pendingActionAt) ? activity.pendingActionAt : 0,
     ),
-    readThrough: a.baselineCursor,
-    unreadCount: Math.min(100, a.cursor - a.baselineCursor),
+    readThrough: activity.baselineCursor,
+    unreadCount: Math.min(100, activity.cursor - activity.baselineCursor),
     mentionCount: 0,
-    ...(ordinal(a.pendingActionRevision) ? { pendingActionRevision: a.pendingActionRevision } : {}),
+    ...eventMetadata,
     pendingActionCount,
     state,
-    ...(a.failed ? { attentionKind: 'failure' } : {}),
+    ...(activity.failed ? { attentionKind: 'failure' } : {}),
     archived: false,
     manualUnread: false,
     manualUnreadRevision: 0,
     stateRevision: 0,
-    preferencesRevision:0,
+    preferencesRevision: 0,
     notificationMode: 'mentions',
     pinOrder: null,
     offline: false,
@@ -105,14 +117,11 @@ export function localEntry(input: DesktopInboxSession) {
     baseline: item.readThrough,
     sourceCursor: item.sourceCursor,
     sourceRevision: item.sourceRevision,
-    lastActivityAt: a.lastMeaningfulAt ?? 0,
+    lastActivityAt: activity.lastMeaningfulAt ?? 0,
     state,
     pendingActionCount,
-    ...(ordinal(a.failureAt) ? { failureAt: a.failureAt } : {}),
-    ...(ordinal(a.failureRevision) ? { failureRevision: a.failureRevision } : {}),
-    ...(ordinal(a.pendingActionAt) ? { pendingActionAt: a.pendingActionAt } : {}),
-    ...(ordinal(a.pendingActionRevision) ? { pendingActionRevision: a.pendingActionRevision } : {}),
-    previewKind: a.previewKind ?? null,
+    ...eventMetadata,
+    previewKind: activity.previewKind ?? null,
     title: label(input.cloudTitle, 120),
     sourceLabel: label(input.sourceLabel, 80),
     remoteHostId: /^[A-Za-z0-9_-]{22}$/u.test(input.remoteHostId ?? '') ? input.remoteHostId : undefined,
@@ -122,7 +131,12 @@ export function localEntry(input: DesktopInboxSession) {
 export type LocalEntry = NonNullable<ReturnType<typeof localEntry>>;
 type Personal = Pick<
   InboxItem,
-  'readThrough' | 'manualUnread' | 'manualUnreadRevision' | 'stateRevision' | 'preferencesRevision' | keyof InboxPreferences
+  | 'readThrough'
+  | 'manualUnread'
+  | 'manualUnreadRevision'
+  | 'stateRevision'
+  | 'preferencesRevision'
+  | keyof InboxPreferences
 >;
 type ScopedMutation = Exclude<InboxMutation, { action: 'markAllRead' }>;
 export function validateTarget(p: ScopedMutation): void {
@@ -163,6 +177,9 @@ export class LocalInboxStore {
       CREATE TABLE IF NOT EXISTS chat_attempt (uid TEXT,key TEXT,generation INTEGER,PRIMARY KEY(uid,key));
       CREATE TABLE IF NOT EXISTS chat_confirm (uid TEXT,key TEXT,generation INTEGER,revision INTEGER,PRIMARY KEY(uid,key));
       CREATE TABLE IF NOT EXISTS read_batch (uid TEXT,id TEXT,signature TEXT,created INTEGER,total INTEGER,processed INTEGER,changed INTEGER,PRIMARY KEY(uid,id));
+      CREATE TABLE IF NOT EXISTS promoted_read(uid TEXT,key TEXT,cursor INTEGER,PRIMARY KEY(uid,key));
+      CREATE TABLE IF NOT EXISTS failure_read(uid TEXT,key TEXT,revision INTEGER,PRIMARY KEY(uid,key));
+      CREATE TABLE IF NOT EXISTS batch_failure(uid TEXT,id TEXT,key TEXT,revision INTEGER,PRIMARY KEY(uid,id,key));
       CREATE TABLE IF NOT EXISTS read_entry (uid TEXT,id TEXT,key TEXT,cursor INTEGER,manual INTEGER,PRIMARY KEY(uid,id,key));
       CREATE TABLE IF NOT EXISTS publication (uid TEXT,key TEXT,generation INTEGER,revision INTEGER,signature TEXT,PRIMARY KEY(uid,key));
       CREATE TABLE IF NOT EXISTS personal (uid TEXT,key TEXT,state TEXT,PRIMARY KEY(uid,key));
@@ -223,9 +240,16 @@ export class LocalInboxStore {
         const value = entry.legacyArchived;
         if (typeof value !== 'boolean' || value === (seen.get(entry.item.key) ?? false)) continue;
         write.run(uid, entry.item.key, Number(value));
-        const row=this.row(uid,entry),expected=row.preferencesRevision??0;
-        this.db.prepare('INSERT OR REPLACE INTO archive_request VALUES(?,?,?)').run(uid,entry.item.key,expected);
-        if(row.archived!==value)this.remember(uid,{...row,archived:value,stateRevision:row.stateRevision+1,preferencesRevision:expected+1});
+        const row = this.row(uid, entry),
+          expected = row.preferencesRevision ?? 0;
+        this.db.prepare('INSERT OR REPLACE INTO archive_request VALUES(?,?,?)').run(uid, entry.item.key, expected);
+        if (row.archived !== value)
+          this.remember(uid, {
+            ...row,
+            archived: value,
+            stateRevision: row.stateRevision + 1,
+            preferencesRevision: expected + 1,
+          });
       }
       this.db.exec('COMMIT');
     } catch (error) {
@@ -233,8 +257,10 @@ export class LocalInboxStore {
       throw error;
     }
   }
-  archiveExpected(uid:string,key:string){
-    return Number(this.db.prepare('SELECT expected FROM archive_request WHERE uid=? AND key=?').get(uid,key)?.expected??0);
+  archiveExpected(uid: string, key: string) {
+    return Number(
+      this.db.prepare('SELECT expected FROM archive_request WHERE uid=? AND key=?').get(uid, key)?.expected ?? 0,
+    );
   }
   pendingArchives(uid: string) {
     return new Map(
@@ -313,10 +339,26 @@ export class LocalInboxStore {
       throw error;
     }
   }
+  failureObserved(uid: string, key: string, revision: number) {
+    return (
+      Number(this.db.prepare('SELECT revision FROM failure_read WHERE uid=? AND key=?').get(uid, key)?.revision ?? 0) >=
+      revision
+    );
+  }
+  observeFailure(uid: string, entry: LocalEntry, revision: number | undefined) {
+    if (!revision || entry.item.attentionKind !== 'failure' || revision !== entry.summary.failureRevision) return;
+    this.db
+      .prepare(
+        'INSERT INTO failure_read VALUES(?,?,?) ON CONFLICT(uid,key) DO UPDATE SET revision=MAX(revision,excluded.revision)',
+      )
+      .run(uid, entry.item.key, revision);
+  }
   batch(uid: string, id: string) {
     return this.db
-      .prepare('SELECT signature,total,processed,changed FROM read_batch WHERE uid=? AND id=?')
-      .get(uid, id) as { signature: string; total: number; processed: number; changed: number } | undefined;
+      .prepare('SELECT signature,total,processed,changed FROM read_batch WHERE uid=? AND id=? AND created>?')
+      .get(uid, id, Date.now() - 30 * 86400000) as
+      | { signature: string; total: number; processed: number; changed: number }
+      | undefined;
   }
   freezeBatch(uid: string, id: string, signature: string, rows: Iterable<InboxItem>) {
     const current = this.batch(uid, id);
@@ -331,10 +373,14 @@ export class LocalInboxStore {
         .prepare('DELETE FROM read_entry WHERE (uid,id) IN (SELECT uid,id FROM read_batch WHERE created<?)')
         .run(cutoff);
       this.db.prepare('DELETE FROM read_batch WHERE created<?').run(cutoff);
+      this.db.exec('DELETE FROM batch_failure WHERE (uid,id) NOT IN (SELECT uid,id FROM read_batch)');
       const insert = this.db.prepare('INSERT INTO read_entry VALUES(?,?,?,?,?)');
+      const insertFailure = this.db.prepare('INSERT INTO batch_failure VALUES(?,?,?,?)');
       let count = 0;
       for (const row of rows) {
         insert.run(uid, id, row.key, row.sourceCursor, row.manualUnreadRevision);
+        if (row.attentionKind === 'failure' && row.failureRevision)
+          insertFailure.run(uid, id, row.key, row.failureRevision);
         count++;
       }
       this.db.prepare('INSERT INTO read_batch VALUES(?,?,?,?,?,0,0)').run(uid, id, signature, Date.now(), count);
@@ -344,11 +390,19 @@ export class LocalInboxStore {
       throw error;
     }
   }
-  applyBatchPage(uid: string, id: string, entries: Map<string, LocalEntry>) {
+  promotedRead(uid: string, key: string) {
+    return Number(this.db.prepare('SELECT cursor FROM promoted_read WHERE uid=? AND key=?').get(uid, key)?.cursor ?? 0);
+  }
+  promotedReadSent(uid: string, key: string, through: number) {
+    this.db.prepare('DELETE FROM promoted_read WHERE uid=? AND key=? AND cursor<=?').run(uid, key, through);
+  }
+  applyBatchPage(uid: string, id: string, entries: Map<string, LocalEntry>, account: string | null) {
     this.db.exec('BEGIN');
     try {
       const page = this.db
-        .prepare('SELECT key,cursor,manual FROM read_entry WHERE uid=? AND id=? ORDER BY key LIMIT 50')
+        .prepare(
+          'SELECT e.key,e.cursor,e.manual,f.revision AS failureRevision FROM read_entry e LEFT JOIN batch_failure f USING(uid,id,key) WHERE e.uid=? AND e.id=? ORDER BY e.key LIMIT 50',
+        )
         .all(uid, id);
       const del = this.db.prepare('DELETE FROM read_entry WHERE uid=? AND id=? AND key=?');
       let changed = 0;
@@ -356,9 +410,24 @@ export class LocalInboxStore {
         const key = String(frozen.key),
           entry = entries.get(key);
         if (entry && entry.item.sourceCursor >= Number(frozen.cursor)) {
+          if (frozen.failureRevision) this.observeFailure(uid, entry, Number(frozen.failureRevision));
           const row = this.row(uid, entry),
             through = Math.max(row.readThrough, Number(frozen.cursor));
           const clears = row.manualUnread && row.manualUnreadRevision === frozen.manual;
+          // A private row can be published while the account-wide server snapshot is being admitted.
+          // The new cloud row must receive the frozen cursor without clearing any newer cloud-side manual flag.
+          if (
+            account &&
+            this.enabled(account) &&
+            this.chatConsent(account, key).enabled &&
+            this.db.prepare('SELECT 1 FROM chat_attempt WHERE uid=? AND key=?').get(account, key)
+          ) {
+            this.db
+              .prepare(
+                'INSERT INTO promoted_read VALUES(?,?,?) ON CONFLICT(uid,key) DO UPDATE SET cursor=MAX(cursor,excluded.cursor)',
+              )
+              .run(account, key, Number(frozen.cursor));
+          }
           if (clears || through > row.readThrough) {
             this.remember(uid, {
               ...row,
@@ -370,6 +439,8 @@ export class LocalInboxStore {
           }
         }
         del.run(uid, id, key);
+        if (frozen.failureRevision)
+          this.db.prepare('DELETE FROM batch_failure WHERE uid=? AND id=? AND key=?').run(uid, id, key);
       }
       this.db
         .prepare('UPDATE read_batch SET processed=processed+?,changed=changed+? WHERE uid=? AND id=?')
@@ -417,15 +488,23 @@ export class LocalInboxStore {
           manualUnread: false,
           manualUnreadRevision: 0,
           stateRevision: 0,
-          preferencesRevision:0,
+          preferencesRevision: 0,
           archived: false,
           notificationMode: 'mentions',
           pinOrder: null,
         };
   }
   remember(uid: string, row: InboxItem) {
-    const { readThrough, manualUnread, manualUnreadRevision, stateRevision, preferencesRevision, archived, notificationMode, pinOrder } =
-      row;
+    const {
+      readThrough,
+      manualUnread,
+      manualUnreadRevision,
+      stateRevision,
+      preferencesRevision,
+      archived,
+      notificationMode,
+      pinOrder,
+    } = row;
     this.db.prepare('INSERT OR REPLACE INTO personal VALUES(?,?,?)').run(
       uid,
       row.key,
@@ -434,7 +513,7 @@ export class LocalInboxStore {
         manualUnread,
         manualUnreadRevision,
         stateRevision,
-        preferencesRevision:preferencesRevision??0,
+        preferencesRevision: preferencesRevision ?? 0,
         archived,
         notificationMode,
         pinOrder,
@@ -463,11 +542,13 @@ export class LocalInboxStore {
     this.db.exec('BEGIN');
     try {
       if (cmd.action === 'preferences') {
-        if(cmd.expectedPreferencesRevision!==(row.preferencesRevision??0))throw new Error('PREFERENCE_REVISION_CONFLICT');
-        if(Object.entries(cmd.patch).every(([key,value])=>row[key as keyof InboxPreferences]===value)) {
-          this.db.exec('COMMIT');return row;
+        if (cmd.expectedPreferencesRevision !== (row.preferencesRevision ?? 0))
+          throw new Error('PREFERENCE_REVISION_CONFLICT');
+        if (Object.entries(cmd.patch).every(([key, value]) => row[key as keyof InboxPreferences] === value)) {
+          this.db.exec('COMMIT');
+          return row;
         }
-        row.preferencesRevision=(row.preferencesRevision??0)+1;
+        row.preferencesRevision = (row.preferencesRevision ?? 0) + 1;
         Object.assign(row, cmd.patch);
         if (cmd.patch.archived !== undefined)
           this.db.prepare('UPDATE legacy_archive SET pending=0 WHERE uid=? AND key=?').run(uid, row.key);
@@ -488,6 +569,7 @@ export class LocalInboxStore {
       }
       if (cmd.action === 'markRead') {
         if (cmd.through > row.sourceCursor) throw new Error('INVALID_READ_CURSOR');
+        this.observeFailure(uid, entry, cmd.observedFailureRevision);
         const next = Math.max(row.readThrough, cmd.through);
         const clear = row.manualUnread && row.manualUnreadRevision === cmd.manualUnreadRevision;
         if (next === row.readThrough && !clear) {

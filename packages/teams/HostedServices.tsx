@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState, type ReactElement } from 'react';
+import { ComposerEditor, ComposerSurface, ComposerToolbar } from '../chat-ui/ComposerSurface';
+import { ChatConnectionStatus, ChatTopbarHeader, ChatTopbarTarget } from './ChatTopbar';
 import type { LocalPublishableBot, SharedHostBot, TeamTaskView } from './execution.js';
 import { availabilityText, newServiceId, serviceCommand, serviceErrorText, serviceIdFrom, type HostedServicesApi, type PublishedService,
   type ServiceList, type ServiceMessage, type ServiceReportReason, type ServiceScope, type ServiceSession, type ServiceSync, type ServiceView } from './hosted-service.js';
-import { Avatar, Dialog, type RenderMarkdown } from './ui';
+import { Avatar, Dialog, Icon, PopupMenu, type RenderMarkdown } from './ui';
 import { intlTag, useTeamsText } from './i18n.js';
 
 /**
@@ -20,14 +22,16 @@ export interface HostedServicesProps {
   link?(serviceId: string): string;
   /** People the publisher can offer a service to by name (their friends). Without it a service is offered to anyone with the link. */
   people?: ReadonlyArray<{ uid: string; name: string }>;
+  onBackToTeams?(): void;
   /** How often an open session is read again, in milliseconds: while the Bot is answering, and otherwise. */
   refreshMs?: { answering: number; idle: number };
 }
 const code = (error: unknown) => error instanceof Error ? error.message : 'SERVICE_UNAVAILABLE';
 const LIVE = ['queued', 'running', 'waiting'];
 
-export function HostedServices({ api, uid, locale, renderMarkdown, initialServiceId, link, people, refreshMs = { answering: 2000, idle: 10000 } }: HostedServicesProps): ReactElement {
+export function HostedServices({ api, uid, locale, renderMarkdown, initialServiceId, link, people, onBackToTeams, refreshMs = { answering: 2000, idle: 10000 } }: HostedServicesProps): ReactElement {
   const t = useTeamsText(locale);
+  const hasTopbar = useContext(ChatTopbarTarget) !== undefined;
   const [list, setList] = useState<ServiceList>(), [status, setStatus] = useState(''), [busy, setBusy] = useState(false);
   const [lookup, setLookup] = useState(''), [candidate, setCandidate] = useState<ServiceView>(), [open, setOpen] = useState<ServiceView>();
   const attempt = useCallback(async (action: () => Promise<unknown>) => {
@@ -44,10 +48,13 @@ export function HostedServices({ api, uid, locale, renderMarkdown, initialServic
     if (view.entered) { setCandidate(undefined); setOpen(view); } else { setOpen(undefined); setCandidate(view); }
   }, [api, locale]);
   useEffect(() => { void attempt(async () => { await refresh(); if (initialServiceId) await find(initialServiceId); }); }, [attempt, refresh, find, initialServiceId]);
-  if (open) return <ServiceSessions api={api} uid={uid} locale={locale} service={open} renderMarkdown={renderMarkdown} refreshMs={refreshMs}
+  if (open) return <ServiceSessions key={open.serviceId} api={api} uid={uid} locale={locale} service={open} renderMarkdown={renderMarkdown} refreshMs={refreshMs}
     onBack={() => { setOpen(undefined); void attempt(refresh); }} onLeft={() => { setOpen(undefined); void attempt(refresh); }} />;
   return <section className="tw-scope tw-embed hosted-services" aria-label={t('services_title')}>
-    <h2>{t('services_title')}</h2>
+    {onBackToTeams ? <ChatTopbarHeader><header className="tw-conv-head">
+      <button type="button" className="tw-icon-btn" aria-label={t('tw_back_team')} title={t('tw_back_team')} onClick={onBackToTeams}><Icon name="chevronLeft" /></button>
+      <div className="tw-conv-title"><h2>{t('services_title')}</h2></div>
+    </header></ChatTopbarHeader> : !hasTopbar ? <h2>{t('services_title')}</h2> : null}
     <p className="teams-hint">{t('services_intro')}</p>
     {status ? <p role="alert">{status}</p> : null}
     <form className="tw-form" onSubmit={event => { event.preventDefault(); const serviceId = serviceIdFrom(lookup);
@@ -98,7 +105,9 @@ function ServiceSessions({ api, uid, locale, service, renderMarkdown, refreshMs,
   const [view, setView] = useState(service), [sessions, setSessions] = useState<ServiceSession[]>(), [sessionId, setSessionId] = useState<string>();
   const [messages, setMessages] = useState<ServiceMessage[]>([]), [tasks, setTasks] = useState<TeamTaskView[]>([]);
   const [text, setText] = useState(''), [status, setStatus] = useState(''), [busy, setBusy] = useState(false);
+  const [syncError, setSyncError] = useState('');
   const [reporting, setReporting] = useState(false), [leaving, setLeaving] = useState(false), [tick, setTick] = useState(0);
+  const [menu, setMenu] = useState(false), menuRef = useRef<HTMLButtonElement>(null);
   const cursor = useRef({ key: '', after: 0, byId: new Map<string, ServiceMessage>() }), end = useRef<HTMLLIElement>(null);
   const attempt = async (action: () => Promise<unknown>) => {
     setBusy(true); setStatus('');
@@ -113,10 +122,10 @@ function ServiceSessions({ api, uid, locale, service, renderMarkdown, refreshMs,
   // The open session: its messages by the change log, its tasks, and whether the service can answer.
   const live = tasks.some(task => LIVE.includes(task.state));
   useEffect(() => {
-    if (!sessionId) { setMessages([]); setTasks([]); return; }
+    if (!sessionId) { setMessages([]); setTasks([]); setSyncError(''); return; }
     let closed = false, running = false;
     const key = `${scopeKey}:${sessionId}`;
-    if (cursor.current.key !== key) { cursor.current = { key, after: 0, byId: new Map() }; setMessages([]); setTasks([]); }
+    if (cursor.current.key !== key) { cursor.current = { key, after: 0, byId: new Map() }; setMessages([]); setTasks([]); setSyncError(''); }
     const pass = async () => {
       if (closed || running || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) return;
       running = true;
@@ -133,7 +142,8 @@ function ServiceSessions({ api, uid, locale, service, renderMarkdown, refreshMs,
         const now = await api.services<ServiceView>({ action: 'getService', serviceId: scope.serviceId });
         if (closed || cursor.current !== at) return;
         setMessages([...at.byId.values()].sort((a, b) => a.seq - b.seq)); setTasks(listed.tasks.sort((a, b) => a.createdAt - b.createdAt)); setView(now);
-      } catch (error) { if (!closed) setStatus(serviceErrorText(code(error), locale)); } finally { running = false; }
+        setSyncError('');
+      } catch (error) { if (!closed) setSyncError(serviceErrorText(code(error), locale)); } finally { running = false; }
     };
     void pass();
     // Quick while the Bot is answering, slow otherwise.
@@ -149,7 +159,7 @@ function ServiceSessions({ api, uid, locale, service, renderMarkdown, refreshMs,
     await loadSessions(); setSessionId(conversationId);
   });
   const send = () => attempt(async () => {
-    const body = text.trim(); if (!body) return;
+    const body = text.trim(); if (!body || busy || view.availability === 'withdrawn') return;
     let conversationId = sessionId;
     if (!conversationId) {
       conversationId = crypto.randomUUID();
@@ -175,27 +185,41 @@ function ServiceSessions({ api, uid, locale, service, renderMarkdown, refreshMs,
     cancelled: t('services_task_cancelled'), authorization_required: t('services_task_authorization_required'),
     needs_reconciliation: t('services_task_needs_reconciliation') } as Record<string, string>)[task.state];
   const off = view.availability !== 'available';
+  const availability = availabilityText(view.availability, locale);
   return <section className="tw-scope tw-conv hosted-service" aria-label={view.name}>
-    <header className="tw-conv-head">
-      <button type="button" onClick={onBack}>{t('tw_services_back')}</button>
-      <div className="tw-conv-title"><h2>{view.name}</h2><p>{t('tw_service_offered_by')} {view.publisherName} · <span className="hosted-service-state" data-online={!off}>{availabilityText(view.availability, locale)}</span></p></div>
-      <select aria-label={t('tw_service_session')} value={sessionId ?? ''} onChange={event => setSessionId(event.target.value || undefined)}>
-        {!sessions?.length ? <option value="">{t('services_new_session')}</option> : null}
-        {sessions?.map(session => <option key={session.id} value={session.id}>{session.title}</option>)}
-      </select>
-      <button type="button" disabled={busy} onClick={() => void newSession()}>{t('services_new_session')}</button>
-      <button type="button" onClick={() => setReporting(true)}>{t('services_report')}</button>
-      <button type="button" onClick={() => setLeaving(true)}>{t('services_leave')}</button>
-    </header>
+    <ChatTopbarHeader><header className="tw-conv-head hosted-service-header">
+      <button type="button" className="tw-icon-btn" aria-label={t('tw_services_back')} title={t('tw_services_back')} onClick={onBack}><Icon name="chevronLeft" /></button>
+      <div className="tw-conv-identity">
+        <Avatar identity={{ kind: 'bot', id: view.sharedBotId, name: view.name }} size={32} />
+        <div className="tw-conv-title"><h2>{view.name}</h2><p>{t('tw_service_offered_by')} {view.publisherName}</p></div>
+      </div>
+      <div className="tw-head-actions">
+        <ChatConnectionStatus kind={syncError ? 'error' : off ? 'offline' : 'ok'}
+          label={syncError ? t('teams_load_failed') : availability} detail={syncError || (off && view.availability !== 'withdrawn' ? t('services_cannot_answer') : availability)}
+          recovery={syncError && sessionId ? { label: t('common_retry'), run: () => setTick(value => value + 1) } : undefined} />
+        <select aria-label={t('tw_service_session')} value={sessionId ?? ''} onChange={event => setSessionId(event.target.value || undefined)}>
+          {!sessions?.length ? <option value="">{t('services_new_session')}</option> : null}
+          {sessions?.map(session => <option key={session.id} value={session.id}>{session.title}</option>)}
+        </select>
+        <button type="button" className="tw-icon-btn" aria-label={t('services_new_session')} title={t('services_new_session')} disabled={busy} onClick={() => void newSession()}><Icon name="plus" /></button>
+        <div className="tw-switcher-wrap tw-friends-more">
+          <button ref={menuRef} type="button" className="tw-icon-btn" aria-label={t('tw_more')} title={t('tw_more')} aria-haspopup="menu" aria-expanded={menu} onClick={() => setMenu(open => !open)}><Icon name="more" /></button>
+          {menu ? <PopupMenu label={view.name} items={[
+            { id: 'report', label: t('services_report'), onSelect: () => setReporting(true) },
+            { id: 'leave', label: t('services_leave'), danger: true, separated: true, onSelect: () => setLeaving(true) },
+          ]} anchor={menuRef} align="end" onClose={restore => { setMenu(false); if (restore) menuRef.current?.focus(); }} /> : null}
+        </div>
+      </div>
+    </header></ChatTopbarHeader>
     <p className="hosted-service-note">{t('services_note_fmt', view.publisherName)}
       {view.limits.userDailyLeft !== undefined ? ` ${t('services_left_today_fmt', view.limits.userDailyLeft)}` : ''}</p>
-    <div className="tw-stream-wrap"><div className="tw-stream" role="log" aria-label={t('tw_messages')} tabIndex={0}>
+    <div className="tw-stream-wrap tw-chat-thread"><div className="tw-stream" role="log" aria-label={t('tw_messages')} tabIndex={0}>
       {!messages.length && !tasks.length ? <p className="tw-empty-line" role="status">{t('services_empty')}</p> : null}
       <ol className="tw-messages">
       {messages.map(message => { const bot = message.author.kind === 'shared_bot';
         return <li key={message.id} className="tw-msg" data-grouped="false" data-mine={!bot} data-kind={bot ? 'bot' : 'user'} data-message-id={message.id}>
-          <div className="tw-msg-lead"><Avatar identity={bot ? { kind: 'bot', id: view.sharedBotId, name: view.name } : { kind: 'user', id: uid, name: t('teams_you') }} size={32} /></div>
-          <div className="tw-msg-main">
+          {bot ? <div className="tw-msg-lead"><Avatar identity={{ kind: 'bot', id: view.sharedBotId, name: view.name }} size={32} /></div> : null}
+          <div className={bot ? 'tw-msg-main' : 'tw-msg-main tw-msg-bubble'}>
             <div className="tw-msg-head"><b className="tw-msg-author">{bot ? view.name : t('teams_you')}</b>{bot ? <span className="tw-tag">{t('teams_bot_tag')}</span> : null}
               {message.waitId && bot ? <span className="tw-tag">{t('services_question')}</span> : null}
               {message.createdAt ? <time className="tw-msg-time" dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString(intlTag(locale), { hour: '2-digit', minute: '2-digit' })}</time> : null}</div>
@@ -212,12 +236,16 @@ function ServiceSessions({ api, uid, locale, service, renderMarkdown, refreshMs,
       <li ref={end} aria-hidden="true" />
       </ol></div></div>
     {status ? <p role="alert" className="hosted-service-note">{status}</p> : null}
-    <form className="hosted-service-composer" onSubmit={event => { event.preventDefault(); void send(); }}>
-      <textarea aria-label={t('tw_composer_message')} value={text} maxLength={8000} disabled={view.availability === 'withdrawn'} placeholder={waiting?.wait?.kind === 'human_input' ? t('services_answer_hint') : t('services_ask_hint_fmt', view.name)}
-        onChange={event => setText(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
-      <button disabled={busy || !text.trim() || view.availability === 'withdrawn'}>{t('teams_message_send')}</button>
+    <form className="tw-composer hosted-service-composer" onSubmit={event => { event.preventDefault(); void send(); }}>
+      <ComposerSurface className="tw-compose-box">
+        <ComposerEditor><textarea className="composer-editor-control tw-message-box" aria-label={t('tw_composer_message')} value={text} maxLength={8000} disabled={view.availability === 'withdrawn'} placeholder={waiting?.wait?.kind === 'human_input' ? t('services_answer_hint') : t('services_ask_hint_fmt', view.name)}
+          onChange={event => setText(event.target.value)} onKeyDown={event => {
+            if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || event.keyCode === 229) return;
+            event.preventDefault(); void send();
+          }} /></ComposerEditor>
+        <ComposerToolbar><button className="tw-primary tw-send" type="submit" aria-label={t('teams_message_send')} disabled={busy || !text.trim() || view.availability === 'withdrawn'}><Icon name="arrowUp" /></button></ComposerToolbar>
+      </ComposerSurface>
     </form>
-    {off && view.availability !== 'withdrawn' ? <p className="hosted-service-note">{t('services_cannot_answer')}</p> : null}
     {reporting ? <ServiceReport api={api} locale={locale} serviceId={scope.serviceId} sessionId={sessionId} onClose={() => setReporting(false)} /> : null}
     {leaving ? <Dialog title={t('services_leave_title_fmt', view.name)} role="alertdialog" onClose={() => setLeaving(false)}>
       <p>{t('services_leave_body')}</p>

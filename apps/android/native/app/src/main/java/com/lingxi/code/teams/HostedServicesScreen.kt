@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -23,11 +24,11 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
-import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.HourglassEmpty
 import androidx.compose.material.icons.outlined.MoreVert
@@ -59,6 +60,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -83,6 +85,8 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lingxi.code.R
 import com.lingxi.code.conversation.AIText
+import com.lingxi.code.conversation.ComposerInputSurface
+import com.lingxi.code.conversation.ComposerSendButton
 import com.lingxi.code.theme.BotAvatar
 import com.lingxi.code.theme.ConfirmDialog
 import com.lingxi.code.theme.PersonAvatar
@@ -205,6 +209,11 @@ private fun ColumnScope.ServiceSession(model: HostedServicesModel, state: Hosted
         Box {
             IconButton(onClick = { menu = true }, modifier = Modifier.testTag("services.menu")) { Icon(Icons.Outlined.MoreVert, stringResource(R.string.services_menu)) }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                if (!service.available && !service.withdrawn) Text(
+                    stringResource(R.string.services_cannot_answer),
+                    Modifier.widthIn(max = 240.dp).padding(horizontal = 16.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 if (state.sessions.isNotEmpty()) DropdownMenuItem(text = { Text(stringResource(R.string.services_sessions)) }, onClick = { menu = false; choosing = true })
                 DropdownMenuItem(text = { Text(stringResource(R.string.services_new_session)) }, enabled = !state.busy, onClick = {
                     menu = false; scope.launch { model.newSession(java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT).format(java.util.Date())) }
@@ -216,8 +225,6 @@ private fun ColumnScope.ServiceSession(model: HostedServicesModel, state: Hosted
         }
     }
     if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth()) else Box(Modifier.padding(top = 4.dp))
-    if (!service.available) Text(stringResource(HostedService.availabilityRes(service.availability)) + if (service.withdrawn) "" else " · " + stringResource(R.string.services_cannot_answer),
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     val list = rememberLazyListState()
     val unanswered = state.tasks.filter { it.state != "completed" }
     LaunchedEffect(state.messages.size + unanswered.size) {
@@ -238,14 +245,30 @@ private fun ColumnScope.ServiceSession(model: HostedServicesModel, state: Hosted
     }
     state.error?.let { Text(stringResource(HostedService.errorRes(it)), Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).testTag("services.session.error").semantics { liveRegion = LiveRegionMode.Polite },
         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
-    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    ComposerInputSurface(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
         val tooLong = TeamsComposeLogic.byteLength(text) > TeamsComposeLogic.MESSAGE_BYTES
-        OutlinedTextField(value = text, onValueChange = { text = it }, enabled = !service.withdrawn, maxLines = 6, modifier = Modifier.weight(1f).testTag("services.composer"),
-            placeholder = { Text(if (state.answering) stringResource(R.string.services_answer_hint) else stringResource(R.string.services_ask_hint_fmt, service.name)) })
-        IconButton(enabled = !state.busy && !service.withdrawn && text.isNotBlank() && !tooLong, modifier = Modifier.testTag("services.send"), onClick = {
-            val sent = text
-            scope.launch { if (model.send(sent) && text == sent) text = "" }
-        }) { Icon(Icons.AutoMirrored.Outlined.Send, stringResource(R.string.teams_message_send)) }
+        val placeholder = if (state.answering) stringResource(R.string.services_answer_hint) else stringResource(R.string.services_ask_hint_fmt, service.name)
+        BasicTextField(
+            value = text, onValueChange = { text = it }, enabled = !service.withdrawn, minLines = 1, maxLines = 6,
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+            modifier = Modifier.fillMaxWidth().testTag("services.composer"),
+            decorationBox = { inner ->
+                Box {
+                    if (text.isEmpty()) Text(placeholder, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    inner()
+                }
+            },
+        )
+        ComposerSendButton(
+            label = stringResource(R.string.teams_message_send),
+            enabled = !state.busy && !service.withdrawn && text.isNotBlank() && !tooLong,
+            modifier = Modifier.align(Alignment.End).testTag("services.send"),
+            onClick = {
+                val sent = text
+                scope.launch { if (model.send(sent) && text == sent) text = "" }
+            },
+        )
     }
     if (choosing) AlertDialog(
         onDismissRequest = { choosing = false }, title = { Text(stringResource(R.string.services_sessions)) },

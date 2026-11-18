@@ -385,10 +385,12 @@ try {
   assert.deepEqual([await cardAvatar('Alpha'), await cardAvatar('Beta')], others, 'a card and a row of the same Bot agree');
   await run(`Array.from(document.querySelectorAll('.bots-card')).find(card => card.querySelector('.bots-card-name').textContent === 'Fixture Bot').click()`);
   await wait(`document.querySelector('.bots-detail-header h1')?.textContent === 'Fixture Bot'`);
+  assert.equal(await run(`Boolean(document.querySelector('.desktop-window-toolbar .bots-detail-header'))`), true, 'Bot details use the outer toolbar');
   assert.equal(await avatarIn('.bots-detail-header'), personalBotAvatar, 'the Bot\'s own page');
   assert.equal(await run(`document.querySelector('.bots-detail-header .bots-avatar').getAttribute('aria-hidden')`), 'true', 'which is decoration beside the name');
   await run(`Array.from(document.querySelectorAll('.bots-detail-actions button')).find(button => button.textContent.trim() === 'New chat').click()`);
   await wait(`document.querySelector('.desktop-topbar-project[title="Fixture Bot"]')`);
+  assert.equal(await run(`document.querySelector('.desktop-window-toolbar .desktop-topbar-project').getBoundingClientRect().width > 0`), true, 'Bot chat topbar is visible with the Bots sidebar');
   assert.equal(await avatarIn('.desktop-topbar-project'), personalBotAvatar, 'the title of a chat of the Bot');
   assert.equal(await run(`Boolean(document.querySelector('.desktop-topbar-project .desktop-topbar-project-icon svg'))`), false, 'not a generic robot');
   result.botAvatar = true;

@@ -553,23 +553,21 @@
 .hosted-services code { font-size: 12px; overflow-wrap: anywhere; user-select: all; }
 .hosted-services fieldset { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 0; padding: 8px 12px; border: 1px solid var(--tw-line); border-radius: 10px; }
 .hosted-services details > summary { cursor: pointer; padding: 6px 0; font-weight: 600; }
-.hosted-service .tw-conv-head { flex-wrap: wrap; gap: 8px; }
-.hosted-service .tw-msg { display: grid; grid-template-columns: 36px minmax(0, 1fr); column-gap: 10px; padding: 2px 20px 2px 16px; }
-.hosted-service .tw-msg[data-grouped='false'] { padding-top: 14px; }
-.hosted-service .tw-msg[data-mine='true'] { background: var(--tw-own); justify-content: normal; }
-.hosted-service .tw-msg:hover { background: color-mix(in srgb, var(--tw-hover) 55%, transparent); }
-.hosted-service .tw-msg[data-mine='true']:hover { background: color-mix(in srgb, var(--tw-hover) 55%, var(--tw-own)); }
-.hosted-service .tw-msg-lead { justify-content: center; padding-block-start: 2px; }
-.hosted-service .tw-msg-main { max-inline-size: none; padding-block: 0; }
-.hosted-service .tw-msg-head { margin-block-end: 0; }
-.hosted-service .tw-msg-body { font-size: 13px; line-height: 1.55; }
-.hosted-service .tw-conv-head select { width: auto; max-width: 220px; }
-.hosted-service-state[data-online='true'] { color: var(--tw-online); }
+.hosted-service-header select { width: 9rem; text-overflow: ellipsis; }
+@container outer-chat (width < 28rem) {
+  .hosted-service-header select { width: 4.5rem; }
+  .hosted-service-header { position: relative; }
+  .hosted-service-header .tw-top-connection { position: static; }
+  .hosted-service-header .tw-connection-detail { inset-inline-end: 8px; }
+}
+@media (pointer: coarse) {
+  .hosted-service-header select { min-block-size: 44px; }
+}
+.hosted-service-header .tw-head-actions { gap: 4px; }
+.hosted-service-composer .composer-toolbar { justify-content: flex-end; }
 .hosted-service-note { margin: 0; padding: 4px 20px; font-size: 12px; line-height: 1.5; color: var(--tw-muted); }
 .tw-msg-body.hosted-service-note { padding: 0; }
 .hosted-service-note[role='alert'] { color: var(--tw-danger); }
-.hosted-service-composer { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 8px 16px 16px; }
-.hosted-service-composer textarea { flex: 1; min-height: 44px; max-height: 200px; resize: vertical; }
 .tw-sidebar-services { flex: none; margin: 4px 12px 10px; padding: 6px 8px; text-align: start; }
 
 /* Member projections and draft-only examples share the existing cards and composer. */

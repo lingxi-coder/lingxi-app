@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactElement } from 'react';
+import { ChatPageHeading } from './ChatTopbar';
 import { friendsErrorText } from './errors.js';
 import { classifyQuery, NOTE_MAX, relationAction, type LookupResult, type Proof } from './friends.js';
 import type { Confirmed, FriendsWorkspace } from './friends-workspace.js';
@@ -123,7 +124,7 @@ export function AddFriendView({ workspace, snapshot, locale, renderAvatar }: Fri
     if ('error' in outcome) setError(outcome.error); else setFound({ proof: query, result: outcome.result });
   };
   return <section className="tw-scope tw-friends-page" aria-labelledby="tw-friends-add">
-    <h2 id="tw-friends-add">{t('friends_add')}</h2>
+    <ChatPageHeading id="tw-friends-add" title={t('friends_add')} />
     <MyLink workspace={workspace} snapshot={snapshot} locale={locale} />
     <section className="tw-friends-card" aria-labelledby="tw-friends-find">
       <h3 id="tw-friends-find">{t('friends_search_title')}</h3>

@@ -49,6 +49,29 @@
 .bots-detail-title p { font-size: 13px; }
 .bots-detail-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; }
 .bots-detail-actions { display: flex; flex: 0 0 auto; gap: 8px; }
+.bots-create-header { justify-content: flex-start; }
+.bots-detail-header .bots-detail-actions { margin-inline-start: auto; }
+.desktop-chat-topbar-slot :is(.bots-header, .bots-detail-header) {
+  --bots-muted: var(--tw-muted);
+  --bots-ok: var(--tw-online);
+  --bots-warn: var(--tw-accent-text);
+  display: flex; flex-direction: row; align-items: center; height: 100%; gap: 8px; margin: 0; padding-inline: 8px;
+}
+.desktop-chat-topbar-slot :is(.bots-header, .bots-detail-title) > div { min-width: 0; }
+.desktop-chat-topbar-slot :is(.bots-header, .bots-detail-header) h1 { margin: 0; font-size: 13px; font-weight: 600; }
+.desktop-chat-topbar-slot :is(.bots-header h1, .bots-header p, .bots-detail-title h1, .bots-detail-meta .bots-muted) {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.desktop-chat-topbar-slot .bots-header p { font-size: 11px; }
+.desktop-chat-topbar-slot .bots-detail-identity { align-items: center; gap: 8px; }
+.desktop-chat-topbar-slot .bots-avatar img { width: 30px; height: 30px; }
+.desktop-chat-topbar-slot .bots-detail-title { gap: 0; }
+.desktop-chat-topbar-slot .bots-detail-meta { flex-wrap: nowrap; gap: 6px; }
+.desktop-chat-topbar-slot .bots-detail-meta .bots-muted { font-size: 11px; }
+.desktop-chat-topbar-slot button.bots-back { min-width: 32px; display: inline-grid; place-items: center; padding: 0; border-color: transparent; }
+.desktop-chat-topbar-slot button[data-variant='primary'] { color: var(--tw-accent-fg); background: var(--tw-accent); border-color: transparent; }
+.desktop-chat-topbar-slot button[data-variant='primary']:hover:enabled { background: color-mix(in srgb, var(--tw-accent) 88%, var(--tw-fg)); }
+.desktop-chat-topbar-slot button[data-variant='danger'] { color: var(--tw-danger); }
 .bots-tabs { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 2px; }
 .bots-page .bots-tabs button[aria-selected='true'] { background: var(--bots-surface); color: var(--bots-accent); border-color: var(--bots-accent); }
 /* The tab on show lays out its parts as the page does; while the Bot is still being read it holds nothing and takes no room. */

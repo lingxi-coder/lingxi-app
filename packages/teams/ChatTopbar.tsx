@@ -21,6 +21,14 @@ export function ChatTopbarControl({ children }: { children: ReactNode }) {
   return target ? createPortal(children, target) : null;
 }
 
+export function ChatPageHeading({ title, id }: { title: string; id?: string }) {
+  const target = useContext(ChatTopbarTarget);
+  const heading = <h2 id={id}>{title}</h2>;
+  return target === undefined ? heading : <ChatTopbarHeader>
+    <header className="tw-conv-head"><div className="tw-conv-identity"><div className="tw-conv-title">{heading}</div></div></header>
+  </ChatTopbarHeader>;
+}
+
 export interface ConnectionStatus { kind: 'ok' | 'connecting' | 'offline' | 'error'; label: string; detail: string; action?: 'refresh' | 'reconnect' }
 /**
  * A failed refetch of the team list is an error with a retry.
@@ -60,6 +68,14 @@ export function TopbarConnection({ snapshot, workspace, locale, friend }: {
   }
   if (!status) return null;
   const { kind, label, detail, action } = status;
+  return <ChatConnectionStatus kind={kind} label={label} detail={detail}
+    recovery={action === 'refresh' ? { label: t('common_retry'), run: () => void workspace.refresh() }
+      : action === 'reconnect' ? { label: t('teams_reconnect'), run: () => workspace.reconnect() } : undefined} />;
+}
+
+export function ChatConnectionStatus({ kind, label, detail, recovery }: Pick<ConnectionStatus, 'kind' | 'label' | 'detail'> & {
+  recovery?: { label: string; run(): void };
+}) {
   return <details className="tw-top-connection" data-kind={kind}
     onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }}
     onKeyDown={event => {
@@ -74,9 +90,7 @@ export function TopbarConnection({ snapshot, workspace, locale, friend }: {
     </summary>
     <div className="tw-connection-detail">
       <p>{detail}</p>
-      {action ? <button type="button" className="tw-link" onClick={() => action === 'refresh' ? void workspace.refresh() : workspace.reconnect()}>
-        {action === 'refresh' ? t('common_retry') : t('teams_reconnect')}
-      </button> : null}
+      {recovery ? <button type="button" className="tw-link" onClick={recovery.run}>{recovery.label}</button> : null}
     </div>
   </details>;
 }

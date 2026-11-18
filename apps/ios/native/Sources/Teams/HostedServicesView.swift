@@ -143,10 +143,6 @@ private struct HostedServiceSessionView: View {
     var body: some View {
         if let service = model.open {
             VStack(spacing: 0) {
-                if !service.available {
-                    TeamsBanner(kind: .offline, title: LocalizedStringKey(HostedService.availabilityKey(service.availability)),
-                                detail: service.withdrawn ? nil : "services_cannot_answer")
-                }
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
@@ -179,6 +175,9 @@ private struct HostedServiceSessionView: View {
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
+                        Text(LocalizedStringKey(HostedService.availabilityKey(service.availability)))
+                        if !service.available && !service.withdrawn { Text("services_cannot_answer") }
+                        Divider()
                         if !model.sessions.isEmpty {
                             Picker("services_sessions", selection: Binding(get: { model.session ?? "" }, set: { model.select($0) })) {
                                 ForEach(model.sessions) { Text($0.title).tag($0.id) }
@@ -191,8 +190,9 @@ private struct HostedServiceSessionView: View {
                         Divider()
                         Button("services_report", systemImage: "flag") { reporting = true }
                         Button("services_leave", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { leaving = true }
-                    } label: { Image(systemName: "ellipsis.circle") }
+                    } label: { Image(systemName: service.available ? "ellipsis.circle" : "wifi.slash") }
                     .accessibilityLabel(Text("services_menu"))
+                    .accessibilityValue(Text(LocalizedStringKey(HostedService.availabilityKey(service.availability))))
                     .accessibilityIdentifier("services.menu")
                 }
             }
@@ -248,22 +248,25 @@ private struct HostedServiceSessionView: View {
     }
 
     private func composer(_ service: HostedServiceView) -> some View {
-        HStack(alignment: .bottom, spacing: 8) {
+        ComposerInputSurface(focused: focused) {
             TextField(text: $text, prompt: model.answering ? Text("services_answer_hint") : Text("services_ask_hint \(service.name)"), axis: .vertical) { Text("services_ask_hint \(service.name)") }
                 .lineLimit(1...6)
                 .focused($focused)
-                .padding(.horizontal, 12).padding(.vertical, 8)
-                .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .padding(.horizontal, 6)
+                .frame(minHeight: 36)
                 .disabled(service.withdrawn)
                 .accessibilityIdentifier("services.composer")
-            Button {
-                let sent = text
-                Task { if await model.send(sent), text == sent { text = "" } }
-            } label: { Image(systemName: "arrow.up.circle.fill").font(.title).minimumHitTarget() }
-            .disabled(model.busy || service.withdrawn || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                      || TeamsComposeLogic.byteLength(text) > TeamsComposeLogic.messageBytes)
-            .accessibilityLabel(Text("teams_message_send"))
-            .accessibilityIdentifier("services.send")
+            HStack {
+                Spacer()
+                Button {
+                    let sent = text
+                    Task { if await model.send(sent), text == sent { text = "" } }
+                } label: { Image(systemName: "arrow.up.circle.fill").font(.title).minimumHitTarget() }
+                .disabled(model.busy || service.withdrawn || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                          || TeamsComposeLogic.byteLength(text) > TeamsComposeLogic.messageBytes)
+                .accessibilityLabel(Text("teams_message_send"))
+                .accessibilityIdentifier("services.send")
+            }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(.bar)

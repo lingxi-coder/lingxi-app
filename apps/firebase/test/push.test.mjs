@@ -84,9 +84,11 @@ test('Firestore: binding ownership, FID rotation, reordered logout, retries, exp
     await store.initialize(id, { installationSecret: input().installationSecret });
     await assert.rejects(store.mutate(id, input(1, { uid: 'spoofed' }), 'user-a'));
     await assert.rejects(store.mutate(id, input(1, { appId: 'other.application' }), 'user-a'));
-    const first = await store.mutate(id, input(), 'user-a');
+    const qaInput = input(1, { appId: 'com.lingxi.code.inboxqa.debug' });
+    const first = await store.mutate(id, qaInput, 'user-a');
+    assert.equal((await store.device(id).get()).data().appId, qaInput.appId);
     assert.equal(Date.parse(first.expiresAt), now + REGISTRATION_TTL_MS);
-    assert.deepEqual(await store.mutate(id, input(), 'user-a'), first, 'lost-response retry must be idempotent');
+    assert.deepEqual(await store.mutate(id, qaInput, 'user-a'), first, 'lost-response retry must be idempotent');
     await assert.rejects(store.mutate(id, input(), 'user-b'), { code: 'STALE_REGISTRATION' });
     await assert.rejects(store.mutate(id, input(2, { installationSecret: 'b'.repeat(64) }), 'user-a'), { status: 403 });
     const otherId = randomUUID();

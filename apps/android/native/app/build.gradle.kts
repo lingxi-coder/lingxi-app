@@ -30,6 +30,17 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// Real-device acceptance gets its own app/data directory and Firebase identity.
+val inboxQa = providers.gradleProperty("lingxiInboxQa").map(String::toBooleanStrict).getOrElse(false)
+require(!inboxQa || gradle.startParameter.taskNames.none { it.contains("release", ignoreCase = true) }) {
+    "Inbox QA is available only for debug builds"
+}
+androidComponents {
+    beforeVariants(selector().withBuildType("release")) {
+        if (inboxQa) it.enable = false
+    }
+}
+
 kotlin {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
@@ -90,6 +101,7 @@ android {
     productFlavors {
         create("play") {
             dimension = "distribution"
+            if (inboxQa) applicationId = "com.lingxi.code.inboxqa"
             // "play" is the Store distribution described by the MobileLinux
             // plan. High-risk offloads are absent at compile time.
             buildConfigField("String", "DISTRIBUTION_CHANNEL", "\"store\"")
@@ -186,6 +198,7 @@ android {
     }
 
     sourceSets {
+        if (inboxQa) getByName("play").res.srcDir("src/inboxQa/res")
         getByName("test").resources.srcDir(rootProject.file("../../../resources/voice"))
         // Shared mobile/Desktop vectors (mobile-team-bot-vectors.json,
         // agent-avatar-identities.json): the unit suites load them from the

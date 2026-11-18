@@ -10,6 +10,12 @@ network or engine calls happen yet.
 
 Application id: `com.lingxi.code` (debug variant: `com.lingxi.code.debug`).
 
+For isolated Inbox acceptance, build `:app:assemblePlayDebug -PlingxiInboxQa=true`.
+This uses the registered Firebase app `com.lingxi.code.inboxqa.debug`, labelled
+`LingXi Inbox QA`, with separate app data. Release variants are disabled in this
+mode. Use disposable accounts; installing the QA package does not require
+uninstalling, clearing, or signing out of the normal app.
+
 ## Surfaces
 
 Mirrors the iPhone design 1:1, adapted to idiomatic Compose:

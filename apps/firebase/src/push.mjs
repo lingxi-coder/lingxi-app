@@ -10,7 +10,7 @@ const installationId = z.uuid();
 const secret = z.string().regex(/^[a-f0-9]{64}$/);
 const revision = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const appIds = {
-  android: new Set(['com.lingxi.code', 'com.lingxi.code.debug', 'com.lingxi.code.direct', 'com.lingxi.code.direct.debug']),
+  android: new Set(['com.lingxi.code', 'com.lingxi.code.debug', 'com.lingxi.code.direct', 'com.lingxi.code.direct.debug', 'com.lingxi.code.inboxqa.debug']),
   ios: new Set(['com.lingxi.code', 'com.lingxi.code.full']),
 };
 const shortText = (max) => z.string().trim().min(1).max(max);

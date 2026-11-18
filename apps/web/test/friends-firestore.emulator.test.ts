@@ -90,7 +90,7 @@ test('Friends Web SDK: owner-only listeners, a redeemed friend link and its chat
     assert.deepEqual(snapshot().cards[0]!.lastMessage, { id: 'message-3', seq: 3, at: at.toISOString(), author: { kind: 'user', uid: bob }, preview: 'Are you there?' });
     assert.equal(snapshot().badge, 2, 'two messages are unread');
     workspace.openChat(bob);
-    assert.equal(snapshot().badge, 0, 'the chat on screen is read');
+    assert.equal(snapshot().badge, 2, 'opening a chat does not claim its unseen incoming messages were read');
     workspace.show('home');
 
     // Bob offers two teams, and an old offer is still listed: each arrives as an owner-readable document through the mapper, Timestamp

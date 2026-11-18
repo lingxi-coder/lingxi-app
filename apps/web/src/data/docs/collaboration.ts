@@ -99,7 +99,7 @@ export const collaborationPages: DocPage[] = [
       ] },
       { id: 'share-options', title: t('Choose how to share a Local App', '选择 Local App 的共享方式'), bullets: [
         t('For anyone to install a copy, make the market listing public and share its link.', '要让大家都能安装副本，在市场上架应用后分享详情页链接。'),
-        t('To give the source to one person, send them a source ZIP directly from iOS or Android.', '只想把源码给指定的人，可以从 iOS 或 Android 导出源码 ZIP，直接发给对方。'),
+        t('To give the source to one person, share a source ZIP. The Export source ZIP entry is available only on iOS and Android.', '只想把源码给指定的人，可以私下发送源码 ZIP。「导出源码 ZIP」入口仅在 iOS 和 Android 提供。'),
         t('To use an app running on your own computer, open it from a paired device. You can continue working with records saved by its backend.', '要从自己的另一台设备继续使用电脑上的应用，通过已配对设备打开，就能继续使用应用后端保存的记录。'),
       ], links: [{ label: t('Publish a market listing', '上架应用并分享链接'), href: '/docs/local-apps#market' }, { label: t('Share a source ZIP privately', '单独分享源码 ZIP'), href: '/docs/local-apps#source-zip' }, { label: t('Open the running app', '访问正在运行的应用'), href: '/docs/local-apps#paired-devices' }] },
       { id: 'market', title: t('Publish to the market and send the listing', '发布到市场并发送链接'), steps: [
@@ -108,7 +108,7 @@ export const collaborationPages: DocPage[] = [
         t('Open the public market detail page and send its link in the intended DM or group. The recipient reviews the release and installs a compatible copy with their own permissions and data.', '打开已上架应用的市场详情页，把链接发到目标私信或群聊。接收者查看版本并在兼容设备上安装，使用自己的权限和数据。'),
       ], links: [{ label: t('Send a team message', '发送团队消息'), href: '/docs/teams#send-message' }] },
       { id: 'source-zip', title: t('Give someone a source ZIP privately', '单独分享源码 ZIP'), steps: [
-        t('On the iOS or Android device that holds the release, open Apps → app details, export the current revision’s source ZIP and save the file. The archive contains the release source. Runtime databases, browser data and permissions stay with the original installation.', '在保存该版本的 iOS 或 Android 设备上进入「应用 → 应用详情」，导出当前版本的源码 ZIP 并保存文件。压缩包包含发布版本的源码。运行数据库、浏览器数据和授权保存在原设备上。'),
+        t('The Export source ZIP entry is available only on iOS and Android. On the device that holds the release, open Apps → app details → Export source ZIP and save the file. The archive contains the release source. Runtime databases, browser data and permissions stay with the original installation.', '「导出源码 ZIP」入口仅在 iOS 和 Android 提供。在保存该版本的移动设备上进入「应用 → 应用详情 → 导出源码 ZIP」并保存文件。压缩包包含发布版本的源码。运行数据库、浏览器数据和授权保存在原设备上。'),
         t('Send the ZIP privately using a channel that accepts it, such as AirDrop or email. To share through a LingXi team DM, send a download link restricted to that person. Team attachments accept PNG, JPEG, PDF and plain text.', '通过隔空投送或邮件等支持 ZIP 的方式单独发送。要在灵犀团队私信里分享，可以发送仅接收者可访问的下载链接。团队附件支持 PNG、JPEG、PDF 和纯文本。'),
         t('On iOS in Code mode, open Apps → + → Import source folder and select the ZIP. On Android in Code mode, choose Import source in Apps and select the ZIP. Open the imported app from its details.', '接收者在 iOS 的 Code 模式打开「应用 → + → 导入源码文件夹」并选择 ZIP。在 Android 的 Code 模式打开「应用 → 导入源码」，选择 ZIP。导入完成后，在应用详情打开本机副本。'),
       ] },

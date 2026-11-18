@@ -14,7 +14,7 @@ Release to your Apps library, share an installable copy or use your running desk
 ## Choose how to share a Local App
 
 - For anyone to install a copy, make the market listing public and share its link.
-- To give the source to one person, send them a source ZIP directly from iOS or Android.
+- To give the source to one person, share a source ZIP. The Export source ZIP entry is available only on iOS and Android.
 - To use an app running on your own computer, open it from a paired device. You can continue working with records saved by its backend.
 
 - [Publish a market listing](local-apps.md#market)
@@ -35,7 +35,7 @@ Release to your Apps library, share an installable copy or use your running desk
 
 ## Give someone a source ZIP privately
 
-1. On the iOS or Android device that holds the release, open Apps → app details, export the current revision’s source ZIP and save the file. The archive contains the release source. Runtime databases, browser data and permissions stay with the original installation.
+1. The Export source ZIP entry is available only on iOS and Android. On the device that holds the release, open Apps → app details → Export source ZIP and save the file. The archive contains the release source. Runtime databases, browser data and permissions stay with the original installation.
 2. Send the ZIP privately using a channel that accepts it, such as AirDrop or email. To share through a LingXi team DM, send a download link restricted to that person. Team attachments accept PNG, JPEG, PDF and plain text.
 3. On iOS in Code mode, open Apps → + → Import source folder and select the ZIP. On Android in Code mode, choose Import source in Apps and select the ZIP. Open the imported app from its details.
 

@@ -117,6 +117,7 @@ test('product questions open the right section in both languages', () => {
     ['zh', '如何把 Local App 发布到市场？', 'local-apps', 'market'],
     ['zh', '如何发布 Local App 到应用市场？', 'local-apps', 'market'],
     ['zh', '怎么私下分享 Local App 给朋友？', 'local-apps', 'source-zip'],
+    ['zh', '如何把我做的 Local App 共享给一位同事？', 'local-apps', 'source-zip'],
     ['zh', '我只在 iPhone 上有这个 Local App，怎么只发给一个同事？如果后来决定让大家都能安装，要怎么操作？', 'local-apps', 'source-zip'],
     ['zh', '我的手机通过远控打开电脑上的应用，我昨天记的数据这次还能继续用吗？', 'local-apps', 'paired-devices'],
     ['zh', '如何共享 Local App', 'local-apps', 'share-options'],
@@ -130,7 +131,8 @@ test('product questions open the right section in both languages', () => {
     assert.ok(page?.sections.some(section => section.id === workflow.section), workflow.page + '#' + workflow.section);
     for (const phrase of workflow.queries) {
       for (const locale of ['en', 'zh'] as const) {
-        const result = searchDocs(phrase, locale)[0];
+        const query = phrase.replace('{{product_name}}', 'LingXi').replace('{{product_name_zh}}', '灵犀');
+        const result = searchDocs(query, locale)[0];
         assert.deepEqual([result?.page.id, result?.sectionId], [workflow.page, workflow.section], phrase);
       }
     }
@@ -153,7 +155,7 @@ test('Local App sharing guidance distinguishes public releases, source copies an
     const makePublic = market.indexOf(locale === 'en' ? 'Make public' : '上架应用');
     assert.ok(hidden >= 0 && makePublic > hidden, locale);
     for (const platform of ['iOS', 'Android']) assert.ok(market.includes(platform), locale);
-    assert.match(sectionText('source-zip'), /ZIP/u);
+    assert.match(sectionText('source-zip'), locale === 'en' ? /available only on iOS and Android/u : /仅在 iOS 和 Android 提供/u);
     const remote = sectionText('paired-devices');
     for (const storage of ['localStorage', 'IndexedDB', locale === 'en' ? 'backend' : '后端']) {
       assert.ok(remote.includes(storage), locale + ' ' + storage);

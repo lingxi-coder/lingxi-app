@@ -181,7 +181,10 @@ function workflowKey(text: string): string {
 // Match complete ASCII words and individual Han characters, as in the bundled skill.
 // Stable ties follow the order of the shared workflow index.
 const workflowSearch = workflows.flatMap(workflow =>
-  workflow.queries.map(phrase => ({ workflow, phrase: workflowKey(phrase) })))
+  workflow.queries.map(query => ({
+    workflow,
+    phrase: workflowKey(query.replace('{{product_name}}', overview.title.en).replace('{{product_name_zh}}', overview.title.zh)),
+  })))
   .sort((a, b) => Array.from(b.phrase).length - Array.from(a.phrase).length);
 
 export function searchDocs(query: string, locale: 'en' | 'zh'): DocSearchResult[] {

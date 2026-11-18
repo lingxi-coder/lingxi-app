@@ -893,3 +893,49 @@ test('Inbox refreshes a rejected token once while preserving permission denial',
   await assert.rejects(f.service.request('owner', { action: 'list' }), /SOURCE_ACCESS_REQUIRED/);
   assert.deepEqual(refreshes, [false]);
 });
+
+test('missing cloud service suspends auth-error subscriptions and reconnects after recovery', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'inbox-cloud-watch-recovery-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  let available = false, watches = 0;
+  const f = fixture('owner', [row()], dir, {
+    fetcher: async () => available ? Response.json({ items: [], next: null })
+      : Response.json({ error: { code: 'NOT_FOUND' } }, { status: 404 }),
+    watch: () => { watches++; return () => {}; },
+  });
+  t.after(() => f.service.close());
+  await f.service.request('owner', { action: 'list' });
+  f.service.start();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(watches, 0, 'unavailable deployment cannot replace local rows with SDK auth errors');
+  available = true;
+  const page = await f.service.request<InboxPage>('owner', { action: 'list' });
+  for (let i = 0; i < 100 && !watches; i++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(watches, 1, 'a successful cloud request restores subscriptions');
+  assert.equal(page.items[0].key, key);
+  assert.equal(page.cloudUnavailable, undefined);
+});
+
+test('late cloud connection cannot add a duplicate watcher after unavailable-service recovery', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'inbox-late-cloud-watch-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  let resolveFirst!: (value: never) => void;
+  const first = new Promise<never>(resolve => { resolveFirst = resolve; });
+  let connections = 0, watches = 0, available = false;
+  const f = fixture('owner', [row()], dir, {
+    teams: { firestore: async () => ++connections === 1 ? first : ({ db: {} } as never) },
+    fetcher: async () => available ? Response.json({ items: [], next: null })
+      : Response.json({ error: { code: 'NOT_FOUND' } }, { status: 404 }),
+    watch: () => { watches++; return () => {}; },
+  });
+  t.after(() => f.service.close());
+  f.service.start();
+  await f.service.request('owner', { action: 'list' });
+  available = true;
+  await f.service.request('owner', { action: 'list' });
+  for (let i = 0; i < 100 && !watches; i++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(watches, 1);
+  resolveFirst({ db: {} } as never);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(watches, 1, 'a stale Firestore handshake must not install another listener');
+});

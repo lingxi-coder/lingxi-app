@@ -100,6 +100,8 @@ export class InboxService {
   private localWakeAt = Infinity;
   private closed = false;
   private cloudBadge = 0;
+  private cloudUnavailable = false;
+  private watchRevision = 0;
   private readonly deviceId: string;
   private presenceActive = false;
   private presenceRevision = 0;
@@ -207,6 +209,7 @@ export class InboxService {
     this.presenceActive = false;
     this.projection = undefined;
     this.cloudBadge = 0;
+    this.cloudUnavailable = false;
     this.notices.reset();
     if (this.started && !this.closed) {
       this.connect();
@@ -221,9 +224,10 @@ export class InboxService {
   private connect() {
     const uid = this.uid,
       epoch = this.epoch;
-    if (!uid) return;
+    if (!uid || this.cloudUnavailable) return;
+    const revision = ++this.watchRevision;
     const error = (err: Error) => {
-      if (this.closed || uid !== this.uid || epoch !== this.epoch) return;
+      if (this.closed || uid !== this.uid || epoch !== this.epoch || this.cloudUnavailable || revision !== this.watchRevision) return;
       this.stopWatch?.();
       this.stopWatch = undefined;
       const code = (err as Error & { code?: string }).code;
@@ -242,17 +246,18 @@ export class InboxService {
     void Promise.all([this.opts.teams.firestore(uid), import('firebase/firestore')])
       .then(([{ db }, sdk]) => {
         this.check(uid, epoch);
+        if (this.cloudUnavailable || revision !== this.watchRevision) return;
         this.stopWatch = (this.opts.watch ?? watchInbox)(
           sdk,
           db,
           uid,
           () => {
-            if (this.closed || epoch !== this.epoch) return;
+            if (this.closed || epoch !== this.epoch || revision !== this.watchRevision) return;
             this.signal('dirty');
             if (this.opts.notify) this.notices.changed(uid, epoch);
           },
           (count) => {
-            if (this.closed || epoch !== this.epoch) return;
+            if (this.closed || epoch !== this.epoch || revision !== this.watchRevision) return;
             this.cloudBadge = count;
             this.emitBadge();
           },
@@ -572,14 +577,24 @@ export class InboxService {
     this.check(uid, epoch);
     // An older deployment has no Inbox route. Preserve the authorized local
     // projection while cloud service is unavailable; this is not a login failure.
-    if (response.status === 404 && (!value.error || value.error === 'NOT_FOUND' || value.error?.code === 'NOT_FOUND'))
+    if (response.status === 404 && (!value.error || value.error === 'NOT_FOUND' || value.error?.code === 'NOT_FOUND')) {
+      this.cloudUnavailable = true;
+      this.watchRevision++;
+      this.stopWatch?.();
+      this.stopWatch = undefined;
+      clearTimeout(this.reconnect);
       throw new Error('INBOX_SERVICE_UNAVAILABLE');
+    }
     if (!response.ok)
       throw new Error(
         typeof value.error === 'string'
           ? value.error
           : (value.error?.code ?? (response.status === 401 ? 'INVALID_SESSION' : 'INBOX_REQUEST_FAILED')),
       );
+    if (this.cloudUnavailable) {
+      this.cloudUnavailable = false;
+      if (this.started) this.connect();
+    }
     return value;
   }
   private localProjection() {

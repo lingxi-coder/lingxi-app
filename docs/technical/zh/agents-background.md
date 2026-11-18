@@ -56,18 +56,18 @@ cargo test --locked -p harness-runtime --features desktop --test background_outp
 
 [源码仓库](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/agent/src/context.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/agent/src/context.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
-- [harness-runtime/crates/agent/src/handle.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/agent/src/handle.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
-- [harness-runtime/crates/agent/src/runner.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/agent/src/runner.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
-- [harness-runtime/crates/agent/src/pool.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/agent/src/pool.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
-- [harness-runtime/crates/agent/src/pool/capacity.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/agent/src/pool/capacity.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
-- [harness-runtime/crates/runtime/src/desktop/background_agent.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/runtime/src/desktop/background_agent.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
-- [harness-runtime/crates/runtime/src/desktop/session_agents.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/runtime/src/desktop/session_agents.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
-- [harness-runtime/crates/tasks/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/tasks/src/lib.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
-- [harness-runtime/crates/tasks/src/handlers/local_agent.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/tasks/src/handlers/local_agent.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
-- [harness-runtime/crates/coordinator/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/coordinator/src/lib.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
-- [harness-runtime/crates/runtime/src/parked_agent_restore.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/runtime/src/parked_agent_restore.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
+- [harness-runtime/crates/agent/src/context.rs](https://github.com/lingxi-coder/harness-runtime/blob/c5fcd20fad3839b3685497c8e5ebb7c34b47e658/crates/agent/src/context.rs) — 已提交源码 (c5fcd20fad3839b3685497c8e5ebb7c34b47e658)
+- [harness-runtime/crates/agent/src/handle.rs](https://github.com/lingxi-coder/harness-runtime/blob/c5fcd20fad3839b3685497c8e5ebb7c34b47e658/crates/agent/src/handle.rs) — 已提交源码 (c5fcd20fad3839b3685497c8e5ebb7c34b47e658)
+- [harness-runtime/crates/agent/src/runner.rs](https://github.com/lingxi-coder/harness-runtime/blob/c5fcd20fad3839b3685497c8e5ebb7c34b47e658/crates/agent/src/runner.rs) — 已提交源码 (c5fcd20fad3839b3685497c8e5ebb7c34b47e658)
+- [harness-runtime/crates/agent/src/pool.rs](https://github.com/lingxi-coder/harness-runtime/blob/c5fcd20fad3839b3685497c8e5ebb7c34b47e658/crates/agent/src/pool.rs) — 已提交源码 (c5fcd20fad3839b3685497c8e5ebb7c34b47e658)
+- [harness-runtime/crates/agent/src/pool/capacity.rs](https://github.com/lingxi-coder/harness-runtime/blob/c5fcd20fad3839b3685497c8e5ebb7c34b47e658/crates/agent/src/pool/capacity.rs) — 已提交源码 (c5fcd20fad3839b3685497c8e5ebb7c34b47e658)
+- [harness-runtime/crates/runtime/src/desktop/background_agent.rs](https://github.com/lingxi-coder/harness-runtime/blob/c5fcd20fad3839b3685497c8e5ebb7c34b47e658/crates/runtime/src/desktop/background_agent.rs) — 已提交源码 (c5fcd20fad3839b3685497c8e5ebb7c34b47e658)
+- [harness-runtime/crates/runtime/src/desktop/session_agents.rs](https://github.com/lingxi-coder/harness-runtime/blob/c5fcd20fad3839b3685497c8e5ebb7c34b47e658/crates/runtime/src/desktop/session_agents.rs) — 已提交源码 (c5fcd20fad3839b3685497c8e5ebb7c34b47e658)
+- [harness-runtime/crates/tasks/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/c5fcd20fad3839b3685497c8e5ebb7c34b47e658/crates/tasks/src/lib.rs) — 已提交源码 (c5fcd20fad3839b3685497c8e5ebb7c34b47e658)
+- [harness-runtime/crates/tasks/src/handlers/local_agent.rs](https://github.com/lingxi-coder/harness-runtime/blob/c5fcd20fad3839b3685497c8e5ebb7c34b47e658/crates/tasks/src/handlers/local_agent.rs) — 已提交源码 (c5fcd20fad3839b3685497c8e5ebb7c34b47e658)
+- [harness-runtime/crates/coordinator/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/c5fcd20fad3839b3685497c8e5ebb7c34b47e658/crates/coordinator/src/lib.rs) — 已提交源码 (c5fcd20fad3839b3685497c8e5ebb7c34b47e658)
+- [harness-runtime/crates/runtime/src/parked_agent_restore.rs](https://github.com/lingxi-coder/harness-runtime/blob/c5fcd20fad3839b3685497c8e5ebb7c34b47e658/crates/runtime/src/parked_agent_restore.rs) — 已提交源码 (c5fcd20fad3839b3685497c8e5ebb7c34b47e658)
 
-- harness-runtime: HEAD c551d1b4ac161cf9024dfcbd88ccd4c22f55de69; 所据文件指纹 sha256:6e9c6b19e59dad38ee1a5c755e041b15b7d37e041d16fb9ada609f303de3ea64; 产品固定版本 c551d1b4ac161cf9024dfcbd88ccd4c22f55de69
+- harness-runtime: HEAD c5fcd20fad3839b3685497c8e5ebb7c34b47e658; 所据文件指纹 sha256:65fece4e523e42368b8fcbcd809331db857f0ea76748c3b02d75d9ce81d658aa; 产品固定版本 c5fcd20fad3839b3685497c8e5ebb7c34b47e658
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

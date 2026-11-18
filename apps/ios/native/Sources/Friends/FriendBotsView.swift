@@ -92,7 +92,24 @@ struct FriendBotsView: View {
             }
         }
         .listStyle(.insetGrouped)
-        .safeAreaInset(edge: .top, spacing: 0) { banners(chat) }
+        .toolbar {
+            if let model, !model.error.isEmpty || (model.directoryReady && model.offline) {
+                ToolbarItem(placement: .topBarTrailing) {
+                    let status = model.error.isEmpty ? LocalizedStringKey("teams_offline_title") : LocalizedStringKey(TeamsErrors.key(model.error))
+                    Menu {
+                        Text(model.error.isEmpty ? LocalizedStringKey("teams_messages_offline") : status)
+                        Button("teams_reconnect", systemImage: "arrow.clockwise") { workspace.reconnect() }
+                    } label: { Image(systemName: model.error.isEmpty ? "wifi.slash" : "exclamationmark.circle") }
+                    .accessibilityLabel(Text(status))
+                }
+            }
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if !workspace.actionError.isEmpty, workspace.actionError != model?.error {
+                TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(workspace.actionError)), actionTitle: "common_close") { workspace.clearActionError() }
+                    .accessibilityIdentifier("friends.bots.banner")
+            }
+        }
         .sheet(item: $listOf) { bot in
             if let model = workspace.messaging { TeamSharedListSheet(bot: bot, model: model, members: workspace.directory) { listOf = nil } }
         }
@@ -106,25 +123,6 @@ struct FriendBotsView: View {
             Button("common_cancel", role: .cancel) {}
         } message: { _ in
             Text("teams_bot_stop_detail")
-        }
-    }
-
-    /// What the Teams conversation view says above a chat: a failing or offline model, and the last refused action.
-    @ViewBuilder
-    private func banners(_ chat: FriendsWorkspace.Chat) -> some View {
-        let workspace = chat.workspace
-        VStack(spacing: 0) {
-            if let model = workspace.messaging {
-                if !model.error.isEmpty {
-                    TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(model.error)), actionTitle: "teams_reconnect") { workspace.reconnect() }
-                } else if model.directoryReady && model.offline {
-                    TeamsBanner(kind: .offline, title: "teams_offline_title", detail: "teams_messages_offline", actionTitle: "teams_reconnect") { workspace.reconnect() }
-                }
-            }
-            if !workspace.actionError.isEmpty, workspace.actionError != workspace.messaging?.error {
-                TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(workspace.actionError)), actionTitle: "common_close") { workspace.clearActionError() }
-                    .accessibilityIdentifier("friends.bots.banner")
-            }
         }
     }
 

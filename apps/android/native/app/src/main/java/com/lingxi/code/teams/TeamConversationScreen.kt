@@ -160,7 +160,16 @@ internal fun TeamConversationScreen(
                     modifier = Modifier.weight(1f),
                 ) { ConversationLead(conversation, members, bots, uid, strings, 40.dp, label) }
                 IconButton(onClick = { showDetails = true }, modifier = Modifier.testTag(TeamsTags.INFO)) { Icon(Icons.Outlined.Info, stringResource(R.string.teams_conversation_details)) }
-            } else Spacer(Modifier.weight(1f))
+            } else {
+                Text(
+                    creation?.let { (it.optJSONObject("payload") ?: it).optString("title").takeIf(String::isNotBlank) }
+                        ?: team.name,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             val unread = if (messaging.readsReady && conversation != null) TeamsListLogic.unreadCount(conversation) else 0
             TeamsConnectionMenu(
                 error = messaging.error.takeIf { it.isNotEmpty() && it != "SERVICE_UNAVAILABLE" },

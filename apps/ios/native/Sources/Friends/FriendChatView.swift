@@ -79,6 +79,7 @@ struct FriendChatView: View {
                 .toolbar { toolbar(friend) }
         case .loading:
             FriendChatLoadingView()
+                .navigationTitle(friends.friend(uid)?.displayName ?? "")
         case .unavailable:
             FriendChatUnavailableView(onClose: onClose)
         }

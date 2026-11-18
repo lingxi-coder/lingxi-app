@@ -24,6 +24,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -89,7 +90,6 @@ import com.lingxi.code.conversation.ComposerInputSurface
 import com.lingxi.code.conversation.ComposerSendButton
 import com.lingxi.code.theme.BotAvatar
 import com.lingxi.code.theme.ConfirmDialog
-import com.lingxi.code.theme.PersonAvatar
 import com.lingxi.code.theme.rememberReduceMotion
 import kotlinx.coroutines.launch
 import java.util.UUID
@@ -240,7 +240,7 @@ private fun ColumnScope.ServiceSession(model: HostedServicesModel, state: Hosted
         }
         // Nothing here yet: the box below is the action (U9).
         if (state.messages.isEmpty() && state.tasks.isEmpty()) item("empty") { TeamsMessageState(stringResource(R.string.teams_preview_none), body = stringResource(R.string.services_empty), fill = false) }
-        items(state.messages, key = { it.id }) { message -> ServiceMessage(message, service, state.uid) }
+        items(state.messages, key = { it.id }) { message -> ServiceMessage(message, service) }
         items(unanswered, key = { "task:" + it.taskId }) { task -> ServiceTaskLine(task, state, model) }
     }
     state.error?.let { Text(stringResource(HostedService.errorRes(it)), Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).testTag("services.session.error").semantics { liveRegion = LiveRegionMode.Polite },
@@ -296,18 +296,23 @@ private fun ColumnScope.ServiceSession(model: HostedServicesModel, state: Hosted
  * tint of the row, never a bubble, and the service's carry its name. The name, the Question tag and the text are one accessibility element.
  */
 @Composable
-private fun ServiceMessage(message: TeamMessage, service: HostedServiceView, uid: String) {
+private fun ServiceMessage(message: TeamMessage, service: HostedServiceView) {
     val bot = message.authorKind != "user"
     Row(
-        Modifier.fillMaxWidth().then(if (bot) Modifier else Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = OWN_MESSAGE_TINT)))
-            .padding(horizontal = 16.dp, vertical = 6.dp).testTag("services.message.${message.id}"),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        Modifier.fillMaxWidth().padding(start = if (bot) 16.dp else 48.dp, end = 16.dp, top = 6.dp, bottom = 6.dp)
+            .testTag("services.message.${message.id}"),
+        horizontalArrangement = if (bot) Arrangement.spacedBy(10.dp) else Arrangement.End,
     ) {
-        if (bot) BotAvatar(service.sharedBotId, 32.dp) else PersonAvatar(uid, "", 32.dp)
-        Column(Modifier.weight(1f).semantics(mergeDescendants = true) {}, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        if (bot) BotAvatar(service.sharedBotId, 32.dp)
+        val content = if (bot) Modifier.weight(1f) else Modifier.widthIn(max = 360.dp)
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = OWN_MESSAGE_TINT), RoundedCornerShape(16.dp))
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+        Column(content.semantics(mergeDescendants = true) {}, verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(if (bot) service.name else stringResource(R.string.teams_you), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                 if (bot && message.waitId != null) Text(stringResource(R.string.services_question), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                val time = TeamsStreamLogic.formatClock(message.createdAtMs)
+                if (time.isNotEmpty()) Text(time, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             when {
                 message.recalled -> Text(stringResource(R.string.teams_message_recalled), fontStyle = FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant)

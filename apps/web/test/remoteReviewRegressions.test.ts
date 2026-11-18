@@ -1,3 +1,4 @@
+import './support/remoteSharedUi';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
@@ -342,6 +343,7 @@ test('the actual remote route remounts session state for a different session or 
   }).outputText;
   const module = { exports: {} as { default: (props: any) => ReturnType<typeof createElement> } };
   const substitute = (specifier: string): unknown => {
+    if (specifier === '../../../../packages/teams/ChatTopbar') return require('../../../packages/teams/ChatTopbar.tsx');
     if (specifier === '../remote/useRemote') return hooks;
     if (specifier === '../remote/SessionView') return { SessionView: statefulSession };
     if (specifier === '../remote/Bots') return { BotList: () => null, BotPage: () => null };

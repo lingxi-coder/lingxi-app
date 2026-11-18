@@ -1,3 +1,4 @@
+/** @jsxRuntime automatic */
 import type { ComponentPropsWithoutRef, ReactNode } from 'react';
 import './composer-surface.css';
 

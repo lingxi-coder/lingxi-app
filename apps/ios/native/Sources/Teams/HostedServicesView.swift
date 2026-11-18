@@ -156,7 +156,7 @@ private struct HostedServiceSessionView: View {
                                 TeamsStateView(systemImage: "bubble.left.and.bubble.right", title: "teams_preview_none", message: "services_empty")
                                     .frame(maxWidth: .infinity).padding(.vertical, 24)
                             }
-                            ForEach(model.messages) { message in HostedServiceMessageCell(message: message, service: service, uid: model.viewer) }
+                            ForEach(model.messages) { message in HostedServiceMessageCell(message: message, service: service) }
                             ForEach(model.tasks.filter { $0.state != "completed" }) { task in taskLine(task) }
                             Color.clear.frame(height: 1).id("end")
                         }
@@ -277,7 +277,6 @@ private struct HostedServiceMessageCell: View {
     @Environment(\.locale) private var locale
     let message: TeamMessage
     let service: HostedServiceView
-    let uid: String
 
     var body: some View {
         let bot = message.author.kind != "user", recalled = message.recalled == true
@@ -285,7 +284,8 @@ private struct HostedServiceMessageCell: View {
         let name = bot ? service.name : TeamsText.you
         let question = bot && message.waitId != nil
         HStack(alignment: .top, spacing: 10) {
-            if bot { AgentAvatar(agentID: AvatarIdentity.teamBotAvatarId(service.sharedBotId), size: 32) } else { PersonAvatar(id: uid, name: "", size: 32) }
+            if bot { AgentAvatar(agentID: AvatarIdentity.teamBotAvatarId(service.sharedBotId), size: 32) }
+            else { Spacer(minLength: 32) }
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(verbatim: name).font(.subheadline.weight(.semibold)).lineLimit(1)
@@ -304,7 +304,11 @@ private struct HostedServiceMessageCell: View {
                     Text(message.text).textSelection(.enabled)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, bot ? 0 : 12).padding(.vertical, bot ? 0 : 8)
+            .background {
+                if !bot { RoundedRectangle(cornerRadius: 16).fill(Color.accentColor.opacity(0.06)) }
+            }
+            .frame(maxWidth: bot ? .infinity : 360, alignment: bot ? .leading : .trailing)
             // One element for VoiceOver, as in a Team's stream: author, tag, time and text, with Copy among its actions.
             .accessibilityElement(children: .combine)
             .accessibilityLabel(Text(verbatim: spokenLabel(name: name, question: question, clock: clock, recalled: recalled)))
@@ -313,8 +317,6 @@ private struct HostedServiceMessageCell: View {
             }
         }
         .padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 1)
-        // The viewer's own words sit on the faint tint of the accent; the Bot's never do (U3).
-        .background { if !bot { Color.accentColor.opacity(0.06) } }
         .contentShape(Rectangle())
         .contextMenu { if !recalled && !message.text.isEmpty { Button("chat_message_copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.text } } }
         .accessibilityElement(children: .contain)

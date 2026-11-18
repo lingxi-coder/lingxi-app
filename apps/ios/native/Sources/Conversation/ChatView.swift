@@ -435,16 +435,23 @@ struct ChatView: View {
             ? providerRepository.visibleModelReferences(convo.availableModels) : convo.availableModels
         conversationContent
         .overlay(alignment: .top) {
-            if let rejectionID = convo.compactRejectionID {
-                CompactRejectionAlert { convo.compactRejectionID = nil }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-                    .id(rejectionID)
-                    .task(id: rejectionID) {
-                        guard !UIAccessibility.isVoiceOverRunning else { return }
-                        do { try await Task.sleep(for: .seconds(5)) } catch { return }
-                        if convo.compactRejectionID == rejectionID { convo.compactRejectionID = nil }
-                    }
+            VStack(spacing: 6) {
+                if let message = runtimeErrorMessage {
+                    RuntimeErrorBanner(title: runtimeErrorTitle(message), message: message, onDismiss: dismissRuntimeError)
+                        .frame(maxWidth: 560)
+                        .id(message)
+                }
+                if let rejectionID = convo.compactRejectionID {
+                    CompactRejectionAlert { convo.compactRejectionID = nil }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
+                        .id(rejectionID)
+                        .task(id: rejectionID) {
+                            guard !UIAccessibility.isVoiceOverRunning else { return }
+                            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                            if convo.compactRejectionID == rejectionID { convo.compactRejectionID = nil }
+                        }
+                }
             }
         }
         .environment(\.theme, t)
@@ -1031,8 +1038,6 @@ struct ChatView: View {
         .padding(.horizontal, 24)
     }
 
-    /// Keep failures compact beside the composer; the complete diagnostic is
-    /// available in a native sheet. Durable completion remains silent.
     @ViewBuilder
     private var runtimeFooter: some View {
         switch runtimeFooterState {
@@ -1042,25 +1047,19 @@ struct ChatView: View {
             ConversationReconnectNotice(retry: retry).id(runID)
         case let .compaction(status):
             CompactionRuntimeFooter(status: status)
-        case let .error(message):
-            RuntimeErrorBanner(
-                title: runtimeErrorTitle(message),
-                message: message,
-                onDismiss: dismissRuntimeError
-            )
-            .id(message)
         }
     }
 
-    private var runtimeFooterState: RuntimeFooterState {
+    private var runtimeErrorMessage: String? {
         if let captureStatus, !captureStatus.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return .error(captureStatus)
+            return captureStatus
         }
+        return convo.error?.message
+    }
+
+    private var runtimeFooterState: RuntimeFooterState {
         if let compaction = convo.compactionStatus {
             return .compaction(compaction)
-        }
-        if let error = convo.error {
-            return .error(error.message)
         }
         if let run = ConversationRenderLayout.pinnedRun(convo.items), let retry = run.retry, run.status == .running {
             return .reconnecting(retry, run.id)
@@ -1248,16 +1247,17 @@ struct ChatView: View {
         draftSourceCodeUnitsBinding.wrappedValue = updated.sourceCodeUnits
     }
 
-    /// Attach button: drive an on-device camera capture (falling back to the
-    /// photo library when the camera is unavailable, e.g. the simulator) and
-    /// surface the photo as a composer attachment chip.
+    /// Capture an attachment with the camera or pick one from Photos.
+    /// Simulators open Photos directly so they can use imported images.
     private func captureFromCamera() {
         captureStatus = nil
         Task {
+            #if targetEnvironment(simulator)
+            let result = await cameraCapture.capture(fromLibrary: true)
+            #else
             var result = await cameraCapture.capture(fromLibrary: false)
-            // Simulators have no camera — fall back to the library so the
-            // affordance is still exercisable.
             if case .failed = result { result = await cameraCapture.capture(fromLibrary: true) }
+            #endif
             switch result {
             case let .captured(att):
                 attachment = att
@@ -1283,7 +1283,6 @@ private enum RuntimeFooterState: Equatable {
     case hidden
     case reconnecting(ConversationRetrySnapshot, String)
     case compaction(ConversationCompactionStatus)
-    case error(String)
 }
 
 private struct CompactionRuntimeFooter: View {
@@ -1569,8 +1568,12 @@ private struct RuntimeErrorBanner: View {
         .padding(.horizontal, 14)
         .padding(.top, 8)
         .fixedSize(horizontal: false, vertical: true)
-        .layoutPriority(1)
+        .shadow(color: .black.opacity(0.09), radius: 12, y: 4)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("conversation.llm-status")
+        .onAppear {
+            UIAccessibility.post(notification: .announcement, argument: title)
+        }
         .sheet(isPresented: $showsDetails, onDismiss: { copied = false }) {
             NavigationStack {
                 ScrollView {

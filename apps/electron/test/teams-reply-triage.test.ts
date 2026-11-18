@@ -10,8 +10,8 @@ const message = (seq: number, text: string, author: ChatSourceMessage['author'] 
 const bot = { sharedBotId: 'sharedbot_01', name: 'Travel Helper', description: 'Plans trips and finds hotels.' };
 const botAuthor = { kind: 'shared_bot' as const, sharedBotId: 'sharedbot_01', displayName: 'Travel Helper' };
 const answering = (probability: number | 'refused' | Error, seen: DecisionInput[] = [], configured = true): ReplyDecision => ({
-  configured: async () => configured,
-  evaluate: async (input: DecisionInput) => {
+  isConfigured: async () => configured,
+  evaluateTool: async (input: DecisionInput) => {
     seen.push(input);
     if (probability instanceof Error) throw probability;
     return { state_revision: 0, usage: { input_tokens: 1, output_tokens: 1 }, actual_model: null, elapsed_ms: 1,
@@ -27,6 +27,35 @@ test('reply triage: a reply to the Bot or its name asks it, without the Decision
   assert.deepEqual(await triage([earlier, message(2, 'Which is quietest?', undefined, { replyTo: earlier.messageId })], answering(0, seen)), { action: 'run', source: 'rule' });
   assert.deepEqual(await triage([message(1, 'travel helper, any ideas for Lisbon?')], answering(0, seen)), { action: 'run', source: 'rule' });
   assert.equal(seen.length, 0);
+});
+test('reply triage: a name calls the Bot as a whole word, and a burst passed over counts as asking', async () => {
+  const at = (text: string, name: string, extra: Partial<TriageInput> = {}) => {
+    const latest = message(9, text);
+    return triageReply({ bot: { ...bot, name }, conversation: { kind: 'group' }, messages: [latest], messageId: latest.messageId, decision: answering(0.1), signal: new AbortController().signal, ...extra });
+  };
+  const rule = { action: 'run', source: 'rule' }, judged = { action: 'decline', source: 'decision' };
+  assert.deepEqual(await at('Al, any ideas for Lisbon?', 'Al'), rule);
+  assert.deepEqual(await at('what do you think, @al?', 'Al'), rule);
+  assert.deepEqual(await at('Also, lunch at noon?', 'Al'), judged, 'letters inside another word');
+  assert.deepEqual(await at('the maximum is 3', 'Max'), judged);
+  assert.deepEqual(await at('小助手帮我订个酒店', '小助手'), rule, 'a script without spaces matches anywhere');
+  assert.deepEqual(await at('Max帮我看看', 'Max'), rule);
+  assert.deepEqual(await at('😀 nice', '😀'), judged, 'one character is not a name');
+  const asked = message(7, 'Travel Helper, which hotel is quietest?'), chatter = message(8, 'thanks!');
+  assert.deepEqual(await triageReply({ bot, conversation: { kind: 'group' }, messages: [asked, chatter], messageId: chatter.messageId, earlier: [asked.messageId], decision: answering(0.1), signal: new AbortController().signal }), rule);
+  assert.deepEqual(await triageReply({ bot, conversation: { kind: 'group' }, messages: [asked, chatter], messageId: chatter.messageId, decision: answering(0.1), signal: new AbortController().signal }), judged);
+  // A request passed over without the Bot's name is judged with the message that ended the burst.
+  const seen: DecisionInput[] = [], request = message(7, 'how do I rotate the API key?');
+  await triageReply({ bot, conversation: { kind: 'group' }, messages: [message(6, 'morning'), request, chatter], messageId: chatter.messageId, earlier: [request.messageId], decision: answering(0.9, seen), signal: new AbortController().signal });
+  assert.deepEqual((seen[0]!.state as { recent: Array<{ text: string; unanswered?: boolean }> }).recent.map(entry => [entry.text, entry.unanswered ?? false]), [['morning', false], [request.text, true]]);
+  assert.match((seen[0]!.questions.reply as { instructions: string }).instructions, /marked unanswered/u);
+});
+test('reply triage: the Decision service is never sent half of a surrogate pair', () => {
+  const cut = message(1, `${'a'.repeat(499)}😀 and more`), latest = message(2, `${'b'.repeat(1999)}😀 tail`, { kind: 'user', uid: 'user_0', displayName: 'Bo\uD83D' });
+  const input = decisionInput({ bot: { ...bot, description: `${'d'.repeat(499)}😀` }, conversation: { kind: 'group' }, messages: [cut, latest], messageId: latest.messageId });
+  // JSON writes a whole pair as the character itself, and only a lone half as an escape.
+  assert.doesNotMatch(JSON.stringify(input), /\\ud[89a-f][0-9a-f]{2}/iu);
+  assert.equal((input.state as { recent: Array<{ text: string }> }).recent[0]!.text, `${'a'.repeat(499)}…`);
 });
 test('reply triage: the probability chooses decline, a run that may stay silent, or a run', async () => {
   const chat = [message(1, 'Lunch at noon?'), message(2, 'Sure!')];

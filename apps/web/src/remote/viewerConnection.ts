@@ -256,6 +256,13 @@ function verificationFailure(reason: VerifyFailure, detail?: string): Connection
   return { kind: 'verification', detail: detail === undefined ? reason : `${reason}: ${detail}`, auto: false };
 }
 
+/** What an `auth.denied` notice on an approved connection means for the user. */
+function noticeFailure(notice: string): ConnectionFailure {
+  return notice === 'revoked' ? { kind: 'revoked', auto: false }
+    : notice === 'disabled' ? { kind: 'disabled', auto: false }
+    : { kind: 'denied', detail: notice, auto: false };
+}
+
 /** What a signed `rejected` answer means for the user. */
 function rejectionFailure(reason: AnswerRecord['reason']): ConnectionFailure {
   switch (reason) {
@@ -889,6 +896,14 @@ export class ViewerConnection {
     } else {
       throw new AttemptError({ kind: 'protocol', detail: 'unknown initialize status', auto: false });
     }
+    // The link may have ended in the very delivery that approved it (the device revoked, remote control switched off right after): the attempt
+    // fails as that. Published as ready, it would sit on a closed link that nothing reconnects, since its close was seen before it was live.
+    if (a.notice !== undefined) {
+      const failure = noticeFailure(a.notice);
+      if (failure.kind === 'revoked') await this.deps.keys.unpair(this.deps.hostId).catch(() => undefined);
+      throw new AttemptError(failure);
+    }
+    if (a.closeReason !== undefined) throw new AttemptError({ kind: 'closed', detail: a.closeReason, auto: this.current.everReady });
 
     // The computer has accepted this browser: remember its key for every later answer.
     const hostName = displayText(host.name, 64) || this.deps.hostId;
@@ -946,10 +961,7 @@ export class ViewerConnection {
     this.live = undefined;
     this.dispose(a, reason);
     if (a.notice !== undefined) {
-      const failure: ConnectionFailure =
-        a.notice === 'revoked' ? { kind: 'revoked', auto: false }
-        : a.notice === 'disabled' ? { kind: 'disabled', auto: false }
-        : { kind: 'denied', detail: a.notice, auto: false };
+      const failure = noticeFailure(a.notice);
       if (failure.kind === 'revoked') void this.deps.keys.unpair(this.deps.hostId).catch(() => undefined);
       this.fail(failure);
       return;

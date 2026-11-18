@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactElement } from 'react';
+import { ChatPageHeading } from './ChatTopbar';
 import { friendsErrorText } from './errors.js';
 import { handleValid, NAME_MAX, nameValid, type FriendProfile } from './friends.js';
 import type { ProfileChanges, FriendsWorkspace } from './friends-workspace.js';
@@ -12,7 +13,7 @@ export function FriendProfileSettings({ workspace, snapshot, locale }: FriendsVi
   // D2: every open of this page reads the profile again.
   useEffect(() => { void workspace.refreshProfile(); }, [workspace]);
   return <section className="tw-scope tw-friends-page" aria-labelledby="tw-friends-profile">
-    <h2 id="tw-friends-profile">{t('friends_profile_title')}</h2>
+    <ChatPageHeading id="tw-friends-profile" title={t('friends_profile_title')} />
     {profile ? <ProfileForm key={profile.uid} workspace={workspace} profile={profile} locale={locale} />
       : snapshot.profileLoading ? <p className="tw-hint" role="status">{t('teams_loading')}</p>
       : <div className="tw-form">

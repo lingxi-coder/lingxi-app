@@ -727,7 +727,7 @@ export function App() {
     setMessageRequest(null);
   }, []);
 
-  const hasChatTopbar = (page === 'teams' && !botServices) || page === 'friends';
+  const hasChatTopbar = page === 'teams' || page === 'friends' || page === 'bots';
 
   const emptyMessage = bridge.sessionLoading
     ? tr('desktop_shell_loading_session')
@@ -804,7 +804,7 @@ export function App() {
               {hasChatTopbar && <div ref={setChatTopbar} className="desktop-chat-topbar-slot no-drag" />}
               {page === 'scheduled' && <ScheduledTasksTopBar />}
               {page === 'apps' && <LocalAppsTopBar onOpenMarket={() => { void window.lingxi?.localApps?.marketBrowse().catch(error => setLocalAppNavigationError(error instanceof Error ? error.message : String(error))); }} />}
-              <div style={{ display: page === 'chat' && (sidebarMode === 'home' || sidebarMode === 'apps') ? 'contents' : 'none' }}>
+              <div style={{ display: page === 'chat' && (sidebarMode === 'home' || sidebarMode === 'apps' || botChat) ? 'contents' : 'none' }}>
                 <BetaTopBar
                   bridge={bridge}
                   app={appChat ? { name: appWorkspace.activeGroup?.name ?? bridge.activeSession!.projectPath.split(/[\\/]+/).at(-1) ?? '', onOpen: showAppLibrary } : undefined}

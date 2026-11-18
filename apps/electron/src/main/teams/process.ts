@@ -22,6 +22,8 @@ export interface TeamHostBootstrap {
   sharedList?: { title: string; description: string; approval?: 'requester' };
   /** Nobody asked the Bot for this task (`run` and `continue`): offer it the tool that leaves the message unanswered. */
   mayDecline?: boolean;
+  /** With `mayDecline` only: the member wrote this message to the Bot directly (a Bot DM), so the Bot answers unless it plainly needs no answer. */
+  addressed?: boolean;
   knowledge?: Array<{ id: string; title: string; text: string }>;
   deadlineAt?: number; model?: Omit<TeamModelRoute, 'credential_id'>; credentials?: ProviderAccountEnvelope;
   limits?: { max_turns: number; context_window_tokens: number; output_tokens_per_request: number; physical_dispatches: number };

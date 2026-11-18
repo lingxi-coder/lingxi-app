@@ -35,8 +35,8 @@ struct NativeImagePreview: View {
             .padding(.horizontal, 16).padding(.top, 12)
 
             ZStack {
-                if let asset {
-                    PreviewZoomView(image: asset.image, command: command, reduceMotion: reduceMotion) { newScale, newMinimum in
+                if let previewImage {
+                    PreviewZoomView(image: previewImage, command: command, reduceMotion: reduceMotion) { newScale, newMinimum in
                         if abs(scale - newScale) > 0.0001 { scale = newScale }
                         if abs(minimum - newMinimum) > 0.0001 { minimum = newMinimum }
                     }
@@ -52,21 +52,21 @@ struct NativeImagePreview: View {
 
             HStack(spacing: 4) {
                 Button { request(.out) } label: { Image(systemName: "minus") }
-                    .disabled(asset == nil || scale <= minimum + 0.001)
+                    .disabled(previewImage == nil || scale <= minimum + 0.001)
                     .accessibilityLabel(String(localized: "image_preview_zoom_out"))
                     .accessibilityIdentifier("image-preview.zoom-out")
                 Button { request(.fit) } label: {
-                    Text(asset == nil ? "—" : percentage)
+                    Text(previewImage == nil ? "—" : percentage)
                         .font(.system(.subheadline, design: .default, weight: .medium))
                         .monospacedDigit().frame(minWidth: 68, minHeight: 44)
                 }
                 .buttonStyle(.plain)
-                .disabled(asset == nil)
+                .disabled(previewImage == nil)
                 .accessibilityLabel(String(localized: "image_preview_fit"))
                 .accessibilityValue(percentage)
                 .accessibilityIdentifier("image-preview.fit")
                 Button { request(.in) } label: { Image(systemName: "plus") }
-                    .disabled(asset == nil || scale >= 8)
+                    .disabled(previewImage == nil || scale >= 8)
                     .accessibilityLabel(String(localized: "image_preview_zoom_in"))
                     .accessibilityIdentifier("image-preview.zoom-in")
             }
@@ -100,6 +100,7 @@ struct NativeImagePreview: View {
     private func request(_ action: PreviewZoomAction) {
         command = PreviewZoomCommand(sequence: command.sequence + 1, action: action)
     }
+    private var previewImage: UIImage? { fallbackImage ?? asset?.image }
     private var percentage: String { Double(scale).formatted(.percent.precision(.fractionLength(0))) }
 }
 
@@ -147,7 +148,7 @@ private struct PreviewImageAsset {
             type = response.mimeType.flatMap { UTType(mimeType: $0) } ?? type
         } else { throw CocoaError(.fileReadUnsupportedScheme) }
         return try await Task.detached(priority: .userInitiated) {
-            guard let image = UIImage(data: data) else { throw CocoaError(.fileReadCorruptFile) }
+            guard let image = fallbackImage ?? UIImage(data: data) else { throw CocoaError(.fileReadCorruptFile) }
             return PreviewImageAsset(image: image, data: data, contentType: type)
         }.value
     }

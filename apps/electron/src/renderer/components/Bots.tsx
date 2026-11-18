@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
+import { useContext, useEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
+import { ChatTopbarHeader, ChatTopbarTarget } from '../../../../../packages/teams/ChatTopbar';
+import { Icon as ChatIcon } from '../../../../../packages/teams/ui';
 import type { BotUi, BotsApi } from '../../shared/bots';
 import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
@@ -36,6 +38,7 @@ export function Bots({ visible, bots, api, bridge, onOpenChat, onNewRoutine, onO
   const t = useT();
   useI18n();
   const { controller, state, view, setView } = bots;
+  const topbar = useContext(ChatTopbarTarget);
   useEffect(() => { if (visible) void controller.reload(); }, [controller, visible]);
   // The owner can change the login item in System Settings: read it again whenever the page comes into view or the window is returned to.
   const [loginItem] = useState(() => new LoginItemController(api.loginItem));
@@ -57,7 +60,7 @@ export function Bots({ visible, bots, api, bridge, onOpenChat, onNewRoutine, onO
     '--bots-error': t.danger, '--bots-ok': t.ok, '--bots-warn': t.warn,
   } as CSSProperties;
 
-  return <section className="bots-page" aria-label={tr('bots_title')} style={style}>
+  return <ChatTopbarTarget.Provider value={visible ? topbar : undefined}><section className="bots-page" aria-label={tr('bots_title')} style={style}>
     {view.kind === 'create'
       ? <BotCreate key={view.requestId ?? 'new'} api={api} models={models} pickFolder={bridge.pickBotFolder} onCancel={() => setView({ kind: 'list' })}
         initialProposal={view.proposal} guard={bots.guard} onAssist={onAssist}
@@ -73,7 +76,7 @@ export function Bots({ visible, bots, api, bridge, onOpenChat, onNewRoutine, onO
         : <BotList state={state} activityOf={activityOf} onNew={() => setView({ kind: 'create' })}
           onOpen={(botId) => setView({ kind: 'detail', botId })} onRetry={() => void controller.reload()}
           background={<BotsBackground keepAwake={bridge.bootstrap?.settings?.botsKeepAwake === true} onKeepAwake={(enabled) => void bridge.setBotsKeepAwake(enabled)} loginItem={loginItem} />} />}
-  </section>;
+  </section></ChatTopbarTarget.Provider>;
 }
 
 export function BotList({ state, activityOf, onNew, onOpen, onRetry, background }: {
@@ -90,10 +93,10 @@ export function BotList({ state, activityOf, onNew, onOpen, onRetry, background 
   const loading = state.availability === undefined || (state.loading && bots.length === 0);
   const empty = !loading && state.error === undefined && bots.length === 0;
   return <>
-    <header className="bots-header">
+    <ChatTopbarHeader><header className="bots-header">
       <div><h1>{tr('bots_title')}</h1><p>{tr('bots_tagline')}</p></div>
       <button type="button" data-variant="primary" onClick={onNew}>{tr('bots_new')}</button>
-    </header>
+    </header></ChatTopbarHeader>
     {state.error !== undefined ? <p role="alert" className="bots-problem">{tr('bots_load_failed')} {state.error} <button type="button" onClick={onRetry}>{tr('common_retry')}</button></p> : null}
     {loading ? <p role="status" className="bots-muted">{tr('bots_loading')}</p> : null}
     {empty ? <div className="bots-empty">
@@ -173,9 +176,11 @@ export function BotCreate({ api, models, pickFolder, onCancel, onCreated, initia
   };
   const shown = shownProblems(problems, attempted);
   return <div className="bots-detail">
-    <button type="button" className="bots-back" data-variant="quiet" disabled={busy || opening} onClick={() => guard.leave(onCancel)}>← {tr('bots_back')}</button>
-    <header className="bots-header"><div><h1>{tr(initialProposal ? 'bots_assist_review_title' : 'bots_new')}</h1>
-      {initialProposal ? <p>{tr('bots_assist_review_hint')}</p> : null}</div></header>
+    <ChatTopbarHeader><header className="bots-header bots-create-header">
+      <button type="button" className="bots-back" data-variant="quiet" aria-label={tr('bots_back')} title={tr('bots_back')} disabled={busy || opening} onClick={() => guard.leave(onCancel)}><ChatIcon name="chevronLeft" /></button>
+      <div><h1>{tr(initialProposal ? 'bots_assist_review_title' : 'bots_new')}</h1></div>
+    </header></ChatTopbarHeader>
+    {initialProposal ? <p className="bots-muted">{tr('bots_assist_review_hint')}</p> : null}
     {onAssist && !initialProposal ? <div className="bot-create-mode" role="group" aria-label={tr('bots_assist_method')}>
       <button type="button" aria-pressed={mode === 'assist'} disabled={busy || opening} onClick={() => setMode('assist')}>{tr('bots_assist_mode')}</button>
       <button type="button" aria-pressed={mode === 'manual'} disabled={busy || opening} onClick={() => setMode('manual')}>{tr('bots_assist_manual')}</button>

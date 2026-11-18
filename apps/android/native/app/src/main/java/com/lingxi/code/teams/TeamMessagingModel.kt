@@ -395,11 +395,12 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         val task = TeamTask.parse(execute("getTask", JSONObject().put("taskId", taskId), lifecycle))
         mutable.update { if (it.selected == selection) it.copy(tasks = if (it.tasks.any { old -> old.taskId == taskId }) it.tasks.map { old -> if (old.taskId == taskId) task else old } else it.tasks + task) else it }
     }
-    /** Stops a task: at once while it is queued or waiting, at the worker's next check while the Bot is working. A task that has already ended stays as it is. */
     /** Sets which Bots of a Chat judge for themselves whether to answer it. The listener brings the new setting. */
-    fun setConversationAutoReply(conversationId: String, expectedRevision: Long, targets: List<String>) = launchOperation {
-        execute("setConversationAutoReply", JSONObject().put("conversationId", conversationId).put("expectedRevision", expectedRevision).put("targets", JSONArray(targets)), lifecycle)
+    fun setConversationAutoReply(conversationId: String, expectedRevision: Long, targets: List<String>, onFailed: () -> Unit = {}) = launchOperation {
+        try { execute("setConversationAutoReply", JSONObject().put("conversationId", conversationId).put("expectedRevision", expectedRevision).put("targets", JSONArray(targets)), lifecycle) }
+        catch (error: Exception) { if (error !is CancellationException) onFailed(); throw error }
     }
+    /** Stops a task: at once while it is queued or waiting, at the worker's next check while the Bot is working. A task that has already ended stays as it is. */
     fun cancelTask(taskId: String) = launchOperation {
         try { execute("cancelTask", JSONObject().put("taskId", taskId), lifecycle) }
         catch (error: TeamMessageFailure) { if (error.code != "TASK_FINISHED") throw error }

@@ -351,6 +351,9 @@ internal fun RemoteSessionScreen(
                     color = t.text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
                 val modeLabel = meta.sessionMode?.let { sessionModeLabel(it) }
                 Text(listOfNotNull(botName, hostName, modeLabel).joinToString(" · "), color = t.text3, fontSize = 12.sp, maxLines = 1)
+                if (!reattaching && !approvalOnly && meta.sessionMode != null && meta.phase != RemoteSessionPhaseFfi.LIVE) {
+                    state.statusLine?.let { Text(it, color = t.text3, fontSize = 12.sp, maxLines = 2) }
+                }
             }
         }
         val ownerMode = meta.sessionMode

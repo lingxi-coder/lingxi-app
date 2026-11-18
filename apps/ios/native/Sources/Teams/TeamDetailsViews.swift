@@ -5,6 +5,9 @@ import SwiftUI
 struct TeamConversationDetailsSheet: View {
     @Environment(TeamsWorkspace.self) private var workspace
     @Environment(\.dismiss) private var dismiss
+    /// The Chat and auto-reply revision a change was sent from: the switches wait until the listener brings the next
+    /// revision, since another toggle before then would send the old one and conflict.
+    @State private var autoReplySent: String?
     let conversationID: String
     /// In the wide layout the details are a side pane: Close replaces Done and calls this instead of dismissing a sheet.
     var onClose: (() -> Void)?
@@ -113,10 +116,12 @@ struct TeamConversationDetailsSheet: View {
                         let on = auto.on.contains(card.sharedBotId)
                         VStack(alignment: .leading, spacing: 4) {
                             Toggle(card.name, isOn: Binding(get: { on }, set: { enabled in
-                                let targets = TeamAutoReply.targets(auto.bots, on: auto.on, switching: card.sharedBotId, to: enabled)
-                                Task { await workspace.run { try await model.setConversationAutoReply(conversation.id, expectedRevision: conversation.autoReply?.revision ?? 0, targets: targets) } }
+                                let targets = TeamAutoReply.targets(auto.bots, on: auto.on, kept: auto.kept, switching: card.sharedBotId, to: enabled)
+                                let revision = conversation.autoReply?.revision ?? 0
+                                autoReplySent = "\(conversation.id)#\(revision)"
+                                Task { if await !workspace.run({ try await model.setConversationAutoReply(conversation.id, expectedRevision: revision, targets: targets) }) { autoReplySent = nil } }
                             }))
-                            .disabled(model.offline || workspace.messageBusy || !on && !TeamAutoReply.available(card))
+                            .disabled(model.offline || workspace.messageBusy || autoReplySent == "\(conversation.id)#\(conversation.autoReply?.revision ?? 0)" || !on && !TeamAutoReply.available(card))
                             .accessibilityIdentifier("teams.conversation.details.autoreply.\(card.sharedBotId)")
                             // Said before it is switched on: where this Chat's messages go.
                             Group {

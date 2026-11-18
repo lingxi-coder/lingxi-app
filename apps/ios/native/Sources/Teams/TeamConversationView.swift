@@ -54,6 +54,21 @@ struct TeamConversationView: View {
                 loaded(context)
             } else {
                 missing
+                    .navigationTitle(workspace.messaging?.cache?.creation.flatMap { $0.conversationId == conversationID ? $0.title : nil }
+                                     ?? workspace.team?.name ?? "")
+                    .toolbar {
+                        if let model = workspace.messaging,
+                           !model.error.isEmpty || (model.directoryReady && model.offline) {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                let status = model.error.isEmpty ? LocalizedStringKey("teams_offline_title") : LocalizedStringKey(TeamsErrors.key(model.error))
+                                Menu {
+                                    Text(model.error.isEmpty ? LocalizedStringKey("teams_messages_offline") : status)
+                                    Button("teams_reconnect", systemImage: "arrow.clockwise") { workspace.reconnect() }
+                                } label: { Image(systemName: model.error.isEmpty ? "wifi.slash" : "exclamationmark.circle") }
+                                .accessibilityLabel(Text(status))
+                            }
+                        }
+                    }
             }
         }
         .navigationBarTitleDisplayMode(.inline)

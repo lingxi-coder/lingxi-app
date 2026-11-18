@@ -33,7 +33,7 @@ async function main() {
     await configureFixtureWindow(win);
     await wait(`document.querySelector('.desktop-nav-rail [aria-label="Bots"]')`);
     await click('.desktop-nav-rail [aria-label="Bots"]');
-    await clickText('.bots-page button', 'New Bot');
+    await clickText('.desktop-window-toolbar .bots-header button', 'New Bot');
     await wait(`document.querySelector('.bot-create-intro')`);
     assert.equal(await run(`document.querySelector('.bot-create-intro button[type="submit"]').disabled`), true);
     await clickText('.bot-create-examples button', 'Writing partner');
@@ -95,7 +95,7 @@ async function main() {
     assert.equal(await run(`document.querySelector('.bots-persona').value`), proposal.persona);
     await screenshot('bot-creation-review');
     await submitTwice('.bot-create-fields');
-    await wait(`document.querySelector('.bots-page h1')?.textContent === 'My writing partner'`);
+    await wait(`document.querySelector('.desktop-window-toolbar .bots-detail-header h1')?.textContent === 'My writing partner'`);
     assert.equal((await calls('create')).length, 2);
     assert.deepEqual((await calls('create')).at(-1)[1], { name: 'My writing partner', description: proposal.description, persona: proposal.persona, permissionMode: 'default' });
     assert.deepEqual(errors, []);

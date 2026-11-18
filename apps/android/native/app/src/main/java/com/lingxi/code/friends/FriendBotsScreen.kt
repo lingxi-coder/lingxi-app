@@ -29,9 +29,8 @@ import com.lingxi.code.teams.TeamSharedListRules
 import com.lingxi.code.teams.TeamMember
 import com.lingxi.code.teams.StopSharingDialog
 import com.lingxi.code.teams.TeamMessagingState
-import com.lingxi.code.teams.TeamsErrorBanner
 import com.lingxi.code.teams.TeamsMessageState
-import com.lingxi.code.teams.TeamsOfflineBanner
+import com.lingxi.code.teams.TeamsConnectionMenu
 import com.lingxi.code.teams.botAvailabilityText
 import com.lingxi.code.theme.BotAvatar
 
@@ -62,9 +61,13 @@ internal fun FriendBotsScreen(
     // The read has not settled: it failed, or it is still out. A settled empty list is the empty state.
     val unsettled = messaging.botsFailed || !messaging.botsLoaded
     Column(modifier.fillMaxSize().testTag(FriendsTags.BOTS_SCREEN)) {
-        FriendsPageHeader(stringResource(R.string.friends_bots_title), showBack, onBack)
-        if (messaging.directoryReady && messaging.offline) TeamsOfflineBanner(onReconnect)
-        if (messaging.error.isNotEmpty() && messaging.error != "SERVICE_UNAVAILABLE") TeamsErrorBanner(messaging.error, onRetry = onReconnect)
+        FriendsPageHeader(stringResource(R.string.friends_bots_title), showBack, onBack) {
+            TeamsConnectionMenu(
+                error = messaging.error.takeIf { it.isNotEmpty() && it != "SERVICE_UNAVAILABLE" },
+                offline = messaging.directoryReady && messaging.offline,
+                onReconnect = onReconnect,
+            )
+        }
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             if (messaging.bots.isEmpty()) item(key = "status") {
                 if (unsettled) {

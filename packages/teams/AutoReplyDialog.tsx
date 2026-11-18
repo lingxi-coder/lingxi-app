@@ -8,13 +8,15 @@ import { useTeamsText } from './i18n.js';
 /** The Chats where a Bot may judge for itself whether to answer: groups, channels and Bot DMs. */
 const KINDS: TeamConversation['kind'][] = ['group', 'channel', 'bot_dm'];
 
-/** The Bots of a Chat that can be switched to answer on their own, and those already on (which can always be switched off). */
-export function autoReplyBots(conversation: TeamConversation, snapshot: Pick<TeamsSnapshot, 'bots' | 'uid'>): { bots: SharedBotCard[]; on: string[] } {
-  if (!KINDS.includes(conversation.kind) || !conversation.participants.includes(`user:${snapshot.uid}`)) return { bots: [], on: [] };
+/** The Bots of a Chat that can be switched to answer on their own, and those already on (which can always be switched off). `kept` are
+ * Bots of the Chat already on that this person cannot see: the setting is the whole list, so a change here leaves them on. */
+export function autoReplyBots(conversation: TeamConversation, snapshot: Pick<TeamsSnapshot, 'bots' | 'uid'>): { bots: SharedBotCard[]; on: string[]; kept: string[] } {
+  if (!KINDS.includes(conversation.kind) || !conversation.participants.includes(`user:${snapshot.uid}`)) return { bots: [], on: [], kept: [] };
   const on = conversation.autoReply?.targets ?? [];
   const bots = snapshot.bots.filter(bot => conversation.participants.includes(`shared_bot:${bot.sharedBotId}`)
     && (on.includes(bot.sharedBotId) || bot.state === 'published' && !!bot.autoReply));
-  return { bots, on: on.filter(id => bots.some(bot => bot.sharedBotId === id)) };
+  const shown = (id: string) => bots.some(bot => bot.sharedBotId === id);
+  return { bots, on: on.filter(shown), kept: on.filter(id => !shown(id) && conversation.participants.includes(`shared_bot:${id}`)) };
 }
 
 /**
@@ -25,13 +27,15 @@ export function AutoReplyDialog({ workspace, snapshot, conversation, scope, loca
   workspace: TeamsWorkspace; snapshot: TeamsSnapshot; conversation: TeamConversation; scope: ExecutionScope; locale: string; onClose(): void;
 }): ReactElement {
   const t = useTeamsText(locale);
-  const { bots, on } = autoReplyBots(conversation, snapshot);
-  const [chosen, setChosen] = useState<string[]>(on);
+  const { bots, on, kept } = autoReplyBots(conversation, snapshot);
+  // The setting as the dialog opened: a change saved meanwhile by someone else is a conflict, not silently overwritten by this one.
+  const [opened] = useState(() => ({ on, kept, revision: conversation.autoReply?.revision ?? 0 }));
+  const [chosen, setChosen] = useState<string[]>(opened.on);
   const nameOf = (uid: string) => uid === snapshot.uid ? t('teams_list_history_you_inline') : snapshot.directory.find(member => member.uid === uid)?.displayName || t('tw_its_maintainer');
-  const changed = chosen.length !== on.length || chosen.some(id => !on.includes(id));
+  const changed = chosen.length !== opened.on.length || chosen.some(id => !opened.on.includes(id));
   const save = async () => {
-    const targets = bots.map(bot => bot.sharedBotId).filter(id => chosen.includes(id));
-    if (await workspace.run(() => workspace.api.messages(executionCommand(scope, 'setConversationAutoReply', { conversationId: conversation.id, expectedRevision: conversation.autoReply?.revision ?? 0, targets })))) onClose();
+    const targets = [...bots.map(bot => bot.sharedBotId).filter(id => chosen.includes(id)), ...opened.kept];
+    if (await workspace.run(() => workspace.api.messages(executionCommand(scope, 'setConversationAutoReply', { conversationId: conversation.id, expectedRevision: opened.revision, targets })))) onClose();
   };
   return <Dialog title={t('teams_auto_reply_title')} onClose={onClose}>
     <div className="tw-form">

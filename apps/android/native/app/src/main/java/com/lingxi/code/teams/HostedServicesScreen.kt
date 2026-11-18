@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -23,11 +24,12 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
-import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.HourglassEmpty
 import androidx.compose.material.icons.outlined.MoreVert
@@ -59,6 +61,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -83,9 +86,10 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lingxi.code.R
 import com.lingxi.code.conversation.AIText
+import com.lingxi.code.conversation.ComposerInputSurface
+import com.lingxi.code.conversation.ComposerSendButton
 import com.lingxi.code.theme.BotAvatar
 import com.lingxi.code.theme.ConfirmDialog
-import com.lingxi.code.theme.PersonAvatar
 import com.lingxi.code.theme.rememberReduceMotion
 import kotlinx.coroutines.launch
 import java.util.UUID
@@ -241,6 +245,11 @@ private fun ColumnScope.ServiceSession(model: HostedServicesModel, state: Hosted
         Box {
             IconButton(onClick = { menu = true }, modifier = Modifier.testTag("services.menu")) { Icon(Icons.Outlined.MoreVert, stringResource(R.string.services_menu)) }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                if (!service.available && !service.withdrawn) Text(
+                    stringResource(R.string.services_cannot_answer),
+                    Modifier.widthIn(max = 240.dp).padding(horizontal = 16.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 if (state.sessions.isNotEmpty()) DropdownMenuItem(text = { Text(stringResource(R.string.services_sessions)) }, onClick = { menu = false; choosing = true })
                 DropdownMenuItem(text = { Text(stringResource(R.string.inbox_mark_read)) }, enabled = ref != null, onClick = {
                     menu = false
@@ -276,7 +285,7 @@ private fun ColumnScope.ServiceSession(model: HostedServicesModel, state: Hosted
         if (state.earlier != null) item("earlier") {
             TextButton(onClick = model::loadEarlier, enabled = !state.loadingHistory) { Text(stringResource(R.string.teams_messages_earlier)) }
         }
-        items(state.messages, key = { it.id }) { message -> ServiceMessage(message, service, state.uid) }
+        items(state.messages, key = { it.id }) { message -> ServiceMessage(message, service) }
         items(unanswered, key = { "task:" + it.taskId }) { task -> ServiceTaskLine(task, state, model) }
     }
     if (state.olderWindow && ref != null) {
@@ -287,14 +296,30 @@ private fun ColumnScope.ServiceSession(model: HostedServicesModel, state: Hosted
     }
     state.error?.let { Text(stringResource(HostedService.errorRes(it)), Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).testTag("services.session.error").semantics { liveRegion = LiveRegionMode.Polite },
         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
-    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    ComposerInputSurface(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
         val tooLong = TeamsComposeLogic.byteLength(text) > TeamsComposeLogic.MESSAGE_BYTES
-        OutlinedTextField(value = text, onValueChange = { text = it }, enabled = !service.withdrawn, maxLines = 6, modifier = Modifier.weight(1f).testTag("services.composer"),
-            placeholder = { Text(if (state.answering) stringResource(R.string.services_answer_hint) else stringResource(R.string.services_ask_hint_fmt, service.name)) })
-        IconButton(enabled = !state.busy && !service.withdrawn && text.isNotBlank() && !tooLong, modifier = Modifier.testTag("services.send"), onClick = {
-            val sent = text
-            scope.launch { if (model.send(sent) && text == sent) text = "" }
-        }) { Icon(Icons.AutoMirrored.Outlined.Send, stringResource(R.string.teams_message_send)) }
+        val placeholder = if (state.answering) stringResource(R.string.services_answer_hint) else stringResource(R.string.services_ask_hint_fmt, service.name)
+        BasicTextField(
+            value = text, onValueChange = { text = it }, enabled = !service.withdrawn, minLines = 1, maxLines = 6,
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+            modifier = Modifier.fillMaxWidth().testTag("services.composer"),
+            decorationBox = { inner ->
+                Box {
+                    if (text.isEmpty()) Text(placeholder, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    inner()
+                }
+            },
+        )
+        ComposerSendButton(
+            label = stringResource(R.string.teams_message_send),
+            enabled = !state.busy && !service.withdrawn && text.isNotBlank() && !tooLong,
+            modifier = Modifier.align(Alignment.End).testTag("services.send"),
+            onClick = {
+                val sent = text
+                scope.launch { if (model.send(sent) && text == sent) text = "" }
+            },
+        )
     }
     if (choosing) AlertDialog(
         onDismissRequest = { choosing = false }, title = { Text(stringResource(R.string.services_sessions)) },
@@ -322,18 +347,23 @@ private fun ColumnScope.ServiceSession(model: HostedServicesModel, state: Hosted
  * tint of the row, never a bubble, and the service's carry its name. The name, the Question tag and the text are one accessibility element.
  */
 @Composable
-private fun ServiceMessage(message: TeamMessage, service: HostedServiceView, uid: String) {
+private fun ServiceMessage(message: TeamMessage, service: HostedServiceView) {
     val bot = message.authorKind != "user"
     Row(
-        Modifier.fillMaxWidth().then(if (bot) Modifier else Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = OWN_MESSAGE_TINT)))
-            .padding(horizontal = 16.dp, vertical = 6.dp).testTag("services.message.${message.id}"),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        Modifier.fillMaxWidth().padding(start = if (bot) 16.dp else 48.dp, end = 16.dp, top = 6.dp, bottom = 6.dp)
+            .testTag("services.message.${message.id}"),
+        horizontalArrangement = if (bot) Arrangement.spacedBy(10.dp) else Arrangement.End,
     ) {
-        if (bot) BotAvatar(service.sharedBotId, 32.dp) else PersonAvatar(uid, "", 32.dp)
-        Column(Modifier.weight(1f).semantics(mergeDescendants = true) {}, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        if (bot) BotAvatar(service.sharedBotId, 32.dp)
+        val content = if (bot) Modifier.weight(1f) else Modifier.widthIn(max = 360.dp)
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = OWN_MESSAGE_TINT), RoundedCornerShape(16.dp))
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+        Column(content.semantics(mergeDescendants = true) {}, verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(if (bot) service.name else stringResource(R.string.teams_you), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                 if (bot && message.waitId != null) Text(stringResource(R.string.services_question), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                val time = TeamsStreamLogic.formatClock(message.createdAtMs)
+                if (time.isNotEmpty()) Text(time, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             when {
                 message.recalled -> Text(stringResource(R.string.teams_message_recalled), fontStyle = FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant)

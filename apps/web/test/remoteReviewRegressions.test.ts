@@ -1,3 +1,4 @@
+import './support/remoteSharedUi';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
@@ -130,7 +131,7 @@ test('a rejected remote admission preserves the original text and prepared image
     await act(async () => { renderer.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
     assert.equal(renderer.root.findByType('textarea').props.value, text);
     assert.equal(renderer.root.findAllByType('img').length, 1);
-    assert.equal(renderer.root.findAllByProps({ role: 'alert' }).length, 1);
+    assert.equal(renderer.root.findAllByProps({ role: 'alert' }).length, 0);
   } finally {
     if (renderer) act(() => renderer.unmount());
     globalThis.createImageBitmap = original;
@@ -165,6 +166,14 @@ test('a mode conflict between render and send retains the session file attachmen
       controller.handleSnapshot({ session_id: 's', phase: 'begin', epoch: 'e2', first_message_index: 0, session_mode: 'chat' });
       renderer.root.findByType('form').props.onSubmit({ preventDefault() {} });
     });
+    assert.equal(renderer.root.findByType('textarea').props.value, text);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Remove file' }).length, 1);
+    const dismissLabel = 'Dismiss send failure notification';
+    const notice = () => renderer.root.findByProps({ className: 'send-failure-notice' });
+    assert.deepEqual(notice().findByProps({ role: 'alert' }).children, ['Not sent']);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': dismissLabel }).props.onClick(); });
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': dismissLabel }).length, 0);
+    assert.deepEqual(notice().findByProps({ role: 'alert' }).children, []);
     assert.equal(renderer.root.findByType('textarea').props.value, text);
     assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Remove file' }).length, 1);
   } finally {
@@ -342,6 +351,7 @@ test('the actual remote route remounts session state for a different session or 
   }).outputText;
   const module = { exports: {} as { default: (props: any) => ReturnType<typeof createElement> } };
   const substitute = (specifier: string): unknown => {
+    if (specifier === '../../../../packages/teams/ChatTopbar') return require('../../../packages/teams/ChatTopbar.tsx');
     if (specifier === '../remote/useRemote') return hooks;
     if (specifier === '../remote/SessionView') return { SessionView: statefulSession };
     if (specifier === '../remote/Bots') return { BotList: () => null, BotPage: () => null };

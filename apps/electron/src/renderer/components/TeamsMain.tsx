@@ -3,7 +3,6 @@ import type { TeamMember } from '../../../../../packages/teams';
 import { InviteFriendsDialog, InviteNotice, MemberFriendDialog } from '../../../../../packages/teams/friend-dialogs';
 import { HostedServices } from '../../../../../packages/teams/HostedServices';
 import { serviceLink, type HostedServicesApi } from '../../../../../packages/teams/hosted-service';
-import { useTeamsText } from '../../../../../packages/teams/i18n';
 import { TeamConversationView } from '../../../../../packages/teams/TeamConversationView';
 import { TeamDetailsDrawer } from '../../../../../packages/teams/TeamDetailsDrawer';
 import type { UseFriends } from '../../../../../packages/teams/useFriendsWorkspace';
@@ -35,7 +34,6 @@ export function TeamsMain({ teams, friends, locale, drawer, services, inboxTarge
   inboxTarget?: { serviceId: string; sessionId: string };
   notificationTarget?: InboxNoticeTarget;
   /** Bot services are shown in place of the Team. */ services: boolean; onCloseServices(): void }) {
-  const t = useTeamsText(locale);
   const { workspace, snapshot, signedIn } = teams;
   const [adding, setAdding] = useState<TeamMember>();
   const [inviting, setInviting] = useState(false);
@@ -50,12 +48,11 @@ export function TeamsMain({ teams, friends, locale, drawer, services, inboxTarge
   if (services && servicesApi) return (
     <div className="teams-page">
       <div className="teams-conversation" style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-        <button type="button" className="tw-link" style={{ alignSelf: 'flex-start', margin: '10px 20px 0' }} onClick={onCloseServices}>{t('tw_back_team')}</button>
         <div style={{ flex: 1, minHeight: 0 }}>
           <HostedServices key={snapshot.uid} api={servicesApi} uid={snapshot.uid} locale={locale}
             notificationTarget={notificationTarget}
             initialServiceId={inboxTarget?.serviceId} initialSessionId={inboxTarget?.sessionId}
-            renderMarkdown={renderTeamMarkdown} link={id => serviceLink('https://lingxios.net', id)} />
+            renderMarkdown={renderTeamMarkdown} link={id => serviceLink('https://lingxios.net', id)} onBackToTeams={onCloseServices} />
         </div>
       </div>
     </div>

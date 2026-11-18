@@ -31,17 +31,19 @@ internal data class TeamBotCard(val sharedBotId: String, val name: String, val d
 /** Which Bots of a Chat judge for themselves whether to answer its messages. Any person in a group, channel or Bot DM may change it. */
 internal object TeamAutoReply {
     private val kinds = setOf("group", "channel", "bot_dm")
-    data class Choice(val bots: List<TeamBotCard>, val on: List<String>)
+    /** `kept`: Bots of the Chat already on that this person cannot see. The setting is the whole list, so a change here leaves them on. */
+    data class Choice(val bots: List<TeamBotCard>, val on: List<String>, val kept: List<String> = emptyList())
     /** The Bots that can be switched on (published to answer on their own), and those already on, which can always be switched off. */
     fun bots(conversation: TeamMessageConversation, cards: List<TeamBotCard>, uid: String): Choice {
         if (conversation.kind !in kinds || "user:$uid" !in conversation.participants) return Choice(emptyList(), emptyList())
         val on = conversation.autoReply?.targets.orEmpty()
         val bots = cards.filter { "shared_bot:${it.sharedBotId}" in conversation.participants && (it.sharedBotId in on || available(it)) }
-        return Choice(bots, on.filter { id -> bots.any { it.sharedBotId == id } })
+        val shown = { id: String -> bots.any { it.sharedBotId == id } }
+        return Choice(bots, on.filter(shown), on.filter { !shown(it) && "shared_bot:$it" in conversation.participants })
     }
     fun available(card: TeamBotCard) = card.state == "published" && card.autoReply != null
-    /** The setting after one Bot is switched, in the Chat's Bot order. */
-    fun targets(choice: Choice, switching: String, enabled: Boolean) = choice.bots.map { it.sharedBotId }.filter { if (it == switching) enabled else it in choice.on }
+    /** The setting after one Bot is switched, in the Chat's Bot order, with the Bots this person cannot see left as they are. */
+    fun targets(choice: Choice, switching: String, enabled: Boolean) = choice.bots.map { it.sharedBotId }.filter { if (it == switching) enabled else it in choice.on } + choice.kept
 }
 /** What a Bot run cost, as the host reports it: `missing` carries no figures; the cost only when the host could price it (`costMicros` is millionths of `currency`). */
 internal data class TeamTaskUsage(val status: String, val inputTokens: Long = 0, val outputTokens: Long = 0, val costMicros: Double? = null, val currency: String? = null) {

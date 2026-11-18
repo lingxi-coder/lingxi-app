@@ -390,15 +390,17 @@ enum TeamExecutionContract {
 enum TeamAutoReply {
     static let kinds: Set<String> = ["group", "channel", "bot_dm"]
     /// The Bots that can be switched on (published to answer on their own), and those already on, which can always be switched off.
-    static func bots(_ conversation: TeamMessageConversation, cards: [TeamBotCard], uid: String) -> (bots: [TeamBotCard], on: [String]) {
-        guard kinds.contains(conversation.kind), conversation.participants.contains("user:" + uid) else { return ([], []) }
+    /// `kept`: Bots of the Chat already on that this person cannot see. The setting is the whole list, so a change here leaves them on.
+    static func bots(_ conversation: TeamMessageConversation, cards: [TeamBotCard], uid: String) -> (bots: [TeamBotCard], on: [String], kept: [String]) {
+        guard kinds.contains(conversation.kind), conversation.participants.contains("user:" + uid) else { return ([], [], []) }
         let on = conversation.autoReply?.targets ?? []
         let bots = cards.filter { card in conversation.participants.contains("shared_bot:" + card.sharedBotId) && (on.contains(card.sharedBotId) || available(card)) }
-        return (bots, on.filter { id in bots.contains { $0.sharedBotId == id } })
+        let shown = { (id: String) -> Bool in bots.contains { $0.sharedBotId == id } }
+        return (bots, on.filter(shown), on.filter { !shown($0) && conversation.participants.contains("shared_bot:" + $0) })
     }
     static func available(_ card: TeamBotCard) -> Bool { card.state == "published" && card.autoReply != nil }
-    /// The setting after one Bot is switched, in the Chat's Bot order.
-    static func targets(_ bots: [TeamBotCard], on: [String], switching id: String, to enabled: Bool) -> [String] {
-        bots.map(\.sharedBotId).filter { $0 == id ? enabled : on.contains($0) }
+    /// The setting after one Bot is switched, in the Chat's Bot order, with the Bots this person cannot see left as they are.
+    static func targets(_ bots: [TeamBotCard], on: [String], kept: [String] = [], switching id: String, to enabled: Bool) -> [String] {
+        bots.map(\.sharedBotId).filter { $0 == id ? enabled : on.contains($0) } + kept
     }
 }

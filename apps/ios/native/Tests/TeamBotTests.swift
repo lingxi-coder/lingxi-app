@@ -233,6 +233,12 @@ final class TeamBotTests: XCTestCase {
         XCTAssertEqual(TeamAutoReply.targets(offered.bots, on: offered.on, switching: "sharedbot_a", to: true), ["sharedbot_a", "sharedbot_c"])
         XCTAssertEqual(TeamAutoReply.targets(offered.bots, on: offered.on, switching: "sharedbot_c", to: false), [])
         XCTAssertTrue(TeamAutoReply.bots(chat, cards: cards, uid: "bob").bots.isEmpty, "only the Chat's people change it")
+        // A Bot on in the Chat that this person cannot see (published to others only) stays on whatever they switch.
+        chat = TeamMessageConversation(id: "chat_0001", kind: "group", title: "Trip", participants: ["user:alice", "shared_bot:sharedbot_a", "shared_bot:sharedbot_x"],
+                                       lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0, autoReply: TeamConversationAutoReply(revision: 4, targets: ["sharedbot_x", "sharedbot_gone"]))
+        let hidden = TeamAutoReply.bots(chat, cards: cards, uid: "alice")
+        XCTAssertEqual(hidden.on, []); XCTAssertEqual(hidden.kept, ["sharedbot_x"], "a Bot no longer in the Chat is not kept")
+        XCTAssertEqual(TeamAutoReply.targets(hidden.bots, on: hidden.on, kept: hidden.kept, switching: "sharedbot_a", to: true), ["sharedbot_a", "sharedbot_x"])
         chat = TeamMessageConversation(id: "chat_0002", kind: "dm", title: "", participants: ["user:alice", "shared_bot:sharedbot_a"], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0)
         XCTAssertTrue(TeamAutoReply.bots(chat, cards: cards, uid: "alice").bots.isEmpty)
     }

@@ -1,4 +1,6 @@
 import { BotMarketPanel } from './BotMarketPanel';
+import { ChatTopbarHeader } from '../../../../../packages/teams/ChatTopbar';
+import { Icon } from '../../../../../packages/teams/ui';
 import { useEffect, useId, useState, type KeyboardEvent } from 'react';
 import type { BotUi, BotsApi } from '../../shared/bots';
 import { tr } from '../i18n/locale';
@@ -191,8 +193,8 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
   };
 
   return <div className="bots-detail">
-    <button type="button" className="bots-back" data-variant="quiet" onClick={() => guard.leave(onBack)}>← {tr('bots_back')}</button>
-    <header className="bots-detail-header">
+    <ChatTopbarHeader><header className="bots-detail-header">
+      <button type="button" className="bots-back" data-variant="quiet" aria-label={tr('bots_back')} title={tr('bots_back')} onClick={() => guard.leave(onBack)}><Icon name="chevronLeft" size={16} /></button>
       <div className="bots-detail-identity">
         <span className="bots-avatar" aria-hidden="true"><AgentAvatar agentId={botId} size={40} /></span>
         <div className="bots-detail-title">
@@ -201,7 +203,6 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
             <BotStateChip activity={activity} />
             <span className="bots-muted">{lastActive !== undefined ? tr('bots_last_active', relativeActivity(lastActive)) : tr('bots_no_chats_yet')}</span>
           </div>
-          {description ? <p className="bots-muted">{description}</p> : null}
         </div>
       </div>
       <div className="bots-detail-actions">
@@ -210,7 +211,8 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
         </button>
         <button type="button" data-variant="danger" onClick={() => setDeleting({ busy: false, error: '' })}>{tr('bots_delete')}</button>
       </div>
-    </header>
+    </header></ChatTopbarHeader>
+    {description ? <p className="bots-muted">{description}</p> : null}
     {openError ? <p role="alert" className="bots-problem">{openError}</p> : null}
     {state.phase === 'failed' ? <p role="alert" className="bots-problem">{tr('bots_detail_failed', state.loadError ?? '')} <button type="button" onClick={() => void editor.load()}>{tr('common_retry')}</button></p> : null}
     {state.phase === 'loading' ? <p role="status" className="bots-muted">{tr('bots_detail_loading')}</p> : null}

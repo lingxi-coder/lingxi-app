@@ -1,4 +1,5 @@
 import { useState, type ReactElement } from 'react';
+import { ChatPageHeading } from './ChatTopbar';
 import { friendsErrorText } from './errors.js';
 import type { FriendsViewProps } from './FriendsSidebar';
 import { Avatar } from './ui';
@@ -16,7 +17,7 @@ export function BlockedList({ workspace, snapshot, locale, renderAvatar }: Frien
     if (code) setFailed({ uid, code });
   };
   return <section className="tw-scope tw-friends-page" aria-labelledby="tw-friends-blocked">
-    <h2 id="tw-friends-blocked">{t('friends_blocked_title')}</h2>
+    <ChatPageHeading id="tw-friends-blocked" title={t('friends_blocked_title')} />
     {snapshot.blocksLoading ? <p className="tw-hint" role="status">{t('teams_loading')}</p>
       : snapshot.blocksError ? <div className="tw-form">
         <p role="alert" className="tw-error">{t('friends_load_error')}</p>

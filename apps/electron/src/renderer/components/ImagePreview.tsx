@@ -1,6 +1,7 @@
 import { DESKTOP_BRIDGE_GLOBAL } from '../../shared/desktopBridge';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
+import { ComposerImageThumbnail } from '../../../../../packages/chat-ui/ComposerSurface';
 import { useI18n } from '../i18n/useI18n';
 import { Icon } from './Icon';
 
@@ -9,17 +10,20 @@ interface ImagePreviewProps {
   alt: string;
   style?: CSSProperties;
   imageStyle?: CSSProperties;
+  composerAttachment?: boolean;
 }
 
 /** Mount the modal only while viewing; transcript thumbnails stay inexpensive. */
-export function ImagePreview({ src, alt, style, imageStyle }: ImagePreviewProps) {
+export function ImagePreview({ src, alt, style, imageStyle, composerAttachment }: ImagePreviewProps) {
   const { tr } = useI18n();
   const [open, setOpen] = useState(false);
   const close = useCallback(() => setOpen(false), []);
   return <>
-    <button type="button" className="image-preview-trigger" style={style}
+    <button type="button" className={composerAttachment ? 'composer-image-preview' : 'image-preview-trigger'} style={style}
       aria-label={tr('desktop_image_open', alt)} aria-haspopup="dialog" onClick={() => setOpen(true)}>
-      <img src={src} alt={alt} style={imageStyle} draggable={false} />
+      {composerAttachment
+        ? <ComposerImageThumbnail key={src} src={src} />
+        : <img src={src} alt={alt} style={imageStyle} draggable={false} />}
     </button>
     {open && createPortal(<ImageViewer key={src} src={src} alt={alt} onClose={close} />, document.body)}
   </>;

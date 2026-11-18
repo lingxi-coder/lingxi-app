@@ -164,10 +164,6 @@ private struct HostedServiceSessionView: View {
     var body: some View {
         if let service = model.open {
             VStack(spacing: 0) {
-                if !service.available {
-                    TeamsBanner(kind: .offline, title: LocalizedStringKey(HostedService.availabilityKey(service.availability)),
-                                detail: service.withdrawn ? nil : "services_cannot_answer")
-                }
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
@@ -186,7 +182,7 @@ private struct HostedServiceSessionView: View {
                                     .disabled(model.loadingOlder).padding()
                             }
                             ForEach(model.messages) { message in
-                                HostedServiceMessageCell(message: message, service: service, uid: model.viewer)
+                                HostedServiceMessageCell(message: message, service: service)
                                     .id(message.seq)
                             }
                             ForEach(model.tasks.filter { $0.state != "completed" }) { task in taskLine(task) }
@@ -234,6 +230,9 @@ private struct HostedServiceSessionView: View {
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
+                        Text(LocalizedStringKey(HostedService.availabilityKey(service.availability)))
+                        if !service.available && !service.withdrawn { Text("services_cannot_answer") }
+                        Divider()
                         if !model.sessions.isEmpty {
                             Picker("services_sessions", selection: Binding(get: { model.session ?? "" }, set: { model.select($0) })) {
                                 ForEach(model.sessions) { Text($0.title).tag($0.id) }
@@ -246,8 +245,9 @@ private struct HostedServiceSessionView: View {
                         Divider()
                         Button("services_report", systemImage: "flag") { reporting = true }
                         Button("services_leave", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { leaving = true }
-                    } label: { Image(systemName: "ellipsis.circle") }
+                    } label: { Image(systemName: service.available ? "ellipsis.circle" : "wifi.slash") }
                     .accessibilityLabel(Text("services_menu"))
+                    .accessibilityValue(Text(LocalizedStringKey(HostedService.availabilityKey(service.availability))))
                     .accessibilityIdentifier("services.menu")
                 }
             }
@@ -317,22 +317,25 @@ private struct HostedServiceSessionView: View {
     }
 
     private func composer(_ service: HostedServiceView) -> some View {
-        HStack(alignment: .bottom, spacing: 8) {
+        ComposerInputSurface(focused: focused) {
             TextField(text: $text, prompt: model.answering ? Text("services_answer_hint") : Text("services_ask_hint \(service.name)"), axis: .vertical) { Text("services_ask_hint \(service.name)") }
                 .lineLimit(1...6)
                 .focused($focused)
-                .padding(.horizontal, 12).padding(.vertical, 8)
-                .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .padding(.horizontal, 6)
+                .frame(minHeight: 36)
                 .disabled(service.withdrawn)
                 .accessibilityIdentifier("services.composer")
-            Button {
-                let sent = text
-                Task { if await model.send(sent), text == sent { text = "" } }
-            } label: { Image(systemName: "arrow.up.circle.fill").font(.title).minimumHitTarget() }
-            .disabled(model.busy || service.withdrawn || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                      || TeamsComposeLogic.byteLength(text) > TeamsComposeLogic.messageBytes)
-            .accessibilityLabel(Text("teams_message_send"))
-            .accessibilityIdentifier("services.send")
+            HStack {
+                Spacer()
+                Button {
+                    let sent = text
+                    Task { if await model.send(sent), text == sent { text = "" } }
+                } label: { Image(systemName: "arrow.up.circle.fill").font(.title).minimumHitTarget() }
+                .disabled(model.busy || service.withdrawn || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                          || TeamsComposeLogic.byteLength(text) > TeamsComposeLogic.messageBytes)
+                .accessibilityLabel(Text("teams_message_send"))
+                .accessibilityIdentifier("services.send")
+            }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(.bar)
@@ -343,7 +346,6 @@ private struct HostedServiceMessageCell: View {
     @Environment(\.locale) private var locale
     let message: TeamMessage
     let service: HostedServiceView
-    let uid: String
 
     var body: some View {
         let bot = message.author.kind != "user", recalled = message.recalled == true
@@ -351,7 +353,8 @@ private struct HostedServiceMessageCell: View {
         let name = bot ? service.name : TeamsText.you
         let question = bot && message.waitId != nil
         HStack(alignment: .top, spacing: 10) {
-            if bot { AgentAvatar(agentID: AvatarIdentity.teamBotAvatarId(service.sharedBotId), size: 32) } else { PersonAvatar(id: uid, name: "", size: 32) }
+            if bot { AgentAvatar(agentID: AvatarIdentity.teamBotAvatarId(service.sharedBotId), size: 32) }
+            else { Spacer(minLength: 32) }
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(verbatim: name).font(.subheadline.weight(.semibold)).lineLimit(1)
@@ -370,7 +373,11 @@ private struct HostedServiceMessageCell: View {
                     Text(message.text).textSelection(.enabled)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, bot ? 0 : 12).padding(.vertical, bot ? 0 : 8)
+            .background {
+                if !bot { RoundedRectangle(cornerRadius: 16).fill(Color.accentColor.opacity(0.06)) }
+            }
+            .frame(maxWidth: bot ? .infinity : 360, alignment: bot ? .leading : .trailing)
             // One element for VoiceOver, as in a Team's stream: author, tag, time and text, with Copy among its actions.
             .accessibilityElement(children: .combine)
             .accessibilityLabel(Text(verbatim: spokenLabel(name: name, question: question, clock: clock, recalled: recalled)))
@@ -379,8 +386,6 @@ private struct HostedServiceMessageCell: View {
             }
         }
         .padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 1)
-        // The viewer's own words sit on the faint tint of the accent; the Bot's never do (U3).
-        .background { if !bot { Color.accentColor.opacity(0.06) } }
         .contentShape(Rectangle())
         .contextMenu { if !recalled && !message.text.isEmpty { Button("chat_message_copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.text } } }
         .accessibilityElement(children: .contain)

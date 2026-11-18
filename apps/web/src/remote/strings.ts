@@ -188,6 +188,8 @@ export const strings = {
   imageLoading: text('正在加载图片…', 'Loading the image…'),
   imageFailed: text('图片加载失败，点击重试', 'The image failed to load. Tap to retry'),
   imageAlt: text('图片', 'Image'),
+  previewImage: text('预览附件图片', 'Preview attached image'),
+  closeImagePreview: text('关闭图片预览', 'Close image preview'),
 
   // composer
   composerPlaceholder: text('发消息…', 'Message…'),
@@ -203,6 +205,7 @@ export const strings = {
   imageSizeError: text('这张图片太大，无法压缩到 2 MB 以内。', 'That image is too large to shrink under 2 MB.'),
   sending: text('发送中…', 'Sending…'),
   sendFailed: text('发送失败', 'Not sent'),
+  dismissSendFailure: text('关闭发送失败通知', 'Dismiss send failure notification'),
   sendRetry: text('重发', 'Resend'),
   dismiss: text('放弃', 'Dismiss'),
 

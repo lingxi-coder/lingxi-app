@@ -157,11 +157,33 @@ scenario('a service that cannot answer says why, and its sessions stay readable'
   assert.match(page.text(), /The service cannot answer right now\. You can still read your sessions\./u);
 });
 
+scenario('a hosted Bot can resync immediately from the connection control', async context => {
+  const f = fake();
+  f.state.view = { ...f.state.view, entered: true, generation: 1 };
+  f.state.sessions.push({ id: 'session-001', title: 'A trip' });
+  const messages = f.api.serviceMessages;
+  let unavailable = true;
+  f.api.serviceMessages = async <T,>(command: Parameters<typeof messages>[0]) => {
+    if (unavailable && command.action === 'sync') throw new ApiError('NETWORK');
+    return messages<T>(command);
+  };
+  const { page } = await open(context, f, { initialServiceId: serviceId, refreshMs: { answering: 60_000, idle: 60_000 } });
+  const status = () => page.oneByClass('tw-top-connection');
+  assert.equal(status().props['data-kind'], 'error');
+  unavailable = false;
+  await page.click(page.button('Retry'));
+  assert.equal(status().props['data-kind'], 'ok');
+});
+
 scenario('a report goes to LingXi with what the person chose to attach; leaving is confirmed', async context => {
   const f = fake(); f.state.view = { ...f.state.view, entered: true, generation: 1 };
   const { page } = await open(context, f, { initialServiceId: serviceId });
   await page.type(page.oneByLabel('Message'), 'Hello'); await page.submit(page.oneByClass('hosted-service-composer'));
-  await page.click(page.button('Report'));
+  const serviceAction = async (label: string) => {
+    await page.click(page.oneByLabel('More'));
+    await page.click(page.find(node => node.props.role === 'menuitem' && textOf(node) === label)[0]);
+  };
+  await serviceAction('Report');
   assert.match(page.text(), /The report goes to LingXi, not to the publisher\./u);
   const reason = page.find(node => node.type === 'select' && node.props.value === 'harmful')[0];
   await page.during(() => reason.props.onChange({ target: { value: 'deceptive' } }));
@@ -170,7 +192,7 @@ scenario('a report goes to LingXi with what the person chose to attach; leaving 
   assert.deepEqual([f.state.reports[0].reason, f.state.reports[0].text, 'sessionId' in f.state.reports[0]], ['deceptive', '', false], 'the session is named only when the person ticks it');
   assert.match(page.text(), /The publisher is not told who reported\./u);
   await page.click(page.button('Close'));
-  await page.click(page.button('Leave'));
+  await serviceAction('Leave');
   assert.match(page.text(), /Requests that have not started are stopped/u);
   await page.click(page.find(node => node.type === 'button' && textOf(node) === 'Leave' && String(node.props.className).includes('tw-danger-btn'))[0]);
   assert.ok(f.state.commands.some(c => c.action === 'leaveService'));

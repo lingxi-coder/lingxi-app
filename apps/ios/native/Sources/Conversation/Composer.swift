@@ -280,9 +280,6 @@ struct Composer: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
             ComposerInputSurface(focused: inputFocused) {
-                // Captured-photo attachment chip (the device-vision analog of how
-                // a transcript lands in the draft): a thumbnail + a remove button,
-                // shown only once a camera capture has surfaced an image.
                 if let attachment {
                     AttachmentThumb(attachment: attachment, onRemove: onRemoveAttachment)
                 }
@@ -950,53 +947,67 @@ struct ComposerTurnActionIcon: View {
 
 // MARK: - Attachment thumbnail chip
 
-/// A captured-photo thumbnail chip with a remove (×) affordance — mirrors
-/// Android `AttachmentThumb`.
 private struct AttachmentThumb: View {
     @Environment(\.theme) private var t
+    @Environment(\.colorSchemeContrast) private var contrast
     @State private var preview = false
     let attachment: ComposerAttachment
     let onRemove: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
+        let dimensions = Text("\(attachment.width) × \(attachment.height)")
+        HStack(spacing: 10) {
             #if canImport(UIKit)
-                ZStack(alignment: .topTrailing) {
-                    Button { preview = true } label: { Image(uiImage: attachment.image)
+                Button { preview = true } label: {
+                    let shape = RoundedRectangle(cornerRadius: 10)
+                    Image(uiImage: attachment.image)
                         .resizable()
-                        .scaledToFill()
-                        .frame(width: 74, height: 62)
-                        .clipShape(.rect(cornerRadius: 10))
+                        .scaledToFit()
+                        .padding(3)
+                        .frame(width: 96, height: 64)
+                        .background(t.surface, in: shape)
+                        .clipShape(shape)
                         .overlay {
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(t.borderStrong.opacity(0.55), lineWidth: 0.5)
+                            shape.strokeBorder(t.borderStrong, lineWidth: contrast == .increased ? 1 : 0.5)
+                                .allowsHitTesting(false)
                         }
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(String(localized: "chat_preview_attached_image"))
-                    .fullScreenCover(isPresented: $preview) {
-                        NativeImagePreview(source: "data:\(attachment.mediaType);base64,\(attachment.base64)", mediaType: attachment.mediaType, fallbackImage: attachment.image)
-                    }
-                    Button(action: onRemove) {
-                        LXIcon(name: .x, size: 11, color: .white, stroke: 2)
-                            .frame(width: 24, height: 24)
-                            .background(.black.opacity(0.62), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(3)
-                    .accessibilityLabel("composer_remove_attachment")
+                }
+                .accessibilityLabel("chat_preview_attached_image")
+                .accessibilityValue(dimensions)
+                .accessibilityIdentifier("composer.image.preview")
+                .fullScreenCover(isPresented: $preview) {
+                    NativeImagePreview(
+                        source: "data:\(attachment.mediaType);base64,\(attachment.base64)",
+                        mediaType: attachment.mediaType,
+                        fallbackImage: attachment.image
+                    )
                 }
             #endif
+
             VStack(alignment: .leading, spacing: 2) {
-                Text(attachment.mediaType == "image/jpeg" ? "Image" : attachment.mediaType)
-                    .font(.system(size: 12, weight: .medium))
+                Text("chat_attached_image")
+                    .font(.subheadline.weight(.medium))
                     .foregroundStyle(t.text2)
-                Text("\(attachment.width)×\(attachment.height)")
-                    .font(.system(size: 11))
+                dimensions
+                    .font(.caption)
+                    .monospacedDigit()
                     .foregroundStyle(t.text3)
             }
-            Spacer()
+            #if canImport(UIKit)
+                .accessibilityHidden(true)
+            #endif
+
+            Spacer(minLength: 0)
+
+            Button(action: onRemove) {
+                LXIcon(name: .x, size: 12, color: t.text2, stroke: 2)
+                    .frame(width: 28, height: 28)
+                    .background(t.surfaceHover, in: Circle())
+            }
+            .accessibilityLabel("composer_remove_attachment")
+            .accessibilityIdentifier("composer.image.remove")
         }
+        .buttonStyle(ComposerActionButtonStyle())
         .padding(.horizontal, 4).padding(.vertical, 2)
     }
 }

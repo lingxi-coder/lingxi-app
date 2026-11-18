@@ -1,12 +1,13 @@
-import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactElement } from 'react';
+import { useContext, useEffect, useId, useRef, useState, useSyncExternalStore, type ReactElement } from 'react';
 import { nowFriends } from './AddFriendView';
+import { ChatPageHeading, ChatTopbarHeader, ChatTopbarTarget, TopbarConnection } from './ChatTopbar';
 import { FriendLeaveDialog, FriendProfileDialog } from './friend-dialogs';
 import { FriendBotsPanel } from './FriendBotsPanel';
 import { chatEnded, FRIEND_CHAT } from './friends.js';
 import type { FriendChat } from './friends-workspace.js';
 import type { FriendsViewProps } from './FriendsSidebar';
 import { CreationBanner, TeamConversationView } from './TeamConversationView';
-import { Icon, PopupMenu, type MenuItem, type RenderMarkdown } from './ui';
+import { Avatar, Icon, PopupMenu, type MenuItem, type RenderMarkdown } from './ui';
 import type { TeamsWorkspace } from './workspace.js';
 import { useTeamsText } from './i18n.js';
 
@@ -26,10 +27,14 @@ export interface FriendChatViewProps extends FriendsViewProps {
 export function FriendChatView(props: FriendChatViewProps): ReactElement | null {
   const { workspace, snapshot, locale } = props;
   const t = useTeamsText(locale);
+  const hasTopbar = useContext(ChatTopbarTarget) !== undefined;
   const chat = snapshot.chat;
   if (!chat) return null;
   if (chat.ended) return <Unavailable locale={locale} onBack={() => workspace.show('home')} />;
-  if (!chat.workspace) return <section className="tw-scope tw-conv tw-conv-empty"><p className="tw-empty-line" role="status">{t('teams_loading')}</p></section>;
+  if (!chat.workspace) return <section className="tw-scope tw-conv tw-conv-empty">
+    {hasTopbar ? <ChatPageHeading title={chat.name} /> : null}
+    <p className="tw-empty-line" role="status">{t('teams_loading')}</p>
+  </section>;
   // Another friend is another chat: what the view holds (the open panel, the welcome) is not carried over.
   return <PairChat key={chat.uid} {...props} chat={chat} pair={chat.workspace} />;
 }
@@ -47,6 +52,7 @@ function Unavailable({ locale, onBack }: { locale: string; onBack(): void }): Re
 function PairChat({ notificationTarget,workspace, snapshot, renderAvatar, renderMarkdown, locale, now, chat, pair }: FriendChatViewProps & { chat: FriendChat; pair: TeamsWorkspace }): ReactElement {
   const t = useTeamsText(locale);
   const view = useSyncExternalStore(pair.subscribe, pair.getSnapshot);
+  const hasTopbar = useContext(ChatTopbarTarget) !== undefined;
   const [welcome, setWelcome] = useState(chat.joined);
   const [panel, setPanel] = useState(false);
   const [profile, setProfile] = useState(false);
@@ -68,8 +74,14 @@ function PairChat({ notificationTarget,workspace, snapshot, renderAvatar, render
   if (!conversation) {
     // A Bot chat being created is not in the directory yet, and one that was discarded or never appeared leaves a selection with nothing behind it.
     return <section className="tw-scope tw-conv tw-conv-empty">
+      {hasTopbar ? <ChatTopbarHeader><header className="tw-conv-head">
+        {view.selectedConversationId !== FRIEND_CHAT ? <button type="button" className="tw-icon-btn" aria-label={t('remote_back')} onClick={toChat}><Icon name="chevronLeft" /></button> : null}
+        <div className="tw-conv-identity"><Avatar identity={{ kind: 'user', id: chat.uid, name: chat.name }} size={32} render={renderAvatar} />
+          <div className="tw-conv-title"><h2>{chat.name}</h2></div></div>
+        <TopbarConnection snapshot={view} workspace={pair} locale={locale} friend />
+      </header></ChatTopbarHeader> : null}
       {view.creation ? <CreationBanner workspace={pair} snapshot={view} locale={locale} /> : <p className="tw-empty-line" role="status">{t('teams_loading')}</p>}
-      {view.selectedConversationId !== FRIEND_CHAT ? <div className="tw-empty-actions"><button type="button" onClick={toChat}>{t('remote_back')}</button></div> : null}
+      {!hasTopbar && view.selectedConversationId !== FRIEND_CHAT ? <div className="tw-empty-actions"><button type="button" onClick={toChat}>{t('remote_back')}</button></div> : null}
     </section>;
   }
   const friendChat = conversation.id === FRIEND_CHAT;

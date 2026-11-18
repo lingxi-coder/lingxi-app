@@ -169,7 +169,16 @@ internal fun TeamConversationScreen(
                     modifier = Modifier.weight(1f),
                 ) { ConversationLead(conversation, members, bots, uid, strings, 40.dp, label) }
                 IconButton(onClick = { showDetails = true }, modifier = Modifier.testTag(TeamsTags.INFO)) { Icon(Icons.Outlined.Info, stringResource(R.string.teams_conversation_details)) }
-            } else Spacer(Modifier.weight(1f))
+            } else {
+                Text(
+                    creation?.let { (it.optJSONObject("payload") ?: it).optString("title").takeIf(String::isNotBlank) }
+                        ?: team.name,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             TeamsConnectionMenu(
                 error = messaging.error.takeIf { it.isNotEmpty() && it != "SERVICE_UNAVAILABLE" },
                 offline = messaging.directoryReady && messaging.offline,
@@ -187,11 +196,15 @@ internal fun TeamConversationScreen(
         }
     }
 
+    // The auto-reply switches wait for their own change: until the listener brings the next revision, another toggle would send the old one and conflict.
+    var autoReplySent by remember(conversation?.id) { mutableStateOf<Long?>(null) }
     if (showDetails && conversation != null) ConversationDetailsSheet(
         conversation = conversation, label = label, members = members, bots = bots, uid = uid, strings = strings,
         unread = unread, online = online,
         onMarkRead = { workspace.messagingModel.markRead(conversation.id, conversation.lastSeq) }, onDismiss = { showDetails = false },
-        onAutoReply = { targets -> workspace.messagingModel.setConversationAutoReply(conversation.id, conversation.autoReply?.revision ?: 0, targets) },
+        onAutoReply = { targets -> val revision = conversation.autoReply?.revision ?: 0; autoReplySent = revision
+            workspace.messagingModel.setConversationAutoReply(conversation.id, revision, targets, onFailed = { autoReplySent = null }) },
+        busy = autoReplySent != null && autoReplySent == (conversation.autoReply?.revision ?: 0),
     )
     recalling?.let { message ->
         ConfirmDialog(

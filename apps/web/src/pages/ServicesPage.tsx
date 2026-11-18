@@ -5,6 +5,7 @@ import { auth } from '../app/firebase';
 import { Markdown } from '../remote/markdown';
 import { webServicesApi } from '../services/api';
 import { SignInCard } from '../teams/SignInCard';
+import { ChatTopbarTarget } from '../../../../packages/teams/ChatTopbar';
 import { HostedServices } from '../../../../packages/teams/HostedServices';
 import { serviceLink } from '../../../../packages/teams/hosted-service';
 import { useTeamsText } from '../../../../packages/teams/i18n';
@@ -26,12 +27,14 @@ function SignedIn({ user, locale, serviceId }: { user: User; locale: string; ser
 export default function ServicesPage({ locale, serviceId }: { locale: Locale; serviceId?: string }) {
   const t = useTeamsText(locale);
   const [user, setUser] = useState<User | null | undefined>(undefined), [busy, setBusy] = useState(false);
+  const [chatTopbar, setChatTopbar] = useState<HTMLDivElement | null>(null);
   useEffect(() => onAuthStateChanged(auth, setUser), []);
   const signOutNow = async () => { setBusy(true); try { await signOut(auth); } catch { /* The person stays signed in. */ } finally { setBusy(false); } };
-  return <main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><a href="/inbox">{locale === 'zh' ? '收件箱' : 'Inbox'}</a><a href="/teams">{t('teams_title')}</a><a href="/friends">{t('friends_title')}</a><h1>{t('services_title')}</h1>
+  return <ChatTopbarTarget.Provider value={chatTopbar}><main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><a href="/inbox">{locale === 'zh' ? '收件箱' : 'Inbox'}</a><a href="/teams">{t('teams_title')}</a><a href="/friends">{t('friends_title')}</a><h1>{t('services_title')}</h1>
+      <div ref={setChatTopbar} className="teams-web-chat-slot" />
       <span>{user?.displayName || user?.email}</span>{user ? <button disabled={busy} onClick={() => void signOutNow()}>{t('tw_sign_out')}</button> : null}</header>
     {user === undefined ? <p role="status" className="teams-web-note">{t('teams_loading')}</p>
       : user ? <SignedIn key={user.uid} user={user} locale={locale} serviceId={serviceId} />
       : <SignInCard auth={auth} locale={locale} note={serviceId ? t('tw_signin_note_service') : t('tw_signin_note_services')} />}
-  </main>;
+  </main></ChatTopbarTarget.Provider>;
 }

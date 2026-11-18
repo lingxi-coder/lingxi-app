@@ -1,3 +1,4 @@
+import { SendFailureNotice } from '../../../../../packages/chat-ui/SendFailureNotice';
 import { ComposerEditor, ComposerSurface, ComposerToolbar } from '../../../../../packages/chat-ui/ComposerSurface';
 import { CommandResultPanel } from './CommandResultPanel';
 import './CommandResultPanel.css';
@@ -548,9 +549,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     asideRef.current?.toggleAttribute('inert', sidebarCollapsed || bridge.projectCreationOpen);
     railRef.current?.toggleAttribute('inert', bridge.projectCreationOpen);
   }, [bridge.projectCreationOpen, sidebarCollapsed]);
-  const blockNavigation = useCallback((event: { target: EventTarget | null; preventDefault(): void; stopPropagation(): void }) => {
+  const blockNavigation = useCallback((event: { preventDefault(): void; stopPropagation(): void }) => {
     if (!bridge.projectCreationOpen) return;
-    if (event.target instanceof Element && event.target.closest('[data-conversation-space]')) return;
     event.preventDefault();
     event.stopPropagation();
   }, [bridge.projectCreationOpen]);
@@ -967,13 +967,6 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
           {homePage && <button type="button" className="sidebar-header-icon" aria-label={activityView ? tr('desktop_chat_activity_off') : tr('desktop_chat_activity_on')} title={`${tr(activityView ? 'desktop_chat_activity_off' : 'desktop_chat_activity_on')} (⌥⌘U)`} aria-pressed={activityView} onClick={onToggleActivityView ?? (() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); })} style={{ color: activityView ? t.accent : t.text3, background: activityView ? t.accentBg : undefined }}><DesktopIcon name="bell" size={18} /></button>}
           {searchable && <button type="button" className="sidebar-header-icon" aria-label={tr('desktop_search_chats')} title={tr('desktop_search_chats')} aria-expanded={searchOpen} onClick={() => { setSidebarCollapsed(false); setSearchOpen(true); window.requestAnimationFrame(() => searchInputRef.current?.focus()); }} style={{ color: t.text3 }}><DesktopIcon name="search" size={18} /></button>}
         </div>
-        {homePage && <div className="no-drag" data-conversation-space role="tablist" aria-label={tr('desktop_chat_conversation_mode')} style={{ display: 'flex', gap: 2, padding: '4px 8px' }}>
-          {(['chat', 'code'] as const).map((mode) => <button key={mode} type="button" role="tab" aria-selected={currentSpace === mode}
-            onClick={() => { onOpenChat?.(); void bridge.switchConversationSpace(mode); }}
-            style={{ border: 0, borderRadius: 7, padding: '6px 11px', background: currentSpace === mode ? t.surfaceActive : 'transparent', color: currentSpace === mode ? t.text : t.text3, cursor: 'pointer' }}>
-            {mode === 'chat' ? 'Chat' : 'Code'}
-          </button>)}
-        </div>}
         {topbar}
       </div>
       <div className="desktop-body">
@@ -1943,6 +1936,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([]);
   const [imageNotice, setImageNotice] = useState<string | null>(null);
+  const [sendFailure, setSendFailure] = useState<{ sessionId: string | null; message: string } | null>(null);
   const [imageDragActive, setImageDragActive] = useState(false);
   const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'unsupported' | 'denied'>('idle');
   const [audioGuidance, setAudioGuidance] = useState<AudioSetupGuidance | null>(null);
@@ -2445,6 +2439,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
     imageAttachmentsRef.current = images;
     setImageAttachments(images);
     setImageNotice(null);
+    setSendFailure(null);
     setFilePicker(null);
     setPreviewPath(null);
     mentionDismissed.current = false;
@@ -3018,19 +3013,23 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   };
 
   const sideCreationPending = useRef(false);
+  const notifySendFailure = (message = tr('remote_send_failed'), sessionId = draftSessionId.current) => {
+    if (sessionId === draftSessionId.current) setSendFailure({ sessionId, message });
+  };
   const submit = async () => {
     const snapshot = input.current ? richPromptSnapshot(input.current) : { text, files: selectedFiles };
     const value = promptWithFileMentions(snapshot.text, snapshot.files);
     if (!ready || flowModeRef.current) return;
+    setSendFailure(null);
     if (!value) {
-      if (imageAttachments.length) setImageNotice('请先输入问题，再发送图片。');
+      if (imageAttachments.length) notifySendFailure('请先输入问题，再发送图片。');
       return;
     }
     let slashCommand = snapshot.files.length === 0 ? snapshot.text.trim() : '';
     const sideInput = sideCreationInput(snapshot.text, snapshot.files);
     if (onCreateSide && sideInput !== null) {
       if (sideCreationPending.current) return;
-      if (imageAttachments.length) { setImageNotice(tr('desktop_chat_side_chat_images')); return; }
+      if (imageAttachments.length) { notifySendFailure(tr('desktop_chat_side_chat_images')); return; }
       sideCreationPending.current = true;
       const originalHtml = input.current?.innerHTML;
       const submittedSessionId = draftSessionId.current;
@@ -3038,17 +3037,17 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       try {
         await onCreateSide(sideInput);
         if (draftSessionId.current === submittedSessionId && composerDraftRevision.current === submittedRevision && input.current?.innerHTML === originalHtml) clearComposer();
-      } catch (error) { setImageNotice(error instanceof Error ? error.message : String(error)); }
+      } catch (error) { notifySendFailure(error instanceof Error ? error.message : String(error), submittedSessionId); }
       finally { sideCreationPending.current = false; }
       return;
     }
     const isSlashCommand = /^\/[^\s/]+(?:\s|$)/.test(slashCommand);
     if (bridge.running && isSlashCommand && !isSideQuestionCommand(slashCommand, bridge.desktop.slashCommands)) {
-      setImageNotice(tr('desktop_chat_slash_wait'));
+      notifySendFailure(tr('desktop_chat_slash_wait'));
       return;
     }
     if (bridge.running && imageAttachments.length && !isSlashCommand) {
-      setImageNotice(tr('desktop_chat_pending_images'));
+      notifySendFailure(tr('desktop_chat_pending_images'));
       return;
     }
     if (isSlashCommand) {
@@ -3057,12 +3056,12 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
         if (invocation && !invocation.strategy) {
           if (selectedFusion) slashCommand = chooseFusionStrategy(slashCommand, selectedFusion);
           else if (!parseFusionCatalog(bridge.fusionCatalogEvent?.catalog_json).default_strategy) {
-            setImageNotice(tr('desktop_chat_select_fusion'));
+            notifySendFailure(tr('desktop_chat_select_fusion'));
             return;
           }
         }
       } catch (cause) {
-        setImageNotice(cause instanceof Error ? cause.message : tr('desktop_chat_fusion_read_failed'));
+        notifySendFailure(cause instanceof Error ? cause.message : tr('desktop_chat_fusion_read_failed'));
         return;
       }
     }
@@ -3072,7 +3071,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       const resolved = resolveDesktopCommand(slashCommand, ALL_DESKTOP_COMMANDS);
       if (resolved && !desktopCommandIsShadowed(slashCommand, bridge.desktop.slashCommands)) {
         if (images.length) {
-          setImageNotice('桌面本地命令不支持图片附件，请移除图片后重试。');
+          notifySendFailure('桌面本地命令不支持图片附件，请移除图片后重试。');
           return;
         }
         const submittedSessionId = activeSessionId;
@@ -3084,7 +3083,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
         } catch (cause) {
           const message = cause instanceof Error ? cause.message : String(cause);
           if (submittedSessionId) bridge.emitCommandOutput(message, true, submittedSessionId);
-          else setImageNotice(message);
+          else notifySendFailure(message);
         }
         return;
       }
@@ -3132,7 +3131,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
         composerDraftRevision.current += 1;
         bumpDraftGeneration(submitted.sessionId);
         imageDraftGeneration.current += 1;
-        setImageNotice('命令执行失败，草稿和图片附件已恢复，可以修改后重试。');
+        notifySendFailure(undefined, submitted.sessionId);
       };
       const ownsVisibleDraft = () => draftSessionId.current === submitted.sessionId
         && imageDraftGeneration.current === submitted.generation
@@ -3140,13 +3139,11 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       try {
         const accepted = await bridge.runSlashCommand(slashCommand, images, restoreOnTerminalError);
         if (!accepted) {
-          if (ownsVisibleDraft()) {
-            setImageNotice(images.length ? '发送失败，图片附件已保留，可以重试。' : '命令发送失败，草稿已保留，可以重试。');
-          }
+          notifySendFailure(undefined, submitted.sessionId);
           return;
         }
         if (terminalErrorSeen) {
-          if (ownsVisibleDraft()) setImageNotice('命令执行失败，草稿和图片附件已保留，可以重试。');
+          notifySendFailure(undefined, submitted.sessionId);
           return;
         }
         if (ownsVisibleDraft()) {
@@ -3167,9 +3164,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
           }
         }
       } catch {
-        if (ownsVisibleDraft()) {
-          setImageNotice(images.length ? '发送失败，图片附件已保留，可以重试。' : '命令发送失败，草稿已保留，可以重试。');
-        }
+        notifySendFailure(undefined, submitted.sessionId);
       }
       return;
     }
@@ -3199,7 +3194,10 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
             visualizationChip ? { visualizationContext: visualizationChip } : undefined,
           )
         : null;
-      if (supportsTrackedSend && !tracked) return;
+      if (supportsTrackedSend && !tracked) {
+        notifySendFailure(undefined, submitted.sessionId);
+        return;
+      }
       const queued = tracked?.queued ?? bridge.sendPrompt(
         value,
         images,
@@ -3251,7 +3249,7 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
       submittedAutoplaySubscription?.();
       if (autoplaySubscription.current === submittedAutoplaySubscription) autoplaySubscription.current = null;
       if (submittedAutoplayOwner && autoplayOwner.current?.id === submittedAutoplayOwner.id) autoplayOwner.current = null;
-      if (ownsVisibleDraft()) setImageNotice('发送失败，图片附件已保留，可以重试。');
+      notifySendFailure(undefined, submitted.sessionId);
     }
   };
 
@@ -3731,6 +3729,16 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
   );
   return (
     <div className="desktop-composer-dock" style={{ flexShrink: 0, padding: '12px var(--conversation-gutter) 20px', background: t.stageBg }}>
+      {typeof document !== 'undefined' && createPortal(<SendFailureNotice
+        message={sendFailure && sendFailure.sessionId === activeSessionId ? sendFailure.message : null}
+        dismissLabel={tr('chat_dismiss_error')}
+        onDismiss={() => setSendFailure(null)}
+        style={{
+          '--send-failure-border': t.borderStrong,
+          '--send-failure-surface': t.surface,
+          '--send-failure-text': t.text,
+        } as CSSProperties}
+      />, document.body)}
       {audioGuidance && <AudioSetupGuide guidance={audioGuidance}
         onOpenSettings={() => onOpenSettingsPage('voice')} onDismiss={() => setAudioGuidance(null)} />}
       {flowMode && (
@@ -3784,14 +3792,20 @@ export function BetaComposer({ localAppDraft, onLocalAppDraftConsumed, bridge, r
           />
         )}
         {imageAttachments.length > 0 && (
-          <div aria-label={tr('desktop_chat_image_attachments')} style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '12px 18px 2px' }}>
+          <ul className="composer-image-attachments" aria-label={tr('desktop_chat_image_attachments')} style={{
+            '--composer-attachment-text': t.text2,
+            '--composer-attachment-fill': t.surfaceHover,
+          } as CSSProperties}>
             {imageAttachments.map((attachment) => (
-              <div key={attachment.id} title={attachment.name} style={{ position: 'relative', width: 74, height: 62, overflow: 'hidden', borderRadius: 10, background: t.surfaceHover, outline: `1px solid color-mix(in oklab, ${t.borderStrong} 55%, transparent)` }}>
-                <ImagePreview src={attachment.previewUrl} alt={attachment.name} style={{ height: '100%' }} imageStyle={{ display: 'block', width: '100%', height: '100%', objectFit: 'cover', outline: `1px solid color-mix(in oklab, ${t.text} 10%, transparent)`, outlineOffset: -1 }} />
-                <button type="button" aria-label={tr('desktop_chat_remove_named', attachment.name)} title={tr('desktop_chat_remove_image')} onClick={() => removeImage(attachment.id)} style={{ position: 'absolute', top: 3, right: 3, width: 24, height: 24, display: 'grid', placeItems: 'center', padding: 0, border: 0, borderRadius: 99, background: 'rgba(0,0,0,.62)', color: '#fff', cursor: 'pointer' }}><Icon name="x" size={11} stroke={2} /></button>
-              </div>
+              <li className="composer-image-attachment" key={attachment.id} title={attachment.name}>
+                <ImagePreview src={attachment.previewUrl} alt={attachment.name} composerAttachment />
+                <button type="button" className="composer-image-remove" aria-label={tr('desktop_chat_remove_named', attachment.name)}
+                  title={tr('desktop_chat_remove_image')} onClick={() => removeImage(attachment.id)}>
+                  <span aria-hidden="true"><Icon name="x" size={12} stroke={2} /></span>
+                </button>
+              </li>
             ))}
-          </div>
+          </ul>
         )}
         {imageNotice && <div role="status" style={{ padding: '0 18px 9px', color: t.warn, fontSize: 10.5 }}>{imageNotice}</div>}
         {visualizationChip && (

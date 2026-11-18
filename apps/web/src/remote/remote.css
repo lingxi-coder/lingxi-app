@@ -1,8 +1,24 @@
 /* Remote Control. Class names start with rc-; colours come from the site's theme variables. */
 .rc-page { min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; background: var(--bg); color: var(--ink); }
 .rc-shell-head { padding: 10px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); }
-.rc-shell-head h1 { margin: 0; font-size: 16px; font-weight: 600; }
+.rc-shell-head > h1 { margin: 0; font-size: 16px; font-weight: 600; }
 .rc-shell-actions { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.rc-topbar-slot { flex: 1; min-width: 0; container: remote-topbar / inline-size; }
+.rc-topbar-slot:empty { display: none; }
+.rc-topbar-slot .rc-session-head { margin-inline: auto; max-width: 52rem; }
+.rc-topbar-status { max-width: 32%; color: var(--warning); font-size: 12px; }
+.rc-new-chat { flex: none; }
+@media (max-width: 760px) {
+  .rc-shell-head:has(.rc-topbar-slot:not(:empty)) { flex-wrap: wrap; padding-inline: 12px; }
+  .rc-topbar-slot { order: 1; flex-basis: 100%; }
+}
+@media (pointer: coarse) {
+  .rc-shell-head .rc-back, .rc-shell-head .rc-new-chat { min-width: 44px; min-height: 44px; }
+}
+@container remote-topbar (width < 24rem) {
+  .rc-topbar-slot .rc-session-head { gap: 6px; }
+  .rc-topbar-status { font-size: 11px; }
+}
 .rc-account { max-width: 30vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-3); font-size: 12px; }
 .rc-main { flex: 1; min-height: 0; width: 100%; max-width: 760px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
 .rc-signin { justify-content: center; }
@@ -40,8 +56,6 @@
 /* Bots */
 .rc-bot-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .rc-bot-head > div { min-width: 0; }
-.rc-bot-head h2 { margin-bottom: 4px; }
-.rc-bot-head p { margin-bottom: 4px; }
 .rc-bot-description { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rc-bot-chats { margin-top: 14px; }
 
@@ -49,11 +63,20 @@
 .rc-badge-direct { color: var(--accent); border-color: var(--accent); }
 
 /* One session */
-.rc-session { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+.rc-session {
+  --send-failure-border: var(--line-strong);
+  --send-failure-surface: var(--surface);
+  --send-failure-text: var(--ink);
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
 .rc-session-head { display: flex; align-items: center; gap: 10px; }
 .rc-back { width: 36px; height: 36px; flex: none; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font-size: 20px; line-height: 1; cursor: pointer; }
 .rc-session-title { flex: 1; min-width: 0; }
-.rc-session-title h1 { margin: 0; font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-session-title :is(h1, h2) { margin: 0; font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rc-session-title p { margin: 0; color: var(--ink-3); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rc-scroll { flex: 1; min-height: 40vh; max-height: calc(100dvh - 300px); overflow-y: auto; padding: 4px 0; overscroll-behavior: contain; }
 .rc-older { width: 100%; margin-bottom: 8px; }
@@ -114,21 +137,62 @@
 .rc-card legend { padding: 0; margin-bottom: 4px; font-size: 13px; }
 .rc-choice { padding: 4px 0; display: flex; align-items: flex-start; gap: 8px; font-size: 13px; }
 .rc-choice small { display: block; color: var(--ink-3); }
-.rc-other, .rc-form input, .rc-composer textarea, .rc-controls select { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font: inherit; font-size: 16px; }
+.rc-other, .rc-form input, .rc-controls select { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font: inherit; font-size: 16px; }
 
 /* Controls and composer */
 .rc-controls { display: flex; flex-wrap: wrap; gap: 8px; }
 .rc-controls label { flex: 1 1 130px; min-width: 0; display: flex; flex-direction: column; gap: 2px; color: var(--ink-3); font-size: 11px; }
-.rc-composer { padding-top: 6px; display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--line); }
-.rc-composer-row { display: flex; align-items: flex-end; gap: 6px; }
-.rc-composer textarea { flex: 1; min-width: 0; min-height: 44px; max-height: 160px; resize: vertical; }
+.rc-composer {
+  --composer-border: var(--line);
+  --composer-surface: var(--surface);
+  --composer-attachment-text: var(--ink-2);
+  --composer-attachment-fill: var(--bg);
+  padding-top: 6px;
+}
+.rc-composer:focus-within { --composer-border: var(--accent); }
+.rc-composer .composer-editor-control { color: var(--ink); font-size: 16px; resize: vertical; }
+.rc-composer .rc-note { margin-inline: 12px; }
+.rc-composer .composer-toolbar .rc-icon-button { margin-inline-end: auto; }
 .rc-composer .button { min-height: 44px; }
 .rc-icon-button { width: 44px; height: 44px; flex: none; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--ink); font-size: 20px; cursor: pointer; }
 .rc-icon-button:disabled, .rc-composer .button:disabled { opacity: .5; cursor: default; }
-.rc-attachments { margin: 0; padding: 0; list-style: none; display: flex; gap: 8px; }
-.rc-attachments li { position: relative; }
-.rc-attachments img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; }
-.rc-attachments button { position: absolute; top: -6px; right: -6px; width: 22px; height: 22px; border: 0; border-radius: 50%; background: var(--ink); color: var(--bg); cursor: pointer; }
+.rc-image-preview {
+  position: fixed;
+  inset: 0;
+  box-sizing: border-box;
+  inline-size: 100%;
+  block-size: 100%;
+  max-inline-size: none;
+  max-block-size: none;
+  margin: 0;
+  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+    max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  border: 0;
+  background: #151515;
+  color: #fff;
+}
+.rc-image-preview[open] {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+}
+.rc-image-preview img {
+  justify-self: center;
+  inline-size: 100%;
+  block-size: 100%;
+  object-fit: contain;
+}
+.rc-image-preview-close {
+  justify-self: end;
+  inline-size: 44px;
+  block-size: 44px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  color: #222;
+  font-size: 24px;
+  cursor: pointer;
+}
 
 /* Sign-in */
 .rc-form { display: grid; gap: 10px; }

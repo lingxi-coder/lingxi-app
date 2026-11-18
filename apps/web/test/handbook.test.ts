@@ -8,6 +8,7 @@ import test from 'node:test';
 import { docGroups, docPages, docMarkdown, searchDocs } from '../src/data/docs';
 import { docsBaseline, resolveDocSources } from '../src/data/docs/sources';
 import { markdownHref } from '../src/data/docs/markdown';
+import workflows from '../src/data/docs/product-workflows.json';
 const web = fileURLToPath(new URL('..', import.meta.url));
 const output = path.resolve(web, '../../docs/technical');
 
@@ -81,4 +82,28 @@ test('tables, steps and diagram descriptions participate in handbook search', ()
   assert.ok(searchDocs('资源完整性', 'zh').length);
   assert.equal(markdownHref('/docs/harness#installation'), 'harness.md#installation');
   assert.equal(markdownHref('/docs-assets/system-layers.svg'), '../assets/system-layers.svg');
+});
+
+test('product questions open the right section in both languages', () => {
+  for (const [locale, query, pageId, sectionId] of [
+    ['zh', '如何创建 team', 'teams', 'create-team'],
+    ['en', 'How do I create a DM?', 'teams', 'direct-message'],
+    ['zh', '如何创建群聊', 'teams', 'group-chat'],
+    ['zh', '如何发送 message', 'teams', 'send-message'],
+    ['zh', '怎么把 Bot 分享给团队', 'teams', 'share-bot'],
+    ['zh', 'Bot 不回消息', 'bots', 'no-reply'],
+    ['zh', '不需要 @ 也能自主回复吗', 'teams', 'auto-reply'],
+    ['en', 'Can it reply without an @?', 'teams', 'auto-reply'],
+    ['zh', '远控', 'remote-control', 'same-account'],
+    ['en', 'How can I publish a local app?', 'local-apps', 'publish-local'],
+    ['zh', '如何共享 Local App', 'local-apps', 'share-options'],
+    ['zh', '让别人安装我的应用', 'local-apps', 'market'],
+  ] as const) {
+    const first = searchDocs(query, locale)[0];
+    assert.deepEqual([first?.page.id, first?.sectionId], [pageId, sectionId], query);
+  }
+  for (const workflow of workflows) {
+    const page = docPages.find(page => page.id === workflow.page);
+    assert.ok(page?.sections.some(section => section.id === workflow.section), workflow.page + '#' + workflow.section);
+  }
 });

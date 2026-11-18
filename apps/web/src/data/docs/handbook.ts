@@ -109,12 +109,14 @@ export const customizePages: DocPage[] = [
     sourceUrl: harness,
     sources: [
       { repo: 'harness-runtime', path: 'crates/skill/src/listing.rs' },
+      { repo: 'harness-runtime', path: 'crates/skill/src/builtin/lingxi-api/SKILL.md' },
       { repo: 'harness-runtime', path: 'crates/command-api/src/builtins/skills.rs' },
       { repo: 'lingxi-app', path: 'apps/cli/host/src/argv.rs' },
       { repo: 'lingxi-app', path: 'apps/cli/host/src/commands/plugin.rs' },
     ],
     sections: [
       { id: 'layout', title: t('Where to put one', '放在哪里'), paragraphs: [
+        t('In Chat or Code, ask LingXi how to use the product or enter /lingxi-api with a topic such as teams, bots, remote-control or local-app. For a personal Bot draft, use /create-bot.', '在 Chat 或 Code 中可以直接问灵犀如何使用产品，也可以输入 /lingxi-api，加上 teams、bots、remote-control 或 local-app 主题。想起草个人 Bot 时可用 /create-bot。'),
         t('Each skill is a directory that contains SKILL.md. The name you see is the directory name. The short text comes from the file’s description, and an optional when_to_use field can add a longer hint.', '每个 skill 是一个含有 SKILL.md 的目录。你看到的名字是目录名。简短说明来自文件里的 description，可选的 when_to_use 可以再加一段使用提示。'),
         t('Project skills are every existing .lingxi/skills directory from the current directory up to the nearest git root. The walk stops at your home directory. The directory closest to the current folder is listed first. Your skills for every project live in ~/.lingxi/skills. When a managed directory is configured, LingXi also reads <managed>/.lingxi/skills. Extra roots passed into the session appear after those.', '项目 skill 来自当前目录往上、直到最近的 git 根目录之间每一个存在的 .lingxi/skills。走到你的主目录就停止。离当前文件夹最近的目录排在前面。对所有项目生效的 skill 在 ~/.lingxi/skills。配置了托管目录时，灵犀还会读取 <managed>/.lingxi/skills。会话额外收到的根目录排在这些之后。'),
       ], code: [{
@@ -392,6 +394,8 @@ export const handbookReferencePages: DocPage[] = [
           [t('/init', '/init'), t('Create a project LINGXI.md.', '创建项目的 LINGXI.md。')],
           [t('/memory', '/memory'), t('Show the loaded instruction files.', '显示已加载的说明文件。')],
           [t('/model', '/model'), t('Choose the model.', '选择模型。')],
+          [t('/lingxi-api', '/lingxi-api'), t('Ask a product question, such as how to create a team or share a Local App.', '询问产品用法，例如如何创建团队或共享 Local App。')],
+          [t('/create-bot', '/create-bot'), t('Draft a personal Bot for review on Desktop.', '起草个人 Bot，在桌面版审核并创建。')],
           [t('/permissions', '/permissions'), t('Manage allow and deny rules.', '管理允许和拒绝规则。')],
           [t('/plan', '/plan'), t('Use plan mode, or view the plan for this session.', '使用计划模式，或查看这次会话的计划。')],
           [t('/doctor', '/doctor'), t('Check this setup from inside the session.', '在会话里检查当前环境。')],
@@ -476,6 +480,9 @@ export const extraProductPages: DocPage[] = [
       ], links: [
         { label: t('Remote control', '远控'), href: '/docs/remote-control' },
         { label: t('Open remote control', '打开远控'), href: '/remote' },
+        { label: t('Teams and messages', '团队和消息'), href: '/docs/teams' },
+        { label: t('Personal and shared Bots', '个人与共享 Bot'), href: '/docs/bots' },
+        { label: t('Publish and share Local Apps', '发布和共享 Local App'), href: '/docs/local-apps' },
       ] },
       { id: 'apps', title: t('Apps on the computer', '电脑上的应用'), paragraphs: [
         t('The Apps view lists local apps that run on the connected desktop and open in this browser. An app appears there after remote access is enabled for it on the desktop. The row says it runs on the desktop. Long-running work belongs on that computer; the phone apps also run work on the phone itself.', '应用视图列出在已连接的桌面电脑上运行、并在这个浏览器里打开的本地应用。在桌面版里为某个应用打开远程访问之后，它会出现在这里。这一行会标明它运行在桌面电脑上。长时间的工作适合放在那台电脑上；手机应用也会把工作放在手机自己上面运行。'),

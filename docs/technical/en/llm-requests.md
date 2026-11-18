@@ -284,19 +284,19 @@ A completed response produces a reusable ContinuationRef only with stable accoun
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/client/options.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/client/options.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/client/prepared.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/client/prepared.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/client/executor.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/client/executor.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/client/requests.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/client/requests.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/protocol/llm.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/protocol/llm.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/codecs/mod.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/codecs/mod.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/transport.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/transport.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/tests/execution_contracts.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/tests/execution_contracts.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/client/chat.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/client/chat.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/protocol/message.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/protocol/message.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/protocol/json_payload.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/protocol/json_payload.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/protocol/continuation.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/protocol/continuation.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
+- [llm-client/src/client/options.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/client/options.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/client/prepared.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/client/prepared.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/client/executor.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/client/executor.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/client/requests.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/client/requests.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/protocol/llm.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/protocol/llm.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/codecs/mod.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/codecs/mod.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/transport.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/transport.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/tests/execution_contracts.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/tests/execution_contracts.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/client/chat.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/client/chat.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/protocol/message.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/protocol/message.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/protocol/json_payload.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/protocol/json_payload.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/protocol/continuation.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/protocol/continuation.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
 
-- llm-client: HEAD 66ce76a2ecc679f0dba551e26ef6aaceb40d2f49; Referenced input fingerprint sha256:89fef6f87fb7803bec69d768fa11e408a54f2123d196e2c859d8faba79092d96; Product pin 3cb37e3a3b840b54a4e92994fdc8b1edf7f592d3
+- llm-client: HEAD 63c8f7663b7cba7466538213f86c6df4a30442a9; Referenced input fingerprint sha256:c333c57f017ceb83b75e77ac252dc2cf3850ac8a74a5199f5d9154b7e698100c; Product pin 63c8f7663b7cba7466538213f86c6df4a30442a9
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

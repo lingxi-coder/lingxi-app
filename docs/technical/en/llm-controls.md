@@ -86,38 +86,37 @@ Verification method: Compile check (llm-structured-output)
 
 <a id="finite-decisions"></a>
 
-## Finite single-choice decisions
+## Provider-native decisions
 
-DecisionRequest shares text/image context across one or more questions, each with unique nonempty question IDs and option IDs. DecisionService uses verified strict structured-output routes. models() lists admitted models; an arbitrary catalog structured_output flag, compatible gateway or account is insufficient.
+Use the native resource for the configured protocol. OpenAI Decisions accepts input and named questions. TypeSafe SystemOne accepts state, questions and optional assets. The host selects the endpoint and passes credentials in RequestOptions.
 
-### One finite-choice question with retained call report
+### Ask a predicate with a configured Decisions resource
 
 ```rust
-use lingxi_llm_client::{LlmClient, RequestOptions};
-use lingxi_llm_client::protocol::{DecisionContextPart, DecisionOption, DecisionQuestion, DecisionRequest, DecisionResult};
+use lingxi_llm_client::providers::openai::decisions::{CreateRequest, Decisions};
+use lingxi_llm_client::RequestOptions;
+use serde_json::{json, Value};
 
 pub async fn classify(
-    client: &LlmClient,
+    service: &Decisions<'_>,
+    model: &str,
+    evidence: &str,
     options: &RequestOptions,
-) -> Result<DecisionResult, Box<dyn std::error::Error>> {
-    let request = DecisionRequest {
-        model: "gpt-6-luna".into(),
-        context: vec![DecisionContextPart::Text { text: "The build completed successfully.".into() }],
-        questions: vec![DecisionQuestion {
-            id: "build_status".into(), prompt: "What is the build status?".into(),
-            options: vec![
-                DecisionOption { id: "passed".into(), label: "Passed".into() },
-                DecisionOption { id: "failed".into(), label: "Failed".into() },
-            ],
-        }],
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let request = CreateRequest {
+        model: model.into(),
+        input: json!(evidence),
+        questions: vec![json!({
+            "type": "predicate", "name": "passed", "instructions": "Did the build pass?"
+        })],
     };
-    Ok(client.decisions().decide_in("openai", &request, options).await?)
+    Ok(service.create(&request, options).await?)
 }
 ```
 
 Verification method: Compile check (llm-decision)
 
-Refused, Incomplete, InvalidResult and ProviderWithReport retain call reports where available. Answers must be offered IDs for every original question; invalid completed results do not weaken constraints or fail over. report.usage is the final attempt; prior_attempts retains earlier reported usage separately.
+- [Configure auto-reply for a shared Bot](teams.md#auto-reply)
 
 <a id="caches-and-embeddings"></a>
 
@@ -134,23 +133,23 @@ client.embeddings().embed uses an independent configured route with ServiceSetti
 
 [Source repository](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/protocol/inference.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/protocol/inference.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/protocol/request_controls.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/protocol/request_controls.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/protocol/structured.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/protocol/structured.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/codecs/inference.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/codecs/inference.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/codecs/structured.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/codecs/structured.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/codecs/cache.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/codecs/cache.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/client/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/client/decisions.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/protocol/decision.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/protocol/decision.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/embeddings/mod.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/embeddings/mod.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/token_count/request.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/token_count/request.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/providers/openrouter/response_cache.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/providers/openrouter/response_cache.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/tests/structured_output.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/tests/structured_output.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/tests/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/tests/decisions.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/tests/embeddings.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/tests/embeddings.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/protocol/json_payload.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/protocol/json_payload.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/client/stream.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/client/stream.rs) — Committed source (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
+- [llm-client/src/protocol/inference.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/protocol/inference.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/protocol/request_controls.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/protocol/request_controls.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/protocol/structured.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/protocol/structured.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/codecs/inference.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/codecs/inference.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/codecs/structured.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/codecs/structured.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/codecs/cache.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/codecs/cache.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/providers/openai/decisions.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/providers/openai/decisions.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/providers/native_decision.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/providers/native_decision.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/embeddings/mod.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/embeddings/mod.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/token_count/request.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/token_count/request.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/providers/openrouter/response_cache.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/providers/openrouter/response_cache.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/tests/structured_output.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/tests/structured_output.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/tests/native_decisions.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/tests/native_decisions.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/tests/embeddings.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/tests/embeddings.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/protocol/json_payload.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/protocol/json_payload.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/client/stream.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/client/stream.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
 
-- llm-client: HEAD 66ce76a2ecc679f0dba551e26ef6aaceb40d2f49; Referenced input fingerprint sha256:89fef6f87fb7803bec69d768fa11e408a54f2123d196e2c859d8faba79092d96; Product pin 3cb37e3a3b840b54a4e92994fdc8b1edf7f592d3
+- llm-client: HEAD 63c8f7663b7cba7466538213f86c6df4a30442a9; Referenced input fingerprint sha256:c333c57f017ceb83b75e77ac252dc2cf3850ac8a74a5199f5d9154b7e698100c; Product pin 63c8f7663b7cba7466538213f86c6df4a30442a9
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

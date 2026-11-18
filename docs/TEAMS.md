@@ -385,6 +385,11 @@ logout, account changes, binding changes and shutdown cancel captured host work.
 
 ### Authenticated triggers and one-shot execution
 
+This section records the original T3 worker protocol. For current shared Bot
+admission see [Teams and messages](technical/en/teams.md#auto-reply). A Bot
+published with auto-reply enabled can receive unaddressed group or channel
+messages in conversations that opted it in. A Bot DM already addresses its Bot.
+
 Human message creation accepts up to eight explicit `targets`. A Bot DM derives
 its target from its immutable conversation; a group/channel requires a selected,
 participating, currently permitted Bot. Plain `@name`, SDK `mentions`, replies by

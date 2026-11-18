@@ -247,7 +247,7 @@ pub async fn submit_background(
     id: 'llm-controls', group: 'llm', packageName: 'lingxi-llm-client', sourceUrl: currentSource,
     title: t('Output, inference & cache controls', '输出、推理与缓存控制'),
     description: t('Apply validated request-local contracts without weakening schemas or confusing reasoning budgets with monetary limits.', '应用已校验的请求级约定，不弱化 Schema，并区分推理预算与金额限制。'),
-    sources: sources('src/protocol/inference.rs', 'src/protocol/request_controls.rs', 'src/protocol/structured.rs', 'src/codecs/inference.rs', 'src/codecs/structured.rs', 'src/codecs/cache.rs', 'src/client/decisions.rs', 'src/protocol/decision.rs', 'src/embeddings/mod.rs', 'src/token_count/request.rs', 'src/providers/openrouter/response_cache.rs', 'tests/structured_output.rs', 'tests/decisions.rs', 'tests/embeddings.rs'),
+    sources: sources('src/protocol/inference.rs', 'src/protocol/request_controls.rs', 'src/protocol/structured.rs', 'src/codecs/inference.rs', 'src/codecs/structured.rs', 'src/codecs/cache.rs', 'src/providers/openai/decisions.rs', 'src/providers/native_decision.rs', 'src/embeddings/mod.rs', 'src/token_count/request.rs', 'src/providers/openrouter/response_cache.rs', 'tests/structured_output.rs', 'tests/native_decisions.rs', 'tests/embeddings.rs'),
     sections: [
       {
         id: 'inference-controls', title: t('Thinking, effort and service tier', 'Thinking、effort 与服务等级'),
@@ -282,29 +282,28 @@ pub async fn structured_answer(
         bullets: [t('Stream collectors reconstruct terminal content and then validate; individual JSON deltas are not standalone documents. Validation errors retain response/events and usage for host accounting.', '流收集器先重建终止内容再校验；单个 JSON 增量不是独立文档。校验错误保留响应、事件与用量，供宿主结算。'), t('First-party Qwen and DeepSeek JSON Object requests require JSON/json in explicit system/user text. Their checks do not count assistant text, tool descriptions or attachment payloads. Strict schema support is admitted per model/route rather than protocol compatibility.', '第一方 Qwen 与 DeepSeek JSON Object 请求要求显式 system/user 文本出现 JSON/json；助手文本、工具描述与附件载荷不计入检查。严格 Schema 支持按模型/路由准入，而非按协议兼容性判断。')],
       },
       {
-        id: 'finite-decisions', title: t('Finite single-choice decisions', '有限选项单选决策'),
-        paragraphs: [t('DecisionRequest shares text/image context across one or more questions, each with unique nonempty question IDs and option IDs. DecisionService uses verified strict structured-output routes. models() lists admitted models; an arbitrary catalog structured_output flag, compatible gateway or account is insufficient.', 'DecisionRequest 在一个或多个问题间共享文本/图像上下文，每个问题与选项 ID 必须非空且唯一。DecisionService 使用已验证的严格结构化输出路由。models() 列出准入模型；任意目录 structured_output 标记、兼容网关或账户不足以准入。')],
-        code: [{ label: t('One finite-choice question with retained call report', '保留调用报告的有限选项问题'), language: 'rust', verification: 'compile', exampleId: 'llm-decision', code: `use lingxi_llm_client::{LlmClient, RequestOptions};
-use lingxi_llm_client::protocol::{DecisionContextPart, DecisionOption, DecisionQuestion, DecisionRequest, DecisionResult};
+        id: 'finite-decisions', title: t('Provider-native decisions', '供应商原生 Decision'),
+        paragraphs: [t('Use the native resource for the configured protocol. OpenAI Decisions accepts input and named questions. TypeSafe SystemOne accepts state, questions and optional assets. The host selects the endpoint and passes credentials in RequestOptions.', '按已配置的协议使用原生接口。OpenAI Decisions 接收输入与命名问题，TypeSafe SystemOne 接收状态、问题与可选素材。宿主选择端点，通过 RequestOptions 传入凭据。')],
+        code: [{ label: t('Ask a predicate with a configured Decisions resource', '用已配置的 Decisions 服务做判断'), language: 'rust', verification: 'compile', exampleId: 'llm-decision', code: `use lingxi_llm_client::providers::openai::decisions::{CreateRequest, Decisions};
+use lingxi_llm_client::RequestOptions;
+use serde_json::{json, Value};
 
 pub async fn classify(
-    client: &LlmClient,
+    service: &Decisions<'_>,
+    model: &str,
+    evidence: &str,
     options: &RequestOptions,
-) -> Result<DecisionResult, Box<dyn std::error::Error>> {
-    let request = DecisionRequest {
-        model: "gpt-6-luna".into(),
-        context: vec![DecisionContextPart::Text { text: "The build completed successfully.".into() }],
-        questions: vec![DecisionQuestion {
-            id: "build_status".into(), prompt: "What is the build status?".into(),
-            options: vec![
-                DecisionOption { id: "passed".into(), label: "Passed".into() },
-                DecisionOption { id: "failed".into(), label: "Failed".into() },
-            ],
-        }],
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let request = CreateRequest {
+        model: model.into(),
+        input: json!(evidence),
+        questions: vec![json!({
+            "type": "predicate", "name": "passed", "instructions": "Did the build pass?"
+        })],
     };
-    Ok(client.decisions().decide_in("openai", &request, options).await?)
+    Ok(service.create(&request, options).await?)
 }` }],
-        note: t('Refused, Incomplete, InvalidResult and ProviderWithReport retain call reports where available. Answers must be offered IDs for every original question; invalid completed results do not weaken constraints or fail over. report.usage is the final attempt; prior_attempts retains earlier reported usage separately.', 'Refused、Incomplete、InvalidResult 与 ProviderWithReport 在可用时保留调用报告。每个原问题必须返回已提供的选项 ID；不合法完成结果不会弱化约束或回退。report.usage 对应最后一次尝试，prior_attempts 分开保留更早已报告的用量。'),
+        links: [{ label: t('Configure auto-reply for a shared Bot', '配置共享 Bot 的自主回复'), href: '/docs/teams#auto-reply' }],
       },
       {
         id: 'caches-and-embeddings', title: t('Prompt caches, response caches and embeddings', '提示缓存、响应缓存与嵌入'),

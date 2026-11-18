@@ -15,6 +15,7 @@ export function RouteLink({ children, className, href, onClick, ...anchorProps }
       event.ctrlKey ||
       event.shiftKey ||
       event.altKey ||
+      href.includes('#') ||
       event.currentTarget.target === '_blank'
     ) {
       return;

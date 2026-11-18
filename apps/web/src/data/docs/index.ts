@@ -1,4 +1,6 @@
 import { bridgePages } from './bridge';
+import { collaborationPages } from './collaboration';
+import workflows from './product-workflows.json';
 import { harnessPages } from './harness';
 import { llmPages } from './llm';
 import { mobilePages } from './mobile';
@@ -48,6 +50,9 @@ const overview: DocPage = {
       { label: { en: 'Desktop', zh: '桌面' }, href: '/docs/using-desktop' },
       { label: { en: 'iPhone and Android', zh: 'iPhone 与 Android' }, href: '/docs/using-mobile' },
       { label: { en: 'Permissions', zh: '权限' }, href: '/docs/permissions' },
+      { label: { en: 'Teams and messages', zh: '团队和消息' }, href: '/docs/teams' },
+      { label: { en: 'Personal and shared Bots', zh: '个人与共享 Bot' }, href: '/docs/bots' },
+      { label: { en: 'Publish and share Local Apps', zh: '发布和共享 Local App' }, href: '/docs/local-apps' },
       { label: { en: 'Remote control', zh: '远控' }, href: '/docs/remote-control' },
       { label: { en: 'Help', zh: '帮助' }, href: '/docs/help' },
     ] },
@@ -129,7 +134,7 @@ const useAfterCli = usePages.filter((page) => page.id !== 'using-cli');
 const productBeforeHelp = productPages.filter((page) => page.id !== 'help');
 const helpPage = productPages.filter((page) => page.id === 'help');
 
-export const docPages: DocPage[] = [overview, ...guidePages, ...cliPage, ...sessionPages, ...useAfterCli, ...customizePages, ...handbookReferencePages, ...productBeforeHelp, ...extraProductPages, ...helpPage, reference, ...harnessPages, ...agentWorkflowPages, ...llmPages, ...mobilePages, ...bridgePages, ...runtimeSystemPages, ...llmServicePages, ...platformPages, ...operationsPages];
+export const docPages: DocPage[] = [overview, ...guidePages, ...cliPage, ...sessionPages, ...useAfterCli, ...customizePages, ...handbookReferencePages, ...collaborationPages, ...productBeforeHelp, ...extraProductPages, ...helpPage, reference, ...harnessPages, ...agentWorkflowPages, ...llmPages, ...mobilePages, ...bridgePages, ...runtimeSystemPages, ...llmServicePages, ...platformPages, ...operationsPages];
 
 export function getDocPage(id: string): DocPage | undefined {
   return docPages.find((page) => page.id === id);
@@ -162,13 +167,39 @@ for (const locale of ['en', 'zh'] as const) {
   });
 }
 
-export function searchDocs(query: string, locale: 'en' | 'zh') {
+export interface DocSearchResult {
+  page: DocPage;
+  excerpt: string;
+  sectionId?: string;
+}
+
+function normalizeWorkflow(query: string): string {
+  return query.toLowerCase().replace(/\s+/gu, '');
+}
+
+const workflowSearch = workflows.flatMap(workflow =>
+  workflow.queries.map(phrase => ({ ...workflow, phrase: normalizeWorkflow(phrase) })));
+
+export function searchDocs(query: string, locale: 'en' | 'zh'): DocSearchResult[] {
   const terms = query.trim().toLocaleLowerCase().split(/\s+/u).filter(Boolean);
   if (!terms.length) return docPages.slice(0, 7).map((page) => ({ page, excerpt: page.description[locale] }));
-  return docSearchRecords[locale].flatMap((entry) => {
+  const question = normalizeWorkflow(query);
+  const best = workflowSearch.filter(item => question.includes(item.phrase))
+    .sort((a, b) => b.phrase.length - a.phrase.length)[0];
+  const matchPage = best && getDocPage(best.page);
+  const section = matchPage?.sections.find(item => item.id === best.section);
+  const results = docSearchRecords[locale].flatMap((entry) => {
     if (!terms.every((term) => entry.haystack.includes(term))) return [];
     const matchIndex = entry.loweredBlocks.findIndex((block) => terms.some((term) => block.includes(term)));
     const excerpt = matchIndex >= 0 ? entry.blocks[matchIndex]! : entry.page.description[locale];
     return [{ page: entry.page, excerpt: excerpt.slice(0, 180) }];
   });
+  if (matchPage && section) {
+    const excerpt = section.steps?.[0] ?? section.paragraphs?.[0] ?? section.bullets?.[0] ?? section.title;
+    return [{ page: matchPage, sectionId: section.id, excerpt: excerpt[locale] }, ...results.filter(row => row.page !== matchPage)];
+  }
+  // A product page named by the query should precede pages that merely cite it.
+  const titleMatch = (page: DocPage) => Number([page.id, page.title[locale]].some(title =>
+    normalizeWorkflow(title).includes(question)));
+  return results.sort((a, b) => titleMatch(b.page) - titleMatch(a.page));
 }

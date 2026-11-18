@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tomllib
+from functools import cache
 
 REPOSITORIES = ('lingxi-app', 'harness-runtime', 'llm-client', 'mobile-linux-runtime')
 
@@ -33,10 +34,21 @@ def source_revision(repo: Path, paths: list[str]) -> str:
     return revision or head
 
 
+@cache
 def revision_published(repo: Path, revision: str) -> bool:
     """Use locally known origin branches without fetching or guessing from HEAD."""
     refs = git(repo, 'for-each-ref', '--format=%(refname)', '--contains=' + revision, 'refs/remotes/origin/').decode().splitlines()
     return any(ref != 'refs/remotes/origin/HEAD' for ref in refs)
+
+
+@cache
+def published_file_revision(repo: Path, revision: str, path: str) -> str | None:
+    """A local documentation branch may reference product code already on origin."""
+    changed = git(repo, 'log', '-1', '--format=%H', revision, '--', path).decode().strip()
+    if changed and revision_published(repo, changed):
+        if git(repo, 'show', f'{changed}:{path}') == git(repo, 'show', f'{revision}:{path}'):
+            return changed
+    return None
 
 
 def product_pins(workspace: Path) -> dict[str, str]:
@@ -97,9 +109,13 @@ def build(workspace: Path, pages: list[dict]) -> dict:
         for ref in refs:
             repo = ref['repo']
             revision = metadata[repo]['revision']
-            ref['revision'] = revision
             if ref['sourceState'] == 'committed' and not metadata[repo]['published']:
-                ref['sourceState'] = 'unpublished'
+                public_revision = published_file_revision(workspace / repo, revision, ref['path'])
+                if public_revision:
+                    revision = public_revision
+                else:
+                    ref['sourceState'] = 'unpublished'
+            ref['revision'] = revision
             if ref['sourceState'] == 'committed':
                 from urllib.parse import quote
                 ref['url'] = f'{metadata[repo]["sourceUrl"]}/blob/{revision}/{quote(ref["path"], safe="/")}'

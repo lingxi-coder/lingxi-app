@@ -1507,13 +1507,16 @@ export function validateClientEvent(value: unknown): ClientEvent {
       if (!Array.isArray(input['sessions'])) throw new Error('invalid sessions');
       for (const row of input['sessions']) {
         const item = object(row, 'session row');
-        exactKeys(item, ['uuid', 'mode', 'title', 'modified_rfc3339', 'message_count', 'path', 'workspace_path'], 'session row');
+        exactKeys(item, ['uuid', 'mode', 'title', 'modified_rfc3339', 'message_count', 'path', 'workspace_path', 'user_title', 'activity_json'], 'session row');
         string(item['uuid'], 'session row uuid');
         sessionMode(item['mode'], 'session row mode');
         string(item['title'], 'session row title');
         string(item['modified_rfc3339'], 'session row modified_rfc3339');
         integer(item['message_count'], 'session row message_count');
         string(item['path'], 'session row path');
+        for (const field of ['user_title', 'activity_json']) {
+          if (item[field] !== undefined && item[field] !== null) string(item[field], `session row ${field}`);
+        }
         if (item['workspace_path'] !== undefined && item['workspace_path'] !== null) {
           string(item['workspace_path'], 'session workspace path');
         }

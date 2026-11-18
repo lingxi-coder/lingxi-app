@@ -42,10 +42,10 @@ export function inboxErrorText(code: string, cn: boolean) {
       ? '同步空间已满或不可用。请联网同步后重试。'
       : 'Sync storage is full or unavailable. Reconnect and retry.';
   if (
-    ['SOURCE_ACCESS_REQUIRED', 'STALE_MEMBERSHIP', 'MEMBERSHIP_REQUIRED', 'INBOX_ITEM_MISSING'].includes(code)
+    ['SOURCE_ACCESS_REQUIRED', 'STALE_MEMBERSHIP', 'MEMBERSHIP_REQUIRED', 'INBOX_ITEM_MISSING', 'permission-denied'].includes(code)
   )
     return cn ? '当前账号无法再访问此会话。' : 'This account no longer has access to this conversation.';
-  if (['INVALID_SESSION', 'SIGN_IN_REQUIRED', 'unauthenticated', 'permission-denied'].includes(code))
+  if (['INVALID_SESSION', 'SIGN_IN_REQUIRED', 'unauthenticated'].includes(code))
     return cn ? '请重新登录后重试。' : 'Sign in again to continue.';
   if (code === 'PREFERENCE_REVISION_CONFLICT')
     return cn
@@ -283,7 +283,9 @@ export function InboxList({ controller, onOpen, activeKey, locale = 'en' }: Inbo
       </div>
       {state.batchBusy ? <p role="status">{cn ? '正在标为已读…' : 'Marking conversations read…'}</p> : null}
       {history ? <NoticeHistory controller={controller} cn={cn} onOpen={onOpen} /> : null}
-      {state.offline ? <p role="status">{cn ? '离线' : 'Offline'}</p> : null}
+      {state.offline ? <p role="status">{state.cloudUnavailable
+        ? (cn ? '云端会话暂不可用，本机会话仍可使用。' : 'Cloud conversations are unavailable. Local chats are still available.')
+        : (cn ? '离线' : 'Offline')}</p> : null}
       {state.error || error ? (
         <p role="alert">
           {inboxErrorText(error || state.error, cn)}{' '}

@@ -183,6 +183,17 @@ async function main() {
     await waitChats();
     await wait("!document.querySelector('.lx-inbox-row[aria-current=page]')");
 
+    console.error('Checking Apps to Chats content restoration');
+    await run("document.querySelector('.desktop-nav-rail button[title=Apps]').click()");
+    await wait("document.querySelector('.local-apps-sidebar-disclosure')");
+    await run("document.querySelector('.local-apps-sidebar-disclosure').click()");
+    await wait("document.querySelector('.local-apps-sidebar-chats button')");
+    await run("document.querySelector('.local-apps-sidebar-chats button').click()");
+    await wait("window.inboxFixture.selected() === 'app-author' && document.querySelector('.desktop-nav-rail button[title=Apps][aria-current=page]')");
+    await clickRail('chats');
+    await wait(`${selectedView('chats')} && window.inboxFixture.selected() === 'draft'`);
+    assert.equal(await run("document.querySelector('.local-apps-sidebar')?.offsetHeight ?? 0"), 0);
+
     // Large text and reduced motion retain usable first-level navigation.
     if (!contents.debugger.isAttached()) contents.debugger.attach('1.3');
     await contents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [

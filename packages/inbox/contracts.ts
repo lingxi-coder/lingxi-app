@@ -66,6 +66,7 @@ export interface InboxNotice extends InboxNoticeTarget {
   deliverable: boolean;
 }
 export interface InboxPage {
+  cloudUnavailable?: boolean;
   partialOffline?: boolean;
   items: InboxItem[];
   next?: InboxCursor | null;

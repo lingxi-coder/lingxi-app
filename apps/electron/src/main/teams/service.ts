@@ -12,7 +12,7 @@ import type { TeamsFirestoreSession, TeamsFirestoreOptions } from './firestore.j
 export interface Account {
   snapshot(): { user: { uid: string } | null };
   sessionEpoch?(): number;
-  getIdToken(): Promise<string>;
+  getIdToken(forceRefresh?: boolean): Promise<string>;
   onChanged(callback: () => void): () => void;
 }
 export interface TeamAccountContext { uid: string; epoch: number }

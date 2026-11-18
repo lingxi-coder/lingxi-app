@@ -852,3 +852,44 @@ test('Unread and Needs attention include muted archived chats, while All, badges
   assert.equal(item.notificationMode, 'none');
   assert.equal(item.pendingActionCount, 1);
 });
+
+test('missing cloud Inbox deployment preserves signed-in local conversations', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'inbox-missing-cloud-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const html of [false, true]) {
+    const f = fixture('owner', [row()], dir, { fetcher: async () => html
+      ? new Response('<html>Not found</html>', { status: 404 })
+      : Response.json({ error: { code: 'NOT_FOUND' } }, { status: 404 }) });
+    const page = await f.service.request<InboxPage>('owner', { action: 'list' });
+    assert.equal(page.partialOffline, true);
+    assert.equal(page.cloudUnavailable, true);
+    assert.equal(page.items[0].key, key);
+    await assert.rejects(f.service.request('other', { action: 'list' }), /INVALID_SESSION/);
+    f.service.close();
+  }
+});
+
+test('Inbox refreshes a rejected token once while preserving permission denial', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'inbox-token-refresh-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const refreshes: boolean[] = [];
+  let calls = 0, status = 401;
+  const f = fixture('owner', [row()], dir, {
+    account: { snapshot: () => ({ user: { uid: 'owner' } }), getIdToken: async force => {
+      refreshes.push(Boolean(force)); return force ? 'fresh' : 'old';
+    }, onChanged: () => () => {} },
+    fetcher: async (_, init) => {
+      calls++;
+      if (status === 401 && (init?.headers as Record<string, string>).Authorization === 'Bearer fresh')
+        return Response.json({ items: [], next: null });
+      return Response.json({ error: status === 401 ? 'INVALID_SESSION' : 'SOURCE_ACCESS_REQUIRED' }, { status });
+    },
+  });
+  t.after(() => f.service.close());
+  await f.service.request('owner', { action: 'list' });
+  assert.deepEqual(refreshes, [false, true]);
+  assert.equal(calls, 2);
+  status = 403; refreshes.length = 0;
+  await assert.rejects(f.service.request('owner', { action: 'list' }), /SOURCE_ACCESS_REQUIRED/);
+  assert.deepEqual(refreshes, [false]);
+});

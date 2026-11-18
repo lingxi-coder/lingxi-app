@@ -15,6 +15,7 @@ import {
 import { browserInboxStorage, enqueue, type InboxStorage } from './storage.js';
 
 export interface InboxSnapshot {
+  cloudUnavailable?: boolean;
   items: InboxItem[];
   filter: InboxFilter;
   category?: InboxCategory;
@@ -274,6 +275,7 @@ export class InboxController {
         hasMore: !!cursor,
         busy: false,
         offline: !!first?.partialOffline,
+        cloudUnavailable: !!first?.cloudUnavailable,
         error: '',
       });
       if (first?.partialOffline) return;

@@ -13,7 +13,7 @@ import { useBots } from './bridge/useBots';
 import { useBotSessions } from './bridge/useBotSessions';
 import { useSidebarMode } from './bridge/useSidebarMode';
 import { modeForSettledChat, pageForMode, type AppPage } from './bridge/sidebarMode';
-import type { SidebarMode } from '../shared/settings';
+import type { SidebarMode, SessionRef } from '../shared/settings';
 import { BotsSidebar } from './components/BotsSidebar';
 import { TeamsSidebar, focusTeamsSidebarSoon } from './components/TeamsSidebar';
 import { FriendsPanel } from './components/FriendsPanel';
@@ -281,6 +281,11 @@ export function App() {
   // so the chat is always listed beside it. Only settled changes count: a chat that is still opening says nothing yet.
   const appChat = !botChat && bridge.activeSession?.mode === 'code' && (Boolean(appWorkspace.activeGroup)
     || (localAppProjectTarget.current !== undefined && localAppProjectTarget.current === bridge.activeSession.projectId));
+  const ordinaryChat = useRef<SessionRef>();
+  useEffect(() => {
+    if (sidebarMode === 'home' && page === 'chat' && !bridge.sessionLoading && !appChat && !botChat && bridge.activeSession)
+      ordinaryChat.current = bridge.activeSession;
+  }, [sidebarMode, page, bridge.sessionLoading, appChat, botChat, bridge.activeSession]);
   const settledChatOwner = useRef(`${botChat}:${appChat}:${bridge.activeSession?.sessionId}`);
   useEffect(() => {
     const owner = `${botChat}:${appChat}:${bridge.activeSession?.sessionId}`;
@@ -297,10 +302,27 @@ export function App() {
   const selectSidebarMode = useCallback((mode: SidebarMode, after?: () => void) => {
     if (sessionNavigationBlocked() || (mode === 'bots' && !bots.available)) return;
     const next = pageForMode(mode, { page, botChat, appChat });
-    const go = () => { setSidebarMode(mode); openPage(next); after?.(); };
+    const finish = () => { setSidebarMode(mode); openPage(next); after?.(); };
+    const go = () => {
+      if (mode !== 'home' || (!appChat && !botChat)) { finish(); return; }
+      cancelLocalAppNavigation();
+      const nonce = localAppNavigation.current;
+      const previous = ordinaryChat.current;
+      const target = previous && !appWorkspace.projectPaths.includes(previous.projectPath) ? previous : undefined;
+      void (async () => {
+        const opened = target
+          ? await localAppBridge.current.openSession(target.projectPath, target.sessionId, undefined, target.mode)
+          : await localAppBridge.current.newSession();
+        if (!opened || localAppNavigation.current !== nonce) return;
+        localAppProjectTarget.current = undefined;
+        finish();
+      })().catch(error => {
+        if (localAppNavigation.current === nonce) setLocalAppNavigationError(localAppErrorMessage(error));
+      });
+    };
     // Staying on the page, or coming to it, leaves nothing behind.
     if (next === page) go(); else leaveBots(go);
-  }, [bots.available, botChat, appChat, leaveBots, openPage, page, sessionNavigationBlocked, setSidebarMode]);
+  }, [bots.available, botChat, appChat, leaveBots, openPage, page, sessionNavigationBlocked, setSidebarMode, cancelLocalAppNavigation, appWorkspace.projectPaths, setLocalAppNavigationError]);
   /** Bring Teams forward when its sidebar is shown beside a utility page. */
   const showTeams = useCallback(() => { if (page !== 'teams') openPage('teams'); }, [openPage, page]);
   // Bot services (Bots offered outside Teams) take the place of the Team's conversation in the Teams page.
@@ -747,7 +769,7 @@ export function App() {
             homeView={projectBrowser ? 'projects' : 'chats'}
             onHomeViewChange={view => {
               const changeView = () => setProjectBrowser(view === 'projects');
-              if (sidebarMode === 'home' && (page === 'chat' || page === 'friends' || page === 'teams')) {
+              if (sidebarMode === 'home' && !appChat && !botChat && (page === 'chat' || page === 'friends' || page === 'teams')) {
                 if (!sessionNavigationBlocked()) changeView();
               } else selectSidebarMode('home', changeView);
             }}

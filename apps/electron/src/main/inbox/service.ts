@@ -51,8 +51,8 @@ function transient(error: unknown) {
   return (
     error instanceof TypeError ||
     (error instanceof Error &&
-      ['INBOX_OFFLINE', 'TimeoutError', 'AbortError'].includes(
-        error.message === 'INBOX_OFFLINE' ? error.message : error.name,
+      ['INBOX_OFFLINE', 'INBOX_SERVICE_UNAVAILABLE', 'TimeoutError', 'AbortError'].includes(
+        error.message.startsWith('INBOX_') ? error.message : error.name,
       ))
   );
 }
@@ -531,9 +531,9 @@ export class InboxService {
     this.changed();
     await this.publisher.consentChanged();
   }
-  private async post<T>(uid: string, epoch: number, command: object): Promise<T> {
+  private async post<T>(uid: string, epoch: number, command: object, refreshed = false): Promise<T> {
     this.check(uid, epoch);
-    const token = await this.opts.account.getIdToken();
+    const token = await this.opts.account.getIdToken(refreshed);
     this.check(uid, epoch);
     if ('action' in command && command.action === 'assistantSource') {
       const bind = command as { action: 'assistantSource'; enabled: boolean; consentRevision: number };
@@ -567,8 +567,13 @@ export class InboxService {
     });
     this.check(uid, epoch);
     if (response.status === 429 || response.status >= 500) throw new Error('INBOX_OFFLINE');
-    const value = await response.json();
+    if (response.status === 401 && !refreshed) return this.post<T>(uid, epoch, command, true);
+    const value = await response.json().catch(() => ({}));
     this.check(uid, epoch);
+    // An older deployment has no Inbox route. Preserve the authorized local
+    // projection while cloud service is unavailable; this is not a login failure.
+    if (response.status === 404 && (!value.error || value.error === 'NOT_FOUND' || value.error?.code === 'NOT_FOUND'))
+      throw new Error('INBOX_SERVICE_UNAVAILABLE');
     if (!response.ok)
       throw new Error(
         typeof value.error === 'string'
@@ -803,11 +808,12 @@ export class InboxService {
       throw new Error('INVALID_INPUT');
     const prefix = normalizeTitle(c.searchPrefix ?? ''),
       compare = prefix ? byTitle : byPosition;
-    let partialOffline = false;
+    let partialOffline = false, cloudUnavailable = false;
     const cloudPage = uid
       ? this.post<InboxPage>(uid, epoch, c).catch((error) => {
           if (!transient(error)) throw error;
           partialOffline = true;
+          cloudUnavailable = error instanceof Error && error.message === 'INBOX_SERVICE_UNAVAILABLE';
           return { items: [], next: null };
         })
       : { items: [], next: null };
@@ -858,7 +864,7 @@ export class InboxService {
             ...(prefix ? { titleSort: titleOf(last) } : { pinOrder: last.pinOrder }),
           }
         : (cloud.next ?? null);
-    return { items, next, ...(partialOffline ? { partialOffline: true } : {}) };
+    return { items, next, ...(partialOffline ? { partialOffline: true } : {}), ...(cloudUnavailable ? { cloudUnavailable: true } : {}) };
   }
   close() {
     this.closed = true;

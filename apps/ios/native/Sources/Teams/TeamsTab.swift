@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Where a push in the Teams tab goes.
 enum TeamsRoute: Hashable {
@@ -39,9 +40,16 @@ struct TeamsTab: View {
     /// it is only restored for the same account and team, and only while the conversation is still in the directory.
     @SceneStorage("teams.openConversation") private var storedOpen = ""
     @State private var restoredOpen = false
+    @State private var sceneSessionID = ""
 
     var body: some View {
         content
+            .background(TeamsSceneSessionReader { id in
+                guard sceneSessionID != id else { return }
+                sceneSessionID = id
+                if let snapshot = try? TeamsSceneNavigationStore().read(sceneID: id) { storedOpen = snapshot }
+                restoreOpenConversation()
+            }.frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true))
             .sheet(item: $sheet) { sheetContent($0) }
             .onChange(of: tabs.teamsJoinCode, initial: true) { _, _ in consumeJoinCode() }
             .onChange(of: workspace.uid) { _, uid in
@@ -289,13 +297,17 @@ struct TeamsTab: View {
     }
 
     private func rememberOpen(_ id: String?) {
-        guard let id, let uid = workspace.uid, let team = workspace.team else { storedOpen = ""; return }
-        storedOpen = [uid, team.id, id].joined(separator: "\n")
+        if let id, let uid = workspace.uid, let team = workspace.team {
+            storedOpen = [uid, team.id, id].joined(separator: "\n")
+        } else {
+            storedOpen = ""
+        }
+        if !sceneSessionID.isEmpty { try? TeamsSceneNavigationStore().write(storedOpen, sceneID: sceneSessionID) }
     }
 
     /// After the process was killed: the conversation that was open comes back, once the directory says it is still there.
     private func restoreOpenConversation() {
-        guard !restoredOpen, !storedOpen.isEmpty, let model = workspace.messaging, model.directoryReady,
+        guard !sceneSessionID.isEmpty, !restoredOpen, !storedOpen.isEmpty, let model = workspace.messaging, model.directoryReady,
               let uid = workspace.uid, let team = workspace.team else { return }
         restoredOpen = true
         let parts = storedOpen.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
@@ -317,5 +329,33 @@ struct TeamsTab: View {
         tabs.teamsJoinCode = nil
         joinPrefill = code
         sheet = .joinTeam
+    }
+}
+
+/// Read the containing window's scene instead of choosing a global foreground window.
+private struct TeamsSceneSessionReader: UIViewRepresentable {
+    var onSession: (String) -> Void
+
+    func makeUIView(context: Context) -> Probe { Probe(onSession: onSession) }
+    func updateUIView(_ view: Probe, context: Context) { view.onSession = onSession }
+
+    final class Probe: UIView {
+        var onSession: (String) -> Void
+
+        init(onSession: @escaping (String) -> Void) {
+            self.onSession = onSession
+            super.init(frame: .zero)
+        }
+
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard let id = window?.windowScene?.session.persistentIdentifier else { return }
+            Task { @MainActor [weak self] in
+                guard let self, window?.windowScene?.session.persistentIdentifier == id else { return }
+                onSession(id)
+            }
+        }
     }
 }

@@ -42,3 +42,33 @@ struct TeamsPreferences {
         }
     }
 }
+
+/// SceneStorage may checkpoint an earlier navigation value when a process is terminated.
+/// Keep an atomic snapshot per UIKit scene, including an empty value when the user goes back.
+struct TeamsSceneNavigationStore {
+    var directory: URL?
+
+    func read(sceneID: String) throws -> String? {
+        let file = try fileURL(sceneID: sceneID)
+        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+        return try JSONDecoder().decode(String.self, from: Data(contentsOf: file))
+    }
+
+    func write(_ value: String, sceneID: String) throws {
+        let file = try fileURL(sceneID: sceneID)
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        try JSONEncoder().encode(value).write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+
+    private func fileURL(sceneID: String) throws -> URL {
+        guard !sceneID.isEmpty, sceneID.utf8.count <= 160 else {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
+        let root = try directory ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                                           appropriateFor: nil, create: true).appendingPathComponent("TeamsNavigation", isDirectory: true)
+        let name = Data(sceneID.utf8).base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "=", with: "")
+        return root.appendingPathComponent(name).appendingPathExtension("json")
+    }
+}

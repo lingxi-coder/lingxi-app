@@ -24,6 +24,7 @@ import { useTeams } from './bridge/useTeams';
 import { useFriends } from './bridge/useFriends';
 import { useDesktopInbox, useAssistantInboxReading } from './bridge/useDesktopInbox';
 import { DesktopInboxPanel } from './components/DesktopInboxPanel';
+import { Icon } from './components/Icon';
 import { AssistantNoticePreview } from './components/AssistantNoticePreview';
 import type { InboxItem, InboxNoticeTarget } from '../../../../packages/inbox/contracts';
 import type { InboxNotification } from '../shared/inbox';
@@ -829,9 +830,23 @@ export function App() {
           <ErrorBanner bridge={{ error: localAppNavigationError, clearError: clearLocalAppNavigationError }} presentation={localAppNavigationPresentation} />
           <ErrorBanner bridge={bridge} />
           {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} friends={friends} locale={locale} drawer={teamsDrawer} services={botServices} inboxTarget={serviceInboxTarget} notificationTarget={conversationNoticeTarget} onCloseServices={closeBotServices} /></Suspense>}
-          {inboxNotice ? <div className="desktop-inbox-toast" role="status"><div><strong>{inboxNotice.title}</strong><p>{inboxNotice.body}</p></div>
-            <button type="button" onClick={() => { const notice = inboxNotice; setInboxNotice(undefined); void openInboxNotification(notice).catch(() => setLocalAppNavigationError(locale.startsWith('zh') ? '此会话暂时不可用。' : 'This conversation is unavailable.')); }}>{locale.startsWith('zh') ? '查看' : 'View'}</button>
-            <button type="button" aria-label={locale.startsWith('zh') ? '关闭提醒' : 'Dismiss notification'} onClick={() => setInboxNotice(undefined)}>×</button></div> : null}
+          <div className="desktop-inbox-toast-announcement" role="status">
+            {inboxNotice && `${inboxNotice.title}. ${inboxNotice.body}`}
+          </div>
+          {inboxNotice && <div className="desktop-inbox-toast">
+            <span className="desktop-inbox-toast-icon" aria-hidden="true"><Icon name="bell" size={16} /></span>
+            <div className="desktop-inbox-toast-copy">
+              <strong>{inboxNotice.title}</strong>
+              <p>{inboxNotice.body}</p>
+            </div>
+            <button type="button" className="desktop-inbox-toast-view" onClick={() => {
+              setInboxNotice(undefined);
+              void openInboxNotification(inboxNotice).catch(() => setLocalAppNavigationError(locale.startsWith('zh') ? '此会话暂时不可用。' : 'This conversation is unavailable.'));
+            }}>{locale.startsWith('zh') ? '查看' : 'View'}</button>
+            <button type="button" className="desktop-inbox-toast-dismiss" aria-label={tr('desktop_ui_dismiss_notification')} onClick={() => setInboxNotice(undefined)}>
+              <span aria-hidden="true"><Icon name="x" size={14} /></span>
+            </button>
+          </div>}
           {page === 'friends' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('friends_loading')}</p>}><FriendsPage friends={friends} locale={locale} notificationTarget={conversationNoticeTarget} /></Suspense>}
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps sidebarTarget={pageSidebar} visible={page === 'apps'} onCreate={() => openLocalAppChat()} onDevelopmentBlocked={() => setLocalAppNavigationError(tr('local_app_development_requires_code'))} canDevelop={bridge.bootstrap?.conversationSpaces.activeMode === 'code' && !bridge.sessionLoading} /></div>
           {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>

@@ -57,6 +57,33 @@ async function main() {
     };
 
     await waitChats();
+    if (process.argv.includes('--inbox-toast')) {
+      const toast = "document.querySelector('.desktop-inbox-toast')";
+      await run('window.inboxFixture.notifyAssistant(false)');
+      await wait(`${toast}?.textContent.includes('Conversation update')`);
+      assert.equal(await run("document.querySelector('.desktop-inbox-toast-announcement[role=status]')?.textContent"), 'LingXi. Conversation update');
+      if (process.env.LINGXI_INBOX_TOAST_SCREENSHOT) {
+        await settleFixtureAnimations(contents, '.desktop-inbox-toast');
+        const frame = await run(`(() => {
+          const { left, bottom } = ${toast}.getBoundingClientRect();
+          const x = Math.max(0, Math.floor(left) - 40);
+          return { x, y: 0, width: innerWidth - x, height: Math.ceil(bottom) + 28 };
+        })()`);
+        writeFileSync(process.env.LINGXI_INBOX_TOAST_SCREENSHOT, (await contents.capturePage(frame)).toPNG());
+      }
+      await run(`${toast}.querySelector('button[aria-label="Dismiss notification"]').click()`);
+      await wait(`!${toast}`);
+      assert.equal(await run("window.inboxFixture.opens.includes('assistant-result')"), false, 'dismissing the toast must not open the conversation');
+
+      await run('window.inboxFixture.notifyAssistant(false)');
+      await wait(toast);
+      await run(`${toast}.querySelector('.desktop-inbox-toast-view').click()`);
+      await wait(`!${toast}`);
+      await wait("window.inboxFixture.selected() === 'assistant-result' && document.querySelector('.desktop-assistant-notice-preview')?.textContent.includes('The compatibility report is ready.')");
+      await delay(450);
+      assert.equal(Boolean(await run(request('markRead', 'assistant'))), false, 'notification preview must preserve unread');
+      return;
+    }
     console.error('Checking filters and row actions');
     assert.deepEqual(await run("[...document.querySelectorAll('.lx-inbox-row strong')].map(node => node.textContent)"),
       ['Release checklist', 'Bob', 'general']);

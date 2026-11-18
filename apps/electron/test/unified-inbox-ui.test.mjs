@@ -13,7 +13,7 @@ import { createServer } from 'vite';
 const electronRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 
-test('Desktop Inbox filters and routes conversations and reads visible Assistant results', async () => {
+async function runFixture(args = []) {
   const temporary = mkdtempSync(join(tmpdir(), 'lingxi-unified-inbox-ui-'));
   let vite;
   let child;
@@ -35,7 +35,7 @@ test('Desktop Inbox filters and routes conversations and reads visible Assistant
     const url = `http://127.0.0.1:${address.port}/unified-inbox-ui.html`;
     const userData = join(temporary, 'electron');
     mkdirSync(userData);
-    child = spawn(electronBinary, [join(fixtureRoot, 'unified-inbox-ui-electron.mjs'), url], {
+    child = spawn(electronBinary, [join(fixtureRoot, 'unified-inbox-ui-electron.mjs'), url, ...args], {
       cwd: electronRoot,
       env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0', ELECTRON_IS_DEV: '0', LINGXI_TEST_USER_DATA: userData },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -54,4 +54,7 @@ test('Desktop Inbox filters and routes conversations and reads visible Assistant
     await vite?.close();
     rmSync(temporary, { recursive: true, force: true });
   }
-});
+}
+
+test('Desktop Inbox filters and routes conversations and reads visible Assistant results', () => runFixture());
+test('Desktop Inbox notification dismisses or opens the conversation preview', () => runFixture(['--inbox-toast']));

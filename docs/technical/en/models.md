@@ -20,9 +20,9 @@ The file is settings.json in the config directory. The model field is the select
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/apps/cli/tui-core/src/recent_models.rs](https://github.com/lingxi-coder/lingxi-app/blob/dc2adef5ee1ba629e42ccbe79d319854723ff788/apps/cli/tui-core/src/recent_models.rs) — Committed source (dc2adef5ee1ba629e42ccbe79d319854723ff788)
-- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/f6a7da5687cdaa2ecf4c671ac9a51cdbce62bb78/apps/cli/host/src/argv.rs) — Committed source (f6a7da5687cdaa2ecf4c671ac9a51cdbce62bb78)
-- [lingxi-app/apps/cli/tui/src/session.rs](https://github.com/lingxi-coder/lingxi-app/blob/617dbc8501087f2c7218dc266b265bc2615cb7fc/apps/cli/tui/src/session.rs) — Committed source (617dbc8501087f2c7218dc266b265bc2615cb7fc)
+- [lingxi-app/apps/cli/tui-core/src/recent_models.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/tui-core/src/recent_models.rs) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/argv.rs) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/cli/tui/src/session.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/tui/src/session.rs) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 
 - lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; Referenced input fingerprint sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 

@@ -58,7 +58,7 @@ Computer Use 和 Local App Market 拥有自己的架构及实现证据。同处�
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app)
 
-- lingxi-app/Cargo.toml — 未发布源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/Cargo.toml) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 - [harness-runtime/crates/runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/runtime/Cargo.toml) — 已提交源码 (f50814ec8381f10756f66eadf457474d90bcc69a)
 - [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/runtime/src/api.rs) — 已提交源码 (f50814ec8381f10756f66eadf457474d90bcc69a)
 - [llm-client/src/lib.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/lib.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)

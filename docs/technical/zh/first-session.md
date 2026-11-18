@@ -66,9 +66,9 @@ lingxi --resume SESSION_ID
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/f6a7da5687cdaa2ecf4c671ac9a51cdbce62bb78/apps/cli/host/src/argv.rs) — 已提交源码 (f6a7da5687cdaa2ecf4c671ac9a51cdbce62bb78)
-- [lingxi-app/apps/cli/tui/src/session.rs](https://github.com/lingxi-coder/lingxi-app/blob/617dbc8501087f2c7218dc266b265bc2615cb7fc/apps/cli/tui/src/session.rs) — 已提交源码 (617dbc8501087f2c7218dc266b265bc2615cb7fc)
-- [lingxi-app/apps/cli/host/src/repl.rs](https://github.com/lingxi-coder/lingxi-app/blob/6ae4a821a1ad89c29087973856fa7b9ed7df4b7a/apps/cli/host/src/repl.rs) — 已提交源码 (6ae4a821a1ad89c29087973856fa7b9ed7df4b7a)
+- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/argv.rs) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/cli/tui/src/session.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/tui/src/session.rs) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/cli/host/src/repl.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/repl.rs) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 - [harness-runtime/crates/branding/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/branding/src/lib.rs) — 已提交源码 (f50814ec8381f10756f66eadf457474d90bcc69a)
 - [harness-runtime/crates/memory/src/lingxi_md/agents.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/memory/src/lingxi_md/agents.rs) — 已提交源码 (f50814ec8381f10756f66eadf457474d90bcc69a)
 - [harness-runtime/crates/orchestrator/src/prompt/nested_memory.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/orchestrator/src/prompt/nested_memory.rs) — 已提交源码 (f50814ec8381f10756f66eadf457474d90bcc69a)

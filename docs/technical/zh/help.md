@@ -28,8 +28,8 @@
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/apps/cli/tui/src/session.rs](https://github.com/lingxi-coder/lingxi-app/blob/617dbc8501087f2c7218dc266b265bc2615cb7fc/apps/cli/tui/src/session.rs) — 已提交源码 (617dbc8501087f2c7218dc266b265bc2615cb7fc)
-- [lingxi-app/apps/web/src/pages/PrivacyPage.tsx](https://github.com/lingxi-coder/lingxi-app/blob/ac429b1f89879dde570552ea9c2f5915354d8e47/apps/web/src/pages/PrivacyPage.tsx) — 已提交源码 (ac429b1f89879dde570552ea9c2f5915354d8e47)
+- [lingxi-app/apps/cli/tui/src/session.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/tui/src/session.rs) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/web/src/pages/PrivacyPage.tsx](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/web/src/pages/PrivacyPage.tsx) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 
 - lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; 所据文件指纹 sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 

@@ -81,7 +81,7 @@ The bridge is an internal Node.js package. Rust crates are not Python or npm SDK
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- lingxi-app/Cargo.toml — Unpublished source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/Cargo.toml) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 - [harness-runtime/crates/runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/runtime/Cargo.toml) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
 - [llm-client/src/lib.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/lib.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
 - [mobile-linux-runtime/Cargo.toml](https://github.com/lingxi-coder/mobile-linux-runtime/blob/5dd627e1049ba85e0563b7f351f79b00267c58c3/Cargo.toml) — Committed source (5dd627e1049ba85e0563b7f351f79b00267c58c3)

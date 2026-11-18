@@ -48,7 +48,7 @@ LINGXI_DISABLE_AGENT_VIEW 为 1、true、yes 或 on 时关闭 Agent 视图。set
 
 - [harness-runtime/crates/branding/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/branding/src/lib.rs) — 已提交源码 (f50814ec8381f10756f66eadf457474d90bcc69a)
 - [harness-runtime/crates/core/src/host/agent_view.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/core/src/host/agent_view.rs) — 已提交源码 (f50814ec8381f10756f66eadf457474d90bcc69a)
-- [lingxi-app/apps/cli/host/src/run/resume.rs](https://github.com/lingxi-coder/lingxi-app/blob/d87ee457638cc8f3cdec6c63f058ecdfad917c7e/apps/cli/host/src/run/resume.rs) — 已提交源码 (d87ee457638cc8f3cdec6c63f058ecdfad917c7e)
+- [lingxi-app/apps/cli/host/src/run/resume.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/run/resume.rs) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 
 - lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; 所据文件指纹 sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 - harness-runtime: HEAD f50814ec8381f10756f66eadf457474d90bcc69a; 所据文件指纹 sha256:6fe1d28e55bd5b9d72e3fe6ee54f892c7efe64b640840a407ccee12dcef85567; 产品固定版本 f50814ec8381f10756f66eadf457474d90bcc69a

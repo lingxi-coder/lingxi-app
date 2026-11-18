@@ -32,10 +32,10 @@ Check the conversation first. In a team, check the published Bot’s availabilit
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/apps/electron/src/renderer/bridge/botCreation.ts](https://github.com/lingxi-coder/lingxi-app/blob/225035844ee21c5000a593abd7eadd3c3dfb3235/apps/electron/src/renderer/bridge/botCreation.ts) — Committed source (225035844ee21c5000a593abd7eadd3c3dfb3235)
-- [lingxi-app/packages/teams/FriendBotsPanel.tsx](https://github.com/lingxi-coder/lingxi-app/blob/12ec044a7f3f16f78b9098f14f07feff9f519e76/packages/teams/FriendBotsPanel.tsx) — Committed source (12ec044a7f3f16f78b9098f14f07feff9f519e76)
-- [lingxi-app/packages/teams/HostedServices.tsx](https://github.com/lingxi-coder/lingxi-app/blob/5e2001a2be689d88f91ff467d96129993414da0f/packages/teams/HostedServices.tsx) — Committed source (5e2001a2be689d88f91ff467d96129993414da0f)
-- [lingxi-app/apps/electron/src/main/bots/marketHost.ts](https://github.com/lingxi-coder/lingxi-app/blob/cb49df4f24f684583d7cab55acc68eb676380b27/apps/electron/src/main/bots/marketHost.ts) — Committed source (cb49df4f24f684583d7cab55acc68eb676380b27)
+- [lingxi-app/apps/electron/src/renderer/bridge/botCreation.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/electron/src/renderer/bridge/botCreation.ts) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/packages/teams/FriendBotsPanel.tsx](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/packages/teams/FriendBotsPanel.tsx) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/packages/teams/HostedServices.tsx](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/packages/teams/HostedServices.tsx) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/electron/src/main/bots/marketHost.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/electron/src/main/bots/marketHost.ts) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 
 - lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; Referenced input fingerprint sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 

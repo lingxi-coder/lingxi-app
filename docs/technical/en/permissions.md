@@ -42,8 +42,8 @@ A permission mode decides whether LingXi asks you. It does not by itself start a
 [Source repository](https://github.com/lingxi-coder/harness-runtime)
 
 - [harness-runtime/crates/permission/src/mode.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/permission/src/mode.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
-- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/f6a7da5687cdaa2ecf4c671ac9a51cdbce62bb78/apps/cli/host/src/argv.rs) — Committed source (f6a7da5687cdaa2ecf4c671ac9a51cdbce62bb78)
-- [lingxi-app/apps/cli/tui/src/bottom_pane/permission_mode_indicator.rs](https://github.com/lingxi-coder/lingxi-app/blob/dc2adef5ee1ba629e42ccbe79d319854723ff788/apps/cli/tui/src/bottom_pane/permission_mode_indicator.rs) — Committed source (dc2adef5ee1ba629e42ccbe79d319854723ff788)
+- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/argv.rs) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/cli/tui/src/bottom_pane/permission_mode_indicator.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/tui/src/bottom_pane/permission_mode_indicator.rs) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 
 - lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; Referenced input fingerprint sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 - harness-runtime: HEAD f50814ec8381f10756f66eadf457474d90bcc69a; Referenced input fingerprint sha256:6fe1d28e55bd5b9d72e3fe6ee54f892c7efe64b640840a407ccee12dcef85567; Product pin f50814ec8381f10756f66eadf457474d90bcc69a

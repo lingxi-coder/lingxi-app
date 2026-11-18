@@ -32,8 +32,8 @@ lingxi plugin init NAME creates a skills-directory plugin at ~/.lingxi/skills/NA
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/apps/cli/host/src/commands/plugin.rs](https://github.com/lingxi-coder/lingxi-app/blob/44506fb99f28b92b7a2b809860e8148cb80557fc/apps/cli/host/src/commands/plugin.rs) — Committed source (44506fb99f28b92b7a2b809860e8148cb80557fc)
-- [lingxi-app/apps/cli/host/src/commands/plugin_tag.rs](https://github.com/lingxi-coder/lingxi-app/blob/7f9b782412d2cee4a1992d99eeadcbf5473314d7/apps/cli/host/src/commands/plugin_tag.rs) — Committed source (7f9b782412d2cee4a1992d99eeadcbf5473314d7)
+- [lingxi-app/apps/cli/host/src/commands/plugin.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/commands/plugin.rs) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/cli/host/src/commands/plugin_tag.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/commands/plugin_tag.rs) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 
 - lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; Referenced input fingerprint sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 

@@ -51,8 +51,8 @@ The program name in help text is lingxi-cli. After the npm package is installed,
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/f6a7da5687cdaa2ecf4c671ac9a51cdbce62bb78/apps/cli/host/src/argv.rs) — Committed source (f6a7da5687cdaa2ecf4c671ac9a51cdbce62bb78)
-- [lingxi-app/apps/cli/host/src/commands/mod.rs](https://github.com/lingxi-coder/lingxi-app/blob/f8bec55f8d02e580cdeb2e7ec0ee855a87be4771/apps/cli/host/src/commands/mod.rs) — Committed source (f8bec55f8d02e580cdeb2e7ec0ee855a87be4771)
+- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/argv.rs) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/cli/host/src/commands/mod.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/commands/mod.rs) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 - [harness-runtime/crates/command-api/src/builtins/register.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/command-api/src/builtins/register.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
 - [harness-runtime/crates/core/src/host/agent_view.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/core/src/host/agent_view.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
 

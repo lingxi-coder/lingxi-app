@@ -47,7 +47,7 @@
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/packages/bridge-client/src/protocol.ts](https://github.com/lingxi-coder/lingxi-app/blob/46cdd49436a5997e703a890cfc5662e40c92889a/packages/bridge-client/src/protocol.ts) — 已提交源码 (46cdd49436a5997e703a890cfc5662e40c92889a)
+- [lingxi-app/packages/bridge-client/src/protocol.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/packages/bridge-client/src/protocol.ts) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 - [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/runtime/src/api.rs) — 已提交源码 (f50814ec8381f10756f66eadf457474d90bcc69a)
 - [llm-client/src/lib.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/lib.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
 - [mobile-linux-runtime/crates/mobile-linux-api/src/lib.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/5dd627e1049ba85e0563b7f351f79b00267c58c3/crates/mobile-linux-api/src/lib.rs) — 已提交源码 (5dd627e1049ba85e0563b7f351f79b00267c58c3)

@@ -66,10 +66,10 @@ Current-worktree examples require local checkouts and an explicit complete depen
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- lingxi-app/Cargo.toml — Unpublished source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
-- [lingxi-app/rust-toolchain.toml](https://github.com/lingxi-coder/lingxi-app/blob/011ca150ec195d3d8324f10955f91ede556a03d7/rust-toolchain.toml) — Committed source (011ca150ec195d3d8324f10955f91ede556a03d7)
-- [lingxi-app/apps/setup.sh](https://github.com/lingxi-coder/lingxi-app/blob/dc2adef5ee1ba629e42ccbe79d319854723ff788/apps/setup.sh) — Committed source (dc2adef5ee1ba629e42ccbe79d319854723ff788)
-- [lingxi-app/scripts/lib/runtime_source.py](https://github.com/lingxi-coder/lingxi-app/blob/3f14f98a824b207989c9e0c9b2c7c06023ca2083/scripts/lib/runtime_source.py) — Committed source (3f14f98a824b207989c9e0c9b2c7c06023ca2083)
+- [lingxi-app/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/Cargo.toml) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/rust-toolchain.toml](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/rust-toolchain.toml) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/setup.sh](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/setup.sh) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/scripts/lib/runtime_source.py](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/scripts/lib/runtime_source.py) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 - [harness-runtime/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/Cargo.toml) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
 - [llm-client/Cargo.toml](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/Cargo.toml) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
 

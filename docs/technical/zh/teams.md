@@ -75,13 +75,13 @@
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/packages/teams/TeamSidebar.tsx](https://github.com/lingxi-coder/lingxi-app/blob/12ec044a7f3f16f78b9098f14f07feff9f519e76/packages/teams/TeamSidebar.tsx) — 已提交源码 (12ec044a7f3f16f78b9098f14f07feff9f519e76)
-- [lingxi-app/packages/teams/NewConversationDialog.tsx](https://github.com/lingxi-coder/lingxi-app/blob/a3ecab5a900bae02175bfc9c2bc4507d8f2e6659/packages/teams/NewConversationDialog.tsx) — 已提交源码 (a3ecab5a900bae02175bfc9c2bc4507d8f2e6659)
-- [lingxi-app/packages/teams/Composer.tsx](https://github.com/lingxi-coder/lingxi-app/blob/12ec044a7f3f16f78b9098f14f07feff9f519e76/packages/teams/Composer.tsx) — 已提交源码 (12ec044a7f3f16f78b9098f14f07feff9f519e76)
-- [lingxi-app/packages/teams/BotDirectory.tsx](https://github.com/lingxi-coder/lingxi-app/blob/c0eeb5af8aad9e218c510597a301176cf8db53e2/packages/teams/BotDirectory.tsx) — 已提交源码 (c0eeb5af8aad9e218c510597a301176cf8db53e2)
-- [lingxi-app/packages/teams/AutoReplyDialog.tsx](https://github.com/lingxi-coder/lingxi-app/blob/c00607ed4841d7d032a571105471e9c8b7c0b6ce/packages/teams/AutoReplyDialog.tsx) — 已提交源码 (c00607ed4841d7d032a571105471e9c8b7c0b6ce)
-- [lingxi-app/apps/firebase/src/shared-bots.mjs](https://github.com/lingxi-coder/lingxi-app/blob/a57345ae28ffedd218cd6bd3570c25d5c6eb5944/apps/firebase/src/shared-bots.mjs) — 已提交源码 (a57345ae28ffedd218cd6bd3570c25d5c6eb5944)
-- [lingxi-app/apps/electron/src/main/teams/replyTriage.ts](https://github.com/lingxi-coder/lingxi-app/blob/c00607ed4841d7d032a571105471e9c8b7c0b6ce/apps/electron/src/main/teams/replyTriage.ts) — 已提交源码 (c00607ed4841d7d032a571105471e9c8b7c0b6ce)
+- [lingxi-app/packages/teams/TeamSidebar.tsx](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/packages/teams/TeamSidebar.tsx) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/packages/teams/NewConversationDialog.tsx](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/packages/teams/NewConversationDialog.tsx) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/packages/teams/Composer.tsx](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/packages/teams/Composer.tsx) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/packages/teams/BotDirectory.tsx](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/packages/teams/BotDirectory.tsx) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/packages/teams/AutoReplyDialog.tsx](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/packages/teams/AutoReplyDialog.tsx) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/firebase/src/shared-bots.mjs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/firebase/src/shared-bots.mjs) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/electron/src/main/teams/replyTriage.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/electron/src/main/teams/replyTriage.ts) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 
 - lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; 所据文件指纹 sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 

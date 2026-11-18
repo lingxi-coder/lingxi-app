@@ -32,8 +32,8 @@ A project-scoped server is stored in .mcp.json. Until you approve it, lingxi mcp
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/apps/cli/host/src/commands/mcp.rs](https://github.com/lingxi-coder/lingxi-app/blob/fe1286654b4f55942b4e3e1f0d10d5618e18fb64/apps/cli/host/src/commands/mcp.rs) — Committed source (fe1286654b4f55942b4e3e1f0d10d5618e18fb64)
-- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/f6a7da5687cdaa2ecf4c671ac9a51cdbce62bb78/apps/cli/host/src/argv.rs) — Committed source (f6a7da5687cdaa2ecf4c671ac9a51cdbce62bb78)
+- [lingxi-app/apps/cli/host/src/commands/mcp.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/commands/mcp.rs) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/argv.rs) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 
 - lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; Referenced input fingerprint sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 

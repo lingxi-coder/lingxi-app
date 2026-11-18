@@ -288,7 +288,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [源码仓库](https://github.com/lingxi-coder/llm-client)
 
-- lingxi-app/Cargo.toml — 未发布源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/Cargo.toml) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 - [llm-client/Cargo.toml](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/Cargo.toml) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
 - [llm-client/src/lib.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/lib.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
 - [llm-client/src/client/builder.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/client/builder.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)

@@ -70,9 +70,9 @@ Recipes describe a complete interaction; Harness chapters describe API signature
 - [harness-runtime/crates/client/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/client/src/lib.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
 - [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/client/src/protocol/commands.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
 - [llm-client/src/lib.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/lib.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)
-- [lingxi-app/packages/bridge-client/src/client.ts](https://github.com/lingxi-coder/lingxi-app/blob/fc6f9ca01c2bdfc32759a2ca0e4156f464ddb3e7/packages/bridge-client/src/client.ts) — Committed source (fc6f9ca01c2bdfc32759a2ca0e4156f464ddb3e7)
-- [lingxi-app/apps/bridge-server/src/server.rs](https://github.com/lingxi-coder/lingxi-app/blob/fc6f9ca01c2bdfc32759a2ca0e4156f464ddb3e7/apps/bridge-server/src/server.rs) — Committed source (fc6f9ca01c2bdfc32759a2ca0e4156f464ddb3e7)
-- [lingxi-app/apps/bridge-server/src/router.rs](https://github.com/lingxi-coder/lingxi-app/blob/fc6f9ca01c2bdfc32759a2ca0e4156f464ddb3e7/apps/bridge-server/src/router.rs) — Committed source (fc6f9ca01c2bdfc32759a2ca0e4156f464ddb3e7)
+- [lingxi-app/packages/bridge-client/src/client.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/packages/bridge-client/src/client.ts) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/bridge-server/src/server.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/bridge-server/src/server.rs) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/bridge-server/src/router.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/bridge-server/src/router.rs) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 
 - lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; Referenced input fingerprint sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 - harness-runtime: HEAD f50814ec8381f10756f66eadf457474d90bcc69a; Referenced input fingerprint sha256:6fe1d28e55bd5b9d72e3fe6ee54f892c7efe64b640840a407ccee12dcef85567; Product pin f50814ec8381f10756f66eadf457474d90bcc69a

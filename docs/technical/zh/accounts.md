@@ -47,9 +47,9 @@ lingxi provider accounts list PROVIDER
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/apps/cli/host/src/commands/provider.rs](https://github.com/lingxi-coder/lingxi-app/blob/f8bec55f8d02e580cdeb2e7ec0ee855a87be4771/apps/cli/host/src/commands/provider.rs) — 已提交源码 (f8bec55f8d02e580cdeb2e7ec0ee855a87be4771)
-- [lingxi-app/apps/cli/tui-core/src/recent_models.rs](https://github.com/lingxi-coder/lingxi-app/blob/dc2adef5ee1ba629e42ccbe79d319854723ff788/apps/cli/tui-core/src/recent_models.rs) — 已提交源码 (dc2adef5ee1ba629e42ccbe79d319854723ff788)
-- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/f6a7da5687cdaa2ecf4c671ac9a51cdbce62bb78/apps/cli/host/src/argv.rs) — 已提交源码 (f6a7da5687cdaa2ecf4c671ac9a51cdbce62bb78)
+- [lingxi-app/apps/cli/host/src/commands/provider.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/commands/provider.rs) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/cli/tui-core/src/recent_models.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/tui-core/src/recent_models.rs) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/argv.rs) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 
 - lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; 所据文件指纹 sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 

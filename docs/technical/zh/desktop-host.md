@@ -80,16 +80,16 @@ npm run verify:package
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app/tree/main/apps/electron/src/main/bridge.ts)
 
-- [lingxi-app/apps/electron/src/main/index.ts](https://github.com/lingxi-coder/lingxi-app/blob/5e2001a2be689d88f91ff467d96129993414da0f/apps/electron/src/main/index.ts) — 已提交源码 (5e2001a2be689d88f91ff467d96129993414da0f)
-- [lingxi-app/apps/electron/src/main/bridge.ts](https://github.com/lingxi-coder/lingxi-app/blob/46cdd49436a5997e703a890cfc5662e40c92889a/apps/electron/src/main/bridge.ts) — 已提交源码 (46cdd49436a5997e703a890cfc5662e40c92889a)
-- [lingxi-app/apps/electron/src/main/bridgeDiscovery.ts](https://github.com/lingxi-coder/lingxi-app/blob/bf5fe70e95a713843cf6d5df80dc726d70de3430/apps/electron/src/main/bridgeDiscovery.ts) — 已提交源码 (bf5fe70e95a713843cf6d5df80dc726d70de3430)
-- [lingxi-app/apps/electron/src/main/validation.ts](https://github.com/lingxi-coder/lingxi-app/blob/968a9775bf65c19a5485c03a23334671c4dceadb/apps/electron/src/main/validation.ts) — 已提交源码 (968a9775bf65c19a5485c03a23334671c4dceadb)
-- [lingxi-app/apps/electron/src/main/host-utils.ts](https://github.com/lingxi-coder/lingxi-app/blob/390ecb77fcf9401f679c9f84f45e9352ffdcbbe7/apps/electron/src/main/host-utils.ts) — 已提交源码 (390ecb77fcf9401f679c9f84f45e9352ffdcbbe7)
-- [lingxi-app/apps/electron/src/preload/index.ts](https://github.com/lingxi-coder/lingxi-app/blob/46cdd49436a5997e703a890cfc5662e40c92889a/apps/electron/src/preload/index.ts) — 已提交源码 (46cdd49436a5997e703a890cfc5662e40c92889a)
-- [lingxi-app/apps/electron/src/preload/event-replay.ts](https://github.com/lingxi-coder/lingxi-app/blob/fc6f9ca01c2bdfc32759a2ca0e4156f464ddb3e7/apps/electron/src/preload/event-replay.ts) — 已提交源码 (fc6f9ca01c2bdfc32759a2ca0e4156f464ddb3e7)
-- [lingxi-app/apps/electron/src/renderer/bridge/useBridge.ts](https://github.com/lingxi-coder/lingxi-app/blob/39c54c598117585eb32b2c3558a091c43da2f019/apps/electron/src/renderer/bridge/useBridge.ts) — 已提交源码 (39c54c598117585eb32b2c3558a091c43da2f019)
-- [lingxi-app/apps/electron/scripts/package-macos-flare.sh](https://github.com/lingxi-coder/lingxi-app/blob/a499e8c638dfcc8d91420efe6e1b7690b0953546/apps/electron/scripts/package-macos-flare.sh) — 已提交源码 (a499e8c638dfcc8d91420efe6e1b7690b0953546)
-- [lingxi-app/apps/electron/package.json](https://github.com/lingxi-coder/lingxi-app/blob/fc6f9ca01c2bdfc32759a2ca0e4156f464ddb3e7/apps/electron/package.json) — 已提交源码 (fc6f9ca01c2bdfc32759a2ca0e4156f464ddb3e7)
+- [lingxi-app/apps/electron/src/main/index.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/electron/src/main/index.ts) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/electron/src/main/bridge.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/electron/src/main/bridge.ts) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/electron/src/main/bridgeDiscovery.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/electron/src/main/bridgeDiscovery.ts) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/electron/src/main/validation.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/electron/src/main/validation.ts) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/electron/src/main/host-utils.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/electron/src/main/host-utils.ts) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/electron/src/preload/index.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/electron/src/preload/index.ts) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/electron/src/preload/event-replay.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/electron/src/preload/event-replay.ts) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/electron/src/renderer/bridge/useBridge.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/electron/src/renderer/bridge/useBridge.ts) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/electron/scripts/package-macos-flare.sh](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/electron/scripts/package-macos-flare.sh) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/electron/package.json](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/electron/package.json) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 
 - lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; 所据文件指纹 sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 

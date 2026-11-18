@@ -28,11 +28,11 @@
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/apps/web/src/pages/RemotePage.tsx](https://github.com/lingxi-coder/lingxi-app/blob/5e2001a2be689d88f91ff467d96129993414da0f/apps/web/src/pages/RemotePage.tsx) — 已提交源码 (5e2001a2be689d88f91ff467d96129993414da0f)
-- [lingxi-app/apps/web/src/remote/strings.ts](https://github.com/lingxi-coder/lingxi-app/blob/ecdd4a201cd02d021c5adc0fc3f8fdb78bcf062b/apps/web/src/remote/strings.ts) — 已提交源码 (ecdd4a201cd02d021c5adc0fc3f8fdb78bcf062b)
-- [lingxi-app/apps/web/src/remote/LocalApps.tsx](https://github.com/lingxi-coder/lingxi-app/blob/56a7d4038209887eb3c296f86d9cedc30e70d999/apps/web/src/remote/LocalApps.tsx) — 已提交源码 (56a7d4038209887eb3c296f86d9cedc30e70d999)
-- [lingxi-app/apps/web/src/pages/RemoteSignInPage.tsx](https://github.com/lingxi-coder/lingxi-app/blob/c109827fce2d2feaf9fc89de5e4c5b7969de4a75/apps/web/src/pages/RemoteSignInPage.tsx) — 已提交源码 (c109827fce2d2feaf9fc89de5e4c5b7969de4a75)
-- [lingxi-app/apps/web/src/pages/LoginPage.tsx](https://github.com/lingxi-coder/lingxi-app/blob/ac429b1f89879dde570552ea9c2f5915354d8e47/apps/web/src/pages/LoginPage.tsx) — 已提交源码 (ac429b1f89879dde570552ea9c2f5915354d8e47)
+- [lingxi-app/apps/web/src/pages/RemotePage.tsx](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/web/src/pages/RemotePage.tsx) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/web/src/remote/strings.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/web/src/remote/strings.ts) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/web/src/remote/LocalApps.tsx](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/web/src/remote/LocalApps.tsx) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/web/src/pages/RemoteSignInPage.tsx](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/web/src/pages/RemoteSignInPage.tsx) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/web/src/pages/LoginPage.tsx](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/web/src/pages/LoginPage.tsx) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 
 - lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; 所据文件指纹 sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 

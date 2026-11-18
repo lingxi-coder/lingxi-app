@@ -24,9 +24,9 @@ The desktop app uses the same config directory and LINGXI.md files as the CLI. S
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/apps/web/src/data/mockData.ts](https://github.com/lingxi-coder/lingxi-app/blob/ac429b1f89879dde570552ea9c2f5915354d8e47/apps/web/src/data/mockData.ts) — Committed source (ac429b1f89879dde570552ea9c2f5915354d8e47)
-- [lingxi-app/apps/README.md](https://github.com/lingxi-coder/lingxi-app/blob/d0ecc1937054bb16747e73bccf328806856e1685/apps/README.md) — Committed source (d0ecc1937054bb16747e73bccf328806856e1685)
-- [lingxi-app/apps/web/src/remote/strings.ts](https://github.com/lingxi-coder/lingxi-app/blob/ecdd4a201cd02d021c5adc0fc3f8fdb78bcf062b/apps/web/src/remote/strings.ts) — Committed source (ecdd4a201cd02d021c5adc0fc3f8fdb78bcf062b)
+- [lingxi-app/apps/web/src/data/mockData.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/web/src/data/mockData.ts) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/README.md](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/README.md) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/web/src/remote/strings.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/web/src/remote/strings.ts) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 
 - lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; Referenced input fingerprint sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 

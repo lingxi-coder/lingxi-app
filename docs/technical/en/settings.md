@@ -39,8 +39,8 @@ For the permission mode, the CLI reads the user settings.json and then the proje
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/apps/cli/host/src/permission_settings.rs](https://github.com/lingxi-coder/lingxi-app/blob/97e8ce929efdbe64481ed9ea9cce9812c0b72bd7/apps/cli/host/src/permission_settings.rs) — Committed source (97e8ce929efdbe64481ed9ea9cce9812c0b72bd7)
-- [lingxi-app/apps/cli/host/src/run/resume.rs](https://github.com/lingxi-coder/lingxi-app/blob/d87ee457638cc8f3cdec6c63f058ecdfad917c7e/apps/cli/host/src/run/resume.rs) — Committed source (d87ee457638cc8f3cdec6c63f058ecdfad917c7e)
+- [lingxi-app/apps/cli/host/src/permission_settings.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/permission_settings.rs) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/cli/host/src/run/resume.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/run/resume.rs) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 - [harness-runtime/crates/migrations/src/global_config.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/migrations/src/global_config.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
 - [harness-runtime/crates/branding/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/branding/src/lib.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
 - [harness-runtime/crates/hooks/src/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/hooks/src/events.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)

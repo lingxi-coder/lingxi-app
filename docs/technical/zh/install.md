@@ -39,10 +39,10 @@ cargo run --locked -p cli --bin lingxi-cli -- --help
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/packaging/npm/package.json](https://github.com/lingxi-coder/lingxi-app/blob/011ca150ec195d3d8324f10955f91ede556a03d7/packaging/npm/package.json) — 已提交源码 (011ca150ec195d3d8324f10955f91ede556a03d7)
-- [lingxi-app/apps/web/src/data/mockData.ts](https://github.com/lingxi-coder/lingxi-app/blob/ac429b1f89879dde570552ea9c2f5915354d8e47/apps/web/src/data/mockData.ts) — 已提交源码 (ac429b1f89879dde570552ea9c2f5915354d8e47)
-- [lingxi-app/apps/cli/host/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/1f0765b0ac6b74a3af39f14ed82601616e381db5/apps/cli/host/Cargo.toml) — 已提交源码 (1f0765b0ac6b74a3af39f14ed82601616e381db5)
-- [lingxi-app/README.md](https://github.com/lingxi-coder/lingxi-app/blob/d0ecc1937054bb16747e73bccf328806856e1685/README.md) — 已提交源码 (d0ecc1937054bb16747e73bccf328806856e1685)
+- [lingxi-app/packaging/npm/package.json](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/packaging/npm/package.json) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/web/src/data/mockData.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/web/src/data/mockData.ts) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/cli/host/Cargo.toml](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/Cargo.toml) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/README.md](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/README.md) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 
 - lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; 所据文件指纹 sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 

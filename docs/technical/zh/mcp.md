@@ -32,8 +32,8 @@ lingxi mcp get my-server
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/apps/cli/host/src/commands/mcp.rs](https://github.com/lingxi-coder/lingxi-app/blob/fe1286654b4f55942b4e3e1f0d10d5618e18fb64/apps/cli/host/src/commands/mcp.rs) — 已提交源码 (fe1286654b4f55942b4e3e1f0d10d5618e18fb64)
-- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/f6a7da5687cdaa2ecf4c671ac9a51cdbce62bb78/apps/cli/host/src/argv.rs) — 已提交源码 (f6a7da5687cdaa2ecf4c671ac9a51cdbce62bb78)
+- [lingxi-app/apps/cli/host/src/commands/mcp.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/commands/mcp.rs) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/argv.rs) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 
 - lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; 所据文件指纹 sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 

@@ -41,9 +41,9 @@ lingxi doctor 读取当前目录的设置，不弹出信任询问，也不会连
 
 [源码仓库](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/f6a7da5687cdaa2ecf4c671ac9a51cdbce62bb78/apps/cli/host/src/argv.rs) — 已提交源码 (f6a7da5687cdaa2ecf4c671ac9a51cdbce62bb78)
+- [lingxi-app/apps/cli/host/src/argv.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/argv.rs) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 - [harness-runtime/crates/permission/src/mode.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/permission/src/mode.rs) — 已提交源码 (f50814ec8381f10756f66eadf457474d90bcc69a)
-- [lingxi-app/apps/cli/host/src/commands/mod.rs](https://github.com/lingxi-coder/lingxi-app/blob/f8bec55f8d02e580cdeb2e7ec0ee855a87be4771/apps/cli/host/src/commands/mod.rs) — 已提交源码 (f8bec55f8d02e580cdeb2e7ec0ee855a87be4771)
+- [lingxi-app/apps/cli/host/src/commands/mod.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/cli/host/src/commands/mod.rs) — 已提交源码 (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 
 - lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; 所据文件指纹 sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 - harness-runtime: HEAD f50814ec8381f10756f66eadf457474d90bcc69a; 所据文件指纹 sha256:6fe1d28e55bd5b9d72e3fe6ee54f892c7efe64b640840a407ccee12dcef85567; 产品固定版本 f50814ec8381f10756f66eadf457474d90bcc69a

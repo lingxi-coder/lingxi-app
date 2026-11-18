@@ -81,15 +81,15 @@ Verification method: Environment validation
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/.github/workflows/lingxi-release.yml](https://github.com/lingxi-coder/lingxi-app/blob/9afa34a6dd5c46de7eb80a3ccbe2d35df9200778/.github/workflows/lingxi-release.yml) — Committed source (9afa34a6dd5c46de7eb80a3ccbe2d35df9200778)
-- [lingxi-app/.github/workflows/desktop-packages.yml](https://github.com/lingxi-coder/lingxi-app/blob/04651101dff21184dcb839ef89708c2c0c9c537d/.github/workflows/desktop-packages.yml) — Committed source (04651101dff21184dcb839ef89708c2c0c9c537d)
-- [lingxi-app/apps/electron/scripts/package-macos-flare.sh](https://github.com/lingxi-coder/lingxi-app/blob/a499e8c638dfcc8d91420efe6e1b7690b0953546/apps/electron/scripts/package-macos-flare.sh) — Committed source (a499e8c638dfcc8d91420efe6e1b7690b0953546)
-- [lingxi-app/apps/web/package.json](https://github.com/lingxi-coder/lingxi-app/blob/ab33bdd823ec03a71e878d1cf8c9f88b3efd39c5/apps/web/package.json) — Committed source (ab33bdd823ec03a71e878d1cf8c9f88b3efd39c5)
-- [lingxi-app/apps/web/scripts/build-rustdoc.py](https://github.com/lingxi-coder/lingxi-app/blob/1b3a75958f0fc5bb24b7cca64372abe0464720cb/apps/web/scripts/build-rustdoc.py) — Committed source (1b3a75958f0fc5bb24b7cca64372abe0464720cb)
-- [lingxi-app/apps/web/scripts/rustdoc-availability.ts](https://github.com/lingxi-coder/lingxi-app/blob/07ad69d8d219502e63f918d84c3434c97edce8e6/apps/web/scripts/rustdoc-availability.ts) — Committed source (07ad69d8d219502e63f918d84c3434c97edce8e6)
-- [lingxi-app/apps/web/vite.config.ts](https://github.com/lingxi-coder/lingxi-app/blob/a499e8c638dfcc8d91420efe6e1b7690b0953546/apps/web/vite.config.ts) — Committed source (a499e8c638dfcc8d91420efe6e1b7690b0953546)
-- [lingxi-app/resources/translations/generate.py](https://github.com/lingxi-coder/lingxi-app/blob/a3ecab5a900bae02175bfc9c2bc4507d8f2e6659/resources/translations/generate.py) — Committed source (a3ecab5a900bae02175bfc9c2bc4507d8f2e6659)
-- [lingxi-app/apps/ios/native/scripts/build-xcframework.sh](https://github.com/lingxi-coder/lingxi-app/blob/a6ad22cf441750a94165fdfae45de1d2e7428e35/apps/ios/native/scripts/build-xcframework.sh) — Committed source (a6ad22cf441750a94165fdfae45de1d2e7428e35)
+- [lingxi-app/.github/workflows/lingxi-release.yml](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/.github/workflows/lingxi-release.yml) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/.github/workflows/desktop-packages.yml](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/.github/workflows/desktop-packages.yml) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/electron/scripts/package-macos-flare.sh](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/electron/scripts/package-macos-flare.sh) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/web/package.json](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/web/package.json) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/web/scripts/build-rustdoc.py](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/web/scripts/build-rustdoc.py) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/web/scripts/rustdoc-availability.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/web/scripts/rustdoc-availability.ts) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/web/vite.config.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/web/vite.config.ts) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/resources/translations/generate.py](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/resources/translations/generate.py) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/apps/ios/native/scripts/build-xcframework.sh](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/ios/native/scripts/build-xcframework.sh) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 
 - lingxi-app: HEAD 90a626b807a57c06a984bcd117bb03235aa6e0e5; Referenced input fingerprint sha256:0414ded61011432be634176b81ab5e5d501536ae723505b952a4b31c1b32bd78
 

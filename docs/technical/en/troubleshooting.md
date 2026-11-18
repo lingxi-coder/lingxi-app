@@ -52,8 +52,8 @@ Check rootfs/native assets against their declared manifest/checksum and target A
 
 [Source repository](https://github.com/lingxi-coder/lingxi-app)
 
-- [lingxi-app/apps/bridge-server/src/server.rs](https://github.com/lingxi-coder/lingxi-app/blob/fc6f9ca01c2bdfc32759a2ca0e4156f464ddb3e7/apps/bridge-server/src/server.rs) — Committed source (fc6f9ca01c2bdfc32759a2ca0e4156f464ddb3e7)
-- [lingxi-app/packages/bridge-client/src/client.ts](https://github.com/lingxi-coder/lingxi-app/blob/fc6f9ca01c2bdfc32759a2ca0e4156f464ddb3e7/packages/bridge-client/src/client.ts) — Committed source (fc6f9ca01c2bdfc32759a2ca0e4156f464ddb3e7)
+- [lingxi-app/apps/bridge-server/src/server.rs](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/apps/bridge-server/src/server.rs) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
+- [lingxi-app/packages/bridge-client/src/client.ts](https://github.com/lingxi-coder/lingxi-app/blob/90a626b807a57c06a984bcd117bb03235aa6e0e5/packages/bridge-client/src/client.ts) — Committed source (90a626b807a57c06a984bcd117bb03235aa6e0e5)
 - [harness-runtime/crates/session/src/jsonl/recovery.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/session/src/jsonl/recovery.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
 - [harness-runtime/crates/runtime/src/api.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/runtime/src/api.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
 - [llm-client/src/client/executor.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/client/executor.rs) — Committed source (63c8f7663b7cba7466538213f86c6df4a30442a9)

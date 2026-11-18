@@ -67,7 +67,7 @@ async function assertDialogCentered() {
 const result = {};
 try {
   // This fixture has no Inbox preload. The Teams rail reports the selected team's unread directory.
-  // The unified Inbox fixture covers the account-wide Home badge across sources.
+  // The unified Inbox fixture covers the account-wide Chats badge across sources.
   await load();
   await configureFixtureWindow(win);
   await setViewport(1280, 850);
@@ -77,7 +77,7 @@ try {
   assert.equal(await run(`document.querySelector('${railTeams} .desktop-rail-count').getAttribute('aria-hidden')`), 'true', 'the digits are not read out as well');
   assert.equal(await run(`document.querySelector('${railTeams}').title`), 'Teams, 4 unread');
   assert.deepEqual(await run(`Array.from(document.querySelectorAll('.desktop-nav-rail button')).map(button => button.getAttribute('aria-label'))`),
-    ['Home', 'Bots', 'Teams, 4 unread', 'Friends', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
+    ['Chats', 'Projects', 'Bots', 'Teams, 4 unread', 'Friends', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
   result.railBadge = true;
 
   // Teams mode: the workspace's own sidebar, the Teams page beside it, and the mode saved.
@@ -93,7 +93,7 @@ try {
   assert.equal(await run(`Boolean(document.querySelector('${row('chan-general')}').closest('.tw-row').querySelector('[role="img"][aria-label="4 unread"]'))`), true, 'the unread count of the row');
   assert.equal(await run(`Boolean(document.querySelector('${row('bot-chat')} .tw-avatar-custom img'))`), true, 'a Bot wears its avatar');
   assert.match(await run(`document.querySelector('.teams-page').textContent`), /Team Bots/);
-  assert.equal(await run(`Boolean(document.querySelector('.sidebar-new-chat'))`), false, 'the projects are Home\'s');
+  assert.equal(await run(`Boolean(document.querySelector('.sidebar-new-chat'))`), false, 'the projects belong to their own view');
   assert.deepEqual((await writes()).at(-1), ['updateSettings', { sidebar: { mode: 'teams' } }]);
   // With no chat selected the topbar still owns the team's connection state.
   await wait(`document.querySelector('.desktop-window-toolbar .tw-top-connection[data-kind="ok"]')`);
@@ -235,13 +235,13 @@ try {
   await menuAction('team-details');
   await wait(`!document.querySelector('.tw-drawer')`);
   // Off the Teams page the menu item does nothing: it must not have opened the panel behind the chat.
-  await click(rail('Home'));
+  await click(rail('Chats'));
   await wait(`!document.querySelector('${sidebar}') && document.querySelector('.sidebar-new-chat')`);
   await menuAction('team-details');
   await delay(150);
   await click(railTeams);
   await wait(`document.querySelector('.teams-conversation .tw-msg')`);
-  assert.equal(await shown('.tw-drawer'), false, 'the item was ignored on Home');
+  assert.equal(await shown('.tw-drawer'), false, 'the item was ignored on Chats');
   result.drawerMenu = true;
 
   // Apps owns a separate workspace; Teams restores the selected conversation.

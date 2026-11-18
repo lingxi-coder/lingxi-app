@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { app, BrowserWindow } from 'electron';
-import { configureFixtureWindow, waitForFixture } from './electron-test-environment.mjs';
+import { configureFixtureWindow, settleFixtureAnimations, waitForFixture } from './electron-test-environment.mjs';
 
 const url = process.argv.find(value => value.startsWith('http://'));
 app.setPath('userData', process.env.LINGXI_TEST_USER_DATA);
@@ -41,29 +41,33 @@ async function main() {
     const current = name => `${row(name)}?.getAttribute('aria-current') === 'page'`;
     const hasMainText = text => `document.querySelector('.desktop-main')?.innerText.includes(${JSON.stringify(text)})`;
     const rowCount = count => `document.querySelectorAll('.lx-inbox-row').length === ${count}`;
-    const waitHome = () => wait("document.querySelector('.desktop-inbox-panel') && document.querySelector('.desktop-rail-button[title=Home][aria-current=page]')");
+    const rail = view => `document.querySelector('.desktop-rail-${view}')`;
+    const clickRail = view => run(`${rail(view)}.click()`);
+    const selectedView = view => `${rail(view)}?.getAttribute('aria-current') === 'page'`;
+    const waitChats = () => wait(`document.querySelector('.desktop-inbox-panel') && ${selectedView('chats')}`);
     const request = (action, name, extra = 'true') => `window.inboxFixture.requests.find(({uid, command}) =>
       uid === 'alice' && command.action === '${action}' && command.key === window.inboxFixture.${name} && (${extra}))`;
     const visible = (name, generation) => `window.inboxFixture.visible.at(-1)?.key === window.inboxFixture.${name}
       && window.inboxFixture.visible.at(-1)?.generation === ${generation}`;
     const screenshot = async () => {
       if (process.env.LINGXI_INBOX_SCREENSHOT) {
+        await settleFixtureAnimations(contents, '.desktop-nav-rail');
         writeFileSync(process.env.LINGXI_INBOX_SCREENSHOT, (await contents.capturePage()).toPNG());
       }
     };
 
-    await waitHome();
+    await waitChats();
     console.error('Checking filters and row actions');
     assert.deepEqual(await run("[...document.querySelectorAll('.lx-inbox-row strong')].map(node => node.textContent)"),
       ['Release checklist', 'Bob', 'general']);
-    assert.equal(await run("document.querySelector('.desktop-rail-button[title=Home] .desktop-rail-count')?.textContent"), '2');
+    assert.equal(await run("document.querySelector('.desktop-rail-chats .desktop-rail-count')?.textContent"), '2');
     assert.equal(await run(`(() => {
-      const home = document.querySelector('.desktop-rail-button[title=Home]');
+      const home = document.querySelector('.desktop-rail-chats');
       const button = home.getBoundingClientRect();
       const badge = home.querySelector('.desktop-rail-count').getBoundingClientRect();
       return badge.left >= button.left && badge.right <= button.right + 3
         && badge.top >= button.top - 1 && badge.bottom <= button.bottom;
-    })()`), true, 'position the unread count on the Home button');
+    })()`), true, 'position the unread count on the Chats button');
 
     await clickButton('Attention');
     await wait(`${rowCount(1)} && ${row('assistant')}`);
@@ -98,15 +102,51 @@ async function main() {
     await clickButton('Archived');
     await wait(rowCount(3));
 
-    await clickButton('Projects and workspaces');
-    await wait("document.querySelector('button[title=\"/fixture/Inbox Project\"]') && !document.querySelector('.desktop-inbox-panel')");
-    await clickButton('All chats');
+    console.error('Checking independent Chats and Projects subviews');
+    await clickButton('Unread');
+    await wait(rowCount(2));
+    assert.equal(await run("Boolean(document.querySelector('.desktop-nav-rail [title=Home], .desktop-home-tabs'))"), false, 'Chats and Projects replace Home in the main rail');
+    assert.deepEqual(await run("[...document.querySelectorAll('.desktop-nav-rail button')].slice(0, 2).map(button => button.title)"), ['Chats', 'Projects']);
+    await clickRail('projects');
+    await wait(`${selectedView('projects')} && document.querySelector('.projects-sidebar-section')?.getBoundingClientRect().height > 0`);
+    assert.equal(await run("document.querySelector('.desktop-inbox-panel').offsetHeight"), 0);
+    assert.equal(await run("document.querySelectorAll('.desktop-home-view[role=region]:not([hidden])').length"), 1);
+    assert.equal(await run("Boolean(document.querySelector('button[title=\"/fixture/Inbox Project\"]'))"), true);
+    if (process.env.LINGXI_PROJECTS_SCREENSHOT) {
+      await settleFixtureAnimations(contents, '.desktop-nav-rail');
+      writeFileSync(process.env.LINGXI_PROJECTS_SCREENSHOT, (await contents.capturePage()).toPNG());
+    }
+    // Main navigation uses native Tab and Enter: focusing an item never navigates by itself.
+    await run(`${rail('projects')}.focus()`);
+    contents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab', modifiers: ['shift'] });
+    contents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab', modifiers: ['shift'] });
+    await wait(`document.activeElement === ${rail('chats')}`);
+    assert.equal(await run(selectedView('projects')), true, 'focus alone preserves the active view');
+    contents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+    contents.sendInputEvent({ type: 'char', keyCode: '\r' });
+    contents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+    await wait(`${selectedView('chats')} && document.activeElement === ${rail('chats')}`);
+    await wait(rowCount(2));
+    assert.equal(await run("document.querySelector('.lx-inbox-switch button[aria-pressed=true]').textContent.trim()"), 'Unread');
+    assert.equal(await run("window.inboxFixture.opens.length"), 0, 'changing subviews does not open a conversation');
+    assert.equal(await run("window.inboxFixture.requests.filter(({command}) => command.action === 'markRead').length"), 0);
+    await run("(() => { const list = document.querySelector('.lx-inbox-scroll'); list.style.maxHeight = '40px'; list.style.minHeight = '0'; list.scrollTop = 30; list.dispatchEvent(new Event('scroll')); })()");
+    await wait("document.querySelector('.lx-inbox-scroll').scrollTop === 30");
+    await clickRail('projects');
+    await wait(selectedView('projects'));
+    await run("document.querySelector('.projects-sidebar-actions button[aria-haspopup=menu]').click()");
+    await wait("document.querySelector('.projects-sidebar-menu-layer')");
+    await clickRail('chats');
+    await wait("!document.querySelector('.projects-sidebar-menu-layer')");
+    await wait(`${selectedView('chats')} && document.querySelector('.lx-inbox-scroll').scrollTop === 30`);
+    await run("(() => { const list = document.querySelector('.lx-inbox-scroll'); list.style.maxHeight = ''; list.style.minHeight = ''; })()");
+    await clickButton('All');
     await wait(rowCount(3));
 
     console.error('Checking Friends and Teams routes');
     await clickRow('friend');
     await wait(`${hasMainText('The design is ready for your review.')} && document.querySelector('.desktop-inbox-panel')`);
-    await waitHome();
+    await waitChats();
     await wait(`${visible('friend', 1)} && ${current('friend')}`);
     assert.equal(await run(`document.activeElement === ${row('friend')}`), true);
     await wait(request('markRead', 'friend', 'command.through === 1 && command.generation === 1'));
@@ -114,7 +154,7 @@ async function main() {
 
     await clickRow('channel');
     await wait(`${hasMainText('Build 42 passed the smoke checks.')} && document.querySelector('.desktop-inbox-panel')`);
-    await waitHome();
+    await waitChats();
     await wait(`${visible('channel', 3)} && ${current('channel')}`);
     assert.equal(await run(`document.activeElement === ${row('channel')}`), true);
     await screenshot();
@@ -135,13 +175,35 @@ async function main() {
     assert.ok(elapsed >= 295, `committed result became read after only ${elapsed}ms`);
     await wait(`!${row('assistant')}.querySelector('b[aria-label]')`);
     assert.match(await run(`${row('assistant')}.textContent`), /Approval needed/);
-    await waitHome();
+    await waitChats();
 
     // Leaving the live transcript cancels pending browser timers without throwing during Stage cleanup.
     await run("document.querySelector('button[aria-label=\"New assistant conversation\"]').click()");
     await wait("window.inboxFixture.selected() === 'draft' && document.querySelector('.desktop-stage')");
-    await waitHome();
+    await waitChats();
     await wait("!document.querySelector('.lx-inbox-row[aria-current=page]')");
+
+    // Large text and reduced motion retain usable first-level navigation.
+    if (!contents.debugger.isAttached()) contents.debugger.attach('1.3');
+    await contents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [
+      { name: 'prefers-reduced-motion', value: 'reduce' }, { name: 'prefers-contrast', value: 'more' },
+    ] });
+    await run("document.documentElement.style.fontSize = '32px'");
+    await clickRail('projects');
+    await wait(selectedView('projects'));
+    assert.equal(await run(`getComputedStyle(${rail('projects')}).transitionDuration`), '0s');
+    assert.equal(await run(`(() => {
+      const item = ${rail('projects')}.getBoundingClientRect();
+      return item.width >= 24 && item.height >= 24 && item.left >= 0 && item.bottom <= innerHeight;
+    })()`), true, 'large-text navigation stays visible and operable');
+    await run(`${rail('chats')}.focus()`);
+    contents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
+    contents.sendInputEvent({ type: 'char', keyCode: ' ' });
+    contents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+    await wait(selectedView('chats'));
+    await run("document.documentElement.style.fontSize = ''");
+    await contents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [] });
+    contents.debugger.detach();
     console.log(JSON.stringify({ assistantReadMs: elapsed }));
   } catch (error) {
     console.error(error);

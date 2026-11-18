@@ -144,7 +144,7 @@ export function App() {
   const { setMode: setSidebarMode, mode: sidebarMode } = useSidebarMode({
     page, setPage, botsAvailable: bots.available, botsKnown: bots.state.availability !== undefined,
     settings: bridge.bootstrap?.settings, save: bridge.updateSidebarPreferences,
-    unifiedInbox: Boolean(inbox.api) && !projectBrowser,
+    unifiedInbox: Boolean(inbox.api),
   });
   const appWorkspace = useLocalAppWorkspace(bridge);
   const localAppBridge = useRef(bridge);
@@ -742,10 +742,15 @@ export function App() {
             teamsUnread={teams.snapshot?.totalUnread ?? 0}
             friendsUnread={friends.snapshot?.badge ?? 0}
             inboxBadge={inbox.snapshot.badge}
-            homePanel={!projectBrowser && inbox.controller ? <DesktopInboxPanel inbox={inbox} locale={locale} activeKey={activeInboxKey ?? inboxReading.item?.key} onOpen={openInboxItem}
+            homePanel={inbox.api ? <DesktopInboxPanel inbox={inbox} locale={locale} activeKey={activeInboxKey ?? inboxReading.item?.key} onOpen={openInboxItem}
               onNewChat={() => { setInboxSourceTarget(undefined); setNotificationPreview(false); setPage('chat'); setSidebarMode('home'); void bridge.newSession(); }} /> : undefined}
-            homeToolbar={inbox.api ? <div className="desktop-inbox-mode"><button type="button" aria-pressed={projectBrowser}
-              onClick={() => setProjectBrowser(value => !value)}>{locale.startsWith('zh') ? projectBrowser ? '返回全部聊天' : '项目与工作区' : projectBrowser ? 'All chats' : 'Projects and workspaces'}</button></div> : undefined}
+            homeView={projectBrowser ? 'projects' : 'chats'}
+            onHomeViewChange={view => {
+              const changeView = () => setProjectBrowser(view === 'projects');
+              if (sidebarMode === 'home' && (page === 'chat' || page === 'friends' || page === 'teams')) {
+                if (!sessionNavigationBlocked()) changeView();
+              } else selectSidebarMode('home', changeView);
+            }}
             sidebarMode={sidebarMode}
             localAppProjects={appWorkspace.projectPaths}
             onSelectSidebarMode={selectSidebarMode}

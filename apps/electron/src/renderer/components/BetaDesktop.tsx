@@ -8,6 +8,7 @@ import { tr } from '../i18n/locale';
 import { unreadBadgeText } from '../bridge/teamsUnread';
 import { AgentAvatar } from './AgentAvatar';
 import { DesktopIcon } from './DesktopIcon';
+import './HomeViews.css';
 import { ImagePreview } from './ImagePreview';
 import { localAppAuthoringPrompt, localAppDraftDisposition, type LocalAppDraft } from '../bridge/localAppChat';
 import { NeedsInputBadge, sessionNeedsInput } from './NeedsInputBadge';
@@ -30,6 +31,7 @@ import { parseFusionCatalog } from './settings/pages/FusionCatalog';
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -451,7 +453,7 @@ export function SessionRow({ projectPath, session, active, pinned, opening, stat
   );
 }
 
-export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, botsAvailable = false, teamsUnread = 0, friendsUnread = 0, sidebarMode = 'home', localAppProjects = [], onSelectSidebarMode, modePanel, homePanel, homeToolbar, inboxBadge = 0, sidebarCollapsed: collapsedByParent, onSidebarCollapsedChange, onOpenChat, children, topbar, pageSidebarRef }: {
+export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, botsAvailable = false, teamsUnread = 0, friendsUnread = 0, sidebarMode = 'home', localAppProjects = [], onSelectSidebarMode, modePanel, homePanel, homeView = 'chats', onHomeViewChange, inboxBadge = 0, sidebarCollapsed: collapsedByParent, onSidebarCollapsedChange, onOpenChat, children, topbar, pageSidebarRef }: {
   bridge: UseBridge;
   activityView?: boolean;
   onToggleActivityView?(): void;
@@ -474,7 +476,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   /** The sidebar's content in the modes other than Home, given what the search box holds (trimmed, in lower case). */
   modePanel?(mode: Exclude<SidebarMode, 'home'>, search: string): ReactNode;
   homePanel?: ReactNode;
-  homeToolbar?: ReactNode;
+  homeView?: 'chats' | 'projects';
+  onHomeViewChange?(view: 'chats' | 'projects'): void;
   inboxBadge?: number;
   /** Whether the sidebar is hidden, when the parent keeps that (the View menu toggles it); absent, the sidebar keeps it itself. */
   sidebarCollapsed?: boolean;
@@ -485,9 +488,14 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   pageSidebarRef?(element: HTMLDivElement | null): void;
 }) {
   const t = useT();
+  const homeViewId = useId();
+  const splitHome = Boolean(homePanel && onHomeViewChange);
+  const projectListVisible = sidebarMode === 'home' && (!homePanel || (splitHome && homeView === 'projects')) && !scheduled;
+  const [projectsVisited, setProjectsVisited] = useState(false);
+  useEffect(() => { if (projectListVisible) setProjectsVisited(true); }, [projectListVisible]);
   const homePage = sidebarMode === 'home' && !apps && !scheduled && !changes;
   // Every sidebar mode (Home, Bots, Teams, Apps) narrows its list with the sidebar's search box (`modePanel(mode, search)`); a page that replaces the sidebar has none, and Friends has a filter field of its own.
-  const searchable = !apps && !scheduled && !changes && sidebarMode !== 'friends' && !(sidebarMode === 'home' && homePanel);
+  const searchable = !apps && !scheduled && !changes && sidebarMode !== 'friends' && !(sidebarMode === 'home' && homePanel && !projectListVisible);
   const asideRef = useRef<HTMLElement>(null);
   const railRef = useRef<HTMLElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
@@ -554,6 +562,12 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   // What the rail marks as the page the window is on: data-active draws it (global.css), aria-current tells assistive technology.
   const railMarked = !scheduled && !changes;
   const modeMarked = (mode: SidebarMode) => railMarked && sidebarMode === mode;
+  const chatsMarked = modeMarked('home') && homeView === 'chats';
+  const projectsMarked = modeMarked('home') && homeView === 'projects';
+  const selectHomeView = (view: 'chats' | 'projects') => {
+    if (onHomeViewChange) onHomeViewChange(view);
+    else selectMode('home');
+  };
   const appsMarked = railMarked && (sidebarMode === 'apps' || (!onSelectSidebarMode && apps));
   // The rail's Teams button says how many messages wait: the number is for the eye, the label for everything else.
   const teamsBadge = unreadBadgeText(teamsUnread);
@@ -573,15 +587,19 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   }, [revealedSessionKey, activeRowIndex, visibleSession?.projectPath]);
   useEffect(() => {
     if (!revealedSessionKey) { focusedSessionRef.current = null; return; }
+    if (!projectListVisible) { focusedSessionRef.current = revealedSessionKey; return; }
     if (focusedSessionRef.current === revealedSessionKey) return;
     const row = asideRef.current?.querySelector<HTMLButtonElement>('[data-session-id][aria-current="page"]');
     if (!row) return;
     focusedSessionRef.current = revealedSessionKey;
     row.focus({ preventScroll: true });
     row.scrollIntoView({ block: 'nearest' });
-  }, [revealedSessionKey, expandedProjects, showAllSessions]);
+  }, [revealedSessionKey, expandedProjects, showAllSessions, projectListVisible]);
   const [menuProject, setMenuProject] = useState<string | null>(null);
   const [projectsMenu, setProjectsMenu] = useState<'root' | 'organize' | 'sort' | null>(null);
+  useEffect(() => {
+    if (!projectListVisible) { setMenuProject(null); setProjectsMenu(null); }
+  }, [projectListVisible]);
   const [projectsMenuPosition, setProjectsMenuPosition] = useState<{ left: number; top: number } | null>(null);
   const [sidebarOrganization, setSidebarOrganization] = useState<SidebarOrganization>(() => settings?.sidebar?.organization ?? 'project');
   const [chatSort, setChatSort] = useState<ChatSort>(() => settings?.sidebar?.chatSort ?? 'updated');
@@ -960,7 +978,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       </div>
       <div className="desktop-body">
       <nav ref={railRef} className="desktop-nav-rail no-drag" aria-label={tr('desktop_main_navigation')} aria-disabled={bridge.projectCreationOpen || undefined} onClickCapture={blockNavigation}>
-        <button type="button" className="desktop-rail-button desktop-rail-home" data-active={modeMarked('home') || undefined} aria-current={modeMarked('home') ? 'page' : undefined} aria-label={inboxBadge > 0 ? `${tr('desktop_home')} (${inboxBadge})` : tr('desktop_home')} title={tr('desktop_home')} onClick={() => selectMode('home')}><DesktopIcon name="home" size={20} />{inboxBadge > 0 ? <span className="desktop-rail-count" aria-hidden="true">{unreadBadgeText(inboxBadge)}</span> : null}</button>
+        <button type="button" id={`${homeViewId}-chats`} className="desktop-rail-button desktop-rail-workspace desktop-rail-chats" aria-current={chatsMarked ? 'page' : undefined} aria-label={inboxBadge > 0 ? `${tr('tabs_chats')} (${inboxBadge})` : tr('tabs_chats')} title={tr('tabs_chats')} onClick={() => selectHomeView('chats')}><DesktopIcon name="chat" size={20} />{inboxBadge > 0 ? <span className="desktop-rail-count" aria-hidden="true">{unreadBadgeText(inboxBadge)}</span> : null}</button>
+        <button type="button" id={`${homeViewId}-projects`} className="desktop-rail-button desktop-rail-workspace desktop-rail-projects" aria-current={projectsMarked ? 'page' : undefined} aria-label={tr('drawer_entry_projects')} title={tr('drawer_entry_projects')} onClick={() => selectHomeView('projects')}><DesktopIcon name="folder" size={20} /></button>
         {botsAvailable && <button type="button" className="desktop-rail-button" data-active={modeMarked('bots') || undefined} aria-current={modeMarked('bots') ? 'page' : undefined} aria-label={tr('bots_title')} title={tr('bots_title')} onClick={() => selectMode('bots')}><Icon name="bot" size={21} stroke={1.7} /></button>}
         <button type="button" className="desktop-rail-button desktop-rail-teams" data-active={modeMarked('teams') || undefined} aria-current={modeMarked('teams') ? 'page' : undefined} aria-label={teamsRailLabel} title={teamsRailLabel} onClick={() => selectMode('teams')}>
           <Icon name="users" size={21} stroke={1.7} />
@@ -989,9 +1008,24 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', '--desktop-accent': t.accent } as CSSProperties}
     >
       {scheduled ? <div ref={pageSidebarRef} className="desktop-page-sidebar" /> : <>
-      {searchOpen && sidebarMode !== 'friends' && <div className="sidebar-search"><DesktopIcon name="search" size={15} /><input ref={searchInputRef} type="search" aria-label={tr('desktop_search_chats_projects')} placeholder={tr('desktop_search_chats_projects')} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setSearchQuery(''); setSearchOpen(false); } }} /><button type="button" aria-label={tr('desktop_close_search')} onClick={() => { setSearchQuery(''); setSearchOpen(false); }}><Icon name="x" size={15} /></button></div>}
+      {searchOpen && searchable && <div className="sidebar-search"><DesktopIcon name="search" size={15} /><input ref={searchInputRef} type="search" aria-label={tr('desktop_search_chats_projects')} placeholder={tr('desktop_search_chats_projects')} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setSearchQuery(''); setSearchOpen(false); } }} /><button type="button" aria-label={tr('desktop_close_search')} onClick={() => { setSearchQuery(''); setSearchOpen(false); }}><Icon name="x" size={15} /></button></div>}
 
-      {sidebarMode === 'home' && !homePanel && <div style={{ padding: '16px 12px 14px' }}>
+      {/* Electron drag regions discard pointer events. Keep every session control in
+          an explicit no-drag region even if the title-bar geometry changes. */}
+      <DragDropProvider
+        sensors={(defaults) => defaults.map((sensor) => sensor === PointerSensor ? SESSION_POINTER_SENSOR : sensor)}
+        onDragEnd={handleSessionDragEnd}
+      >
+      {sidebarMode !== 'home' ? modePanel?.(sidebarMode, normalizedSearch) ?? null : null}
+      {homePanel ? <div className="desktop-home-view" role={splitHome ? 'region' : undefined}
+        aria-labelledby={splitHome ? `${homeViewId}-chats` : undefined}
+        hidden={sidebarMode !== 'home' || (splitHome && homeView !== 'chats')}>
+        {homePanel}
+      </div> : null}
+      {(!splitHome || projectsVisited || projectListVisible) && <div className="desktop-home-view" role={splitHome ? 'region' : undefined}
+        aria-labelledby={splitHome ? `${homeViewId}-projects` : undefined}
+        hidden={!projectListVisible}>
+      {sidebarMode === 'home' && <div style={{ padding: '16px 12px 14px' }}>
         <button
           className="sidebar-primary-action sidebar-new-chat"
           type="button"
@@ -1011,16 +1045,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
         </button>
       </div>}
 
-      {/* Electron drag regions discard pointer events. Keep every session control in
-          an explicit no-drag region even if the title-bar geometry changes. */}
-      <DragDropProvider
-        sensors={(defaults) => defaults.map((sensor) => sensor === PointerSensor ? SESSION_POINTER_SENSOR : sensor)}
-        onDragEnd={handleSessionDragEnd}
-      >
-      {sidebarMode === 'home' ? homeToolbar : null}
-      {sidebarMode !== 'home' ? modePanel?.(sidebarMode, normalizedSearch) ?? null : homePanel ?? (
       <nav className="no-drag desktop-sidebar-list" aria-label={tr('desktop_projects_sessions')} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 10px 12px' }}>
-        {pinnedSessions.length > 0 ? (
+        {!splitHome && pinnedSessions.length > 0 ? (
           <section aria-labelledby="pinned-sessions-heading" style={{ marginBottom: 24 }}>
             <h2 id="pinned-sessions-heading" className="sidebar-section-heading"><button type="button" aria-expanded={pinnedExpanded} onClick={() => setPinnedExpanded((value) => !value)} style={{ color: t.text4 }}>{tr('drawer_recents_pinned')} <Icon name="chevron" size={13} stroke={1.7} style={{ transform: pinnedExpanded ? 'none' : 'rotate(-90deg)' }} /></button></h2>
             {pinnedExpanded && pinnedSessions.filter((pinned) => {
@@ -1051,7 +1077,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
           </section>
         ) : null}
 
-        {globalSessions.length > 0 && <section aria-label={tr('drawer_search_section_sessions')}>
+        {!splitHome && globalSessions.length > 0 && <section aria-label={tr('drawer_search_section_sessions')}>
           <h2 style={{ padding: '8px', color: t.text4, fontSize: 11, fontWeight: 600, letterSpacing: '.04em' }}>{tr('drawer_search_section_sessions')}</h2>
           {(normalizedSearch ? globalSessions.filter(({ session }) => matchesSearch(session.title || tr('remote_untitled'))) : showAllSessions['global'] ? globalSessions : globalSessions.slice(0, 5)).map(({ projectPath: workspace, session }) => {
             const pinned = pinnedKeys.has(`${workspace}\0${session.uuid}`);
@@ -1299,7 +1325,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
           </button>)}
         </details>}
       </nav>
-      )}
+      </div>}
       <DragOverlay
         className="sidebar-session-drag-overlay"
         dropAnimation={null}

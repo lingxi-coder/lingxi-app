@@ -1,4 +1,5 @@
 import { Files } from './Files';
+import { SendFailureNotice } from '../../../../packages/chat-ui/SendFailureNotice';
 import { ChatTopbarControl } from '../../../../packages/teams/ChatTopbar';
 import type { FileReceipt } from '@lingxi/bridge-client/remote';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -39,6 +40,8 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
   const botName = knownBots(list).find((bot) => bot.bot_id === botId)?.name;
   const scroller = useRef<HTMLDivElement>(null);
   const [attachments, setAttachments] = useState<FileReceipt[]>([]);
+  const [sendFailure, setSendFailure] = useState<typeof controller | null>(null);
+  const observedFailures = useRef<{ controller: typeof controller; ids: Set<string> } | null>(null);
   const stickToBottom = useRef(true);
   useEffect(() => setAttachments([]), [client, sessionId]);
 
@@ -59,6 +62,17 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
     return () => botThreads?.deactivate();
   }, [botThreads]);
 
+  useEffect(() => {
+    const ids = new Set(state.outgoing.filter((prompt) => prompt.status === 'failed').map((prompt) => prompt.id));
+    const previous = observedFailures.current;
+    observedFailures.current = { controller, ids };
+    if (previous?.controller !== controller) {
+      setSendFailure(null);
+    } else if ([...ids].some((id) => !previous.ids.has(id))) {
+      setSendFailure(controller);
+    }
+  }, [controller, state.outgoing]);
+
   // Follow new content while the reader is at the bottom; leave them alone once they scroll up.
   useLayoutEffect(() => {
     const element = scroller.current;
@@ -69,8 +83,25 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
   const approval = isTeamApproval(sessionId);
   const running = state.turn.running || state.transcript.conversation.running;
 
+  const retryPrompt = async (id: string) => {
+    setSendFailure(null);
+    try {
+      await controller.retryPrompt(id);
+      if (controller.getState().outgoing.some((entry) => entry.id === id && entry.status === 'failed')) {
+        setSendFailure(controller);
+      }
+    } catch {
+      setSendFailure(controller);
+    }
+  };
+
   return (
     <div className="rc-session">
+      <SendFailureNotice
+        message={sendFailure === controller ? t(locale, 'sendFailed') : null}
+        dismissLabel={t(locale, 'dismissSendFailure')}
+        onDismiss={() => setSendFailure(null)}
+      />
       <ChatTopbarControl><header className="rc-session-head">
         <button type="button" className="rc-back" onClick={onBack} aria-label={botName === undefined ? t(locale, 'back') : t(locale, 'backToBot', { name: botName })}>
           ‹
@@ -114,7 +145,7 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
                 {prompt.status === 'failed' ? (
                   <>
                     {' '}
-                    <button type="button" className="rc-link" disabled={!live || (running && (prompt.images.length > 0 || (prompt.files?.length ?? 0) > 0))} onClick={() => void controller.retryPrompt(prompt.id).catch(() => undefined)}>{t(locale, 'sendRetry')}</button>
+                    <button type="button" className="rc-link" disabled={!live || (running && (prompt.images.length > 0 || (prompt.files?.length ?? 0) > 0))} onClick={() => void retryPrompt(prompt.id)}>{t(locale, 'sendRetry')}</button>
                     {' '}
                     <button type="button" className="rc-link" onClick={() => controller.dismissPrompt(prompt.id)}>{t(locale, 'dismiss')}</button>
                   </>
@@ -140,11 +171,15 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
         disabled={!live}
         hasFiles={attachments.length > 0}
         onSend={(text, images) => {
+          setSendFailure(null);
           try {
             void controller.sendPrompt(text, images, running ? [] : attachments.map(f => f.ref));
             if (!running) setAttachments([]);
             return true;
-          } catch { return false; }
+          } catch {
+            setSendFailure(controller);
+            return false;
+          }
         }}
         onStop={() => void controller.cancelTurn().catch(() => undefined)}
       /></> : null}

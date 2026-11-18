@@ -17,6 +17,31 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
     }
 
+    func testRuntimeErrorNotificationKeepsComposerInPlace() {
+        app.terminate()
+        let message = "Fixture send failure diagnostic"
+        app.launchEnvironment["LINGXI_UI_TEST_RUNTIME_ERROR"] = message
+        app.launch()
+
+        let dismiss = app.buttons["conversation.runtime-error.dismiss"]
+        let details = app.buttons["conversation.runtime-error.details"]
+        let editor = app.textViews["composer.input"]
+        XCTAssertTrue(dismiss.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(editor.exists)
+        XCTAssertLessThan(dismiss.frame.midY, app.frame.midY)
+        let editorFrame = editor.frame
+
+        details.tap()
+        XCTAssertTrue(app.staticTexts["conversation.runtime-error.message"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["conversation.runtime-error.message"].label, message)
+        app.buttons["conversation.runtime-error.close-details"].tap()
+        XCTAssertTrue(dismiss.waitForExistence(timeout: 5))
+        dismiss.tap()
+
+        XCTAssertFalse(dismiss.exists)
+        XCTAssertEqual(editor.frame, editorFrame)
+    }
+
     func testCompactTranscriptSpacingAndIconOnlyCopy() {
         app.terminate()
         app.launchEnvironment["LINGXI_UI_TEST_COMPACT_TRANSCRIPT"] = "1"

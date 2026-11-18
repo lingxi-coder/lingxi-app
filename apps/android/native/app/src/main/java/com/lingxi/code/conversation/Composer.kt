@@ -546,42 +546,51 @@ fun ComposerAttachment.toImageRef(): ImageRefDto = ImageRefDto(
 @Composable
 private fun AttachmentThumb(attachment: ComposerAttachment, onRemove: () -> Unit) {
     val t = LingXiTheme.palette
-    var preview by remember { mutableStateOf(false) }
+    val thumbnailShape = RoundedCornerShape(10.dp)
+    var preview by remember(attachment) { mutableStateOf(false) }
     if (preview) ImagePreviewDialog(ImagePreviewSource.Encoded(attachment.base64, attachment.mediaType), onDismiss = { preview = false })
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
         modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
     ) {
         Image(
             bitmap = attachment.thumb,
-            contentDescription = stringResource(R.string.composer_captured_photo),
-            contentScale = ContentScale.Crop,
+            contentDescription = stringResource(R.string.chat_preview_attached_image),
+            contentScale = ContentScale.Fit,
             modifier = Modifier
-                .size(48.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .clickable(role = androidx.compose.ui.semantics.Role.Button) { preview = true },
+                .size(width = 96.dp, height = 64.dp)
+                .clip(thumbnailShape)
+                .background(t.surface)
+                .border(1.dp, t.borderStrong, thumbnailShape)
+                .clickable(role = Role.Button) { preview = true }
+                .padding(3.dp),
         )
-        Text(
-            text = "${attachment.width}×${attachment.height}",
-            color = t.text3,
-            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-        )
-        Spacer(Modifier.weight(1f))
-        Box(
-            modifier = Modifier
-                .size(28.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .clickable(onClick = onRemove),
-            contentAlignment = Alignment.Center,
-        ) {
-            LXIcon(
-                name = LXIconName.X,
-                size = 14.dp,
-                color = t.text3,
-                stroke = 2f,
-                contentDescription = stringResource(R.string.composer_remove_photo),
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                text = stringResource(R.string.chat_attached_image),
+                color = t.text2,
+                style = MaterialTheme.typography.bodyMedium,
             )
+            Text(
+                text = "${attachment.width} × ${attachment.height}",
+                color = t.text3,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        IconButton(onClick = onRemove, modifier = Modifier.size(48.dp)) {
+            Box(
+                modifier = Modifier.size(28.dp).background(t.surfaceHover, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                LXIcon(
+                    name = LXIconName.X,
+                    size = 12.dp,
+                    color = t.text2,
+                    stroke = 2f,
+                    contentDescription = stringResource(R.string.composer_remove_photo),
+                )
+            }
         }
     }
 }

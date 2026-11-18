@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { ComposerEditor, ComposerSurface, ComposerToolbar } from '../../../../packages/chat-ui/ComposerSurface';
+import { ComposerEditor, ComposerImageThumbnail, ComposerSurface, ComposerToolbar } from '../../../../packages/chat-ui/ComposerSurface';
 import type { ImageRefDto } from '@lingxi/bridge-client';
 import type { Locale } from '../utils/locale';
 import { ImageRejected, shrinkImage } from './imageShrink';
@@ -22,9 +22,43 @@ const IMAGE_ERRORS: Record<ImageRejected['reason'], StringKey> = {
   size: 'imageSizeError',
 };
 
+interface DraftImage {
+  id: number;
+  image: ImageRefDto;
+}
+
+function ImageAttachment({ image, locale, onRemove }: { image: ImageRefDto; locale: Locale; onRemove(): void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const [open, setOpen] = useState(false);
+  const src = `data:${image.media_type};base64,${image.base64}`;
+  const previewLabel = t(locale, 'previewImage');
+  return (
+    <li className="composer-image-attachment">
+      <button type="button" className="composer-image-preview" aria-label={previewLabel} aria-haspopup="dialog"
+        onClick={() => {
+          dialog.current?.showModal();
+          setOpen(true);
+        }}>
+        <ComposerImageThumbnail src={src} />
+      </button>
+      <button type="button" className="composer-image-remove" aria-label={t(locale, 'removeImage')} onClick={onRemove}>
+        <span aria-hidden="true">×</span>
+      </button>
+      <dialog ref={dialog} className="rc-image-preview" aria-label={previewLabel} onClose={() => setOpen(false)}>
+        <button type="button" className="rc-image-preview-close" aria-label={t(locale, 'closeImagePreview')}
+          onClick={() => dialog.current?.close()}>
+          <span aria-hidden="true">×</span>
+        </button>
+        {open && <img src={src} alt={t(locale, 'imageAlt')} />}
+      </dialog>
+    </li>
+  );
+}
+
 export function Composer({ locale, running, disabled, hasFiles, onSend, onStop }: ComposerProps) {
   const [text, setText] = useState('');
-  const [images, setImages] = useState<ImageRefDto[]>([]);
+  const [images, setImages] = useState<DraftImage[]>([]);
+  const nextImageId = useRef(0);
   const [problem, setProblem] = useState<string | null>(null);
   const [shrinking, setShrinking] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -32,10 +66,7 @@ export function Composer({ locale, running, disabled, hasFiles, onSend, onStop }
 
   const send = (): void => {
     if (!canSend) return;
-    if (!onSend(text, running ? [] : images)) {
-      setProblem(t(locale, 'sendFailed'));
-      return;
-    }
+    if (!onSend(text, running ? [] : images.map(({ image }) => image))) return;
     setText('');
     // A text follow-up cannot carry images. Keep the unsent draft until idle.
     if (!running) setImages([]);
@@ -47,14 +78,15 @@ export function Composer({ locale, running, disabled, hasFiles, onSend, onStop }
     setProblem(null);
     setShrinking(true);
     try {
-      const added: ImageRefDto[] = [];
+      const added: DraftImage[] = [];
       for (const file of Array.from(files)) {
         if (images.length + added.length >= MAX_IMAGE_ATTACHMENTS) {
           setProblem(t(locale, 'imageLimit', { count: MAX_IMAGE_ATTACHMENTS }));
           break;
         }
         try {
-          added.push(await shrinkImage(file));
+          const image = await shrinkImage(file);
+          added.push({ id: nextImageId.current++, image });
         } catch (error) {
           setProblem(t(locale, error instanceof ImageRejected ? IMAGE_ERRORS[error.reason] : 'imageDecodeError'));
         }
@@ -76,14 +108,10 @@ export function Composer({ locale, running, disabled, hasFiles, onSend, onStop }
     >
       <ComposerSurface>
         {images.length > 0 ? (
-          <ul className="rc-attachments">
-            {images.map((image, index) => (
-              <li key={index}>
-                <img src={`data:${image.media_type};base64,${image.base64}`} alt={t(locale, 'imageAlt')} />
-                <button type="button" aria-label={t(locale, 'removeImage')} onClick={() => setImages((current) => current.filter((_, i) => i !== index))}>
-                  ×
-                </button>
-              </li>
+          <ul className="composer-image-attachments">
+            {images.map(({ id, image }) => (
+              <ImageAttachment key={id} image={image} locale={locale}
+                onRemove={() => setImages((current) => current.filter((item) => item.id !== id))} />
             ))}
           </ul>
         ) : null}

@@ -1,5 +1,5 @@
 /** @jsxRuntime automatic */
-import type { ComponentPropsWithoutRef, ReactNode } from 'react';
+import { useState, type ComponentPropsWithoutRef, type ReactNode } from 'react';
 import './composer-surface.css';
 
 type DivProps = ComponentPropsWithoutRef<'div'>;
@@ -14,4 +14,13 @@ export function ComposerEditor({ children }: { children: ReactNode }) {
 
 export function ComposerToolbar({ children }: { children: ReactNode }) {
   return <div className="composer-toolbar">{children}</div>;
+}
+
+export function ComposerImageThumbnail({ src }: { src: string }) {
+  const [dimensions, setDimensions] = useState('');
+  return <>
+    <img className="composer-image-thumbnail" src={src} alt="" draggable={false}
+      onLoad={({ currentTarget }) => setDimensions(`${currentTarget.naturalWidth} × ${currentTarget.naturalHeight}`)} />
+    {dimensions && <span className="composer-image-dimensions">{dimensions}</span>}
+  </>;
 }

@@ -63,7 +63,16 @@
 .rc-badge-direct { color: var(--accent); border-color: var(--accent); }
 
 /* One session */
-.rc-session { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+.rc-session {
+  --send-failure-border: var(--line-strong);
+  --send-failure-surface: var(--surface);
+  --send-failure-text: var(--ink);
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
 .rc-session-head { display: flex; align-items: center; gap: 10px; }
 .rc-back { width: 36px; height: 36px; flex: none; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font-size: 20px; line-height: 1; cursor: pointer; }
 .rc-session-title { flex: 1; min-width: 0; }
@@ -133,7 +142,13 @@
 /* Controls and composer */
 .rc-controls { display: flex; flex-wrap: wrap; gap: 8px; }
 .rc-controls label { flex: 1 1 130px; min-width: 0; display: flex; flex-direction: column; gap: 2px; color: var(--ink-3); font-size: 11px; }
-.rc-composer { --composer-border: var(--line); --composer-surface: var(--surface); padding-top: 6px; }
+.rc-composer {
+  --composer-border: var(--line);
+  --composer-surface: var(--surface);
+  --composer-attachment-text: var(--ink-2);
+  --composer-attachment-fill: var(--bg);
+  padding-top: 6px;
+}
 .rc-composer:focus-within { --composer-border: var(--accent); }
 .rc-composer .composer-editor-control { color: var(--ink); font-size: 16px; resize: vertical; }
 .rc-composer .rc-note { margin-inline: 12px; }
@@ -141,10 +156,43 @@
 .rc-composer .button { min-height: 44px; }
 .rc-icon-button { width: 44px; height: 44px; flex: none; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--ink); font-size: 20px; cursor: pointer; }
 .rc-icon-button:disabled, .rc-composer .button:disabled { opacity: .5; cursor: default; }
-.rc-attachments { margin: 0; padding: 0; list-style: none; display: flex; gap: 8px; }
-.rc-attachments li { position: relative; }
-.rc-attachments img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; }
-.rc-attachments button { position: absolute; top: -6px; right: -6px; width: 22px; height: 22px; border: 0; border-radius: 50%; background: var(--ink); color: var(--bg); cursor: pointer; }
+.rc-image-preview {
+  position: fixed;
+  inset: 0;
+  box-sizing: border-box;
+  inline-size: 100%;
+  block-size: 100%;
+  max-inline-size: none;
+  max-block-size: none;
+  margin: 0;
+  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+    max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  border: 0;
+  background: #151515;
+  color: #fff;
+}
+.rc-image-preview[open] {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+}
+.rc-image-preview img {
+  justify-self: center;
+  inline-size: 100%;
+  block-size: 100%;
+  object-fit: contain;
+}
+.rc-image-preview-close {
+  justify-self: end;
+  inline-size: 44px;
+  block-size: 44px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  color: #222;
+  font-size: 24px;
+  cursor: pointer;
+}
 
 /* Sign-in */
 .rc-form { display: grid; gap: 10px; }

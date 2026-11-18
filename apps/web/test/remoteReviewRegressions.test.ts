@@ -131,7 +131,7 @@ test('a rejected remote admission preserves the original text and prepared image
     await act(async () => { renderer.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
     assert.equal(renderer.root.findByType('textarea').props.value, text);
     assert.equal(renderer.root.findAllByType('img').length, 1);
-    assert.equal(renderer.root.findAllByProps({ role: 'alert' }).length, 1);
+    assert.equal(renderer.root.findAllByProps({ role: 'alert' }).length, 0);
   } finally {
     if (renderer) act(() => renderer.unmount());
     globalThis.createImageBitmap = original;
@@ -166,6 +166,14 @@ test('a mode conflict between render and send retains the session file attachmen
       controller.handleSnapshot({ session_id: 's', phase: 'begin', epoch: 'e2', first_message_index: 0, session_mode: 'chat' });
       renderer.root.findByType('form').props.onSubmit({ preventDefault() {} });
     });
+    assert.equal(renderer.root.findByType('textarea').props.value, text);
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Remove file' }).length, 1);
+    const dismissLabel = 'Dismiss send failure notification';
+    const notice = () => renderer.root.findByProps({ className: 'send-failure-notice' });
+    assert.deepEqual(notice().findByProps({ role: 'alert' }).children, ['Not sent']);
+    await act(async () => { renderer.root.findByProps({ 'aria-label': dismissLabel }).props.onClick(); });
+    assert.equal(renderer.root.findAllByProps({ 'aria-label': dismissLabel }).length, 0);
+    assert.deepEqual(notice().findByProps({ role: 'alert' }).children, []);
     assert.equal(renderer.root.findByType('textarea').props.value, text);
     assert.equal(renderer.root.findAllByProps({ 'aria-label': 'Remove file' }).length, 1);
   } finally {

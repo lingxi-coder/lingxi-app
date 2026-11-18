@@ -462,6 +462,29 @@ fun ChatScreen(
                             .padding(end = 16.dp, bottom = 16.dp),
                     )
                 }
+                Column(
+                    modifier = Modifier.align(Alignment.TopCenter),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    state.error?.takeUnless { modelSetupRequired }?.let {
+                        ErrorBanner(
+                            error = it,
+                            onDismiss = onDismissError,
+                            modifier = Modifier.widthIn(max = 560.dp),
+                        )
+                    }
+                    state.compactRejectionId?.let { id ->
+                        val accessibilityManager = androidx.compose.ui.platform.LocalAccessibilityManager.current
+                        LaunchedEffect(id) {
+                            delay(accessibilityManager?.calculateRecommendedTimeoutMillis(5_000, containsText = true, containsControls = true) ?: 5_000)
+                            onDismissCompactRejection()
+                        }
+                        CompactRejectionAlert(
+                            onDismiss = onDismissCompactRejection,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        )
+                    }
+                }
             }
             computerUseSetup?.let {
                 ComputerUseSetupBanner(
@@ -476,11 +499,7 @@ fun ChatScreen(
             state.agentRun?.takeIf { it.active }?.let { run ->
                 run.retry?.let { ReconnectNotice(it, run.turnId, Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) }
             }
-            // Match iOS: one runtime footer, with execution details in summary sheets.
             state.compaction?.let { CompactionProgressRow(it) }
-                ?: state.error?.takeUnless { modelSetupRequired }?.let {
-                    ErrorBanner(error = it, onDismiss = onDismissError)
-                }
             if (audioGuidance != null) {
                 AudioSetupBanner(audioGuidance, onOpenVoiceSettings, onDismissAudioGuidance)
             } else {
@@ -570,17 +589,7 @@ fun ChatScreen(
                 onDiscardRecovery = onDiscardRecoveredTurn,
             )
         }
-        state.compactRejectionId?.let { id ->
-            val accessibilityManager = androidx.compose.ui.platform.LocalAccessibilityManager.current
-            LaunchedEffect(id) {
-                delay(accessibilityManager?.calculateRecommendedTimeoutMillis(5_000, containsText = true, containsControls = true) ?: 5_000)
-                onDismissCompactRejection()
-            }
-            CompactRejectionAlert(
-                onDismiss = onDismissCompactRejection,
-                modifier = Modifier.align(Alignment.TopCenter).padding(horizontal = 16.dp).padding(top = if (showTopBar) 64.dp else 8.dp),
-            )
-        }
+
     }
 
     }
@@ -1075,7 +1084,7 @@ internal fun ComputerUseSetupBanner(
 /** A compact error summary with the complete, copyable diagnostic in a native sheet. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ErrorBanner(error: ChatError, onDismiss: () -> Unit) {
+private fun ErrorBanner(error: ChatError, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
     val t = LingXiTheme.palette
     val context = LocalContext.current
     val resumeFailure = stringResource(R.string.chat_resume_session_failed)
@@ -1089,8 +1098,9 @@ private fun ErrorBanner(error: ChatError, onDismiss: () -> Unit) {
     val shape = RoundedCornerShape(18.dp)
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
+        modifier = modifier
             .testTag(UiTags.CHAT_ERROR)
+            .semantics { liveRegion = androidx.compose.ui.semantics.LiveRegionMode.Polite }
             .fillMaxWidth()
             .padding(horizontal = 14.dp)
             .padding(top = 8.dp)

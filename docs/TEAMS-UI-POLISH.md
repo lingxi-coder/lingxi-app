@@ -68,24 +68,15 @@ mark use the same 0.24 x size rounded rectangle.
 | Android | `BotAvatar(avatarId, size)` clipped with `RoundedCornerShape(size * 0.24f)`; sizes are dp; initials are sized from the dp size (U7). Key `BotAvatar` by `avatarId` in every call site. |
 | Desktop and Web | `border-radius: 24%` on Bot, channel and team avatars; Web renders the AgentAvatar art through `renderAvatar` instead of a letter tile. |
 
-**U3 Own message.** In Team and Friend streams, a message written by the signed-in person shows the author as "You"
-(`teams_you`) and its row gets a faint tint: the accent at 6 percent over the stream background. Layout and alignment do not change
-(rows stay flat; there are no bubbles).
-- The tint is background only: no border, no change of text colour. Body text keeps the primary text colour; time and "Edited"
-  keep the muted colour.
-- Consecutive messages of one author inside the 5-minute group window form one tinted block; "You" is on the group's first row.
-- Bot replies are never tinted. Hover and selection layer on top of the tint.
-- Assistive technology reads the author as "You".
-- Contrast is computed, not assumed (Appendix D): body text on the tint is at least 12.9:1 on every client and theme, and the muted
-  text of Desktop is 5.49:1 (light) and 7.23:1 (dark). The brief's pairs: Desktop light #1d1d1f on `#0066d6` at 6 percent over
-  `#ffffff` (row `#f0f6fd`) is 15.44:1; Desktop dark #f5f5f7 on `#0a84ff` at 6 percent over `#1e1e20` (row `#1d242d`) is 14.35:1.
-  Both are at least 4.5:1.
+**U3 Message list.** Team and Friend streams place incoming human messages on the leading side and
+outgoing messages on the trailing side. Outgoing bubbles use a faint accent tint and show “You”
+(`teams_you`) on the first message in a group. The five-minute grouping window, date breaks and unread
+boundary determine where a group starts. Each message shows its own time. Pending messages use the
+outgoing bubble with send status and the available retry or discard actions.
 
-| Client | Translation |
-| --- | --- |
-| iOS | `.background(Color.accentColor.opacity(0.06))` on the message row. |
-| Android | `Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.06f))` on the row. |
-| Desktop and Web | token `--tw-own: var(--teams-own, color-mix(in srgb, var(--tw-accent) 6%, transparent))`, defined with the other tokens on `.tw-scope, .tw-dialog`; the row uses `background: var(--tw-own)`. The accent already switches per scheme, so one definition covers light and dark. |
+Quotes and attachments sit with the message they belong to. Agent responses use the Agent Chat
+Markdown renderer on Desktop and mobile, with the agent’s own reading column. Run, approval and artifact
+controls sit with their corresponding response or request.
 
 **U4 Run card.** One anatomy on every client: (1) state: glyph and label; (2) title: the Bot's name; (3) detail: one line;
 (4) actions: the fewest that fit the state (see below). Applies to the Team task card (`TeamTaskCard` in `Teams/TeamBotViews.swift` and

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { ChatTopbarTarget } from '../../../../packages/teams/ChatTopbar';
 import { navigateTo, parseRemoteBotRoute, parseRemoteRoute, remoteBotRoute, remoteSessionRoute, type AppRoute } from '../app/router';
 import type { Theme } from '../app/useTheme';
 import type { Locale } from '../utils/locale';
@@ -42,6 +43,7 @@ export default function RemotePage(props: RemotePageProps) {
   const auth = useAuthState();
   const [crypto, setCrypto] = useState<boolean | undefined>(undefined);
   const persistent = usePersistentPairing();
+  const [topbar, setTopbar] = useState<HTMLDivElement | null>(null);
 
   useEffect(() => {
     // The strict policy is set for the exact paths /remote and /remote/**; a differently-cased URL would load without it.
@@ -60,9 +62,10 @@ export default function RemotePage(props: RemotePageProps) {
   }, []);
 
   return (
-    <div className="rc-page">
+    <ChatTopbarTarget.Provider value={topbar}><div className="rc-page">
       <header className="rc-shell-head">
         <h1>{t(locale, 'title')}</h1>
+        <div ref={setTopbar} className="rc-topbar-slot" />
         <div className="rc-shell-actions">
           {auth.status === 'signedIn' && auth.email ? <span className="rc-account" title={t(locale, 'signedInAs', { email: auth.email })}>{auth.email}</span> : null}
           <button type="button" className="control-chip" onClick={() => onLocaleChange(locale === 'zh' ? 'en' : 'zh')}>{t(locale, 'language')}</button>
@@ -90,7 +93,7 @@ export default function RemotePage(props: RemotePageProps) {
           <SignedIn key={auth.uid} uid={auth.uid} locale={locale} route={props.route} />
         )}
       </main>
-    </div>
+    </div></ChatTopbarTarget.Provider>
   );
 }
 

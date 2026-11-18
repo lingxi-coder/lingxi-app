@@ -244,7 +244,7 @@ test('the default palette meets contrast in light and dark, and the stylesheet k
   assert.match(css, /\.tw-scope \.tw-icon-btn[^{]*\{[^}]*width:\s*28px/, 'icon buttons are 28px wide');
   assert.match(css, /\.tw-scope :focus-visible[^{]*\{[^}]*outline:\s*2px solid var\(--tw-focus\)/, 'keyboard focus is outlined');
   assert.match(css, /prefers-reduced-motion:\s*reduce\)\s*\{[^}]*transition:\s*none/, 'motion can be turned off');
-  for (const hidden of ['.tw-row-more', '.tw-msg-actions', '.tw-msg-hover-time']) {
+  for (const hidden of ['.tw-row-more', '.tw-msg-actions']) {
     assert.match(css, new RegExp(`${hidden.replace('.', '\\.')}[^{]*\\{[^}]*opacity:\\s*0`), `${hidden} starts hidden`);
     assert.match(css, new RegExp(`:focus-within [^{]*${hidden.replace('.', '\\.')}|\\.tw-row:focus-within ${hidden.replace('.', '\\.')}`), `${hidden} also shows on focus-within`);
   }
@@ -448,7 +448,7 @@ test('conversation view: header, stream with day and unread dividers, grouped ru
   const header = /<header class="tw-conv-head">[^]*?<\/header>/.exec(markup)?.[0] ?? '';
   assert.match(header, /class="tw-chan"[^>]*>#</, 'a channel\'s header has the # tile'); assert.match(header, /<h2>general<\/h2>/, 'and its title is the name alone'); assert.match(header, /<p>2 members · 1 Bot<\/p>/, 'Bots are not counted as members');
   assert.equal(count(header.replace(/<[^>]*>/g, ''), /#/g), 1, 'one #, the tile\'s: the title does not repeat it');
-  assert.match(markup, /class="tw-platform" title="[^"]*readable by the platform[^"]*">Platform readable/);
+  assert.match(markup, /class="tw-platform" title="[^"]*readable by the platform[^"]*"[^]*?<span>Platform readable<\/span>/);
   assert.match(markup, /role="log" aria-label="Messages" tabindex="0"/);
   assert.equal(count(markup, /class="tw-date"/g), 1); assert.match(markup, /class="tw-date"><span>Today<\/span>/);
   assert.equal(count(markup, /data-unread-divider/g), 1); assert.match(markup, /<span>New messages<\/span>/);
@@ -459,14 +459,16 @@ test('conversation view: header, stream with day and unread dividers, grouped ru
   assert.match(markup, /data-message-id="message-1" data-message-seq="1"/);
   assert.match(markup, /<b class="tw-msg-author">Bob<\/b>/); assert.match(markup, /<b class="tw-msg-author">You<\/b>/, 'the signed-in person reads "You" on their own row');
   assert.doesNotMatch(markup, /<b class="tw-msg-author">Alice<\/b>/, 'and not their own name');
-  assert.equal(count(markup, /data-mine="true"/g), 1, 'one own row'); assert.match(markup, /data-mine="true" data-kind="user"[^>]*data-message-id="message-4"/, 'message 4 is the signed-in person\'s: the tint is the only cue, there is no bubble');
-  assert.equal(count(markup, /data-mine="false"/g), 6, 'every other row is not');
+  assert.equal(count(markup, /data-mine="true"/g), 1, 'one own row'); assert.match(markup, /data-mine="true" data-kind="user"[^>]*data-message-id="message-4"/, 'message 4 is the signed-in person\'s');
+  assert.equal(count(markup, /data-mine="false"/g), 6, 'the other messages are incoming');
+  assert.equal(count(markup, /class="tw-msg-bubble"/g), 7, 'human messages use bubbles');
+  assert.equal(count(markup, /class="tw-msg-time"/g), 7, 'timestamps stay visible in grouped rows');
   assert.match(markup, /<blockquote class="tw-quote"><b>Alice<\/b> Thanks &lt;script&gt;alert\(1\)&lt;\/script&gt;<\/blockquote>/, 'the quote names the author and is escaped');
   assert.doesNotMatch(markup, /<script>alert/, 'message text is never markup'); assert.match(markup, /Thanks &lt;script&gt;/);
   assert.match(markup, /<em>Message recalled<\/em>/); assert.match(markup, /\(edited\)/);
   assert.equal(count(markup, /aria-label="Reply"/g), 6, 'every message that is not recalled can be answered');
   assert.equal(count(markup, /aria-label="Edit"/g), 1, 'only the viewer\'s own'); assert.equal(count(markup, /aria-label="Recall"/g), 1);
-  assert.match(markup, /<button type="button" disabled=""[^>]*>Mark as read|>Mark as read<\/button>/); assert.doesNotMatch(markup, /Mark as read<\/button>[^]*disabled=""[^]*Mark as read/);
+  assert.match(markup, /aria-label="Mark as read" title="Mark as read"><svg/);
   assert.match(markup, /aria-pressed="false" aria-label="Team details"/);
   assert.match(markup, /<textarea[^>]*aria-label="Message"[^>]*placeholder="Message #general"/); assert.match(markup, /Type @ to ask a Bot/);
   assert.match(markup, /aria-label="Ask a Bot \(@\)"/); assert.match(markup, /class="tw-primary tw-send" disabled="" aria-label="Send"/, 'nothing to send yet');
@@ -489,7 +491,8 @@ test('conversation view: only a shared Bot\'s messages go through the host\'s Ma
   assert.deepEqual(calls, ['## Plan\n- [ ] one', 'edited **reply**'], 'the person\'s and the recalled message never reach the renderer');
   assert.match(markup, /<p class="tw-msg-body">\*\*typed\*\* by a person<\/p>/, 'a person\'s text is a plain paragraph');
   assert.match(markup, /<div class="tw-msg-body tw-md" data-markdown="true"><div class="host-md">## Plan\n- \[ \] one<\/div><\/div>/);
-  assert.match(markup, /class="tw-edited"> \(edited\)<\/small>/, 'the edited marker stays');
+  assert.match(markup, /class="tw-msg-agent"/, 'Bot replies have a full reading column');
+  assert.match(markup, /class="tw-msg-meta"><small class="tw-edited">\(edited\)<\/small>/, 'the edited marker stays');
   assert.match(markup, /<em>Message recalled<\/em>/, 'the recalled marker stays');
   const plain = html(view(workspace, snapshot()));
   assert.doesNotMatch(plain, /data-markdown/, 'without a host renderer a Bot message is plain text, as before');
@@ -551,7 +554,7 @@ test('conversation view: pending messages show their state and can be discarded;
   await until(() => snapshot().offline, 'offline');
   const offline = html(view(workspace, snapshot()));
   assert.match(offline, /data-kind="offline"/); assert.match(offline, /Saved on this device\. Reconnect to confirm access/);
-  assert.match(offline, /Offline: messages are saved and sent when you reconnect/); assert.match(offline, /disabled=""[^>]*>Mark as read/, 'marking read needs a connection');
+  assert.match(offline, /Offline: messages are saved and sent when you reconnect/); assert.match(offline, /aria-label="Mark as read"[^>]*disabled=""/, 'marking read needs a connection');
   const connecting = html(view(workspace, { ...snapshot(), messagingConnecting: true, messagingError: '' }));
   assert.match(connecting, /data-kind="connecting"/);
   assert.match(connecting, /messages will send after server confirmation/);
@@ -612,7 +615,7 @@ test('conversation subtitle names who is in a conversation or whether its Bot is
   assert.equal(conversationSubtitle(conversation('c', { participants: [] }), snap([]), 'en'), '');
 });
 
-test('drawer: leave or delete first, then tabs by role, with a resizable separator and a close button', async context => {
+test('drawer: tabs by role above the team management footer, with a resizable separator and a close button', async context => {
   const list = members('alice', 'bob', 'owner'); list[1]!.role = 'admin';
   const { fake, workspace, snapshot } = await open(fake => {
     fake.details.set('team-aaaa', { team: team('team-aaaa', { name: 'Acme', role: 'owner' }), members: list, invites: [
@@ -625,7 +628,7 @@ test('drawer: leave or delete first, then tabs by role, with a resizable separat
   const markup = html(drawer(workspace, snapshot()));
   assert.match(markup, /<aside class="tw-scope tw-drawer" role="complementary" aria-label="Team details" style="width:360px">/);
   assert.match(markup, /role="separator" aria-orientation="vertical"[^>]*aria-valuemin="280" aria-valuemax="480" aria-valuenow="360" tabindex="0"/);
-  assert.ok(markup.indexOf('Delete team') > 0 && markup.indexOf('Delete team') < markup.indexOf('role="tablist"'), 'delete is above the tabs');
+  assert.match(markup, /role="tabpanel"[^]*<footer class="tw-drawer-footer"[^]*>Delete team<\/button>/, 'the destructive action sits below the tab content');
   assert.doesNotMatch(markup, /Leave team/); assert.match(markup, /<h2 tabindex="-1">Acme<\/h2>/); assert.match(markup, /aria-label="Close details"/);
   assert.equal(count(markup, /role="tab"/g), 3); assert.match(markup, /role="tab"[^>]*aria-selected="true"[^>]*tabindex="0"[^>]*>Members</); assert.equal(count(markup, /tabindex="-1" class="tw-tab">(Invites|Bots)</g), 2);
   assert.match(markup, /role="tabpanel"[^>]*aria-labelledby="[^"]*-tab-members"/);

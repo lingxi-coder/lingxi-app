@@ -1,3 +1,4 @@
+import './support/remoteSharedUi';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Fragment, createElement, type ReactElement } from 'react';
@@ -203,7 +204,7 @@ test('a Bot page shows what the Bot is and its chats, newest first, asking for t
   const c = await computer(withChats);
   const page = await Mounted.create(botPage(c.client, c.connection.state, 'a'), c.wait);
   try {
-    assert.deepEqual(page.texts('.rc-crumb button'), ['Back to Studio Mac']);
+    assert.equal(page.label('.rc-session-head .rc-back'), 'Back to Studio Mac');
     assert.deepEqual(page.texts('h2'), ['Bot a']);
     assert.deepEqual(page.texts('.rc-bot-head p'), ['Plans trips']);
     assert.deepEqual(page.texts('.rc-bot-head .rc-pending-tag'), ['1 waiting for you']);
@@ -255,7 +256,7 @@ test('the page is in the language of the page', async () => {
   const c = await computer(withChats);
   const page = await Mounted.create(botPage(c.client, c.connection.state, 'a', { locale: 'zh' }), c.wait);
   try {
-    assert.deepEqual(page.texts('.rc-crumb button'), ['返回 Studio Mac']);
+    assert.equal(page.label('.rc-session-head .rc-back'), '返回 Studio Mac');
     assert.deepEqual(page.texts('.rc-bot-head .rc-pending-tag'), ['1 个对话等你回复']);
     assert.ok(page.has('新对话'));
   } finally {
@@ -323,9 +324,9 @@ test('a Bot that goes away is told as such and the way back still works; one tha
     c.host.bots = [];
     await page.during(() => announce(c.h, c.client, c.host));
     assert.deepEqual(page.texts('p'), [BOT_GONE]);
-    assert.deepEqual(page.texts('h2'), []);
+    assert.deepEqual(page.texts('.rc-session-head h2'), ['Bots']);
     assert.ok(!page.has('New chat'), 'nothing to start a chat of');
-    await page.click('Back to Studio Mac');
+    await page.click('‹');
     assert.equal(back, 1);
 
     const listed = c.host.requests('bot.threads.list').length;
@@ -392,7 +393,7 @@ test('before the computer has said which Bots it has, the Bot page is loading an
   const page = await Mounted.create(botPage(client, { phase: 'ready' } as ConnectionState, 'a'));
   try {
     assert.deepEqual(page.texts('.rc-note'), ['Loading…']);
-    assert.deepEqual(page.texts('.rc-crumb button'), ['Back to Studio Mac'], 'the way back is there');
+    assert.equal(page.label('.rc-session-head .rc-back'), 'Back to Studio Mac', 'the way back is there');
     assert.ok(!page.has('New chat'));
   } finally {
     await page.unmount();
@@ -403,12 +404,12 @@ test('while the connection is down the page says so and starts no chat', async (
   const c = await computer(withChats);
   const page = await Mounted.create(botPage(c.client, { ...c.connection.state, phase: 'reconnecting' }, 'a'), c.wait);
   try {
-    assert.deepEqual(page.texts('.rc-banner'), ['Connection lost. Reconnecting…']);
+    assert.deepEqual(page.texts('.rc-session-head .rc-topbar-status'), ['Connection lost. Reconnecting…']);
     assert.ok(page.disabled('New chat'));
     assert.deepEqual(page.texts('strong'), ['Newer', 'Older'], 'what is known stays');
 
     await page.update(botPage(c.client, c.connection.state, 'a'));
-    assert.deepEqual(page.texts('.rc-banner'), []);
+    assert.deepEqual(page.texts('.rc-session-head .rc-topbar-status'), []);
     assert.ok(!page.disabled('New chat'));
   } finally {
     await page.unmount();

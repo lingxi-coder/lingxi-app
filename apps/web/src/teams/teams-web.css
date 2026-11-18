@@ -40,18 +40,27 @@
 
 /* The bar: the site, Remote Control, who is signed in. */
 .teams-web-nav { display: flex; flex: none; align-items: center; gap: 24px; padding: 10px 24px; border-bottom: 1px solid var(--line); }
-.teams-web-nav a { flex: none; color: inherit; text-decoration: none; white-space: nowrap; }
-.teams-web-nav h1 { flex: none; margin: 0; font-size: 15px; font-weight: 600; }
-.teams-web-nav span { margin-left: auto; overflow: hidden; color: var(--ink-2); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
-.teams-web-nav button { flex: none; background: none; border: 0; color: inherit; cursor: pointer; white-space: nowrap; }
+.teams-web-nav > a { flex: none; color: inherit; text-decoration: none; white-space: nowrap; }
+.teams-web-nav > h1 { flex: none; margin: 0; font-size: 15px; font-weight: 600; }
+.teams-web-nav > span { margin-left: auto; overflow: hidden; color: var(--ink-2); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.teams-web-nav > button { flex: none; background: none; border: 0; color: inherit; cursor: pointer; white-space: nowrap; }
 .teams-web-note { margin: auto; padding: 24px; color: var(--ink-2); }
 
+.teams-web-chat-slot { display: flex; flex: 1; min-width: 0; }
+.teams-web-chat-slot:empty { display: none; }
+.teams-web-nav:has(.teams-web-chat-slot:not(:empty)) { gap: 12px; position: relative; z-index: 6; }
+.teams-web-nav:has(.teams-web-chat-slot:not(:empty)) > span { margin-left: 0; max-width: 9rem; }
+@media (max-width: 960px) {
+  .teams-web-nav:has(.teams-web-chat-slot:not(:empty)) { flex-wrap: wrap; }
+  .teams-web-chat-slot { flex-basis: 100%; order: 1; min-height: 44px; }
+  .teams-web-nav:has(.hosted-service-header) { padding-inline: 12px; }
+}
 /* Signed out: the site's sign-in card, narrower. */
 .teams-login { width: min(480px, calc(100% - 32px)); margin: 48px auto; }
 .teams-login .button { width: 100%; }
 
 /* Signed in: sidebar | conversation | details. */
-.teams-web-body { display: flex; flex: 1; min-height: 0; }
+.teams-web-body { container: teams-web-workspace / inline-size; position: relative; display: flex; flex: 1; min-height: 0; }
 .teams-web-sidebar { display: flex; flex: none; flex-direction: column; width: 304px; min-height: 0; border-right: 1px solid var(--line); background: var(--teams-sidebar-bg); }
 .teams-web-sidebar > .tw-sidebar { flex: 1 1 0; height: auto; min-height: 0; }
 .teams-web-conversation { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
@@ -59,10 +68,10 @@
 .teams-web-body > .tw-drawer { height: auto; }
 .teams-web-back { display: none; align-self: flex-start; min-height: 36px; margin: 4px 8px 0; padding: 0 8px; background: none; border: 0; color: var(--accent-strong); font-size: 13px; cursor: pointer; }
 
-/* A narrow window has no room for the conversation and the details side by side: the details then lie over the right edge. */
-@media (max-width: 1100px) {
-  .teams-web-body { position: relative; }
-  .teams-web-body > .tw-drawer { position: absolute; inset: 0 0 0 auto; z-index: 4; box-shadow: -12px 0 28px rgb(0 0 0 / 16%); }
+/* Keep the chat and the sidebar usable at narrow widths. */
+.teams-web-body > .tw-drawer { position: absolute; inset: 0 0 0 auto; z-index: 4; box-shadow: -12px 0 28px rgb(0 0 0 / 16%); }
+@container teams-web-workspace (width >= 69rem) {
+  .teams-web-body > .tw-drawer { position: relative; inset: auto; z-index: auto; box-shadow: none; }
 }
 /* A phone shows the sidebar or the conversation, and the conversation has a way back. */
 @media (max-width: 760px) {
@@ -71,6 +80,9 @@
   .teams-web-body[data-pane='list'] .teams-web-conversation { display: none; }
   .teams-web-body[data-pane='conversation'] .teams-web-sidebar { display: none; }
   .teams-web-back { display: inline-flex; align-items: center; }
+  .teams-web-chat-slot .teams-web-back { order: -1; flex: none; min-height: 44px; align-self: center; margin: 0; padding-inline: 2px; }
+  .teams-web:has(.teams-web-body[data-pane='list']) .teams-web-chat-slot :is(.tw-conv-identity, .tw-head-actions > :not(.tw-top-connection)) { display: none; }
+  .teams-web:has(.teams-web-body[data-pane='list']) .teams-web-chat-slot:not(:has(.tw-top-connection)) { display: none; }
 }
 
 /* Friends shares the Teams layout; its chat and pages sit where the conversation does, and the header shows the unread badge (D14). */

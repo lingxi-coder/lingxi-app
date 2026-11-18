@@ -473,6 +473,10 @@ scenario('the friend menu: View profile, Remove friend and Block, the last two b
   assert.ok(textOf(dialogs(page)[0]).includes('@rob') && textOf(dialogs(page)[0]).includes('Friends since'), 'a fresh name and the date they became friends');
   assert.equal(snapshot().chat?.name, 'Robert');
   await page.click(dialogs(page)[0].findAll((node: any) => node.type === 'button').find((node: any) => textOf(node) === 'Close'));
+  await page.click(page.oneByLabel('View profile'));
+  assert.ok(textOf(dialogs(page)[0]).includes('Robert'), 'the header opens the same profile');
+  await page.click(dialogs(page)[0].findAll((node: any) => node.type === 'button').find((node: any) => textOf(node) === 'Close'));
+
 
   await page.click(page.oneByLabel('More'));
   await page.click(page.find(node => node.props.role === 'menuitem' && textOf(node) === 'Remove friend')[0]);

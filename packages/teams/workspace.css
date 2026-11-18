@@ -36,7 +36,7 @@
   --tw-badge-fg: var(--teams-badge-fg, #ffffff);
   --tw-online: var(--teams-online, #1f7a3a);
   --tw-focus: var(--teams-focus, #2f48b8);
-  /* U3: the tint of the signed-in person's own rows, the accent at 6% over the stream. It follows the accent, so the dark scheme has its own without a second line. */
+  /* Outgoing message tint follows the host accent. */
   --tw-own: color-mix(in srgb, var(--tw-accent) 6%, transparent);
   --tw-font: var(--teams-font, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif);
   --tw-shadow: 0 6px 24px rgba(0, 0, 0, 0.16);
@@ -203,59 +203,120 @@
 .tw-scope .tw-more { margin: 2px 8px; justify-content: flex-start; }
 
 /* ── Conversation ── */
-.tw-conv { display: flex; flex-direction: column; height: 100%; background: var(--tw-bg); }
+.tw-conv { container: conversation / inline-size; min-width: 0; display: flex; flex-direction: column; height: 100%; background: var(--tw-bg); }
 .tw-conv-empty { align-items: center; justify-content: center; }
-.tw-conv-head { display: flex; align-items: center; gap: 12px; min-height: 60px; padding: 10px 20px; border-bottom: 1px solid var(--tw-line); background: var(--tw-bg); flex: none; }
+.tw-conv-head { display: flex; align-items: center; gap: 6px; min-height: 64px; padding: 6px clamp(10px, 2.5%, 20px); border-bottom: 1px solid var(--tw-line); background: var(--tw-bg); flex: none; }
+.tw-conv-identity { position: relative; display: flex; align-items: center; gap: 10px; flex: 1; min-inline-size: 0; padding: 5px 6px; border-radius: 12px; }
+.tw-conv-identity:has(.tw-conv-identity-button:hover) { background: var(--tw-hover); }
+.tw-scope .tw-conv-identity-button { position: absolute; inset: 0; border: 0; border-radius: inherit; padding: 0; }
+.tw-scope .tw-conv-identity-button:hover:enabled { background: transparent; }
 .tw-conv-title { flex: 1; min-width: 0; }
-.tw-conv-title h2 { font-size: 15px; line-height: 1.3; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tw-conv-title h2 { font-size: 16px; line-height: 1.3; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tw-conv-title p { font-size: 12px; color: var(--tw-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tw-platform { font-size: 11px; color: var(--tw-muted); border: 1px solid var(--tw-line); border-radius: 10px; padding: 1px 8px; white-space: nowrap; }
+.tw-head-actions { display: flex; align-items: center; justify-content: flex-end; flex: none; gap: 4px; }
+.tw-platform { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--tw-muted); padding: 3px 7px; white-space: nowrap; }
+.tw-scope .tw-head-actions button, .tw-scope .tw-conv-head > .tw-icon-btn { min-width: 36px; min-height: 36px; border-color: transparent; border-radius: 9px; }
+.tw-scope .tw-head-actions [aria-pressed='true'], .tw-scope .tw-head-actions [aria-expanded='true'] { color: var(--tw-accent-text); background: var(--tw-selected); }
+@container conversation (width < 36rem) {
+  .tw-head-actions { gap: 2px; }
+  .tw-head-actions .tw-platform span, .tw-head-action span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .tw-scope .tw-head-action { padding: 0; }
+}
+@media (pointer: coarse) {
+  .tw-scope .tw-head-actions button, .tw-scope .tw-conv-head > .tw-icon-btn { min-width: 44px; min-height: 44px; }
+}
+/* The host's outer toolbar. The conversation body and the host's navigation share these controls. */
+.tw-outer-chat { container: outer-chat / inline-size; flex: 1; min-width: 0; }
+.tw-outer-chat .tw-conv-head { height: 100%; min-height: 0; gap: 4px; padding: 0 8px; border: 0; background: transparent; }
+.tw-outer-chat .tw-conv-identity { padding: 2px 4px; gap: 8px; }
+.tw-outer-chat .tw-conv-title h2 { font-size: 13px; }
+.tw-outer-chat .tw-conv-title p { font-size: 11px; line-height: 1.2; }
+.tw-outer-chat .tw-head-actions button, .tw-outer-chat .tw-conv-head > .tw-icon-btn { min-width: 32px; min-height: 30px; }
+.tw-top-connection { position: relative; flex: none; }
+.tw-top-connection summary, .tw-connection-label { display: flex; align-items: center; gap: 5px; }
+.tw-top-connection summary { min-height: 30px; padding: 0 6px; border-radius: 8px; list-style: none; color: var(--tw-muted); cursor: pointer; font-size: 11px; white-space: nowrap; }
+.tw-top-connection summary::-webkit-details-marker { width: 0; }
+.tw-top-connection summary:hover, .tw-top-connection[open] summary { background: var(--tw-hover); }
+.tw-connection-label .tw-dot { margin: 0; flex: none; }
+.tw-top-connection[data-kind='ok'] .tw-dot { background: var(--tw-online); }
+.tw-top-connection[data-kind='error'] .tw-dot { background: var(--tw-danger); }
+.tw-connection-detail { position: absolute; inset-block-start: calc(100% + 5px); inset-inline-end: 0; z-index: 50; width: min(240px, 60vw); padding: 10px; border: 1px solid var(--tw-line); border-radius: 10px; background: var(--tw-surface); box-shadow: var(--tw-shadow); }
+.tw-scope .tw-connection-detail .tw-link { margin-top: 4px; }
+@container outer-chat (width < 40rem) {
+  .tw-outer-chat .tw-platform span, .tw-outer-chat .tw-head-action span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .tw-outer-chat .tw-head-action { padding: 0; }
+}
+@container outer-chat (width < 25rem) {
+  .tw-connection-label > span + span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+}
+@media (pointer: coarse) {
+  .tw-outer-chat .tw-head-actions button, .tw-outer-chat .tw-conv-head > .tw-icon-btn, .tw-top-connection summary { min-width: 44px; min-height: 44px; }
+}
 .tw-banner { align-items: center; gap: 8px; justify-content: space-between; margin: 8px 16px 0; padding: 6px 10px; color: var(--tw-fg); }
 .tw-stream-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.tw-stream { flex: 1; min-height: 0; overflow-y: auto; position: relative; overscroll-behavior: contain; padding-bottom: 8px; }
-.tw-earlier { display: flex; justify-content: center; padding: 10px 0 0; }
-.tw-messages { padding: 20px 0 12px; }
-.tw-date { display: flex; align-items: center; gap: 12px; margin: 14px 16px 6px; font-size: 12px; color: var(--tw-muted); }
-.tw-date::before, .tw-date::after { content: ''; flex: 1; height: 1px; background: var(--tw-line); }
-.tw-date span { padding: 3px 11px; border-radius: 12px; background: var(--tw-hover); font-weight: 600; }
-.tw-unread { display: flex; align-items: center; gap: 10px; margin: 8px 16px; font-size: 12px; font-weight: 700; color: var(--tw-accent-text); }
-.tw-unread::before, .tw-unread::after { content: ''; flex: 1; height: 1px; background: var(--tw-accent-text); opacity: 0.5; }
-.tw-msg { position: relative; display: grid; grid-template-columns: 36px minmax(0, 1fr); column-gap: 10px; padding: 2px 20px 2px 16px; content-visibility: auto; contain-intrinsic-size: auto 48px; }
-.tw-msg[data-grouped='false'] { padding-top: 14px; }
-.tw-msg { --tw-row-hover: color-mix(in srgb, var(--tw-hover) 55%, transparent); }
-.tw-msg:hover { background: var(--tw-row-hover); }
-/* U3: the person's own messages are tinted, never in a bubble and never moved; text keeps its colours on the tint. Hover lies over it. */
-.tw-msg[data-mine='true'] { background: var(--tw-own); }
-.tw-msg[data-mine='true']:hover { background: linear-gradient(var(--tw-row-hover), var(--tw-row-hover)), var(--tw-own); }
-.tw-msg-lead { display: flex; justify-content: center; align-items: flex-start; padding-top: 2px; }
-.tw-msg-main { min-width: 0; }
-.tw-msg-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
-.tw-msg-author { font-size: 13px; }
-.tw-tag { font-size: 11px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--tw-line); color: var(--tw-muted); }
-.tw-msg-head small, .tw-msg-time, .tw-msg-hover-time, .tw-edited { font-size: 11px; color: var(--tw-muted); }
-.tw-msg-hover-time { opacity: 0; transition: opacity 0.12s; white-space: nowrap; }
-.tw-msg:hover .tw-msg-hover-time, .tw-msg:focus-within .tw-msg-hover-time { opacity: 1; }
-.tw-msg-body { font-size: 13px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tw-chat-thread { container: chat-thread / inline-size; }
+.tw-stream { flex: 1; min-height: 0; overflow-y: auto; position: relative; overscroll-behavior: contain; padding-block-end: 8px; }
+.tw-chat-thread .tw-stream { display: flex; flex-direction: column; padding-block-end: 12px; background: color-mix(in srgb, var(--tw-bg) 78%, var(--tw-sidebar-bg)); }
+.tw-chat-thread .tw-stream > * { flex: none; }
+.tw-earlier { display: flex; justify-content: center; padding-block-start: 10px; }
+.tw-scope .tw-chat-thread .tw-messages { inline-size: 100%; max-inline-size: 52rem; margin-block-start: auto; margin-inline: auto; padding: 8px clamp(10px, 3%, 24px) 0; }
+.tw-date { display: flex; justify-content: center; margin-block: 16px 8px; font-size: 12px; color: var(--tw-muted); }
+.tw-date span { padding: 4px 11px; border-radius: 999px; background: var(--tw-hover); font-weight: 600; }
+.tw-unread { display: flex; align-items: center; gap: 10px; margin-block: 12px 8px; font-size: 12px; font-weight: 700; color: var(--tw-accent-text); }
+.tw-unread::before, .tw-unread::after { content: ''; flex: 1; height: 1px; background: currentColor; opacity: 0.4; }
+.tw-msg { display: flex; align-items: flex-start; gap: 8px; padding-block: 1px; }
+.tw-msg[data-grouped='false'], .tw-pending { padding-block-start: 9px; }
+.tw-msg[data-mine='true'] { justify-content: flex-end; }
+.tw-msg-lead { flex: 0 0 32px; display: flex; align-items: center; padding-block-start: 3px; }
+.tw-msg-main { position: relative; min-inline-size: 0; max-inline-size: min(calc(100% - 44px), 34rem); }
+.tw-msg[data-kind='bot'] .tw-msg-main { flex: 1; max-inline-size: min(calc(100% - 40px), 44rem); padding-block: 4px; }
+.tw-msg-bubble { padding: 7px 11px 5px; border: 1px solid var(--tw-line); border-radius: 16px; background: var(--tw-surface); }
+.tw-msg-agent { padding-block: 2px; }
+.tw-msg[data-mine='true'] .tw-msg-bubble { background: color-mix(in srgb, var(--tw-accent) 6%, var(--tw-bg)); }
+.tw-msg[data-grouped='true']:not([data-mine='true']) .tw-msg-bubble { border-start-start-radius: 6px; }
+.tw-msg[data-grouped='true'][data-mine='true'] .tw-msg-bubble { border-start-end-radius: 6px; }
+.tw-msg[data-kind='user']:not([data-mine='true']):has(+ .tw-msg[data-grouped='true']) .tw-msg-bubble { border-end-start-radius: 6px; }
+.tw-msg[data-mine='true']:has(+ .tw-msg[data-grouped='true']) .tw-msg-bubble { border-end-end-radius: 6px; }
+.tw-msg-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 3px 7px; margin-block-end: 2px; }
+.tw-msg-author { font-size: 13px; overflow-wrap: anywhere; }
+.tw-tag { font-size: 11px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--tw-line); color: var(--tw-muted); }
+.tw-msg-head small, .tw-msg-head time, .tw-msg-meta { font-size: 11px; color: var(--tw-muted); }
+.tw-msg-meta { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 2px 5px; margin-block-start: 2px; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.tw-msg-meta small { font-size: inherit; }
+.tw-msg-agent .tw-msg-meta { justify-content: flex-start; }
+.tw-msg-text-line { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; }
+.tw-msg-text-line .tw-msg-body { min-inline-size: 0; }
+.tw-msg-text-line .tw-msg-meta { margin-inline-start: auto; }
+.tw-msg-body { font-size: 14px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .tw-msg-body.tw-md, .tw-artifact .tw-md { white-space: normal; }
 .tw-md { min-width: 0; overflow-wrap: anywhere; }
 .tw-md > :first-child { margin-top: 0; }
 .tw-md > :last-child { margin-bottom: 0; }
 .tw-msg[data-recalled='true'] .tw-msg-body { color: var(--tw-muted); }
-.tw-quote { margin: 2px 0 4px; padding: 2px 10px; border-left: 3px solid var(--tw-line); font-size: 12px; color: var(--tw-muted); max-height: 64px; overflow: hidden; overflow-wrap: anywhere; }
+.tw-quote { margin: 2px 0 4px; padding: 3px 8px; border-inline-start: 2px solid var(--tw-accent-text); border-radius: 4px; background: var(--tw-hover); font-size: 12px; color: var(--tw-muted); max-height: 64px; overflow: hidden; overflow-wrap: anywhere; }
 .tw-quote b { color: var(--tw-fg); font-weight: 600; }
-.tw-msg-actions { position: absolute; top: -14px; right: 16px; display: flex; gap: 2px; padding: 2px; background: var(--tw-surface); border: 1px solid var(--tw-line); border-radius: 8px; box-shadow: var(--tw-shadow); opacity: 0; transition: opacity 0.12s; z-index: 2; }
-.tw-msg:hover .tw-msg-actions, .tw-msg:focus-within .tw-msg-actions { opacity: 1; }
-.tw-pending { opacity: 0.85; }
-.tw-pending .tw-msg-main { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding-bottom: 6px; }
+.tw-msg-actions { position: absolute; inset-block-start: 1px; inset-inline-end: 2px; display: flex; gap: 2px; padding: 2px; background: var(--tw-surface); border: 1px solid var(--tw-line); border-radius: 10px; box-shadow: var(--tw-shadow); opacity: 0; pointer-events: none; transition: opacity 0.12s; z-index: 2; }
+.tw-msg:hover .tw-msg-actions, .tw-msg:focus-within .tw-msg-actions { opacity: 1; pointer-events: auto; }
+.tw-pending .tw-msg-main { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .tw-pending[data-error='true'] .tw-msg-head small { color: var(--tw-danger); }
-/* A message waiting to be sent has nothing to act on: the pointer does not change its tint, and the red of a failure stays readable on it. */
-.tw-pending[data-mine='true']:hover { background: var(--tw-own); }
 .tw-pending-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.tw-scope .tw-jump { position: absolute; right: 16px; bottom: 12px; border-radius: 16px; background: var(--tw-surface); box-shadow: var(--tw-shadow); padding: 3px 12px; z-index: 3; }
-@media (hover: none) { .tw-msg-actions, .tw-scope .tw-row-more, .tw-msg-hover-time { opacity: 1; } .tw-msg-actions { position: static; box-shadow: none; border: 0; padding: 0; grid-column: 2; justify-self: start; } }
+.tw-scope .tw-jump { position: absolute; inset-inline-end: 16px; bottom: 12px; border-radius: 999px; background: var(--tw-surface); box-shadow: var(--tw-shadow); padding: 3px 12px; z-index: 3; }
+@container chat-thread (min-width: 32rem) {
+  .tw-chat-thread .tw-msg[data-mine='true'] .tw-msg-main { max-inline-size: min(calc(100% - 104px), 34rem); }
+  .tw-msg[data-mine='true'] .tw-msg-actions { inset-inline-end: 100%; inset-inline-start: auto; }
+  .tw-chat-thread .tw-msg:not([data-mine='true']) .tw-msg-main { max-inline-size: min(calc(100% - 76px), 34rem); }
+  .tw-chat-thread .tw-msg[data-kind='bot'] .tw-msg-main { max-inline-size: min(calc(100% - 76px), 44rem); }
+  .tw-msg:not([data-mine='true']) .tw-msg-actions { inset-inline-start: 100%; inset-inline-end: auto; }
+}
+@media (hover: none) {
+  .tw-scope .tw-row-more { opacity: 1; }
+  .tw-msg-actions { opacity: 1; pointer-events: auto; position: static; width: fit-content; margin-block-start: 3px; margin-inline-start: auto; box-shadow: none; border: 0; padding: 0; background: transparent; }
+}
+@media (prefers-reduced-motion: reduce) { .tw-msg-actions { transition: none; } }
 
 /* ── Composer ── */
 .tw-composer { flex: none; padding: 8px 16px 16px; display: flex; flex-direction: column; gap: 6px; }
+.tw-composer > .tw-hint { width: 100%; max-width: var(--conversation-width, 52rem); margin-inline: auto; padding-inline: 10px; }
 .tw-readonly { padding: 10px 12px; border-radius: 8px; background: var(--tw-hover); color: var(--tw-fg); font-size: 12px; }
 .tw-context { display: flex; align-items: center; gap: 8px; padding: 4px 10px; border-radius: 8px; background: var(--tw-hover); font-size: 12px; color: var(--tw-muted); }
 .tw-context-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -283,39 +344,70 @@
 /* The files a Bot read for its reply: one quiet line over the reply, cut with an ellipsis; the full list is its tooltip. */
 .tw-msg-sources { margin: 0 0 2px; color: var(--tw-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tw-target { display: inline-flex; align-items: center; gap: 2px; padding: 0 2px 0 10px; border-radius: 14px; background: var(--tw-selected); font-size: 12px; font-weight: 600; min-height: 28px; }
-.tw-compose-box { position: relative; display: flex; flex-direction: column; padding: 10px 12px 8px; border: 1px solid var(--tw-border); border-radius: 16px; background: var(--tw-surface); box-shadow: 0 3px 14px rgb(0 0 0 / 5%); transition: border-color 0.14s ease, box-shadow 0.14s ease; }
-.tw-compose-box:focus-within { border-color: var(--tw-focus); box-shadow: 0 0 0 2px color-mix(in srgb, var(--tw-focus) 35%, transparent); }
-.tw-scope .tw-compose-box textarea { width: 100%; min-height: 38px; max-height: 200px; resize: none; border: 0; outline: 0; background: transparent; color: inherit; font: inherit; line-height: 1.55; padding: 3px 2px; }
+.tw-compose-box { --composer-border: var(--tw-border); --composer-surface: var(--tw-surface); }
+.tw-compose-box:focus-within { --composer-border: var(--tw-focus); box-shadow: 0 0 0 2px color-mix(in srgb, var(--tw-focus) 35%, transparent); }
+.tw-compose-context { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px 0; }
+.composer-surface.tw-compose-box textarea { resize: none; color: inherit; }
 .tw-compose-box textarea::placeholder { color: var(--tw-muted); opacity: 1; }
-.tw-compose-tools { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
-.tw-compose-tools .tw-icon-btn:first-child { margin-right: auto; }
+@supports (field-sizing: content) {
+  .composer-surface.tw-compose-box textarea { field-sizing: content; inline-size: auto; min-inline-size: 100%; max-inline-size: 100%; }
+}
+.tw-scope .tw-compose-box > .composer-toolbar { justify-content: flex-end; flex-wrap: wrap; }
+.tw-compose-leading { display: flex; align-items: center; gap: 4px; margin-inline-end: auto; }
+.tw-scope .tw-compose-leading .tw-icon-btn { width: 40px; min-height: 40px; border-radius: 50%; }
 .tw-count { font-size: 11px; color: var(--tw-muted); }
 .tw-count[data-over='true'] { color: var(--tw-danger); font-weight: 700; }
-.tw-send { min-width: 36px; }
+.tw-scope .tw-compose-box .tw-send { min-width: 40px; min-height: 40px; border-radius: 999px; }
+.tw-scope .tw-compose-box .tw-send:has(svg) { padding: 0; }
+@media (prefers-reduced-motion: no-preference) {
+  .tw-compose-box .composer-toolbar button:active:enabled { scale: .96; }
+}
+@media (pointer: coarse) {
+  .tw-scope .tw-compose-leading .tw-icon-btn, .tw-scope .tw-compose-box .tw-send { min-width: 44px; min-height: 44px; }
+}
 .tw-mentions { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); z-index: 20; max-height: 220px; overflow: auto; padding: 4px; background: var(--tw-surface); border: 1px solid var(--tw-line); border-radius: 10px; box-shadow: var(--tw-shadow); }
 .tw-mention { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 4px 8px; border-radius: 6px; cursor: pointer; }
 .tw-mention[aria-selected='true'] { background: var(--tw-selected); }
 .tw-mention small { margin-left: auto; font-size: 12px; color: var(--tw-muted); }
 
 /* ── Details drawer ── */
-.tw-drawer { position: relative; display: flex; flex-direction: column; height: 100%; flex: none; max-width: 100%; background: var(--tw-bg); border-left: 1px solid var(--tw-line); }
+.tw-drawer { position: relative; display: flex; flex-direction: column; height: 100%; flex: none; min-width: 0; max-width: 100%; background: var(--tw-bg); border-inline-start: 1px solid var(--tw-line); }
 .tw-resize { position: absolute; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; z-index: 5; touch-action: none; }
 .tw-resize:hover, .tw-resize:focus-visible, .tw-resize:active { background: color-mix(in srgb, var(--tw-focus) 45%, transparent); outline: 0; }
-.tw-drawer-head { display: flex; align-items: flex-start; gap: 12px; padding: 14px 12px 8px 16px; }
+.tw-drawer-head { display: flex; align-items: center; gap: 12px; padding: 16px 14px; flex: none; }
 .tw-drawer-title { flex: 1; min-width: 0; }
-.tw-drawer-title h2 { font-size: 15px; overflow-wrap: anywhere; }
+.tw-drawer-title h2, .tw-drawer-title strong { overflow-wrap: anywhere; }
+.tw-drawer-title h2 { font-size: 17px; line-height: 1.25; }
 .tw-drawer-title h2:focus { outline: 0; }
 .tw-drawer-title p { font-size: 12px; color: var(--tw-muted); }
-.tw-drawer-danger { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 0 16px 10px; border-bottom: 1px solid var(--tw-line); }
-.tw-drawer-error { padding: 8px 16px 0; }
-.tw-tabs { display: flex; gap: 2px; padding: 8px 12px 0; border-bottom: 1px solid var(--tw-line); }
-.tw-scope .tw-tab { border: 0; border-radius: 6px 6px 0 0; padding: 4px 12px; border-bottom: 2px solid transparent; }
-.tw-scope .tw-tab[aria-selected='true'] { font-weight: 700; border-bottom-color: var(--tw-accent-text); }
-.tw-drawer-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 16px 20px; }
-.tw-people li { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--tw-line); }
+.tw-drawer-head .tw-icon-btn { min-width: 36px; min-height: 36px; }
+.tw-drawer-chat { display: flex; flex: none; align-items: center; gap: 10px; margin: 0 14px 12px; padding: 8px 10px; border-radius: 12px; background: var(--tw-hover); }
+.tw-drawer-error { padding: 4px 14px; }
+.tw-tabs { display: flex; gap: 3px; margin: 0 14px 4px; padding: 3px; border-radius: 11px; background: var(--tw-hover); }
+.tw-scope .tw-tab { flex: 1; min-inline-size: 0; border: 1px solid transparent; border-radius: 8px; padding: 4px; overflow-wrap: anywhere; }
+.tw-scope .tw-tab[aria-selected='true'] { font-weight: 700; border-color: var(--tw-line); background: var(--tw-surface); color: var(--tw-fg); }
+.tw-drawer-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 8px 14px 16px; }
+.tw-drawer-footer { flex: none; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 10px; justify-content: space-between; border-top: 1px solid var(--tw-line); padding: 8px 12px 10px; }
+.tw-panel-disclosure { max-width: 100%; color: var(--tw-muted); }
+.tw-panel-disclosure[open] { flex: 1 0 100%; }
+.tw-panel-disclosure summary { display: flex; align-items: center; gap: 6px; cursor: pointer; min-height: 28px; border-radius: 8px; }
+.tw-panel-disclosure summary::after { content: ''; width: 6px; height: 6px; border-right: 1px solid currentColor; border-bottom: 1px solid currentColor; transform: rotate(45deg); margin-inline: 2px 4px; }
+.tw-panel-disclosure[open] summary::after { transform: rotate(225deg); }
+.tw-panel-disclosure p { padding: 4px 2px; }
+.tw-scope .tw-drawer-footer .tw-danger-btn { margin-inline-start: auto; color: var(--tw-danger); }
+.tw-people li { padding: 4px 0; border-bottom: 1px solid var(--tw-line); }
+.tw-person-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 4px; }
 .tw-person-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.tw-person-text b { overflow-wrap: anywhere; }
 .tw-person-text small { font-size: 12px; color: var(--tw-muted); }
-.tw-person-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.tw-member-actions summary { border-radius: 8px; cursor: pointer; list-style: none; }
+.tw-member-actions summary::-webkit-details-marker, .tw-panel-disclosure summary::-webkit-details-marker { width: 0; }
+.tw-member-actions summary:hover, .tw-member-actions[open] summary { background: var(--tw-hover); }
+.tw-person-more { display: grid; min-width: 36px; place-items: center; color: var(--tw-muted); }
+.tw-person-actions { display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 4px 4px 54px; }
+@media (pointer: coarse) {
+  .tw-drawer-head .tw-icon-btn, .tw-panel-disclosure summary, .tw-member-actions summary { min-width: 44px; min-height: 44px; }
+}
 .tw-invites { display: flex; flex-direction: column; gap: 14px; }
 .tw-share { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 10px; background: var(--tw-hover); }
 .tw-share label { display: flex; flex-direction: column; gap: 6px; }
@@ -438,10 +530,14 @@
 .tw-lookup-who { display: flex; align-items: center; gap: 10px; }
 .tw-lookup-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .tw-lookup-note textarea { resize: vertical; }
-.tw-friends-chat { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.tw-friends-chat > .tw-conv { flex: 1; min-height: 0; height: auto; }
-.tw-friends-bots { position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; background: var(--tw-bg); }
-.tw-friends-bots-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 16px 20px; }
+.tw-friends-chat { position: relative; display: flex; height: 100%; min-height: 0; container: friend-chat / inline-size; }
+.tw-friends-thread { display: flex; flex: 1; min-width: 0; min-height: 0; flex-direction: column; }
+.tw-friends-thread > .tw-conv { flex: 1; min-height: 0; height: auto; }
+.tw-friends-bots { position: absolute; inset: 0 0 0 auto; z-index: 4; width: min(100%, 360px); display: flex; flex-direction: column; background: var(--tw-bg); border-inline-start: 1px solid var(--tw-line); box-shadow: -12px 0 28px rgb(0 0 0 / 16%); }
+.tw-friends-bots-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 14px 20px; }
+@container friend-chat (width >= 48rem) {
+  .tw-friends-bots { position: relative; flex: 0 0 340px; box-shadow: none; }
+}
 .tw-invite-picker { max-height: 40vh; overflow-y: auto; }
 .tw-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
@@ -457,14 +553,21 @@
 .hosted-services code { font-size: 12px; overflow-wrap: anywhere; user-select: all; }
 .hosted-services fieldset { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 0; padding: 8px 12px; border: 1px solid var(--tw-line); border-radius: 10px; }
 .hosted-services details > summary { cursor: pointer; padding: 6px 0; font-weight: 600; }
-.hosted-service .tw-conv-head { flex-wrap: wrap; gap: 8px; }
-.hosted-service .tw-conv-head select { width: auto; max-width: 220px; }
-.hosted-service-state[data-online='true'] { color: var(--tw-online); }
+.hosted-service-header select { width: 9rem; text-overflow: ellipsis; }
+@container outer-chat (width < 28rem) {
+  .hosted-service-header select { width: 4.5rem; }
+  .hosted-service-header { position: relative; }
+  .hosted-service-header .tw-top-connection { position: static; }
+  .hosted-service-header .tw-connection-detail { inset-inline-end: 8px; }
+}
+@media (pointer: coarse) {
+  .hosted-service-header select { min-block-size: 44px; }
+}
+.hosted-service-header .tw-head-actions { gap: 4px; }
+.hosted-service-composer .composer-toolbar { justify-content: flex-end; }
 .hosted-service-note { margin: 0; padding: 4px 20px; font-size: 12px; line-height: 1.5; color: var(--tw-muted); }
 .tw-msg-body.hosted-service-note { padding: 0; }
 .hosted-service-note[role='alert'] { color: var(--tw-danger); }
-.hosted-service-composer { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 8px 16px 16px; }
-.hosted-service-composer textarea { flex: 1; min-height: 44px; max-height: 200px; resize: vertical; }
 .tw-sidebar-services { flex: none; margin: 4px 12px 10px; padding: 6px 8px; text-align: start; }
 
 /* Member projections and draft-only examples share the existing cards and composer. */

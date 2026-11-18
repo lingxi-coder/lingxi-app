@@ -93,8 +93,10 @@ try {
   assert.match(await run(`document.querySelector('.teams-page').textContent`), /Team Bots/);
   assert.equal(await run(`Boolean(document.querySelector('.sidebar-new-chat'))`), false, 'the projects are Home\'s');
   assert.deepEqual((await writes()).at(-1), ['updateSettings', { sidebar: { mode: 'teams' } }]);
-  // No conversation is open, so there is no header and no header button: the team menu of the sidebar is the way into the details panel.
-  assert.equal(await shown('.tw-conv-head'), false);
+  // With no chat selected the topbar still owns the team's connection state.
+  await wait(`document.querySelector('.desktop-window-toolbar .tw-top-connection[data-kind="ok"]')`);
+  assert.equal(await shown('.teams-page .tw-conv-head'), false);
+  assert.equal(await shown('.teams-sidebar .tw-conn'), false);
   await click(`${sidebar} .tw-switcher`);
   await wait(`document.querySelector('${sidebar} [role="menu"]')`);
   await run(`Array.from(document.querySelectorAll('${sidebar} [role="menuitem"]')).find(item => item.textContent.trim() === 'Team members & settings').click()`);
@@ -121,17 +123,62 @@ try {
   await click(row('chan-general'));
   await wait(`document.querySelectorAll('.teams-conversation .tw-msg').length === 7`);
   assert.equal(await run(`document.querySelector('${row('chan-general')}').getAttribute('aria-current')`), 'page');
-  assert.equal(await run(`document.querySelector('.teams-conversation .tw-conv-head h2').textContent`), 'general');
-  assert.equal(await run(`document.querySelector('.teams-conversation .tw-conv-head').textContent.split('#').length - 1`), 1, 'one #, the tile\'s: the title does not repeat it');
-  assert.equal(await run(`document.querySelector('.teams-conversation .tw-conv-head .tw-chan').textContent`), '#');
+  assert.equal(await run(`document.querySelector('.desktop-window-toolbar .tw-conv-head h2').textContent`), 'general');
+  assert.equal(await run(`document.querySelector('.desktop-window-toolbar .tw-conv-head').textContent.split('#').length - 1`), 1, 'one #, the tile\'s: the title does not repeat it');
+  assert.equal(await run(`document.querySelector('.desktop-window-toolbar .tw-conv-head .tw-chan').textContent`), '#');
   assert.equal(await run(`document.querySelectorAll('.teams-conversation [data-unread-divider]').length`), 1);
   assert.equal(await run(`document.querySelectorAll('.teams-conversation .tw-msg[data-grouped="true"]').length`), 2);
   assert.equal(await shown('.beta-rich-prompt'), false, 'the chat is not on screen');
+  const streamLayout = () => run(`(() => {
+    const stream = document.querySelector('.teams-conversation .tw-stream');
+    const box = (id, selector) => stream.querySelector('[data-message-id="' + id + '"] ' + selector).getBoundingClientRect();
+    const incoming = box('message-1', '.tw-msg-bubble');
+    const grouped = box('message-2', '.tw-msg-bubble');
+    const outgoing = box('message-4', '.tw-msg-bubble');
+    const agent = box('message-6', '.tw-msg-agent');
+    const outgoingRow = stream.querySelector('[data-message-id="message-4"]').getBoundingClientRect();
+    return {
+      separateSides: outgoing.left > incoming.left && outgoing.right === outgoingRow.right && incoming.left === grouped.left,
+      agentUsesColumn: agent.left === incoming.left && agent.width > outgoing.width,
+      clocks: stream.querySelectorAll('.tw-msg-meta time').length,
+      fits: stream.scrollWidth === stream.clientWidth,
+    };
+  })()`);
+  assert.deepEqual(await streamLayout(), { separateSides: true, agentUsesColumn: true, clocks: 7, fits: true });
+  await setViewport(760, 700);
+  assert.deepEqual(await streamLayout(), { separateSides: true, agentUsesColumn: true, clocks: 7, fits: true });
+  await setViewport(1280, 850);
+  if (screenshots) {
+    mkdirSync(screenshots, { recursive: true });
+    writeFileSync(join(screenshots, 'chat-message-list.png'), (await win.webContents.capturePage()).toPNG());
+  }
+  const reply = '.tw-msg[data-message-id="message-2"] button[aria-label="Reply"]';
+  await run(`document.querySelector(${JSON.stringify(reply)}).focus()`);
+  await wait(`getComputedStyle(document.querySelector(${JSON.stringify(reply)}).parentElement).opacity === '1'`);
+  await click(reply);
+  await wait(`document.querySelector('.tw-composer .tw-context-text')?.textContent.includes('Standup in five') && document.activeElement === document.querySelector('.tw-composer textarea')`);
+  await click('.tw-composer .tw-context button');
+  await wait(`!document.querySelector('.tw-composer .tw-context')`);
+  // Cached state and recovery are reachable from the outer bar without a banner in the chat.
+  await run('window.cacheOnlyTeams()');
+  await wait(`document.querySelector('.desktop-window-toolbar .tw-top-connection[data-kind="offline"]')`);
+  assert.equal(await shown('.teams-page [data-kind="offline"]'), false);
+  await click('.desktop-window-toolbar .tw-top-connection summary');
+  await click('.desktop-window-toolbar .tw-connection-detail button');
+  await wait(`document.querySelector('.desktop-window-toolbar .tw-top-connection[data-kind="ok"]')`);
   result.stream = true;
 
-  // Sending calls the service with what was typed, and the message joins the stream.
-  await setValue('.teams-conversation textarea[aria-label="Message"]', 'Hello team');
-  await click('.teams-conversation .tw-send');
+  // The shared input card keeps the chat's editor, keyboard behavior and send command.
+  const composerInput = '.teams-conversation .composer-surface .composer-input-view textarea';
+  const editorHeight = () => run(`document.querySelector(${JSON.stringify(composerInput)}).getBoundingClientRect().height`);
+  const initialHeight = await editorHeight();
+  await setValue(composerInput, Array.from({ length: 8 }, () => 'Draft line').join('\n'));
+  await wait(`document.querySelector(${JSON.stringify(composerInput)}).getBoundingClientRect().height > ${initialHeight}`);
+  await setValue(composerInput, 'Hello team');
+  await wait(`document.querySelector(${JSON.stringify(composerInput)}).getBoundingClientRect().height === ${initialHeight}`);
+  await run(`document.querySelector(${JSON.stringify(composerInput)}).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true }))`);
+  assert.equal(await run(`window.fixtureCalls.some(call => call[0] === 'messages' && call[1].operation === 'create')`), false);
+  await click('.teams-conversation .composer-toolbar .tw-send');
   await wait(`window.fixtureCalls.some(call => call[0] === 'messages' && call[1].operation === 'create' && call[1].text === 'Hello team' && call[1].conversationId === 'chan-general')`);
   await wait(`document.querySelector('.teams-conversation [role="log"]').textContent.includes('Hello team')`);
   assert.equal(await run(`document.querySelector('.teams-conversation textarea[aria-label="Message"]').value`), '', 'and the box is empty again');
@@ -139,10 +186,19 @@ try {
 
   // The details panel: the header button, the width the keyboard sets and the window keeps, the View menu, and the sidebar's team menu.
   assert.equal(await shown('.tw-drawer'), false);
-  await click('.teams-conversation button[aria-label="Team details"]');
+  await click('.desktop-window-toolbar .tw-conv-identity-button');
   await wait(`document.querySelector('.teams-page > .tw-drawer')`);
-  assert.equal(await run(`document.querySelector('.teams-conversation button[aria-label="Team details"]').getAttribute('aria-pressed')`), 'true');
+  assert.equal(await run(`document.querySelector('.desktop-window-toolbar button[aria-label="Team details"]').getAttribute('aria-pressed')`), 'true');
   assert.equal(await run(`document.querySelector('.tw-drawer h2').textContent`), 'Acme');
+  assert.equal(await run(`document.querySelector('.tw-drawer-chat strong').textContent`), 'general');
+  const memberActions = '.tw-drawer .tw-member-actions';
+  const memberRowHeight = () => run(`document.querySelector('${memberActions}').getBoundingClientRect().height`);
+  const collapsedHeight = await memberRowHeight();
+  assert.equal(await run(`document.querySelector('${memberActions}').open`), false);
+  await click(`${memberActions} summary`);
+  await wait(`document.querySelector('${memberActions}').open`);
+  assert.ok(await memberRowHeight() > collapsedHeight, 'actions expand in place below the member');
+  await click(`${memberActions} summary`);
   assert.equal(await drawerWidth(), 360, 'the panel\'s own default, when none was chosen');
   await run(`(() => { const handle = document.querySelector('.tw-resize'); handle.focus(); handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true })); })()`);
   await wait(`document.querySelector('.tw-drawer').getBoundingClientRect().width === 376`);
@@ -210,8 +266,8 @@ try {
   // Reading a conversation takes its messages off the rail's count.
   await click(row('chan-general'));
   await wait(`document.querySelector('${row('chan-general')}[aria-current="page"]')`);
-  const read = await run(`Array.from(document.querySelectorAll('.teams-conversation button')).find(button => /^Mark as read$/.test(button.textContent.trim()))?.disabled === false`);
-  if (read) await run(`Array.from(document.querySelectorAll('.teams-conversation button')).find(button => /^Mark as read$/.test(button.textContent.trim())).click()`);
+  const read = await run(`document.querySelector('.desktop-window-toolbar button[aria-label="Mark as read"]')?.disabled === false`);
+  if (read) await run(`document.querySelector('.desktop-window-toolbar button[aria-label="Mark as read"]').click()`);
   await wait(`document.querySelector('${railTeams}').getAttribute('aria-label') === 'Teams, 3 unread'`);
   assert.equal(await run(`document.querySelector('${railTeams} .desktop-rail-count').textContent`), '3');
   result.badgeFollowsReading = true;
@@ -277,7 +333,7 @@ try {
   assert.deepEqual(await writes(), [], 'bringing the mode back is not a change to save');
   await click(row('chan-general'));
   await wait(`document.querySelector('.teams-conversation .tw-msg')`);
-  await click('.teams-conversation button[aria-label="Team details"]');
+  await click('.desktop-window-toolbar button[aria-label="Team details"]');
   await wait(`document.querySelector('.tw-drawer')`);
   assert.equal(await drawerWidth(), 420);
   await delay(600);
@@ -317,8 +373,8 @@ try {
   await wait(`document.querySelectorAll('.teams-conversation .tw-msg').length === 7`);
   assert.equal(await avatarIn('.teams-conversation .tw-msg[data-kind="bot"]'), botAvatar, 'the Bot\'s message in a channel');
   await click(row('bot-chat'));
-  await wait(`document.querySelector('${row('bot-chat')}[aria-current="page"]') && document.querySelector('.teams-conversation .tw-conv-head')`);
-  assert.equal(await avatarIn('.teams-conversation .tw-conv-head'), botAvatar, 'the header of its conversation');
+  await wait(`document.querySelector('${row('bot-chat')}[aria-current="page"]') && document.querySelector('.desktop-window-toolbar .tw-conv-head')`);
+  assert.equal(await avatarIn('.desktop-window-toolbar .tw-conv-head'), botAvatar, 'the header of its conversation');
   await click(rail('Bots'));
   await wait(`document.querySelectorAll('nav[aria-label="Bots"] button[aria-expanded]:not([aria-haspopup])').length === 3 && document.querySelectorAll('.bots-card').length === 3`);
   const personalBotAvatar = await avatarIn(botRow('Fixture Bot'));
@@ -329,10 +385,12 @@ try {
   assert.deepEqual([await cardAvatar('Alpha'), await cardAvatar('Beta')], others, 'a card and a row of the same Bot agree');
   await run(`Array.from(document.querySelectorAll('.bots-card')).find(card => card.querySelector('.bots-card-name').textContent === 'Fixture Bot').click()`);
   await wait(`document.querySelector('.bots-detail-header h1')?.textContent === 'Fixture Bot'`);
+  assert.equal(await run(`Boolean(document.querySelector('.desktop-window-toolbar .bots-detail-header'))`), true, 'Bot details use the outer toolbar');
   assert.equal(await avatarIn('.bots-detail-header'), personalBotAvatar, 'the Bot\'s own page');
   assert.equal(await run(`document.querySelector('.bots-detail-header .bots-avatar').getAttribute('aria-hidden')`), 'true', 'which is decoration beside the name');
   await run(`Array.from(document.querySelectorAll('.bots-detail-actions button')).find(button => button.textContent.trim() === 'New chat').click()`);
   await wait(`document.querySelector('.desktop-topbar-project[title="Fixture Bot"]')`);
+  assert.equal(await run(`document.querySelector('.desktop-window-toolbar .desktop-topbar-project').getBoundingClientRect().width > 0`), true, 'Bot chat topbar is visible with the Bots sidebar');
   assert.equal(await avatarIn('.desktop-topbar-project'), personalBotAvatar, 'the title of a chat of the Bot');
   assert.equal(await run(`Boolean(document.querySelector('.desktop-topbar-project .desktop-topbar-project-icon svg'))`), false, 'not a generic robot');
   result.botAvatar = true;
@@ -347,7 +405,7 @@ try {
       await wait(`document.querySelectorAll('.teams-conversation .tw-msg').length === 7`);
       await delay(500);
       await snap(`teams-${theme}.png`);
-      await click('.teams-conversation button[aria-label="Team details"]');
+      await click('.desktop-window-toolbar button[aria-label="Team details"]');
       await wait(`document.querySelector('.tw-drawer')`);
       await delay(500);
       await snap(`teams-drawer-${theme}.png`);
@@ -370,7 +428,7 @@ try {
     await wait(`document.querySelectorAll('${sidebar} [data-row]').length === 4`);
     await click(row('chan-general'));
     await wait(`document.querySelectorAll('.teams-conversation .tw-msg').length === 7`);
-    await click('.teams-conversation button[aria-label="Team details"]');
+    await click('.desktop-window-toolbar button[aria-label="Team details"]');
     await wait(`document.querySelector('.tw-drawer')`);
     await run(`Array.from(document.querySelectorAll('.tw-drawer .tw-tab')).find(tab => tab.textContent.trim() === 'Bots').click()`);
     await delay(500);

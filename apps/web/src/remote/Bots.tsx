@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { ChatTopbarControl } from '../../../../packages/teams/ChatTopbar';
 import { RemoteRpcError, type RemoteBotSummary } from '@lingxi/bridge-client/remote';
 import type { Locale } from '../utils/locale';
 import { requestErrorStringKey } from './failureText';
@@ -63,16 +64,17 @@ export function BotPage({ locale, client, hostName, botId, connection, onBack, o
   const bot = knownBots(state).find((entry) => entry.bot_id === botId);
   return (
     <>
-      {connection.phase !== 'ready' ? <p className="rc-banner" role="status">{t(locale, 'reconnecting')}</p> : null}
-      <div className="rc-crumb">
-        <button type="button" className="rc-link" onClick={onBack}>{t(locale, 'backToComputer', { name: hostName })}</button>
-      </div>
+      {!bot ? <ChatTopbarControl><header className="rc-session-head">
+        <button type="button" className="rc-back" onClick={onBack} aria-label={t(locale, 'backToComputer', { name: hostName })}>‹</button>
+        <div className="rc-session-title"><h2>{t(locale, 'bots')}</h2></div>
+        {connection.phase !== 'ready' ? <span className="rc-topbar-status" role="status">{t(locale, 'reconnecting')}</span> : null}
+      </header></ChatTopbarControl> : null}
       {state.bots === undefined ? (
         <p className="rc-note" role="status">{t(locale, 'loading')}</p>
       ) : bot === undefined ? (
         <BotGone locale={locale} />
       ) : (
-        <BotChats locale={locale} client={client} bot={bot} connection={connection} onOpenSession={onOpenSession} />
+        <BotChats locale={locale} client={client} bot={bot} connection={connection} hostName={hostName} onBack={onBack} onOpenSession={onOpenSession} />
       )}
     </>
   );
@@ -97,10 +99,12 @@ interface BotChatsProps {
   client: RemoteClient;
   bot: RemoteBotSummary;
   connection: ConnectionState;
+  hostName: string;
+  onBack(): void;
   onOpenSession(sessionId: string): void;
 }
 
-function BotChats({ locale, client, bot, connection, onOpenSession }: BotChatsProps) {
+function BotChats({ locale, client, bot, connection, hostName, onBack, onOpenSession }: BotChatsProps) {
   const threads = useMemo(() => client.botThreads(bot.bot_id), [client, bot.bot_id]);
   const state = useStore(threads)!;
   const [creating, setCreating] = useState(false);
@@ -135,42 +139,44 @@ function BotChats({ locale, client, bot, connection, onOpenSession }: BotChatsPr
   };
 
   // The list failed because the Bot is no longer there; `bots.changed` says so too, a moment later.
-  if (state.error?.code === 'unknown_session' || state.error?.code === 'not_remote_enabled') return <BotGone locale={locale} />;
+  const gone = state.error?.code === 'unknown_session' || state.error?.code === 'not_remote_enabled';
   return (
-    <section className="rc-panel">
-      <div className="rc-bot-head">
-        <div>
+    <>
+      <ChatTopbarControl><header className="rc-session-head rc-bot-head">
+        <button type="button" className="rc-back" onClick={onBack} aria-label={t(locale, 'backToComputer', { name: hostName })}>‹</button>
+        <div className="rc-session-title">
           <h2>{bot.name}</h2>
-          {bot.description ? <p>{bot.description}</p> : null}
+          {!gone && bot.description ? <p title={bot.description}>{bot.description}</p> : null}
           {bot.waiting_threads > 0 ? <span className="rc-pending-tag">{t(locale, 'botWaiting', { n: bot.waiting_threads })}</span> : null}
         </div>
         <span className={`rc-status rc-status-${bot.status}`}>{t(locale, STATUS[bot.status] ?? 'statusIdle')}</span>
-      </div>
-      <div className="rc-actions">
-        <button type="button" className="button primary" disabled={creating || connection.phase !== 'ready'} onClick={create}>
+        {connection.phase !== 'ready' ? <span className="rc-topbar-status" role="status">{t(locale, 'reconnecting')}</span> : null}
+        {!gone ? <button type="button" className="button primary rc-new-chat" disabled={creating || connection.phase !== 'ready'} onClick={create}>
           {t(locale, 'botNewChat')}
-        </button>
-      </div>
-      {failure !== null ? <p className="rc-note rc-danger" role="alert">{t(locale, newChatErrorKey(failure))}</p> : null}
-      <div className="rc-bot-chats">
-        {state.threads === undefined && state.error === undefined ? <p className="rc-note" role="status">{t(locale, 'loading')}</p> : null}
-        {state.error !== undefined ? (
-          <p className="rc-note rc-danger" role="alert">
-            {t(locale, 'errGeneric')}{' '}
-            <button type="button" className="rc-link" onClick={() => threads.refresh()}>{t(locale, 'retry')}</button>
-          </p>
-        ) : null}
-        {state.threads?.length === 0 ? (
-          <div className="rc-empty">
-            <h3>{t(locale, 'botNoChats')}</h3>
-          </div>
-        ) : null}
-        <ul className="rc-list">
-          {(state.threads ?? []).map((thread) => (
-            <SessionRow key={thread.session_id} locale={locale} session={thread} onOpen={onOpenSession} />
-          ))}
-        </ul>
-      </div>
-    </section>
+        </button> : null}
+      </header></ChatTopbarControl>
+      {gone ? <BotGone locale={locale} /> : <section className="rc-panel">
+        {failure !== null ? <p className="rc-note rc-danger" role="alert">{t(locale, newChatErrorKey(failure))}</p> : null}
+        <div className="rc-bot-chats">
+          {state.threads === undefined && state.error === undefined ? <p className="rc-note" role="status">{t(locale, 'loading')}</p> : null}
+          {state.error !== undefined ? (
+            <p className="rc-note rc-danger" role="alert">
+              {t(locale, 'errGeneric')}{' '}
+              <button type="button" className="rc-link" onClick={() => threads.refresh()}>{t(locale, 'retry')}</button>
+            </p>
+          ) : null}
+          {state.threads?.length === 0 ? (
+            <div className="rc-empty">
+              <h3>{t(locale, 'botNoChats')}</h3>
+            </div>
+          ) : null}
+          <ul className="rc-list">
+            {(state.threads ?? []).map((thread) => (
+              <SessionRow key={thread.session_id} locale={locale} session={thread} onOpen={onOpenSession} />
+            ))}
+          </ul>
+        </div>
+      </section>}
+    </>
   );
 }

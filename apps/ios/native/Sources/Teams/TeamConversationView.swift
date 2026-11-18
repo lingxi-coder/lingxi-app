@@ -20,6 +20,7 @@ struct TeamConversationView: View {
     var onGone: (() -> Void)?
     /// The wide layout opens the conversation details as a side pane; by default they are a sheet.
     var onShowDetails: (() -> Void)?
+    var onShowProfile: (() -> Void)?
 
     /// `lastReadSeq` as it was when the conversation opened: the "new messages" divider stays where it was
     /// even though reading moves the mark. `Int.max` = no divider (the mark never arrived).
@@ -49,6 +50,21 @@ struct TeamConversationView: View {
                 loaded(context)
             } else {
                 missing
+                    .navigationTitle(workspace.messaging?.cache?.creation.flatMap { $0.conversationId == conversationID ? $0.title : nil }
+                                     ?? workspace.team?.name ?? "")
+                    .toolbar {
+                        if let model = workspace.messaging,
+                           !model.error.isEmpty || (model.directoryReady && model.offline) {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                let status = model.error.isEmpty ? LocalizedStringKey("teams_offline_title") : LocalizedStringKey(TeamsErrors.key(model.error))
+                                Menu {
+                                    Text(model.error.isEmpty ? LocalizedStringKey("teams_messages_offline") : status)
+                                    Button("teams_reconnect", systemImage: "arrow.clockwise") { workspace.reconnect() }
+                                } label: { Image(systemName: model.error.isEmpty ? "wifi.slash" : "exclamationmark.circle") }
+                                .accessibilityLabel(Text(status))
+                            }
+                        }
+                    }
             }
         }
         .navigationBarTitleDisplayMode(.inline)
@@ -79,6 +95,10 @@ struct TeamConversationView: View {
         // Without `.contain` the identifier is copied onto every child (composer input, send, rows).
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.conversation.\(conversationID)")
+    }
+
+    private func openDetails() {
+        if let onShowDetails { onShowDetails() } else { showDetails = true }
     }
 
     private func loadDraft() {
@@ -128,6 +148,8 @@ struct TeamConversationView: View {
         let messages = model.cache?.threads[conversation.id]?.messages ?? []
         let participants = TeamsListLogic.conversationParticipants(conversation, members: context.members, bots: context.bots, uid: context.uid, strings: context.strings)
         let carrying = carriesFiles(context)
+        let connectionError = !model.error.isEmpty
+        let connectionOffline = model.directoryReady && model.offline
         return VStack(spacing: 0) {
             banners(context)
             if conversation.kind == "bot_dm", let bot = context.bots.first(where: { conversation.participants.contains("shared_bot:\($0.sharedBotId)") }) {
@@ -146,11 +168,24 @@ struct TeamConversationView: View {
         }
         .toolbar {
             ToolbarItem(placement: .principal) {
-                HStack(spacing: 8) {
+                let identity = HStack(spacing: 8) {
                     ConversationLead(conversation: conversation, label: context.label, participants: participants, size: 32)
                     VStack(alignment: .leading, spacing: 0) {
                         Text(context.label).font(.headline).lineLimit(1)
                         if let subtitle = context.subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+                    }
+                }
+                Group {
+                    if context.pair == nil {
+                        Button(action: openDetails) { identity }
+                            .buttonStyle(.plain)
+                            .accessibilityHint(Text("teams_conversation_details"))
+                    } else if let onShowProfile {
+                        Button(action: onShowProfile) { identity }
+                            .buttonStyle(.plain)
+                            .accessibilityHint(Text("friends_menu_view_profile"))
+                    } else {
+                        identity
                     }
                 }
                 .accessibilityElement(children: .combine)
@@ -158,19 +193,28 @@ struct TeamConversationView: View {
             }
             if context.pair == nil {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { if let onShowDetails { onShowDetails() } else { showDetails = true } } label: { Image(systemName: "info.circle") }
+                    Button(action: openDetails) { Image(systemName: "info.circle") }
                         .accessibilityLabel(Text("teams_conversation_details"))
                         .accessibilityIdentifier("teams.conversation.info")
                 }
             }
-            // A friendship's chats read themselves (D12/D13), so they have no manual mark, as on Android.
-            if unread > 0, context.pair == nil {
+            // A friendship's chats read themselves, but connection recovery still belongs in the top bar.
+            let canMarkRead = unread > 0 && context.pair == nil
+            if canMarkRead || connectionError || connectionOffline {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
-                        Button("teams_mark_read", systemImage: "checkmark.circle") { Task { await workspace.markRead(conversation.id) } }
-                            .disabled(model.offline || workspace.messageBusy)
-                    } label: { Image(systemName: "ellipsis.circle") }
-                    .accessibilityLabel(Text("teams_conversation_menu"))
+                        if connectionError || connectionOffline {
+                            Text(connectionError ? LocalizedStringKey(TeamsErrors.key(model.error)) : "teams_messages_offline")
+                            Button("teams_reconnect", systemImage: "arrow.clockwise") { workspace.reconnect() }
+                        }
+                        if canMarkRead {
+                            Button("teams_mark_read", systemImage: "checkmark.circle") { Task { await workspace.markRead(conversation.id) } }
+                                .disabled(model.offline || workspace.messageBusy)
+                        }
+                    } label: {
+                        Image(systemName: connectionError ? "exclamationmark.circle" : connectionOffline ? "wifi.slash" : "ellipsis.circle")
+                    }
+                    .accessibilityLabel(Text(connectionError ? LocalizedStringKey(TeamsErrors.key(model.error)) : connectionOffline ? "teams_offline_title" : "teams_conversation_menu"))
                     .accessibilityIdentifier("teams.conversation.more")
                 }
             }
@@ -224,11 +268,6 @@ struct TeamConversationView: View {
     private func banners(_ context: TeamConversationContext) -> some View {
         let model = context.model
         return VStack(spacing: 0) {
-            if !model.error.isEmpty {
-                TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(model.error)), actionTitle: "teams_reconnect") { workspace.reconnect() }
-            } else if model.directoryReady && model.offline {
-                TeamsBanner(kind: .offline, title: "teams_offline_title", detail: "teams_messages_offline", actionTitle: "teams_reconnect") { workspace.reconnect() }
-            }
             if !workspace.actionError.isEmpty, workspace.actionError != model.error {
                 TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(workspace.actionError)), actionTitle: "common_close") { workspace.clearActionError() }
             }
@@ -299,13 +338,16 @@ struct TeamConversationView: View {
                     }
                 }
                 ForEach(outbox) { intent in
-                    TeamOutboxCell(intent: intent, context: context) {
+                    TeamOutboxCell(intent: intent) {
                         Task { await workspace.run { try await context.model.discard(intent.id) } }
                     }
                 }
             }
+            .padding(.vertical, 8)
             .scrollTargetLayout()
         }
+        .background(Color(uiColor: .systemGroupedBackground))
+        .defaultScrollAnchor(.bottom, for: .alignment)
         .scrollPosition($position)
         .scrollDismissesKeyboard(.interactively)
         .onScrollGeometryChange(for: ScrollMetrics.self) { geometry in

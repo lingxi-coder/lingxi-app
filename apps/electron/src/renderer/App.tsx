@@ -19,6 +19,7 @@ import { TeamsSidebar, focusTeamsSidebarSoon } from './components/TeamsSidebar';
 import { FriendsPanel } from './components/FriendsPanel';
 // The Teams workspace's stylesheet (sidebar, page, panel and dialogs), imported once, here, as the package asks. Its rules are scoped to its own classes.
 import '../../../../packages/teams/styles';
+import { ChatTopbarTarget } from '../../../../packages/teams/ChatTopbar';
 import { useTeams } from './bridge/useTeams';
 import { useFriends } from './bridge/useFriends';
 import { friendLink, type FriendLink } from '../../../../packages/teams/friends';
@@ -292,6 +293,7 @@ export function App() {
   const showTeams = useCallback(() => { if (page !== 'teams') openPage('teams'); }, [openPage, page]);
   // Bot services (Bots offered outside Teams) take the place of the Team's conversation in the Teams page.
   const [botServices, setBotServices] = useState(false);
+  const [chatTopbar, setChatTopbar] = useState<HTMLDivElement | null>(null);
   const openBotServices = useCallback(() => setBotServices(true), []);
   const closeBotServices = useCallback(() => setBotServices(false), []);
   /** Likewise Friends. */
@@ -612,6 +614,8 @@ export function App() {
     setMessageRequest(null);
   }, []);
 
+  const hasChatTopbar = page === 'teams' || page === 'friends' || page === 'bots';
+
   const emptyMessage = bridge.sessionLoading
     ? tr('desktop_shell_loading_session')
     : !workspace?.path
@@ -634,6 +638,7 @@ export function App() {
         style={{ width: '100vw', height: '100vh', overflow: 'hidden', display: 'flex', position: 'relative', background: palette.sidebarBg, color: palette.text, colorScheme: theme, '--desktop-accent': palette.accent, '--rail-material': palette.sidebarBg, '--nav-panel-border': palette.border, ...teamsTheme } as CSSProperties}
       >
         <SettingsBackground active={bridge.projectCreationOpen || settingsRoute !== null || (sessionPicker !== null && !sessionPickerSuspended)}>
+          <ChatTopbarTarget.Provider value={hasChatTopbar ? chatTopbar : undefined}>
           <BetaSidebar
             bridge={bridge}
             pageSidebarRef={setPageSidebar}
@@ -673,9 +678,10 @@ export function App() {
             onOpenChat={() => openPage('chat')}
             onOpenSettings={() => openSettings()}
             topbar={<>
+              {hasChatTopbar && <div ref={setChatTopbar} className="desktop-chat-topbar-slot no-drag" />}
               {page === 'scheduled' && <ScheduledTasksTopBar />}
               {page === 'apps' && <LocalAppsTopBar onOpenMarket={() => { void window.lingxi?.localApps?.marketBrowse().catch(error => setLocalAppNavigationError(error instanceof Error ? error.message : String(error))); }} />}
-              <div style={{ display: page === 'chat' && (sidebarMode === 'home' || sidebarMode === 'apps') ? 'contents' : 'none' }}>
+              <div style={{ display: page === 'chat' && (sidebarMode === 'home' || sidebarMode === 'apps' || botChat) ? 'contents' : 'none' }}>
                 <BetaTopBar
                   bridge={bridge}
                   app={appChat ? { name: appWorkspace.activeGroup?.name ?? bridge.activeSession!.projectPath.split(/[\\/]+/).at(-1) ?? '', onOpen: showAppLibrary } : undefined}
@@ -829,6 +835,7 @@ export function App() {
           </div>
           </div>
           </BetaSidebar>
+          </ChatTopbarTarget.Provider>
         </SettingsBackground>
 
         {settingsRoute && (

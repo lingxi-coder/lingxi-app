@@ -37,6 +37,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -64,6 +65,7 @@ import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
 import com.lingxi.code.friends.FriendsLogic
 import com.lingxi.code.theme.ConfirmDialog
+import com.lingxi.code.theme.ConversationLead
 import com.lingxi.code.theme.IdentityAvatar
 import com.lingxi.code.theme.PersonAvatar
 import com.lingxi.code.theme.TeamTile
@@ -101,13 +103,11 @@ internal fun TeamDetailsScreen(
         }
         if (busy || teams.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         teams.error?.let { TeamsErrorBanner(it) }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            TeamTile(current.id, current.name, 56.dp)
-            Column(Modifier.weight(1f)) {
-                Text(current.name, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("${teamRoleLabel(current.role)} · ${stringResource(R.string.teams_members_count_fmt, current.memberCount)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
+        DetailIdentity(
+            current.name,
+            "${teamRoleLabel(current.role)} · ${stringResource(R.string.teams_members_count_fmt, current.memberCount)}",
+            Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        ) { TeamTile(current.id, current.name, 56.dp) }
         val segments = buildList { add(R.string.teams_members); if (privileged) add(R.string.teams_invites); add(R.string.teams_bots_title) }
         val selected = segment.coerceIn(0, segments.lastIndex)
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
@@ -293,8 +293,16 @@ internal fun ConversationDetailsSheet(
     /** Sends the Bots of this Chat that answer on their own. */
     onAutoReply: (List<String>) -> Unit = {}, busy: Boolean = false,
 ) {
-    TeamsSheet(label, onDismiss) {
-        TeamsListLogic.conversationParticipants(conversation, members, bots, uid, strings).forEach { person ->
+    TeamsSheet(stringResource(R.string.teams_conversation_details), onDismiss) {
+        DetailIdentity(label, conversationSubtitle(conversation, bots)) {
+            ConversationLead(conversation, members, bots, uid, strings, 56.dp, label)
+        }
+        if (unread > 0 && online) TextButton(onClick = { onMarkRead(); onDismiss() }) { Text(stringResource(R.string.teams_mark_read)) }
+        val participants = TeamsListLogic.conversationParticipants(conversation, members, bots, uid, strings)
+        if (participants.isNotEmpty()) Text(
+            stringResource(R.string.teams_members), Modifier.semantics { heading() }, style = MaterialTheme.typography.titleSmall,
+        )
+        participants.forEach { person ->
             Row(Modifier.fillMaxWidth().semantics(mergeDescendants = true) { }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 IdentityAvatar(person, 40.dp)
                 Column(Modifier.weight(1f)) {
@@ -328,7 +336,24 @@ internal fun ConversationDetailsSheet(
                     else stringResource(R.string.teams_auto_reply_unavailable_fmt, card.name), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        if (unread > 0 && online) TextButton(onClick = { onMarkRead(); onDismiss() }) { Text(stringResource(R.string.teams_mark_read)) }
+
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+@Composable
+private fun DetailIdentity(label: String, subtitle: String?, modifier: Modifier = Modifier, avatar: @Composable () -> Unit) {
+    Surface(modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surfaceContainer, shape = MaterialTheme.shapes.large) {
+        Row(
+            Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            avatar()
+            Column(Modifier.weight(1f)) {
+                Text(label, style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (subtitle != null) Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
     }
 }

@@ -6,6 +6,7 @@ import SwiftUI
 /// when the viewer cannot write here. The unsent state lives in the parent so reply, edit and the workspace's
 /// per-conversation drafts can drive it.
 struct TeamComposerView: View {
+    @Environment(\.theme) private var theme
     let context: TeamConversationContext
     @Binding var draft: TeamComposerDraft
     let editing: TeamMessage?
@@ -47,7 +48,7 @@ struct TeamComposerView: View {
         TeamBotMemberRules.blockedAvailability(targets: TeamBotSelection.targets(in: conversation, selected: Set(draft.targets)), cards: context.bots,
             operation: editing == nil ? "create" : "edit", answeringWait: answeringWait)
     }
-    private var asks: Bool { editing == nil && (conversation.kind == "group" || conversation.kind == "channel") }
+    private var asks: Bool { editing == nil && !answeringWait && (conversation.kind == "group" || conversation.kind == "channel") }
     private var askable: Bool { asks && context.bots.contains { $0.selectable && conversation.participants.contains("shared_bot:\($0.sharedBotId)") } }
     private var bytes: Int { TeamsComposeLogic.byteLength(draft.text) }
     private var tooLong: Bool { bytes > TeamsComposeLogic.messageBytes }
@@ -76,11 +77,14 @@ struct TeamComposerView: View {
                     .accessibilityIdentifier("teams.composer.lock")
             } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    contextBars
-                    chips
-                    TeamDraftFilesView(files: files, refusals: refusals, onRemove: onRemoveFile, onDismissRefusals: onDismissRefusals)
                     picker
-                    field
+                    ComposerInputSurface(focused: focus.wrappedValue) {
+                        contextBars
+                        chips
+                        TeamDraftFilesView(files: files, refusals: refusals, onRemove: onRemoveFile, onDismissRefusals: onDismissRefusals)
+                        editor
+                        toolbar
+                    }
                     footer
                 }
                 .padding(.horizontal, 12)
@@ -134,7 +138,7 @@ struct TeamComposerView: View {
 
     @ViewBuilder
     private var chips: some View {
-        if !draft.targets.isEmpty {
+        if !draft.targets.isEmpty && !answeringWait {
             VStack(alignment: .leading, spacing: 4) {
                 Text("teams_composer_bots_asked").font(.caption2).foregroundStyle(.secondary)
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -226,35 +230,43 @@ struct TeamComposerView: View {
         return String(localized: "teams_composer_hint \(name)")
     }
 
-    private var field: some View {
-        HStack(alignment: .bottom, spacing: 8) {
+    private var editor: some View {
+        TextField(placeholder, text: $draft.text, selection: $selection, axis: .vertical)
+            .lineLimit(1...6)
+            .focused(focus)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .accessibilityIdentifier("teams.composer.input")
+            .onChange(of: draft.text) { _, _ in dismissedMention = -1 }
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 0) {
             if let onChooseFiles {
                 TeamAttachButton(disabled: files.count >= TeamAttachments.messageFiles, onChosen: onChooseFiles)
             }
             if asks {
                 Button(action: insertAt) {
-                    Image(systemName: "at").font(.title3.weight(.medium)).minimumHitTarget()
+                    Image(systemName: "at").font(.system(size: 18)).foregroundStyle(theme.text2)
                 }
+                .buttonStyle(ComposerActionButtonStyle())
                 .disabled(!askable || draft.targets.count >= TeamsComposeLogic.maxTargets)
                 .accessibilityLabel(Text("teams_composer_ask_bot"))
                 .accessibilityIdentifier("teams.composer.ask")
             }
-            TextField(placeholder, text: $draft.text, selection: $selection, axis: .vertical)
-                .lineLimit(1...6)
-                .focused(focus)
-                .padding(.horizontal, 12).padding(.vertical, 8)
-                .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .accessibilityIdentifier("teams.composer.input")
-                .onChange(of: draft.text) { _, _ in dismissedMention = -1 }
+            Spacer(minLength: 4)
             Button(action: onVoice) {
-                Image(systemName: listening ? "stop.fill" : "mic").font(.title3.weight(.medium)).minimumHitTarget()
+                Image(systemName: listening ? "stop.fill" : "mic").font(.system(size: 18)).foregroundStyle(theme.text2)
             }
+            .buttonStyle(ComposerActionButtonStyle())
             .accessibilityLabel(Text(LocalizedStringKey(listening ? "composer_stop_recording" : "composer_record")))
             .accessibilityIdentifier("teams.composer.voice")
+            let canSend = !busy && availabilityBlock == nil && TeamAttachments.canSend(text: draft.text, files: files)
             Button(action: onSend) {
-                Image(systemName: editing != nil ? "checkmark.circle.fill" : "arrow.up.circle.fill").font(.title).minimumHitTarget()
+                ComposerTurnActionIcon(systemName: editing != nil ? "checkmark" : "arrow.up", symbolSize: 15, background: theme.accent)
             }
-            .disabled(busy || availabilityBlock != nil || !TeamAttachments.canSend(text: draft.text, files: files))
+            .buttonStyle(ComposerActionButtonStyle())
+            .disabled(!canSend)
+            .opacity(canSend ? 1 : 0.45)
             .accessibilityLabel(Text(LocalizedStringKey(editing != nil ? "teams_message_save" : "teams_message_send")))
             .accessibilityIdentifier("teams.composer.send")
         }
@@ -281,9 +293,6 @@ struct TeamComposerView: View {
             Text("teams_composer_note_bot_dm").font(.caption2).foregroundStyle(.secondary)
         } else if askable && editing == nil {
             Text("teams_composer_note_group").font(.caption2).foregroundStyle(.secondary)
-        }
-        if model.offline {
-            Text("teams_composer_note_offline").font(.caption2).foregroundStyle(.secondary)
         }
     }
 }

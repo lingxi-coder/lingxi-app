@@ -376,14 +376,8 @@ struct RemoteSessionView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if manager.needsSessionReconnect(hostID: source.hostID) {
-                HStack {
-                    Text("remote_err_generic")
-                    Button("common_retry") { Task { await source.start() } }
-                }.font(.caption).padding(8)
-            }
-            if source.phase != .live {
-                Text(source.phase == .closed ? "remote_session_closed" : source.phase == .loading ? "remote_session_loading" : "remote_session_offline")
+            if source.phase == .closed || source.phase == .loading {
+                Text(source.phase == .closed ? "remote_session_closed" : "remote_session_loading")
                     .font(.caption).foregroundStyle(.secondary).padding(8)
             }
             if source.hasOmittedContent { Text("remote_omitted_note").font(.caption).padding(8) }
@@ -451,6 +445,18 @@ struct RemoteSessionView: View {
         // scrolling transcript inside this navigation destination's bounds.
         .clipped()
         .navigationTitle(title)
+        .toolbar {
+            let retry = manager.needsSessionReconnect(hostID: source.hostID)
+            if retry || (source.phase != .live && source.phase != .loading && source.phase != .closed) {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Text(retry ? "remote_err_generic" : "remote_session_offline")
+                        if retry { Button("common_retry", systemImage: "arrow.clockwise") { Task { await source.start() } } }
+                    } label: { Image(systemName: retry ? "exclamationmark.circle" : "wifi.slash") }
+                    .accessibilityLabel(Text(retry ? "remote_err_generic" : "remote_session_offline"))
+                }
+            }
+        }
         .task { await source.start() }
         .onDisappear { Task { await source.stop() } }
         .onChange(of: scenePhase) { _, phase in

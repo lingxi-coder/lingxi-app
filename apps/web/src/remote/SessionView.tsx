@@ -1,4 +1,5 @@
 import { Files } from './Files';
+import { ChatTopbarControl } from '../../../../packages/teams/ChatTopbar';
 import type { FileReceipt } from '@lingxi/bridge-client/remote';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Locale } from '../utils/locale';
@@ -70,7 +71,7 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
 
   return (
     <div className="rc-session">
-      <header className="rc-session-head">
+      <ChatTopbarControl><header className="rc-session-head">
         <button type="button" className="rc-back" onClick={onBack} aria-label={botName === undefined ? t(locale, 'back') : t(locale, 'backToBot', { name: botName })}>
           ‹
         </button>
@@ -78,11 +79,10 @@ export function SessionView({ locale, client, sessionId, connection, deviceName,
           <h1>{displayText(summary?.title ?? '', 120) || t(locale, 'untitled')}</h1>
           {summary?.project_label || botName ? <p>{summary?.project_label || botName}</p> : null}
         </div>
-        <TransportBadge locale={locale} transport={connection.transport} />
-      </header>
-
-      {connection.phase !== 'ready' ? <p className="rc-banner" role="status">{t(locale, 'reconnecting')}</p> : null}
-      {state.status === 'offline' && connection.phase === 'ready' ? <p className="rc-banner" role="status">{t(locale, 'sessionOffline')}</p> : null}
+        {connection.phase !== 'ready' || state.status === 'offline' ? (
+          <span className="rc-topbar-status" role="status">{t(locale, connection.phase === 'ready' ? 'sessionOffline' : 'reconnecting')}</span>
+        ) : <TransportBadge locale={locale} transport={connection.transport} />}
+      </header></ChatTopbarControl>
 
       {!approval ? <Controls locale={locale} client={client} controller={controller} controls={state.controls} disabled={!live} /> : null}
 

@@ -152,9 +152,12 @@ internal fun TeamsListScreen(
                     }
                 }
             }
+            if (!invalid && !messaging.revoked) TeamsConnectionMenu(
+                error = messaging.error.takeIf { listError },
+                offline = messaging.directoryReady && messaging.offline,
+                onReconnect = onReconnect,
+            )
         }
-        if (messaging.directoryReady && messaging.offline && !invalid && !messaging.revoked) TeamsOfflineBanner(onReconnect)
-        if (listError) TeamsErrorBanner(messaging.error, onRetry = onReconnect)
 
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when {

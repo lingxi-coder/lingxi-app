@@ -148,7 +148,7 @@ try {
   result.viewMenu = true;
 
   await click('[aria-label="Open Bot"]');
-  await wait(`document.querySelector('.bots-page h1')?.textContent === 'Alpha'`);
+  await wait(`document.querySelector('.desktop-window-toolbar .bots-detail-header h1')?.textContent === 'Alpha'`);
   assert.deepEqual(await marked(), ['Bots']);
   assert.deepEqual(await run(`Array.from(document.querySelectorAll('.bots-tabs button')).map(button => button.textContent)`),
     ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions', 'Package & Market'], 'no Chats tab: the chats are in the sidebar');
@@ -207,7 +207,7 @@ try {
   await wait(`document.querySelector('${sidebar} [data-session-id="a-3"][aria-current="page"]')`);
   assert.deepEqual((await calls()).filter(call => call[0] === 'openSession').at(-1), ['openSession', 'alpha', 'a-3', '/fixture/transcripts/a-3.jsonl'], 'menu keeps the selected transcript');
   await click('[aria-label="Open Bot"]');
-  await wait(`document.querySelector('.bots-page h1')?.textContent === 'Alpha'`);
+  await wait(`document.querySelector('.desktop-window-toolbar .bots-detail-header h1')?.textContent === 'Alpha'`);
   result.menus = true;
 
   // Deleting from the menu asks first, and nothing is deleted until the question is answered yes.
@@ -268,7 +268,7 @@ try {
   };
   const openBotPage = async name => {
     await botMenuItem(name, 'Bot settings');
-    await wait(`document.querySelector('.bots-page h1')?.textContent === ${JSON.stringify(name)} && ${nameIs(name)}`);
+    await wait(`document.querySelector('.desktop-window-toolbar .bots-detail-header h1')?.textContent === ${JSON.stringify(name)} && ${nameIs(name)}`);
   };
   const opened = async () => (await calls()).filter(call => call[0] === 'openSession');
   const askedAndKept = async (why, leave) => {
@@ -277,7 +277,7 @@ try {
     assert.deepEqual(await opened(), [], `${why}: nothing is opened while the question is open`);
     await answer('cancel');
     assert.equal(await shown('.bots-page'), true, `${why}: still on the Bot's page`);
-    assert.equal(await run(`document.querySelector('.bots-page h1').textContent`), 'Alpha', why);
+    assert.equal(await run(`document.querySelector('.desktop-window-toolbar .bots-detail-header h1').textContent`), 'Alpha', why);
     assert.equal(await run(nameIs('Alpha edited')), true, `${why}: the edit is kept`);
     assert.equal(await unsaved(), true, why);
     assert.deepEqual(await marked(), ['Bots'], `${why}: the mode is as it was`);
@@ -315,7 +315,7 @@ try {
   assert.equal(await shown('.bots-page'), false);
   assert.deepEqual(await opened(), [['openSession', 'alpha', 'a-2', '/fixture/transcripts/a-2.jsonl']]);
   await click('[aria-label="Open Bot"]');
-  await wait(`document.querySelector('.bots-page h1')?.textContent === 'Alpha' && ${nameIs('Alpha')}`);
+  await wait(`document.querySelector('.desktop-window-toolbar .bots-detail-header h1')?.textContent === 'Alpha' && ${nameIs('Alpha')}`);
   assert.equal(await unsaved(), false, 'the edit was given up');
 
   // The same for another Bot, and for the rail: Beta's page, edited, is left for Home.
@@ -323,9 +323,9 @@ try {
   await wait(nameIs('Alpha edited again'));
   await botMenuItem('Beta', 'Bot settings');
   await wait(discardAsked);
-  assert.equal(await run(`document.querySelector('.bots-page h1').textContent`), 'Alpha', 'still on the first Bot while the question is open');
+  assert.equal(await run(`document.querySelector('.desktop-window-toolbar .bots-detail-header h1').textContent`), 'Alpha', 'still on the first Bot while the question is open');
   await answer('primary');
-  await wait(`document.querySelector('.bots-page h1')?.textContent === 'Beta' && ${nameIs('Beta')}`);
+  await wait(`document.querySelector('.desktop-window-toolbar .bots-detail-header h1')?.textContent === 'Beta' && ${nameIs('Beta')}`);
   assert.equal(await unsaved(), false);
   await edit('Beta edited');
   await wait(nameIs('Beta edited'));

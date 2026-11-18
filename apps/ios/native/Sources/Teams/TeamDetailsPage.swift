@@ -133,6 +133,9 @@ struct TeamDetailsPage: View {
                     Section { loadingOrFailed(gateShowsError) }
                 }
             }
+            Section {
+                TeamsNote(text: "teams_disclosure", systemImage: "lock.shield")
+            }
             dangerSection(team)
         }
         .listStyle(.insetGrouped)
@@ -173,7 +176,6 @@ struct TeamDetailsPage: View {
             }
             .padding(.vertical, 2)
             .accessibilityElement(children: .combine)
-            TeamsNote(text: "teams_disclosure", systemImage: "lock.shield")
         }
     }
 

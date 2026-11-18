@@ -1,4 +1,6 @@
-import { useEffect, useId, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactElement } from 'react';
+import { ComposerEditor, ComposerSurface, ComposerToolbar } from '../chat-ui/ComposerSurface';
+import { useContext, useEffect, useId, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactElement } from 'react';
+import { ChatTopbarTarget } from './ChatTopbar';
 import { ATTACHMENT_ACCEPT, type FileRefusal } from './attachments.js';
 import { DraftFiles } from './MessageFiles';
 import { BotMemberDetails, botAvailabilityText } from './BotMemberDetails';
@@ -71,6 +73,7 @@ export interface ComposerProps {
 export function Composer({ workspace, snapshot, conversation, label, locale, renderAvatar, editing, reply, answering, focusToken, onClearEditing, onClearReply, onClearAnswering, onAnswered, onEditLast }: ComposerProps): ReactElement {
   const t = useTeamsText(locale);
   const listId = useId();
+  const hasTopbar = useContext(ChatTopbarTarget) !== undefined;
   const input = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState(() => workspace.draft(conversation.id));
   const [targets, setTargets] = useState<string[]>([]);
@@ -123,8 +126,10 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
   useIsoLayoutEffect(() => {
     const node = input.current;
     if (!node) return;
-    node.style.height = 'auto';
-    node.style.height = `${Math.min(node.scrollHeight, 200)}px`;
+    if (!globalThis.CSS?.supports('field-sizing', 'content')) {
+      node.style.height = 'auto';
+      node.style.height = `${node.scrollHeight}px`;
+    }
     if (caretTo.current !== undefined) { node.setSelectionRange(caretTo.current, caretTo.current); setCaret(caretTo.current); caretTo.current = undefined; }
   }, [text]);
 
@@ -160,7 +165,7 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
     if (!event.dataTransfer.files.length) return;
     event.preventDefault(); add([...event.dataTransfer.files]);
   };
-  const sendable = (canSendText(text) || (ready.length > 0 && !text.trim())) && filesSettled && byteLength(text) <= MESSAGE_BYTES;
+  const sendable = (canSendText(text) || (ready.length > 0 && !text.trim())) && filesSettled && bytes <= MESSAGE_BYTES;
 
   const send = async () => {
     if (lock || unavailable || !sendable || snapshot.messageBusy) return;
@@ -205,21 +210,23 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
     {moved ? <button type="button" disabled={snapshot.messageBusy} onClick={() => void workspace.openBotDm(moved)}>{t('tw_composer_new_chat')}</button> : null}</div>;
   return <form className="tw-composer" onSubmit={event => { event.preventDefault(); void send(); }} onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={drop}>
     {contextBots.map(bot => <div key={bot.sharedBotId}>{!dmBot ? <b>{bot.name}</b> : null}<BotMemberDetails bot={bot} locale={locale} busy={snapshot.messageBusy || !!editing || !!answering} onExample={dmBot ? example => workspace.fillExample(conversation.id, example) : undefined} /></div>)}
-    {editing ? <div className="tw-context"><Icon name="edit" /><span>{t('teams_editing_message')}</span><button type="button" className="tw-link" onClick={onClearEditing}>{t('common_cancel')}</button></div> : null}
-    {reply ? <div className="tw-context"><Icon name="reply" /><span className="tw-context-text">{withSlot(t('teams_replying_to_fmt', SLOT), <b>{reply.author}</b>)}: {snippet(reply.message.recalled ? t('tw_composer_recalled') : reply.message.text)}</span>
-      <button type="button" className="tw-icon-btn" aria-label={t('teams_cancel_reply')} onClick={onClearReply}><Icon name="x" /></button></div> : null}
-    {answering ? <div className="tw-context"><Icon name="reply" /><span className="tw-context-text">{withSlot(t('tw_composer_answering_fmt', SLOT), <b>{answering.author}</b>)}{answering.question ? <>: {snippet(answering.question.text)}</> : null}</span>
-      <button type="button" className="tw-icon-btn" aria-label={t('teams_cancel_reply')} onClick={onClearAnswering}><Icon name="x" /></button></div> : null}
-    {targets.length && !answering ? <ul className="tw-targets" aria-label={t('teams_composer_bots_asked')}>
-      {targets.map(key => <li key={key} className="tw-target">@{botName(key)}
-        <button type="button" className="tw-icon-btn" aria-label={t('teams_composer_remove_bot_fmt', botName(key))} onClick={() => setTargets(old => old.filter(value => value !== key))}><Icon name="x" size={12} /></button></li>)}
-    </ul> : null}
-    <DraftFiles files={files} locale={locale} onRemove={uploadId => workspace.removeFile(conversation.id, uploadId)} />
-    {refused.length ? <ul className="tw-file-refusals" role="alert">
-      {refused.map((item, index) => <li key={`${item.name}:${index}`}><b>{item.name}</b>: {messageErrorText(item.code, locale)}</li>)}
-      <li><button type="button" className="tw-link" onClick={() => setRefused([])}>{t('tw_dismiss')}</button></li>
-    </ul> : null}
-    <div className="tw-compose-box">
+    <ComposerSurface className="tw-compose-box">
+      {editing || reply || answering || targets.length > 0 || files.length > 0 || refused.length > 0 ? <div className="tw-compose-context">
+        {editing ? <div className="tw-context"><Icon name="edit" /><span>{t('teams_editing_message')}</span></div> : null}
+        {reply ? <div className="tw-context"><Icon name="reply" /><span className="tw-context-text">{withSlot(t('teams_replying_to_fmt', SLOT), <b>{reply.author}</b>)}: {snippet(reply.message.recalled ? t('tw_composer_recalled') : reply.message.text)}</span>
+          <button type="button" className="tw-icon-btn" aria-label={t('teams_cancel_reply')} onClick={onClearReply}><Icon name="x" /></button></div> : null}
+        {answering ? <div className="tw-context"><Icon name="reply" /><span className="tw-context-text">{withSlot(t('tw_composer_answering_fmt', SLOT), <b>{answering.author}</b>)}{answering.question ? <>: {snippet(answering.question.text)}</> : null}</span>
+          <button type="button" className="tw-icon-btn" aria-label={t('teams_cancel_reply')} onClick={onClearAnswering}><Icon name="x" /></button></div> : null}
+        {targets.length && !answering ? <ul className="tw-targets" aria-label={t('teams_composer_bots_asked')}>
+          {targets.map(key => <li key={key} className="tw-target">@{botName(key)}
+            <button type="button" className="tw-icon-btn" aria-label={t('teams_composer_remove_bot_fmt', botName(key))} onClick={() => setTargets(old => old.filter(value => value !== key))}><Icon name="x" size={12} /></button></li>)}
+        </ul> : null}
+        <DraftFiles files={files} locale={locale} onRemove={uploadId => workspace.removeFile(conversation.id, uploadId)} />
+        {refused.length ? <ul className="tw-file-refusals" role="alert">
+          {refused.map((item, index) => <li key={`${item.name}:${index}`}><b>{item.name}</b>: {messageErrorText(item.code, locale)}</li>)}
+          <li><button type="button" className="tw-link" onClick={() => setRefused([])}>{t('tw_dismiss')}</button></li>
+        </ul> : null}
+      </div> : null}
       {open ? <ul id={listId} role="listbox" className="tw-mentions" aria-label={t('teams_composer_bots_can_ask')}>
         {candidates.map((bot, index) => <li key={bot.sharedBotId} id={`${listId}-${index}`} role="option" aria-selected={index === choice} className="tw-mention"
           onMouseDown={event => { event.preventDefault(); pick(bot); }}>
@@ -227,24 +234,28 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
           <b>{bot.name}</b><small>{botAvailabilityText(bot, locale)}</small>
         </li>)}
       </ul> : null}
-      <textarea ref={input} rows={1} value={text} onChange={change} onPaste={paste} onSelect={event => setCaret(event.currentTarget.selectionStart)} onKeyDown={keys}
+      <ComposerEditor>
+        <textarea ref={input} className="composer-editor-control" rows={1} value={text} onChange={change} onPaste={paste} onSelect={event => setCaret(event.currentTarget.selectionStart)} onKeyDown={keys}
         aria-label={t('tw_composer_message')} aria-haspopup={asks ? 'listbox' : undefined} aria-controls={open ? listId : undefined}
         aria-activedescendant={open ? `${listId}-${choice}` : undefined} aria-autocomplete={asks ? 'list' : undefined}
         placeholder={editing ? t('teams_composer_edit_hint') : answering ? t('tw_composer_reply_to_fmt', answering.author) : t('teams_composer_hint_fmt', `${conversation.kind === 'channel' ? '#' : ''}${label}`)} />
-      <div className="tw-compose-tools">
-        {!editing && !answering ? <>
-          <input ref={picker} type="file" multiple hidden accept={ATTACHMENT_ACCEPT} aria-hidden="true" tabIndex={-1}
-            onChange={event => { add([...(event.target.files ?? [])]); event.target.value = ''; }} />
-          <button type="button" className="tw-icon-btn" aria-label={t('teams_file_add')} title={t('tw_composer_attach')} onClick={() => picker.current?.click()}><Icon name="clip" /></button>
-        </> : null}
-        {asks ? <button type="button" className="tw-icon-btn" aria-label={t('teams_composer_ask_bot')} title={t('teams_composer_ask_bot')} disabled={!askable || targets.length >= MAX_TARGETS} onClick={insertAt}><Icon name="at" /></button> : null}
+      </ComposerEditor>
+      <ComposerToolbar>
+        <div className="tw-compose-leading">
+          {!editing && !answering ? <>
+            <input ref={picker} type="file" multiple hidden accept={ATTACHMENT_ACCEPT} aria-hidden="true" tabIndex={-1}
+              onChange={event => { add([...(event.target.files ?? [])]); event.target.value = ''; }} />
+            <button type="button" className="tw-icon-btn" aria-label={t('teams_file_add')} title={t('tw_composer_attach')} onClick={() => picker.current?.click()}><Icon name="plus" /></button>
+          </> : null}
+          {asks ? <button type="button" className="tw-icon-btn" aria-label={t('teams_composer_ask_bot')} title={t('teams_composer_ask_bot')} disabled={!askable || targets.length >= MAX_TARGETS} onClick={insertAt}><Icon name="at" /></button> : null}
+        </div>
         {bytes > MESSAGE_BYTES * 0.9 ? <span className="tw-count" data-over={bytes > MESSAGE_BYTES} role="status">{bytes.toLocaleString(intlTag(locale))} / {MESSAGE_BYTES.toLocaleString(intlTag(locale))}</span> : null}
         {editing ? <button type="button" onClick={onClearEditing}>{t('common_cancel')}</button> : null}
         <button type="submit" className="tw-primary tw-send" disabled={snapshot.messageBusy || unavailable || !sendable} aria-label={editing ? t('teams_message_save') : t('teams_message_send')}>
-          {editing ? t('common_save') : <Icon name="send" />}
+          {editing ? t('common_save') : <Icon name="arrowUp" />}
         </button>
-      </div>
-    </div>
+      </ComposerToolbar>
+    </ComposerSurface>
     <p className="tw-hint">
       {unavailable ? `${t('tw_composer_unavailable')} ` : ''}
       {files.length && !filesSettled ? `${files.some(file => file.state === 'failed') ? t('teams_file_note_failed') : t('teams_file_note_uploading')} ` : ''}
@@ -252,7 +263,7 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
         : conversation.kind === 'bot_dm' ? t('teams_composer_note_bot_dm')
         : askable && !editing ? t('teams_composer_note_group')
         : t('tw_composer_keys_hint')}
-      {snapshot.messagingConnecting ? ` ${t('tw_composer_connecting')}`
+      {hasTopbar ? null : snapshot.messagingConnecting ? ` ${t('tw_composer_connecting')}`
         : snapshot.offline ? ` ${t('teams_composer_note_offline')}` : ''}
     </p>
   </form>;

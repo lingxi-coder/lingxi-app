@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { ComposerEditor, ComposerSurface, ComposerToolbar } from '../../../../packages/chat-ui/ComposerSurface';
 import type { ImageRefDto } from '@lingxi/bridge-client';
 import type { Locale } from '../utils/locale';
 import { ImageRejected, shrinkImage } from './imageShrink';
@@ -73,53 +74,56 @@ export function Composer({ locale, running, disabled, hasFiles, onSend, onStop }
         send();
       }}
     >
-      {images.length > 0 ? (
-        <ul className="rc-attachments">
-          {images.map((image, index) => (
-            <li key={index}>
-              <img src={`data:${image.media_type};base64,${image.base64}`} alt={t(locale, 'imageAlt')} />
-              <button type="button" aria-label={t(locale, 'removeImage')} onClick={() => setImages((current) => current.filter((_, i) => i !== index))}>
-                ×
-              </button>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      {problem ? <p className="rc-note rc-danger" role="alert">{problem}</p> : null}
-      {running && images.length === 0 ? <p className="rc-note">{t(locale, 'imagesOnlyWhenIdle')}</p> : null}
-      <div className="rc-composer-row">
-        <button
-          type="button"
-          className="rc-icon-button"
-          aria-label={t(locale, 'attachImage')}
-          disabled={disabled || running || shrinking || images.length >= MAX_IMAGE_ATTACHMENTS}
-          onClick={() => fileInput.current?.click()}
-        >
-          +
-        </button>
-        <input ref={fileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden onChange={(event) => void pick(event.target.files)} />
-        <textarea
-          value={text}
-          rows={1}
-          placeholder={t(locale, running ? 'composerPlaceholderRunning' : 'composerPlaceholder')}
-          onChange={(event) => setText(event.target.value)}
-          onKeyDown={(event) => {
-            // Enter adds a line on a phone keyboard; Ctrl/Cmd+Enter sends.
-            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-              event.preventDefault();
-              send();
-            }
-          }}
-        />
-        {running ? (
-          <button type="button" className="button secondary" disabled={disabled} onClick={onStop}>
-            {t(locale, 'stop')}
-          </button>
+      <ComposerSurface>
+        {images.length > 0 ? (
+          <ul className="rc-attachments">
+            {images.map((image, index) => (
+              <li key={index}>
+                <img src={`data:${image.media_type};base64,${image.base64}`} alt={t(locale, 'imageAlt')} />
+                <button type="button" aria-label={t(locale, 'removeImage')} onClick={() => setImages((current) => current.filter((_, i) => i !== index))}>
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
         ) : null}
-        <button type="submit" className="button primary" disabled={!canSend}>
-          {t(locale, 'send')}
-        </button>
-      </div>
+        {problem ? <p className="rc-note rc-danger" role="alert">{problem}</p> : null}
+        {running && images.length === 0 ? <p className="rc-note">{t(locale, 'imagesOnlyWhenIdle')}</p> : null}
+        <ComposerEditor><textarea
+            className="composer-editor-control"
+            aria-label={t(locale, 'composerPlaceholder')}
+            value={text}
+            rows={1}
+            placeholder={t(locale, running ? 'composerPlaceholderRunning' : 'composerPlaceholder')}
+            onChange={(event) => setText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing && event.keyCode !== 229) {
+                event.preventDefault();
+                send();
+              }
+            }}
+          /></ComposerEditor>
+        <ComposerToolbar>
+          <button
+            type="button"
+            className="rc-icon-button"
+            aria-label={t(locale, 'attachImage')}
+            disabled={disabled || running || shrinking || images.length >= MAX_IMAGE_ATTACHMENTS}
+            onClick={() => fileInput.current?.click()}
+          >
+            +
+          </button>
+          <input ref={fileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden onChange={(event) => void pick(event.target.files)} />
+          {running ? (
+            <button type="button" className="button secondary" disabled={disabled} onClick={onStop}>
+              {t(locale, 'stop')}
+            </button>
+          ) : null}
+          <button type="submit" className="button primary" disabled={!canSend}>
+            {t(locale, 'send')}
+          </button>
+        </ComposerToolbar>
+      </ComposerSurface>
     </form>
   );
 }

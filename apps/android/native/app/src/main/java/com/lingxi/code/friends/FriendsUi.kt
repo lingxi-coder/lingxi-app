@@ -140,12 +140,13 @@ internal fun FriendsErrorText(error: FriendsError, modifier: Modifier = Modifier
 
 /** The header of a pushed page (or a pane when wide): Back on phones, Close beside other panes. At least 56 dp, so a larger font grows it (U7). */
 @Composable
-internal fun FriendsPageHeader(title: String, showBack: Boolean, onClose: () -> Unit) {
+internal fun FriendsPageHeader(title: String, showBack: Boolean, onClose: () -> Unit, actions: @Composable () -> Unit = {}) {
     Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         IconButton(onClick = onClose, modifier = Modifier.testTag(FriendsTags.BACK)) {
             if (showBack) Icon(Icons.AutoMirrored.Outlined.ArrowBack, stringResource(R.string.remote_back)) else Icon(Icons.Outlined.Close, stringResource(R.string.common_close))
         }
-        Text(title, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(title, Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        actions()
     }
 }
 

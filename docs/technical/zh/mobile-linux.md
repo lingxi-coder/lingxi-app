@@ -202,18 +202,18 @@ boot 建立可执行状态，verify 显式刷新完整性。status 读取是诊�
 
 [源码仓库](https://github.com/lingxi-coder/mobile-linux-runtime/tree/main/Cargo.toml)
 
-- [mobile-linux-runtime/Cargo.toml](https://github.com/lingxi-coder/mobile-linux-runtime/blob/25cf8a273bcd572b9be48e18fc9807e01dcdfce1/Cargo.toml) — 已提交源码 (25cf8a273bcd572b9be48e18fc9807e01dcdfce1)
-- [mobile-linux-runtime/rust-toolchain.toml](https://github.com/lingxi-coder/mobile-linux-runtime/blob/25cf8a273bcd572b9be48e18fc9807e01dcdfce1/rust-toolchain.toml) — 已提交源码 (25cf8a273bcd572b9be48e18fc9807e01dcdfce1)
-- [mobile-linux-runtime/crates/mobile-linux-ffi/src/runtime.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/25cf8a273bcd572b9be48e18fc9807e01dcdfce1/crates/mobile-linux-ffi/src/runtime.rs) — 已提交源码 (25cf8a273bcd572b9be48e18fc9807e01dcdfce1)
-- [mobile-linux-runtime/crates/mobile-linux-ffi/src/types.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/25cf8a273bcd572b9be48e18fc9807e01dcdfce1/crates/mobile-linux-ffi/src/types.rs) — 已提交源码 (25cf8a273bcd572b9be48e18fc9807e01dcdfce1)
-- [mobile-linux-runtime/android/runtime/build.gradle.kts](https://github.com/lingxi-coder/mobile-linux-runtime/blob/25cf8a273bcd572b9be48e18fc9807e01dcdfce1/android/runtime/build.gradle.kts) — 已提交源码 (25cf8a273bcd572b9be48e18fc9807e01dcdfce1)
-- [mobile-linux-runtime/ios/Package.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/25cf8a273bcd572b9be48e18fc9807e01dcdfce1/ios/Package.swift) — 已提交源码 (25cf8a273bcd572b9be48e18fc9807e01dcdfce1)
-- [mobile-linux-runtime/scripts/checks/check-resource-contracts.sh](https://github.com/lingxi-coder/mobile-linux-runtime/blob/25cf8a273bcd572b9be48e18fc9807e01dcdfce1/scripts/checks/check-resource-contracts.sh) — 已提交源码 (25cf8a273bcd572b9be48e18fc9807e01dcdfce1)
-- [mobile-linux-runtime/crates/mobile-linux-api/src/mobile_linux.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/25cf8a273bcd572b9be48e18fc9807e01dcdfce1/crates/mobile-linux-api/src/mobile_linux.rs) — 已提交源码 (25cf8a273bcd572b9be48e18fc9807e01dcdfce1)
-- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/config.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/25cf8a273bcd572b9be48e18fc9807e01dcdfce1/crates/mobile-linux-android/src/runtime/config.rs) — 已提交源码 (25cf8a273bcd572b9be48e18fc9807e01dcdfce1)
-- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/config.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/25cf8a273bcd572b9be48e18fc9807e01dcdfce1/crates/mobile-linux-ios/src/runtime/config.rs) — 已提交源码 (25cf8a273bcd572b9be48e18fc9807e01dcdfce1)
-- [mobile-linux-runtime/crates/mobile-linux-core/src/user_workspace.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/25cf8a273bcd572b9be48e18fc9807e01dcdfce1/crates/mobile-linux-core/src/user_workspace.rs) — 已提交源码 (25cf8a273bcd572b9be48e18fc9807e01dcdfce1)
+- [mobile-linux-runtime/Cargo.toml](https://github.com/lingxi-coder/mobile-linux-runtime/blob/5dd627e1049ba85e0563b7f351f79b00267c58c3/Cargo.toml) — 已提交源码 (5dd627e1049ba85e0563b7f351f79b00267c58c3)
+- [mobile-linux-runtime/rust-toolchain.toml](https://github.com/lingxi-coder/mobile-linux-runtime/blob/5dd627e1049ba85e0563b7f351f79b00267c58c3/rust-toolchain.toml) — 已提交源码 (5dd627e1049ba85e0563b7f351f79b00267c58c3)
+- [mobile-linux-runtime/crates/mobile-linux-ffi/src/runtime.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/5dd627e1049ba85e0563b7f351f79b00267c58c3/crates/mobile-linux-ffi/src/runtime.rs) — 已提交源码 (5dd627e1049ba85e0563b7f351f79b00267c58c3)
+- [mobile-linux-runtime/crates/mobile-linux-ffi/src/types.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/5dd627e1049ba85e0563b7f351f79b00267c58c3/crates/mobile-linux-ffi/src/types.rs) — 已提交源码 (5dd627e1049ba85e0563b7f351f79b00267c58c3)
+- [mobile-linux-runtime/android/runtime/build.gradle.kts](https://github.com/lingxi-coder/mobile-linux-runtime/blob/5dd627e1049ba85e0563b7f351f79b00267c58c3/android/runtime/build.gradle.kts) — 已提交源码 (5dd627e1049ba85e0563b7f351f79b00267c58c3)
+- [mobile-linux-runtime/ios/Package.swift](https://github.com/lingxi-coder/mobile-linux-runtime/blob/5dd627e1049ba85e0563b7f351f79b00267c58c3/ios/Package.swift) — 已提交源码 (5dd627e1049ba85e0563b7f351f79b00267c58c3)
+- [mobile-linux-runtime/scripts/checks/check-resource-contracts.sh](https://github.com/lingxi-coder/mobile-linux-runtime/blob/5dd627e1049ba85e0563b7f351f79b00267c58c3/scripts/checks/check-resource-contracts.sh) — 已提交源码 (5dd627e1049ba85e0563b7f351f79b00267c58c3)
+- [mobile-linux-runtime/crates/mobile-linux-api/src/mobile_linux.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/5dd627e1049ba85e0563b7f351f79b00267c58c3/crates/mobile-linux-api/src/mobile_linux.rs) — 已提交源码 (5dd627e1049ba85e0563b7f351f79b00267c58c3)
+- [mobile-linux-runtime/crates/mobile-linux-android/src/runtime/config.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/5dd627e1049ba85e0563b7f351f79b00267c58c3/crates/mobile-linux-android/src/runtime/config.rs) — 已提交源码 (5dd627e1049ba85e0563b7f351f79b00267c58c3)
+- [mobile-linux-runtime/crates/mobile-linux-ios/src/runtime/config.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/5dd627e1049ba85e0563b7f351f79b00267c58c3/crates/mobile-linux-ios/src/runtime/config.rs) — 已提交源码 (5dd627e1049ba85e0563b7f351f79b00267c58c3)
+- [mobile-linux-runtime/crates/mobile-linux-core/src/user_workspace.rs](https://github.com/lingxi-coder/mobile-linux-runtime/blob/5dd627e1049ba85e0563b7f351f79b00267c58c3/crates/mobile-linux-core/src/user_workspace.rs) — 已提交源码 (5dd627e1049ba85e0563b7f351f79b00267c58c3)
 
-- mobile-linux-runtime: HEAD 25cf8a273bcd572b9be48e18fc9807e01dcdfce1; 所据文件指纹 sha256:3f654be245e2810979441677e37d079538d03bf98bfb68f98d054e4cc79d84df; 产品固定版本 43382a20161e371a0a31526412164b3d35545ab5
+- mobile-linux-runtime: HEAD 5dd627e1049ba85e0563b7f351f79b00267c58c3; 所据文件指纹 sha256:5dd456cd771483f341bb99d25aff43140c96f893f6de5541c381c2083f162064; 产品固定版本 5dd627e1049ba85e0563b7f351f79b00267c58c3
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

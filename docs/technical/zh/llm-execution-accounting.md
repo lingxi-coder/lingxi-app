@@ -141,22 +141,22 @@ execution_contracts、failover 与计价测试使用模拟观测验证本地行�
 
 [源码仓库](https://github.com/lingxi-coder/llm-client)
 
-- [llm-client/src/client/executor.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/client/executor.rs) — 已提交源码 (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/client/resolve.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/client/resolve.rs) — 已提交源码 (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/client/prepared.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/client/prepared.rs) — 已提交源码 (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/client/route.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/client/route.rs) — 已提交源码 (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/client/options.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/client/options.rs) — 已提交源码 (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/client/frozen_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/client/frozen_pricing.rs) — 已提交源码 (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/protocol/usage_report.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/protocol/usage_report.rs) — 已提交源码 (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/protocol/provider.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/protocol/provider.rs) — 已提交源码 (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/protocol/llm.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/protocol/llm.rs) — 已提交源码 (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/account/service.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/account/service.rs) — 已提交源码 (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/account/types.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/account/types.rs) — 已提交源码 (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/src/account/execution.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/src/account/execution.rs) — 已提交源码 (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/tests/execution_contracts.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/tests/execution_contracts.rs) — 已提交源码 (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/tests/failover.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/tests/failover.rs) — 已提交源码 (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
-- [llm-client/tests/server_fallback_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/66ce76a2ecc679f0dba551e26ef6aaceb40d2f49/tests/server_fallback_pricing.rs) — 已提交源码 (66ce76a2ecc679f0dba551e26ef6aaceb40d2f49)
+- [llm-client/src/client/executor.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/client/executor.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/client/resolve.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/client/resolve.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/client/prepared.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/client/prepared.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/client/route.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/client/route.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/client/options.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/client/options.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/client/frozen_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/client/frozen_pricing.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/protocol/usage_report.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/protocol/usage_report.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/protocol/provider.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/protocol/provider.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/protocol/llm.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/protocol/llm.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/account/service.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/account/service.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/account/types.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/account/types.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/src/account/execution.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/src/account/execution.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/tests/execution_contracts.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/tests/execution_contracts.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/tests/failover.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/tests/failover.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
+- [llm-client/tests/server_fallback_pricing.rs](https://github.com/lingxi-coder/llm-client/blob/63c8f7663b7cba7466538213f86c6df4a30442a9/tests/server_fallback_pricing.rs) — 已提交源码 (63c8f7663b7cba7466538213f86c6df4a30442a9)
 
-- llm-client: HEAD 66ce76a2ecc679f0dba551e26ef6aaceb40d2f49; 所据文件指纹 sha256:89fef6f87fb7803bec69d768fa11e408a54f2123d196e2c859d8faba79092d96; 产品固定版本 3cb37e3a3b840b54a4e92994fdc8b1edf7f592d3
+- llm-client: HEAD 63c8f7663b7cba7466538213f86c6df4a30442a9; 所据文件指纹 sha256:c333c57f017ceb83b75e77ac252dc2cf3850ac8a74a5199f5d9154b7e698100c; 产品固定版本 63c8f7663b7cba7466538213f86c6df4a30442a9
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

@@ -88,18 +88,18 @@ cargo test --locked -p harness-runtime --features desktop,mobile --test visualiz
 
 [源码仓库](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/runtime/src/inline_visualization.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb7a016c305609a0b4ca7b0c1a91faead18c4db0/crates/runtime/src/inline_visualization.rs) — 已提交源码 (bb7a016c305609a0b4ca7b0c1a91faead18c4db0)
-- [harness-runtime/crates/runtime/src/desktop_visualization.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb7a016c305609a0b4ca7b0c1a91faead18c4db0/crates/runtime/src/desktop_visualization.rs) — 已提交源码 (bb7a016c305609a0b4ca7b0c1a91faead18c4db0)
-- [harness-runtime/crates/runtime/src/mobile/visualization_host.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb7a016c305609a0b4ca7b0c1a91faead18c4db0/crates/runtime/src/mobile/visualization_host.rs) — 已提交源码 (bb7a016c305609a0b4ca7b0c1a91faead18c4db0)
-- [harness-runtime/crates/tools/ui/src/inline_visualization.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb7a016c305609a0b4ca7b0c1a91faead18c4db0/crates/tools/ui/src/inline_visualization.rs) — 已提交源码 (bb7a016c305609a0b4ca7b0c1a91faead18c4db0)
-- [harness-runtime/crates/visualization/src/store.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb7a016c305609a0b4ca7b0c1a91faead18c4db0/crates/visualization/src/store.rs) — 已提交源码 (bb7a016c305609a0b4ca7b0c1a91faead18c4db0)
-- [harness-runtime/crates/visualization/src/service.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb7a016c305609a0b4ca7b0c1a91faead18c4db0/crates/visualization/src/service.rs) — 已提交源码 (bb7a016c305609a0b4ca7b0c1a91faead18c4db0)
-- [harness-runtime/crates/visualization/src/document.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb7a016c305609a0b4ca7b0c1a91faead18c4db0/crates/visualization/src/document.rs) — 已提交源码 (bb7a016c305609a0b4ca7b0c1a91faead18c4db0)
-- [harness-runtime/crates/visualization/src/context.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb7a016c305609a0b4ca7b0c1a91faead18c4db0/crates/visualization/src/context.rs) — 已提交源码 (bb7a016c305609a0b4ca7b0c1a91faead18c4db0)
-- [harness-runtime/crates/visualization/src/checks.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb7a016c305609a0b4ca7b0c1a91faead18c4db0/crates/visualization/src/checks.rs) — 已提交源码 (bb7a016c305609a0b4ca7b0c1a91faead18c4db0)
-- [harness-runtime/crates/runtime/tests/inline_visualization.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb7a016c305609a0b4ca7b0c1a91faead18c4db0/crates/runtime/tests/inline_visualization.rs) — 已提交源码 (bb7a016c305609a0b4ca7b0c1a91faead18c4db0)
-- [harness-runtime/crates/runtime/tests/mobile/visualization_host.rs](https://github.com/lingxi-coder/harness-runtime/blob/bb7a016c305609a0b4ca7b0c1a91faead18c4db0/crates/runtime/tests/mobile/visualization_host.rs) — 已提交源码 (bb7a016c305609a0b4ca7b0c1a91faead18c4db0)
+- [harness-runtime/crates/runtime/src/inline_visualization.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/runtime/src/inline_visualization.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
+- [harness-runtime/crates/runtime/src/desktop_visualization.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/runtime/src/desktop_visualization.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
+- [harness-runtime/crates/runtime/src/mobile/visualization_host.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/runtime/src/mobile/visualization_host.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
+- [harness-runtime/crates/tools/ui/src/inline_visualization.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/tools/ui/src/inline_visualization.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
+- [harness-runtime/crates/visualization/src/store.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/visualization/src/store.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
+- [harness-runtime/crates/visualization/src/service.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/visualization/src/service.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
+- [harness-runtime/crates/visualization/src/document.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/visualization/src/document.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
+- [harness-runtime/crates/visualization/src/context.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/visualization/src/context.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
+- [harness-runtime/crates/visualization/src/checks.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/visualization/src/checks.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
+- [harness-runtime/crates/runtime/tests/inline_visualization.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/runtime/tests/inline_visualization.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
+- [harness-runtime/crates/runtime/tests/mobile/visualization_host.rs](https://github.com/lingxi-coder/harness-runtime/blob/c551d1b4ac161cf9024dfcbd88ccd4c22f55de69/crates/runtime/tests/mobile/visualization_host.rs) — 已提交源码 (c551d1b4ac161cf9024dfcbd88ccd4c22f55de69)
 
-- harness-runtime: HEAD bb7a016c305609a0b4ca7b0c1a91faead18c4db0; 所据文件指纹 sha256:700726d3f012384673f588a15ab3a32ecaf4f3fc499f0e4e86c0b8e6bc321559; 产品固定版本 ae5a65b1f4816cd26a06d462573ebc9841f14f96
+- harness-runtime: HEAD c551d1b4ac161cf9024dfcbd88ccd4c22f55de69; 所据文件指纹 sha256:6e9c6b19e59dad38ee1a5c755e041b15b7d37e041d16fb9ada609f303de3ea64; 产品固定版本 c551d1b4ac161cf9024dfcbd88ccd4c22f55de69
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

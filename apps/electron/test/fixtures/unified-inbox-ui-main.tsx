@@ -165,7 +165,10 @@ Object.assign(window, {
     assistant: assistant.key, friend: friend.key, channel: channel.key, resultUuid, selected: () => selected.sessionId,
     opens, visible, requests, resumeAssistant,
     notifyAssistant: (activate = true) => {
-      for (const callback of notifications) callback({ key: assistant.key, generation: 1, title: 'LingXi', body: 'Conversation update', through: 1, activate });
+      for (const callback of notifications) callback({ key: assistant.key, generation: 1, title: 'LingXi', body: 'Conversation update', kind: 'completion', through: 1, activate });
+    },
+    notifyFriend: () => {
+      for (const callback of notifications) callback({ key: friend.key, generation: 1, title: 'LingXi', body: 'Conversation update', kind: 'dm', through: 1 });
     },
   },
   lingxi: {

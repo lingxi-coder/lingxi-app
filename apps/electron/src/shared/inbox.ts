@@ -8,6 +8,7 @@ export type InboxSignal = { uid: string | null; type: 'dirty' | 'badge' | 'error
 export interface InboxNotification {
   title: string;
   body: string;
+  kind?: string;
   ref?: SessionRef;
   key?: string;
   generation?: number;

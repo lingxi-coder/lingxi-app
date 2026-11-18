@@ -60,8 +60,9 @@ async function main() {
     if (process.argv.includes('--inbox-toast')) {
       const toast = "document.querySelector('.desktop-inbox-toast')";
       await run('window.inboxFixture.notifyAssistant(false)');
-      await wait(`${toast}?.textContent.includes('Conversation update')`);
-      assert.equal(await run("document.querySelector('.desktop-inbox-toast-announcement[role=status]')?.textContent"), 'LingXi. Conversation update');
+      await wait(`${toast}?.querySelector('p')?.textContent === 'Task completed · The compatibility report is ready.'`);
+      assert.equal(await run("document.querySelector('.desktop-inbox-toast-announcement[role=status]')?.textContent"),
+        'Release checklist. Task completed · The compatibility report is ready.');
       if (process.env.LINGXI_INBOX_TOAST_SCREENSHOT) {
         await settleFixtureAnimations(contents, '.desktop-inbox-toast');
         const frame = await run(`(() => {
@@ -74,6 +75,20 @@ async function main() {
       await run(`${toast}.querySelector('button[aria-label="Dismiss notification"]').click()`);
       await wait(`!${toast}`);
       assert.equal(await run("window.inboxFixture.opens.includes('assistant-result')"), false, 'dismissing the toast must not open the conversation');
+
+      await run('window.inboxFixture.notifyFriend()');
+      await wait(`${toast}?.querySelector('p')?.textContent === 'New direct message · The design is ready for your review.'`);
+      assert.equal(await run(`${toast}.querySelector('strong').textContent`), 'Bob');
+      await run(`${toast}.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }))`);
+      await delay(8200);
+      assert.equal(await run(`Boolean(${toast})`), true, 'hover pauses dismissal');
+      await run(`${toast}.querySelector('button').focus()`);
+      await run(`${toast}.dispatchEvent(new PointerEvent('pointerout', { bubbles: true }))`);
+      await delay(8200);
+      assert.equal(await run(`Boolean(${toast})`), true, 'keyboard focus pauses dismissal');
+      await run(`${toast}.querySelector('button').blur()`);
+      await waitForFixture(contents, `!${toast}`, 9000);
+      assert.equal(Boolean(await run(request('markRead', 'friend'))), false, 'auto dismissal preserves unread');
 
       await run('window.inboxFixture.notifyAssistant(false)');
       await wait(toast);

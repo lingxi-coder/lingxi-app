@@ -358,6 +358,8 @@ export class InboxService {
         key,
         generation: row.ref.generation,
         ref: entry.ref,
+        kind: failure || entry.summary.previewKind === 'failure' ? 'failure'
+          : entry.summary.previewKind === 'taskResult' ? 'completion' : 'reply',
         ...(!failure || entry.summary.previewKind === 'failure' ? { through: row.sourceCursor } : {}),
         title: 'LingXi',
         body: 'Conversation update',

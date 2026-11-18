@@ -71,6 +71,7 @@ export class NoticeDelivery {
           this.deliver({
             key: notice.key,
             generation: notice.generation,
+            kind: notice.kind,
             ...(typeof notice.through === 'number' && Number.isSafeInteger(notice.through) && notice.through >= 0
               ? { through: notice.through }
               : {}),

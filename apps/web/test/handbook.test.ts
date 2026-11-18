@@ -84,10 +84,26 @@ test('tables, steps and diagram descriptions participate in handbook search', ()
   assert.equal(markdownHref('/docs-assets/system-layers.svg'), '../assets/system-layers.svg');
 });
 
+test('product actions in standalone Markdown open the website and chapter links stay portable', () => {
+  for (const locale of ['zh', 'en'] as const) {
+    const teams = docMarkdown(docPages.find(page => page.id === 'teams')!, locale);
+    const bots = docMarkdown(docPages.find(page => page.id === 'bots')!, locale);
+    for (const route of ['teams', 'friends']) assert.ok(teams.includes(`](https://lingxios.net/${route})`));
+    assert.ok(bots.includes('](https://lingxios.net/services)'));
+    assert.ok(teams.includes('](teams.md#auto-reply)'));
+  }
+  assert.equal(markdownHref('/teams?invite=example#join'), 'https://lingxios.net/teams?invite=example#join');
+  assert.equal(markdownHref('https://example.org/help'), 'https://example.org/help');
+});
+
 test('product questions open the right section in both languages', () => {
   for (const [locale, query, pageId, sectionId] of [
     ['zh', '如何创建 team', 'teams', 'create-team'],
     ['en', 'How do I create a DM?', 'teams', 'direct-message'],
+    ['zh', '如何创建一个团队？', 'teams', 'create-team'],
+    ['zh', '如何发送团队消息', 'teams', 'send-message'],
+    ['zh', '创建群聊并发送消息', 'teams', 'group-chat'],
+    ['zh', 'Bot 自主回复', 'teams', 'auto-reply'],
     ['zh', '如何创建群聊', 'teams', 'group-chat'],
     ['zh', '如何发送 message', 'teams', 'send-message'],
     ['zh', '怎么把 Bot 分享给团队', 'teams', 'share-bot'],
@@ -96,6 +112,13 @@ test('product questions open the right section in both languages', () => {
     ['en', 'Can it reply without an @?', 'teams', 'auto-reply'],
     ['zh', '远控', 'remote-control', 'same-account'],
     ['en', 'How can I publish a local app?', 'local-apps', 'publish-local'],
+    ['en', 'How do I publish a local app to the market?', 'local-apps', 'market'],
+    ['en', 'Can I publish my local app directly to the app market?', 'local-apps', 'market'],
+    ['zh', '如何把 Local App 发布到市场？', 'local-apps', 'market'],
+    ['zh', '如何发布 Local App 到应用市场？', 'local-apps', 'market'],
+    ['zh', '怎么私下分享 Local App 给朋友？', 'local-apps', 'source-zip'],
+    ['zh', '我只在 iPhone 上有这个 Local App，怎么只发给一个同事？如果后来决定让大家都能安装，要怎么操作？', 'local-apps', 'source-zip'],
+    ['zh', '我的手机通过远控打开电脑上的应用，我昨天记的数据这次还能继续用吗？', 'local-apps', 'paired-devices'],
     ['zh', '如何共享 Local App', 'local-apps', 'share-options'],
     ['zh', '让别人安装我的应用', 'local-apps', 'market'],
   ] as const) {
@@ -105,5 +128,35 @@ test('product questions open the right section in both languages', () => {
   for (const workflow of workflows) {
     const page = docPages.find(page => page.id === workflow.page);
     assert.ok(page?.sections.some(section => section.id === workflow.section), workflow.page + '#' + workflow.section);
+    for (const phrase of workflow.queries) {
+      for (const locale of ['en', 'zh'] as const) {
+        const result = searchDocs(phrase, locale)[0];
+        assert.deepEqual([result?.page.id, result?.sectionId], [workflow.page, workflow.section], phrase);
+      }
+    }
+  }
+  for (const query of ['create admin account', 'How do I create a chatbot?', 'local app SDK protocol']) {
+    assert.equal(searchDocs(query, 'en')[0]?.sectionId, undefined, query);
+  }
+});
+
+test('Local App sharing guidance distinguishes public releases, source copies and remote storage in both languages', () => {
+  const page = docPages.find(item => item.id === 'local-apps')!;
+  for (const locale of ['en', 'zh'] as const) {
+    const sectionText = (id: string) => {
+      const section = page.sections.find(item => item.id === id)!;
+      return [...(section.paragraphs ?? []), ...(section.steps ?? []), ...(section.bullets ?? [])]
+        .map(paragraph => paragraph[locale]).join('\n');
+    };
+    const market = sectionText('market');
+    const hidden = market.indexOf(locale === 'en' ? 'hidden' : '隐藏');
+    const makePublic = market.indexOf(locale === 'en' ? 'Make public' : '上架应用');
+    assert.ok(hidden >= 0 && makePublic > hidden, locale);
+    for (const platform of ['iOS', 'Android']) assert.ok(market.includes(platform), locale);
+    assert.match(sectionText('source-zip'), /ZIP/u);
+    const remote = sectionText('paired-devices');
+    for (const storage of ['localStorage', 'IndexedDB', locale === 'en' ? 'backend' : '后端']) {
+      assert.ok(remote.includes(storage), locale + ' ' + storage);
+    }
   }
 });

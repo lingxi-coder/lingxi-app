@@ -2,11 +2,11 @@ import type { DocPage, DocText } from './types';
 import { codeLabel, docsBaseline, resolveDocSources, verificationLabels } from './sources';
 
 export function markdownHref(href: string): string {
-  if (href === '/docs') return 'overview.md';
-  const page = /^\/docs\/([\w-]+)(#[\w-]+)?$/.exec(href);
-  if (page) return `${page[1]}.md${page[2] ?? ''}`;
+  const page = /^\/docs(?:\/([\w-]+))?\/?(#[\w-]+)?$/.exec(href);
+  if (page) return `${page[1] ?? 'overview'}.md${page[2] ?? ''}`;
   if (href.startsWith('/docs-assets/')) return `../assets/${href.slice('/docs-assets/'.length)}`;
   if (href === '/api-index.json') return '../../../apps/web/public/api-index.json';
+  if (href.startsWith('/')) return new URL(href, 'https://lingxios.net').href;
   return href;
 }
 

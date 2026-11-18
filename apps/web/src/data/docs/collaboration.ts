@@ -37,7 +37,7 @@ export const collaborationPages: DocPage[] = [
       ], links: [{ label: t('Open Friends', '打开好友'), href: '/friends' }] },
       { id: 'send-message', title: t('Send a message or attachment', '发送消息或附件'), paragraphs: [
         t('Open the intended DM, group or channel. Type a message or attach a file, wait for any uploads and choose Send. On Web and Desktop, Enter sends and Shift+Enter inserts a new line. For a reply to a particular message use Reply on that message.', '打开目标私信、群聊或频道，输入文字或添加文件，等附件上传完成后点发送。Web 和桌面端按 Enter 发送，Shift+Enter 换行。要回复某条消息，可在那条消息上选择「回复」。'),
-        t('If the message is pending, reconnect and check the original entry before retrying. A delivered message and a completed Bot task have separate statuses.', '遇到待发送状态，重新连接后先查看原消息，需要时从原记录重试。消息送达后，可在 Bot 任务卡里另行查看执行结果。'),
+        t('If a message is pending, reconnect and check the original entry. Web and Desktop retry temporary failures automatically. If the entry shows Retry, use that button. A delivered message and a completed Bot task have separate statuses.', '遇到待发送状态，重新连接后查看原消息。Web 和桌面端会自动重试临时失败的消息。原记录上出现「重试」按钮时再点。消息送达后，可在 Bot 任务卡里另行查看执行结果。'),
       ] },
       { id: 'bot-chat', title: t('Message a Bot directly or address it in a group', '与 Bot 私聊或在群里点名'), paragraphs: [
         t('Use the + beside Bot chats, select an available shared Bot and open the chat. A Bot DM already addresses the Bot. In a group or channel, type @ and pick a participating Bot from the suggestions to request work from it explicitly.', '在「Bot 对话」旁点加号，选择可用的共享 Bot 并打开对话。Bot 私聊里的消息直接发给它，无需 @。在群聊或频道里要明确派给某个 Bot，可以输入 @ 并从候选列表中点选它。'),
@@ -83,25 +83,39 @@ export const collaborationPages: DocPage[] = [
     description: t('Release to your Apps library, share an installable copy or use your running desktop app from a paired device.', '发布到应用库，让别人安装副本，或从自己的已配对设备使用桌面上的同一份应用。'),
     sources: [
       { repo: 'harness-runtime', path: 'crates/local-app/assets/skill/SKILL.md' },
+      { repo: 'harness-runtime', path: 'crates/skill/src/builtin/lingxi-api/references/local-app.md' },
       { repo: 'lingxi-app', path: 'apps/electron/src/renderer/components/LocalApps.tsx' },
       { repo: 'lingxi-app', path: 'apps/electron/src/renderer/components/LocalAppPublish.tsx' },
       { repo: 'lingxi-app', path: 'apps/electron/src/main/local-apps/remoteGateway.ts' },
+      { repo: 'lingxi-app', path: 'apps/ios/native/Sources/Apps/AppsPages.swift' },
+      { repo: 'lingxi-app', path: 'apps/android/native/app/src/main/java/com/lingxi/code/apps/UnifiedAppsPages.kt' },
+      { repo: 'lingxi-app', path: 'packages/teams/attachments.ts' },
+      { repo: 'lingxi-app', path: 'docs/LOCAL_APP_REMOTE_ACCESS.md' },
     ],
     sections: [
       { id: 'publish-local', title: t('Publish a local release', '发布到本机应用库'), steps: [
         t('In Code mode open the source project on the host you want to use. Ask LingXi to build or update the Local App and publish it into Apps. The local-app skill guides the release through the available LocalApp tool.', '在要运行应用的设备上进入 Code 模式，打开源项目，请灵犀制作或更新 Local App 并发布到「应用」。local-app 技能会按当前宿主提供的 LocalApp 工具完成发布。'),
         t('Open the released revision from Apps and check that it runs. For an update, open Modify on the existing app so the new release uses the same app ID. If the revision changed elsewhere, review the newer source before publishing.', '在「应用」中打开刚发布的版本，确认它能运行。更新时从原应用的「修改」进入，沿用同一应用 ID。如其他地方已发布新版本，先核对最新源码再发布。'),
       ] },
-      { id: 'share-options', title: t('Choose how to share a Local App', '选择 Local App 的共享方式'), paragraphs: [
-        t('To give someone a copy, share the accessible market listing. To continue using your own running app and its existing data from another device, use Remote Control. A listing pasted into a team or DM lets the recipient review the installable release. Team membership alone does not give access to your running desktop app.', '让别人安装副本，可以分享对方有权访问的市场条目。要从自己另一台设备继续使用同一份运行数据，可以用远程控制。市场链接可以发到团队群或私信，接收者自行审核安装。加入团队本身不会获得你电脑上运行实例的访问权。'),
-      ], links: [{ label: t('Share an installable release', '分享可安装版本'), href: '/docs/local-apps#market' }, { label: t('Open the running app', '访问正在运行的应用'), href: '/docs/local-apps#paired-devices' }] },
+      { id: 'share-options', title: t('Choose how to share a Local App', '选择 Local App 的共享方式'), bullets: [
+        t('For anyone to install a copy, make the market listing public and share its link.', '要让大家都能安装副本，在市场上架应用后分享详情页链接。'),
+        t('To give the source to one person, send them a source ZIP directly from iOS or Android.', '只想把源码给指定的人，可以从 iOS 或 Android 导出源码 ZIP，直接发给对方。'),
+        t('To use an app running on your own computer, open it from a paired device. You can continue working with records saved by its backend.', '要从自己的另一台设备继续使用电脑上的应用，通过已配对设备打开，就能继续使用应用后端保存的记录。'),
+      ], links: [{ label: t('Publish a market listing', '上架应用并分享链接'), href: '/docs/local-apps#market' }, { label: t('Share a source ZIP privately', '单独分享源码 ZIP'), href: '/docs/local-apps#source-zip' }, { label: t('Open the running app', '访问正在运行的应用'), href: '/docs/local-apps#paired-devices' }] },
       { id: 'market', title: t('Publish to the market and send the listing', '发布到市场并发送链接'), steps: [
-        t('On Desktop in Code mode, sign in and open Apps → the app’s ••• menu → Publish to market. Fill in the listing and release notes, then choose Review source and publish. Inspect the files in the release before confirming the upload.', '在桌面版 Code 模式下登录，打开「应用 → 目标应用的 ••• → Publish to market」。填写条目和版本说明，点「Review source and publish」，核对要上传的源码文件并确认。'),
-        t('Check the returned status in Manage publications. Once the listing is available to the recipient, copy the market page link into the intended DM or group and send. The recipient opens the listing on a supported device, reviews the release and confirms installation with their own permissions and data.', '在「Manage publications」核对提交状态。确认对方能访问条目后，把市场详情页链接复制到目标私信或群聊并发送。接收者在支持的设备上打开条目、审核版本并确认安装，使用自己的权限和数据。'),
+        t('Sign in on the device that holds the release and enter Code mode. On Desktop, choose Apps → the app’s ••• menu → Publish to market, fill in the listing and release notes, then choose Review source and publish. On iOS or Android, open the app’s details and choose Publish to market. Review the source files and confirm the upload.', '在保存这个版本的设备上登录并切到 Code 模式。桌面版从「应用 → 目标应用的 ••• → Publish to market」进入，填写条目与版本说明，点「Review source and publish」。iOS 和 Android 从「应用 → 应用详情 → 发布到市场」进入。核对要上传的源码文件后确认提交。'),
+        t('A new listing starts hidden. Open the publication manager on the publishing device and check the release status. On Desktop this is Manage publications. After approval, choose Make public. Anyone can now open the listing.', '新条目默认隐藏。在发布设备上打开市场管理页查看版本状态。桌面版入口是「Manage publications」，iOS 是「管理市场发行与审核」，Android 是「管理市场发布」。审核通过后点「上架应用」。此时所有人都可以打开该条目。'),
+        t('Open the public market detail page and send its link in the intended DM or group. The recipient reviews the release and installs a compatible copy with their own permissions and data.', '打开已上架应用的市场详情页，把链接发到目标私信或群聊。接收者查看版本并在兼容设备上安装，使用自己的权限和数据。'),
       ], links: [{ label: t('Send a team message', '发送团队消息'), href: '/docs/teams#send-message' }] },
+      { id: 'source-zip', title: t('Give someone a source ZIP privately', '单独分享源码 ZIP'), steps: [
+        t('On the iOS or Android device that holds the release, open Apps → app details, export the current revision’s source ZIP and save the file. The archive contains the release source. Runtime databases, browser data and permissions stay with the original installation.', '在保存该版本的 iOS 或 Android 设备上进入「应用 → 应用详情」，导出当前版本的源码 ZIP 并保存文件。压缩包包含发布版本的源码。运行数据库、浏览器数据和授权保存在原设备上。'),
+        t('Send the ZIP privately using a channel that accepts it, such as AirDrop or email. To share through a LingXi team DM, send a download link restricted to that person. Team attachments accept PNG, JPEG, PDF and plain text.', '通过隔空投送或邮件等支持 ZIP 的方式单独发送。要在灵犀团队私信里分享，可以发送仅接收者可访问的下载链接。团队附件支持 PNG、JPEG、PDF 和纯文本。'),
+        t('On iOS in Code mode, open Apps → + → Import source folder and select the ZIP. On Android in Code mode, choose Import source in Apps and select the ZIP. Open the imported app from its details.', '接收者在 iOS 的 Code 模式打开「应用 → + → 导入源码文件夹」并选择 ZIP。在 Android 的 Code 模式打开「应用 → 导入源码」，选择 ZIP。导入完成后，在应用详情打开本机副本。'),
+      ] },
       { id: 'paired-devices', title: t('Open the same running app on your own device', '在自己的设备访问同一运行实例'), steps: [
         t('On Desktop configure the remote app gateway and enable Remote Control. In Apps → •••, turn on Allow access from paired devices for this app.', '先在桌面版配置远程应用网关并开启远控。在「应用」中打开目标应用的 •••，勾选允许已配对设备访问。'),
-        t('With the same account, open Remote Control, pair with the computer and select the app under Apps. Its backend and business data stay on the computer. The launch link belongs to that opening and device. To stop sharing, turn off the app’s remote-access setting.', '在自己的另一台设备用同一账号打开远控，完成配对，在所连电脑的「应用」里打开它。后端和业务数据留在电脑上。启动链接绑定这次打开操作和设备。要停止共享，在桌面版关闭该应用的远程访问。'),
+        t('With the same account, open Remote Control, pair with the computer and select the app under Apps. It uses the same backend and the records that backend saves. To stop access, turn off this app’s remote-access setting on Desktop.', '在自己的另一台设备用同一账号打开远控，完成配对，在所连电脑的「应用」里打开它。访问的是同一后端，可以继续使用后端保存的记录。要停止访问，在桌面版关闭该应用的远程访问。'),
+        t('Each remote opening gets a new browser origin. Cookies, localStorage and IndexedDB are isolated for that opening. If an app saves a counter only in the browser, reopening it on the same phone shows the initial count.', '每次远程打开都会获得新的浏览器源。Cookie、localStorage 和 IndexedDB 都按这次打开隔离。如果应用只把计数存在浏览器里，在同一手机上重新打开也会看到初始值。'),
       ], links: [{ label: t('Pair a device', '配对设备'), href: '/docs/remote-control#same-account' }] },
     ],
   },

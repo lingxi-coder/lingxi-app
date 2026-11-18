@@ -173,21 +173,27 @@ export interface DocSearchResult {
   sectionId?: string;
 }
 
-function normalizeWorkflow(query: string): string {
-  return query.toLowerCase().replace(/\s+/gu, '');
+function workflowKey(text: string): string {
+  const tokens = text.toLowerCase().match(/[a-z0-9]+|[\p{L}\p{N}@]/gu) ?? [];
+  return ` ${tokens.join(' ')} `;
 }
 
+// Match complete ASCII words and individual Han characters, as in the bundled skill.
+// Stable ties follow the order of the shared workflow index.
 const workflowSearch = workflows.flatMap(workflow =>
-  workflow.queries.map(phrase => ({ ...workflow, phrase: normalizeWorkflow(phrase) })));
+  workflow.queries.map(phrase => ({ workflow, phrase: workflowKey(phrase) })))
+  .sort((a, b) => Array.from(b.phrase).length - Array.from(a.phrase).length);
 
 export function searchDocs(query: string, locale: 'en' | 'zh'): DocSearchResult[] {
   const terms = query.trim().toLocaleLowerCase().split(/\s+/u).filter(Boolean);
   if (!terms.length) return docPages.slice(0, 7).map((page) => ({ page, excerpt: page.description[locale] }));
-  const question = normalizeWorkflow(query);
-  const best = workflowSearch.filter(item => question.includes(item.phrase))
-    .sort((a, b) => b.phrase.length - a.phrase.length)[0];
-  const matchPage = best && getDocPage(best.page);
-  const section = matchPage?.sections.find(item => item.id === best.section);
+  const question = workflowKey(query);
+  const direct = workflowSearch.find(item => question.includes(item.phrase))?.workflow;
+  const best = direct ?? workflows.find(workflow => workflow.contexts?.some(term => question.includes(workflowKey(term))));
+  const refinement = best?.refinements?.find(item => item.qualifiers.some(phrase => question.includes(workflowKey(phrase))));
+  const sectionId = refinement?.section ?? direct?.section;
+  const matchPage = best && sectionId ? getDocPage(best.page) : undefined;
+  const section = matchPage?.sections.find(item => item.id === sectionId);
   const results = docSearchRecords[locale].flatMap((entry) => {
     if (!terms.every((term) => entry.haystack.includes(term))) return [];
     const matchIndex = entry.loweredBlocks.findIndex((block) => terms.some((term) => block.includes(term)));
@@ -199,7 +205,8 @@ export function searchDocs(query: string, locale: 'en' | 'zh'): DocSearchResult[
     return [{ page: matchPage, sectionId: section.id, excerpt: excerpt[locale] }, ...results.filter(row => row.page !== matchPage)];
   }
   // A product page named by the query should precede pages that merely cite it.
+  const titleQuery = query.toLowerCase().replace(/\s+/gu, '');
   const titleMatch = (page: DocPage) => Number([page.id, page.title[locale]].some(title =>
-    normalizeWorkflow(title).includes(question)));
+    title.toLowerCase().replace(/\s+/gu, '').includes(titleQuery)));
   return results.sort((a, b) => titleMatch(b.page) - titleMatch(a.page));
 }

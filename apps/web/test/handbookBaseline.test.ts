@@ -12,6 +12,33 @@ function run(command: string, args: string[], cwd: string, input?: string) {
   return result.stdout;
 }
 
+test('sync checks workflows at the supplied workspace pin even when its Harness checkout has advanced', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'lingxi-workflow-pin-'));
+  const product = path.join(root, 'lingxi-app');
+  const harness = path.join(root, 'harness-runtime');
+  const workflowPath = path.join(harness, 'crates/skill/src/builtin/lingxi-api/workflows.json');
+  const web = fileURLToPath(new URL('..', import.meta.url));
+  try {
+    mkdirSync(product);
+    mkdirSync(path.dirname(workflowPath), { recursive: true });
+    run('git', ['init', '-q'], harness);
+    run('git', ['config', 'user.name', 'Documentation test'], harness);
+    run('git', ['config', 'user.email', 'docs@example.invalid'], harness);
+    writeFileSync(workflowPath, '[]\n');
+    run('git', ['add', '.'], harness);
+    run('git', ['commit', '-qm', 'pinned workflows'], harness);
+    const pin = run('git', ['rev-parse', 'HEAD'], harness).trim();
+    writeFileSync(path.join(product, 'Cargo.lock'), `[[package]]\nname = "skill"\nsource = "git+https://github.com/lingxi-coder/harness-runtime.git?rev=${pin}#${pin}"\n`);
+    writeFileSync(workflowPath, readFileSync(path.join(web, 'src/data/docs/product-workflows.json')));
+    run('git', ['commit', '-qam', 'match current handbook at HEAD'], harness);
+    // Only the target pin has the old index. Using either HEAD or the script's own
+    // product lock would miss the stale snapshot or fail to find that revision.
+    const check = spawnSync(process.execPath, [path.join(web, 'scripts/sync-docs.mjs'), '--check', '--workspace', '..'], { cwd: product, encoding: 'utf8' });
+    assert.equal(check.status, 1);
+    assert.match(check.stderr, /^Error: Product workflows are stale\./mu);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('handbook fingerprints track referenced configuration independently of API selection', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'lingxi-handbook-baseline-'));
   const repos = ['lingxi-app', 'harness-runtime', 'llm-client', 'mobile-linux-runtime'];

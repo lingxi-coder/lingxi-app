@@ -7,8 +7,8 @@ const args = process.argv.slice(2);
 const check = args.includes('--check');
 const contentOnly = args.includes('--content-only');
 const position = args.indexOf('--workspace');
-const workspace = position >= 0 ? args[position + 1] : path.resolve(webRoot, '../../..');
-if (position >= 0 && !workspace) throw new Error('--workspace requires a path');
+if (position >= 0 && !args[position + 1]) throw new Error('--workspace requires a path');
+const workspace = position >= 0 ? path.resolve(args[position + 1]) : path.resolve(webRoot, '../../..');
 let failed = false;
 function run(command, argv, input) {
   const result = spawnSync(command, argv, { cwd: webRoot, encoding: 'utf8', input, stdio: input === undefined ? 'inherit' : ['pipe', 'inherit', 'inherit'] });
@@ -18,7 +18,7 @@ function run(command, argv, input) {
 if (!contentOnly) {
   // The shipped skill and the handbook search must use the same workflow IDs
   // even when the neighbouring Harness checkout is on a newer branch.
-  const lock = readFileSync(path.join(webRoot, '../../Cargo.lock'), 'utf8');
+  const lock = readFileSync(path.join(workspace, 'lingxi-app', 'Cargo.lock'), 'utf8');
   const revisions = new Set(Array.from(lock.matchAll(/source = "git\+https:\/\/github\.com\/lingxi-coder\/harness-runtime\.git[^"#]*#([a-f0-9]{40})"/g), match => match[1]));
   if (revisions.size !== 1) throw new Error('Expected one pinned Harness revision in Cargo.lock');
   const [revision] = revisions;

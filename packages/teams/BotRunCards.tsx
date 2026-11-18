@@ -156,8 +156,9 @@ export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, onR
   // An approval is decided on the request itself, never by a typed reply.
   const canReply = !!wait && wait.kind === 'human_input' && !!onReply && isMember(wait.recipient)
     && !snapshot.pending.some(item => { const payload = pendingPayload(item); return 'waitId' in payload && payload.waitId === wait.waitId; });
-  // A Bot nobody asked that chose not to answer: one quiet line, nothing to act on.
-  if (task.state === 'declined') return <p className="teams-hint team-bot-run-declined" role="status">{t('teams_task_declined')}</p>;
+  // A Bot that chose not to answer: one quiet line, nothing to act on. A run that used something still says so: a cost is never hidden (U5).
+  if (task.state === 'declined') return <p className="teams-hint team-bot-run-declined" role="status" title={tokenSplit(task.usage, locale) || undefined}>
+    {[t('teams_task_declined'), task.usage ? usageText(task.usage, locale) : ''].filter(Boolean).join(' · ')}</p>;
   const cancel = async () => {
     if (cancelling) return; setCancelling(true); setError('');
     try { await api.messages(executionCommand(scope, 'cancelTask', { taskId: task.taskId })); }

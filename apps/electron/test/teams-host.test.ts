@@ -25,7 +25,7 @@ function fakeService(){
  const events=new EventEmitter();let context:TeamAccountContext|undefined={uid:'owner',epoch:0};const commands:any[]=[],tasks:any[]=[],reads:any[]=[],cards:any[]=[];let deployment:any,inputs:any[]=[];const publicationReceipts=new Map<string,any>();
  const service:TeamHostApi={hostContext:()=>context,assertHostContext:c=>{if(!context||c.uid!==context.uid||c.epoch!==context.epoch)throw Error('INVALID_SESSION');},list:async()=>({teams:[{id:teamId,name:'Team',memberCount:1,role:'owner',generation:1}]}),onChanged:cb=>{events.on('change',cb);return()=>events.off('change',cb);},onMessagesChanged:cb=>{events.on('messages',cb);return()=>events.off('messages',cb);},
  hostMessages:async<T>(c,command)=>{service.assertHostContext(c);commands.push(command);const p=command.payload as any;let result:any={};
- if(command.action==='publishSharedBot'){if(publicationReceipts.has(command.commandId as string))return publicationReceipts.get(command.commandId as string) as T;deployment=p.deployment;inputs=p.inputs.map((v:any)=>({...v,grantId:digest(JSON.stringify([p.sharedBotId,p.expectedRevision+1,v.resourceId]))}));const previous=cards.findIndex(card=>card.sharedBotId===p.sharedBotId);if(previous>=0)cards.splice(previous,1);cards.push({sharedBotId:p.sharedBotId,state:'published',revision:p.expectedRevision+1,maintainer:{uid:'owner',generation:1}});result={sharedBotId:p.sharedBotId,revision:p.expectedRevision+1,grantIds:inputs.map(v=>v.grantId)};publicationReceipts.set(command.commandId as string,result);}
+ if(command.action==='publishSharedBot'){if(publicationReceipts.has(command.commandId as string))return publicationReceipts.get(command.commandId as string) as T;deployment=p.deployment;inputs=p.inputs.map((v:any)=>({...v,grantId:digest(JSON.stringify([p.sharedBotId,p.expectedRevision+1,v.resourceId]))}));const previous=cards.findIndex(card=>card.sharedBotId===p.sharedBotId);if(previous>=0)cards.splice(previous,1);cards.push({sharedBotId:p.sharedBotId,name:p.name,description:p.description,state:'published',revision:p.expectedRevision+1,maintainer:{uid:'owner',generation:1}});result={sharedBotId:p.sharedBotId,revision:p.expectedRevision+1,grantIds:inputs.map(v=>v.grantId)};publicationReceipts.set(command.commandId as string,result);}
  else if(command.action==='listSharedBots')result={bots:cards};
  else if(command.action==='activateDeployment'){assert.equal(p.expectedAccountEpoch,deployment.accountEpoch);deployment.accountEpoch=p.newAccountEpoch;}
  else if(command.action==='listHostTasks')result={tasks:tasks.filter(t=>t.state==='queued')};
@@ -1426,7 +1426,7 @@ test('the Desktop service sends a page\'s service commands only when they are a 
 
 // ---- Auto-reply: unasked (optional) tasks are judged before they run ----
 async function waitFor(check:()=>boolean,ms=8000){const end=Date.now()+ms;while(Date.now()<end){if(check())return;await new Promise(r=>setTimeout(r,20));}assert.ok(check(),'condition reached');}
-const decisionOf=(probability:number|undefined,configured=true)=>({configured:async()=>configured,evaluate:async()=>{if(probability===undefined)throw new Error('Decision service is busy');return {state_revision:0,answers:{reply:{type:'binary' as const,probability}},usage:{input_tokens:1,output_tokens:1},actual_model:null,elapsed_ms:1};}});
+const decisionOf=(probability:number|undefined,configured=true,seen:unknown[]=[])=>({isConfigured:async()=>configured,evaluateTool:async(input:unknown)=>{seen.push(input);if(probability===undefined)throw new Error('Decision service is busy');return {state_revision:0,answers:{reply:{type:'binary' as const,probability}},usage:{input_tokens:1,output_tokens:1},actual_model:null,elapsed_ms:1};}});
 /** A fixture whose service knows the Chat kind and settles a declined task. */
 function autoFixture(t:any,{decision,kind='group',result}:{decision?:ReturnType<typeof decisionOf>;kind?:string;result?:(o:TeamHostProcessOptions)=>TeamHostResult}={}){
  const bootstraps:any[]=[];
@@ -1470,6 +1470,49 @@ test('auto-reply: an unasked task with a later message of its Chat behind it is 
  f.mock.tasks.push(f.task(1),f.task(2));f.mock.wake();await waitFor(()=>f.sent('completeTask').length===1);
  assert.deepEqual(f.sent('declineTask').map(c=>[c.payload.taskId,c.payload.reason]),[['task00001','superseded']]);
  assert.deepEqual(f.sent('startTask').map(c=>c.payload.taskId),['task00002']);
+});
+test('auto-reply: a later message still settling supersedes the task whose wait is over',async t=>{
+ const seen:unknown[]=[],f=autoFixture(t,{decision:decisionOf(0.9,true,seen)});await f.connector.publishLocalBot('owner',f.input);
+ f.mock.tasks.push(f.task(1));f.mock.wake();await new Promise(r=>setTimeout(r,1500));f.mock.tasks.push(f.task(2));f.mock.wake();
+ await waitFor(()=>f.sent('completeTask').length===1);
+ assert.deepEqual(f.sent('declineTask').map(c=>[c.payload.taskId,c.payload.reason]),[['task00001','superseded']]);
+ assert.deepEqual(f.sent('startTask').map(c=>c.payload.taskId),['task00002']);assert.equal(seen.length,1);
+});
+test('auto-reply: a call to the Bot in a superseded message is judged with the next one, unless that task started and answers it itself',async t=>{
+ const judged=async(refuse:boolean)=>{const f=autoFixture(t,{decision:decisionOf(0.1)});await f.connector.publishLocalBot('owner',f.input);
+  const read=f.mock.service.hostReadChat;f.mock.service.hostReadChat=async(c,request)=>{const result=await read(c,request);
+   return {...result,messages:result.messages.map(message=>message.seq===1?{...message,text:'Personal, which hotel is quietest?'}:message)};};
+  const inner=f.mock.service.hostMessages;f.mock.service.hostMessages=async(c,command)=>{
+   if(refuse&&command.action==='declineTask'&&(command.payload as any).taskId==='task00001'){f.mock.commands.push(command);throw new TeamsApiError('TASK_ALREADY_STARTED',409);}return inner(c,command);};
+  f.mock.tasks.push(f.task(1),f.task(2));f.mock.wake();await waitFor(()=>f.sent('declineTask').some(c=>c.payload.taskId==='task00002')||f.sent('completeTask').length===1);
+  return f.sent('declineTask').some(c=>c.payload.taskId==='task00002')?'declined':'answered';};
+ assert.equal(await judged(false),'answered','the passed-over call asks the Bot');
+ assert.equal(await judged(true),'declined','the task that started answers its own message; the next one is judged alone');
+});
+test('auto-reply: a verdict is kept while the Bot×Chat lock holds the start back, and the Decision service is asked once',async t=>{
+ const seen:unknown[]=[],f=autoFixture(t,{decision:decisionOf(0.9,true,seen)});(f.connector as any).options.retryMs=10;await f.connector.publishLocalBot('owner',f.input);
+ const inner=f.mock.service.hostMessages;let starts=0;
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='startTask'&&++starts===1){f.mock.commands.push(command);return {execute:false,taskId:'task00001'} as any;}return inner(c,command);};
+ f.mock.tasks.push(f.task(1));f.mock.wake();await waitFor(()=>f.sent('completeTask').length===1);
+ assert.equal(starts,2);assert.equal(seen.length,1);
+});
+test('auto-reply: a run nobody asked is offered no list whose changes wait for the requester; an asked one is',async t=>{
+ const list={...groceries,approval:'requester' as const};
+ const listing=async(kind:string)=>{const f=autoFixture(t,{decision:decisionOf(0.9),kind});
+  (f.connector as any).options.modelRoute=async()=>({route:chatRoute(),profiles:[chatRoute().model_profile],assertCurrent:async()=>{}});
+  await f.connector.publishLocalBot('owner',{...f.input,sharedList:list});const inner=f.mock.service.hostMessages;
+  f.mock.service.hostMessages=async(c,command)=>{const result:any=await inner(c,command);return command.action==='startTask'?{...result,sharedList:list}:result;};
+  f.mock.tasks.push(f.task(1));f.mock.wake();await waitFor(()=>f.sent('completeTask').length===1);return f.runs()[0];};
+ const group=await listing('group');assert.equal(group.sharedList,undefined);assert.equal(group.askRequester,undefined);
+ assert.deepEqual((await listing('bot_dm')).sharedList,list);
+});
+test('auto-reply: a silence the worker saved before the start was confirmed is delivered as declined, never run again',async t=>{
+ const f=autoFixture(t,{decision:decisionOf(0.5),result:()=>{throw Error('UNEXPECTED_SDK_ENTRY');}});(f.connector as any).options.retryMs=10;
+ await f.connector.publishLocalBot('owner',f.input);const inner=f.mock.service.hostMessages;let lost=false;
+ f.mock.service.hostMessages=async(c,command)=>{const result=await inner(c,command);if(command.action==='startTask'&&!lost){lost=true;const paths=await f.privateStore.owner('owner');
+  mkdirSync(join(paths.runtime,'results'),{mode:0o700});writeFileSync(join(paths.runtime,'results','task00001.json'),JSON.stringify({version:3,type:'result',status:'declined',cursor,text:'',finishedAt:Date.now(),usage:{status:'missing'}}),{mode:0o600});throw Error('SERVICE_UNAVAILABLE');}return result;};
+ f.mock.tasks.push(f.task(1));f.mock.wake();await waitFor(()=>f.sent('completeTask').length===1);
+ assert.equal(f.sent('completeTask')[0].payload.outcome,'declined');assert.equal(f.sent('completeTask')[0].payload.text,'');assert.equal(f.runs().length,0);
 });
 test('auto-reply: a Bot is published to answer unasked only from a Desktop with a Decision service',async t=>{
  const none=autoFixture(t);

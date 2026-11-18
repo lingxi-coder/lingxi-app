@@ -1519,6 +1519,18 @@ test('auto-reply: a failed unasked run in a group is silent, an answer is posted
   assert.equal(reply.state, 'completed');
   assert.equal((await autoChatRef().collection('messages').doc(reply.replyId).get()).data().text, 'The Station Inn is quiet.');
   assert.deepEqual((await execute('listTasks', { conversationId: autoChat }, member)).tasks.map(t => t.taskId), [autoTask(2)]);
+  // Nobody asked it: the answered run is not the author's own request.
+  assert.deepEqual((await execute('listTasks', {}, other)).tasks, []);
+});
+test('auto-reply: a Bot already on that no longer allows it can be kept while the setting changes, and is admitted nothing', options, async () => {
+  await autoGroup();
+  await publishAutoReply(undefined);
+  assert.equal((await execute('setConversationAutoReply', { conversationId: autoChat, expectedRevision: 1, targets: ['sharedbot_01'] }, other)).revision, 2);
+  await say(member, 1);
+  assert.equal(await taskData(autoTask(1)), undefined);
+  await execute('setConversationAutoReply', { conversationId: autoChat, expectedRevision: 2, targets: [] }, member);
+  await assert.rejects(execute('setConversationAutoReply', { conversationId: autoChat, expectedRevision: 3, targets: ['sharedbot_01'] }, member),
+    { code: 'AUTO_REPLY_UNAVAILABLE' }, 'switching it on again needs it to allow it');
 });
 test('auto-reply: in a Bot DM every message is still a charged request, and only there may it end declined', options, async () => {
   await publishAutoReply({ daily: 5 });
@@ -1534,7 +1546,12 @@ test('auto-reply: in a Bot DM every message is still a charged request, and only
   const failing = await start();
   assert.equal((await execute('completeTask', result(failing, { outcome: 'failed', text: 'Failed.', document: undefined }))).state, 'failed');
   assert.equal(await messageCount(), 3);
+  // A request sent while auto-reply was on stands when the DM turns it off: it was asked for, and charged.
+  const pending = await execute('submit', submit(), member);
   await execute('setConversationAutoReply', { conversationId, expectedRevision: 1, targets: [] }, member);
+  const kept = await execute('startTask', { ...host, taskId: pending.tasks[0].taskId });
+  assert.equal(kept.execute, true);
+  assert.equal((await execute('completeTask', result(kept, { text: 'Pack light.', document: undefined }))).state, 'completed');
   const asked = await start();
   assert.equal(asked.task.optional, undefined);
   await assert.rejects(execute('completeTask', declined(asked)), { code: 'TASK_NOT_OPTIONAL' });

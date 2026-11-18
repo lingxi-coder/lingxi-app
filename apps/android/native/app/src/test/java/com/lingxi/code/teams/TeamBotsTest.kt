@@ -220,6 +220,13 @@ class TeamBotsTest {
         assertEquals(listOf("sharedbot_a", "sharedbot_c"), TeamAutoReply.targets(offered, "sharedbot_a", true))
         assertEquals(emptyList<String>(), TeamAutoReply.targets(offered, "sharedbot_c", false))
         assertTrue("only the Chat's people change it", TeamAutoReply.bots(chat, cards, "bob").bots.isEmpty())
+        // A Bot on in the Chat that this person cannot see (published to others only) stays on whatever they switch.
+        val hiddenChat = TeamMessageConversation.fromDocument("chat_0003", mapOf("kind" to "group", "title" to "Trip", "participants" to listOf("user:alice", "shared_bot:sharedbot_a", "shared_bot:sharedbot_x"),
+            "lastSeq" to 0L, "lastChangeSeq" to 0L, "lastMessage" to null, "autoReply" to mapOf("revision" to 4L, "targets" to listOf("sharedbot_x", "sharedbot_gone"))), 0) { null }
+        val hidden = TeamAutoReply.bots(hiddenChat, cards, "alice")
+        assertEquals(emptyList<String>(), hidden.on)
+        assertEquals("a Bot no longer in the Chat is not kept", listOf("sharedbot_x"), hidden.kept)
+        assertEquals(listOf("sharedbot_a", "sharedbot_x"), TeamAutoReply.targets(hidden, "sharedbot_a", true))
         val unreadable = TeamMessageConversation.fromDocument("chat_0002", mapOf("kind" to "group", "title" to "Trip", "participants" to listOf("user:alice"), "lastSeq" to 0L, "lastChangeSeq" to 0L, "lastMessage" to null,
             "autoReply" to mapOf("revision" to "3", "targets" to listOf("sharedbot_c"))), 0) { null }
         assertNull(unreadable.autoReply)

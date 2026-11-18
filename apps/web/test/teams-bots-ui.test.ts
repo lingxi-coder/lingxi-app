@@ -828,20 +828,24 @@ scenario('Auto-reply: the wizard offers it only with Decision set up on this Des
 scenario('Auto-reply: a person in a Chat turns a Bot on after being told where the messages go; a declined run is one quiet line', async context => {
   const { fake, workspace } = await open(context); const calls: MessageCommand[] = [];
   fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, autoReply: { daily: 7 } })]; await workspace.refreshBots(); await until(() => !!workspace.getSnapshot().bots[0]?.autoReply, 'the Bot');
-  fake.conversations.set('team-test', [conversation('test-chat', { kind: 'group', participants: ['user:alice', 'user:bob', 'shared_bot:assistant-fixture'] })]);
+  // `hidden-bot` is on in this Chat, and published only to others: this person cannot see it, and their change leaves it on.
+  fake.conversations.set('team-test', [conversation('test-chat', { kind: 'group', participants: ['user:alice', 'user:bob', 'shared_bot:assistant-fixture', 'shared_bot:hidden-bot'],
+    autoReply: { revision: 2, targets: ['hidden-bot'] } })]);
   await workspace.refresh(); workspace.selectConversation('test-chat'); await until(() => workspace.getSnapshot().selectedConversationId === 'test-chat', 'selection');
   fake.messages = async <T>(command: MessageCommand) => { calls.push(command);
-    if (command.action === 'listTasks') return { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'bob', generation: 1 }, state: 'declined', optional: true, createdAt: 1, deadline: 2 }] } as T;
+    if (command.action === 'listTasks') return { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'bob', generation: 1 }, state: 'declined', optional: true, createdAt: 1, deadline: 2,
+      usage: { status: 'complete', inputTokens: 1200, outputTokens: 0 } }] } as T;
     return { bots: fake.bots } as T; };
   const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en' })); context.after(() => page.unmount());
   await until(() => /Did not reply/.test(page.text()), 'the declined run'); assert.doesNotMatch(page.text(), /Cancel task|Failed/);
+  assert.match(page.text(), /Did not reply · 1\.2K tokens/, 'a run that chose silence still shows what it used');
   const button = page.oneByLabel('Bots that answer on their own'); assert.equal(button.props['aria-pressed'], false);
   await page.click(button);
   assert.match(page.text(), /New messages in this chat are sent to the Decision service and model that you set up for Fixture Bot\. It answers on its own at most 7 times a day\./);
   assert.equal(page.button('Save').props.disabled, true, 'nothing changed yet');
   await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox' && textOf(n.parent) === 'Fixture Bot')[0]); await page.click(page.button('Save'));
   const sent = calls.find(command => command.action === 'setConversationAutoReply') as Extract<MessageCommand, { action: 'setConversationAutoReply' }> | undefined;
-  assert.deepEqual(sent?.payload, { conversationId: 'test-chat', expectedRevision: 0, targets: ['assistant-fixture'] });
+  assert.deepEqual(sent?.payload, { conversationId: 'test-chat', expectedRevision: 2, targets: ['assistant-fixture', 'hidden-bot'] });
 });
 scenario('Auto-reply: a Chat whose Bots cannot answer on their own shows no switch', async context => {
   const { fake, workspace } = await open(context);

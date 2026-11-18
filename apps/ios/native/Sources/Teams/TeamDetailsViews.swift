@@ -104,7 +104,7 @@ struct TeamConversationDetailsSheet: View {
                         let on = auto.on.contains(card.sharedBotId)
                         VStack(alignment: .leading, spacing: 4) {
                             Toggle(card.name, isOn: Binding(get: { on }, set: { enabled in
-                                let targets = TeamAutoReply.targets(auto.bots, on: auto.on, switching: card.sharedBotId, to: enabled)
+                                let targets = TeamAutoReply.targets(auto.bots, on: auto.on, kept: auto.kept, switching: card.sharedBotId, to: enabled)
                                 Task { await workspace.run { try await model.setConversationAutoReply(conversation.id, expectedRevision: conversation.autoReply?.revision ?? 0, targets: targets) } }
                             }))
                             .disabled(model.offline || workspace.messageBusy || !on && !TeamAutoReply.available(card))

@@ -452,6 +452,20 @@ test('host notifications reach listeners, including ones sent right after approv
   connection.stop();
 });
 
+test('a revocation sent right after approval fails the attempt as revoked, never a ready connection on a closed link', async () => {
+  const h = await harness();
+  const connection = h.connect();
+  connection.start();
+  await h.until(connection, 'awaiting_approval');
+  const hostSide = [...h.host.connections.values()][0]!;
+  h.host.approve(hostSide.offer.device.id);
+  void hostSide.notify('auth.denied', { reason: 'revoked' });
+  await h.until(connection, 'failed');
+  assert.equal(connection.state.failure?.kind, 'revoked');
+  assert.equal(connection.state.failure?.auto, false);
+  assert.equal(await h.keys.pinnedHost(h.host.hostId), undefined);
+});
+
 /** True once a promise has settled (for polling in `waitFor`). */
 const settledPromises = new WeakMap<Promise<unknown>, boolean>();
 function settledPromise(promise: Promise<unknown>): boolean {

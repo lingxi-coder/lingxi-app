@@ -14,7 +14,7 @@ import { validateBotManifest } from '../bots/package.js';
 import { TeamPrivateStore, digest, validateTeamModelRoute, type TeamModelSelection, type TeamPersonaSnapshot, type SharedBotBinding, type PublishedDocument, type SavedExecution, type SavedDelivery, type TeamDataRef, type SavedGrantIntent } from './privateStore.js';
 import { runTeamHost, runResult, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult, type TeamRunResult, type TeamTaskCheckpoint, type TeamTaskWait, type TeamContinuation, type BotChatScope, type TeamOperation, type TeamOperationOutcome } from './process.js';
 import type { LocalTeamHost, TeamAccountContext } from './service.js';
-import { triageReply, type ReplyDecision } from './replyTriage.js';
+import { triageReply, type ReplyDecision, type TriageVerdict } from './replyTriage.js';
 
 export interface TeamHostApi {
   hostContext(): TeamAccountContext | undefined;
@@ -61,6 +61,13 @@ const listOffer = (value: unknown): SharedListOffer | undefined => {
   return offer && typeof offer.title === 'string' && typeof offer.description === 'string'
     ? { title: offer.title, description: offer.description, ...(offer.approval === 'requester' ? { approval: 'requester' as const } : {}) } : undefined;
 };
+/** The list a run is given. A run nobody asked has nobody to approve a change, so it gets no list whose changes wait for the requester. */
+const runList = (value: unknown, unasked: boolean): SharedListOffer | undefined => {
+  const offer = listOffer(value);
+  return offer && !(unasked && offer.approval === 'requester') ? offer : undefined;
+};
+/** A worker result that ends the task: it is delivered as it is, never inspected or continued. */
+const finished = (status: string) => status === 'completed' || status === 'failed' || status === 'declined';
 /** The service's digest of a JSON value: object keys in order, so both sides hash the same bytes. */
 const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical) : value !== null && typeof value === 'object'
   ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => [key, canonical(item)])) : value;
@@ -151,6 +158,10 @@ export class TeamConnector implements LocalTeamHost {
   private readonly selections = new Map<string, Selected>(); private readonly publishing = new Set<string>();
   private readonly activated = new Map<string, string>(); private readonly heartbeats = new Map<string, number>();
   private readonly deferred = new Map<string, number>(); private readonly deferredCodes = new Map<string, string>();
+  /** The triage verdict of an unasked task not yet started: a start the Bot×Chat lock refuses is tried again every few seconds, and is judged once. */
+  private readonly verdicts = new Map<string, TriageVerdict>();
+  /** Per Bot and Chat, the message seqs of unasked tasks superseded before anyone judged them: the next judgement counts a call to the Bot in any of them. */
+  private readonly passedOver = new Map<string, Set<number>>();
   private readonly scheduled = new Map<string, number>(); private readonly stops: Array<() => void>;
   private revision = 0; private probes = 0;
   /** Friendship teams the server answered MEMBERSHIP_REQUIRED: the friendship is over and no pass sends them another command (D24). Memory only; `revoke()` clears it. */
@@ -282,7 +293,7 @@ export class TeamConnector implements LocalTeamHost {
       const auto = input.autoReply;
       if (auto !== undefined && (!auto || typeof auto !== 'object' || Object.keys(auto).join(',') !== 'daily' || !Number.isSafeInteger(auto.daily) || auto.daily < 1 || auto.daily > 10000)) throw new Error('INVALID_INPUT');
       // Unasked messages are judged by the Decision service of this Desktop: without one, a Bot is not published to answer them.
-      if (auto && !(await this.options.decision?.configured().catch(() => false))) throw new Error('DECISION_REQUIRED');
+      if (auto && !(await this.options.decision?.isConfigured().catch(() => false))) throw new Error('DECISION_REQUIRED');
       const requestDigest = digest(JSON.stringify(input));
       const pending = await this.options.privateStore.publication(uid,input.publicationId); this.assert(context);
       if (pending) {
@@ -474,7 +485,7 @@ export class TeamConnector implements LocalTeamHost {
     this.wake();
   }
   /** Account reset or sign-out: every running task loses its authority. A cache or listener flicker never comes here. */
-  revoke() { this.revision++; this.ended.clear(); for (const a of this.active.values()) this.abort(a,'REVOKED'); this.selections.clear(); this.deferred.clear(); this.deferredCodes.clear(); this.activated.clear(); this.heartbeats.clear(); this.resultProbes.clear(); this.served.clear(); this.keepServing(); this.wake(); }
+  revoke() { this.revision++; this.ended.clear(); for (const a of this.active.values()) this.abort(a,'REVOKED'); this.selections.clear(); this.deferred.clear(); this.deferredCodes.clear(); this.verdicts.clear(); this.passedOver.clear(); this.activated.clear(); this.heartbeats.clear(); this.resultProbes.clear(); this.served.clear(); this.keepServing(); this.wake(); }
   private wake() {
     if (this.closed || this.resting || (this.options.platform ?? process.platform) !== 'darwin') return; this.pending = true; if (this.refresh) return;
     this.refresh = (async () => { while (this.pending && !this.closed && !this.resting) { this.pending = false; try { await this.discover(); } catch { /* Retry discovery; a failed authorization never starts work. */ } this.keepServing(); } })()
@@ -512,7 +523,7 @@ export class TeamConnector implements LocalTeamHost {
     const running = (b: SharedBotBinding) => [...this.active.keys()].filter(key => { const scope = JSON.parse(key) as string[]; return scope[0] === b.teamId && scope[1] === b.sharedBotId; }).length;
     return { bots: bindings.map(b => ({ teamId: b.teamId, sharedBotId: b.sharedBotId, state: 'checking' as const, ...this.served.get(scopeKey(b)), running: running(b) })),
       ...(this.options.background?.() ?? { openAtLogin: { available: false, enabled: false, needsApproval: false }, keepAwake: false, onBattery: false }),
-      decisionConfigured: await this.options.decision?.configured().catch(() => false) ?? false };
+      decisionConfigured: await this.options.decision?.isConfigured().catch(() => false) ?? false };
   }
   async idle() { await this.refresh; }
   private async discover() {
@@ -535,7 +546,10 @@ export class TeamConnector implements LocalTeamHost {
     for (const key of [...this.served.keys()]) if (!bindings.some(b => scopeKey(b) === key)) this.served.delete(key);
     if (!bindings.length) return;
     const { teams } = await this.options.service.list(c.uid); assert();
-    const candidates: Array<{ binding: SharedBotBinding; task: HostTask; snapshot: TeamPersonaSnapshot }> = [];
+    // `bot` is the name and description members see on the published card: what they call the Bot by.
+    const candidates: Array<{ binding: SharedBotBinding; task: HostTask; snapshot: TeamPersonaSnapshot; bot: { name: string; description: string } }> = [];
+    // Every queued task listed, due or not: a later message still settling, or a start waiting to be tried again, supersedes an earlier unasked task too.
+    const queued: Array<{ binding: SharedBotBinding; task: HostTask }> = [];
     // Cards this pass found paused, unpublished, republished or handed over: their deployment is never activated here.
     const inactive = new Set<string>();
     for (let index = 0; index < bindings.length; index += 1) {
@@ -569,9 +583,10 @@ export class TeamConnector implements LocalTeamHost {
           if (!Array.isArray(response.tasks) || response.tasks.length>100) throw new Error('INVALID_TASK_PAGE');
           for (const task of response.tasks) {
             if (task.state !== 'queued') continue;
+            queued.push({ binding: b, task });
             // An unasked task is judged a moment after it arrives, once a burst of messages has settled.
             if (task.optional === true && !task.resume && !this.deferred.has(task.taskId)) { this.deferred.set(task.taskId,this.now()+SETTLE_MS); setTimeout(() => this.wake(),SETTLE_MS).unref(); continue; }
-            if ((this.deferred.get(task.taskId)??0)<=this.now()) candidates.push({binding:b,task,snapshot});
+            if ((this.deferred.get(task.taskId)??0)<=this.now()) candidates.push({binding:b,task,snapshot,bot:{name:card.name,description:card.description}});
           }
           if (!response.nextCursor) break;
           if (!id(response.nextCursor) || pages.has(response.nextCursor)) throw new Error('INVALID_TASK_PAGE');
@@ -605,7 +620,7 @@ export class TeamConnector implements LocalTeamHost {
             const paths=await this.options.privateStore.owner(c.uid),bins=this.options.binaries();
             const result=await this.options.privateStore.savedResult(c.uid,promoted.taskId)??runResult(await (this.options.run??runTeamHost)({executable:bins.host,home:paths.home,tmp:paths.tmp,signal:AbortSignal.timeout(10000),timeoutMs:10000,assertCurrent:assert,
               bootstrap:{version:3,type:'inspect_result',storageRoot:paths.runtime,workerExecutable:bins.worker,scope:promoted.scope,taskId:promoted.taskId}}));assert();
-            if(result.status==='completed'||result.status==='failed')await this.saveResult(c,promoted,result);
+            if(finished(result.status))await this.saveResult(c,promoted,result);
             else await this.recover(c,b,promoted,{paths,bins},revision,assert);
           }
         }catch{assert();}finally{if(revision===this.revision)this.deferred.set(intent.taskId,this.now()+(this.options.retryMs??5000));}
@@ -630,7 +645,7 @@ export class TeamConnector implements LocalTeamHost {
           const recovered = runResult(await (this.options.run ?? runTeamHost)({executable:bins.host,home:paths.home,tmp:paths.tmp,signal:AbortSignal.timeout(10000),timeoutMs:10000,assertCurrent:assert,
             bootstrap:{version:3,type:'inspect_result',storageRoot:paths.runtime,workerExecutable:bins.worker,scope:intent.scope,taskId:intent.taskId}}));
           assert();
-          if (recovered.status === 'completed' || recovered.status === 'failed' || recovered.status === 'declined') { result = recovered; this.resultProbes.delete(intent.taskId); }
+          if (finished(recovered.status)) { result = recovered; this.resultProbes.delete(intent.taskId); }
           else {
             this.resultProbes.set(intent.taskId, this.now() + (this.options.retryMs ?? 5000));
             // The worker is gone and left no result, and the attempt still has time: the durable checkpoint decides what happens to the task.
@@ -678,17 +693,30 @@ export class TeamConnector implements LocalTeamHost {
     candidates.sort((a,b) => (this.scheduled.get(serialKey(a.binding,a.task.conversationId)) ?? 0) - (this.scheduled.get(serialKey(b.binding,b.task.conversationId)) ?? 0) || a.task.messageSeq - b.task.messageSeq);
     // An unasked task with a later message of its Chat behind it is superseded: the later task sees the same Chat and more. The server starts tasks of a Chat in order, so it must not be left queued.
     const latest = new Map<string, number>();
-    for (const { binding, task } of candidates) { const key = serialKey(binding,task.conversationId); latest.set(key, Math.max(latest.get(key) ?? 0, task.messageSeq)); }
-    for (const { binding, task } of candidates.filter(({ binding, task }) => task.optional === true && !task.resume && task.messageSeq < latest.get(serialKey(binding,task.conversationId))!)) {
-      try { await this.decline(c,binding,task.taskId,'superseded'); } catch { assert(); }
-    }
+    for (const { binding, task } of queued) { const key = serialKey(binding,task.conversationId); latest.set(key, Math.max(latest.get(key) ?? 0, task.messageSeq)); }
+    const superseded = ({ binding, task }: { binding: SharedBotBinding; task: HostTask }) => task.optional === true && !task.resume && task.messageSeq < latest.get(serialKey(binding,task.conversationId))!;
+    // The declines are independent of each other: none waits for another, and none holds up the tasks launched below.
+    const declines = await Promise.allSettled(candidates.filter(superseded).map(async ({ binding, task }) => {
+      const key = serialKey(binding,task.conversationId), seqs = this.passedOver.get(key) ?? new Set<number>();
+      this.passedOver.set(key, seqs.add(task.messageSeq));
+      try { await this.decline(c,binding,task.taskId,'superseded'); } catch (error) {
+        // Refused, because the task started meanwhile: it answers its own message, which the next judgement must not count as unanswered.
+        const left = this.passedOver.get(key);
+        if (definitive(error) && left) { left.delete(task.messageSeq); if (!left.size) this.passedOver.delete(key); }
+        throw error;
+      }
+    }));
+    if (declines.some(outcome => outcome.status === 'rejected')) assert();
+    // A verdict is kept only while its task is still queued.
+    const listed = new Set(queued.map(({ task }) => task.taskId));
+    for (const taskId of this.verdicts.keys()) if (!listed.has(taskId)) this.verdicts.delete(taskId);
     for (const candidate of candidates) {
-      if (candidate.task.optional === true && !candidate.task.resume && candidate.task.messageSeq < latest.get(serialKey(candidate.binding,candidate.task.conversationId))!) continue;
+      if (superseded(candidate)) continue;
       assert(); if (this.active.size+this.probes >= Math.min(4,this.options.maxConcurrent ?? 4)) break;
       if(pendingGrants.has(candidate.task.taskId)||retainedTasks.has(candidate.task.taskId)&&!candidate.task.resume)continue;
       const key = serialKey(candidate.binding,candidate.task.conversationId); if (this.active.has(key)) continue;
-      const { binding, task, snapshot } = candidate, resume = task.resume;
-      this.launch(revision,task.taskId,binding.instanceId,key,signal => resume ? this.answer(c,binding,task,resume,snapshot,signal) : this.execute(c,binding,task,snapshot,signal));
+      const { binding, task, snapshot, bot } = candidate, resume = task.resume;
+      this.launch(revision,task.taskId,binding.instanceId,key,signal => resume ? this.answer(c,binding,task,resume,snapshot,signal) : this.execute(c,binding,task,snapshot,bot,signal));
     }
   }
   /** One task at a time per Bot and Chat. A start that throws is tried again after the retry delay. */
@@ -731,13 +759,14 @@ export class TeamConnector implements LocalTeamHost {
     const snapshot=await this.options.privateStore.snapshot(c.uid,b.snapshot);
     if(context.inputs.length!==snapshot.documents.length||context.inputs.some(input=>!snapshot.documents.some(document=>document.resourceId===input.resourceId&&document.digest===input.digest)))throw new Error('INPUT_GRANT_REQUIRED');
     const {pause:_pause,wait:_wait,list:_list,...kept}=record;
+    const list=CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol)?runList(context.sharedList,record.unasked===true):undefined;
     const next:SavedExecution={...kept,epoch:grant.targetEpoch,deadlineAt:context.task.deadline,
       payload:{...record.payload,...this.hostFields(b),permitId:this.candidate(record)},grant:{...grant,phase:'validated'},
       dispatched:Math.max(record.dispatched,grant.checkpoint?.dispatchesObserved??0,context.physicalDispatchesSpent??0),
       recoveries:record.recoveries+(grant.action==='continueTask'&&grant.payload.reason==='recovery'?1:0),
       // A Bot nobody asked does not ask the member who wrote back: in a group they did not ask it anything.
       ask:context.deployment.capabilities?.durableWait===true&&CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol)&&record.unasked!==true,
-      ...(CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol)&&listOffer(context.sharedList)?{list:listOffer(context.sharedList)!}:{})};
+      ...(list?{list}:{})};
     return await this.options.privateStore.compareExecution(c.uid,record,next)?next:undefined;
   }
   /** A safe grant receipt never replays a permit. Only its candidate plus the original source/context proves admission. */
@@ -860,14 +889,26 @@ export class TeamConnector implements LocalTeamHost {
     await this.attempt(c,b,snapshot,next,accounts,environment,signal,{ epoch: next.epoch, expected_checkpoint_digest: checkpoint.checkpointDigest,
       ...(answer ? { answer: { wait_id: answer.waitId, message_id: answer.messageId, text: answer.text, ...(answer.approved !== undefined ? { approved: answer.approved } : {}) } } : {}) });
   }
-  private async execute(c: TeamAccountContext, b: SharedBotBinding, task: HostTask, snapshot: TeamPersonaSnapshot, signal: AbortSignal) {
+  private async execute(c: TeamAccountContext, b: SharedBotBinding, task: HostTask, snapshot: TeamPersonaSnapshot, bot: { name: string; description: string }, signal: AbortSignal) {
     const assert = () => { this.assert(c); signal.throwIfAborted(); };
     const fields = {...this.hostFields(b),taskId:task.taskId}, environment = { paths: await this.options.privateStore.owner(c.uid), bins: this.options.binaries() }, { paths, bins } = environment; assert();
     const prepared = await this.command<TaskContext>(c,b,'prepareTask',fields); assert();
     const scope: BotChatScope = { teamId:b.teamId, sharedBotId:b.sharedBotId, conversationId:task.conversationId, sessionEpoch:b.sessionEpoch };
+    const sourceScope = {teamId:b.teamId,generation:b.generation,conversationId:task.conversationId}, kind = prepared.conversationKind ?? 'group';
+    // A Bot nobody asked does not ask the member who wrote back: in a group they did not ask it anything.
+    const unasked = task.optional === true && kind !== 'bot_dm';
+    // Nobody asked the Bot for this one: judge first whether it answers at all, before its session is opened, any file is read or any permit spent.
+    // The verdict is kept until the task starts or is declined: a start the Bot×Chat lock refuses is tried again every few seconds, and judged once.
+    let mayDecline = false;
+    if (task.optional === true) {
+      const verdict = this.verdicts.get(task.taskId) ?? await this.triage(c,sourceScope,b,prepared,bot,kind,signal); assert();
+      this.verdicts.set(task.taskId, verdict);
+      if (verdict.action === 'decline') { await this.decline(c,b,task.taskId,'triage'); this.judged(b,task); return; }
+      mayDecline = verdict.action === 'run_may_decline';
+    }
     const run = this.options.run ?? runTeamHost;
     const inspected = runResult(await run({ executable:bins.host,home:paths.home,tmp:paths.tmp,signal,assertCurrent:assert,bootstrap:{version:3,type:'inspect_scope',storageRoot:paths.runtime,workerExecutable:bins.worker,scope} })); assert();
-    const cursor = inspected.cursor, sourceScope = {teamId:b.teamId,generation:b.generation,conversationId:task.conversationId};
+    const cursor = inspected.cursor;
     if (cursor.lastMessageSeq >= prepared.messageSeq) throw new Error('TASK_INPUT_ALREADY_COMMITTED');
     const source = await this.options.service.hostReadChat(c,{...sourceScope,...(cursor.sessionRevision === 0 ? {mode:'recent' as const,throughSeq:prepared.messageSeq} : {mode:'range' as const,fromSeqExclusive:cursor.lastMessageSeq,toSeqInclusive:prepared.messageSeq})}); assert();
     const changes = cursor.lastMessageSeq ? await this.options.service.hostReadChat(c,{...sourceScope,mode:'changes',afterChangeSeq:cursor.lastChangeSeq,throughMessageSeq:cursor.lastMessageSeq}) : undefined; assert();
@@ -875,19 +916,6 @@ export class TeamConnector implements LocalTeamHost {
       || changes.messages.some(message => message.changeSeq > source.lastChangeSeq))) throw new Error('CHAT_CHANGED');
     if (prepared.deployment.definitionDigest !== b.snapshot || prepared.deployment.accountEpoch !== b.accountEpoch || prepared.inputs.some(g => !snapshot.documents.some(d => d.resourceId === g.resourceId && d.digest === g.digest))
       || prepared.inputs.length !== snapshot.documents.length) throw new Error('INPUT_GRANT_REQUIRED');
-    // Nobody asked the Bot for this one: judge first whether it answers at all, before any file is read or any permit spent.
-    let mayDecline = false;
-    // A Bot nobody asked does not ask the member who wrote back: in a group they did not ask it anything.
-    const unasked = task.optional === true && prepared.conversationKind !== 'bot_dm';
-    if (task.optional === true) {
-      const kind = prepared.conversationKind ?? 'group';
-      const recent = await this.options.service.hostReadChat(c,{...sourceScope,mode:'before',beforeSeq:prepared.messageSeq+1,limit:13}); assert();
-      let bot = { name: 'Assistant', description: '' }; try { const local = this.options.store.get(b.instanceId); bot = { name: local.name, description: local.description ?? '' }; } catch { /* The binding check below stops a run of a deleted Bot. */ }
-      const verdict = await triageReply({ bot: { sharedBotId: b.sharedBotId, ...bot }, conversation: { kind }, messages: recent.messages, messageId: prepared.messageId, decision: this.options.decision, signal }); assert();
-      this.log('team_reply_triage', { taskId: task.taskId, action: verdict.action, source: verdict.source });
-      if (verdict.action === 'decline') { await this.decline(c,b,task.taskId,'triage'); return; }
-      mayDecline = verdict.action === 'run_may_decline';
-    }
     const files = await this.inputFiles(c,b,source.messages,prepared.messageId,signal); assert();
     const reference = await this.options.privateStore.dataRef(c.uid,{schemaVersion:1,batchId:task.taskId,...scope,expectedSessionRevision:cursor.sessionRevision,
       fromSeqExclusive:cursor.sessionRevision === 0 ? Math.max(0,prepared.messageSeq-200) : cursor.lastMessageSeq,toSeqInclusive:prepared.messageSeq,lastChangeSeq:source.lastChangeSeq,
@@ -903,12 +931,12 @@ export class TeamConnector implements LocalTeamHost {
       ask:prepared.deployment?.capabilities?.durableWait === true && CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) && !unasked,
       ...(unasked ? { unasked: true } : {}), ...(mayDecline ? { mayDecline: true } : {}),
       ...(files.length ? { files: files.map(({ attachmentId, sha256 }) => ({ attachmentId, sha256 })) } : {}),
-      ...(CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) && listOffer(prepared.sharedList) ? { list: listOffer(prepared.sharedList)! } : {}) };
+      ...(CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) && runList(prepared.sharedList,unasked) ? { list: runList(prepared.sharedList,unasked)! } : {}) };
     const pending=this.grantIntent(b,record,prepared,'startTask',startPayload);
     pending.grant!.cursor={sessionRevision:cursor.sessionRevision,lastMessageSeq:cursor.lastMessageSeq,lastChangeSeq:cursor.lastChangeSeq};
     if(!await this.options.privateStore.compareExecution(c.uid,undefined,pending))return;kept=true;
     const admitted=await this.sendGrant(c,b,pending);if(!admitted){this.deferred.set(task.taskId,this.now()+(this.options.retryMs??5000));return;}
-    this.deferred.delete(task.taskId);this.deferredCodes.delete(task.taskId);
+    this.deferred.delete(task.taskId);this.deferredCodes.delete(task.taskId);this.verdicts.delete(task.taskId);this.judged(b,task);
     await this.attempt(c,b,snapshot,admitted,accounts,environment,signal);
     } finally { if (!kept) await this.options.privateStore.releaseDataRef(c.uid,reference); }
   }
@@ -971,7 +999,7 @@ export class TeamConnector implements LocalTeamHost {
       clearInterval(interval);
       const stop = result?.status === 'waiting' && record.ask && result.wait && result.checkpointDigest && result.pausedAt !== undefined
         ? { wait: result.wait, checkpointDigest: result.checkpointDigest, pausedAt: result.pausedAt, dispatchedRequests: result.dispatchedRequests ?? record.dispatched } : undefined;
-      if (!result || !stop && result.status !== 'completed' && result.status !== 'failed' && result.status !== 'declined') {
+      if (!result || !stop && !finished(result.status)) {
         const code = signal.aborted && typeof signal.reason === 'string' ? signal.reason : result ? 'TEAM_HOST_PROTOCOL' : errorCode(failure);
         this.log('team_task_failed', { taskId: record.taskId, code, aborted: signal.aborted });
         // Only an interruption is continued: this host is closing, or the process stopped without a verdict. Discovery then asks the durable checkpoint.
@@ -1083,11 +1111,33 @@ export class TeamConnector implements LocalTeamHost {
       ...(synthesized ? { synthesized: true as const } : {}),payload};
     return await this.options.privateStore.saveDelivery(c.uid,delivery,record)?delivery:undefined;
   }
-  /** An unasked task this host will not run: the server ends it before any model runs. The command id is the task's, so a repeat is the same request. */
+  /** An unasked task this host will not run: the server ends it before any model runs. The command id is the task's and the reason's: a repeat is the same request, and a
+   * decline for the other reason (a task superseded while its triage still ran) is a request of its own, which finds the task declined. */
   private async decline(c: TeamAccountContext, b: SharedBotBinding, taskId: string, reason: 'triage' | 'superseded') {
-    await this.command(c,b,'declineTask',{...this.hostFields(b),taskId,reason},digest(JSON.stringify(['declineTask',taskId,b.accountEpoch])));
-    this.deferred.delete(taskId); this.deferredCodes.delete(taskId);
+    await this.command(c,b,'declineTask',{...this.hostFields(b),taskId,reason},digest(JSON.stringify(['declineTask',taskId,b.accountEpoch,reason])));
+    this.deferred.delete(taskId); this.deferredCodes.delete(taskId); this.verdicts.delete(taskId);
     this.log('team_task_declined', { taskId, reason });
+  }
+  /** Whether an unasked task's Bot answers. A message passed over by a superseded task of the Chat counts as asking it too, and a reply to a message older than
+   * the window is matched by reading that message. */
+  private async triage(c: TeamAccountContext, scope: { teamId: string; generation: number; conversationId: string }, b: SharedBotBinding, prepared: TaskContext, bot: { name: string; description: string }, kind: string, signal: AbortSignal) {
+    const read = (request: ChatReadRequest) => this.options.service.hostReadChat(c, request).then(result => { this.assert(c); signal.throwIfAborted(); return result.messages; });
+    const messages = await read({...scope,mode:'before',beforeSeq:prepared.messageSeq+1,limit:13});
+    const earlier = [...this.passedOver.get(serialKey(b,scope.conversationId)) ?? []].map(seq => messages.find(message => message.seq === seq)?.messageId).filter((id): id is string => !!id);
+    for (const id of [prepared.messageId, ...earlier]) {
+      const replyTo = messages.find(message => message.messageId === id)?.replyTo;
+      if (replyTo && !messages.some(message => message.messageId === replyTo)) messages.push(...await read({...scope,mode:'byId',messageId:replyTo}));
+    }
+    messages.sort((x, y) => x.seq - y.seq);
+    const verdict = await triageReply({ bot: { sharedBotId: b.sharedBotId, ...bot }, conversation: { kind }, messages, messageId: prepared.messageId, earlier, decision: this.options.decision, signal });
+    this.log('team_reply_triage', { taskId: prepared.task.taskId, action: verdict.action, source: verdict.source });
+    return verdict;
+  }
+  /** A task of the Chat was judged, or started and sees the Chat through its message: the messages passed over up to there need no judgement any more. */
+  private judged(b: SharedBotBinding, task: HostTask) {
+    const key = serialKey(b,task.conversationId), seqs = this.passedOver.get(key);
+    for (const seq of seqs ?? []) if (seq <= task.messageSeq) seqs!.delete(seq);
+    if (seqs && !seqs.size) this.passedOver.delete(key);
   }
   close() { this.closed=true; clearTimeout(this.timer); this.keepServing(); for(const stop of this.stops)stop(); for(const a of this.active.values())this.abort(a,'CLOSED'); this.selections.clear(); }
 }

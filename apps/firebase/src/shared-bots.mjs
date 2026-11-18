@@ -641,8 +641,8 @@ export class SharedBotsStore {
     if (member.data()?.generation !== task.requester.generation || !conversation.data()?.memberUids.includes(task.requester.uid)
       || !conversation.data().participants.includes(`shared_bot:${task.sharedBotId}`)
       || (conversation.data().executionPolicy && !conversation.data().executionPolicy.targets.includes(task.sharedBotId))
-      // An optional task stands only while the Chat still lets its Bot answer unasked.
-      || (task.optional && !conversation.data().autoReply?.targets.includes(task.sharedBotId))
+      // An unasked task stands only while the Chat still lets its Bot answer unasked. A Bot DM task was asked for, and charged: it stands.
+      || (unasked(task, conversation.data()) && !conversation.data().autoReply?.targets.includes(task.sharedBotId))
       || message.data()?.recalled || message.data()?.changeId !== task.changeId) deny(403, 'TASK_REVOKED');
     return conversation;
   }
@@ -675,7 +675,6 @@ export class SharedBotsStore {
     const { lockRef, free, conversation } = await this.admitRun(tx, team, task, bot, deployment, p.expectedLastChangeSeq, now);
     if (!free) return { execute: false, taskId: p.taskId };
     // Unasked runs in groups and channels count against the Bot's own daily limit, not anyone's request quota.
-    let charge = () => {};
     if (unasked(task, conversation.data())) {
       const day = nowDay(now), quotaRef = team.collection('requestQuotas').doc(hash([day, 'auto', task.sharedBotId]));
       const used = (await tx.get(quotaRef)).data()?.used ?? 0, limit = bot.autoReply?.daily ?? 0;
@@ -684,10 +683,9 @@ export class SharedBotsStore {
         tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
         return { execute: false, taskId: p.taskId, state: 'declined' };
       }
-      charge = () => tx.set(quotaRef, { day, used: used + 1, limit });
+      tx.set(quotaRef, { day, used: used + 1, limit });
     }
     const permitId = grantPermit(command, 1), deadline = now + task.activeBudgetMs;
-    charge();
     tx.set(lockRef, { taskId: p.taskId, until: deadline });
     const started = { state: 'running', startedAt: now, attemptStartedAt: now, epoch: 1, deadline, permitDigest: hash(permitId),
       hostId: p.hostId, accountEpoch: p.accountEpoch, inputLastChangeSeq: p.expectedLastChangeSeq };
@@ -1171,8 +1169,10 @@ export class SharedBotsStore {
     const docs = page.docs.slice(0, 100);
     const chats = docs.length ? await tx.getAll(...docs.map(doc => team.collection('conversations').doc(doc.data().conversationId))) : [];
     for (const [i, doc] of docs.entries()) {
-      // An unasked run is shown once it has answered; until then, and when it stays silent, nobody asked to see it.
-      if (chats[i].data()?.memberUids.includes(identity.uid) && !(unasked(doc.data(), chats[i].data()) && !doc.data().replyId)) visible.push(taskView(doc.data(), now));
+      // An unasked run is shown in its Chat once it has answered, or when an action of it has to be checked; until then, and when it stays
+      // silent, nobody asked to see it. Nor is it one of the author's own requests: the Bot's daily limit paid for it, not the author's quota.
+      const hidden = unasked(doc.data(), chats[i].data()) && (!p.conversationId || !doc.data().replyId && doc.data().state !== 'needs_reconciliation');
+      if (chats[i].data()?.memberUids.includes(identity.uid) && !hidden) visible.push(taskView(doc.data(), now));
     }
     return { tasks: visible, next: page.size > 100 ? docs.at(-1).id : null };
   }
@@ -1242,7 +1242,10 @@ export class SharedBotsStore {
     const { ref, value } = await this.conversation(tx, team, p.conversationId, identity, true);
     if ((value.autoReply?.revision ?? 0) !== p.expectedRevision) deny(409, 'AUTO_REPLY_REVISION_CONFLICT');
     if (p.targets.some(id => !value.participants.includes(`shared_bot:${id}`))) deny(403, 'BOT_PARTICIPANT_REQUIRED');
-    const bots = p.targets.length ? await tx.getAll(...p.targets.map(id => team.collection('sharedBots').doc(id))) : [];
+    // Only a Bot being switched on must allow it now. One already on that no longer does (paused, or republished without it) can be kept
+    // while another is switched, as the clients send it: it is admitted no task until it allows it again.
+    const added = p.targets.filter(id => !(value.autoReply?.targets ?? []).includes(id));
+    const bots = added.length ? await tx.getAll(...added.map(id => team.collection('sharedBots').doc(id))) : [];
     if (bots.some(doc => !doc.data()?.autoReply || doc.data().identity.state !== 'published')) deny(409, 'AUTO_REPLY_UNAVAILABLE');
     const revision = p.expectedRevision + 1;
     tx.update(ref, { autoReply: { revision, targets: p.targets } });

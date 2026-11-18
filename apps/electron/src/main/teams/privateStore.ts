@@ -302,7 +302,9 @@ export class TeamPrivateStore {
       const results=join(root,'results'); const info=await lstat(results);
       if (!info.isDirectory() || (info.mode&0o077)!==0 || process.getuid && info.uid!==process.getuid()) throw new Error('UNSAFE_TEAM_STORAGE');
       const result = JSON.parse(await read(join(results,`${taskId}.json`),512*1024));
-      if (!result || result.version !== 3 || result.type !== 'result' || !['completed','failed'].includes(result.status)
+      // A Bot that chose silence leaves a result too: no text and no document.
+      if (!result || result.version !== 3 || result.type !== 'result' || !['completed','failed','declined'].includes(result.status)
+        || result.status === 'declined' && (result.text !== '' || result.document !== undefined)
         || typeof result.text !== 'string' || Buffer.byteLength(result.text)>8192 || !Number.isSafeInteger(result.finishedAt) || !result.usage || !['missing','partial','complete'].includes(result.usage.status)) throw new Error('UNSAFE_TEAM_STORAGE');
       return result as TeamRunResult;
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }

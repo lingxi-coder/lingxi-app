@@ -11,6 +11,7 @@ import { toolGroupSummary } from './toolPresentation';
 import type { TranscriptActivity as Activity } from './transcriptActivities';
 import './TranscriptActivity.css';
 import { TranscriptLeafWindow } from './TranscriptLeafWindow';
+import { LocalAppInstructions } from './LocalAppInstructions';
 
 export function TranscriptActivity({ activity, open, toolOpen, onSetOpen, modUiSessionId, retry }: {
   activity: Activity;
@@ -26,7 +27,8 @@ export function TranscriptActivity({ activity, open, toolOpen, onSetOpen, modUiS
   const thought = activity.thoughts.at(-1);
   const thinking = activity.active && !running;
   const thoughtLabel = thought?.text.trim().slice(-240).replace(/[\r\n]+/g, ' ');
-  const label = thinking && thoughtLabel ? thoughtLabel
+  const label = activity.skill ? `${activity.skill.name} · ${tr('desktop_ui_tool_call_count', activity.tools.length)}`
+    : thinking && thoughtLabel ? thoughtLabel
     : activity.tools.length ? toolGroupSummary(activity.tools)
     : thoughtLabel || (activity.active ? 'Thinking…' : tr('desktop_activity'));
   const failed = activity.tools.filter(tool => tool.status === 'error').length;
@@ -63,10 +65,12 @@ export function TranscriptActivity({ activity, open, toolOpen, onSetOpen, modUiS
         {failedState && <span className="transcript-activity-failed">{failedState}</span>}
       </>}>
       <div className="transcript-activity-details">
-        <TranscriptLeafWindow items={[...activity.tools, ...activity.thoughts.filter(thought => thought.text.trim())]}
-          renderItem={item => item.type === 'tool'
-            ? <ToolCall item={item} modUiSessionId={modUiSessionId} open={toolOpen(item.id)} onSetOpen={onSetOpen} />
-            : <MarkdownContent text={item.text} />} />
+        <TranscriptLeafWindow items={activity.skill?.items ?? [...activity.tools, ...activity.thoughts.filter(thought => thought.text.trim())]}
+          renderItem={item => {
+            if (item.type === 'tool') return <ToolCall item={item} modUiSessionId={modUiSessionId} open={toolOpen(item.id)} onSetOpen={onSetOpen} />;
+            if (item.type === 'skill-instructions') return <LocalAppInstructions id={item.id} name={item.name} text={item.text} open={toolOpen(item.id) ?? false} onSetOpen={onSetOpen} />;
+            return item.text.trim() ? <MarkdownContent text={item.text} /> : null;
+          }} />
       </div>
     </Disclosure>
   </div>;

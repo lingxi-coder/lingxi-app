@@ -32,7 +32,7 @@ import type { ApiRetryStatus } from './ApiRetryNotice';
 import { transcriptRows, type TranscriptToolGroup } from './transcriptRows';
 import { ToolGroup } from './ToolGroup';
 import { TranscriptActivity } from './TranscriptActivity';
-import { isTranscriptActivity, sameTranscriptActivity, transcriptActivities } from './transcriptActivities';
+import { isTranscriptActivity, sameTranscriptActivity, toolGroupSourceIds, transcriptActivities } from './transcriptActivities';
 import { TurnFileSummary } from './TurnFileSummary';
 import { MarkdownContent } from './MarkdownContent';
 import { LocalAppInstructions } from './LocalAppInstructions';
@@ -480,7 +480,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
     const sources = new Map<string, string>(), aliases = new Map<string, string>();
     for (const row of rows) {
       if (row.type !== 'tool-group') continue;
-      const ids = [...row.tools.map(tool => tool.id), ...(isTranscriptActivity(row) ? row.thoughts.map(thought => thought.id) : [])];
+      const ids = toolGroupSourceIds(row);
       const inherited = ids.map(id => previous.get(id)).find(id => id !== undefined);
       const choice = collapseOpen(visible, sessionKey, row.id) !== undefined ? row.id : inherited ?? row.id;
       aliases.set(row.id, choice);
@@ -700,7 +700,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
       if (owner && collapseOpen(visible, sessionKey, owner) !== true) { setOpen(owner, true); return; }
       const rendered = items.find(item => item.id === source.id);
       if (rendered?.type === 'narration' && narrationShouldCollapse(rendered) && !(collapseOpen(visible, sessionKey, rendered.id) ?? narrationDefaultOpen(rendered))) { setOpen(rendered.id, true); return; }
-      const row = presentationRows.find(row => row.id === source.id || (row.type === 'tool-group' && row.tools.some(tool => tool.id === source.id)) || (row.type === 'agents' && row.sourceIds.includes(source.id)));
+      const row = presentationRows.find(row => row.id === source.id || (row.type === 'tool-group' && toolGroupSourceIds(row).includes(source.id)) || (row.type === 'agents' && row.sourceIds.includes(source.id)));
       if (row) {
         if (windowing.reveal(row.id)) return;
         if (row.type === 'tool-group' && row.tools.length > 1 && !groupIsOpen(row.id)) { setOpen(row.id, true); return; }
@@ -978,13 +978,14 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
           }
           if (isTranscriptActivity(item)) {
             const expanded = groupIsOpen(item.id);
+            const activityContent = <TranscriptActivity activity={item} open={expanded} modUiSessionId={modUiSessionId}
+              toolOpen={id => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen}
+              retry={item.active ? apiRetry ?? undefined : undefined} />;
             return <div className="transcript-run-item" data-run-type="activity">
-              <NativeToolGroupSite sessionId={modUiSessionId} group={item} expanded={expanded}
+              {item.skill ? activityContent : <NativeToolGroupSite sessionId={modUiSessionId} group={item} expanded={expanded}
                 stateToken={visible} contentToken={item.active ? apiRetry ?? undefined : undefined}>
-                <TranscriptActivity activity={item} open={expanded} modUiSessionId={modUiSessionId}
-                  toolOpen={id => collapseOpen(visible, sessionKey, id)} onSetOpen={setOpen}
-                  retry={item.active ? apiRetry ?? undefined : undefined} />
-              </NativeToolGroupSite>
+                {activityContent}
+              </NativeToolGroupSite>}
             </div>;
           }
           if (item.type === 'tool-group' && item.tools.some(tool => submittedPlans.some(plan => plan.id === tool.id))) {
@@ -1057,7 +1058,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
           return null;
           })();
           if (!content) return null;
-          const sourceIds = item.type === 'tool-group' ? [...item.tools.map(tool => tool.id), ...(isTranscriptActivity(item) ? item.thoughts.map(thought => thought.id) : [])] : item.type === 'agents' ? item.sourceIds : [item.id];
+          const sourceIds = item.type === 'tool-group' ? toolGroupSourceIds(item) : item.type === 'agents' ? item.sourceIds : [item.id];
           const uuids = [...new Set(sourceIds.flatMap(id => {
             const source = liveItemById.get(id);
             return source ? transcriptRowUuids(source) : [];

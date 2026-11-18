@@ -85,6 +85,21 @@ async function main() {
         }
       }
     }
+    await run('window.activityFixture.repeatedSkill()');
+    const skillGroup = '.transcript-activity[data-activity-id="skill-group:skill-1"]';
+    const skillTrigger = `${skillGroup} > .transcript-activity-trigger`;
+    assert.equal(await run('document.querySelectorAll(".transcript-row").length'), 1);
+    assert.match(await run(`document.querySelector(${JSON.stringify(skillTrigger)}).textContent`), /lingxi-api · 3 calls/);
+    assert.equal(await run(`document.querySelector(${JSON.stringify(skillTrigger)}).getAttribute('aria-expanded')`), 'false');
+    assert.equal(await run('document.querySelectorAll(".local-app-instructions-toggle").length'), 0);
+    await run('window.activityFixture.reveal("instructions-2")');
+    assert.deepEqual(await run(`Array.from(document.querySelectorAll('[data-transcript-leaf-id]')).map(leaf => leaf.dataset.transcriptLeafId)`),
+      ['skill-1', 'guide-1', 'thinking-2', 'skill-2', 'guide-2', 'thinking-3', 'skill-3', 'guide-3']);
+    await run(`document.querySelector('[data-transcript-leaf-id="guide-2"] .local-app-instructions-toggle').click()`);
+    assert.match(await run('document.querySelector(\'[data-transcript-leaf-id="guide-2"]\').innerText'), /Guide for invocation 2\./);
+    assert.equal(await run('document.querySelectorAll(\'.local-app-instructions-toggle[aria-expanded="true"]\').length'), 1);
+    await run(`document.querySelector(${JSON.stringify(skillTrigger)}).click()`);
+    assert.equal(await run('document.querySelectorAll(".local-app-instructions-toggle").length'), 0);
     console.log(JSON.stringify(result));
   } finally { window.destroy(); }
 }

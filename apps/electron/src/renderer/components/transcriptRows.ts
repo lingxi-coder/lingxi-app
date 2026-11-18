@@ -10,7 +10,7 @@ export interface TranscriptToolGroup {
   readonly tools: ToolRunItem[];
 }
 
-interface TranscriptSkillInstructions extends Omit<NarrationRunItem, 'type' | 'role'> {
+export interface TranscriptSkillInstructions extends Omit<NarrationRunItem, 'type' | 'role'> {
   readonly type: 'skill-instructions';
   readonly name: string;
 }

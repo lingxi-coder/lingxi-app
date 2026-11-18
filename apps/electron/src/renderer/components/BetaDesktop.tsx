@@ -537,9 +537,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     asideRef.current?.toggleAttribute('inert', sidebarCollapsed || bridge.projectCreationOpen);
     railRef.current?.toggleAttribute('inert', bridge.projectCreationOpen);
   }, [bridge.projectCreationOpen, sidebarCollapsed]);
-  const blockNavigation = useCallback((event: { target: EventTarget | null; preventDefault(): void; stopPropagation(): void }) => {
+  const blockNavigation = useCallback((event: { preventDefault(): void; stopPropagation(): void }) => {
     if (!bridge.projectCreationOpen) return;
-    if (event.target instanceof Element && event.target.closest('[data-conversation-space]')) return;
     event.preventDefault();
     event.stopPropagation();
   }, [bridge.projectCreationOpen]);
@@ -946,13 +945,6 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
           {homePage && <button type="button" className="sidebar-header-icon" aria-label={activityView ? tr('desktop_chat_activity_off') : tr('desktop_chat_activity_on')} title={`${tr(activityView ? 'desktop_chat_activity_off' : 'desktop_chat_activity_on')} (⌥⌘U)`} aria-pressed={activityView} onClick={onToggleActivityView ?? (() => { onOpenChat?.(); bridge.setRuntimeCenterOverviewOpen(true); })} style={{ color: activityView ? t.accent : t.text3, background: activityView ? t.accentBg : undefined }}><DesktopIcon name="bell" size={18} /></button>}
           {searchable && <button type="button" className="sidebar-header-icon" aria-label={tr('desktop_search_chats')} title={tr('desktop_search_chats')} aria-expanded={searchOpen} onClick={() => { setSidebarCollapsed(false); setSearchOpen(true); window.requestAnimationFrame(() => searchInputRef.current?.focus()); }} style={{ color: t.text3 }}><DesktopIcon name="search" size={18} /></button>}
         </div>
-        {homePage && <div className="no-drag" data-conversation-space role="tablist" aria-label={tr('desktop_chat_conversation_mode')} style={{ display: 'flex', gap: 2, padding: '4px 8px' }}>
-          {(['chat', 'code'] as const).map((mode) => <button key={mode} type="button" role="tab" aria-selected={currentSpace === mode}
-            onClick={() => { onOpenChat?.(); void bridge.switchConversationSpace(mode); }}
-            style={{ border: 0, borderRadius: 7, padding: '6px 11px', background: currentSpace === mode ? t.surfaceActive : 'transparent', color: currentSpace === mode ? t.text : t.text3, cursor: 'pointer' }}>
-            {mode === 'chat' ? 'Chat' : 'Code'}
-          </button>)}
-        </div>}
         {topbar}
       </div>
       <div className="desktop-body">

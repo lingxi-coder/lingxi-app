@@ -983,7 +983,7 @@ export class TeamConnector implements LocalTeamHost {
       try { assert(); result = runResult(await (this.options.run ?? runTeamHost)({executable:bins.host,home:paths.home,tmp:paths.tmp,signal,assertCurrent:assert,authorize:frameAuthorize,
         bootstrap:{version:3,type:continuation ? 'continue' : 'run',storageRoot:paths.runtime,workerExecutable:bins.worker,scope:record.scope,taskId:record.taskId,invocationId:randomUUID(),instructions,
           inputBatchRef:record.batch,knowledge:documents.filter(d=>d.kind==='file').map(d=>({id:d.resourceId,title:d.name,text:d.text})),deadlineAt:record.deadlineAt,
-          model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),...(continuation ? { continuation } : {}),...(record.ask ? { askRequester: true } : {}),...(record.list ? { sharedList: record.list } : {}),...(record.mayDecline ? { mayDecline: true } : {}),
+          model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),...(continuation ? { continuation } : {}),...(record.ask ? { askRequester: true } : {}),...(record.list ? { sharedList: record.list } : {}),...(record.mayDecline ? { mayDecline: true, ...(record.unasked !== true ? { addressed: true } : {}) } : {}),
           limits:{max_turns:20,context_window_tokens:2000000,output_tokens_per_request:4096,physical_dispatches:Math.max(1,DISPATCH_LIMIT-record.dispatched)}},
         operate:operation => this.operate(c,b,record,operation,frame,assert),
         accountCredentials:async request => { await frameAuthorize();

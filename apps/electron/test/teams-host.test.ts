@@ -1451,7 +1451,7 @@ test('auto-reply: an unasked task the Decision service rules out is declined bef
 test('auto-reply: an unsure verdict offers the no-reply tool, and the silence is completed as declined with no text',async t=>{
  const f=autoFixture(t,{decision:decisionOf(0.5),result:o=>({status:'declined',cursor,text:'',finishedAt:Date.now(),usage:{status:'missing'}})});await f.connector.publishLocalBot('owner',f.input);
  f.mock.tasks.push(f.task(1));f.mock.wake();await waitFor(()=>f.sent('completeTask').length===1);
- assert.equal(f.runs()[0].mayDecline,true);assert.equal(f.runs()[0].askRequester,undefined,'nobody in a group asked, so the Bot asks nobody back');
+ assert.equal(f.runs()[0].mayDecline,true);assert.equal(f.runs()[0].addressed,undefined);assert.equal(f.runs()[0].askRequester,undefined,'nobody in a group asked, so the Bot asks nobody back');
  const done=f.sent('completeTask')[0].payload;assert.equal(done.outcome,'declined');assert.equal(done.text,'');assert.equal(done.document,undefined);
 });
 test('auto-reply: a sure verdict runs without the tool; with no verdict a group task is declined and a DM task runs',async t=>{
@@ -1464,6 +1464,9 @@ test('auto-reply: a sure verdict runs without the tool; with no verdict a group 
  const dm=autoFixture(t,{kind:'bot_dm'});await dm.connector.publishLocalBot('owner',dm.input);
  dm.mock.tasks.push(dm.task(1));dm.mock.wake();await waitFor(()=>dm.sent('completeTask').length===1);
  assert.equal(dm.sent('declineTask').length,0);assert.equal(dm.runs()[0].mayDecline,undefined);
+ const unsure=autoFixture(t,{kind:'bot_dm',decision:decisionOf(0.5)});await unsure.connector.publishLocalBot('owner',unsure.input);
+ unsure.mock.tasks.push(unsure.task(1));unsure.mock.wake();await waitFor(()=>unsure.sent('completeTask').length===1);
+ assert.equal(unsure.runs()[0].mayDecline,true);assert.equal(unsure.runs()[0].addressed,true,'the member wrote to the Bot directly, so it is not told nobody asked');
 });
 test('auto-reply: an unasked task with a later message of its Chat behind it is superseded, and only the latest is judged',async t=>{
  const f=autoFixture(t,{decision:decisionOf(0.9)});await f.connector.publishLocalBot('owner',f.input);

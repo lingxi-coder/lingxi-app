@@ -188,11 +188,15 @@ internal fun TeamConversationScreen(
         }
     }
 
+    // The auto-reply switches wait for their own change: until the listener brings the next revision, another toggle would send the old one and conflict.
+    var autoReplySent by remember(conversation?.id) { mutableStateOf<Long?>(null) }
     if (showDetails && conversation != null) ConversationDetailsSheet(
         conversation = conversation, label = label, members = members, bots = bots, uid = uid, strings = strings,
         unread = if (messaging.readsReady) TeamsListLogic.unreadCount(conversation) else 0, online = online,
         onMarkRead = { workspace.messagingModel.markRead(conversation.id, conversation.lastSeq) }, onDismiss = { showDetails = false },
-        onAutoReply = { targets -> workspace.messagingModel.setConversationAutoReply(conversation.id, conversation.autoReply?.revision ?: 0, targets) },
+        onAutoReply = { targets -> val revision = conversation.autoReply?.revision ?: 0; autoReplySent = revision
+            workspace.messagingModel.setConversationAutoReply(conversation.id, revision, targets, onFailed = { autoReplySent = null }) },
+        busy = autoReplySent != null && autoReplySent == (conversation.autoReply?.revision ?: 0),
     )
     recalling?.let { message ->
         ConfirmDialog(

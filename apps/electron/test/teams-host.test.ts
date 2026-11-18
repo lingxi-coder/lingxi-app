@@ -1427,14 +1427,18 @@ test('the Desktop service sends a page\'s service commands only when they are a 
 // ---- Auto-reply: unasked (optional) tasks are judged before they run ----
 async function waitFor(check:()=>boolean,ms=8000){const end=Date.now()+ms;while(Date.now()<end){if(check())return;await new Promise(r=>setTimeout(r,20));}assert.ok(check(),'condition reached');}
 const decisionOf=(probability:number|undefined,configured=true,seen:unknown[]=[])=>({isConfigured:async()=>configured,evaluateTool:async(input:unknown)=>{seen.push(input);if(probability===undefined)throw new Error('Decision service is busy');return {state_revision:0,answers:{reply:{type:'binary' as const,probability}},usage:{input_tokens:1,output_tokens:1},actual_model:null,elapsed_ms:1};}});
-/** A fixture whose service knows the Chat kind and settles a declined task. */
+/** A fixture whose service knows the Chat kind, settles a declined task and, as the server does, ends the earlier unasked tasks of the Chat
+ * when a later one starts or is declined on a verdict. */
 function autoFixture(t:any,{decision,kind='group',result}:{decision?:ReturnType<typeof decisionOf>;kind?:string;result?:(o:TeamHostProcessOptions)=>TeamHostResult}={}){
  const bootstraps:any[]=[];
  const f=fixture(t,async o=>{bootstraps.push(o.bootstrap);return o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor}:result?.(o)??{status:'completed',cursor,text:'Done',finishedAt:Date.now()};},decision?{decision}:{});
  const original=f.mock.service.hostMessages.bind(f.mock.service);
  f.mock.service.hostMessages=async(c,command)=>{
-  if(command.action==='declineTask'){f.mock.commands.push(command);const task=f.mock.tasks.find(v=>v.taskId===(command.payload as any).taskId);if(task)task.state='declined';return {taskId:task?.taskId,state:'declined'} as any;}
-  const value:any=await original(c,command);return command.action==='prepareTask'?{...value,conversationKind:kind}:value;};
+  const supersede=(task:any)=>{for(const v of f.mock.tasks)if(v.conversationId===task.conversationId&&v.state==='queued'&&(v as any).optional&&!(v as any).resume&&v.messageSeq<task.messageSeq)v.state='declined';};
+  if(command.action==='declineTask'){f.mock.commands.push(command);const p=command.payload as any,task=f.mock.tasks.find(v=>v.taskId===p.taskId);if(task){task.state='declined';if(p.reason==='triage')supersede(task);}return {taskId:task?.taskId,state:'declined'} as any;}
+  const value:any=await original(c,command);
+  if(command.action==='startTask'&&value.execute)supersede(f.mock.tasks.find(v=>v.taskId===(command.payload as any).taskId));
+  return command.action==='prepareTask'?{...value,conversationKind:kind}:value;};
  // The triage read: the messages before `beforeSeq`, as the service answers it.
  const read=f.mock.service.hostReadChat.bind(f.mock.service);
  f.mock.service.hostReadChat=async(c,request:any)=>request.mode!=='before'?read(c,request):read(c,{mode:'range',fromSeqExclusive:Math.max(0,request.beforeSeq-1-request.limit),toSeqInclusive:request.beforeSeq-1} as any);
@@ -1469,28 +1473,31 @@ test('auto-reply: a sure verdict runs without the tool; with no verdict a group 
  assert.equal(unsure.runs()[0].mayDecline,true);assert.equal(unsure.runs()[0].addressed,true,'the member wrote to the Bot directly, so it is not told nobody asked');
 });
 test('auto-reply: an unasked task with a later message of its Chat behind it is superseded, and only the latest is judged',async t=>{
- const f=autoFixture(t,{decision:decisionOf(0.9)});await f.connector.publishLocalBot('owner',f.input);
+ const seen:any[]=[],f=autoFixture(t,{decision:decisionOf(0.9,true,seen)});await f.connector.publishLocalBot('owner',f.input);
  f.mock.tasks.push(f.task(1),f.task(2));f.mock.wake();await waitFor(()=>f.sent('completeTask').length===1);
- assert.deepEqual(f.sent('declineTask').map(c=>[c.payload.taskId,c.payload.reason]),[['task00001','superseded']]);
- assert.deepEqual(f.sent('startTask').map(c=>c.payload.taskId),['task00002']);
+ assert.deepEqual(f.sent('declineTask'),[],'the host never ends the earlier task itself: the start of the later one does');
+ assert.deepEqual(f.sent('startTask').map(c=>c.payload.taskId),['task00002']);assert.equal(f.mock.tasks[0].state,'declined');
+ assert.equal(seen.length,1);assert.equal(seen[0].state.recent.filter((m:any)=>m.unanswered).length,1,'the earlier message is shown as unanswered');
 });
 test('auto-reply: a later message still settling supersedes the task whose wait is over',async t=>{
  const seen:unknown[]=[],f=autoFixture(t,{decision:decisionOf(0.9,true,seen)});await f.connector.publishLocalBot('owner',f.input);
  f.mock.tasks.push(f.task(1));f.mock.wake();await new Promise(r=>setTimeout(r,1500));f.mock.tasks.push(f.task(2));f.mock.wake();
  await waitFor(()=>f.sent('completeTask').length===1);
- assert.deepEqual(f.sent('declineTask').map(c=>[c.payload.taskId,c.payload.reason]),[['task00001','superseded']]);
+ assert.deepEqual(f.sent('declineTask'),[]);
  assert.deepEqual(f.sent('startTask').map(c=>c.payload.taskId),['task00002']);assert.equal(seen.length,1);
 });
-test('auto-reply: a call to the Bot in a superseded message is judged with the next one, unless that task started and answers it itself',async t=>{
- const judged=async(refuse:boolean)=>{const f=autoFixture(t,{decision:decisionOf(0.1)});await f.connector.publishLocalBot('owner',f.input);
-  const read=f.mock.service.hostReadChat;f.mock.service.hostReadChat=async(c,request)=>{const result=await read(c,request);
-   return {...result,messages:result.messages.map(message=>message.seq===1?{...message,text:'Personal, which hotel is quietest?'}:message)};};
-  const inner=f.mock.service.hostMessages;f.mock.service.hostMessages=async(c,command)=>{
-   if(refuse&&command.action==='declineTask'&&(command.payload as any).taskId==='task00001'){f.mock.commands.push(command);throw new TeamsApiError('TASK_ALREADY_STARTED',409);}return inner(c,command);};
-  f.mock.tasks.push(f.task(1),f.task(2));f.mock.wake();await waitFor(()=>f.sent('declineTask').some(c=>c.payload.taskId==='task00002')||f.sent('completeTask').length===1);
-  return f.sent('declineTask').some(c=>c.payload.taskId==='task00002')?'declined':'answered';};
- assert.equal(await judged(false),'answered','the passed-over call asks the Bot');
- assert.equal(await judged(true),'declined','the task that started answers its own message; the next one is judged alone');
+test('auto-reply: a call to the Bot in a superseded message is judged with the next one; if that one is revoked first, the earlier one is judged itself',async t=>{
+ const named=(f:ReturnType<typeof autoFixture>)=>{const read=f.mock.service.hostReadChat;f.mock.service.hostReadChat=async(c,request)=>{const result=await read(c,request);
+  return {...result,messages:result.messages.map(message=>message.seq===1?{...message,text:'Personal, which hotel is quietest?'}:message)};};};
+ const carried=autoFixture(t,{decision:decisionOf(0.1)});await carried.connector.publishLocalBot('owner',carried.input);named(carried);
+ carried.mock.tasks.push(carried.task(1),carried.task(2));carried.mock.wake();await waitFor(()=>carried.sent('completeTask').length===1);
+ assert.deepEqual(carried.sent('startTask').map(c=>c.payload.taskId),['task00002'],'the passed-over call asks the Bot');
+ const revoked=autoFixture(t,{decision:decisionOf(0.1)});await revoked.connector.publishLocalBot('owner',revoked.input);named(revoked);
+ const inner=revoked.mock.service.hostMessages;revoked.mock.service.hostMessages=async(c,command)=>{
+  if(command.action==='prepareTask'&&(command.payload as any).taskId==='task00002'){revoked.mock.commands.push(command);throw new TeamsApiError('TASK_REVOKED',403);}return inner(c,command);};
+ revoked.mock.tasks.push(revoked.task(1),revoked.task(2));revoked.mock.wake();await waitFor(()=>revoked.sent('completeTask').length===1);
+ assert.deepEqual(revoked.sent('declineTask').map(c=>[c.payload.taskId,c.payload.reason]),[['task00002','revoked']]);
+ assert.deepEqual(revoked.sent('startTask').map(c=>c.payload.taskId),['task00001'],'the call to the Bot is still answered');
 });
 test('auto-reply: a verdict is kept while the Bot×Chat lock holds the start back, and the Decision service is asked once',async t=>{
  const seen:unknown[]=[],f=autoFixture(t,{decision:decisionOf(0.9,true,seen)});(f.connector as any).options.retryMs=10;await f.connector.publishLocalBot('owner',f.input);

@@ -53,6 +53,10 @@
           "order": "ASCENDING"
         },
         {
+          "fieldPath": "visibility",
+          "order": "ASCENDING"
+        },
+        {
           "fieldPath": "createdAt",
           "order": "DESCENDING"
         },
@@ -68,6 +72,10 @@
       "fields": [
         {
           "fieldPath": "conversationId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "visibility",
           "order": "ASCENDING"
         },
         {

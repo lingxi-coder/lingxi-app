@@ -132,7 +132,7 @@ const payloads = {
       'Only a declined run has no reply'),
   // The host leaves an optional task unanswered before any model runs: its triage said no, or a later message of the
   // same Chat superseded it.
-  declineTask: z.object({ ...host, ...task, reason: z.enum(['triage', 'superseded']) }).strict(),
+  declineTask: z.object({ ...host, ...task, reason: z.enum(['triage', 'superseded', 'revoked']) }).strict(),
   // A question for the requester, or (M2 Q05) one exact list write the requester is asked to approve.
   pauseTask: z.discriminatedUnion('kind', [
     z.object({ ...pause, kind: z.literal('human_input'),

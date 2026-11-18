@@ -98,13 +98,19 @@ function taskView(task, now) {
     ...(task.usage ? { usage: task.usage } : {}), ...(task.optional ? { optional: true } : {}) };
 }
 /** A queued task for one Bot, admitted in the transaction that writes its trigger message. */
-function queuedTask({ sharedBotId, taskId, conversationId, messageId, changeId, seq, requester, bot, lockUntil, now, optional }) {
+/**
+ * Who lists a task, stored so `listTasks` can query it: `asked` (anyone asked the Bot: its Chat and its requester list it), `hidden` (an
+ * unasked run in a group or channel, listed by nobody) and `shown` (such a run that posted a reply or needs checking: its Chat lists it).
+ */
+function queuedTask({ sharedBotId, taskId, conversationId, messageId, changeId, seq, requester, bot, lockUntil, now, optional, visibility }) {
   return { schemaVersion: 1, executionVersion: 2, sharedBotId, taskId, conversationId, messageId, changeId, messageSeq: seq,
     requester, botRevision: bot.identity.revision, deploymentId: bot.identity.activeDeploymentId, maintainer: bot.identity.maintainer,
     state: 'queued', createdAt: now, deadline: Math.max(now, lockUntil) + queueMs, inputGrantIds: bot.grants.map(g => g.grantId),
     epoch: 0, attemptStartedAt: 0, activeBudgetMs: 300000, activeSpentMs: 0, physicalDispatchesSpent: 0,
-    rootTaskId: taskId, operationCount: 0, unverifiedOperations: 0, ...(optional ? { optional: true } : {}) };
+    rootTaskId: taskId, operationCount: 0, unverifiedOperations: 0, ...(optional ? { optional: true } : {}), visibility };
 }
+/** A hidden task that now has a reply in its Chat, or an action someone has to check, is listed from then on. */
+const shown = (task, replyId, state) => task.visibility === 'hidden' && (replyId || state === 'needs_reconciliation') ? { visibility: 'shown' } : {};
 /** An optional task in a group or channel: nobody there asked its Bot, so what the Bot does not say is not shown. */
 const unasked = (task, conversation) => task.optional === true && conversation?.kind !== 'bot_dm';
 
@@ -544,7 +550,7 @@ export class SharedBotsStore {
       lastMessage: { id: p.messageId, seq, at, author, preview: messagePreview(p.text || files.attachments.map(file => file.name).join(', ')) } });
     for (const [i, target] of tasks.entries()) {
       tx.create(team.collection('tasks').doc(target.taskId), queuedTask({ ...target, conversationId: p.conversationId, messageId: p.messageId,
-        changeId: p.changeId, seq, requester: identity, bot: bots[i].data(), lockUntil: locks[i].data()?.until ?? 0, now, optional: dmOptional }));
+        changeId: p.changeId, seq, requester: identity, bot: bots[i].data(), lockUntil: locks[i].data()?.until ?? 0, now, optional: dmOptional, visibility: 'asked' }));
     }
     unaskedTasks.write(seq);
     for (const [i, quotaRef] of quotaRefs.entries()) tx.set(quotaRef, { day, used: (quotas[i].data()?.used ?? 0) + increments[i], limit: limits[i] });
@@ -565,9 +571,11 @@ export class SharedBotsStore {
     const owners = await all(bots.map(doc => team.collection('members').doc(doc.data()?.identity.maintainer.uid ?? '_missing')));
     const deployments = await all(bots.map(doc => team.collection('deployments').doc(doc.data()?.identity.activeDeploymentId ?? '_missing')));
     const locks = await all(ids.map(id => team.collection('chatExecutionLocks').doc(hash([id, conversationId]))));
+    // A Bot that has spent today's unasked runs is not offered the message: its host would only judge it to be told the limit is reached.
+    const day = nowDay(now), spent = await all(ids.map(id => team.collection('requestQuotas').doc(hash([day, 'auto', id]))));
     const admitted = ids.filter((_, i) => {
       const bot = bots[i].data(), d = deployments[i].data();
-      return !!bot?.autoReply && bot.identity.state === 'published' && identityPermitted(bot, identity)
+      return !!bot?.autoReply && (spent[i].data()?.used ?? 0) < bot.autoReply.daily && bot.identity.state === 'published' && identityPermitted(bot, identity)
         && owners[i].data()?.generation === bot.identity.maintainer.generation && c.memberUids.includes(bot.identity.maintainer.uid)
         && !!d?.enabled && d.ready && d.onlineUntil > now && bot.grants.every(grant => this.grantPermits(grant, identity));
     });
@@ -575,7 +583,7 @@ export class SharedBotsStore {
       for (const sharedBotId of admitted) {
         const i = ids.indexOf(sharedBotId), taskId = admissionId(messageId, sharedBotId);
         tx.create(team.collection('tasks').doc(taskId), queuedTask({ sharedBotId, taskId, conversationId, messageId, changeId, seq,
-          requester: identity, bot: bots[i].data(), lockUntil: locks[i].data()?.until ?? 0, now, optional: true }));
+          requester: identity, bot: bots[i].data(), lockUntil: locks[i].data()?.until ?? 0, now, optional: true, visibility: 'hidden' }));
         tx.set(team.collection('signals').doc(sharedBotId), { updatedAt: new Date(now) });
       }
     } };
@@ -652,17 +660,30 @@ export class SharedBotsStore {
   }
   /** Everything a model permit (first start or continue) needs: current deployment,
    * requester authority, source watermark, Bot×Chat lock ownership and message order. */
-  async admitRun(tx, team, task, bot, deployment, watermark, now) {
+  async admitRun(tx, team, task, bot, deployment, watermark, now, first = false) {
     if (!deployment.ready || deployment.onlineUntil <= now || !this.requesterAuthorized(bot, task)) deny(403, 'TASK_REVOKED');
     const conversation = await this.validateTask(tx, team, task);
     if (!await this.sourceWatermarkCurrent(tx, conversation, task, watermark)) deny(409, 'SOURCE_CHANGED');
     const lockRef = team.collection('chatExecutionLocks').doc(hash([task.sharedBotId, task.conversationId]));
     const lock = (await tx.get(lockRef)).data();
+    // A first start passes over earlier optional tasks of the Chat (`superseded`): it sees their messages too. Anything else queued earlier goes first.
+    const { superseded, blocked } = await this.earlierQueued(tx, team, task, now, first);
+    const free = !(lock && lock.until > now && lock.taskId !== task.taskId) && !blocked;
+    return { lockRef, lock, free, conversation, superseded };
+  }
+  /**
+   * The tasks of a Bot and Chat queued before `task`. An optional one that has not started (`superseded`) is ended by the task that starts or is
+   * judged after it, in the same transaction: until then it stays queued, so it is judged itself if that later task is revoked first.
+   */
+  async earlierQueued(tx, team, task, now, supersede) {
     const earlier = await tx.get(team.collection('tasks').where('sharedBotId', '==', task.sharedBotId)
       .where('conversationId', '==', task.conversationId).where('state', '==', 'queued')
-      .where('deadline', '>', now).where('messageSeq', '<', task.messageSeq).limit(1));
-    const free = !(lock && lock.until > now && lock.taskId !== task.taskId) && earlier.empty;
-    return { lockRef, lock, free, conversation };
+      .where('deadline', '>', now).where('messageSeq', '<', task.messageSeq).limit(supersede ? 100 : 1));
+    const passable = doc => supersede && doc.data().optional === true && !doc.data().resume && doc.data().epoch === 0;
+    return { superseded: earlier.docs.filter(passable).map(doc => doc.ref), blocked: earlier.docs.some(doc => !passable(doc)) };
+  }
+  supersede(tx, superseded, now) {
+    for (const ref of superseded) tx.update(ref, { state: 'declined', declineReason: 'superseded', finishedAt: now });
   }
   async start({ tx, team, identity, command, now }) {
     const p = command.payload;
@@ -672,7 +693,7 @@ export class SharedBotsStore {
     if (task.state !== 'queued' || task.epoch >= 1) return { execute: false, taskId: p.taskId };
     if (task.deadline <= now) { tx.update(ref, { state: 'expired' }); return { execute: false, taskId: p.taskId }; }
     if (task.botRevision !== bot.identity.revision) deny(403, 'TASK_REVOKED');
-    const { lockRef, free, conversation } = await this.admitRun(tx, team, task, bot, deployment, p.expectedLastChangeSeq, now);
+    const { lockRef, free, conversation, superseded } = await this.admitRun(tx, team, task, bot, deployment, p.expectedLastChangeSeq, now, true);
     if (!free) return { execute: false, taskId: p.taskId };
     // Unasked runs in groups and channels count against the Bot's own daily limit, not anyone's request quota.
     if (unasked(task, conversation.data())) {
@@ -680,12 +701,14 @@ export class SharedBotsStore {
       const used = (await tx.get(quotaRef)).data()?.used ?? 0, limit = bot.autoReply?.daily ?? 0;
       if (used + 1 > limit) {
         tx.update(ref, { state: 'declined', declineReason: 'quota', finishedAt: now });
+        this.supersede(tx, superseded, now);
         tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
         return { execute: false, taskId: p.taskId, state: 'declined' };
       }
       tx.set(quotaRef, { day, used: used + 1, limit });
     }
     const permitId = grantPermit(command, 1), deadline = now + task.activeBudgetMs;
+    this.supersede(tx, superseded, now);
     tx.set(lockRef, { taskId: p.taskId, until: deadline });
     const started = { state: 'running', startedAt: now, attemptStartedAt: now, epoch: 1, deadline, permitDigest: hash(permitId),
       hostId: p.hostId, accountEpoch: p.accountEpoch, inputLastChangeSeq: p.expectedLastChangeSeq };
@@ -717,7 +740,7 @@ export class SharedBotsStore {
       if (reconcile.length === open.length) return { ...refused, reconcile: reconcile.map(operation => operation.operationId).sort() };
       const lockRef = team.collection('chatExecutionLocks').doc(hash([task.sharedBotId, task.conversationId]));
       const lock = (await tx.get(lockRef)).data();
-      tx.update(ref, { state: 'needs_reconciliation', finishedAt: now, resume: FieldValue.delete() });
+      tx.update(ref, { state: 'needs_reconciliation', finishedAt: now, resume: FieldValue.delete(), ...shown(task, null, 'needs_reconciliation') });
       if (lock?.taskId === task.taskId) tx.delete(lockRef);
       tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
       return { ...refused, state: 'needs_reconciliation' };
@@ -799,12 +822,18 @@ export class SharedBotsStore {
       if (lock?.taskId === p.taskId) tx.delete(lockRef);
       return { taskId: task.taskId, state: 'cancelled', replyId: null, artifactId: null };
     }
-    if (p.outcome === 'declined') {
+    // An unasked run whose Chat no longer lets its Bot answer, or whose message was edited or recalled, ends the same way: nobody asked it,
+    // so nothing is posted, and the Chat is free for its Bot again at once instead of when the run's deadline passes.
+    const chat = task.optional ? (await tx.get(team.collection('conversations').doc(task.conversationId))).data() : undefined;
+    const revoked = unasked(task, chat) && p.outcome !== 'declined' && await this.validateTask(tx, team, task).then(() => false,
+      error => { if (error instanceof SharedBotError && error.code === 'TASK_REVOKED') return true; throw error; });
+    if (p.outcome === 'declined' || revoked) {
       if (!task.optional) deny(400, 'TASK_NOT_OPTIONAL');
       // The Bot chose silence: usage is recorded and nothing is posted.
+      const declineReason = revoked ? 'revoked' : 'model';
       const state = task.unverifiedOperations > 0 ? 'needs_reconciliation' : 'declined';
       tx.update(ref, { state, resultDigest, replyId: null, artifactId: null, usage: p.usage, finishedAt: p.finishedAt, deliveredAt: now,
-        declineReason: 'model', ...(state === 'declined' ? {} : { reconciledState: 'declined' }) });
+        declineReason, ...(state === 'declined' ? {} : { reconciledState: 'declined' }), ...shown(task, null, state) });
       if (lock?.taskId === p.taskId) tx.delete(lockRef);
       return { taskId: task.taskId, state, replyId: null, artifactId: null };
     }
@@ -842,7 +871,7 @@ export class SharedBotsStore {
     // No restricted body, document or diagnostic trace is persisted in shared projections/receipts.
     tx.update(ref, { state, resultDigest, replyId: silent ? null : replyId, artifactId, usage: p.usage, finishedAt: p.finishedAt, deliveredAt: now,
       ...(read.length ? { readFiles: read.map(({ attachmentId, sha256 }) => ({ attachmentId, sha256 })) } : {}),
-      ...(state === settled ? {} : { reconciledState: settled }) });
+      ...(state === settled ? {} : { reconciledState: settled }), ...shown(task, silent ? null : replyId, state) });
     if (lock?.taskId === p.taskId) tx.delete(lockRef);
     return { taskId: task.taskId, state, replyId: silent ? null : replyId, artifactId };
   }
@@ -877,7 +906,7 @@ export class SharedBotsStore {
       this.botMessage(tx, gate, task, bot, identity, now, { messageId: replyId, changeId, text: gate.refusal,
         fields: { deliveryId: hash([task.taskId, 'delivery']) } });
       const state = sourceCurrent ? 'authorization_required' : 'failed';
-      tx.update(ref, { state, resultDigest: pauseDigest, replyId, artifactId: null, finishedAt: p.pausedAt, deliveredAt: now });
+      tx.update(ref, { state, resultDigest: pauseDigest, replyId, artifactId: null, finishedAt: p.pausedAt, deliveredAt: now, ...shown(task, replyId, state) });
       if (lock?.taskId === task.taskId) tx.delete(lockRef);
       return { taskId: task.taskId, state, waitId: p.waitId, messageId: null, expiresAt: null };
     }
@@ -1157,8 +1186,9 @@ export class SharedBotsStore {
     }
     if (p.conversationId) await this.conversation(tx, team, p.conversationId, identity);
     let query = team.collection('tasks');
-    if (p.conversationId) query = query.where('conversationId', '==', p.conversationId);
-    else query = query.where('requester.uid', '==', identity.uid).where('requester.generation', '==', identity.generation);
+    // An unasked run nobody was shown is not read at all, so it never takes the place of one somebody asked for.
+    if (p.conversationId) query = query.where('conversationId', '==', p.conversationId).where('visibility', 'in', ['asked', 'shown']);
+    else query = query.where('requester.uid', '==', identity.uid).where('requester.generation', '==', identity.generation).where('visibility', '==', 'asked');
     query = query.orderBy('createdAt', 'desc').orderBy('__name__').limit(101);
     if (p.after) {
       const cursor = (await tx.get(team.collection('tasks').doc(p.after))).data();
@@ -1168,12 +1198,7 @@ export class SharedBotsStore {
     const page = await tx.get(query), visible = [];
     const docs = page.docs.slice(0, 100);
     const chats = docs.length ? await tx.getAll(...docs.map(doc => team.collection('conversations').doc(doc.data().conversationId))) : [];
-    for (const [i, doc] of docs.entries()) {
-      // An unasked run is shown in its Chat once it has answered, or when an action of it has to be checked; until then, and when it stays
-      // silent, nobody asked to see it. Nor is it one of the author's own requests: the Bot's daily limit paid for it, not the author's quota.
-      const hidden = unasked(doc.data(), chats[i].data()) && (!p.conversationId || !doc.data().replyId && doc.data().state !== 'needs_reconciliation');
-      if (chats[i].data()?.memberUids.includes(identity.uid) && !hidden) visible.push(taskView(doc.data(), now));
-    }
+    for (const [i, doc] of docs.entries()) if (chats[i].data()?.memberUids.includes(identity.uid)) visible.push(taskView(doc.data(), now));
     return { tasks: visible, next: page.size > 100 ? docs.at(-1).id : null };
   }
   /** A member reads a shared document only while they are one of its readers, still read its Chat, and may see every input of the Bot. */
@@ -1233,7 +1258,10 @@ export class SharedBotsStore {
     if (!task.optional) deny(409, 'TASK_NOT_OPTIONAL');
     if (task.state === 'declined') return { taskId: p.taskId, state: 'declined' };
     if (task.state !== 'queued' || task.epoch !== 0) deny(409, 'TASK_ALREADY_STARTED');
+    // A judgement covers the earlier messages its host was shown with this one; a revoked task's message was never judged, so the earlier ones are.
+    const { superseded } = p.reason === 'triage' ? await this.earlierQueued(tx, team, task, now, true) : { superseded: [] };
     tx.update(ref, { state: 'declined', declineReason: p.reason, finishedAt: now });
+    this.supersede(tx, superseded, now);
     tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
     return { taskId: p.taskId, state: 'declined' };
   }

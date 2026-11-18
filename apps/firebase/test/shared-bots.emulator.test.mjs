@@ -1490,21 +1490,63 @@ test('auto-reply: the host declines a queued optional task once, and never an as
 });
 test('auto-reply: a run that stays silent posts nothing and counts against the Bot daily limit', options, async () => {
   await autoGroup({ daily: 1 });
-  await say(member, 1);
+  // Both are admitted before either runs: the limit is checked again when a run starts.
+  await say(member, 1); await say(other, 2);
   const started = await startAuto(1);
   assert.equal(started.execute, true); assert.equal(started.task.optional, true);
   await assert.rejects(execute('completeTask', { ...declined(started), text: 'I would rather not.' }));
   const settled = await execute('completeTask', declined(started));
   assert.deepEqual(settled, { taskId: autoTask(1), state: 'declined', replyId: null, artifactId: null });
   assert.deepEqual(await execute('completeTask', declined(started)), settled);
-  assert.equal((await autoChatRef().collection('messages').get()).size, 1);
+  assert.equal((await autoChatRef().collection('messages').get()).size, 2, 'only the members\' two messages');
   assert.equal((await lockRefFor(autoChat).get()).exists, false);
   // The second unasked run of the day is over the Bot's limit: it ends declined before any model runs.
-  await say(other, 2);
   assert.deepEqual(await startAuto(2), { execute: false, taskId: autoTask(2), state: 'declined' });
   assert.equal((await taskData(autoTask(2))).declineReason, 'quota');
   const quotas = (await db.collection(`teams/${teamId}/requestQuotas`).get()).docs.map(doc => doc.data());
   assert.deepEqual(quotas.map(q => [q.used, q.limit]), [[1, 1]]);
+  // Once the day's runs are spent, a new message is not offered to the Bot at all: no task, so no host judges it.
+  await say(member, 3);
+  assert.equal(await taskData(autoTask(3)), undefined);
+});
+test('auto-reply: a later unasked task ends the earlier ones when it starts or is judged, never when it is revoked', options, async () => {
+  await autoGroup();
+  await say(member, 1); await say(other, 2);
+  const later = await startAuto(2);
+  assert.equal(later.execute, true, 'an earlier unasked task does not hold a later one back');
+  assert.deepEqual([(await taskData(autoTask(1))).state, (await taskData(autoTask(1))).declineReason], ['declined', 'superseded']);
+  await execute('completeTask', declined(later));
+  await say(member, 3); await say(other, 4);
+  await execute('declineTask', { ...host, taskId: autoTask(4), reason: 'revoked' });
+  assert.equal((await taskData(autoTask(3))).state, 'queued', 'nothing judged message 3 with message 4: it is judged itself');
+  await say(member, 5);
+  await execute('declineTask', { ...host, taskId: autoTask(5), reason: 'triage' });
+  assert.deepEqual([(await taskData(autoTask(3))).state, (await taskData(autoTask(3))).declineReason], ['declined', 'superseded']);
+});
+test('auto-reply: a run whose Chat switches auto-reply off ends silently and frees the Chat at once', options, async () => {
+  await autoGroup();
+  await say(member, 1);
+  const started = await startAuto(1);
+  await execute('setConversationAutoReply', { conversationId: autoChat, expectedRevision: 1, targets: [] }, member);
+  const ended = await execute('completeTask', result(started, { text: 'Too late to say.', document: undefined }));
+  assert.deepEqual(ended, { taskId: autoTask(1), state: 'declined', replyId: null, artifactId: null });
+  assert.equal((await taskData(autoTask(1))).declineReason, 'revoked');
+  assert.equal((await autoChatRef().collection('messages').get()).size, 1);
+  assert.equal((await lockRefFor(autoChat).get()).exists, false);
+});
+test('auto-reply: unasked runs nobody was shown never push a listed task off the page', options, async () => {
+  await autoGroup();
+  await say(member, 1);
+  const answered = await startAuto(1);
+  await execute('completeTask', result(answered, { text: 'The Station Inn is quiet.', document: undefined }));
+  const shown = await taskData(autoTask(1));
+  assert.equal(shown.visibility, 'shown');
+  const batch = db.batch();
+  for (let i = 0; i < 120; i += 1) batch.set(taskRef(`hidden_task_${i}`), { ...shown, taskId: `hidden_task_${i}`, visibility: 'hidden', state: 'declined',
+    replyId: null, createdAt: shown.createdAt + 1 + i });
+  await batch.commit();
+  assert.deepEqual((await execute('listTasks', { conversationId: autoChat }, member)).tasks.map(t => t.taskId), [autoTask(1)]);
+  assert.deepEqual((await execute('listTasks', {}, member)).tasks, [], 'nor is an unasked run one of its author\'s own requests');
 });
 test('auto-reply: a failed unasked run in a group is silent, an answer is posted and listed', options, async () => {
   await autoGroup();

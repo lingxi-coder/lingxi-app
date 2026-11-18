@@ -149,12 +149,19 @@ struct TeamsListView: View {
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { teamChip }
             ToolbarItem(placement: .topBarTrailing) {
+                let model = workspace.messaging
+                let error = model?.error ?? ""
+                let offline = model?.directoryReady == true && model?.fromCache == true
                 Menu {
+                    if !error.isEmpty || offline {
+                        Text(error.isEmpty ? "teams_messages_offline" : LocalizedStringKey(TeamsErrors.key(error)))
+                        Button("teams_reconnect", systemImage: "arrow.clockwise") { workspace.reconnect() }
+                    }
                     Button { onDetails() } label: { Label("teams_team_details", systemImage: "person.2") }
                 } label: {
-                    Image(systemName: "ellipsis.circle")
+                    Image(systemName: !error.isEmpty ? "exclamationmark.circle" : offline ? "wifi.slash" : "ellipsis.circle")
                 }
-                .accessibilityLabel(Text("teams_team_menu"))
+                .accessibilityLabel(Text(!error.isEmpty ? LocalizedStringKey(TeamsErrors.key(error)) : offline ? "teams_offline_title" : "teams_team_menu"))
                 .accessibilityIdentifier("teams.menu")
             }
             ToolbarItem(placement: .topBarTrailing) {
@@ -196,13 +203,6 @@ struct TeamsListView: View {
     private var banners: some View {
         VStack(spacing: 0) {
             if let model = workspace.messaging {
-                if !model.error.isEmpty {
-                    TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(model.error)), actionTitle: "teams_reconnect") { workspace.reconnect() }
-                        .accessibilityIdentifier("teams.banner.error")
-                } else if model.directoryReady && model.fromCache {
-                    TeamsBanner(kind: .offline, title: "teams_offline_title", detail: "teams_messages_offline", actionTitle: "teams_reconnect") { workspace.reconnect() }
-                        .accessibilityIdentifier("teams.banner.offline")
-                }
                 if !workspace.actionError.isEmpty, workspace.actionError != model.error {
                     TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(workspace.actionError)), actionTitle: "common_close") { workspace.clearActionError() }
                 }

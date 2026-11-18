@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
-import { messageErrorText, teamsErrorText } from './errors.js';
+import { useContext, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { ChatTopbarTarget, connectionStatus } from './ChatTopbar';
 import { pendingPayload, type TeamConversation } from './messages.js';
 import { snippet } from './compose.js';
 import { NewBotDmDialog, NewConversationDialog } from './NewConversationDialog';
@@ -7,7 +7,9 @@ import { formatListTime } from './stream.js';
 import { CreateTeamDialog, JoinTeamDialog } from './team-dialogs';
 import { ConversationLead, Icon, platformNotice, PopupMenu, rovingKeys, TeamMark, UnreadBadge, type DrawerTab, type MenuItem, type RenderAvatar } from './ui';
 import { conversationLabel, conversationPreview, groupConversations, unreadCount, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';
-import { intlTag, teamsText, useTeamsText } from './i18n.js';
+import { intlTag, useTeamsText } from './i18n.js';
+
+export { connectionStatus, type ConnectionStatus } from './ChatTopbar';
 
 /** Rows shown per section before "Show more". The open conversation is always shown. */
 export const ROW_LIMIT = 50;
@@ -42,30 +44,6 @@ export interface TeamSidebarProps {
    * space ignored). While it is set every match is listed, with no "Show more".
    */
   query?: string;
-}
-
-export interface ConnectionStatus { kind: 'ok' | 'connecting' | 'offline' | 'error'; label: string; detail: string; action?: 'refresh' | 'reconnect' }
-/**
- * The line under the team switcher. A failed refetch of the team list is an error with a retry;
- * initial server confirmation is shown as connecting, then cached-only data is offline.
- * Nothing while the first list is loading or when there is no team to connect to.
- */
-export function connectionStatus(snapshot: Pick<TeamsSnapshot, 'loading' | 'selectedTeamId' | 'loadError' | 'offline' | 'messagingConnecting' | 'messagingError'>, locale: string): ConnectionStatus | undefined {
-  const t = teamsText(locale);
-  if (snapshot.loading) return undefined;
-  if (snapshot.loadError) return { kind: 'error', label: t('tw_sidebar_refresh_failed'), detail: teamsErrorText(snapshot.loadError, locale), action: 'refresh' };
-  if (!snapshot.selectedTeamId) return undefined;
-  if (snapshot.messagingConnecting && !snapshot.messagingError) return {
-    kind: 'connecting', label: t('tw_connecting'),
-    detail: t('tw_sidebar_waiting_server'),
-  };
-  if (snapshot.offline) {
-    return {
-      kind: 'offline', label: t('teams_offline_title'), action: 'reconnect',
-      detail: snapshot.messagingError ? messageErrorText(snapshot.messagingError, locale) : t('tw_sidebar_cached'),
-    };
-  }
-  return { kind: 'ok', label: t('tw_sidebar_connected'), detail: t('tw_sidebar_connected_hint') };
 }
 
 type DialogState = { kind: 'createTeam' } | { kind: 'joinTeam'; code: string } | { kind: 'channel' } | { kind: 'direct' } | { kind: 'botDm' } | null;
@@ -130,7 +108,8 @@ export function TeamSidebar({ workspace, snapshot, renderAvatar, onOpenSettings,
     { id: 'create', label: t('tw_sidebar_create_team'), icon: 'plus', separated: !(team && onOpenSettings), onSelect: () => setDialog({ kind: 'createTeam' }) },
     { id: 'join', label: t('teams_join'), icon: 'plus', onSelect: () => setDialog({ kind: 'joinTeam', code: '' }) },
   ];
-  const status = connectionStatus(snapshot, locale);
+  const hasTopbar = useContext(ChatTopbarTarget) !== undefined;
+  const status = hasTopbar ? undefined : connectionStatus(snapshot, locale);
   const loadingRows = !!snapshot.selectedTeamId && snapshot.offline && snapshot.conversations.length === 0 && !snapshot.messagingError;
 
   return <nav className="tw-scope tw-sidebar" aria-label={t('teams_title')}>

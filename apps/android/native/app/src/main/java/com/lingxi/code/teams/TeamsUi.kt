@@ -7,6 +7,7 @@ import android.text.format.DateFormat
 import androidx.annotation.StringRes
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,7 +19,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -26,8 +31,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
@@ -202,6 +210,41 @@ internal fun dayLabelText(kind: DayKind, atMs: Long): String {
 
 internal fun formatDate(atMs: Long, zone: ZoneId, locale: Locale, skeleton: String): String =
     DateTimeFormatter.ofPattern(DateFormat.getBestDateTimePattern(locale, skeleton), locale).withZone(zone).format(Instant.ofEpochMilli(atMs))
+
+@Composable
+internal fun TeamsConnectionMenu(error: String?, offline: Boolean, onReconnect: () -> Unit, onMarkRead: (() -> Unit)? = null) {
+    if (error == null && !offline && onMarkRead == null) return
+    val status = error?.let { stringResource(teamsErrorRes(it)) }
+        ?: if (offline) stringResource(R.string.teams_offline_title) else null
+    var open by remember { mutableStateOf(false) }
+    val tag = when {
+        error != null -> Modifier.testTag(TeamsTags.ERROR)
+        offline -> Modifier.testTag(TeamsTags.OFFLINE)
+        else -> Modifier
+    }
+    Box {
+        IconButton(onClick = { open = true }, modifier = tag) {
+            val icon = when {
+                error != null -> Icons.Outlined.ErrorOutline
+                offline -> Icons.Outlined.CloudOff
+                else -> Icons.Outlined.MoreVert
+            }
+            Icon(icon, status ?: stringResource(R.string.teams_conversation_menu))
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            if (status != null) {
+                Text(
+                    if (error != null) status else stringResource(R.string.teams_messages_offline),
+                    Modifier.padding(horizontal = 12.dp, vertical = 6.dp), style = MaterialTheme.typography.bodySmall,
+                )
+                DropdownMenuItem(text = { Text(stringResource(R.string.teams_reconnect)) },
+                    onClick = { open = false; onReconnect() })
+            }
+            if (onMarkRead != null) DropdownMenuItem(text = { Text(stringResource(R.string.teams_mark_read)) },
+                onClick = { open = false; onMarkRead() })
+        }
+    }
+}
 
 /** "Offline · saved messages" with the reason and a Reconnect action; a polite live region, so a screen reader says it when it appears. */
 @Composable

@@ -3,6 +3,7 @@ import { Markdown } from '../remote/markdown';
 import type { TeamMember, TeamsApi } from '../../../../packages/teams';
 import { InviteNotice } from '../../../../packages/teams/friend-dialogs';
 import type { FriendsApi } from '../../../../packages/teams/friends';
+import { ChatTopbarControl } from '../../../../packages/teams/ChatTopbar';
 import { useTeamsText } from '../../../../packages/teams/i18n';
 import '../../../../packages/teams/styles';
 import { TeamConversationView } from '../../../../packages/teams/TeamConversationView';
@@ -47,14 +48,18 @@ export function TeamsWorkspaceLayout({ teams: { workspace, snapshot }, locale, i
   const [invited, setInvited] = useState<string[]>();
   const [pane, setPane] = useState<'list' | 'conversation'>();
   if (!workspace || !snapshot) return <p role="status" className="teams-web-note">{t('teams_loading')}</p>;
+  const activePane = pane ?? (snapshot.team ? 'conversation' : 'list');
   return (
-    <div className="teams-web-body" data-pane={pane ?? (snapshot.team ? 'conversation' : 'list')}>
+    <div className="teams-web-body" data-pane={activePane}>
       <div className="teams-web-sidebar">
         <TeamSidebar workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} initialInvite={invite} onInviteHandled={onInviteHandled} onInviteResolved={() => { setPane('conversation'); onInviteResolved?.(); }}
           onOpenSettings={tab => setDrawer(current => ({ open: true, tab: tab ?? current.tab }))} onConversationSelected={() => setPane('conversation')} />
       </div>
       <div className="teams-web-conversation">
-        <button type="button" className="teams-web-back" onClick={() => setPane('list')}>{t('tw_back_conversations')}</button>
+        {activePane === 'conversation' ? <ChatTopbarControl><button type="button" className="teams-web-back" onClick={() => {
+          setPane('list');
+          setDrawer(current => ({ ...current, open: false }));
+        }}>{t('tw_back_conversations')}</button></ChatTopbarControl> : null}
         {invited ? <InviteNotice names={invited} locale={locale} onDone={() => setInvited(undefined)} /> : null}
         <TeamConversationView workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown} detailsOpen={drawer.open}
           onToggleDetails={() => setDrawer(current => ({ ...current, open: !current.open }))} />

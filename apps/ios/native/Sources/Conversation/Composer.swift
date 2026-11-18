@@ -12,8 +12,6 @@ enum VoiceHoldGesturePolicy {
 struct Composer: View {
     @Environment(\.theme) private var t
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    @Environment(\.colorSchemeContrast) private var contrast
     @Binding var inputFocused: Bool
     @Binding var model: ModelOption
     // The picker is driven exclusively by the engine's curated, provider-qualified
@@ -281,7 +279,7 @@ struct Composer: View {
                     .padding(.bottom, 8)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            VStack(alignment: .leading, spacing: 6) {
+            ComposerInputSurface(focused: inputFocused) {
                 // Captured-photo attachment chip (the device-vision analog of how
                 // a transcript lands in the draft): a thumbnail + a remove button,
                 // shown only once a camera capture has surfaced an image.
@@ -376,22 +374,7 @@ struct Composer: View {
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("composer.toolbar")
             }
-            .padding(.horizontal, 10).padding(.top, 14).padding(.bottom, 6)
-            .background {
-                let shape = RoundedRectangle(cornerRadius: 26, style: .continuous)
-                if reduceTransparency || contrast == .increased {
-                    shape.fill(t.composerBg)
-                } else {
-                    shape.fill(.regularMaterial)
-                }
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 26, style: .continuous)
-                    .strokeBorder(t.border.opacity(contrast == .increased ? 1 : inputFocused ? 0.7 : 0.4),
-                                  lineWidth: contrast == .increased ? 1 : 0.5)
-            }
-            .shadow(color: .black.opacity(t.isDark ? 0.12 : 0.04), radius: 12, y: 4)
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: inputFocused)
+
         }
         .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
         // Let the transcript yield height instead of compressing controls out
@@ -903,7 +886,38 @@ enum ComposerSubmissionPolicy {
     }
 }
 
-private struct ComposerActionButtonStyle: ButtonStyle {
+/// The shared input card. Callers supply the editor and the controls
+/// appropriate to the conversation they are composing in.
+struct ComposerInputSurface<Content: View>: View {
+    @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+    let focused: Bool
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 26, style: .continuous)
+        VStack(alignment: .leading, spacing: 6) { content }
+            .padding(.horizontal, 10).padding(.top, 14).padding(.bottom, 6)
+            .background {
+                if reduceTransparency || contrast == .increased {
+                    shape.fill(theme.composerBg)
+                } else {
+                    shape.fill(.regularMaterial)
+                }
+            }
+            .overlay {
+                shape.strokeBorder(theme.border.opacity(contrast == .increased ? 1 : focused ? 0.7 : 0.4),
+                                   lineWidth: contrast == .increased ? 1 : 0.5)
+                    .allowsHitTesting(false)
+            }
+            .shadow(color: .black.opacity(theme.isDark ? 0.12 : 0.04), radius: 12, y: 4)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: focused)
+    }
+}
+
+struct ComposerActionButtonStyle: ButtonStyle {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
@@ -916,7 +930,7 @@ private struct ComposerActionButtonStyle: ButtonStyle {
     }
 }
 
-private struct ComposerTurnActionIcon: View {
+struct ComposerTurnActionIcon: View {
     let systemName: String
     let symbolSize: CGFloat
     let background: Color

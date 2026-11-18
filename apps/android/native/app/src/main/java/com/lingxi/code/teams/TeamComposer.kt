@@ -1,6 +1,8 @@
 package com.lingxi.code.teams
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -11,17 +13,15 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,6 +29,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -40,8 +43,12 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
+import com.lingxi.code.components.LXIconName
 import com.lingxi.code.conversation.AudioSetupBanner
+import com.lingxi.code.conversation.ComposerInputSurface
+import com.lingxi.code.conversation.ComposerSendButton
 import com.lingxi.code.theme.BotAvatar
+import com.lingxi.code.theme.LingXiTheme
 
 /**
  * The composer of a conversation (SPEC-mobile-team-bot-ui section 6.3): a growing field, reply and edit bars, the `@` picker and
@@ -87,13 +94,13 @@ internal fun TeamComposer(
         if (editing == null && field.text != draft.text) field = TextFieldValue(draft.text, TextRange(draft.text.length))
     }
     val askable = conversation.kind == "group" || conversation.kind == "channel"
-    val mention = if (askable && editing == null) TeamsComposeLogic.mentionAt(field.text, field.selection.end) else null
-    val candidates = if (mention != null && draft.targets.size < TeamsComposeLogic.MAX_TARGETS) TeamsComposeLogic.mentionCandidates(bots, conversation, draft.targets, mention.query) else emptyList()
-    val staleTargets = if (editing == null && askable) composerStaleTargets(draft.targets, bots, conversation) else emptySet()
-    val staleBotDm = conversation.kind == "bot_dm" && conversation.sharedBotIds.size != 1
-    val tooLong = TeamsComposeLogic.byteLength(field.text) > TeamsComposeLogic.MESSAGE_BYTES
     val viewer = messaging.cache?.let { TeamMemberRef(uid, it.generation) }
     val answeringWait = TeamTaskActions.answerableWait(replyTo, messaging.tasks, viewer, TeamTaskActions.pendingWaitIds(messaging.cache?.outbox.orEmpty())) != null
+    val mention = if (askable && editing == null && !answeringWait) TeamsComposeLogic.mentionAt(field.text, field.selection.end) else null
+    val candidates = if (mention != null && draft.targets.size < TeamsComposeLogic.MAX_TARGETS) TeamsComposeLogic.mentionCandidates(bots, conversation, draft.targets, mention.query) else emptyList()
+    val staleTargets = if (editing == null && askable && !answeringWait) composerStaleTargets(draft.targets, bots, conversation) else emptySet()
+    val staleBotDm = conversation.kind == "bot_dm" && conversation.sharedBotIds.size != 1
+    val tooLong = TeamsComposeLogic.byteLength(field.text) > TeamsComposeLogic.MESSAGE_BYTES
     val requestTargets = if (conversation.kind == "bot_dm") conversation.sharedBotIds else draft.targets
     val blockedBots = TeamBotEntry.blockedRequests(requestTargets, bots, editing != null || answeringWait)
     val canSend = TeamAttachments.canSend(field.text, files) && !messaging.submitting && blockedBots.isEmpty() && (editing != null || (staleTargets.isEmpty() && !staleBotDm))
@@ -134,78 +141,97 @@ internal fun TeamComposer(
             }
             HorizontalDivider()
         }
-        if (editing != null || replyTo != null) {
-            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
-                    Text(
-                        if (editing != null) stringResource(R.string.teams_editing_message) else stringResource(R.string.teams_replying_to_fmt, replyAuthor),
-                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary,
-                    )
-                    val quoted = editing ?: replyTo!!
-                    Text(if (quoted.recalled) stringResource(R.string.teams_message_recalled) else TeamsComposeLogic.snippet(quoted.text), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                IconButton(onClick = { if (editing != null) onCancelEdit() else onCancelReply() }) { Icon(Icons.Outlined.Close, stringResource(R.string.teams_cancel_reply)) }
-            }
-        }
-        if (draft.targets.isNotEmpty() && editing == null) {
-            Text(stringResource(R.string.teams_composer_bots_asked), Modifier.padding(start = 16.dp, top = 6.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            FlowRow(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                draft.targets.sorted().forEach { key ->
-                    val bot = bots.firstOrNull { it.sharedBotId == key }
-                    val name = bot?.name ?: stringResource(R.string.teams_bot_tag)
-                    val remove = stringResource(R.string.teams_composer_remove_bot_fmt, name)
-                    InputChip(
-                        selected = false, onClick = { update(field, draft.targets - key) },
-                        label = { Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        leadingIcon = { BotAvatar(bot?.avatarId ?: key, 20.dp) },
-                        trailingIcon = { Icon(Icons.Outlined.Close, null, Modifier.size(16.dp)) },
-                        modifier = Modifier.semantics { contentDescription = remove },
-                    )
+        ComposerInputSurface(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            if (editing != null || replyTo != null) {
+                Row(Modifier.fillMaxWidth().padding(start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
+                        Text(
+                            if (editing != null) stringResource(R.string.teams_editing_message) else stringResource(R.string.teams_replying_to_fmt, replyAuthor),
+                            style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary,
+                        )
+                        val quoted = editing ?: replyTo!!
+                        Text(if (quoted.recalled) stringResource(R.string.teams_message_recalled) else TeamsComposeLogic.snippet(quoted.text), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    IconButton(onClick = { if (editing != null) onCancelEdit() else onCancelReply() }) { Icon(Icons.Outlined.Close, stringResource(R.string.teams_cancel_reply)) }
                 }
             }
-        }
-        TeamDraftFiles(files, refusals, onRemoveFile, onDismissRefusals)
-        blockedBots.forEach { bot ->
-            Text(bot.name + " · " + botAvailabilityText(bot), Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-        }
-        if (staleTargets.isNotEmpty() || staleBotDm) Text(stringResource(R.string.teams_error_bot_access_changed), Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.Bottom) {
-            if (onChooseFiles != null) TeamAttachButton(enabled = files.size < TeamAttachments.MESSAGE_FILES && !messaging.submitting, onChosen = onChooseFiles)
-            OutlinedTextField(
-                value = field, onValueChange = { update(it) }, minLines = 1, maxLines = 6, isError = tooLong, enabled = !messaging.submitting,
-                placeholder = {
-                    Text(
-                        if (editing != null) stringResource(R.string.teams_composer_edit_hint)
-                        else stringResource(R.string.teams_composer_hint_fmt, if (conversation.kind == "channel") "#$label" else label),
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    )
+            if (draft.targets.isNotEmpty() && editing == null && !answeringWait) {
+                Text(stringResource(R.string.teams_composer_bots_asked), Modifier.padding(start = 4.dp, top = 6.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                FlowRow(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    draft.targets.sorted().forEach { key ->
+                        val bot = bots.firstOrNull { it.sharedBotId == key }
+                        val name = bot?.name ?: stringResource(R.string.teams_bot_tag)
+                        val remove = stringResource(R.string.teams_composer_remove_bot_fmt, name)
+                        InputChip(
+                            selected = false, onClick = { update(field, draft.targets - key) },
+                            label = { Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            leadingIcon = { BotAvatar(bot?.avatarId ?: key, 20.dp) },
+                            trailingIcon = { Icon(Icons.Outlined.Close, null, Modifier.size(16.dp)) },
+                            modifier = Modifier.semantics { contentDescription = remove },
+                        )
+                    }
+                }
+            }
+            TeamDraftFiles(files, refusals, onRemoveFile, onDismissRefusals)
+            blockedBots.forEach { bot ->
+                Text(bot.name + " · " + botAvailabilityText(bot), Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+            if (staleTargets.isNotEmpty() || staleBotDm) Text(stringResource(R.string.teams_error_bot_access_changed), Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            val palette = LingXiTheme.palette
+            val focus = remember { FocusRequester() }
+            val placeholder = if (editing != null) stringResource(R.string.teams_composer_edit_hint)
+                else stringResource(R.string.teams_composer_hint_fmt, if (conversation.kind == "channel") "#$label" else label)
+            BasicTextField(
+                value = field, onValueChange = { update(it) }, minLines = 1, maxLines = 6, enabled = !messaging.submitting,
+                textStyle = MaterialTheme.typography.bodyLarge.copy(color = palette.text),
+                cursorBrush = SolidColor(palette.accent),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp)
+                    .focusRequester(focus).testTag(TeamsTags.COMPOSER_FIELD),
+                decorationBox = { inner ->
+                    Box {
+                        if (field.text.isEmpty()) Text(placeholder, color = palette.text4, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        inner()
+                    }
                 },
-                modifier = Modifier.weight(1f).testTag(TeamsTags.COMPOSER_FIELD),
             )
-            if (voice != null) TeamVoiceButton(voice, enabled = !messaging.submitting)
-            IconButton(
-                enabled = canSend, modifier = Modifier.testTag(TeamsTags.SEND),
-                onClick = { val submitted = field.text; onSend(submitted, if (editing == null && askable) draft.targets.sorted() else emptyList()) { if (field.text == submitted) field = TextFieldValue("") } },
-            ) { Icon(Icons.AutoMirrored.Outlined.Send, stringResource(if (editing != null) R.string.teams_message_save else R.string.teams_message_send)) }
-        }
-        if (tooLong) Text(stringResource(R.string.teams_composer_too_long), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-        if (hasAskableBots && editing == null) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                AssistChip(
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                if (onChooseFiles != null) TeamAttachButton(enabled = files.size < TeamAttachments.MESSAGE_FILES && !messaging.submitting, onChosen = onChooseFiles)
+                if (hasAskableBots && editing == null && !answeringWait) {
+                    IconButton(
+                        enabled = !messaging.submitting && draft.targets.size < TeamsComposeLogic.MAX_TARGETS,
+                        onClick = {
+                            val caret = field.selection.end
+                            val before = field.text.substring(0, caret)
+                            val token = if (before.isEmpty() || before.last().isWhitespace()) "@" else " @"
+                            update(TextFieldValue(before + token + field.text.substring(caret), TextRange(caret + token.length)))
+                            focus.requestFocus()
+                        },
+                        modifier = Modifier.testTag(TeamsTags.ASK_BOT),
+                    ) {
+                        val description = stringResource(R.string.teams_composer_ask_bot)
+                        Text("@", Modifier.semantics { contentDescription = description }, style = MaterialTheme.typography.titleMedium)
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                if (voice != null) TeamVoiceButton(voice, enabled = !messaging.submitting)
+                ComposerSendButton(
+                    label = stringResource(if (editing != null) R.string.teams_message_save else R.string.teams_message_send),
+                    enabled = canSend,
+                    icon = if (editing != null) LXIconName.Check else LXIconName.ArrowUp,
+                    modifier = Modifier.testTag(TeamsTags.SEND),
                     onClick = {
-                        val caret = field.selection.end
-                        val before = field.text.substring(0, caret)
-                        val text = before + (if (before.isEmpty() || before.last().isWhitespace()) "@" else " @") + field.text.substring(caret)
-                        update(TextFieldValue(text, TextRange(before.length + (text.length - field.text.length))))
+                        val submitted = field.text
+                        onSend(submitted, if (editing == null && askable && !answeringWait) draft.targets.sorted() else emptyList()) {
+                            if (field.text == submitted) field = TextFieldValue("")
+                        }
                     },
-                    label = { Text(stringResource(R.string.teams_composer_ask_bot)) }, modifier = Modifier.testTag(TeamsTags.ASK_BOT),
                 )
             }
         }
+        if (tooLong) Text(stringResource(R.string.teams_composer_too_long), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         val note = when {
             files.any { it.state == TeamDraftFile.State.Failed } -> R.string.teams_file_note_failed
             files.any { it.state == TeamDraftFile.State.Uploading } -> R.string.teams_file_note_uploading
-            messaging.offline -> R.string.teams_composer_note_offline
             conversation.kind == "bot_dm" -> R.string.teams_composer_note_bot_dm
             hasAskableBots -> R.string.teams_composer_note_group
             else -> null

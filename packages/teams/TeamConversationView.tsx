@@ -1,4 +1,5 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
+import { Fragment, useContext, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
+import { ChatTopbarHeader, ChatTopbarTarget, TopbarConnection } from './ChatTopbar';
 import { useTeamTasks } from './bot-runs.js';
 import type { TeamTaskView } from './execution.js';
 import { MemberHome } from './MemberHome';
@@ -26,6 +27,7 @@ export interface FriendHeader {
   uid: string; name: string; handle?: string;
   /** The right of the header: the friend menu. */
   actions?: ReactNode;
+  onOpenProfile?(): void;
 }
 
 export interface TeamConversationViewProps {
@@ -82,14 +84,19 @@ export function TeamConversationView(props: TeamConversationViewProps): ReactEle
   const { snapshot, locale } = props;
   const t = useTeamsText(locale);
   const conversation = snapshot.conversation, model = snapshot.messaging, team = snapshot.team;
+  const hasTopbar = useContext(ChatTopbarTarget) !== undefined;
   if (!conversation || !model || !team) {
-    if (snapshot.loading) return <section className="tw-scope tw-conv tw-conv-empty"><p className="tw-empty-line" role="status">{t('teams_loading')}</p></section>;
-    if (team && !snapshot.selectedConversationId && !snapshot.creation) return <MemberHome key={`${snapshot.uid}:${team.id}:${team.generation}`} workspace={props.workspace} snapshot={snapshot} locale={locale} renderMarkdown={props.renderMarkdown} />;
     const { title, body } = emptyState(snapshot, locale);
-    return <section className="tw-scope tw-conv tw-conv-empty">
+    const chrome = hasTopbar ? <ChatTopbarHeader><header className="tw-conv-head">
+      <div className="tw-conv-identity"><div className="tw-conv-title"><h2>{team?.name ?? t('teams_title')}</h2></div></div>
+      <TopbarConnection snapshot={snapshot} workspace={props.workspace} locale={locale} />
+    </header></ChatTopbarHeader> : null;
+    if (snapshot.loading) return <>{chrome}<section className="tw-scope tw-conv tw-conv-empty"><p className="tw-empty-line" role="status">{t('teams_loading')}</p></section></>;
+    if (team && !snapshot.selectedConversationId && !snapshot.creation) return <>{chrome}<MemberHome key={`${snapshot.uid}:${team.id}:${team.generation}`} workspace={props.workspace} snapshot={snapshot} locale={locale} renderMarkdown={props.renderMarkdown} /></>;
+    return <>{chrome}<section className="tw-scope tw-conv tw-conv-empty">
       <div className="tw-empty"><h2>{title}</h2><p>{body}</p><p className="tw-hint">{platformNotice(locale)}</p></div>
       {snapshot.creation ? <CreationBanner workspace={props.workspace} snapshot={snapshot} locale={locale} /> : null}
-    </section>;
+    </section></>;
   }
   return <ConversationPane key={`${snapshot.uid}:${team.id}:${team.generation}:${conversation.id}`} {...props} conversation={conversation} model={model} team={team} />;
 }
@@ -109,6 +116,7 @@ type Pane = TeamConversationViewProps & { conversation: TeamConversation; model:
 
 function ConversationPane({ workspace, snapshot, conversation, model, team, detailsOpen, onToggleDetails, renderAvatar, renderMarkdown, locale, now, friend, onBack }: Pane): ReactElement {
   const t = useTeamsText(locale);
+  const hasTopbar = useContext(ChatTopbarTarget) !== undefined;
   const uid = snapshot.uid, messages = snapshot.messages, tag = intlTag(locale);
   const minute = Math.floor((now === undefined ? Date.now() : typeof now === 'number' ? now : now.getTime()) / 60_000);
   const [startId, setStartId] = useState<string>();
@@ -252,33 +260,43 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   const auto = friend ? { bots: [], on: [] } : autoReplyBots(conversation, snapshot);
 
   return <section className="tw-scope tw-conv" aria-label={label}>
-    <header className="tw-conv-head">
+    <ChatTopbarHeader><header className="tw-conv-head">
       {onBack ? <button type="button" className="tw-icon-btn" aria-label={t('remote_back')} title={t('remote_back')} onClick={onBack}><Icon name="chevronLeft" /></button> : null}
-      {friend ? <Avatar identity={{ kind: 'user', id: friend.uid, name: friend.name }} size={32} render={renderAvatar} />
-        : <ConversationLead conversation={conversation} label={label} snapshot={snapshot} locale={locale} size={32} render={renderAvatar} />}
-      <div className="tw-conv-title">
-        <h2>{label}</h2>
-        {friend ? friend.handle ? <p>@{friend.handle}</p> : null : subtitle ? <p>{subtitle}</p> : null}
+      <div className="tw-conv-identity">
+        {friend ? <Avatar identity={{ kind: 'user', id: friend.uid, name: friend.name }} size={hasTopbar ? 32 : 40} render={renderAvatar} />
+          : <ConversationLead conversation={conversation} label={label} snapshot={snapshot} locale={locale} size={hasTopbar ? 32 : 40} render={renderAvatar} />}
+        <div className="tw-conv-title">
+          <h2>{label}</h2>
+          {friend ? friend.handle ? <p>@{friend.handle}</p> : null : subtitle ? <p>{subtitle}</p> : null}
+        </div>
+        {friend?.onOpenProfile || (!friend && onToggleDetails) ? <button type="button" className="tw-conv-identity-button"
+          aria-label={t(friend ? 'friends_menu_view_profile' : 'teams_conversation_details')}
+          aria-expanded={friend ? undefined : !!detailsOpen} aria-haspopup={friend ? 'dialog' : undefined}
+          onClick={friend ? friend.onOpenProfile : onToggleDetails} /> : null}
       </div>
-      {friend ? null : <span className="tw-platform" title={platformNotice(locale)}>{platformChip(locale)}</span>}
-      {/* A friend chat reads itself (D13), so it has no manual mark, as on Android. */}
-      {unread > 0 && !friend ? <button type="button" disabled={snapshot.messageBusy || snapshot.offline} onClick={() => void workspace.markRead()}>{t('tw_mark_as_read')}</button> : null}
-      {friend?.actions}
-      {auto.bots.length ? <button type="button" className="tw-icon-btn" aria-pressed={auto.on.length > 0} aria-label={t('teams_auto_reply_title')} title={t('teams_auto_reply_title')} onClick={() => setAutoReplyOpen(true)}><Icon name="bot" /></button> : null}
-      {onToggleDetails && !friend ? <button type="button" className="tw-icon-btn" aria-pressed={!!detailsOpen} aria-label={t('teams_team_details')} title={t('teams_team_details')} onClick={onToggleDetails}><Icon name="panel" /></button> : null}
-    </header>
-    {snapshot.messagingError
+      <div className="tw-head-actions">
+        {hasTopbar ? <TopbarConnection snapshot={snapshot} workspace={workspace} locale={locale} friend={!!friend} /> : null}
+        {friend ? null : <span className="tw-platform" title={platformNotice(locale)}><Icon name="lock" size={13} /><span>{platformChip(locale)}</span></span>}
+        {/* A friend chat reads itself (D13), so it has no manual mark. */}
+        {unread > 0 && !friend ? <button type="button" className="tw-head-action" aria-label={t('tw_mark_as_read')} title={t('tw_mark_as_read')}
+          disabled={snapshot.messageBusy || snapshot.offline} onClick={() => void workspace.markRead()}><Icon name="check" /><span>{t('tw_mark_as_read')}</span></button> : null}
+        {friend?.actions}
+        {auto.bots.length ? <button type="button" className="tw-icon-btn" aria-pressed={auto.on.length > 0} aria-label={t('teams_auto_reply_title')} title={t('teams_auto_reply_title')} onClick={() => setAutoReplyOpen(true)}><Icon name="bot" /></button> : null}
+        {onToggleDetails && !friend ? <button type="button" className="tw-icon-btn" aria-pressed={!!detailsOpen} aria-label={t('teams_team_details')} title={t('teams_team_details')} onClick={onToggleDetails}><Icon name="panel" /></button> : null}
+      </div>
+    </header></ChatTopbarHeader>
+    {!hasTopbar && (snapshot.messagingError
       ? <div className="tw-banner" role="alert" data-kind="error"><span>{messageErrorText(snapshot.messagingError, locale)}</span><button type="button" className="tw-link" onClick={() => workspace.reconnect()}>{t('teams_reconnect')}</button></div>
       : snapshot.messagingConnecting
         ? <div className="tw-banner" role="status" data-kind="connecting">{t('tw_conv_connecting')}</div>
       : snapshot.offline
         ? <div className="tw-banner" role="status" data-kind="offline"><span>{t('teams_messages_offline')}</span><button type="button" className="tw-link" onClick={() => workspace.reconnect()}>{t('teams_reconnect')}</button></div>
-        : null}
+        : null)}
     {snapshot.actionError && snapshot.actionError !== snapshot.messagingError ? <p className="tw-banner" role="alert" data-kind="error">{messageErrorText(snapshot.actionError, locale)}</p> : null}
     <CreationBanner workspace={workspace} snapshot={snapshot} locale={locale} />
     {runs.error ? <p role="alert" className="tw-banner">{messageErrorText(runs.error, locale)}</p> : null}
 
-    <div className="tw-stream-wrap">
+    <div className="tw-stream-wrap tw-chat-thread">
       <div ref={scroller} className="tw-stream" role="log" aria-label={t('tw_messages')} tabIndex={0} onScroll={measure}>
         {start > 0 ? <div className="tw-earlier"><button type="button" onClick={showEarlier}>{t('teams_messages_earlier')} ({start})</button></div> : null}
         {!messages.length && !snapshot.pending.length && !runs.tasks.length ? loadingMessages
@@ -317,8 +335,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
             const operation = 'operation' in payload ? payload.operation : 'create';
             const status = (intent.error ? messageErrorText(intent.error, locale) : '') || (intent.attempted ? t('teams_message_confirming') : t('teams_message_pending'));
             return <li key={payload.changeId} className="tw-msg tw-pending" data-mine="true" data-error={intent.error ? 'true' : undefined}>
-              <div className="tw-msg-lead"><Avatar identity={{ kind: 'user', id: uid, name: nameOf(uid) }} size={32} render={renderAvatar} /></div>
-              <div className="tw-msg-main">
+              <div className="tw-msg-main tw-msg-bubble">
                 <div className="tw-msg-head"><b className="tw-msg-author">{t('teams_you')}</b><small role="status">{status}</small></div>
                 <p className="tw-msg-body">{operation === 'recall' ? t('tw_conv_recall_message') : `${operation === 'edit' ? `${t('teams_message_edit')}: ` : ''}${payload.text}`}</p>
                 {'attachments' in payload && payload.attachments?.length ? <p className="tw-msg-body tw-pending-files"><Icon name="clip" size={12} /> {payload.attachments.length === 1 ? t('tw_files_one') : t('tw_files_other_fmt', payload.attachments.length)}</p> : null}
@@ -384,35 +401,42 @@ function MessageItem({ message, grouped, author, mine, owner, quote, question, a
   const t = useTeamsText(locale);
   const clock = formatClock(message.createdAt, locale);
   const full = message.createdAt ? new Date(message.createdAt).toLocaleString(locale) : undefined;
-  const time = clock ? <time className={grouped ? 'tw-msg-hover-time' : 'tw-msg-time'} dateTime={message.createdAt ?? undefined} title={full}>{clock}</time> : null;
   const acts = !message.recalled && (onReply || onEdit || onRecall);
   // Only a shared Bot writes Markdown; what a person types is shown exactly as typed.
   const markdown = message.author.kind === 'shared_bot' && !message.recalled && renderMarkdown !== undefined;
+  const filesOnly = !message.text && !message.recalled && !!message.attachments?.length;
+  const body = markdown ? <div className="tw-msg-body tw-md" data-markdown="true">
+    {renderMarkdown(message.text)}
+  </div> : filesOnly ? null : <p className="tw-msg-body">
+    {message.recalled ? <em>{t('teams_message_recalled')}</em> : message.text}
+  </p>;
+  const edited = message.editedAt && !message.recalled;
+  const meta = clock || edited ? <div className="tw-msg-meta">
+    {edited ? <small className="tw-edited">({t('tw_edited_tag')})</small> : null}
+    {clock ? <time className="tw-msg-time" dateTime={message.createdAt ?? undefined} title={full}>{clock}</time> : null}
+  </div> : null;
+  const inlineTime = author.kind === 'user' && !!body && !message.attachments?.length && !!meta;
   return <li className="tw-msg" data-grouped={grouped} data-mine={mine} data-kind={author.kind} data-recalled={message.recalled ? 'true' : undefined} data-message-id={message.id} data-message-seq={message.seq}>
-    <div className="tw-msg-lead">{grouped ? time : <Avatar identity={author} size={32} render={renderAvatar} />}</div>
+    {!mine ? <div className="tw-msg-lead">{!grouped ? <Avatar identity={author} size={32} render={renderAvatar} /> : null}</div> : null}
     <div className="tw-msg-main">
-      {!grouped ? <div className="tw-msg-head">
-        <b className="tw-msg-author">{mine ? t('teams_you') : author.name}</b>
-        {author.kind === 'bot' ? <span className="tw-tag">{t('teams_bot_tag')}</span> : null}
-        {question ? <span className="tw-tag">{t('services_question')}</span> : null}
-        {approval ? <span className="tw-tag">{t('teams_approval_tag')}</span> : null}
-        {owner ? <small>{t('teams_bot_owner_fmt', owner)}</small> : null}
-        {time}
+      <div className={author.kind === 'user' ? 'tw-msg-bubble' : 'tw-msg-agent'}>
+        {!grouped ? <div className="tw-msg-head">
+          <b className="tw-msg-author">{mine ? t('teams_you') : author.name}</b>
+          {author.kind === 'bot' ? <span className="tw-tag">{t('teams_bot_tag')}</span> : null}
+          {question ? <span className="tw-tag">{t('services_question')}</span> : null}
+          {approval ? <span className="tw-tag">{t('teams_approval_tag')}</span> : null}
+          {owner ? <small>{t('teams_bot_owner_fmt', owner)}</small> : null}
+        </div> : null}
+        {quote ? <blockquote className="tw-quote">{quote.author ? <b>{quote.author}</b> : null} {quote.text}</blockquote> : null}
+        {inlineTime ? <div className="tw-msg-text-line">{body}{meta}</div> : body}
+        {children}
+        {inlineTime ? null : meta}
+      </div>
+      {acts ? <div className="tw-msg-actions" role="group" aria-label={t('teams_message_actions')}>
+        {onReply ? <button type="button" className="tw-icon-btn" aria-label={t('teams_message_reply')} title={t('teams_message_reply')} onClick={() => onReply(message)}><Icon name="reply" /></button> : null}
+        {onEdit ? <button type="button" className="tw-icon-btn" aria-label={t('teams_message_edit')} title={t('teams_message_edit')} onClick={() => onEdit(message)}><Icon name="edit" /></button> : null}
+        {onRecall ? <button type="button" className="tw-icon-btn tw-danger" aria-label={t('teams_message_recall')} title={t('teams_message_recall')} onClick={() => onRecall(message)}><Icon name="trash" /></button> : null}
       </div> : null}
-      {quote ? <blockquote className="tw-quote">{quote.author ? <b>{quote.author}</b> : null} {quote.text}</blockquote> : null}
-      {markdown ? <div className="tw-msg-body tw-md" data-markdown="true">
-        {renderMarkdown(message.text)}
-        {message.editedAt ? <small className="tw-edited"> ({t('tw_edited_tag')})</small> : null}
-      </div> : !message.text && !message.recalled && message.attachments?.length ? null : <p className="tw-msg-body">
-        {message.recalled ? <em>{t('teams_message_recalled')}</em> : message.text}
-        {message.editedAt && !message.recalled ? <small className="tw-edited"> ({t('tw_edited_tag')})</small> : null}
-      </p>}
-      {children}
     </div>
-    {acts ? <div className="tw-msg-actions" role="group" aria-label={t('teams_message_actions')}>
-      {onReply ? <button type="button" className="tw-icon-btn" aria-label={t('teams_message_reply')} title={t('teams_message_reply')} onClick={() => onReply(message)}><Icon name="reply" /></button> : null}
-      {onEdit ? <button type="button" className="tw-icon-btn" aria-label={t('teams_message_edit')} title={t('teams_message_edit')} onClick={() => onEdit(message)}><Icon name="edit" /></button> : null}
-      {onRecall ? <button type="button" className="tw-icon-btn tw-danger" aria-label={t('teams_message_recall')} title={t('teams_message_recall')} onClick={() => onRecall(message)}><Icon name="trash" /></button> : null}
-    </div> : null}
   </li>;
 }

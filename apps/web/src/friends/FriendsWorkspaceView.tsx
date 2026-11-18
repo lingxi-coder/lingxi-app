@@ -6,6 +6,7 @@ import { FriendLinkDialog } from '../../../../packages/teams/friend-dialogs';
 import { badgeText, type FriendsApi } from '../../../../packages/teams/friends';
 import { FriendsMain } from '../../../../packages/teams/FriendsMain';
 import { FriendsSidebar } from '../../../../packages/teams/FriendsSidebar';
+import { ChatTopbarControl } from '../../../../packages/teams/ChatTopbar';
 import { useTeamsText } from '../../../../packages/teams/i18n';
 import type { RenderMarkdown } from '../../../../packages/teams/ui';
 import { useFriendsWorkspace } from '../../../../packages/teams/useFriendsWorkspace';
@@ -44,7 +45,7 @@ export function FriendsWorkspaceView({ friends, teams, uid, locale, route, chat,
     <div className="teams-web-body" data-pane={snapshot.page === 'home' ? 'list' : 'conversation'}>
       <div className="teams-web-sidebar"><FriendsSidebar workspace={workspace} snapshot={snapshot} locale={locale} /></div>
       <div className="teams-web-conversation">
-        <button type="button" className="teams-web-back" onClick={() => workspace.show('home')}>{t('tw_back_friends')}</button>
+        {snapshot.page !== 'home' ? <ChatTopbarControl><button type="button" className="teams-web-back" onClick={() => workspace.show('home')}>{t('tw_back_friends')}</button></ChatTopbarControl> : null}
         <FriendsMain workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown} />
       </div>
       {code ? <FriendLinkDialog workspace={workspace} locale={locale} code={code} onClose={onCodeHandled} /> : null}

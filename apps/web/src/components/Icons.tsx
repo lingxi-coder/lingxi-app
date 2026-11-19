@@ -191,3 +191,23 @@ export function IconChat(props: SVGProps<SVGSVGElement>) {
     props,
   );
 }
+
+export function IconArrowUp(props: SVGProps<SVGSVGElement>) {
+  return createIcon(<><path d="M12 19V5" /><path d="m6 11 6-6 6 6" /></>, props);
+}
+
+export function IconStop(props: SVGProps<SVGSVGElement>) {
+  return createIcon(<rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none" />, props);
+}
+
+export function IconTrash(props: SVGProps<SVGSVGElement>) {
+  return createIcon(<><path d="M4 7h16" /><path d="M9 7V4.5h6V7" /><path d="M6.5 7 7.5 20h9l1-13" /></>, props);
+}
+
+export function IconRefresh(props: SVGProps<SVGSVGElement>) {
+  return createIcon(<><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8" /><path d="M4 4v4h4" /><path d="M4 13a8 8 0 0 0 14.3 4.9L20 16" /><path d="M20 20v-4h-4" /></>, props);
+}
+
+export function IconSliders(props: SVGProps<SVGSVGElement>) {
+  return createIcon(<><path d="M4 7h10" /><path d="M18 7h2" /><circle cx="16" cy="7" r="2" /><path d="M4 17h2" /><path d="M10 17h10" /><circle cx="8" cy="17" r="2" /></>, props);
+}

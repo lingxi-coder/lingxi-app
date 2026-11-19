@@ -23,17 +23,21 @@ data class DeepLink(val route: String, val params: Map<String, String>, val payl
                 require(decoded.isNotEmpty() && decoded != "." && decoded != ".." && decoded.none { it == '/' || it == '\\' || it < ' ' || it == '\u007f' })
                 decoded
             }
-            require(Regex("^(session/[^/]+|project/[^/]+|new|settings/[^/]+|provider/[^/]+|extensions/(mcp|skill|plugin)/[^/]+|cron/(job|run)/[^/]+|terminal/[^/]+|apps/[^/]+|market/(bot/)?[^/]+|runtime/(agent|task|plan|review|activity)/[^/]+|import/(mcp|plugin|skill|provider)|remote/[^/]+/[^/]+|team/(join|inbox)|friend/(add|requests|chat))$").matches(route))
+            require(Regex("^(session/[^/]+|project/[^/]+|new|settings/[^/]+|provider/[^/]+|extensions/(mcp|skill|plugin)/[^/]+|cron/(job|run)/[^/]+|terminal/[^/]+|apps/[^/]+|market/(bot/)?[^/]+|runtime/(agent|task|plan|review|activity)/[^/]+|import/(mcp|plugin|skill|provider)|remote/[^/]+/[^/]+|team/(join|inbox|chat|bot)|friend/(add|requests|chat))$").matches(route))
             val params = pairs(uri.rawQuery).mapValues { (key, value) ->
                 if (key == "message") value.lowercase(java.util.Locale.ROOT) else value
             }
-            require(params.all { (k, v) -> k in setOf("workspace", "message", "mode", "scope", "review", "runId", "revision", "code", "uid", "turn", "generation", "versionId", "intentId") && v.isNotEmpty() && v.length <= 512 && v.none { it < ' ' || it == '\u007f' } })
+            require(params.all { (k, v) -> k in setOf("workspace", "message", "mode", "scope", "review", "runId", "revision", "code", "uid", "turn", "generation", "versionId", "intentId", "team", "conversation", "bot") && v.isNotEmpty() && v.length <= 512 && v.none { it < ' ' || it == '\u007f' } })
             if (route == "team/inbox" || route == "friend/requests") require(params.isEmpty())
             // A team invitation and a friend link each carry exactly one 32-character code, which no other route accepts.
             if (route == "team/join" || route == "friend/add") require(params.keys == setOf("code") && Regex("^[A-Za-z0-9_-]{32}$").matches(params.getValue("code")))
             else require("code" !in params)
             if (route == "friend/chat") require(params.keys == setOf("uid") && Regex("^[A-Za-z0-9_-]{1,128}$").matches(params.getValue("uid")))
             else require("uid" !in params)
+            // A shared team chat names its team and conversation; a shared Bot names its team and the Bot.
+            val conversationKeys = mapOf("team/chat" to setOf("team", "conversation"), "team/bot" to setOf("team", "bot"))[route]
+            if (conversationKeys != null) require(params.keys == conversationKeys && conversationKeys.all { Regex("^[A-Za-z0-9_-]{1,128}$").matches(params.getValue(it)) })
+            else require(params.keys.none { it in setOf("team", "conversation", "bot") })
             require(params["review"] == null || (route.startsWith("apps/") && params["review"] == "agent"))
             require(params["runId"] == null || (route.startsWith("apps/") && params["review"] == "agent" && params.getValue("runId").length <= 128))
             require(params["revision"] == null || (route.startsWith("apps/") && params["review"] == "agent" && params["runId"] != null &&

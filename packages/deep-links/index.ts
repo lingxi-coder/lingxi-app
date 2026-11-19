@@ -8,8 +8,11 @@ export type DeepLinkTarget = {
 export class DeepLinkError extends Error {
   constructor(public readonly code: 'invalid' | 'unsupported', message: string) { super(message); }
 }
-const routes = /^(session\/[^/]+|project\/[^/]+|new|settings\/[^/]+|provider\/[^/]+|extensions\/(mcp|skill|plugin)\/[^/]+|cron\/(job|run)\/[^/]+|terminal\/[^/]+|apps\/[^/]+|market\/(bot\/)?[^/]+|runtime\/(agent|task|plan|review|activity)\/[^/]+|import\/(mcp|plugin|skill|provider)|remote\/[^/]+\/[^/]+|team\/(join|inbox)|friend\/(add|requests|chat))$/u;
-const parameters = new Set(['workspace', 'message', 'mode', 'scope', 'code', 'versionId', 'intentId', 'uid']);
+const routes = /^(session\/[^/]+|project\/[^/]+|new|settings\/[^/]+|provider\/[^/]+|extensions\/(mcp|skill|plugin)\/[^/]+|cron\/(job|run)\/[^/]+|terminal\/[^/]+|apps\/[^/]+|market\/(bot\/)?[^/]+|runtime\/(agent|task|plan|review|activity)\/[^/]+|import\/(mcp|plugin|skill|provider)|remote\/[^/]+\/[^/]+|team\/(join|inbox|chat|bot)|friend\/(add|requests|chat))$/u;
+const parameters = new Set(['workspace', 'message', 'mode', 'scope', 'code', 'versionId', 'intentId', 'uid', 'team', 'conversation', 'bot']);
+/** The parameters each shared-conversation route carries, and nothing else; no other route accepts them. */
+const conversationRoutes: Record<string, readonly string[]> = { 'team/chat': ['conversation', 'team'], 'team/bot': ['bot', 'team'] };
+const conversationId = /^[A-Za-z0-9_-]{1,128}$/u;
 function validatePayload(value: unknown, depth = 0): void {
   if (depth > 16) throw new DeepLinkError('invalid', 'Payload is too deeply nested');
   if (Array.isArray(value)) { value.forEach(v => validatePayload(v, depth + 1)); return; }
@@ -57,6 +60,10 @@ export function parseDeepLink(raw: string): DeepLinkTarget {
   // A team invitation and a friend link each carry exactly one 32-character code, which no other route accepts.
   if (route === 'team/join' || route === 'friend/add' ? Object.keys(params).length !== 1 || !/^[A-Za-z0-9_-]{32}$/u.test(params.code ?? '') : params.code !== undefined) throw new DeepLinkError('invalid', 'Invalid invitation code');
   if (route === 'friend/chat' ? Object.keys(params).length !== 1 || !/^[A-Za-z0-9_-]{1,128}$/u.test(params.uid ?? '') : params.uid !== undefined) throw new DeepLinkError('invalid', 'Invalid friend identity');
+  // A shared team chat names its team and conversation; a shared Bot names its team and the Bot. Opening one never starts anything.
+  const expected = conversationRoutes[route];
+  if (expected ? Object.keys(params).sort().join() !== expected.join() || expected.some(key => !conversationId.test(params[key]!))
+    : ['team', 'conversation', 'bot'].some(key => params[key] !== undefined)) throw new DeepLinkError('invalid', 'Invalid conversation link');
   if (params.intentId && (!route.startsWith('market/bot/') || !/^[A-Za-z0-9_-]{1,128}$/.test(params.intentId))) throw new DeepLinkError('invalid', 'Invalid Bot handoff identity');
   if (params.versionId && (!route.startsWith('market/bot/') || !/^[A-Za-z0-9_-]{1,128}$/.test(params.versionId))) throw new DeepLinkError('invalid', 'Invalid Bot release identity');
   if (route.startsWith('market/bot/') && (!/^[A-Za-z0-9_-]{1,128}$/.test(route.split('/')[2]!) || Object.keys(params).some(key => key !== 'versionId' && key !== 'intentId'))) throw new DeepLinkError('invalid', 'Invalid Bot market link');

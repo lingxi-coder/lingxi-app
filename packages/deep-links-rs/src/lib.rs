@@ -35,7 +35,7 @@ fn valid_route(route: &str) -> bool {
             ]
             | ["import", "mcp" | "plugin" | "skill" | "provider"]
             | ["remote", _, _]
-            | ["team", "join" | "inbox"]
+            | ["team", "join" | "inbox" | "chat" | "bot"]
             | ["friend", "add" | "requests" | "chat"]
     )
 }
@@ -102,6 +102,9 @@ pub fn parse(raw: &str) -> Result<Target, &'static str> {
             "versionId",
             "intentId",
             "uid",
+            "team",
+            "conversation",
+            "bot",
         ]
         .contains(&key.as_ref())
             || value.is_empty()
@@ -151,6 +154,31 @@ pub fn parse(raw: &str) -> Result<Target, &'static str> {
         }
     } else if params.contains_key("uid") {
         return Err("Invalid friend identity");
+    }
+    // A shared team chat names its team and conversation; a shared Bot names its team and the Bot.
+    let expected: &[&str] = match route.as_str() {
+        "team/chat" => &["conversation", "team"],
+        "team/bot" => &["bot", "team"],
+        _ => &[],
+    };
+    if expected.is_empty() {
+        if ["team", "conversation", "bot"]
+            .iter()
+            .any(|key| params.contains_key(*key))
+        {
+            return Err("Invalid conversation link");
+        }
+    } else if params
+        .keys()
+        .map(String::as_str)
+        .ne(expected.iter().copied())
+        || expected.iter().any(|key| {
+            !params
+                .get(*key)
+                .is_some_and(|id| (1..=128).contains(&id.len()) && url_safe(id))
+        })
+    {
+        return Err("Invalid conversation link");
     }
     if let Some(id) = params.get_mut("message") {
         if !route.starts_with("session/")

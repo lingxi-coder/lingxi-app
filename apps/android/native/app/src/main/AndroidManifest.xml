@@ -147,6 +147,7 @@
                 <data android:scheme="lingxi" android:host="import" />
                 <data android:scheme="lingxi" android:host="remote" />
                 <data android:scheme="lingxi" android:host="team" />
+                <data android:scheme="lingxi" android:host="friend" />
             </intent-filter>
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />

@@ -170,6 +170,46 @@
         "versionId": "release1",
         "intentId": "handoff1"
       }
+    },
+    {
+      "url": "lingxi://team/chat?team=design-team&conversation=2f1c9a7e-55b1-4c1e-9d0a-6b7f2e3c4d5a",
+      "route": "team/chat",
+      "params": {
+        "team": "design-team",
+        "conversation": "2f1c9a7e-55b1-4c1e-9d0a-6b7f2e3c4d5a"
+      }
+    },
+    {
+      "url": "lingxi://team/bot?team=design-team&bot=Bot_01-abc",
+      "route": "team/bot",
+      "params": {
+        "team": "design-team",
+        "bot": "Bot_01-abc"
+      }
+    },
+    {
+      "url": "https://lingxios.net/open/team/chat?team=design-team&conversation=2f1c9a7e-55b1-4c1e-9d0a-6b7f2e3c4d5a",
+      "route": "team/chat",
+      "params": {
+        "team": "design-team",
+        "conversation": "2f1c9a7e-55b1-4c1e-9d0a-6b7f2e3c4d5a"
+      }
+    },
+    {
+      "url": "https://lingxios.net/open/team/bot?team=design-team&bot=Bot_01-abc",
+      "route": "team/bot",
+      "params": {
+        "team": "design-team",
+        "bot": "Bot_01-abc"
+      }
+    },
+    {
+      "url": "lingxi://team/chat?conversation=friend_chat&team=f_abcdef123456",
+      "route": "team/chat",
+      "params": {
+        "team": "f_abcdef123456",
+        "conversation": "friend_chat"
+      }
     }
   ],
   "invalid": [
@@ -231,6 +271,26 @@
     "lingxi://friend/chat?uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e&code=aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-",
     "lingxi://team/inbox?uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e",
     "lingxi://team/join?code=aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-&uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e",
-    "lingxi://new?uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e"
+    "lingxi://new?uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e",
+    "lingxi://team/chat",
+    "lingxi://team/chat?team=design-team",
+    "lingxi://team/chat?conversation=c1",
+    "lingxi://team/chat?team=design-team&conversation=c1&bot=b1",
+    "lingxi://team/chat?team=design-team&conversation=a%2Fb",
+    "lingxi://team/chat?team=design%20team&conversation=c1",
+    "lingxi://team/chat?team=design-team&conversation=c1&workspace=w",
+    "lingxi://team/chat?team=design-team&team=other&conversation=c1",
+    "lingxi://team/chat?team=design-team&conversation=c1#payload=%7B%7D",
+    "lingxi://team/chat?team=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&conversation=c1",
+    "lingxi://team/bot",
+    "lingxi://team/bot?team=design-team",
+    "lingxi://team/bot?team=design-team&bot=b1&conversation=c1",
+    "lingxi://team/bot?team=design-team&bot=b.1",
+    "lingxi://team/other?team=design-team&conversation=c1",
+    "lingxi://team/inbox?team=design-team",
+    "lingxi://team/join?code=aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-&team=t1",
+    "lingxi://friend/chat?uid=u1&conversation=c1",
+    "lingxi://new?bot=b1",
+    "lingxi://team/chat/extra?team=design-team&conversation=c1"
   ]
 }

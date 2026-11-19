@@ -50,7 +50,7 @@ struct CanonicalDeepLink: Codable, Equatable, Sendable, Identifiable {
         let parts = segments.compactMap { $0 }
         let simple: Set<String> = ["session", "project", "settings", "provider", "terminal", "apps", "market"]
         let friendRoute = parts.count == 2 && parts[0] == "friend" && ["add", "requests", "chat"].contains(parts[1])
-        let valid = (parts.count == 3 && parts[0] == "market" && parts[1] == "bot") || parts == ["new"] || parts == ["team", "join"] || parts == ["team", "inbox"] || friendRoute || (parts.count == 2 && simple.contains(parts[0]))
+        let valid = (parts.count == 3 && parts[0] == "market" && parts[1] == "bot") || parts == ["new"] || parts == ["team", "join"] || parts == ["team", "inbox"] || parts == ["team", "chat"] || parts == ["team", "bot"] || friendRoute || (parts.count == 2 && simple.contains(parts[0]))
             || (parts.count == 3 && parts[0] == "extensions" && ["mcp", "skill", "plugin"].contains(parts[1]))
             || (parts.count == 3 && parts[0] == "cron" && ["job", "run"].contains(parts[1]))
             || (parts.count == 3 && parts[0] == "runtime" && ["agent", "task", "plan", "review", "activity"].contains(parts[1]))
@@ -58,7 +58,7 @@ struct CanonicalDeepLink: Codable, Equatable, Sendable, Identifiable {
         guard valid || (parts.count == 3 && parts[0] == "remote") else { return nil }
         var params: [String: String] = [:]
         for item in components.queryItems ?? [] {
-            guard ["workspace", "message", "mode", "scope", "review", "runId", "revision", "code", "uid", "versionId", "intentId"].contains(item.name), params[item.name] == nil,
+            guard ["workspace", "message", "mode", "scope", "review", "runId", "revision", "code", "uid", "versionId", "intentId", "team", "conversation", "bot"].contains(item.name), params[item.name] == nil,
                   let value = item.value, !value.isEmpty, value.count <= 512,
                   !value.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { return nil }
             params[item.name] = value
@@ -90,6 +90,11 @@ struct CanonicalDeepLink: Codable, Equatable, Sendable, Identifiable {
         if parts == ["friend", "chat"] {
             guard params.count == 1, let uid = params["uid"], uid.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil else { return nil }
         } else if params["uid"] != nil { return nil }
+        // A shared team chat names its team and conversation; a shared Bot names its team and the Bot.
+        let conversationKeys: Set<String>? = parts == ["team", "chat"] ? ["team", "conversation"] : parts == ["team", "bot"] ? ["team", "bot"] : nil
+        if let conversationKeys {
+            guard Set(params.keys) == conversationKeys, conversationKeys.allSatisfy({ params[$0]?.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil }) else { return nil }
+        } else if params["team"] != nil || params["conversation"] != nil || params["bot"] != nil { return nil }
         if let intentID = params["intentId"] { guard parts.count == 3, parts[0] == "market", parts[1] == "bot", intentID.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil else { return nil } }
         if let versionID = params["versionId"] { guard parts.count == 3, parts[0] == "market", parts[1] == "bot", versionID.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil else { return nil } }
         if parts.count == 3, parts[0] == "market", parts[1] == "bot" { guard parts[2].range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil, params.keys.allSatisfy({ $0 == "versionId" || $0 == "intentId" }) else { return nil } }

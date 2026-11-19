@@ -19,6 +19,7 @@ export const appRoutes = [
   '/remote',
   '/login/remote',
   '/inbox',
+  '/projects',
   '/teams',
   '/teams/join',
   '/friends',
@@ -110,7 +111,7 @@ export function parseServiceRoute(path: string): string | null {
 
 export type SecurityZone = 'remote' | 'sign-in' | 'site' | 'workspace';
 
-const workspaceRoots = ['/chat', '/inbox', '/teams', '/friends', '/services'];
+const workspaceRoots = ['/chat', '/projects', '/inbox', '/teams', '/friends', '/services'];
 
 /** The signed-in workspace (Chat, Inbox, Teams, Friends, Services) shares one document policy, so moving inside it stays in-page. */
 export function securityZone(route: string): SecurityZone {

@@ -14,7 +14,7 @@ import { noticeTargetFromSearch,sourceRoute } from '../inbox/route';
 import type { Locale } from '../utils/locale';
 import '../teams/teams-web.css';
 
-function SignedIn({ user, locale, focusKey }: { user: User; locale: Locale; focusKey?: string }) {
+function SignedIn({ user, locale, focusKey, projects }: { user: User; locale: Locale; focusKey?: string; projects: boolean }) {
   const [controller, setController] = useState<InboxController>();
   const [receipts, setReceipts] = useState<boolean>(),
     [preferenceError, setError] = useState('');
@@ -24,6 +24,7 @@ function SignedIn({ user, locale, focusKey }: { user: User; locale: Locale; focu
     const db = teamsDatabase(auth.app);
     const model = new InboxController({
       uid: user.uid,
+      scope: projects ? 'assistant' : 'messages',
       request,
       watch: (...args) => watchInbox(sdk, db, user.uid, ...args),
     });
@@ -40,7 +41,7 @@ function SignedIn({ user, locale, focusKey }: { user: User; locale: Locale; focu
       };
       void resolve().catch(e=>{if(live)setError(e.message);});
     }
-    void request<{ dmReceipts: boolean }>({ action: 'accountPreferences' })
+    if (!projects) void request<{ dmReceipts: boolean }>({ action: 'accountPreferences' })
       .then((result) => {
         if (live) setReceipts(result.dmReceipts);
       })
@@ -51,7 +52,7 @@ function SignedIn({ user, locale, focusKey }: { user: User; locale: Locale; focu
       live = false;
       model.close();
     };
-  }, [user, focusKey]);
+  }, [user, focusKey, projects]);
   return controller ? (
     <>
       <InboxList
@@ -63,7 +64,7 @@ function SignedIn({ user, locale, focusKey }: { user: User; locale: Locale; focu
           location.assign(route);
         }}
       />
-      <label>
+      {!projects && <label>
         <input
           type="checkbox"
           disabled={receipts === undefined}
@@ -72,7 +73,7 @@ function SignedIn({ user, locale, focusKey }: { user: User; locale: Locale; focu
             const enabled = e.currentTarget.checked;
             setReceipts(undefined);
             const request = webInboxRequest(user);
-            void request<{ dmReceipts: boolean }>({ action: 'accountPreferences', dmReceipts: enabled })
+            if (!projects) void request<{ dmReceipts: boolean }>({ action: 'accountPreferences', dmReceipts: enabled })
               .then((result) => {
                 setReceipts(result.dmReceipts);
                 setError('');
@@ -86,26 +87,27 @@ function SignedIn({ user, locale, focusKey }: { user: User; locale: Locale; focu
         {locale === 'zh'
           ? '双方开启时共享私聊已读回执'
           : 'Share direct-message read receipts when both people enable them'}
-      </label>
+      </label>}
       {preferenceError ? <p role="alert">{inboxErrorText(preferenceError, locale === 'zh')}</p> : null}
     </>
   ) : null;
 }
 
-export default function InboxPage({ locale, focusKey }: { locale: Locale; focusKey?: string }) {
+export default function InboxPage({ locale, focusKey, projects = false }: { locale: Locale; focusKey?: string; projects?: boolean }) {
   const user = useAuthUser();
   return (
     <main className="teams-web">
       <header className="teams-web-nav">
         <a href="/">LingXi</a>
-        <h1>{locale === 'zh' ? '收件箱' : 'Inbox'}</h1>
+        <h1>{projects ? (locale === 'zh' ? '项目' : 'Projects') : (locale === 'zh' ? '消息' : 'Messages')}</h1>
+        {projects ? <a href="/inbox">{locale === 'zh' ? '消息' : 'Messages'}</a> : <a href="/projects">{locale === 'zh' ? '项目' : 'Projects'}</a>}
         <a href="/teams">{locale === 'zh' ? '团队' : 'Teams'}</a>
         <a href="/friends">{locale === 'zh' ? '好友' : 'Friends'}</a>
         <a href="/remote">{locale === 'zh' ? '设备' : 'Devices'}</a>
       </header>
       <div style={{ height: 'min(75dvh, 860px)', padding: '1rem' }}>
         {user ? (
-          <SignedIn focusKey={focusKey} key={user.uid} user={user} locale={locale} />
+          <SignedIn projects={projects} focusKey={focusKey} key={user.uid} user={user} locale={locale} />
         ) : user === null ? (
           <SignInCard
             auth={auth}

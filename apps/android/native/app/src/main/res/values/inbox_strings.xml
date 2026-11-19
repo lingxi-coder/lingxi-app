@@ -1,5 +1,5 @@
 <resources>
-    <string name="inbox_title">对话</string>
+    <string name="inbox_title">消息</string>
     <string name="inbox_badge">%1$d 个对话需要关注</string>
     <string name="inbox_assistant">助手</string>
     <string name="inbox_service">服务</string>
@@ -35,7 +35,7 @@
     <string name="inbox_completed">已完成</string>
     <string name="inbox_muted">已静音</string>
     <string name="inbox_source_unavailable">请在对话来源设备上打开，或前往机器人页面配对该设备。</string>
-    <string name="inbox_back">返回收件箱</string>
+    <string name="inbox_back">返回消息</string>
     <string name="inbox_jump_latest">跳到最新并标为已读</string>
     <string name="inbox_read_receipt">已读</string>
     <string name="inbox_notification_title">灵犀对话</string>

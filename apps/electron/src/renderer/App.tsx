@@ -123,7 +123,7 @@ export function App() {
   const localAppProjectTarget = useRef<string>();
   const localAppNavigationQueue = useRef<Promise<void>>(Promise.resolve());
   const [page, setPage] = useState<AppPage>('chat');
-  const [projectBrowser, setProjectBrowser] = useState(false);
+  const [projectBrowser, setProjectBrowser] = useState(true);
   const [notificationPreview, setNotificationPreview] = useState(false);
   const [inboxNotice, setInboxNotice] = useState<{ uid: string | null; notice: InboxNotification }>();
   const [inboxSourceTarget, setInboxSourceTarget] = useState<InboxNoticeTarget & { key: string; generation: number; uid: string | null }>();
@@ -206,6 +206,7 @@ export function App() {
   }, [setLocalAppNavigationError]);
   const openPage = useCallback((next: AppPage) => {
     if (sessionNavigationBlocked()) return;
+    if (next === 'chat') setProjectBrowser(true);
     if (next !== 'chat' && localAppBridge.current.handoffPending) void localAppBridge.current.cancelSessionHandoff();
     cancelLocalAppNavigation();
     setPage(next);
@@ -245,6 +246,7 @@ export function App() {
     setNotificationPreview(true);
     cancelLocalAppNavigation();
     setSettingsRoute(null);
+    setProjectBrowser(true);
     setPage('chat');
     setActivityView(false);
   }), [cancelLocalAppNavigation]);
@@ -291,7 +293,9 @@ export function App() {
   const settledChatOwner = useRef(`${botChat}:${appChat}:${bridge.activeSession?.sessionId}`);
   useEffect(() => {
     const owner = `${botChat}:${appChat}:${bridge.activeSession?.sessionId}`;
-    if (bridge.sessionLoading || settledChatOwner.current === owner) return;
+    if (bridge.sessionLoading) return;
+    if (page === 'chat' && sidebarMode === 'home' && !botChat && !appChat) setProjectBrowser(true);
+    if (settledChatOwner.current === owner) return;
     settledChatOwner.current = owner;
     const next = modeForSettledChat(sidebarMode, page, botChat, appChat);
     if (next !== sidebarMode) setSidebarMode(next);
@@ -341,13 +345,12 @@ export function App() {
     setNotificationPreview(Boolean(target));
     setInboxSourceTarget(target ? { ...target, key: item.key, generation: item.ref.generation, uid: inbox.uid } : undefined);
     setMessageTarget(null);
-    setProjectBrowser(false);
     if (item.ref.kind === 'assistant') {
       const ref = await inbox.api?.localRef(item.key);
       if (ref) {
         const opened = await localAppBridge.current.openSession(ref.projectPath, ref.sessionId, undefined, ref.mode);
         if (!opened) throw new Error(locale.startsWith('zh') ? '暂时无法打开此会话，请重试。' : 'This conversation could not be opened. Please retry.');
-        setSidebarMode('home'); setPage('chat'); setActivityView(false);
+        setProjectBrowser(true); setSidebarMode('home'); setPage('chat'); setActivityView(false);
       } else if (item.remoteHostId && /^[A-Za-z0-9_-]{22}$/.test(item.remoteHostId)) {
         const url = new URL(`https://lingxios.net/remote/${item.remoteHostId}/${encodeURIComponent(item.ref.conversationId)}`);
         url.searchParams.set('inbox', item.key);
@@ -361,15 +364,15 @@ export function App() {
       } else throw new Error(locale.startsWith('zh') ? '请在原设备开启此会话的远程访问，并确认设备在线。' : 'Enable remote access for this conversation on its source device and make sure it is online.');
     } else if (item.category === 'friend' && item.peerUid && friends.workspace) {
       friends.workspace.openChat(item.peerUid);
-      setSidebarMode('home'); setPage('friends');
+      setProjectBrowser(false); setSidebarMode('home'); setPage('friends');
     } else if (item.ref.kind === 'service') {
       setServiceInboxTarget({ serviceId: item.ref.sourceId, sessionId: item.ref.conversationId });
-      setBotServices(true); setSidebarMode('home'); setPage('teams');
+      setBotServices(true); setProjectBrowser(false); setSidebarMode('home'); setPage('teams');
     } else if (teams.workspace) {
       await teams.workspace.refresh();
       teams.workspace.selectTeam(item.ref.sourceId);
       teams.workspace.selectConversation(item.ref.conversationId);
-      setBotServices(false); setSidebarMode('home'); setPage('teams');
+      setBotServices(false); setProjectBrowser(false); setSidebarMode('home'); setPage('teams');
     } else throw new Error(locale.startsWith('zh') ? '请先登录后再打开此会话。' : 'Sign in before opening this conversation.');
   }, [inbox.api, inbox.uid, friends.workspace, teams.workspace, locale, setSidebarMode, cancelLocalAppNavigation, sessionNavigationBlocked]);
   const openInboxNotification = useCallback(async (notice: InboxNotification) => {
@@ -378,7 +381,7 @@ export function App() {
       await openInboxItem(item, { through: notice.through ?? 0, messageId: notice.messageId, taskId: notice.taskId,
         key: notice.key, generation: notice.generation });
     } else if (notice.ref) {
-      setInboxSourceTarget(undefined); setNotificationPreview(true); setPage('chat'); setSidebarMode('home');
+      setInboxSourceTarget(undefined); setNotificationPreview(true); setProjectBrowser(true); setPage('chat'); setSidebarMode('home');
       await localAppBridge.current.openSession(notice.ref.projectPath, notice.ref.sessionId, undefined, notice.ref.mode);
     }
   }, [inbox.api, inbox.uid, openInboxItem, setSidebarMode]);
@@ -404,7 +407,7 @@ export function App() {
     && inboxSourceTarget.key.split(':')[2] === bridge.activeSession?.sessionId ? inboxSourceTarget : undefined;
   const conversationNoticeTarget = inboxSourceTarget?.uid === inbox.uid && inboxSourceTarget.key === activeInboxKey ? inboxSourceTarget : undefined;
   const activeActivity = bridge.activeSession ? bridge.bootstrap?.projectCatalogs?.[bridge.activeSession.projectPath]?.sessions.find(row => row.uuid === bridge.activeSession!.sessionId)?.activity_json : undefined;
-  const inboxReading = useAssistantInboxReading(inbox, page === 'chat' ? bridge.activeSession?.sessionId : undefined,
+  const inboxReading = useAssistantInboxReading(inbox, bridge.activeSession?.sessionId,
     activeActivity, page === 'chat' && !assistantNoticeTarget && !bridge.sessionLoading && !settingsRoute && !sessionPicker, notificationPreview || Boolean(messageTarget));
   useEffect(() => {
     if (!inbox.api) return;
@@ -798,14 +801,18 @@ export function App() {
             teamsUnread={teams.snapshot?.totalUnread ?? 0}
             friendsUnread={friends.snapshot?.badge ?? 0}
             inboxBadge={inbox.snapshot.badge}
-            homePanel={inbox.api ? <DesktopInboxPanel inbox={inbox} locale={locale} activeKey={activeInboxKey ?? inboxReading.item?.key} onOpen={openInboxItem}
-              onNewChat={() => { setInboxSourceTarget(undefined); setNotificationPreview(false); setPage('chat'); setSidebarMode('home'); void bridge.newSession(); }} /> : undefined}
+            homePanel={inbox.api ? <DesktopInboxPanel inbox={inbox} locale={locale} activeKey={activeInboxKey ?? inboxReading.item?.key} onOpen={openInboxItem} /> : undefined}
             homeView={projectBrowser ? 'projects' : 'chats'}
             onHomeViewChange={view => {
-              const changeView = () => setProjectBrowser(view === 'projects');
-              if (sidebarMode === 'home' && !appChat && !botChat && (page === 'chat' || page === 'friends' || page === 'teams')) {
-                if (!sessionNavigationBlocked()) changeView();
-              } else selectSidebarMode('home', changeView);
+              if (view === 'projects' || !inbox.api) {
+                selectSidebarMode('home');
+              } else if (!sessionNavigationBlocked()) {
+                leaveBots(() => {
+                  setProjectBrowser(false);
+                  setSidebarMode('home');
+                  if (sidebarMode !== 'home' || (page !== 'friends' && page !== 'teams')) openPage('messages');
+                });
+              }
             }}
             sidebarMode={sidebarMode}
             localAppProjects={appWorkspace.projectPaths}
@@ -832,7 +839,11 @@ export function App() {
             onSidebarCollapsedChange={setSidebarCollapsed}
             scheduled={page === 'scheduled'}
             onOpenScheduled={() => openPage('scheduled')}
-            onOpenChat={() => openPage('chat')}
+            onOpenChat={() => {
+              setInboxSourceTarget(undefined);
+              setNotificationPreview(false);
+              openPage('chat');
+            }}
             onOpenSettings={() => openSettings()}
             topbar={<>
               {hasChatTopbar && <div ref={setChatTopbar} className="desktop-chat-topbar-slot no-drag" />}
@@ -862,6 +873,9 @@ export function App() {
           {page === 'apps' && localAppInstallStatus && <p role="status" className="local-app-update">{localAppInstallStatus}</p>}
           <ErrorBanner bridge={{ error: localAppNavigationError, clearError: clearLocalAppNavigationError }} presentation={localAppNavigationPresentation} />
           <ErrorBanner bridge={bridge} />
+          {page === 'messages' && <p style={{ margin: 'auto', color: palette.text3 }}>
+            {locale.startsWith('zh') ? '选择一条会话以查看消息' : 'Select a conversation to view messages'}
+          </p>}
           {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} friends={friends} locale={locale} drawer={teamsDrawer} services={botServices} inboxTarget={serviceInboxTarget} notificationTarget={conversationNoticeTarget} onCloseServices={closeBotServices} /></Suspense>}
           <DesktopInboxToast notice={inboxNotice?.uid === inbox.uid ? inboxNotice.notice : undefined}
             api={inbox.api} uid={inbox.uid} locale={locale} onDismiss={dismissInboxNotice} onOpen={notice => {

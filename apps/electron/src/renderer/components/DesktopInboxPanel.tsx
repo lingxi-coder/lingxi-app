@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
 import { InboxList } from '../../../../../packages/inbox/InboxList';
 import type { InboxItem, InboxNoticeTarget } from '../../../../../packages/inbox/contracts';
+import { tr } from '../i18n/locale';
 import type { useDesktopInbox } from '../bridge/useDesktopInbox';
 import './DesktopInboxPanel.css';
 
-export function DesktopInboxPanel({ inbox, locale, activeKey, onOpen, onNewChat }: {
+export function DesktopInboxPanel({ inbox, locale, activeKey, onOpen }: {
   inbox: ReturnType<typeof useDesktopInbox>; locale: string;
   activeKey?: string;
-  onOpen(item: InboxItem, target?: InboxNoticeTarget): Promise<void>; onNewChat(): void;
+  onOpen(item: InboxItem, target?: InboxNoticeTarget): Promise<void>;
 }) {
   const cn = locale.startsWith('zh');
   const [preferences, setPreferences] = useState<{ uid: string; sync: boolean; receipts: boolean }>();
@@ -57,9 +58,7 @@ export function DesktopInboxPanel({ inbox, locale, activeKey, onOpen, onNewChat 
   };
   if (!inbox.controller) return null;
   return <div className="desktop-inbox-panel">
-    <header className="desktop-inbox-heading"><h2>{cn ? '聊天' : 'Chats'}</h2>
-      <button type="button" onClick={onNewChat} aria-label={cn ? '新建助手对话' : 'New assistant conversation'}>＋</button>
-    </header>
+    <header className="desktop-inbox-heading"><h2>{tr('tw_messages')}</h2></header>
     <InboxList controller={inbox.controller} locale={locale} activeKey={activeKey} onOpen={onOpen} />
     {inbox.uid ? <details className="desktop-inbox-preferences">
       <summary>{cn ? '会话与隐私设置' : 'Conversation settings'}</summary>
@@ -75,6 +74,6 @@ export function DesktopInboxPanel({ inbox, locale, activeKey, onOpen, onNewChat 
         onChange={event => { void save('receipts', event.target.checked); }} />{cn ? '分享私聊已读回执' : 'Share direct-message read receipts'}</label>
       <p>{cn ? '双方开启后才显示对方已读。此设置不影响自己的多端阅读同步。' : 'Receipts appear only when both people enable them. Your own reading position always syncs.'}</p>
       {failed ? <p role="alert">{cn ? '暂时无法保存或读取设置，请稍后重试。' : 'Settings are temporarily unavailable. Please try again.'}</p> : null}
-    </details> : <p className="desktop-inbox-sign-in">{cn ? '登录后查看好友、团队和已授权的跨设备会话。' : 'Sign in for friends, teams and authorized conversations on your other devices.'}</p>}
+    </details> : <p className="desktop-inbox-sign-in">{cn ? '登录后查看好友、团队和 Bot 消息。' : 'Sign in to view messages from friends, teams, and bots.'}</p>}
   </div>;
 }

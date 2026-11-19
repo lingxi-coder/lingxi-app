@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   freezeRead,
   inboxKey,
+  matchesInboxCategory,
   type InboxCommand,
   type InboxItem,
   type InboxPage,
@@ -82,6 +83,36 @@ test('key deduplicates a Friends pair, rejects ambiguous segments, and routes by
     0,
     'own messages and edits leave count unchanged',
   );
+});
+
+test('Messages and Projects keep separate lists, cached pages and bulk-read scopes', async () => {
+  const messages = [row(1, { category: 'friend' }), row(2), row(3, { category: 'service' })];
+  const agent = row(4, { category: 'assistant' });
+  const { records, storage } = memory();
+  const scopes: (string | undefined)[] = [];
+  const request: InboxRequest = async <T>(command: InboxCommand): Promise<T> => {
+    if (command.action === 'list') {
+      return { items: [...messages, agent].filter(item => matchesInboxCategory(item.category, command.category)) } as T;
+    }
+    if (command.action === 'markAllReadSnapshot') {
+      scopes.push(command.category);
+      return { jobId: command.operationId, state: 'complete' } as T;
+    }
+    throw new Error('Unexpected inbox command');
+  };
+  for (const scope of ['messages', 'assistant'] as const) {
+    const model = new InboxController({ uid: 'alice', scope, storage, request });
+    try {
+      await model.start();
+      const expected = scope === 'messages' ? messages : [agent];
+      assert.deepEqual(model.getSnapshot().items, expected);
+      assert.deepEqual(records.get('alice')?.scopedCache?.[scope]?.page.items, expected);
+      await model.markAllReadSnapshot();
+    } finally {
+      model.close();
+    }
+  }
+  assert.deepEqual(scopes, ['messages', 'assistant']);
 });
 
 test('visible dwell confirms contiguous content; flush uses the original manual generation', () => {

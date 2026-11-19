@@ -702,6 +702,13 @@ test('compaction phases follow engine events without an automatic command echo',
   s = reduceEvent(s, { type: 'compaction_completed', messages_before: 42, messages_after: 8, bytes_saved: 1024, summary: 'Summary' });
   assert.equal(s.items.length, 2, 'the data-bearing completion enriches the existing terminal row');
   assert.equal((s.items[0] as Compaction).messagesBefore, 42);
+  for (const phase of ['summarizing', 'restoring']) {
+    assert.equal(reduceEvent(s, { type: 'compaction_status', phase }, 10_000), s,
+      'a late phase cannot reopen the completed operation');
+  }
+  const next = reduceEvent(s, { type: 'compaction_status', phase: 'preparing' }, 11_000);
+  assert.notEqual(next.activeCompactionId, id, 'an explicit start can begin another compact');
+  assert.equal((next.items.at(-1) as Compaction).startedAt, 11_000);
 });
 
 test('manual compaction reuses its optimistic row and cancels without claiming success', () => {
@@ -738,6 +745,16 @@ test('submitted prompt reserves the turn slot before turn_started arrives', () =
   assert.equal(s.running, true);
   s = reduceEvent(s, { type: 'turn_ended', outcome: { type: 'cancelled' }, cost: COST });
   assert.equal(s.running, false);
+});
+
+test('an earlier turn cannot settle a tracked pending message waiting for a model switch', () => {
+  let state = reduceEvent(emptyConversation(), { type: 'turn_started', turn_id: 1 });
+  state = appendPendingUserPrompt(state, 'follow up', [], 100, 'client-turn:2');
+  const pending = state.items.at(-1);
+  state = reduceEvent(state, { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST });
+  assert.ok(state.items.includes(pending!), 'the earlier terminal leaves the active delivery marker intact');
+  state = reduceEvent(state, { type: 'turn_started', turn_id: 2 });
+  assert.equal(state.items.find(item => item.type === 'narration' && item.role === 'user')?.delivery, undefined);
 });
 
 test('an ordinary prompt after a bare picker command clears the stale pending-slash name', () => {

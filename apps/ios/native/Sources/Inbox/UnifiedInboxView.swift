@@ -4,8 +4,7 @@ struct UnifiedInboxView: View {
     @Environment(InboxStore.self) private var inbox
     @Environment(TeamsWorkspace.self) private var teams
     let open: (InboxRow) -> Void
-    let newConversation: () -> Void
-    let resumeConversation: () -> Void
+    let openProjects: () -> Void
 
     @State private var selection: Set<String> = []
     @State private var selecting = false
@@ -61,13 +60,13 @@ struct UnifiedInboxView: View {
         }
         .listStyle(.plain)
         .accessibilityIdentifier("inbox.list")
-        .navigationTitle("Chats")
+        .navigationTitle("session_details_messages")
         .searchable(text: $inbox.search, prompt: "Search by title")
         .refreshable { inbox.refreshNow() }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button("New assistant chat", systemImage: "square.and.pencil", action: newConversation)
-                    .accessibilityIdentifier("inbox.new-conversation")
+                Button("drawer_entry_projects", systemImage: "folder", action: openProjects)
+                    .accessibilityIdentifier("inbox.open-projects")
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu("Conversation options", systemImage: "ellipsis.circle") {
@@ -82,7 +81,6 @@ struct UnifiedInboxView: View {
                         Button("Mark all conversations as read", systemImage: "envelope.open") { confirmingReadAll = true }
                             .disabled(!inbox.canMarkAllRead)
                     }
-                    Button("Continue current assistant chat", systemImage: "arrow.right", action: resumeConversation)
                     if inbox.uid != nil { Button("Inbox settings", systemImage: "gearshape") { options = true } }
                 }
             }
@@ -110,7 +108,6 @@ struct UnifiedInboxView: View {
             .accessibilityIdentifier("inbox.filter")
             Picker("Category", selection: $inbox.category) {
                 Text("All categories").tag(InboxCategory?.none)
-                Text("Assistant").tag(InboxCategory?.some(.assistant))
                 Text("Friends").tag(InboxCategory?.some(.friend))
                 Text("Teams").tag(InboxCategory?.some(.team))
                 Text("Services").tag(InboxCategory?.some(.service))

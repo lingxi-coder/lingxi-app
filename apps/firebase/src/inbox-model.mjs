@@ -55,7 +55,7 @@ const listScope = {
   archived: z.boolean().optional(),
   searchPrefix: z.string().max(120).optional(),
   filter: z.enum(['all', 'unread', 'attention']).optional(),
-  category: z.enum(['team', 'friend', 'service', 'assistant']).optional()
+  category: z.enum(['team', 'friend', 'service', 'assistant', 'messages']).optional()
 };
 export const command = z.discriminatedUnion('action', [
   z.object({ action: z.literal('list'), ...page, ...listScope }).strict(),
@@ -154,6 +154,7 @@ export const capped = n => Math.min(100, Math.max(0, n));
 export const attention = r => !!r && (!!r.attentionKind || r.mentionCount > 0 || r.pendingActionCount > 0);
 export const unread = r => !!r && (r.manualUnread || r.unreadCount > 0);
 export const badge = r => Boolean(r && !r.archived && (unread(r) || attention(r)));
+export const messageCategories = ['friend', 'team', 'service'];
 export const shard = key => String(parseInt(digest(key).slice(0, 2), 16) % 16);
 export const deny = (status, code) => {
   throw Object.assign(new Error(code), { status, code });

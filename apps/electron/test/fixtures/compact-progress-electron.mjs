@@ -28,14 +28,18 @@ async function main() {
     const snapshot = () => webContents.executeJavaScript(`(() => {
       const row = document.querySelector('.compact-status');
       const progress = row?.querySelector('[role="progressbar"]');
+      const title = row?.querySelector('.compact-status-title');
+      const animation = title ? getComputedStyle(title) : null;
       const state = window.compactFixture.state();
       return {
         rowCount: document.querySelectorAll('.compact-status').length,
         text: row?.textContent ?? '',
-        title: row?.querySelector('.compact-status-title')?.textContent ?? '',
+        title: title?.textContent ?? '',
         progressCount: document.querySelectorAll('[role="progressbar"]').length,
         valueNow: progress?.getAttribute('aria-valuenow') ?? null,
-        elapsed: row?.querySelector('.compact-status-elapsed')?.getAttribute('aria-label') ?? null,
+        elapsed: row?.querySelector('.compact-status-elapsed')?.textContent ?? null,
+        animation: animation?.animationName ?? null,
+        animationIterations: animation?.animationIterationCount ?? null,
         id: state.items.find((item) => item.type === 'compaction')?.id,
         item: state.items.find((item) => item.type === 'compaction'),
         summaries: state.summaries,
@@ -71,6 +75,8 @@ async function main() {
     }
 
     results.aged = await snapshot();
+    await waitFor(webContents, `document.querySelector('.compact-status-elapsed')?.textContent !== ${JSON.stringify(results.aged.elapsed)}`);
+    results.ticked = await snapshot();
     await webContents.executeJavaScript('window.compactFixture.remount()');
     results.remounted = await snapshot();
 

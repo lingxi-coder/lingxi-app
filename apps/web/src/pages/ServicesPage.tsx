@@ -30,7 +30,7 @@ export default function ServicesPage({ locale, serviceId }: { locale: Locale; se
   const user = useAuthUser(), [busy, setBusy] = useState(false);
   const [chatTopbar, setChatTopbar] = useState<HTMLDivElement | null>(null);
   const signOutNow = async () => { setBusy(true); try { await signOut(auth); } catch { /* The person stays signed in. */ } finally { setBusy(false); } };
-  return <ChatTopbarTarget.Provider value={chatTopbar}><main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><a href="/inbox">{locale === 'zh' ? '收件箱' : 'Inbox'}</a><a href="/teams">{t('teams_title')}</a><a href="/friends">{t('friends_title')}</a><h1>{t('services_title')}</h1>
+  return <ChatTopbarTarget.Provider value={chatTopbar}><main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><a href="/inbox">{locale === 'zh' ? '消息' : 'Messages'}</a><a href="/teams">{t('teams_title')}</a><a href="/friends">{t('friends_title')}</a><h1>{t('services_title')}</h1>
       <div ref={setChatTopbar} className="teams-web-chat-slot" />
       <span>{user?.displayName || user?.email}</span>{user ? <button disabled={busy} onClick={() => void signOutNow()}>{t('tw_sign_out')}</button> : null}</header>
     {user === undefined ? <p role="status" className="teams-web-note">{t('teams_loading')}</p>

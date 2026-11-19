@@ -6338,6 +6338,7 @@ impl ChatWidget {
                 ),
                 cost: self.cost.clone(),
                 compact_percent: pct,
+                compact_sweep_ms: Some(self.start.elapsed().as_millis()),
                 retry_message: None,
             };
         }
@@ -6346,6 +6347,7 @@ impl ChatWidget {
             text: self.spinner_text(),
             cost: self.cost.clone(),
             compact_percent: None,
+            compact_sweep_ms: None,
             retry_message: self.api_retry.as_ref().map(|retry| retry.message.clone()),
         }
     }
@@ -10155,6 +10157,9 @@ mod tests {
         widget.apply_turn_event(TurnEvent::CompactStarted);
         let during = widget.pane_status();
         assert!(during.running, "compaction shows the running status row");
+        assert!(during.compact_sweep_ms.is_some());
+        widget.start = std::time::Instant::now() - Duration::from_millis(5_000);
+        assert!(widget.pane_status().compact_sweep_ms.is_some());
         assert!(
             during.text.contains("Compacting conversation"),
             "message: {:?}",
@@ -10167,6 +10172,7 @@ mod tests {
 
         widget.apply_turn_event(TurnEvent::CompactEnded);
         let after = widget.pane_status();
+        assert!(after.compact_sweep_ms.is_none());
         assert!(
             !after.running && after.compact_percent.is_none(),
             "compaction end returns to idle"

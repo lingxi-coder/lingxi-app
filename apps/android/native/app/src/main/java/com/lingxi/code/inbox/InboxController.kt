@@ -75,7 +75,7 @@ internal class InboxController private constructor(
     private var presenceJob: Job? = null
     private var presenceOwner: Any? = null
     private val receiptUpdates = MutableStateFlow<Map<String, InboxItem>>(emptyMap())
-    private var cloudQuery = InboxQuery()
+    private var cloudQuery = InboxQuery(category = "messages")
     private var next: InboxCursor? = null
     private var cloudItems = emptyList<InboxItem>()
     private val verifiedAt = mutableMapOf<InboxRef, Long>()
@@ -293,7 +293,7 @@ internal class InboxController private constructor(
         rows.forEach { verify(it.ref, authorizedAt) }
         cloudItems = if (reset) rows else (cloudItems + rows).distinctBy { it.key }.take(10_000)
         projection.update { previous ->
-            val resetUnfiltered = reset && cloudQuery == InboxQuery()
+            val resetUnfiltered = reset && cloudQuery == InboxQuery(category = "messages")
             val pageRows = rows.associateBy { it.key }
             if (resetUnfiltered || previous.size > 10_000) pageRows else previous + pageRows
         }
@@ -484,7 +484,6 @@ internal class InboxController private constructor(
         if (!networkOnline || !state.value.readBatchReady || state.value.readBatchBusy || !valid(uid)) return
         val requestedAt = System.currentTimeMillis()
         val jobId = java.util.UUID.randomUUID().toString()
-        val local = freezeLocalAssistantReads(localAssistant.value)
         mutable.update { it.copy(readBatchBusy = true, writeError = null) }
         readBatchJob = scope.launch {
             try {
@@ -496,7 +495,7 @@ internal class InboxController private constructor(
                 }
                 val completed = try {
                     val reply = request(uid, JSONObject().put("action", "markAllReadSnapshot")
-                        .put("operationId", jobId).put("requestedAt", requestedAt))
+                        .put("operationId", jobId).put("requestedAt", requestedAt).put("category", "messages"))
                     completeBatchIfTerminal(uid, jobId, reply)
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (failure: TeamMessageFailure) {
@@ -506,17 +505,6 @@ internal class InboxController private constructor(
                     } else false
                 }
                 catch (_: Exception) { false }
-                if (valid(uid) && local.isNotEmpty()) {
-                    outboxLock.withLock {
-                        val saved = withContext(Dispatchers.IO) { store.rememberLocalBatch(uid, local) }
-                        if (valid(uid)) {
-                            localAssistant.update { rows -> rows.map { row -> row.withLocalState(saved[row.key]) } }
-                            local.forEach { (row, read) ->
-                                AssistantInboxAlerts.cancelRead(row.ref, read.body.getLong("through"), row.pendingActionRevision, row.failureRevision)
-                            }
-                        }
-                    }
-                }
                 if (!completed) pollReadBatch(uid, jobId)
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) {

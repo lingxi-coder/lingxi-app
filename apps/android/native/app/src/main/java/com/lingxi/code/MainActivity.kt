@@ -292,7 +292,7 @@ class MainActivity : ComponentActivity() {
             // stay overlays above it.
             val tabState = rememberTabShellState()
             var inboxOpen by rememberSaveable { mutableStateOf(true) }
-            var inboxNewRequest by rememberSaveable { mutableIntStateOf(0) }
+            var inboxProjectsRequest by rememberSaveable { mutableIntStateOf(0) }
             val requestedInboxLaunch by pendingInboxLaunch.collectAsState()
             val inboxBanner by inbox.banner.collectAsState()
             val inboxAccount by inbox.state.collectAsState()
@@ -601,7 +601,7 @@ class MainActivity : ComponentActivity() {
                                 onChromeChanged = { pages, drawer, overlay -> if (!inboxOpen) tabState.reportChatsChrome(pages, drawer, overlay) },
                                 inbox = inbox,
                                 inboxOpen = inboxOpen || terminalOpen || !prefs.setupDone || pendingImport != null || botMarketHandoff != null,
-                                inboxNewRequest = inboxNewRequest,
+                                inboxProjectsRequest = inboxProjectsRequest,
                                 onOpenInbox = { inboxOpen = true },
                                 modelSetupRequired = settingsState.needsLlmSetup,
                                 assistantName = prefs.assistantName,
@@ -631,9 +631,9 @@ class MainActivity : ComponentActivity() {
                             val canCloseThread = !inboxOpen && tabState.depthOf(AppTab.Chats) == 0 && !tabState.chatsDrawerOpen &&
                                 !tabState.chatsFullScreenOverlay && !terminalOpen && prefs.setupDone && !deepLinkBlocked
                             androidx.activity.compose.BackHandler(enabled = canCloseThread) { inboxOpen = true }
-                            if (inboxOpen) InboxScreen(inbox, openInboxRow, onNew = {
+                            if (inboxOpen) InboxScreen(inbox, openInboxRow, onOpenProjects = {
                                 inboxOpen = false
-                                inboxNewRequest++
+                                inboxProjectsRequest++
                             })
                         },
                         settings = { body ->

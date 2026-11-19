@@ -3,7 +3,7 @@
 import type { SidebarMode } from '../../shared/settings';
 
 /** The pages of the main area. */
-export type AppPage = 'chat' | 'scheduled' | 'apps' | 'changes' | 'bots' | 'teams' | 'friends';
+export type AppPage = 'chat' | 'messages' | 'scheduled' | 'apps' | 'changes' | 'bots' | 'teams' | 'friends';
 
 /**
  * Home shows the chat view; Apps, Teams and Friends have their own library pages.

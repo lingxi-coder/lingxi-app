@@ -1,5 +1,5 @@
 import { transcriptRowUuids } from './reuse';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { SessionAgentSummaryDto, StructuredDiffDto } from '@lingxi/bridge-client';
 import type { Locale } from '../utils/locale';
 import { Markdown } from './markdown';
@@ -69,12 +69,44 @@ function Row({ locale, row, transcript, deviceName, fetchImage }: { locale: Loca
         </p>
       ) : null;
     case 'compaction':
-      return <p className="rc-note">{displayText(row.detail ?? row.status, 120)}</p>;
+      return <CompactionNote locale={locale} item={row} />;
     case 'command':
       return <pre className="rc-code rc-command">{row.output}</pre>;
     default:
       return null;
   }
+}
+
+const compactionLabels = {
+  running: 'compacting',
+  complete: 'compacted',
+  error: 'compactionFailed',
+  cancelled: 'compactionCancelled',
+  skipped: 'compactionSkipped',
+} as const;
+
+function CompactionNote({ locale, item }: { locale: Locale; item: Extract<RunItem, { type: 'compaction' }> }) {
+  const running = item.status === 'running';
+  const failed = item.status === 'error';
+  const label = item.status === 'complete' && item.automatic ? 'automaticallyCompacted' : compactionLabels[item.status];
+  return (
+    <div className={failed ? 'rc-note rc-danger' : 'rc-note'}>
+      <span className={running ? 'rc-compaction-sweep' : undefined} role={failed ? 'alert' : 'status'}>
+        {t(locale, label)}{failed && item.detail ? ` · ${displayText(item.detail, 120)}` : ''}
+      </span>
+      {running && item.startedAt !== undefined && <CompactionElapsed locale={locale} startedAt={item.startedAt} />}
+    </div>
+  );
+}
+
+function CompactionElapsed({ locale, startedAt }: { locale: Locale; startedAt: number }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, []);
+  const seconds = Math.max(0, Math.floor((now - startedAt) / 1_000));
+  return <span className="rc-compaction-elapsed" role="timer">{t(locale, 'compactionElapsed', { seconds: String(seconds) })}</span>;
 }
 
 function Narration({ locale, item, meta, deviceName, fetchImage }: { locale: Locale; item: Extract<RunItem, { type: 'narration' }>; meta: PromptMeta | undefined; deviceName: string; fetchImage(ref: string): Promise<string> }) {

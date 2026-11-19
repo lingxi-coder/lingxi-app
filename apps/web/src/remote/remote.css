@@ -27,6 +27,26 @@
 .rc-panel h3 { margin: 0 0 6px; font-size: 14px; }
 .rc-panel p { margin: 0 0 10px; color: var(--ink-2); font-size: 14px; line-height: 1.55; }
 .rc-note { margin: 4px 0; color: var(--ink-3); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.rc-compaction-elapsed { margin-inline-start: 8px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+@media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
+  @supports (background-clip: text) {
+    .rc-compaction-sweep {
+      display: inline-block;
+      color: transparent;
+      background-image:
+        linear-gradient(100deg, transparent 42%, var(--ink) 50%, transparent 58%),
+        linear-gradient(var(--ink-3), var(--ink-3));
+      background-size: 240% 100%, 100% 100%;
+      background-repeat: no-repeat;
+      background-clip: text;
+      animation: rc-compaction-sweep 2.2s linear infinite;
+    }
+  }
+}
+@keyframes rc-compaction-sweep {
+  from { background-position: 120% 0, 0 0; }
+  to { background-position: -120% 0, 0 0; }
+}
 .rc-danger { color: var(--danger); }
 .rc-banner { margin: 0; padding: 8px 16px; background: var(--surface-2); color: var(--warning); font-size: 12px; border-bottom: 1px solid var(--line); }
 .rc-actions { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; }

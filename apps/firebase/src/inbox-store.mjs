@@ -9,6 +9,7 @@ import {
   attention,
   unread,
   badge,
+  messageCategories,
   shard,
   deny,
   digest,
@@ -402,7 +403,8 @@ export class InboxStore {
         let q = account.collection(notices ? 'inboxNotices' : 'inbox');
         const prefix = searchTitle(p.searchPrefix ?? '');
         if (!notices) {
-          if (p.category) q = q.where('category', '==', p.category);
+          if (p.category === 'messages') q = q.where('category', 'in', messageCategories);
+          else if (p.category) q = q.where('category', '==', p.category);
           if (p.filter === 'unread') q = q.where('isUnread', '==', true);
           if (p.filter === 'attention') q = q.where('needsAttention', '==', true);
           if (p.archived === true || !['unread', 'attention'].includes(p.filter))

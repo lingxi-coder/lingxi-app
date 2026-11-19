@@ -61,14 +61,14 @@ test('the sign-in page has its own, lighter policy and the strict one does not a
 
 test('security zones have disjoint policy patterns', () => {
   const withPolicy = config.hosting.headers.filter((entry) => entry.headers.some((header) => header.key === 'Content-Security-Policy')).map((entry) => entry.source);
-  assert.deepEqual(withPolicy, ['/inbox{,/**}', '/chat{,/**}', '/remote', '/remote/**', '/login/remote', '/teams', '/teams/**', '/friends', '/friends/**', '/services', '/services/**']);
+  assert.deepEqual(withPolicy, ['/{inbox,projects}{,/**}', '/chat{,/**}', '/remote', '/remote/**', '/login/remote', '/teams', '/teams/**', '/friends', '/friends/**', '/services', '/services/**']);
 });
 
 test('Teams and Friends alone get Firestore connectivity and invitation and friend links suppress referrers', () => {
   const teamPolicy = policyFor('/teams');
   assert.ok(teamPolicy);
   assert.equal(policyFor('/teams/**'), teamPolicy);
-  assert.ok(directives(policyFor('/inbox{,/**}')!).get('connect-src')!.includes('https://firestore.googleapis.com'));
+  assert.ok(directives(policyFor('/{inbox,projects}{,/**}')!).get('connect-src')!.includes('https://firestore.googleapis.com'));
   // Friends is in the teams security zone: the same policy, never cached, never leaking a friend code in a referrer (D1).
   assert.equal(policyFor('/friends'), teamPolicy);
   assert.equal(policyFor('/friends/**'), teamPolicy);
@@ -78,7 +78,7 @@ test('Teams and Friends alone get Firestore connectivity and invitation and frie
   assert.ok(directives(teamPolicy).get('connect-src')!.includes('https://firestore.googleapis.com'));
   assert.ok(!directives(policyFor('/remote')!).get('connect-src')!.includes('https://firestore.googleapis.com'));
   assert.equal(policyFor('/chat{,/**}'), teamPolicy, 'Chat shares the workspace policy');
-  assert.equal(policyFor('/inbox{,/**}'), teamPolicy, 'Inbox shares the workspace policy');
+  assert.equal(policyFor('/{inbox,projects}{,/**}'), teamPolicy, 'Messages and Projects share the workspace policy');
   assert.ok(directives(teamPolicy).get('connect-src')!.includes('https://us-central1-lingxi-5e4b2.cloudfunctions.net'), 'the model proxy is reachable from the workspace');
   assert.ok(!directives(policyFor('/remote')!).get('connect-src')!.includes('https://us-central1-lingxi-5e4b2.cloudfunctions.net'));
   for (const source of ['/chat{,/**}', '/teams', '/teams/**', '/friends', '/friends/**', '/services', '/services/**', '/open/team/join', '/open/friend/add']) {

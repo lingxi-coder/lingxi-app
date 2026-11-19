@@ -1,5 +1,5 @@
 import { createRoot } from 'react-dom/client';
-import { inboxKey, isUnread, needsAttention, orderItems, type InboxCommand, type InboxItem, type InboxRef } from '../../../../packages/inbox/contracts';
+import { inboxKey, isUnread, matchesInboxCategory, needsAttention, orderItems, type InboxCommand, type InboxItem, type InboxRef } from '../../../../packages/inbox/contracts';
 import { card, FakeFriends, pairTeamId } from '../../../web/test/support/fakeFriends';
 import { conversation, FakeTeams, message, team } from '../../../web/test/support/fakeTeams';
 import { FRIEND_CHAT } from '../../../../packages/teams/friends';
@@ -105,7 +105,7 @@ function resumeAssistant() {
 function serve(uid: string | null, command: InboxCommand): unknown {
   requests.push({ uid, command: structuredClone(command), at: Date.now() });
   if (command.action === 'list') return { items: uid === 'alice' ? items.filter(row =>
-    row.archived === Boolean(command.archived) && (!command.category || row.category === command.category) &&
+    row.archived === Boolean(command.archived) && matchesInboxCategory(row.category, command.category) &&
     (command.filter !== 'unread' || isUnread(row)) && (command.filter !== 'attention' || needsAttention(row)) &&
     (!command.searchPrefix || row.title.toLowerCase().startsWith(command.searchPrefix))).sort(orderItems) : [] };
   if (!uid) throw new Error('SIGN_IN_REQUIRED');

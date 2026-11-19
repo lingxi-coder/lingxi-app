@@ -910,12 +910,9 @@ struct RootView: View {
         Group {
             if showsInbox && navigation.path.isEmpty {
                 NavigationStack {
-                    UnifiedInboxView(open: openInboxRow, newConversation: {
+                    UnifiedInboxView(open: openInboxRow, openProjects: {
                         showsInbox = false
-                        inboxPreviewSession = nil
-                        startNewChat(in: .global, mode: activeMode)
-                    }, resumeConversation: {
-                        showsInbox = false
+                        navigation.showSidebar()
                     })
                 }
             } else {
@@ -1130,7 +1127,7 @@ struct RootView: View {
                         .toolbar {
                             if navigation.path.isEmpty {
                                 ToolbarItem(placement: .topBarLeading) {
-                                    Button("Inbox", systemImage: "tray") {
+                                    Button("session_details_messages", systemImage: "bubble.left.and.bubble.right") {
                                         navigation.closeSidebar()
                                         showsInbox = true
                                     }

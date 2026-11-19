@@ -765,15 +765,19 @@ async function assertRendererContract(page, leakPatterns) {
   assert.equal(details.screenLabel, 'LingXi Code Desktop Beta');
   assert.equal(details.hasPrompt, true, 'desktop prompt composer must render');
   assert.match(details.bodyText, /LingXi/);
-  assert.match(details.bodyText, /Chats/);
-  assert.equal(await evaluate(page, `document.querySelectorAll('.desktop-nav-rail .desktop-rail-chats').length === 1 && document.querySelectorAll('.desktop-nav-rail .desktop-rail-projects').length === 1 && !document.querySelector('.desktop-nav-rail button[title=Home]')`), true, 'Chats and Projects replace Home');
+  assert.equal(await evaluate(page, `document.querySelectorAll('.desktop-nav-rail .desktop-rail-chats').length === 1 && document.querySelectorAll('.desktop-nav-rail .desktop-rail-projects').length === 1 && !document.querySelector('.desktop-nav-rail button[title=Home]')`), true, 'Messages and Projects each have one navigation entry');
   assert.equal(details.appsNavigationCount, 1, 'Apps must have one main navigation entry');
   assert.equal(details.scheduledNavigationCount, 1, 'Scheduled tasks must have one main navigation entry');
   assert.equal(details.duplicateSidebarEntries, 0, 'the chat sidebar must not duplicate Apps or Scheduled');
   await evaluate(page, `document.querySelector('.desktop-rail-projects').click()`);
   await waitFor(() => evaluate(page, `document.querySelector('.desktop-rail-projects')?.getAttribute('aria-current') === 'page' && document.querySelector('.projects-sidebar-section')?.offsetHeight > 0 && Boolean(document.querySelector('.sidebar-new-chat'))`), { label: 'Projects navigation and original project controls' });
   await evaluate(page, `document.querySelector('.desktop-rail-chats').click()`);
-  await waitFor(() => evaluate(page, `document.querySelector('.desktop-rail-chats')?.getAttribute('aria-current') === 'page' && document.querySelector('.desktop-inbox-panel')?.offsetHeight > 0`), { label: 'Chats navigation and Inbox restored' });
+  await waitFor(() => evaluate(page, `document.querySelector('.desktop-rail-chats')?.getAttribute('aria-current') === 'page'
+    && document.querySelector('.desktop-inbox-panel')?.offsetHeight > 0
+    && !document.querySelector('[aria-label="Prompt"]')?.offsetHeight`), { label: 'Messages list opens without the Agent composer' });
+  await evaluate(page, `document.querySelector('.desktop-rail-projects').click()`);
+  await waitFor(() => evaluate(page, `document.querySelector('.desktop-rail-projects')?.getAttribute('aria-current') === 'page'
+    && document.querySelector('[aria-label="Prompt"]')?.offsetHeight > 0`), { label: 'Agent composer restored in Projects' });
   assert.match(details.bodyText, /workspace/);
   assert.equal(
     isExpectedBootstrapPromptPlaceholder(details.promptPlaceholder,
@@ -1522,14 +1526,14 @@ async function assertColdSessionOpen(page, sessionId, activateWindow) {
   assert.equal(typeof result.remoteStatus.enabled, 'boolean', 'the packaged Remote Control status IPC must remain available');
   assert(Array.isArray(result.remoteSessions.sessions), 'the packaged Remote Control sessions IPC must remain available');
   // Opening a native session intentionally retains the Teams workspace. Select
-  // Home explicitly before checking the ordinary Code transcript on reload.
-  await waitFor(() => evaluate(page, `Boolean(document.querySelector('.desktop-nav-rail .desktop-rail-chats')) && !document.querySelector('.desktop-nav-rail .desktop-rail-chats').disabled && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'cold-open renderer session admission before Home navigation' });
-  await evaluate(page, `document.querySelector('.desktop-nav-rail .desktop-rail-chats').click()`);
+  // Projects explicitly before checking the ordinary Code transcript on reload.
+  await waitFor(() => evaluate(page, `Boolean(document.querySelector('.desktop-nav-rail .desktop-rail-projects')) && !document.querySelector('.desktop-nav-rail .desktop-rail-projects').disabled && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'cold-open renderer session admission before Projects navigation' });
+  await evaluate(page, `document.querySelector('.desktop-nav-rail .desktop-rail-projects').click()`);
   // useSidebarMode treats an absent sidebar preference as Home.
   try {
-    await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => (state.settings.sidebar?.mode ?? 'home') === 'home' && document.querySelector('.desktop-nav-rail .desktop-rail-chats')?.getAttribute('aria-current') === 'page')`), { label: 'cold-open Home workspace persisted' });
+    await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => (state.settings.sidebar?.mode ?? 'home') === 'home' && document.querySelector('.desktop-nav-rail .desktop-rail-projects')?.getAttribute('aria-current') === 'page')`), { label: 'cold-open Projects workspace persisted' });
   } catch (error) {
-    log(`cold-open Home navigation state: ${JSON.stringify(await evaluate(page, `(async () => ({ body: document.body?.innerText, home: document.querySelector('.desktop-nav-rail .desktop-rail-chats')?.outerHTML, rail: document.querySelector('.desktop-nav-rail')?.outerHTML, bootstrap: await window.lingxi.bootstrap() }))()`))}`);
+    log(`cold-open Projects navigation state: ${JSON.stringify(await evaluate(page, `(async () => ({ body: document.body?.innerText, home: document.querySelector('.desktop-nav-rail .desktop-rail-projects')?.outerHTML, rail: document.querySelector('.desktop-nav-rail')?.outerHTML, bootstrap: await window.lingxi.bootstrap() }))()`))}`);
     throw error;
   }
   for (let reload = 0; reload < cycles; reload++) {
@@ -1612,16 +1616,16 @@ async function assertColdSessionOpen(page, sessionId, activateWindow) {
 }
 
 async function openPackagedProjectDraft(page, projectPath) {
-  // App source projects belong to the first-level Apps workspace and are
-  // hidden from Home. Exercise Home's ordinary New chat action to prove its
+  // App source projects belong to the Apps workspace.
+  // Exercise the ordinary New chat action in Projects to prove its
   // Global draft is isolated from authoring.
   const active = await evaluate(page, 'window.lingxi.bootstrap().then(state => state.activeSession)');
   assert.equal(active?.projectPath, projectPath);
-  await waitFor(() => evaluate(page, `Boolean(document.querySelector('.desktop-nav-rail .desktop-rail-chats')) && !document.querySelector('.desktop-nav-rail .desktop-rail-chats').disabled && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'Home navigation admission before ordinary New chat' });
-  await evaluate(page, `document.querySelector('.desktop-nav-rail .desktop-rail-chats').click()`);
-  await waitFor(() => evaluate(page, `Boolean(document.querySelector('button[aria-label="New assistant conversation"]:not(:disabled)'))`), { label: 'ordinary Home New chat action' });
-  await evaluate(page, `document.querySelector('button[aria-label="New assistant conversation"]').click()`);
-  await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectId === null && state.activeSession?.sessionId !== ${JSON.stringify(active.sessionId)})`), { label: 'ordinary Global chat draft opened from Home' });
+  await waitFor(() => evaluate(page, `Boolean(document.querySelector('.desktop-nav-rail .desktop-rail-projects')) && !document.querySelector('.desktop-nav-rail .desktop-rail-projects').disabled && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true'`), { label: 'Projects navigation admission before ordinary New chat' });
+  await evaluate(page, `document.querySelector('.desktop-nav-rail .desktop-rail-projects').click()`);
+  await waitFor(() => evaluate(page, `Boolean(document.querySelector('button.sidebar-new-chat:not(:disabled)'))`), { label: 'ordinary Projects New chat action' });
+  await evaluate(page, `document.querySelector('button.sidebar-new-chat').click()`);
+  await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => state.activeSession?.projectId === null && state.activeSession?.sessionId !== ${JSON.stringify(active.sessionId)})`), { label: 'ordinary Global chat draft opened from Projects' });
 }
 
 async function showPackagedAppLibrary(page) {
@@ -1651,9 +1655,9 @@ async function assertPackagedAppDraftWithoutReload(page, probe, created, session
   })()`);
   assert.ok(draft.includes(created.id) && draft.includes(marker));
   const newChat = async () => {
-    await evaluate(page, `document.querySelector('.desktop-nav-rail .desktop-rail-chats').click()`);
-    await waitFor(() => evaluate(page, `Boolean(document.querySelector('button[aria-label="New assistant conversation"]:not(:disabled)'))`), { label: 'Home new-chat action' });
-    await evaluate(page, `document.querySelector('button[aria-label="New assistant conversation"]').click()`);
+    await evaluate(page, `document.querySelector('.desktop-nav-rail .desktop-rail-projects').click()`);
+    await waitFor(() => evaluate(page, `Boolean(document.querySelector('button.sidebar-new-chat:not(:disabled)'))`), { label: 'Projects new-chat action' });
+    await evaluate(page, `document.querySelector('button.sidebar-new-chat').click()`);
     await waitFor(() => evaluate(page, `window.lingxi.bootstrap().then(state => typeof state.activeSession?.sessionId === 'string' && state.activeSession.sessionId !== ${JSON.stringify(sessionId)} && Boolean(document.querySelector('[aria-label="Prompt"][contenteditable="true"]')) && document.querySelector('.desktop-nav-rail')?.getAttribute('aria-disabled') !== 'true' && !document.querySelector('[aria-label="Prompt"]').innerText.includes(${JSON.stringify(created.id)}) && !document.querySelector('[aria-label="Prompt"]').innerText.includes(${JSON.stringify(marker)}) && !document.querySelector('.local-app-chat-card'))`), { label: 'unrelated live chat excludes App draft and transcript' });
   };
   const returnToAuthor = async () => {

@@ -133,11 +133,13 @@ function renderCompaction(item: CompactionRunItem): string {
   return render(React.createElement(Stage, { liveItems: [item], sessionKey: 'session-a' }));
 }
 
-test('compaction status shows a quiet inline label and engine-confirmed completion', () => {
-  const running = renderCompaction({ type: 'compaction', id: 'compact-1', status: 'running', phase: 'summarizing', phaseStartedAt: Date.now() });
+test('compaction status shows a shimmer and elapsed time until engine-confirmed completion', () => {
+  const running = renderCompaction({ type: 'compaction', id: 'compact-1', status: 'running', phase: 'summarizing', startedAt: Date.now() - 15_000 });
   assert.match(running, /role="status"/);
   assert.match(running, /Compacting context/);
-  assert.doesNotMatch(running, /progressbar|compact-progress|compact-status-elapsed|running-sweep/);
+  assert.match(running, /running-sweep/);
+  assert.match(running, /compact-status-elapsed.*>15s</);
+  assert.doesNotMatch(running, /progressbar|compact-progress/);
 
   const complete = renderCompaction({
     type: 'compaction',
@@ -148,7 +150,7 @@ test('compaction status shows a quiet inline label and engine-confirmed completi
     bytesSaved: 32_768,
   });
   assert.match(complete, /Context compacted/);
-  assert.doesNotMatch(complete, /18 → 4|KB saved|progressbar|compact-status-detail|compact-status-elapsed/);
+  assert.doesNotMatch(complete, /18 → 4|KB saved|progressbar|compact-status-detail|compact-status-elapsed|running-sweep/);
   const automatic = renderCompaction({ type: 'compaction', id: 'auto', status: 'complete', automatic: true });
   assert.match(automatic, /Context automatically compacted/);
 

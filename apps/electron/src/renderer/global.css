@@ -802,11 +802,22 @@ body {
   display: grid;
   gap: 4px;
 }
+.compact-status-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 8px;
+}
 .compact-status-title {
   font-size: .875rem;
   font-weight: 400;
   line-height: 22px;
   overflow-wrap: anywhere;
+}
+.compact-status-elapsed {
+  font-size: .75rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .compact-status-detail {
   color: var(--compact-muted);

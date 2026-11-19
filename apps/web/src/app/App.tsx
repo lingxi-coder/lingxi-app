@@ -40,10 +40,14 @@ export function App() {
   useEffect(() => {
     document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
     document.documentElement.dataset.theme = theme;
+    if (route === '/projects') {
+      document.title = locale === 'zh' ? '项目 — 灵犀 LingXi' : 'Projects — LingXi';
+      return;
+    }
     if (route === '/chat' || route.startsWith('/chat/')) {
       document.title = locale === 'zh' ? '对话 — 灵犀 LingXi' : 'Chat — LingXi';
     } else if (route === '/inbox' || route.startsWith('/inbox/')) {
-      document.title = locale === 'zh' ? '收件箱 — 灵犀 LingXi' : 'Inbox — LingXi';
+      document.title = locale === 'zh' ? '消息 — 灵犀 LingXi' : 'Messages — LingXi';
     } else if (route === '/services' || route.startsWith('/services/')) {
       document.title = locale === 'zh' ? 'Bot 服务 — 灵犀 LingXi' : 'Bot services — LingXi';
     } else if (route === '/teams' || route === '/teams/join') {
@@ -82,6 +86,7 @@ export function App() {
   };
 
   if (route === '/chat' || route.startsWith('/chat/')) return <Suspense fallback={<main role="status">{locale === 'zh' ? '正在加载…' : 'Loading…'}</main>}><ChatPage locale={locale} target={parseChatRoute(route) ?? { kind: 'home' }} theme={theme} onLocaleChange={setLocale} onThemeToggle={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))} /></Suspense>;
+  if (route === '/projects') return <Suspense fallback={null}><InboxPage locale={locale} projects /></Suspense>;
   if (route === '/inbox' || route.startsWith('/inbox/')) return <Suspense fallback={null}><InboxPage locale={locale} focusKey={route.startsWith('/inbox/')?decodeURIComponent(route.slice(7)):undefined} /></Suspense>;
   if (route.startsWith('/open/')) return <OpenLinkPage locale={locale} />;
   if (route === '/teams' || route === '/teams/join') return <Suspense fallback={<main role="status">{locale === 'zh' ? '正在加载团队…' : 'Loading teams…'}</main>}><TeamsPage locale={locale} /></Suspense>;

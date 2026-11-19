@@ -17,7 +17,8 @@ export interface InboxListProps {
   activeKey?: string;
 }
 const filters: InboxFilter[] = ['all', 'unread', 'attention'];
-const categories: InboxCategory[] = ['assistant', 'friend', 'team', 'service'];
+const messageCategories: InboxCategory[] = ['friend', 'team', 'service'];
+const categories: InboxCategory[] = ['assistant', ...messageCategories];
 const en = {
   all: 'All',
   unread: 'Unread',
@@ -261,24 +262,28 @@ export function InboxList({ controller, onOpen, activeKey, locale = 'en' }: Inbo
               </button>
             ))}
           </div>
-          <label className="lx-inbox-sr" htmlFor={catId}>
-            {cn ? '类别' : 'Category'}
-          </label>
-          <select
-            id={catId}
-            value={state.category ?? ''}
-            onChange={(e) => {
-              const cat = e.target.value as InboxCategory;
-              run(() => controller.setFilter(state.filter, cat || undefined, state.archived));
-            }}
-          >
-            <option value="">{cn ? '类别' : 'Category'}</option>
-            {categories.map((category) => (
-              <option key={category} value={category}>
-                {labels[category]}
-              </option>
-            ))}
-          </select>
+          {controller.scope !== 'assistant' && (
+            <>
+              <label className="lx-inbox-sr" htmlFor={catId}>
+                {cn ? '类别' : 'Category'}
+              </label>
+              <select
+                id={catId}
+                value={state.category ?? ''}
+                onChange={(e) => {
+                  const cat = e.target.value as InboxCategory;
+                  run(() => controller.setFilter(state.filter, cat || undefined, state.archived));
+                }}
+              >
+                <option value="">{cn ? '类别' : 'Category'}</option>
+                {(controller.scope === 'messages' ? messageCategories : categories).map((category) => (
+                  <option key={category} value={category}>
+                    {labels[category]}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
         </div>
       </div>
       {state.batchBusy ? <p role="status">{cn ? '正在标为已读…' : 'Marking conversations read…'}</p> : null}

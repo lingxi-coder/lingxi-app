@@ -1,5 +1,5 @@
 import { FieldPath } from 'firebase-admin/firestore';
-import { DAY, deny, digest, millis, searchTitle } from './inbox-model.mjs';
+import { DAY, deny, digest, messageCategories, millis, searchTitle } from './inbox-model.mjs';
 
 const view = (id, v) => ({ jobId: id, state: v.state, processed: v.processed });
 const jobRef = (db, uid, id) => db.collection('users').doc(uid).collection('inboxReadBatches').doc(id);
@@ -59,7 +59,7 @@ export async function runReadBatch(store, uid, id, enqueue) {
     .filter(
       r =>
         (v.scope.archived === null || r.archived === v.scope.archived) &&
-        (!v.scope.category || r.category === v.scope.category) &&
+        (v.scope.category === 'messages' ? messageCategories.includes(r.category) : !v.scope.category || r.category === v.scope.category) &&
         (v.scope.filter !== 'attention' || r.needsAttention) &&
         (!v.scope.prefix || r.titleSort.startsWith(v.scope.prefix))
     );

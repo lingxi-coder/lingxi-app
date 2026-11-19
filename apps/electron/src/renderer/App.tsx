@@ -38,7 +38,7 @@ import { localAppAuthoringErrorPresentation, localAppErrorMessage } from './brid
 import type { ActionableError } from './bridge/errors';
 import type { LocalAppEditRequest } from '../shared/localApps';
 import type { TerminalScope } from '../shared/terminal';
-import { settingsLinkRequest, runtimeLinkItem, type SettingsLinkRequest, type ScheduledLinkRequest } from './deepLinkRoutes';
+import { settingsLinkRequest, runtimeLinkItem, teamLinkRequest, teamLinkStep, pairLinkFriend, type SettingsLinkRequest, type ScheduledLinkRequest, type TeamLinkRequest } from './deepLinkRoutes';
 import { SETTINGS_NAV } from './components/settings/nav';
 import { useSideChats } from './bridge/useSideChats';
 import { SideChatPanel } from './components/SideChatPanel';
@@ -131,6 +131,7 @@ export function App() {
   const handledTeamInvite = useCallback(() => setTeamInvite(undefined), []);
   // A friend link waits here, in memory only (D8), until the Friends workspace of a signed-in account can take it.
   const [friendTarget, setFriendTarget] = useState<FriendLink>();
+  const [teamLink, setTeamLink] = useState<TeamLinkRequest>();
   const handledFriendCode = useCallback(() => setFriendTarget(undefined), []);
   const [theme, setTheme] = useState<ThemeMode>('dark');
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
@@ -425,6 +426,27 @@ export function App() {
     if (friendTarget.kind === 'chat') friendsWorkspace.openChat(friendTarget.uid); else friendsWorkspace.showRequests();
     setFriendTarget(undefined);
   }, [friendsWorkspace, friendTarget]);
+  // A shared team conversation or Bot opens once Teams (or, for a friendship, Friends) has what it needs; one the viewer cannot
+  // open says so instead of showing another team. A Bot never gets a chat by itself: without one the team's Bots are shown.
+  useEffect(() => {
+    if (!teamLink) return;
+    const unavailable = () => { setTeamLink(undefined); setLocalAppNavigationError(tr('desktop_link_destination_unavailable')); };
+    if (teamLink.kind === 'pair') {
+      const uid = pairLinkFriend(teamLink.teamId, friends.snapshot);
+      if (uid === undefined || !friendsWorkspace) return;
+      if (uid === null) { unavailable(); return; }
+      friendsWorkspace.openChat(uid); setTeamLink(undefined);
+      return;
+    }
+    if (!teams.workspace || !teams.snapshot) return;
+    const next = teamLinkStep(teamLink, teams.snapshot);
+    if (next.step === 'wait') return;
+    if (next.step === 'unavailable') { unavailable(); return; }
+    if (next.step === 'open') { teams.workspace.openConversation(next.teamId, next.conversationId); if (next.done) setTeamLink(undefined); return; }
+    if (next.step === 'select') teams.workspace.selectConversation(next.conversationId);
+    else showTeamDetails('bots');
+    setTeamLink(undefined);
+  }, [teamLink, teams.workspace, teams.snapshot, friendsWorkspace, friends.snapshot, showTeamDetails, setLocalAppNavigationError]);
   /** The team menu of the sidebar: the details panel beside the conversation, on a tab when one is asked for. */
   const openTeamDetails = useCallback((tab?: DrawerTab) => { showTeams(); showTeamDetails(tab); }, [showTeams, showTeamDetails]);
   const showChat = useCallback(() => {
@@ -644,6 +666,11 @@ export function App() {
         // The join dialog (and the friend dialog likewise) opens in the sidebar, which cannot be used while it is hidden.
         if (route === 'team/join' || route === 'team/inbox') { setTeamInvite(params.code); setPage('teams'); setSidebarCollapsed(false); }
         else if (friend) { setFriendTarget(friend); setPage('friends'); setSidebarCollapsed(false); }
+        else if (teamLinkRequest(delivery.target)) {
+          const request = teamLinkRequest(delivery.target)!;
+          if (!teams.workspace && !friends.workspace) throw new Error(tr('desktop_link_destination_unavailable'));
+          setTeamLink(request); setBotServices(false); setSidebarMode('home'); setPage(request.kind === 'pair' ? 'friends' : 'teams');
+        }
         else if (settingsTarget) { linkSurfacePending.current = true; openSettings(settingsTarget); }
         else if (kind === 'settings') {
           if (!SETTINGS_NAV.some(page => page.id === id)) throw new Error(tr('desktop_link_settings_unavailable'));

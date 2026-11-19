@@ -3790,5 +3790,10 @@
   "tw_error_auto_reply_unavailable": "この Bot は自分から返信しなくなりました。メンテナーが公開時に再び有効にできます。",
   "tw_error_auto_reply_unsupported": "ホスト型の Bot サービスは自分から返信できません。",
   "tw_error_decision_required": "まずこの Desktop で Decision を設定してください：設定 → モデルとサービス → Decision。",
-  "tw_its_maintainer": "そのメンテナー"
+  "tw_its_maintainer": "そのメンテナー",
+  "teams_share_link": "リンクを共有",
+  "teams_share_link_copied": "リンクをコピーしました",
+  "teams_share_link_failed": "リンクをコピーできませんでした",
+  "teams_share_bot_note": "開いた人はそれぞれ自分とこの Bot のチャットに入ります",
+  "teams_share_text_fmt": "LingXi で「%1$s」を開く"
 }

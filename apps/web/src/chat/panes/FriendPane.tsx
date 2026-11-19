@@ -19,6 +19,6 @@ export function FriendPane({ friends: { workspace, snapshot }, uid, pairTeamId, 
   if (!friend) return <PaneNotice title={zh ? '无法打开这个对话' : 'This chat is not available'}
     text={zh ? '你们已不是好友，或者链接已过期。' : 'You are no longer friends, or the link has expired.'} action={{ href: '/friends/add', label: zh ? '添加好友' : 'Add a friend' }} />;
   return <div className="chat-pane-conversation">
-    <FriendsMain workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown} />
+    <FriendsMain shareLink workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown} />
   </div>;
 }

@@ -214,6 +214,9 @@
 .tw-conv-title h2 { font-size: 16px; line-height: 1.3; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tw-conv-title p { font-size: 12px; color: var(--tw-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tw-head-actions { display: flex; align-items: center; justify-content: flex-end; flex: none; gap: 4px; }
+.tw-link-share { position: relative; display: inline-flex; }
+.tw-link-share-status { position: absolute; z-index: 40; top: calc(100% + 6px); right: 0; padding: 5px 10px; border-radius: 8px; background: var(--tw-fg, #1d1c1d); color: var(--tw-bg, #fff); font-size: 12px; white-space: nowrap; pointer-events: none; }
+.tw-link-share-status:empty { opacity: 0; padding: 0; }
 .tw-platform { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--tw-muted); padding: 3px 7px; white-space: nowrap; }
 .tw-scope .tw-head-actions button, .tw-scope .tw-conv-head > .tw-icon-btn { min-width: 36px; min-height: 36px; border-color: transparent; border-radius: 9px; }
 .tw-scope .tw-head-actions [aria-pressed='true'], .tw-scope .tw-head-actions [aria-expanded='true'] { color: var(--tw-accent-text); background: var(--tw-selected); }

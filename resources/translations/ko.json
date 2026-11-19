@@ -3790,5 +3790,10 @@
   "tw_error_auto_reply_unavailable": "이 Bot은 더 이상 스스로 답하지 않습니다. 메인테이너가 게시할 때 다시 켤 수 있습니다.",
   "tw_error_auto_reply_unsupported": "호스팅된 Bot 서비스는 스스로 답할 수 없습니다.",
   "tw_error_decision_required": "먼저 이 Desktop에서 Decision을 설정하세요: 설정 → 모델 및 서비스 → Decision.",
-  "tw_its_maintainer": "해당 메인테이너"
+  "tw_its_maintainer": "해당 메인테이너",
+  "teams_share_link": "링크 공유",
+  "teams_share_link_copied": "링크를 복사했습니다",
+  "teams_share_link_failed": "링크를 복사할 수 없습니다",
+  "teams_share_bot_note": "링크를 연 사람마다 이 Bot과의 자신만의 채팅이 열립니다",
+  "teams_share_text_fmt": "LingXi에서 “%1$s” 열기"
 }

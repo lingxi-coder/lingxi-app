@@ -3207,4 +3207,9 @@
     <string name="teams_bot_remaining_today">Your remaining requests today</string>
     <string name="teams_bot_resets">Resets</string>
     <string name="teams_bot_examples_hint">Examples add to your draft. Review and send when ready.</string>
+    <string name="teams_share_link">Share link</string>
+    <string name="teams_share_link_copied">Link copied</string>
+    <string name="teams_share_link_failed">Couldn’t copy the link</string>
+    <string name="teams_share_bot_note">Everyone who opens it gets their own chat with this Bot</string>
+    <string name="teams_share_text_fmt">Open “%1$s” in LingXi</string>
 </resources>

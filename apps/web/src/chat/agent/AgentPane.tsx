@@ -2,13 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent }
 import type { ChatEvent, VaultProvider } from '../../../../../packages/llm-vault/contracts';
 import { ComposerEditor, ComposerSurface, ComposerToolbar } from '../../../../../packages/chat-ui/ComposerSurface';
 import type { ChatTarget } from '../../app/router';
-import { IconArrowUp, IconCopy, IconRefresh, IconSliders, IconStop, IconTrash } from '../../components/Icons';
+import { IconArrowUp, IconCheck, IconCopy, IconLink, IconRefresh, IconSliders, IconStop, IconTrash } from '../../components/Icons';
 import { Markdown } from '../../remote/markdown';
 import type { AgentChatEntry } from '../ChatSidebar';
 import { LlmError, type LlmClient } from './client';
 import { errorText } from './errors';
 import { contextOf, newId, titleOf, type AgentChat, type AgentHistory, type AgentMessage } from './history';
 import { ProviderSettings } from './ProviderSettings';
+import { agentShareLink } from './share';
 
 export interface AgentHostProps {
   uid: string;
@@ -225,7 +226,10 @@ function AgentPane({ uid, name, locale, target, client, history, open, initialPr
   return <div className="agent-pane">
     <header className="agent-head">
       <h2>{chat.title || t('New chat', '新对话')}</h2>
+      <div className="agent-head-actions">
+      <ShareQuestion chat={chat} zh={zh} />
       <button type="button" className="chat-icon-button" aria-label={t('Delete this chat', '删除这个对话')} onClick={() => void remove()}><IconTrash width={16} height={16} /></button>
+      </div>
     </header>
     <div className="agent-scroll" ref={scroller}>
       <ol className="agent-transcript" aria-live="polite">
@@ -249,4 +253,20 @@ function AgentPane({ uid, name, locale, target, client, history, open, initialPr
     </div>
     <div className="agent-dock">{setupCard}{composer}<p className="agent-footnote">{t('Answers come from the model you chose and may be wrong.', '回答由你选择的模型生成，可能有误。')}</p></div>
   </div>;
+}
+
+/** Shares the chat's first question as a link that opens a new chat with it in the composer; the answers stay in this browser. */
+function ShareQuestion({ chat, zh }: { chat: AgentChat; zh: boolean }) {
+  const [status, setStatus] = useState<'copied' | 'failed'>();
+  useEffect(() => { if (!status) return; const timer = setTimeout(() => setStatus(undefined), 2400); return () => clearTimeout(timer); }, [status]);
+  const link = agentShareLink(chat);
+  if (!link) return null;
+  const label = zh ? '分享问题链接（只包含第一个问题，不含回答）' : 'Share the question as a link (the first question only, without answers)';
+  const share = async () => {
+    try { await navigator.clipboard.writeText(link); setStatus('copied'); } catch { setStatus('failed'); }
+  };
+  return <span className="agent-share">
+    <button type="button" className="chat-icon-button" aria-label={label} title={label} onClick={() => void share()}>{status === 'copied' ? <IconCheck width={16} height={16} /> : <IconLink width={16} height={16} />}</button>
+    <span className="agent-share-status" role="status">{status === 'copied' ? (zh ? '链接已复制' : 'Link copied') : status === 'failed' ? (zh ? '无法复制链接' : 'Couldn’t copy the link') : ''}</span>
+  </span>;
 }

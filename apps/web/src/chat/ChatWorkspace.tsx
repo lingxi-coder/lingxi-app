@@ -13,6 +13,7 @@ import { webInboxRequest } from '../inbox/session';
 import { webTeamsApi } from '../teams/api';
 import { teamsDatabase } from '../teams/firestore';
 import type { Locale } from '../utils/locale';
+import { OpenInAppBanner } from './OpenInAppBanner';
 import { ChatSidebar, type AgentChatEntry } from './ChatSidebar';
 import { BotPane } from './panes/BotPane';
 import { FriendPane } from './panes/FriendPane';
@@ -50,6 +51,15 @@ export function ChatWorkspace({ user, locale, theme, target, onLocaleChange, onT
   const [apis, setApis] = useState<{ teams: ReturnType<typeof webTeamsApi>; friends: ReturnType<typeof webFriendsApi>; inbox: InboxController }>();
   const [agentChats, setAgentChats] = useState<AgentChatEntry[]>([]);
   const [drawer, setDrawer] = useState(false);
+  // A shared link that continued here offers the app once; the marker leaves the address straight away.
+  const [viaLink, setViaLink] = useState(() => new URLSearchParams(window.location.search).get('via') === 'link');
+  useEffect(() => {
+    const query = new URLSearchParams(window.location.search);
+    if (!query.has('via')) return;
+    query.delete('via');
+    const search = query.toString();
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`);
+  }, []);
   useEffect(() => {
     const db = teamsDatabase(auth.app);
     const inbox = new InboxController({ uid: user.uid, request: webInboxRequest(user), watch: (...args) => watchInbox(sdk, db, user.uid, ...args) });
@@ -88,7 +98,9 @@ export function ChatWorkspace({ user, locale, theme, target, onLocaleChange, onT
     <button type="button" className="chat-drawer-scrim" aria-label={zh ? '关闭对话列表' : 'Close the conversation list'} onClick={() => setDrawer(false)} />
     <main className="chat-main">
       <button type="button" className="chat-drawer-toggle" aria-label={zh ? '打开对话列表' : 'Open the conversation list'} aria-expanded={drawer} onClick={() => setDrawer(true)}><span /><span /><span /></button>
+      {viaLink && <OpenInAppBanner target={target} locale={locale} onClose={() => setViaLink(false)} />}
       {pane}
     </main>
   </div>;
 }
+

@@ -63,7 +63,7 @@ export function TeamsWorkspaceLayout({ teams: { workspace, snapshot }, locale, i
           setDrawer(current => ({ ...current, open: false }));
         }}>{t('tw_back_conversations')}</button></ChatTopbarControl> : null}
         {invited ? <InviteNotice names={invited} locale={locale} onDone={() => setInvited(undefined)} /> : null}
-        <TeamConversationView notificationTarget={noticeTargetFromSearch(typeof location==='undefined'?'':location.search)} workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown} detailsOpen={drawer.open}
+        <TeamConversationView shareLink notificationTarget={noticeTargetFromSearch(typeof location==='undefined'?'':location.search)} workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown} detailsOpen={drawer.open}
           onToggleDetails={() => setDrawer(current => ({ ...current, open: !current.open }))} />
       </div>
       {drawer.open ? <TeamDetailsDrawer workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} tab={drawer.tab}

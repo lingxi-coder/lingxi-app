@@ -3790,5 +3790,10 @@
   "tw_error_auto_reply_unavailable": "此 Bot 已不再支援自主回覆，可由其維護者在發布時重新開啟。",
   "tw_error_auto_reply_unsupported": "託管的 Bot 服務不支援自主回覆。",
   "tw_error_decision_required": "請先在此 Desktop 設定判斷服務：設定 → 模型與服務 → Decision。",
-  "tw_its_maintainer": "其維護者"
+  "tw_its_maintainer": "其維護者",
+  "teams_share_link": "分享連結",
+  "teams_share_link_copied": "已複製連結",
+  "teams_share_link_failed": "無法複製連結",
+  "teams_share_bot_note": "每個人開啟後會進入自己與這個 Bot 的對話",
+  "teams_share_text_fmt": "在靈犀中開啟「%1$s」"
 }

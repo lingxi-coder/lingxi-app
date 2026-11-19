@@ -3800,5 +3800,10 @@
   "tw_error_auto_reply_unavailable": "This Bot no longer answers on its own. Its maintainer can turn it back on when publishing it.",
   "tw_error_auto_reply_unsupported": "A hosted Bot service cannot answer on its own.",
   "tw_error_decision_required": "Set up Decision on this Desktop first: Settings → Models & Services → Decision.",
-  "tw_its_maintainer": "its maintainer"
+  "tw_its_maintainer": "its maintainer",
+  "teams_share_link": "Share link",
+  "teams_share_link_copied": "Link copied",
+  "teams_share_link_failed": "Couldn’t copy the link",
+  "teams_share_bot_note": "Everyone who opens it gets their own chat with this Bot",
+  "teams_share_text_fmt": "Open “%1$s” in LingXi"
 }

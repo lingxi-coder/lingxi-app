@@ -44,7 +44,7 @@ export function TeamPane({ teams: { workspace, snapshot }, teamId, conversationI
   if (snapshot.selectedTeamId !== teamId) return <PaneNotice busy text={t('teams_loading')} />;
   return <div className="chat-pane-team">
     <div className="chat-pane-conversation">
-      <TeamConversationView workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown}
+      <TeamConversationView shareLink workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown}
         detailsOpen={drawer.open} onToggleDetails={() => setDrawer(current => ({ ...current, open: !current.open }))} />
     </div>
     {drawer.open ? <TeamDetailsDrawer workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} tab={drawer.tab}

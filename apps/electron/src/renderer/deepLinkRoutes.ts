@@ -3,6 +3,9 @@ import type { UseBridge } from './bridge/bridgeTypes';
 import type { RuntimeCenterItemRef } from './bridge/runtimeCenterState';
 import type { SubmittedPlan } from './bridge/submittedPlan';
 import { planRuntimeItemId } from './bridge/runtimeCenterState';
+import type { SharedBotCard } from '../../../../packages/teams/execution';
+import type { TeamConversation } from '../../../../packages/teams/messages';
+import { findBotDm } from '../../../../packages/teams/workspace';
 
 export interface SettingsLinkRequest {
   requestId: string;
@@ -53,4 +56,47 @@ export function terminalCommandInput(command: string): string {
   if (!command.trim() || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(command)) throw new Error('Enter a command without terminal control characters.');
   // Bracketed paste prevents embedded line breaks from executing part of a reviewed command.
   return `\x1b[200~${command.replace(/\r\n?/g, '\n')}\x1b[201~\r`;
+}
+
+/** A shared team conversation or team Bot (`team/chat`, `team/bot`). A friendship's links name its pair team (`f_…`). */
+export type TeamLinkRequest =
+  | { kind: 'conversation'; teamId: string; conversationId: string }
+  | { kind: 'bot'; teamId: string; botId: string }
+  | { kind: 'pair'; teamId: string };
+
+export function teamLinkRequest(target: DeepLinkTarget): TeamLinkRequest | null {
+  const { team, conversation, bot } = target.params;
+  if (target.route !== 'team/chat' && target.route !== 'team/bot') return null;
+  if (team!.startsWith('f_')) return { kind: 'pair', teamId: team! };
+  return target.route === 'team/chat' ? { kind: 'conversation', teamId: team!, conversationId: conversation! } : { kind: 'bot', teamId: team!, botId: bot! };
+}
+
+interface TeamLinkSnapshot {
+  loading: boolean; uid: string; selectedTeamId: string; botsLoaded: boolean; messagingConnecting: boolean;
+  teams: readonly { id: string }[]; bots: readonly SharedBotCard[]; conversations: readonly TeamConversation[];
+}
+/**
+ * The next step toward a team link once Teams can carry it out. A team the viewer is not in is `unavailable`, never another team.
+ * A Bot opens the viewer's own chat with it when there is one, else the team's Bots, where starting a chat is the viewer's choice.
+ */
+export type TeamLinkStep =
+  | { step: 'wait' } | { step: 'unavailable' }
+  | { step: 'open'; teamId: string; conversationId: string; done: boolean }
+  | { step: 'select'; conversationId: string } | { step: 'bots' };
+
+export function teamLinkStep(request: Exclude<TeamLinkRequest, { kind: 'pair' }>, snapshot: TeamLinkSnapshot): TeamLinkStep {
+  if (snapshot.loading) return { step: 'wait' };
+  if (!snapshot.teams.some(team => team.id === request.teamId)) return { step: 'unavailable' };
+  if (request.kind === 'conversation') return { step: 'open', teamId: request.teamId, conversationId: request.conversationId, done: true };
+  if (snapshot.selectedTeamId !== request.teamId) return { step: 'open', teamId: request.teamId, conversationId: '', done: false };
+  if (!snapshot.botsLoaded || snapshot.messagingConnecting) return { step: 'wait' };
+  if (!snapshot.bots.some(card => card.sharedBotId === request.botId)) return { step: 'unavailable' };
+  const existing = findBotDm(snapshot.conversations, snapshot.uid, request.botId, snapshot.bots);
+  return existing ? { step: 'select', conversationId: existing.id } : { step: 'bots' };
+}
+
+/** The friend whose pair team a link names, once the cards are in: `undefined` while waiting, `null` for no such friendship. */
+export function pairLinkFriend(teamId: string, snapshot: { loading: boolean; cards: readonly { uid: string; state: string; teamId?: string }[] } | undefined): string | null | undefined {
+  if (!snapshot || snapshot.loading) return undefined;
+  return snapshot.cards.find(card => card.state === 'friends' && card.teamId === teamId)?.uid ?? null;
 }

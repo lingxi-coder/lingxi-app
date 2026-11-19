@@ -465,6 +465,11 @@ export type TeamsKey =
   | 'teams_run_queued_detail'
   | 'teams_run_revoked'
   | 'teams_run_revoked_detail'
+  | 'teams_share_bot_note'
+  | 'teams_share_link'
+  | 'teams_share_link_copied'
+  | 'teams_share_link_failed'
+  | 'teams_share_text_fmt'
   | 'teams_stale_error'
   | 'teams_task_cancel'
   | 'teams_task_cancelled'
@@ -1291,6 +1296,11 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_run_queued_detail: { en: 'Waiting for the Bot’s Desktop to pick this up.', 'zh-Hans': '等待 Bot 所在的 Desktop 接收此请求。', 'zh-Hant': '等待 Bot 所在的 Desktop 接收此請求。', ja: 'Bot の Desktop が受け取るのを待っています。', ko: 'Bot의 Desktop이 요청을 받을 때까지 기다리는 중입니다.' },
   teams_run_revoked: { en: 'Access revoked', 'zh-Hans': '授权已撤销', 'zh-Hant': '授權已撤銷', ja: 'アクセスが取り消されました', ko: '접근 권한 취소됨' },
   teams_run_revoked_detail: { en: 'You no longer have access to this Bot.', 'zh-Hans': '你已无法再使用此 Bot。', 'zh-Hant': '你已無法再使用此 Bot。', ja: 'この Bot を利用できなくなりました。', ko: '이 Bot을 더 이상 사용할 수 없습니다.' },
+  teams_share_bot_note: { en: 'Everyone who opens it gets their own chat with this Bot', 'zh-Hans': '每个人打开后进入自己与这个 Bot 的对话', 'zh-Hant': '每個人開啟後會進入自己與這個 Bot 的對話', ja: '開いた人はそれぞれ自分とこの Bot のチャットに入ります', ko: '링크를 연 사람마다 이 Bot과의 자신만의 채팅이 열립니다' },
+  teams_share_link: { en: 'Share link', 'zh-Hans': '分享链接', 'zh-Hant': '分享連結', ja: 'リンクを共有', ko: '링크 공유' },
+  teams_share_link_copied: { en: 'Link copied', 'zh-Hans': '链接已复制', 'zh-Hant': '已複製連結', ja: 'リンクをコピーしました', ko: '링크를 복사했습니다' },
+  teams_share_link_failed: { en: 'Couldn’t copy the link', 'zh-Hans': '无法复制链接', 'zh-Hant': '無法複製連結', ja: 'リンクをコピーできませんでした', ko: '링크를 복사할 수 없습니다' },
+  teams_share_text_fmt: { en: 'Open “%1$s” in LingXi', 'zh-Hans': '在灵犀中打开「%1$s」', 'zh-Hant': '在靈犀中開啟「%1$s」', ja: 'LingXi で「%1$s」を開く', ko: 'LingXi에서 “%1$s” 열기' },
   teams_stale_error: { en: 'Membership changed. Refresh before trying again.', 'zh-Hans': '成员身份已变化，请刷新后重试。', 'zh-Hant': '成員身分已變更，請重新整理後再試。', ja: 'メンバーシップが変更されました。更新してからもう一度お試しください。', ko: '멤버십이 변경되었습니다. 새로 고친 뒤 다시 시도하세요.' },
   teams_task_cancel: { en: 'Cancel task', 'zh-Hans': '取消任务', 'zh-Hant': '取消任務', ja: 'タスクをキャンセル', ko: '작업 취소' },
   teams_task_cancelled: { en: 'Cancelled', 'zh-Hans': '已取消', 'zh-Hant': '已取消', ja: 'キャンセル済み', ko: '취소됨' },

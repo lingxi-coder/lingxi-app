@@ -127,6 +127,7 @@ const paths = {
   arrowUp: 'M12 19V5M6 11l6-6 6 6',
   panel: 'M4 5h16v14H4zM15 5v14',
   copy: 'M9 9h11v11H9zM5 15V5h10',
+  link: 'M10 14a4.5 4.5 0 0 0 6.4 0l3.2-3.2a4.5 4.5 0 0 0-6.4-6.4L12 5.6M14 10a4.5 4.5 0 0 0-6.4 0l-3.2 3.2a4.5 4.5 0 0 0 6.4 6.4l1.2-1.2',
   bot: 'M12 8V4H8M6 8h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2zM2 14h2M20 14h2M15 13v2M9 13v2',
   // The glyphs of a Bot run's state (U4): a circle or a triangle, then what it says. None of them is told apart by colour alone.
   clock: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2',

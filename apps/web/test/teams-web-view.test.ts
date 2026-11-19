@@ -186,3 +186,20 @@ for (const [locale, words] of Object.entries(OWN_WORDS)) {
     for (const key of ['tw_signin_title', 'account_google', 'account_email', 'account_password']) assert.ok(!text.includes(english[key]!), `${locale} still shows "${english[key]}"`);
   });
 }
+
+scenario('layout: the conversation header shares its link; a copy says so, and a failed copy says that instead', async context => {
+  const { workspace } = await open(context);
+  const saved = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const copied: string[] = [];
+  let fail = false;
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText: async (text: string) => { if (fail) throw new Error('denied'); copied.push(text); } } } });
+  context.after(() => { if (saved) Object.defineProperty(globalThis, 'navigator', saved); });
+  const page = await mount(workspace, layout(workspace)); context.after(() => page.unmount());
+  workspace.selectConversation('chan-general'); await settle(); await page.during(() => undefined);
+  await page.click(page.oneByLabel('Share link'));
+  assert.deepEqual(copied, ['https://lingxios.net/open/team/chat?conversation=chan-general&team=team-aaaa']);
+  assert.equal(textOf(page.oneByClass('tw-link-share-status')), 'Link copied');
+  fail = true;
+  await page.click(page.oneByLabel('Share link'));
+  assert.equal(textOf(page.oneByClass('tw-link-share-status')), 'Couldn’t copy the link');
+});

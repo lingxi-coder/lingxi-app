@@ -6,6 +6,8 @@ import { ChatTopbarHeader, ChatTopbarTarget, TopbarConnection } from './ChatTopb
 import { useTeamTasks } from './bot-runs.js';
 import type { TeamTaskView } from './execution.js';
 import { MemberHome } from './MemberHome';
+import { conversationShareLink } from './share.js';
+import { ShareLinkButton } from './ShareLinkButton';
 import { botAvailabilityText } from './BotMemberDetails';
 import { snippet } from './compose.js';
 import { Composer, composerLock } from './Composer';
@@ -49,6 +51,8 @@ export interface TeamConversationViewProps {
   friend?: FriendHeader;
   /** A Back button at the start of the header: a friendship's Bot DM returns to the friend chat (D22). */
   onBack?(): void;
+  /** The header offers the conversation's link, which opens it in the app where installed and on the web otherwise. */
+  shareLink?: boolean;
 }
 
 /** The second line of the header: who is in the conversation, or whether its Bot is reachable. */
@@ -120,7 +124,7 @@ export function CreationBanner({ workspace, snapshot, locale }: { workspace: Tea
 
 type Pane = TeamConversationViewProps & { conversation: TeamConversation; model: NonNullable<TeamsSnapshot['messaging']>; team: NonNullable<TeamsSnapshot['team']> };
 
-function ConversationPane({ workspace, snapshot, conversation, model, team, detailsOpen, onToggleDetails, renderAvatar, renderMarkdown, locale, now, friend, onBack }: Pane): ReactElement {
+function ConversationPane({ workspace, snapshot, conversation, model, team, detailsOpen, onToggleDetails, renderAvatar, renderMarkdown, locale, now, friend, onBack, shareLink }: Pane): ReactElement {
   const t = useTeamsText(locale);
   const hasTopbar = useContext(ChatTopbarTarget) !== undefined;
   const uid = snapshot.uid, messages = snapshot.messages, tag = intlTag(locale);
@@ -283,6 +287,8 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   };
   const subtitle = conversationSubtitle(conversation, snapshot, locale);
   const auto = friend ? { bots: [], on: [] } : autoReplyBots(conversation, snapshot);
+  // A friendship's Bot DM (D22) has no link of its own: its pair team is not one the Teams workspace opens.
+  const link = shareLink && !(onBack && conversation.kind === 'bot_dm') ? conversationShareLink(team.id, conversation) : null;
 
   return <section className="tw-scope tw-conv" aria-label={label}>
     <ChatTopbarHeader><header className="tw-conv-head">
@@ -304,6 +310,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
         {friend ? null : <span className="tw-platform" title={platformNotice(locale)}><Icon name="lock" size={13} /><span>{platformChip(locale)}</span></span>}
         {unread > 0 && !friend ? <button type="button" className="tw-head-action" aria-label={t('tw_mark_as_read')} title={t('tw_mark_as_read')}
           disabled={snapshot.messageBusy || snapshot.offline} onClick={() => void workspace.markRead()}><Icon name="check" /><span>{t('tw_mark_as_read')}</span></button> : null}
+        {link ? <ShareLinkButton link={link} title={label} locale={locale} note={conversation.kind === 'bot_dm' ? t('teams_share_bot_note') : undefined} /> : null}
         {friend?.actions}
         {auto.bots.length ? <button type="button" className="tw-icon-btn" aria-pressed={auto.on.length > 0} aria-label={t('teams_auto_reply_title')} title={t('teams_auto_reply_title')} onClick={() => setAutoReplyOpen(true)}><Icon name="bot" /></button> : null}
         {onToggleDetails && !friend ? <button type="button" className="tw-icon-btn" aria-pressed={!!detailsOpen} aria-label={t('teams_team_details')} title={t('teams_team_details')} onClick={onToggleDetails}><Icon name="panel" /></button> : null}

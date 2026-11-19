@@ -14,5 +14,5 @@ export function FriendsPage({ friends, locale, notificationTarget }: { friends: 
   const { workspace, snapshot, signedIn } = friends;
   if (!signedIn) return <FriendsSignIn />;
   if (!workspace || !snapshot) return <p role="status" style={{ margin: 'auto' }}>{tr('friends_loading')}</p>;
-  return <div className="friends-page"><FriendsMain workspace={workspace} snapshot={snapshot} locale={locale} notificationTarget={notificationTarget} renderAvatar={renderTeamAvatar} renderMarkdown={renderTeamMarkdown} /></div>;
+  return <div className="friends-page"><FriendsMain shareLink workspace={workspace} snapshot={snapshot} locale={locale} notificationTarget={notificationTarget} renderAvatar={renderTeamAvatar} renderMarkdown={renderTeamMarkdown} /></div>;
 }

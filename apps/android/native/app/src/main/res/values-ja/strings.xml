@@ -3207,4 +3207,9 @@
     <string name="teams_bot_remaining_today">自分の今日の残りリクエスト数</string>
     <string name="teams_bot_resets">リセット時刻</string>
     <string name="teams_bot_examples_hint">入力例は下書きに追加されます。内容を確認してから送信してください。</string>
+    <string name="teams_share_link">リンクを共有</string>
+    <string name="teams_share_link_copied">リンクをコピーしました</string>
+    <string name="teams_share_link_failed">リンクをコピーできませんでした</string>
+    <string name="teams_share_bot_note">開いた人はそれぞれ自分とこの Bot のチャットに入ります</string>
+    <string name="teams_share_text_fmt">LingXi で「%1$s」を開く</string>
 </resources>

@@ -172,6 +172,16 @@ export function IconCopy(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+export function IconLink(props: SVGProps<SVGSVGElement>) {
+  return createIcon(
+    <>
+      <path d="M10 14a4.5 4.5 0 0 0 6.4 0l3.2-3.2a4.5 4.5 0 0 0-6.4-6.4L12 5.6" />
+      <path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3.2 3.2a4.5 4.5 0 0 0 6.4 6.4l1.2-1.2" />
+    </>,
+    props,
+  );
+}
+
 export function IconClose(props: SVGProps<SVGSVGElement>) {
   return createIcon(
     <>

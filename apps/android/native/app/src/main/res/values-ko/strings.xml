@@ -3207,4 +3207,9 @@
     <string name="teams_bot_remaining_today">오늘 남은 내 요청 수</string>
     <string name="teams_bot_resets">초기화 시각</string>
     <string name="teams_bot_examples_hint">예시는 초안에 추가됩니다. 내용을 확인한 뒤 직접 보내세요.</string>
+    <string name="teams_share_link">링크 공유</string>
+    <string name="teams_share_link_copied">링크를 복사했습니다</string>
+    <string name="teams_share_link_failed">링크를 복사할 수 없습니다</string>
+    <string name="teams_share_bot_note">링크를 연 사람마다 이 Bot과의 자신만의 채팅이 열립니다</string>
+    <string name="teams_share_text_fmt">LingXi에서 “%1$s” 열기</string>
 </resources>

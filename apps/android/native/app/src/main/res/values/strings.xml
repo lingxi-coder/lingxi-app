@@ -3207,4 +3207,9 @@
     <string name="teams_bot_remaining_today">本人今日剩余请求</string>
     <string name="teams_bot_resets">重置于</string>
     <string name="teams_bot_examples_hint">示例会加入草稿，请检查后自行发送。</string>
+    <string name="teams_share_link">分享链接</string>
+    <string name="teams_share_link_copied">链接已复制</string>
+    <string name="teams_share_link_failed">无法复制链接</string>
+    <string name="teams_share_bot_note">每个人打开后进入自己与这个 Bot 的对话</string>
+    <string name="teams_share_text_fmt">在灵犀中打开「%1$s」</string>
 </resources>

@@ -2,10 +2,11 @@ import { z } from 'zod';
 import { CLIENTS, VaultError, exportInput, removeInput, upsertInput } from './llm-vault.mjs';
 
 /**
- * `llmApi`: the model-provider vault and (from Phase 5) the streaming model proxy.
+ * `llmApi`: the model-provider vault and the streaming model proxy.
  *
  *   GET  /providers          the caller's providers, without keys
- *   POST /providers          {action:'upsert'|'delete', …}
+ *   POST /providers          {action:'upsert'|'delete'|'test', …}
+ *   POST /chat               one streamed model turn through the stored key (`llm-chat.mjs`)
  *   POST /providers/export   native apps only: plaintext keys, after a sign-in in the last five minutes
  *
  * Paths are accepted under `/llmApi` (the function URL) and `/v1/llm` (the Hosting rewrite). A request body, header or
@@ -15,7 +16,7 @@ export const EXPORT_FRESHNESS_SECONDS = 300;
 export const EXPORTS_PER_DAY = 10;
 const uid = z.string().min(1).max(128).regex(/^[^/\u0000-\u001f\u007f]+$/u);
 
-export function createLlmHandler({ vault, verifyToken, origins = [], clock = Date.now, observe = () => undefined, chat }) {
+export function createLlmHandler({ vault, verifyToken, origins = [], clock = Date.now, observe = () => undefined, chat, test }) {
   return async request => {
     const started = clock();
     const headers = new Headers({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
@@ -62,6 +63,7 @@ export function createLlmHandler({ vault, verifyToken, origins = [], clock = Dat
       }
       if (body?.action === 'upsert') return finish(reply({ provider: await vault.upsert(user.uid, parse(upsertInput, body), source) }));
       if (body?.action === 'delete') return finish(reply(await vault.remove(user.uid, parse(removeInput, body), source)));
+      if (body?.action === 'test' && test) return finish(reply(await test(user.uid, body, request.signal)));
       throw new VaultError(400, 'INVALID_INPUT');
     } catch (error) {
       if (error instanceof VaultError || (Number.isInteger(error?.status) && typeof error?.code === 'string'))

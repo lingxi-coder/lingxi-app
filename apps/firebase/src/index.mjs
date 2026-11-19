@@ -28,6 +28,8 @@ import { createTeamMarketEligibilityHandler, TeamMarketEligibilityStore } from '
 import { createLlmHandler } from './llm-api.mjs';
 import { VaultStore, parseKeyring } from './llm-vault.mjs';
 import { serveStreaming } from './llm-http.mjs';
+import { createChat } from './llm-chat.mjs';
+import { upstreamTransport } from './llm-egress.mjs';
 
 const app = initializeApp();
 const seed = JSON.parse(readFileSync(new URL('./seed.json', import.meta.url), 'utf8'));
@@ -285,8 +287,10 @@ export const marketTeamEligibility = onRequest({ region: 'us-central1', minInsta
 // (Hosting rewrites cap at 60 s and may buffer a stream); `/v1/llm` on Hosting serves the rest.
 const vaultKey = defineSecret('provider-vault-key');
 let vaultKeyring;
+const vault = new VaultStore(teamsDb, () => (vaultKeyring ??= parseKeyring(vaultKey.value())));
+const llmChat = createChat({ vault, transport: upstreamTransport() });
 const llmHandler = createLlmHandler({
-  vault: new VaultStore(teamsDb, () => (vaultKeyring ??= parseKeyring(vaultKey.value()))),
+  vault, chat: llmChat.chat, test: llmChat.test,
   verifyToken: token => getAuth(app).verifyIdToken(token, true),
   origins: ['https://lingxios.net', 'https://lingxi-5e4b2.web.app', 'https://lingxi-5e4b2.firebaseapp.com',
     'http://localhost:5173', 'http://127.0.0.1:5173'],

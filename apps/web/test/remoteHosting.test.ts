@@ -61,7 +61,7 @@ test('the sign-in page has its own, lighter policy and the strict one does not a
 
 test('security zones have disjoint policy patterns', () => {
   const withPolicy = config.hosting.headers.filter((entry) => entry.headers.some((header) => header.key === 'Content-Security-Policy')).map((entry) => entry.source);
-  assert.deepEqual(withPolicy, ['/inbox{,/**}', '/remote', '/remote/**', '/login/remote', '/teams', '/teams/**', '/friends', '/friends/**', '/services', '/services/**']);
+  assert.deepEqual(withPolicy, ['/inbox{,/**}', '/chat{,/**}', '/remote', '/remote/**', '/login/remote', '/teams', '/teams/**', '/friends', '/friends/**', '/services', '/services/**']);
 });
 
 test('Teams and Friends alone get Firestore connectivity and invitation and friend links suppress referrers', () => {
@@ -77,17 +77,23 @@ test('Teams and Friends alone get Firestore connectivity and invitation and frie
   assert.equal(policyFor('/services/**'), teamPolicy);
   assert.ok(directives(teamPolicy).get('connect-src')!.includes('https://firestore.googleapis.com'));
   assert.ok(!directives(policyFor('/remote')!).get('connect-src')!.includes('https://firestore.googleapis.com'));
-  for (const source of ['/teams', '/teams/**', '/friends', '/friends/**', '/services', '/services/**', '/open/team/join', '/open/friend/add']) {
+  assert.equal(policyFor('/chat{,/**}'), teamPolicy, 'Chat shares the workspace policy');
+  assert.equal(policyFor('/inbox{,/**}'), teamPolicy, 'Inbox shares the workspace policy');
+  assert.ok(directives(teamPolicy).get('connect-src')!.includes('https://us-central1-lingxi-5e4b2.cloudfunctions.net'), 'the model proxy is reachable from the workspace');
+  assert.ok(!directives(policyFor('/remote')!).get('connect-src')!.includes('https://us-central1-lingxi-5e4b2.cloudfunctions.net'));
+  for (const source of ['/chat{,/**}', '/teams', '/teams/**', '/friends', '/friends/**', '/services', '/services/**', '/open/team/join', '/open/friend/add']) {
     const headers = config.hosting.headers.find(entry => entry.source === source)?.headers;
     assert.equal(headers?.find(header => header.key === 'Referrer-Policy')?.value, 'no-referrer', source);
     assert.equal(headers?.find(header => header.key === 'Cache-Control')?.value, 'no-store', source);
   }
 });
 
-// Firebase Hosting's globs, as far as firebase.json uses them: `**` crosses `/`, `*` does not.
+// Firebase Hosting's globs, as far as firebase.json uses them: `**` crosses `/`, `*` does not, `{a,b}` is either.
 const escapeLiteral = (text: string): string => text.replace(/[.+?^${}()|[\]\\]/gu, '\\$&');
+const globBody = (glob: string): string => glob.split('**').map((part) => part.split('*').map(escapeLiteral).join('[^/]*')).join('.*');
 const globToRegExp = (glob: string): RegExp => {
-  const body = glob.split('**').map((part) => part.split('*').map(escapeLiteral).join('[^/]*')).join('.*');
+  const brace = /^(?<head>[^{]*)\{(?<options>[^}]*)\}(?<tail>.*)$/u.exec(glob);
+  const body = brace ? `${globBody(brace.groups!.head!)}(?:${brace.groups!.options!.split(',').map(globBody).join('|')})${globBody(brace.groups!.tail!)}` : globBody(glob);
   return new RegExp(`^${body}$`, 'u');
 };
 const matches = (source: string, route: string): boolean => globToRegExp(source).test(route);
@@ -99,10 +105,18 @@ test('membership and friend requests reach teamsApi before the general catalog r
   }
 });
 
+test('model provider and chat calls reach llmApi before the general catalog rewrite', () => {
+  for (const route of ['/v1/llm', '/v1/llm/providers', '/v1/llm/chat']) {
+    assert.deepEqual(config.hosting.rewrites.find(entry => matches(entry.source, route))?.function, { functionId: 'llmApi', region: 'us-central1' }, route);
+  }
+  assert.deepEqual(config.hosting.rewrites.find(entry => matches(entry.source, '/v1/model-catalog'))?.function, { functionId: 'catalogApi', region: 'us-central1' });
+});
+
 test('the globs of firebase.json are read as Hosting reads them', () => {
   assert.ok(matches('/remote/**', '/remote/a/b/c') && matches('/remote/**', '/remote/a'));
   assert.ok(!matches('/remote/**', '/remote') && !matches('/remote', '/remote/a') && !matches('/remote/**', '/remote-control/a'));
   assert.ok(matches('**', '/') && matches('**', '/anything/at/all'));
+  assert.ok(matches('/chat{,/**}', '/chat') && matches('/chat{,/**}', '/chat/team/a/b') && !matches('/chat{,/**}', '/chatter'));
   assert.ok(matches('/assets/*', '/assets/a.js') && !matches('/assets/*', '/assets/a/b.js'));
 });
 

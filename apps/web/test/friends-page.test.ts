@@ -11,6 +11,7 @@ import type FriendsPageType from '../src/pages/FriendsPage';
 import { FakeFriends, card, pairTeamId, pointer, uid, until } from './support/fakeFriends';
 import { FakeTeams, conversation } from './support/fakeTeams';
 import { loadTeamsModule } from './support/loadTeamsModule';
+import { fakeAuthHook } from './support/fakeAuthHook';
 import { hostNode, reactTestRenderer, scenario, settle, textOf, withDom } from './support/workspacePage';
 
 const require = createRequire(import.meta.url);
@@ -35,6 +36,7 @@ function pageFixture() {
     '../../../../packages/teams/i18n': i18n, // The test renderer cannot portal into the page's topbar slot: the page provides no slot, so the views keep their headers inline.
     '../../../../packages/teams/ChatTopbar': { ...loadTeamsModule<Record<string, unknown>>('ChatTopbar'), ChatTopbarTarget: { Provider: ({ children }: { children: unknown }) => children } },
   };
+  mocks['../app/useAuthUser'] = fakeAuthHook(mocks['firebase/auth'] as Parameters<typeof fakeAuthHook>[0]);
   new Function('require', 'module', 'exports', compiled.outputText)((id: string) => id in mocks ? mocks[id] : require(id), module, module.exports);
   return { Page: module.exports.default, friends, teams, signIn() { const user = { uid, email: 'fixture@example.invalid' } as User; listeners.forEach(next => next(user)); } };
 }

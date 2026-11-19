@@ -59,9 +59,9 @@ test('answering one link leaves a different, newer one pending', () => {
 // ── Routes and links (D1, D17) ──
 
 test('/friends and /friends/add are routes of the Teams security zone and nothing else is', () => {
-  for (const route of ['/friends', '/friends/add']) { assert.ok((appRoutes as readonly string[]).includes(route), route); assert.equal(resolveRoute(route), route); assert.equal(securityZone(route), 'teams', route); }
+  for (const route of ['/friends', '/friends/add']) { assert.ok((appRoutes as readonly string[]).includes(route), route); assert.equal(resolveRoute(route), route); assert.equal(securityZone(route), 'workspace', route); }
   assert.equal(resolveRoute('/Friends/Add/?code=x'), '/friends/add');
-  assert.equal(securityZone('/friends/anything'), 'teams');
+  assert.equal(securityZone('/friends/anything'), 'workspace');
   for (const route of ['/friendship', '/friend', '/friendsx', '/team', '/']) assert.equal(securityZone(route), 'site', route);
   assert.equal(resolveRoute('/friends/unknown'), '/', 'only the two routes exist');
 });

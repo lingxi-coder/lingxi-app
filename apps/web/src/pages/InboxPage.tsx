@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { onAuthStateChanged, type User } from 'firebase/auth';
+import { type User } from 'firebase/auth';
+import { useAuthUser } from '../app/useAuthUser';
 import * as sdk from 'firebase/firestore';
 import { InboxList, inboxErrorText } from '../../../../packages/inbox/InboxList';
 import { webInboxRequest } from '../inbox/session';
@@ -92,8 +93,7 @@ function SignedIn({ user, locale, focusKey }: { user: User; locale: Locale; focu
 }
 
 export default function InboxPage({ locale, focusKey }: { locale: Locale; focusKey?: string }) {
-  const [user, setUser] = useState<User | null>();
-  useEffect(() => onAuthStateChanged(auth, setUser), []);
+  const user = useAuthUser();
   return (
     <main className="teams-web">
       <header className="teams-web-nav">

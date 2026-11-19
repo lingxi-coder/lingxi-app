@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isRemoteRoute, normalizePath, parseRemoteBotRoute, parseRemoteRoute, remoteBotRoute, remoteSessionRoute, resolveRoute, securityZone } from '../src/app/router';
+import { chatRoute, isRemoteRoute, normalizePath, parseChatRoute, parseRemoteBotRoute, parseRemoteRoute, remoteBotRoute, remoteSessionRoute, resolveRoute, securityZone } from '../src/app/router';
 import { docPageIds } from '../src/app/docRoutes';
 import { docPages } from '../src/data/docs';
 
@@ -102,4 +102,28 @@ test('the page of a Bot is a remote page: it gets the strict document policy', (
   assert.ok(isRemoteRoute(route));
   assert.equal(securityZone(route), 'remote');
   assert.equal(securityZone(resolveRoute('/remote/h/bots/b')), 'remote');
+});
+
+test('chat routes keep id case, round-trip, and reject other shapes', () => {
+  assert.deepEqual(parseChatRoute('/chat'), { kind: 'home' });
+  assert.deepEqual(parseChatRoute('/chat/?via=link'), { kind: 'home' });
+  assert.deepEqual(parseChatRoute('/chat/settings/providers'), { kind: 'providers' });
+  assert.deepEqual(parseChatRoute('/chat/team/T_Ab1/Conv_X9'), { kind: 'team', teamId: 'T_Ab1', conversationId: 'Conv_X9' });
+  assert.deepEqual(parseChatRoute('/chat/friend/UidAbC'), { kind: 'friend', uid: 'UidAbC' });
+  assert.deepEqual(parseChatRoute('/chat/bot/f_abc/Bot1'), { kind: 'bot', teamId: 'f_abc', botId: 'Bot1' });
+  assert.deepEqual(parseChatRoute('/chat/agent/0F2a-11'), { kind: 'agent', id: '0F2a-11' });
+  for (const bad of ['/chat/team/onlyone', '/chat/friend/a/b', '/chat/bot/a', '/chat/agent', '/chat/unknown/x', '/chat/team/a%2Fb/c', '/chat/team/%E0%A4%A/c', '/chats']) {
+    assert.equal(parseChatRoute(bad), null, bad);
+  }
+  for (const target of [{ kind: 'home' }, { kind: 'providers' }, { kind: 'team', teamId: 'T', conversationId: 'c:1' }, { kind: 'friend', uid: 'U' }, { kind: 'bot', teamId: 'T', botId: 'B' }, { kind: 'agent', id: 'A' }] as const) {
+    assert.deepEqual(parseChatRoute(chatRoute(target)), target);
+    assert.equal(resolveRoute(chatRoute(target)), chatRoute(target));
+  }
+  assert.equal(resolveRoute('/CHAT'), '/chat');
+  assert.equal(resolveRoute('/chat/team/a'), '/chat', 'a malformed chat path opens the workspace home');
+});
+
+test('the chat workspace shares one security zone with Inbox, Teams, Friends and Services', () => {
+  for (const route of ['/chat', '/chat/team/T/C', '/inbox', '/teams', '/friends/add', '/services/s_abcdef']) assert.equal(securityZone(route), 'workspace', route);
+  assert.equal(securityZone('/chatter'), 'site');
 });

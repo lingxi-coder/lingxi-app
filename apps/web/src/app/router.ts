@@ -24,11 +24,13 @@ export const appRoutes = [
   '/friends',
   '/friends/add',
   '/services',
+  '/chat',
 ] as const;
 
 export type AppRoute =
   | (typeof appRoutes)[number]
   | `/inbox/${string}`
+  | `/chat/${string}`
   | `/open/${string}`
   | `/services/${string}`
   | `/remote/${string}/${string}`
@@ -106,15 +108,62 @@ export function parseServiceRoute(path: string): string | null {
   return match ? match[1]! : null;
 }
 
-export type SecurityZone = 'remote' | 'sign-in' | 'site' | 'teams';
+export type SecurityZone = 'remote' | 'sign-in' | 'site' | 'workspace';
 
+const workspaceRoots = ['/chat', '/inbox', '/teams', '/friends', '/services'];
+
+/** The signed-in workspace (Chat, Inbox, Teams, Friends, Services) shares one document policy, so moving inside it stays in-page. */
 export function securityZone(route: string): SecurityZone {
-  if (route === '/inbox' || route.startsWith('/inbox/') || route === '/teams' || route.startsWith('/teams/') || route === '/friends' || route.startsWith('/friends/') || route === '/services' || route.startsWith('/services/')) return 'teams';
+  if (workspaceRoots.some((root) => route === root || route.startsWith(`${root}/`))) return 'workspace';
   if (isRemoteRoute(route)) return 'remote';
   return route === '/login/remote' ? 'sign-in' : 'site';
 }
 
+/** One place in the Chat workspace. Ids are case-sensitive, so the path is parsed as written. */
+export type ChatTarget =
+  | { kind: 'home' }
+  | { kind: 'providers' }
+  | { kind: 'agent'; id: string }
+  | { kind: 'team'; teamId: string; conversationId: string }
+  | { kind: 'friend'; uid: string }
+  | { kind: 'bot'; teamId: string; botId: string };
+
+const chatId = /^[A-Za-z0-9_:.-]{1,128}$/u;
+
+/** `/chat`, `/chat/agent/<id>`, `/chat/team/<team>/<conversation>`, `/chat/friend/<uid>`, `/chat/bot/<team>/<bot>`, `/chat/settings/providers`; `null` otherwise. */
+export function parseChatRoute(path: string): ChatTarget | null {
+  const pathname = (path.split(/[?#]/u)[0] ?? '').replace(/\/$/u, '');
+  if (pathname === '/chat') return { kind: 'home' };
+  if (pathname === '/chat/settings/providers') return { kind: 'providers' };
+  const parts = pathname.split('/').slice(2);
+  let ids: string[];
+  try { ids = parts.slice(1).map((part) => decodeURIComponent(part)); } catch { return null; }
+  if (!ids.every((id) => chatId.test(id))) return null;
+  const [first, second] = ids;
+  if (parts[0] === 'agent' && ids.length === 1) return { kind: 'agent', id: first! };
+  if (parts[0] === 'friend' && ids.length === 1) return { kind: 'friend', uid: first! };
+  if (parts[0] === 'team' && ids.length === 2) return { kind: 'team', teamId: first!, conversationId: second! };
+  if (parts[0] === 'bot' && ids.length === 2) return { kind: 'bot', teamId: first!, botId: second! };
+  return null;
+}
+
+/** The route of one place in the Chat workspace; the inverse of {@link parseChatRoute}. */
+export function chatRoute(target: ChatTarget): AppRoute {
+  const e = encodeURIComponent;
+  switch (target.kind) {
+    case 'home': return '/chat';
+    case 'providers': return '/chat/settings/providers';
+    case 'agent': return `/chat/agent/${e(target.id)}`;
+    case 'friend': return `/chat/friend/${e(target.uid)}`;
+    case 'team': return `/chat/team/${e(target.teamId)}/${e(target.conversationId)}`;
+    case 'bot': return `/chat/bot/${e(target.teamId)}/${e(target.botId)}`;
+  }
+}
+
 export function resolveRoute(path: string): AppRoute {
+  const chat = parseChatRoute(path);
+  if (chat) return chatRoute(chat);
+  if ((path.split(/[?#]/u)[0] ?? '').toLowerCase().startsWith('/chat/')) return '/chat';
   const inbox = /^\/inbox\/([^/?#]+)\/?$/u.exec(path.split(/[?#]/u)[0] ?? '');
   if(inbox) {
     try {

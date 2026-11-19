@@ -1,6 +1,7 @@
 import {noticeTargetFromSearch} from '../inbox/route';
 import { useEffect, useMemo, useState } from 'react';
-import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
+import { signOut, type User } from 'firebase/auth';
+import { useAuthUser } from '../app/useAuthUser';
 import { auth } from '../app/firebase';
 import { Markdown } from '../remote/markdown';
 import { webServicesApi } from '../services/api';
@@ -26,9 +27,8 @@ function SignedIn({ user, locale, serviceId }: { user: User; locale: string; ser
 /** `/services` and `/services/<id>`: the Bots people offer outside their Teams, for a signed-in account. A link opens the service it names; nothing is entered before the person agrees. */
 export default function ServicesPage({ locale, serviceId }: { locale: Locale; serviceId?: string }) {
   const t = useTeamsText(locale);
-  const [user, setUser] = useState<User | null | undefined>(undefined), [busy, setBusy] = useState(false);
+  const user = useAuthUser(), [busy, setBusy] = useState(false);
   const [chatTopbar, setChatTopbar] = useState<HTMLDivElement | null>(null);
-  useEffect(() => onAuthStateChanged(auth, setUser), []);
   const signOutNow = async () => { setBusy(true); try { await signOut(auth); } catch { /* The person stays signed in. */ } finally { setBusy(false); } };
   return <ChatTopbarTarget.Provider value={chatTopbar}><main className="teams-web"><header className="teams-web-nav"><a href="/">LingXi</a><a href="/inbox">{locale === 'zh' ? '收件箱' : 'Inbox'}</a><a href="/teams">{t('teams_title')}</a><a href="/friends">{t('friends_title')}</a><h1>{t('services_title')}</h1>
       <div ref={setChatTopbar} className="teams-web-chat-slot" />

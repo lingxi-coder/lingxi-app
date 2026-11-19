@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
+import { signOut, type User } from 'firebase/auth';
+import { useAuthUser } from '../app/useAuthUser';
 import { teamsDatabase } from '../teams/firestore';
 import { auth } from '../app/firebase';
 import { webFriendsApi } from '../friends/api';
@@ -28,7 +29,7 @@ function SignedIn({ user, locale, invite, onInviteHandled, onInviteResolved }: {
 }
 export default function TeamsPage({ locale }: { locale: Locale }) {
   const t = useTeamsText(locale);
-  const [user, setUser] = useState<User | null | undefined>(undefined);
+  const user = useAuthUser();
   const [code, setCode] = useState(() => readInviteIntent(`https://lingxios.net${location.pathname}${location.search}${location.hash}`, inviteStorage));
   const handledInvite = useRef(code);
   const [chatTopbar, setChatTopbar] = useState<HTMLDivElement | null>(null);
@@ -39,7 +40,6 @@ export default function TeamsPage({ locale }: { locale: Locale }) {
     let retained = !code;
     if (code) retained = retainInviteIntent(code, inviteStorage);
     if (code && retained && (location.search || location.hash)) history.replaceState(null, '', location.pathname);
-    return onAuthStateChanged(auth, setUser);
   }, []);
   const signOutNow = async () => {
     setBusy(true);

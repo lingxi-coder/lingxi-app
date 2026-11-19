@@ -1,7 +1,8 @@
 import {noticeTargetFromSearch} from '../inbox/route';
 import {type InboxNoticeTarget} from '../../../../packages/inbox/contracts';
 import { useEffect, useRef, useState } from 'react';
-import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
+import { signOut, type User } from 'firebase/auth';
+import { useAuthUser } from '../app/useAuthUser';
 import { auth } from '../app/firebase';
 import { webFriendsApi } from '../friends/api';
 import { clearAddIntent, readAddIntent, retainAddIntent } from '../friends/add-intent';
@@ -39,7 +40,7 @@ const chatParameter = (): string | undefined => {
 
 export default function FriendsPage({ locale, route, badge, onBadge }: { locale: Locale } & Page) {
   const t = useTeamsText(locale);
-  const [user, setUser] = useState<User | null | undefined>(undefined);
+  const user = useAuthUser();
   const [code, setCode] = useState(() => readAddIntent(`https://lingxios.net${location.pathname}${location.search}${location.hash}`, intentStorage));
   const handled = useRef(code), chat = useRef(chatParameter()), target=useRef(noticeTargetFromSearch(location.search));
   const [chatTopbar, setChatTopbar] = useState<HTMLDivElement | null>(null);
@@ -49,7 +50,6 @@ export default function FriendsPage({ locale, route, badge, onBadge }: { locale:
     let retained = !code;
     if (code) retained = retainAddIntent(code, intentStorage);
     if (retained && (location.search || location.hash)) history.replaceState(null, '', location.pathname);
-    return onAuthStateChanged(auth, setUser);
   }, []);
   const signOutNow = async () => {
     setBusy(true);

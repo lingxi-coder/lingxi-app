@@ -14,7 +14,7 @@ test('Team invitations roundtrip without folding case or automatically joining',
   assert.equal(inviteCode(`lingxi://team/join?code=${code}`), code);
   assert.equal(inviteCode(`https://lingxios.net/teams/join?code=${code}`), code);
   assert.equal(resolveRoute('/teams/join'), '/teams/join');
-  assert.equal(securityZone('/teams'), 'teams');
+  assert.equal(securityZone('/teams'), 'workspace');
   assert.notEqual(securityZone('/teams'), securityZone('/remote'));
 });
 test('Team invitations reject ambiguous or credential-bearing links', () => {

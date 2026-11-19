@@ -272,3 +272,39 @@ test('provider popup cancellation settles the service and closes the origin-chec
   assert.equal(button.disabled, true);
   await assert.rejects(fetch(url));
 });
+
+test('re-authentication accepts only the signed-in account and keeps its session epoch', async () => {
+  const saved = store(session());
+  let response: Record<string, unknown> = { ...authResponse, idToken: 'fresh-id', refreshToken: 'fresh-refresh' };
+  const service = new AccountService(config, saved, async () => {}, mockFetch(url => Response.json(url.includes('lookup') ? { users: [{ localId: 'u1', email: 'a@example.com' }] } : response)));
+  await service.execute({ type: 'status' });
+  const epoch = service.sessionEpoch();
+  assert.equal(service.recentlyAuthenticated(), false, 'a restored session never counts as a fresh sign-in');
+
+  const ok = await service.execute({ type: 'signIn', email: 'a@example.com', password: 'pw', expectUid: 'u1' });
+  assert.equal(ok.error, null);
+  assert.equal(service.sessionEpoch(), epoch);
+  assert.equal(service.recentlyAuthenticated(), true);
+  assert.equal(await service.getIdToken(), 'fresh-id');
+
+  response = { ...authResponse, localId: 'u2', idToken: 'other-id', refreshToken: 'other-refresh' };
+  const mismatch = await service.execute({ type: 'signIn', email: 'b@example.com', password: 'pw', expectUid: 'u1' });
+  assert.equal(mismatch.error, '请使用当前登录的灵犀账号验证身份。');
+  assert.equal(mismatch.user?.uid, 'u1');
+  assert.equal(JSON.parse(saved.value!).refreshToken, 'fresh-refresh', 'the other account’s tokens are discarded');
+  assert.equal(await service.getIdToken(), 'fresh-id');
+
+  const wrongTarget = await service.execute({ type: 'signIn', email: 'a@example.com', password: 'pw', expectUid: 'u9' });
+  assert.equal(wrongTarget.error, '请使用当前登录的灵犀账号验证身份。');
+
+  // An ordinary sign-in is a new authentication identity.
+  response = { ...authResponse, idToken: 'next-id', refreshToken: 'next-refresh' };
+  await service.execute({ type: 'signIn', email: 'a@example.com', password: 'pw' });
+  assert.notEqual(service.sessionEpoch(), epoch);
+});
+test('expectUid is accepted only on sign-in and OAuth commands', () => {
+  assert.deepEqual(parseAccountCommand({ type: 'oauth', provider: 'google.com', expectUid: 'u1' }), { type: 'oauth', provider: 'google.com', expectUid: 'u1' });
+  assert.deepEqual(parseAccountCommand({ type: 'signIn', email: 'a@example.com', password: 'p', expectUid: 'u1' }), { type: 'signIn', email: 'a@example.com', password: 'p', expectUid: 'u1' });
+  for (const input of [{ type: 'register', email: 'a@example.com', password: 'p', expectUid: 'u1' }, { type: 'status', expectUid: 'u1' }, { type: 'oauth', provider: 'google.com', expectUid: '../u' }, { type: 'oauth', provider: 'google.com', expectUid: 7 }])
+    assert.throws(() => parseAccountCommand(input), JSON.stringify(input));
+});

@@ -1,5 +1,7 @@
 import { logicalProviderId, providerAccountSummary, type ProviderAccountSnapshot } from '../../../../shared/providerAccounts';
 import { ProviderAccounts } from './ProviderAccounts';
+import { CloudProviders } from './CloudProviders';
+import { VAULT_PRESET_IDS } from '../../../../shared/providerVault';
 import { ProviderProtocol } from './ProviderProtocol';
 import { useI18n } from '../../../i18n/useI18n';
 import { tr } from '../../../i18n/locale';
@@ -98,12 +100,13 @@ export function ProviderCredentials({ bridge, onLayerLockChange, initialProvider
       </button>;
     })}</div>
     {officialProviders.every(provider => !`${provider.label} ${provider.id}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())) && <p className="pa-empty">{tr('provider_accounts_no_matches')}</p>}
+    <CloudProviders onPulled={async () => { await bridge.reloadProviderSettings?.().catch(() => undefined); await refreshAccounts(); await bridge.refreshModelPicker('manual').catch(() => undefined); }} />
   </div>;
   return <div className="provider-settings-content" style={theme}>
     <button type="button" className="settings-provider-back provider-back-link" data-testid="provider-list-back" disabled={applying} onClick={() => setSelectedProviderId(null)}><Icon name="chevronL" size={14} />{tr('provider_accounts_all_providers')}</button>
     <header className="provider-detail-heading"><span className="provider-monogram" aria-hidden="true">{selectedProvider.label.slice(0, 1)}</span><div><h2>{selectedProvider.label}</h2><p>{tr('provider_accounts_global')}</p></div></header>
     {bridge.providerSettingsApplyPending && <div className="pa-feedback pa-error" role="alert"><span>{bridge.providerSettingsError}</span><button className="pa-button" disabled={applying} onClick={() => { setApplying(true); void bridge.updateProviderSettings({}).catch(cause => setApplyError(cause instanceof Error ? cause.message : tr('provider_accounts_error'))).finally(() => setApplying(false)); }}>{tr('common_retry')}</button></div>}
-    {bridge.providerAccounts ? <ProviderAccounts key={selectedProvider.id} api={bridge.providerAccounts} provider={selectedProvider} running={bridge.running || applying} onConfigured={configured} usageRows={bridge.cost?.by_account} /> : <p role="alert">{tr('provider_accounts_status_error')}</p>}
+    {bridge.providerAccounts ? <ProviderAccounts key={selectedProvider.id} api={bridge.providerAccounts} provider={selectedProvider} running={bridge.running || applying} onConfigured={configured} usageRows={bridge.cost?.by_account} cloudSyncable={VAULT_PRESET_IDS.has(logicalProviderId(selectedProvider.id))} /> : <p role="alert">{tr('provider_accounts_status_error')}</p>}
     {applyError && <p role="alert" style={{ color: t.danger }}>{applyError}<button type="button" disabled={applying} onClick={() => void configured()} className="pa-button">{tr('desktop_settings_00a58a5b98')}</button></p>}
     <details className="provider-models-disclosure"><summary><span><strong>{tr('desktop_settings_e06568d15f')}</strong></span><Icon name="chevron" size={15} /></summary>
       <ProviderProtocol providerId={selectedProvider.id} bridge={bridge} onLayerLockChange={onLayerLockChange} />

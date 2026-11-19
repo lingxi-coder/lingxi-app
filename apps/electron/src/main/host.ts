@@ -4,6 +4,9 @@ import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
 import { CH_SESSION_HISTORY, historyCursor } from '../shared/sessionHistory.js';
 import { CH_PROVIDER_ACCOUNTS, CH_PROVIDER_ACCOUNTS_CANCEL, type ProviderAccountCommand } from '../shared/providerAccounts.js';
 import type { DesktopProviderAccounts } from './provider-accounts.js';
+import { ProviderVaultClient, ProviderVaultError, vaultInstallPlan, vaultUpsertFor } from './provider-vault.js';
+import { CH_PROVIDER_VAULT, parseProviderVaultCommand, type ProviderVaultCommand, type ProviderVaultPull, type ProviderVaultReply, type ProviderVaultSyncResult } from '../shared/providerVault.js';
+import type { VaultExport } from '../../../../packages/llm-vault/contracts';
 import { CH_ACCOUNT, CH_ACCOUNT_CHANGED } from '../shared/account.js';
 import { CH_IMAGE_SAVE } from '../shared/imageSave.js';
 import { registerImageSave } from './imageSave.js';
@@ -562,6 +565,9 @@ function metadataSelection(value: unknown): SessionMetadataSelection {
   return { scope: selected!.scope, transcriptPath: selected!.transcriptPath!, sourceToken: input.sourceToken };
 }
 
+/** The account service as the host uses it; the ID token never leaves the main process. */
+type HostAccount = Pick<AccountService, 'snapshot' | 'sessionEpoch' | 'getIdToken' | 'recentlyAuthenticated' | 'onChanged' | 'execute' | 'dispose'>;
+
 export class HostController {
   private readonly metadataSources = new Map<string, CapturedMetadataSource>();
   private readonly metadataSenderGenerations = new WeakMap<WebContents, number>();
@@ -649,11 +655,13 @@ export class HostController {
   }
   attachLocalAppSessions(value: NonNullable<HostController['localAppSession']>): void { this.localAppSession = value; }
 
-  private account?: AccountService;
+  private account?: HostAccount;
   private offAccount?: () => void;
-  attachAccount(service: AccountService): void {
+  private providerVault?: ProviderVaultClient;
+  attachAccount(service: HostAccount, vault = new ProviderVaultClient(service)): void {
     this.offAccount?.();
     this.account = service;
+    this.providerVault = vault;
     this.offAccount = service.onChanged(state => {
       for (const target of this.targets.keys()) if (!target.isDestroyed()) target.send(CH_ACCOUNT_CHANGED, state);
     });
@@ -1619,7 +1627,9 @@ export class HostController {
       if (!this.providerAccounts) throw new Error('Secure provider account storage is unavailable.');
       if (request === undefined) return this.providerAccounts.snapshot();
       if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('Invalid account operation.');
-      const command = request as ProviderAccountCommand;
+      const { cloudSync, ...rest } = request as ProviderAccountCommand;
+      const command = rest as ProviderAccountCommand;
+      if (cloudSync !== undefined && (typeof cloudSync !== 'boolean' || (command.action !== 'add' && command.action !== 'reconnect'))) throw new Error('Invalid account operation.');
       if (!['list', 'add', 'update', 'reorder', 'enable', 'remove', 'test', 'logout', 'reconnect', 'set_policy'].includes(command.action)
         || !Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0
         || (command.operationId !== undefined && (!Number.isSafeInteger(command.operationId) || command.operationId < 0))
@@ -1633,8 +1643,17 @@ export class HostController {
       const abort = new AbortController();
       const cancel = () => abort.abort();
       event.sender.once('destroyed', cancel);
-      try { return await this.providerAccounts.command(command, credential as string | undefined, abort.signal); }
+      let result: ProviderAccountSnapshot;
+      try { result = await this.providerAccounts.command(command, credential as string | undefined, abort.signal); }
       finally { event.sender.removeListener('destroyed', cancel); }
+      // The key is saved on this Mac first; a vault that cannot take it is reported, never undoes the local save.
+      if (!cloudSync || typeof credential !== 'string' || !credential.trim()) return result;
+      const providerId = command.action === 'add' ? command.providerId : result.accounts.find(account => account.accountId === command.accountId)?.providerId;
+      return { ...result, cloudSync: providerId ? await this.syncProviderToVault(providerId, credential.trim()) : { ok: false, code: 'UNSUPPORTED_PROVIDER' } };
+    });
+    this.ipc.handle(CH_PROVIDER_VAULT, async (event: IpcMainInvokeEvent, value?: unknown) => {
+      this.assertSender(event);
+      return this.providerVaultCommand(parseProviderVaultCommand(value));
     });
     this.ipc.handle(CH_PROVIDER_ACCOUNTS_CANCEL, (event: IpcMainInvokeEvent, operationId?: unknown) => {
       this.assertSender(event);
@@ -2171,6 +2190,66 @@ export class HostController {
       failedCount: summary.failedCount,
       ...(restartRequired ? { restartRequired: true } : {}),
     };
+  }
+
+  /** Stores a key just saved on this Mac in the signed-in account's vault, so the Web (and later this account's other devices) can use it. */
+  private async syncProviderToVault(providerId: string, apiKey: string): Promise<ProviderVaultSyncResult> {
+    const uid = this.account?.snapshot().user?.uid;
+    if (!uid || !this.providerVault) return { ok: false, code: 'SIGN_IN_REQUIRED' };
+    try {
+      const profile = providerById(providerId) ? undefined : (await this.sessionCatalog.providerSettings()).effective.providers;
+      const input = vaultUpsertFor(providerId, profile && typeof profile === 'object' ? (profile as Record<string, unknown>)[providerId] : undefined, apiKey);
+      if (!input) return { ok: false, code: 'UNSUPPORTED_PROVIDER' };
+      await this.providerVault.upsert(uid, input);
+      return { ok: true };
+    } catch (error) { return { ok: false, code: error instanceof ProviderVaultError ? error.code : 'INTERNAL' }; }
+  }
+
+  private async providerVaultCommand(command: ProviderVaultCommand): Promise<ProviderVaultReply> {
+    const uid = this.account?.snapshot().user?.uid, vault = this.providerVault;
+    if (!uid || !vault || !this.account) return { ok: false, code: 'SIGN_IN_REQUIRED' };
+    if (command.action === 'pull') {
+      if (!this.providerAccounts) throw new Error('Secure provider account storage is unavailable.');
+      this.assertNoActiveTurn();
+      // The vault checks the token's auth_time too; asking first saves the round trip and its daily export allowance.
+      if (!this.account.recentlyAuthenticated()) return { ok: false, code: 'REAUTH_REQUIRED' };
+    }
+    try {
+      if (command.action === 'remove') await vault.remove(uid, command.id, command.expectedRevision);
+      let pulled: ProviderVaultPull[] | undefined;
+      if (command.action === 'pull') {
+        const exported = await vault.exportKeys(uid, command.ids);
+        pulled = [];
+        for (const provider of exported) pulled.push(await this.installVaultProvider(provider));
+        for (const id of command.ids) if (!exported.some(provider => provider.id === id)) pulled.push({ id, ok: false, code: 'PROVIDER_NOT_FOUND' });
+      }
+      return { ok: true, providers: await vault.list(uid), ...(pulled ? { pulled } : {}) };
+    } catch (error) {
+      if (error instanceof ProviderVaultError) return { ok: false, code: error.code };
+      throw error;
+    }
+  }
+
+  /** One exported provider into this Mac's settings and credential store; the key lives in this call only. */
+  private async installVaultProvider(exported: VaultExport): Promise<ProviderVaultPull> {
+    const { apiKey, ...provider } = exported;
+    try {
+      const settings = await this.sessionCatalog.providerSettings();
+      const record = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+      const plan = vaultInstallPlan(provider, record(settings.effective.providers));
+      if (plan.kind === 'unsupported') return { id: provider.id, ok: false, code: plan.code };
+      if (plan.kind === 'custom' && plan.profile) {
+        await this.sessionCatalog.providerSettings({ providers: { ...record(settings.raw.providers), [plan.providerId]: plan.profile } }, settings.raw);
+        await this.bridge.applyProviderSettings();
+      }
+      const accounts = await this.providerAccounts!.snapshot();
+      // Pulling again replaces the key of the account an earlier pull added rather than adding another.
+      const existing = accounts.accounts.find(account => account.providerId === plan.providerId && account.authKind === 'api_key' && account.displayName === plan.displayName);
+      await this.providerAccounts!.command(existing
+        ? { action: 'reconnect', expectedRevision: accounts.configRevision, accountId: existing.accountId, providerId: plan.providerId, displayName: plan.displayName, authKind: 'api_key', executionBindingId: plan.providerId }
+        : { action: 'add', expectedRevision: accounts.configRevision, providerId: plan.providerId, displayName: plan.displayName, authKind: 'api_key', executionBindingId: plan.providerId }, apiKey);
+      return { id: provider.id, ok: true, localProviderId: plan.providerId };
+    } catch { return { id: provider.id, ok: false, code: 'INSTALL_FAILED' }; }
   }
 
   private async requireCredentialProvider(providerId: unknown): Promise<{ id: string }> {
@@ -3561,7 +3640,7 @@ export class HostController {
       CH_SESSION_METADATA_CAPTURE, CH_SESSION_METADATA_RELEASE, CH_SESSION_TOUCH, CH_SESSION_RENAME,
       CH_SESSION_WORKSPACE, CH_NATIVE_AUDIO_FLOW_LEASE,
       CH_WORKSPACE_FILES_SEARCH, CH_COMPUTER_SETTINGS,
-      CH_PROVIDER_ACCOUNTS, CH_PROVIDER_ACCOUNTS_CANCEL, 'lingxi:provider-accounts:routing:get', 'lingxi:provider-settings',
+      CH_PROVIDER_ACCOUNTS, CH_PROVIDER_ACCOUNTS_CANCEL, 'lingxi:provider-accounts:routing:get', 'lingxi:provider-settings', CH_PROVIDER_VAULT,
       CH_PLUGIN_SECRET_GET, CH_PLUGIN_SECRET_SET, CH_PLUGIN_SECRET_CLEAR, CH_PLUGIN_SECRET_CLEANUP,
       CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET, CH_MICROPHONE_ACCESS_GET,
       CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_CLIPBOARD_WRITE_TEXT, CH_INTERFACE_LOCALE, CH_OPEN_SYSTEM_SETTINGS,

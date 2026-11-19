@@ -8,6 +8,9 @@ import { logicalProviderId, orderedProviderAccounts } from '../../../../shared/p
 import type { ProviderDefinition } from '../../../../shared/providers';
 import { useT } from '../../../theme/ThemeContext';
 import { Icon } from '../../Icon';
+import { useAccountState } from '../../../bridge/useAccountState';
+import type { AccountApi } from '../../../../shared/account';
+import { readVaultSyncPreference, vaultCodeText, writeVaultSyncPreference } from './CloudProviders';
 
 export function providerAccountHealthLabel(health?: ProviderAccountHealth): string {
   if (!health) return tr('provider_accounts_health_unknown');
@@ -24,12 +27,17 @@ function AccountSessionUsageLines({ usage }: { usage: AccountSessionUsage }) {
 }
 
 /** User priority stays stable; observed availability is shown independently. */
-export function ProviderAccounts({ api, provider, running, onConfigured, usageRows }: {
+export function ProviderAccounts({ api, provider, running, onConfigured, usageRows, cloudSyncable = false, account }: {
   api: ProviderAccountsApi; provider: ProviderDefinition; running: boolean; onConfigured?: () => Promise<unknown>;
   usageRows?: readonly AccountUsageRowDto[];
+  /** Offer "sync to my LingXi account" for a key: a provider the cloud vault can hold. Shown only while signed in. */
+  cloudSyncable?: boolean;
+  account?: AccountApi;
 }) {
   useI18n();
   const t = useT();
+  const signedIn = Boolean(useAccountState(account).state?.user);
+  const [cloudSync, setCloudSync] = useState(readVaultSyncPreference);
   const [routing, setRouting] = useState<ProviderAccountRouting>();
   const [snapshot, setSnapshot] = useState<ProviderAccountSnapshot>();
   const [name, setName] = useState('');
@@ -88,6 +96,7 @@ export function ProviderAccounts({ api, provider, running, onConfigured, usageRo
   const supportsKey = provider.authMethods.includes('api_key') || provider.authMethods.includes('token');
   const supportsOAuth = provider.authMethods.includes('oauth');
   const showForm = Boolean(snapshot) && provider.available && formOpen;
+  const offerCloudSync = cloudSyncable && signedIn && authKind === 'api_key';
   useEffect(() => {
     if (!showForm) {
       if (accountDialog.current?.open) { accountDialog.current.close(); addButton.current?.focus(); }
@@ -110,7 +119,7 @@ export function ProviderAccounts({ api, provider, running, onConfigured, usageRo
       setSnapshot(next);
       if (command.action === 'add' || command.action === 'reconnect') {
         setKey(''); setName(''); setReplacementId(undefined); setFormOpen(false);
-        setNotice(tr('provider_accounts_connected'));
+        setNotice(!next.cloudSync ? tr('provider_accounts_connected') : next.cloudSync.ok ? tr('provider_vault_synced') : tr('provider_vault_sync_failed', vaultCodeText(next.cloudSync.code)));
         await onConfigured?.();
       }
       if (command.action === 'remove') setRemovalId(undefined);
@@ -187,12 +196,13 @@ export function ProviderAccounts({ api, provider, running, onConfigured, usageRo
     {error && !showForm && !removalId && <p className="pa-feedback pa-error" role="alert">{error}</p>}
     {notice && <p className="pa-feedback pa-success" role="status"><Icon name="check" size={15} />{notice}</p>}
     <dialog ref={accountDialog} className="pa-dialog pa-account-dialog" aria-labelledby="pa-form-title" onCancel={event => { event.preventDefault(); if (busy && oauthBusy) cancelLogin(); else closeForm(); }}>
-    {showForm && <form ref={form} aria-labelledby="pa-form-title" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (busy && oauthBusy) cancelLogin(); else closeForm(); } }} onSubmit={event => { event.preventDefault(); if (!locked && (authKind === 'oauth' || key.trim())) { setFormOpen(true); void perform({ action: replacementId ? 'reconnect' : 'add', accountId: replacementId, providerId: logicalProviderId(provider.id), displayName: name.trim() || provider.label, authKind, executionBindingId: authKind === 'oauth' ? 'openai-chatgpt' : logicalProviderId(provider.id) }, authKind === 'api_key' ? key : undefined); } }}>
+    {showForm && <form ref={form} aria-labelledby="pa-form-title" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (busy && oauthBusy) cancelLogin(); else closeForm(); } }} onSubmit={event => { event.preventDefault(); if (!locked && (authKind === 'oauth' || key.trim())) { setFormOpen(true); void perform({ action: replacementId ? 'reconnect' : 'add', accountId: replacementId, providerId: logicalProviderId(provider.id), displayName: name.trim() || provider.label, authKind, executionBindingId: authKind === 'oauth' ? 'openai-chatgpt' : logicalProviderId(provider.id), ...(offerCloudSync && cloudSync ? { cloudSync: true } : {}) }, authKind === 'api_key' ? key : undefined); } }}>
         <header><h3 id="pa-form-title">{tr(replacementId ? authKind === 'oauth' ? 'provider_accounts_reconnect' : 'provider_accounts_replace' : 'provider_accounts_add')}</h3></header>
         {supportsKey && supportsOAuth && !replacementId && <div className="pa-segment" aria-label={tr('provider_accounts_method')}><button type="button" aria-pressed={authKind === 'oauth'} disabled={busy} onClick={() => setAuthKind('oauth')}>ChatGPT</button><button type="button" aria-pressed={authKind === 'api_key'} disabled={busy} onClick={() => setAuthKind('api_key')}>{tr('provider_accounts_key')}</button></div>}
 
         {authKind === 'api_key' && <label className="pa-field">{tr('provider_accounts_key')}<input type="password" autoComplete="new-password" value={key} onChange={event => setKey(event.target.value)} disabled={busy} required /></label>}
         {authKind === 'api_key' && provider.credentialManagementUrl && <p className="pa-key-link"><a href={provider.credentialManagementUrl} target="_blank" rel="noopener noreferrer">{tr('desktop_settings_aab39b9ba5')}</a></p>}
+        {offerCloudSync && <label className="pa-check"><input type="checkbox" checked={cloudSync} disabled={busy} onChange={event => { setCloudSync(event.target.checked); writeVaultSyncPreference(event.target.checked); }} /><span>{tr('provider_vault_sync')}<small>{tr('provider_vault_sync_hint')}</small></span></label>}
         <details className="pa-form-options"><summary>{tr('desktop_advanced')}</summary>
         <label className="pa-field">{tr('provider_accounts_optional_name')}<input autoComplete="off" value={name} onChange={event => setName(event.target.value)} disabled={busy || Boolean(replacementId)} maxLength={128} placeholder={provider.label} /></label>
         </details>

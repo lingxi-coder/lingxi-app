@@ -317,6 +317,7 @@ export interface LingxiApi {
   decision: DecisionApi;
   providerAccounts: ProviderAccountsApi;
   providerSettings(patch?: Record<string, unknown>, expected?: Record<string, unknown>): Promise<import('../shared/providerAccounts.js').HostProviderSettings>;
+  providerVault: import('../shared/providerVault.js').ProviderVaultApi;
   pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
   setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretMetadata>;
   clearPluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
@@ -647,6 +648,7 @@ const api: LingxiApi = {
     cancel: operationId => ipcRenderer.invoke('lingxi:provider-accounts:cancel', operationId),
   },
   providerSettings: (patch, expected) => ipcRenderer.invoke('lingxi:provider-settings', patch, expected),
+  providerVault: { command: command => ipcRenderer.invoke('lingxi:provider-vault', command) },
   pluginSecret: (pluginId, key) => ipcRenderer.invoke(CH_PLUGIN_SECRET_GET, pluginId, key) as Promise<PluginSecretMetadata>,
   setPluginSecret: (pluginId, key, secret) => ipcRenderer.invoke(CH_PLUGIN_SECRET_SET, pluginId, key, secret) as Promise<PluginSecretMetadata>,
   clearPluginSecret: (pluginId, key) => ipcRenderer.invoke(CH_PLUGIN_SECRET_CLEAR, pluginId, key) as Promise<PluginSecretMetadata>,

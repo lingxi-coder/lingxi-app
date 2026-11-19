@@ -13,6 +13,8 @@ import {
 } from '../../../bridge/modelCatalog';
 import { ghostButtonStyle } from './ghostButton';
 import { ProviderAccounts } from './ProviderAccounts';
+import { readVaultSyncPreference, vaultCodeText, writeVaultSyncPreference } from './CloudProviders';
+import { useAccountState } from '../../../bridge/useAccountState';
 import { providerById } from '../../../../shared/providers';
 import { ProviderRegion } from './ProviderRegion';
 
@@ -86,6 +88,9 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer,
   const [originalName, setOriginalName] = useState<string | null>(null);
   const [draft, setDraft] = useState<CustomProviderDraft>({ type: 'openai', models: [{ id: '' }] });
   const [apiKey, setApiKey] = useState('');
+  const signedIn = Boolean(useAccountState().state?.user);
+  const [cloudSync, setCloudSync] = useState(readVaultSyncPreference);
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState('');
@@ -137,10 +142,10 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer,
     setProfileName(name); setOriginalName(name); setDraft(editableProviderDraft(value)); setApiKey('');
     setFormError(null); setEditorOpen(true); setImportOpen(false);
   };
-  const persist = async (next: Record<string, CustomProviderDraft> | null, credentials: Record<string, string> = {}, removedProviderId?: string) => {
+  const persist = async (next: Record<string, CustomProviderDraft> | null, credentials: Record<string, string> = {}, removedProviderId?: string, sync = false) => {
     if (busy) return false;
     const token = generation.current;
-    setSaving(true); onLayerLockChange?.(true); setSaveError(null);
+    setSaving(true); onLayerLockChange?.(true); setSaveError(null); setSyncNotice(null);
     const configurationChanged = next !== null && !equalProviderSettings(providers, next);
     let configSaved = !configurationChanged;
     const remaining = { ...credentials };
@@ -153,8 +158,9 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer,
         if (generation.current !== token) return false;
         if (!bridge.providerAccounts) throw new Error(tr('provider_accounts_status_error'));
         const accounts = await bridge.providerAccounts.snapshot();
-        await bridge.providerAccounts.command({ action: 'add', expectedRevision: accounts.configRevision, providerId: name, executionBindingId: name, authKind: 'api_key', displayName: name }, key);
+        const saved = await bridge.providerAccounts.command({ action: 'add', expectedRevision: accounts.configRevision, providerId: name, executionBindingId: name, authKind: 'api_key', displayName: name, ...(sync ? { cloudSync: true } : {}) }, key);
         delete remaining[name];
+        if (saved.cloudSync && generation.current === token) setSyncNotice(saved.cloudSync.ok ? tr('provider_vault_synced') : tr('provider_vault_sync_failed', vaultCodeText(saved.cloudSync.code)));
       }
       if (generation.current !== token) return false;
       if (removedProviderId) await bridge.setModelPickerVisibility(withoutProviderModelPickerVisibility(modelPickerVisibility, removedProviderId));
@@ -180,7 +186,7 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer,
     if (error) { setFormError(error); return; }
     if (!originalName && providers[name]) { setFormError(tr('desktop_settings_db858f13d7')); return; }
     setFormError(null);
-    void persist({ ...providers, [name]: normalizedDraft }, apiKey.trim() ? { [name]: apiKey.trim() } : {});
+    void persist({ ...providers, [name]: normalizedDraft }, apiKey.trim() ? { [name]: apiKey.trim() } : {}, undefined, signedIn && cloudSync && Boolean(apiKey.trim()));
   };
   const handleRemoveProvider = (name: string) => {
     const next = { ...providers }; delete next[name];
@@ -298,10 +304,12 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer,
         {saveError && <div role="alert" style={{ padding: 18, color: t.danger }}>{saveError}
           {Object.keys(pendingCredentials).length > 0 && <button disabled={busy} onClick={() => void persist(null, pendingCredentials)} style={ghostButtonStyle(t)}>{tr('desktop_settings_65f36ab91c')}</button>}
         </div>}
-      {editorOpen && originalName && bridge.providerAccounts && <ProviderAccounts api={bridge.providerAccounts} provider={{ ...providerById('openai')!, id: originalName, label: originalName, credentialManagementUrl: '', authMethod: 'api_key', authMethods: ['api_key'] }} running={bridge.running || busy} onConfigured={() => bridge.refreshModelPicker('manual')} usageRows={bridge.cost?.by_account} />}
+      {editorOpen && originalName && bridge.providerAccounts && <ProviderAccounts api={bridge.providerAccounts} provider={{ ...providerById('openai')!, id: originalName, label: originalName, credentialManagementUrl: '', authMethod: 'api_key', authMethods: ['api_key'] }} running={bridge.running || busy} onConfigured={() => bridge.refreshModelPicker('manual')} usageRows={bridge.cost?.by_account} cloudSyncable />}
+      {syncNotice && <p role="status" style={{ padding: '0 18px', color: t.text3, fontSize: 13 }}>{syncNotice}</p>}
       {editorOpen && <Card title={originalName ? tr('desktop_settings_39e42e9346', originalName) : tr('desktop_settings_7add78b882')}>
         <fieldset disabled={busy} style={{ border: 0, padding: 20, margin: 0, minWidth: 0 }}>
           <ProviderEditorFields key={originalName ?? "new"} name={profileName} onName={setProfileName} nameLocked={originalName !== null} draft={draft} onDraft={setDraft} apiKey={apiKey} onApiKey={setApiKey} credentialConfigured={credentialConfigured(profileName)} />
+          {signedIn && apiKey.trim() && <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 14, fontSize: 13, color: t.text }}><input type="checkbox" checked={cloudSync} onChange={event => { setCloudSync(event.target.checked); writeVaultSyncPreference(event.target.checked); }} style={{ marginTop: 2 }} /><span>{tr('provider_vault_sync')}<br /><small style={{ color: t.text3 }}>{tr('provider_vault_sync_hint')}</small></span></label>}
           {formError && <p role="alert" style={{ color: t.danger }}>{formError}</p>}
           <div style={{ display: 'flex', gap: 8, marginTop: 20, flexWrap: 'wrap' }}>
             <button onClick={handleSaveProvider} style={primaryButtonStyle}>{saving ? tr('desktop_settings_ff509c9ba0') : tr('desktop_settings_e6cf84ee3a')}</button>

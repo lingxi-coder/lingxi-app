@@ -79,3 +79,6 @@
 @media(prefers-contrast:more){.provider-directory-status,.provider-directory-status small{color:var(--pa-text)}}
 
 .pa-account-dialog .pa-field input{min-height:40px}
+.pa-check{display:flex;gap:9px;align-items:flex-start;margin:0 0 14px;font-size:13px;line-height:1.45;color:var(--pa-text);cursor:pointer}.pa-check input{margin:2px 0 0;flex:none;accent-color:var(--pa-accent)}.pa-check span{display:grid;gap:2px}.pa-check small{font-size:12px;color:var(--pa-secondary)}
+.cloud-providers{margin-top:22px}.cloud-providers .pa-account{flex-wrap:wrap}.cloud-providers .pa-account>.pa-caption{flex-basis:100%;margin:0}
+.pa-reauth-oauth{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 12px}

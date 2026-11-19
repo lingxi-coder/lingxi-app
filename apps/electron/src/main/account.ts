@@ -19,6 +19,7 @@ export function accountError(error: unknown): string {
     TOO_MANY_ATTEMPTS_TRY_LATER: '尝试次数过多，请稍后重试。', USER_DISABLED: '此账号已停用。',
     OPERATION_NOT_ALLOWED: '此登录方式尚未启用。', INVALID_IDP_RESPONSE: '登录凭据无效，请重试。',
     FEDERATED_USER_ID_ALREADY_LINKED: '此登录方式已关联其他账号。', NEED_CONFIRMATION: '请先使用原有登录方式登录此邮箱。',
+    ACCOUNT_MISMATCH: '请使用当前登录的灵犀账号验证身份。',
     INVALID_REFRESH_TOKEN: '登录已失效，请重新登录。', INVALID_ID_TOKEN: '登录已失效，请重新登录。', TOKEN_EXPIRED: '登录已失效，请重新登录。', USER_NOT_FOUND: '登录已失效，请重新登录。',
   };
   if (messages[code]) return messages[code];
@@ -39,6 +40,8 @@ export class AccountService {
   private readonly ready: Promise<void>;
   private tokenRequest?: Promise<string>;
   private authenticationEpoch = 0;
+  /** When the credentials were last entered in this process; restored and refreshed sessions do not count. */
+  private authenticatedAt = 0;
 
   constructor(
     private readonly config: { apiKey: string; authDomain: string; projectId: string; appId: string },
@@ -69,6 +72,11 @@ export class AccountService {
   snapshot(): AccountState { return { user: this.session?.user ?? null, busy: this.busy, persistence: this.store.persistent ? 'secure' : 'session', error: this.error, ...(this.sessionExpired ? { sessionExpired: true } : {}) }; }
   /** Main-only authentication identity; normal ID/refresh-token rotation retains it. */
   sessionEpoch(): number { return this.authenticationEpoch; }
+  /**
+   * Main-only: whether the account signed in with its credentials within `maxMs`, the freshness the vault asks of a key
+   * export (five minutes, measured by the server from the token's `auth_time`; this keeps a margin under it).
+   */
+  recentlyAuthenticated(maxMs = 240_000): boolean { return this.session !== null && Date.now() - this.authenticatedAt < maxMs; }
   onChanged(callback: (state: AccountState) => void): () => void {
     this.events.on('change', callback);
     return () => { this.events.off('change', callback); };
@@ -110,23 +118,28 @@ export class AccountService {
       throw error;
     }
   }
-  private async accept(value: AuthResponse): Promise<void> {
+  /** `expectUid` re-authenticates: the response must be the signed-in account, which then keeps its session epoch. */
+  private async accept(value: AuthResponse, expectUid?: string): Promise<void> {
     if (value.needConfirmation) throw new Error('NEED_CONFIRMATION');
     if (!value.localId || !value.refreshToken || !value.idToken) throw new Error('INVALID_IDP_RESPONSE');
+    if (expectUid !== undefined && (this.session?.user.uid !== expectUid || value.localId !== expectUid)) throw new Error('ACCOUNT_MISMATCH');
     const previous = this.session;
-    const previousToken = this.idToken, previousExpiry = this.expiresAt, previousExpired = this.sessionExpired;
+    const previousToken = this.idToken, previousExpiry = this.expiresAt, previousExpired = this.sessionExpired, previousAuthenticatedAt = this.authenticatedAt;
     this.session = { projectId: this.config.projectId, refreshToken: value.refreshToken, user: {
       uid: value.localId, email: value.email ?? null, displayName: value.displayName ?? null, emailVerified: value.emailVerified === true,
     } };
-    this.authenticationEpoch++;
+    if (expectUid === undefined) this.authenticationEpoch++;
     this.tokenRequest = undefined;
     this.sessionExpired = false;
+    this.authenticatedAt = Date.now();
     this.idToken = value.idToken;
     this.expiresAt = Date.now() + Number(value.expiresIn) * 1000;
     this.publish();
     try { await this.save(); } catch (error) {
       this.session = previous; this.idToken = previousToken; this.expiresAt = previousExpiry; this.sessionExpired = previousExpired;
-      this.authenticationEpoch++; this.tokenRequest = undefined; this.publish(); throw error;
+      this.authenticatedAt = previousAuthenticatedAt;
+      if (expectUid === undefined) this.authenticationEpoch++;
+      this.tokenRequest = undefined; this.publish(); throw error;
     }
   }
 
@@ -182,10 +195,13 @@ export class AccountService {
     try {
       switch (command.type) {
         case 'signIn': case 'register':
-          await this.accept(await this.request<AuthResponse>(command.type === 'register' ? 'signUp' : 'signInWithPassword', { email: command.email, password: command.password, returnSecureToken: true }));
+          if (command.type === 'signIn' && command.expectUid !== undefined && this.session?.user.uid !== command.expectUid) throw new Error('ACCOUNT_MISMATCH');
+          await this.accept(await this.request<AuthResponse>(command.type === 'register' ? 'signUp' : 'signInWithPassword', { email: command.email, password: command.password, returnSecureToken: true }),
+            command.type === 'signIn' ? command.expectUid : undefined);
           await this.reload();
           break;
         case 'oauth': {
+          if (command.expectUid !== undefined && this.session?.user.uid !== command.expectUid) throw new Error('ACCOUNT_MISMATCH');
           this.abort = new AbortController();
           const credential = await browserSignIn(this.config, command.provider, this.openExternal, this.abort.signal);
           const postBody = new URLSearchParams({ providerId: credential.providerId });
@@ -197,7 +213,7 @@ export class AccountService {
             ...(credential.pendingToken ? { pendingToken: credential.pendingToken } : { postBody: postBody.toString() }),
           });
           if (this.abort.signal.aborted) throw new Error('登录已取消。');
-          await this.accept(response);
+          await this.accept(response, command.expectUid);
           break;
         }
         case 'signOut':

@@ -54,6 +54,8 @@ export interface ProviderAccountSnapshot {
   modelEntitlements?: ProviderAccountModelEntitlement[];
   modelAvailability?: ProviderAccountModelAvailability[];
   providerPolicies?: Record<string, { allowSubscriptionToMetered: boolean }>;
+  /** Present after an add or reconnect asked for `cloudSync`. */
+  cloudSync?: { ok: boolean; code?: string };
 }
 export interface ProviderAccountCommand {
   action: 'list' | 'add' | 'update' | 'reorder' | 'enable' | 'remove' | 'test' | 'logout' | 'reconnect' | 'set_credential' | 'set_policy';
@@ -67,6 +69,8 @@ export interface ProviderAccountCommand {
   accountIds?: string[];
   enabled?: boolean;
   allowSubscriptionToMetered?: boolean;
+  /** Add or reconnect with a key only: also store the key in the signed-in account's cloud vault (`shared/providerVault.ts`). */
+  cloudSync?: boolean;
 }
 export interface ProviderAccountRouting {
   logicalCallId: string;

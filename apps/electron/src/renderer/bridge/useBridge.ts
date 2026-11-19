@@ -2709,6 +2709,11 @@ export function useBridge(): UseBridge {
     }).catch(error => { if (live) setProviderSettingsError(error instanceof Error ? error.message : 'Provider settings unavailable.'); });
     return () => { live = false; };
   }, [host]);
+  const reloadProviderSettings = useCallback(async () => {
+    if (!host?.providerSettings || providerSettingsSaves.current.size > 0) return;
+    const value = await host.providerSettings();
+    providerSettingsRef.current = value.raw; setProviderSettings(value.effective); setProviderSettingsLocked(value.locked); setProviderSettingsError(undefined);
+  }, [host]);
   const updateProviderSettings = useCallback(
     async (patch: Record<string, unknown>) => {
       if (!host?.providerSettings || !providerSettingsRef.current) throw new Error('Provider settings are unavailable.');
@@ -3043,6 +3048,7 @@ export function useBridge(): UseBridge {
     setNotificationPreferences,
     setModelPickerVisibility,
     updateProviderSettings,
+    reloadProviderSettings,
     updateEngineSettings,
     updatePermissionRules,
     setDefaultPermissionMode,

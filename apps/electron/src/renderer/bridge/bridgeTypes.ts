@@ -279,6 +279,8 @@ export interface UseBridge {
   updateEngineSettings(destination: 'user' | 'project' | 'local', patch: Record<string, unknown>): Promise<void>;
   /** Save provider settings and wait for confirmation from the persisted file layer. */
   updateProviderSettings(patch: Record<string, unknown>): Promise<void>;
+  /** Reads provider settings again after the main process changed them (a provider pulled from the cloud vault). */
+  reloadProviderSettings?(): Promise<void>;
   /**
    * `update_permission_rules` — the ONLY write path for `permissions.{allow,deny,ask}`.
    * `apply_patch` refuses the `permissions` key outright, so there is no

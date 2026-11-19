@@ -223,6 +223,7 @@ export interface LingxiApi {
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
   previewWorkspaceFile(sessionId: string, path: string): Promise<WorkspaceFilePreview>;
   providerAccounts: ProviderAccountsApi;
+  providerVault?: import('../../shared/providerVault.js').ProviderVaultApi;
   providerSettings(patch?: Record<string, unknown>, expected?: Record<string, unknown>): Promise<import('../../shared/providerAccounts.js').HostProviderSettings>;
   pluginSecret(pluginId: string, key: string): Promise<PluginSecretMetadata>;
   setPluginSecret(pluginId: string, key: string, secret: string): Promise<PluginSecretMetadata>;

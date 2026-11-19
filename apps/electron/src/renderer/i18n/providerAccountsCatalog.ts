@@ -552,5 +552,236 @@ export const providerAccountsCatalog: Record<string, Record<string, string>> = {
     "zh-Hant": "上一把金鑰，第 %s 代 · 輸入 %s · 輸出 %s · %s",
     "ja": "以前のキー（世代 %s）· 入力 %s · 出力 %s · %s",
     "ko": "이전 키, %s세대 · 입력 %s · 출력 %s · %s"
+  },
+  "provider_vault_sync": {
+    "en": "Sync to my LingXi account (usable on the web)",
+    "zh-Hans": "同步到我的灵犀账号（网页版可用）",
+    "zh-Hant": "同步到我的靈犀帳號（網頁版可用）",
+    "ja": "LingXi アカウントに同期（Web 版で利用可能）",
+    "ko": "내 LingXi 계정에 동기화(웹에서 사용 가능)"
+  },
+  "provider_vault_sync_hint": {
+    "en": "The key is encrypted in your account's vault. The web calls the model through LingXi and never sees the key.",
+    "zh-Hans": "Key 加密保存在你账号的金库中；网页版通过灵犀代理调用模型，浏览器读不到 Key。",
+    "zh-Hant": "Key 加密保存在你帳號的金庫中；網頁版透過靈犀代理呼叫模型，瀏覽器讀不到 Key。",
+    "ja": "キーはアカウントの保管庫に暗号化して保存されます。Web 版は LingXi 経由でモデルを呼び出し、キーを読み取りません。",
+    "ko": "키는 계정 보관함에 암호화되어 저장됩니다. 웹은 LingXi를 통해 모델을 호출하며 키를 볼 수 없습니다."
+  },
+  "provider_vault_synced": {
+    "en": "Account saved and synced to your LingXi account",
+    "zh-Hans": "账号已保存，并已同步到灵犀账号",
+    "zh-Hant": "帳號已儲存，並已同步到靈犀帳號",
+    "ja": "アカウントを保存し、LingXi アカウントに同期しました",
+    "ko": "계정을 저장하고 LingXi 계정에 동기화했습니다"
+  },
+  "provider_vault_sync_failed": {
+    "en": "Saved on this Mac, but syncing to your LingXi account failed: %@",
+    "zh-Hans": "已保存到本机，但同步到灵犀账号失败：%@",
+    "zh-Hant": "已儲存到本機，但同步到靈犀帳號失敗：%@",
+    "ja": "この Mac には保存しましたが、LingXi アカウントへの同期に失敗しました：%@",
+    "ko": "이 Mac에는 저장했지만 LingXi 계정 동기화에 실패했습니다: %@"
+  },
+  "provider_vault_title": {
+    "en": "From your LingXi account",
+    "zh-Hans": "来自灵犀账号",
+    "zh-Hant": "來自靈犀帳號",
+    "ja": "LingXi アカウントから",
+    "ko": "LingXi 계정에서"
+  },
+  "provider_vault_desc": {
+    "en": "Model services saved on the web or another device. Pull one to use it on this Mac.",
+    "zh-Hans": "在网页版或其他设备上保存的模型服务，拉取到本机后即可使用。",
+    "zh-Hant": "在網頁版或其他裝置上儲存的模型服務，拉取到本機後即可使用。",
+    "ja": "Web 版や他のデバイスで保存したモデルサービスです。この Mac に取り込むと使えます。",
+    "ko": "웹이나 다른 기기에서 저장한 모델 서비스입니다. 이 Mac으로 가져오면 사용할 수 있습니다."
+  },
+  "provider_vault_empty": {
+    "en": "No model services in your account yet.",
+    "zh-Hans": "账号中还没有模型服务。",
+    "zh-Hant": "帳號中還沒有模型服務。",
+    "ja": "アカウントにはまだモデルサービスがありません。",
+    "ko": "계정에 아직 모델 서비스가 없습니다."
+  },
+  "provider_vault_sign_in": {
+    "en": "Sign in to LingXi to share model services with the web.",
+    "zh-Hans": "登录灵犀账号后，可与网页版共用模型服务。",
+    "zh-Hant": "登入靈犀帳號後，可與網頁版共用模型服務。",
+    "ja": "LingXi にサインインすると、Web 版とモデルサービスを共有できます。",
+    "ko": "LingXi에 로그인하면 웹과 모델 서비스를 함께 사용할 수 있습니다."
+  },
+  "provider_vault_pull": {
+    "en": "Pull to this Mac",
+    "zh-Hans": "拉取到本机",
+    "zh-Hant": "拉取到本機",
+    "ja": "この Mac に取り込む",
+    "ko": "이 Mac으로 가져오기"
+  },
+  "provider_vault_pulling": {
+    "en": "Pulling…",
+    "zh-Hans": "正在拉取…",
+    "zh-Hant": "正在拉取…",
+    "ja": "取り込み中…",
+    "ko": "가져오는 중…"
+  },
+  "provider_vault_pulled": {
+    "en": "Pulled to this Mac",
+    "zh-Hans": "已拉取到本机",
+    "zh-Hant": "已拉取到本機",
+    "ja": "この Mac に取り込みました",
+    "ko": "이 Mac으로 가져왔습니다"
+  },
+  "provider_vault_pull_failed": {
+    "en": "%@ could not be pulled: %@",
+    "zh-Hans": "%@ 拉取失败：%@",
+    "zh-Hant": "%@ 拉取失敗：%@",
+    "ja": "%@ を取り込めませんでした：%@",
+    "ko": "%@을(를) 가져오지 못했습니다: %@"
+  },
+  "provider_vault_remove": {
+    "en": "Remove from account",
+    "zh-Hans": "从账号移除",
+    "zh-Hant": "從帳號移除",
+    "ja": "アカウントから削除",
+    "ko": "계정에서 제거"
+  },
+  "provider_vault_remove_confirm": {
+    "en": "Remove %@ from your LingXi account? The web stops using it; this Mac keeps its own copy.",
+    "zh-Hans": "从灵犀账号移除 %@？网页版将无法再使用它，本机已保存的副本不受影响。",
+    "zh-Hant": "從靈犀帳號移除 %@？網頁版將無法再使用它，本機已儲存的副本不受影響。",
+    "ja": "%@ を LingXi アカウントから削除しますか？Web 版では使えなくなりますが、この Mac のコピーは残ります。",
+    "ko": "LingXi 계정에서 %@을(를) 제거할까요? 웹에서는 더 이상 사용할 수 없으며 이 Mac의 사본은 유지됩니다."
+  },
+  "provider_vault_source_web": {
+    "en": "Saved on the web",
+    "zh-Hans": "来自网页版",
+    "zh-Hant": "來自網頁版",
+    "ja": "Web 版で保存",
+    "ko": "웹에서 저장"
+  },
+  "provider_vault_source_desktop": {
+    "en": "Saved on Desktop",
+    "zh-Hans": "来自桌面端",
+    "zh-Hant": "來自桌面端",
+    "ja": "デスクトップで保存",
+    "ko": "데스크톱에서 저장"
+  },
+  "provider_vault_source_android": {
+    "en": "Saved on Android",
+    "zh-Hans": "来自 Android",
+    "zh-Hant": "來自 Android",
+    "ja": "Android で保存",
+    "ko": "Android에서 저장"
+  },
+  "provider_vault_source_ios": {
+    "en": "Saved on iOS",
+    "zh-Hans": "来自 iOS",
+    "zh-Hant": "來自 iOS",
+    "ja": "iOS で保存",
+    "ko": "iOS에서 저장"
+  },
+  "provider_vault_source_unknown": {
+    "en": "Saved in your account",
+    "zh-Hans": "保存在账号中",
+    "zh-Hant": "儲存在帳號中",
+    "ja": "アカウントに保存",
+    "ko": "계정에 저장"
+  },
+  "provider_vault_desktop_only": {
+    "en": "Desktop only",
+    "zh-Hans": "仅桌面端可用",
+    "zh-Hant": "僅桌面端可用",
+    "ja": "デスクトップのみ",
+    "ko": "데스크톱 전용"
+  },
+  "provider_vault_reauth_title": {
+    "en": "Confirm it's you",
+    "zh-Hans": "验证身份",
+    "zh-Hant": "驗證身分",
+    "ja": "本人確認",
+    "ko": "본인 확인"
+  },
+  "provider_vault_reauth_desc": {
+    "en": "Pulling a key to this Mac needs a fresh sign-in as %@.",
+    "zh-Hans": "拉取 Key 到本机前，请重新登录 %@ 确认是你本人。",
+    "zh-Hant": "拉取 Key 到本機前，請重新登入 %@ 確認是你本人。",
+    "ja": "キーをこの Mac に取り込む前に、%@ として再度サインインしてください。",
+    "ko": "키를 이 Mac으로 가져오기 전에 %@(으)로 다시 로그인해 주세요."
+  },
+  "provider_vault_reauth_password": {
+    "en": "Password",
+    "zh-Hans": "密码",
+    "zh-Hant": "密碼",
+    "ja": "パスワード",
+    "ko": "비밀번호"
+  },
+  "provider_vault_reauth_submit": {
+    "en": "Confirm and pull",
+    "zh-Hans": "确认并拉取",
+    "zh-Hant": "確認並拉取",
+    "ja": "確認して取り込む",
+    "ko": "확인 후 가져오기"
+  },
+  "provider_vault_reauth_google": {
+    "en": "Confirm with Google",
+    "zh-Hans": "使用 Google 验证",
+    "zh-Hant": "使用 Google 驗證",
+    "ja": "Google で確認",
+    "ko": "Google로 확인"
+  },
+  "provider_vault_reauth_apple": {
+    "en": "Confirm with Apple",
+    "zh-Hans": "使用 Apple 验证",
+    "zh-Hant": "使用 Apple 驗證",
+    "ja": "Apple で確認",
+    "ko": "Apple로 확인"
+  },
+  "provider_vault_error": {
+    "en": "Couldn't reach your LingXi account: %@",
+    "zh-Hans": "无法访问灵犀账号：%@",
+    "zh-Hant": "無法存取靈犀帳號：%@",
+    "ja": "LingXi アカウントにアクセスできません：%@",
+    "ko": "LingXi 계정에 접근할 수 없습니다: %@"
+  },
+  "provider_vault_code_network": {
+    "en": "check your network and try again",
+    "zh-Hans": "请检查网络后重试",
+    "zh-Hant": "請檢查網路後重試",
+    "ja": "ネットワークを確認して再試行してください",
+    "ko": "네트워크를 확인하고 다시 시도하세요"
+  },
+  "provider_vault_code_unsupported": {
+    "en": "this provider can't be stored in your account",
+    "zh-Hans": "此服务无法保存到账号",
+    "zh-Hant": "此服務無法儲存到帳號",
+    "ja": "このサービスはアカウントに保存できません",
+    "ko": "이 서비스는 계정에 저장할 수 없습니다"
+  },
+  "provider_vault_code_limit": {
+    "en": "your account already has 20 model services",
+    "zh-Hans": "账号中的模型服务已达 20 个上限",
+    "zh-Hant": "帳號中的模型服務已達 20 個上限",
+    "ja": "アカウントのモデルサービスが上限の 20 件に達しています",
+    "ko": "계정의 모델 서비스가 최대 20개에 도달했습니다"
+  },
+  "provider_vault_code_rate": {
+    "en": "too many requests today; try again later",
+    "zh-Hans": "今日请求次数过多，请稍后重试",
+    "zh-Hant": "今日請求次數過多，請稍後重試",
+    "ja": "本日のリクエストが多すぎます。しばらくしてから再試行してください",
+    "ko": "오늘 요청이 너무 많습니다. 나중에 다시 시도하세요"
+  },
+  "provider_vault_code_conflict": {
+    "en": "a built-in provider already uses this name",
+    "zh-Hans": "已有同名的内置服务",
+    "zh-Hant": "已有同名的內建服務",
+    "ja": "同じ名前の組み込みサービスがあります",
+    "ko": "같은 이름의 기본 제공 서비스가 있습니다"
+  },
+  "provider_vault_code_session": {
+    "en": "sign in again",
+    "zh-Hans": "请重新登录",
+    "zh-Hant": "請重新登入",
+    "ja": "再度サインインしてください",
+    "ko": "다시 로그인하세요"
   }
 };

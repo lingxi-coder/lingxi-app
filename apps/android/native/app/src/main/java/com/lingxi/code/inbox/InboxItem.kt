@@ -74,7 +74,8 @@ internal data class InboxItem(
     val needsBadge get() = !archived && (attention || unread)
 
     fun matches(query: InboxQuery): Boolean {
-        if (query.category != null && query.category != category) return false
+        if (query.category == "messages" && category == "assistant") return false
+        if (query.category != null && query.category != "messages" && query.category != category) return false
         val matchesFilter = when (query.filter) {
             InboxFilter.All -> !archived
             InboxFilter.Archived -> archived

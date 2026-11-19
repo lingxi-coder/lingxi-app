@@ -5,12 +5,15 @@ export interface QueuedIntent {
   command: InboxMutation;
   lease?: { owner: string; until: number };
 }
+type InboxCache = { page: InboxPage; verifiedAt: number };
+
 export interface InboxRecord {
   version: 1;
   exposure?: { revision: number; ranges: Array<[number, number]> };
   queue: QueuedIntent[];
   batch?: { jobId: string; startedAt: number };
-  cache?: { page: InboxPage; verifiedAt: number };
+  cache?: InboxCache;
+  scopedCache?: Partial<Record<'messages' | 'assistant', InboxCache>>;
 }
 export interface InboxStorage {
   update<T>(uid: string, reduce: (state: InboxRecord) => T): Promise<T>;

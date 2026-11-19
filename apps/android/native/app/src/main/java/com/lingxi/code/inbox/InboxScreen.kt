@@ -19,7 +19,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.Badge
 import androidx.compose.material3.DropdownMenu
@@ -61,7 +60,7 @@ import java.time.format.FormatStyle
 internal fun InboxScreen(
     controller: InboxController,
     onOpen: (InboxItem) -> Unit,
-    onNew: () -> Unit,
+    onOpenProjects: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val state by controller.state.collectAsStateWithLifecycle()
@@ -69,7 +68,7 @@ internal fun InboxScreen(
     var category by rememberSaveable(state.uid) { mutableStateOf<String?>(null) }
     var search by rememberSaveable(state.uid) { mutableStateOf("") }
     var menu by remember { mutableStateOf(false) }
-    val query = InboxQuery(filter, category, search)
+    val query = InboxQuery(filter, category ?: "messages", search)
     val listState = rememberLazyListState()
     LaunchedEffect(controller, filter, category, query.searchPrefix) {
         if (query.searchPrefix.isNotEmpty()) kotlinx.coroutines.delay(250)
@@ -85,7 +84,7 @@ internal fun InboxScreen(
         Column(Modifier.windowInsetsPadding(WindowInsets.statusBars)) {
             Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(stringResource(R.string.inbox_title), Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
-                IconButton(onClick = onNew) { Icon(Icons.Default.Add, stringResource(R.string.inbox_new_assistant)) }
+                TextButton(onClick = onOpenProjects) { Text(stringResource(R.string.drawer_entry_projects)) }
                 Box {
                     IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, stringResource(R.string.inbox_options)) }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -132,7 +131,7 @@ internal fun InboxScreen(
                 }
             }
             Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                for (candidate in listOf("assistant", "friend", "team")) {
+                for (candidate in listOf("friend", "team", "service")) {
                     FilterChip(selected = category == candidate, onClick = { category = if (category == candidate) null else candidate },
                         label = { Text(stringResource(inboxCategoryRes(candidate))) })
                 }
@@ -162,7 +161,7 @@ internal fun InboxScreen(
                     }
                 }
             }
-            val pinned = remember(state.rows) { state.rows.filter { !it.archived && it.pinOrder != null }.sortedWith(InboxItem.ordering) }
+            val pinned = remember(state.rows) { state.rows.filter { it.category != "assistant" && !it.archived && it.pinOrder != null }.sortedWith(InboxItem.ordering) }
             val pinPositions = remember(pinned) { pinned.mapIndexed { index, row -> row.key to index }.toMap() }
             LazyColumn(state = listState, modifier = Modifier.fillMaxSize().testTag("inbox.rows")) {
                 items(rows, key = { it.key }, contentType = { "conversation" }) { row ->

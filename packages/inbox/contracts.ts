@@ -2,6 +2,12 @@ export const INBOX_PAGE_SIZE = 50;
 export const INBOX_SCHEMA_VERSION = 1;
 export type InboxKind = 'assistant' | 'team' | 'service';
 export type InboxCategory = InboxKind | 'friend';
+export type InboxQueryCategory = InboxCategory | 'messages';
+
+export function matchesInboxCategory(category: InboxCategory, query?: InboxQueryCategory): boolean {
+  if (query === 'messages') return category !== 'assistant';
+  return !query || category === query;
+}
 export type NotificationMode = 'all' | 'mentions' | 'none';
 export interface InboxRef {
   kind: InboxKind;
@@ -110,7 +116,7 @@ export type InboxCommand =
       action: 'markAllReadSnapshot';
       operationId: string;
       requestedAt: number;
-      category?: InboxCategory;
+      category?: InboxQueryCategory;
       filter?: InboxFilter;
       archived?: boolean;
       searchPrefix?: string;
@@ -121,7 +127,7 @@ export type InboxCommand =
       searchPrefix?: string;
       after?: InboxCursor;
       filter?: InboxFilter;
-      category?: InboxCategory;
+      category?: InboxQueryCategory;
       archived?: boolean;
     }
   | {

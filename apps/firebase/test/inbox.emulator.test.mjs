@@ -766,6 +766,26 @@ test('revocation cleanup paginates independently of source access checks', optio
   while (queued.length) await runner.run(queued.shift());
   assert.equal((await db.collection('users/me/inbox').get()).size, 0);
 });
+test('Messages search and read batches leave Agent conversations in Projects', options, async () => {
+  await seed(1);
+  const src = { sourceId: 'project-device', sourceSecret: 'p'.repeat(40) };
+  const { generation } = await store.execute('me', { action: 'assistantSource', ...src, enabled: true });
+  await store.execute('me', {
+    action: 'assistantPublish', ...src, generation, conversationId: 'project-chat', title: 'Chat project',
+    baseline: 0, sourceRevision: 1, sourceCursor: 1, lastActivityAt: now,
+    previewKind: 'reply', pendingActionCount: 0, state: 'completed'
+  });
+  const messages = await store.execute('me', { action: 'list', category: 'messages', searchPrefix: 'chat' });
+  assert.deepEqual(messages.items.map(row => row.key), [key]);
+  const projects = await store.execute('me', { action: 'list', category: 'assistant' });
+  assert.deepEqual(projects.items.map(row => row.key), ['assistant:project-device:project-chat']);
+  const start = { action: 'markAllReadSnapshot', category: 'messages', operationId: 'message-batch', requestedAt: now };
+  await store.execute('me', start);
+  await new InboxJobs(store, null, async () => {}).run({ type: 'readBatch', uid: 'me', id: start.operationId });
+  const remaining = await store.execute('me', { action: 'list', filter: 'unread' });
+  assert.deepEqual(remaining.items.map(row => row.key), ['assistant:project-device:project-chat']);
+});
+
 test(
   'global batch freezes every unread row at one server snapshot and preserves new/unseen marks',
   options,

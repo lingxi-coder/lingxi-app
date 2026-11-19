@@ -16,7 +16,7 @@ export function useDesktopInbox() {
   const [opened, setOpened] = useState<{ uid: string | null; controller: InboxController }>();
   useEffect(() => {
     if (!api) return;
-    const controller = new InboxController({ uid: uid ?? 'local', request: command => api.request(uid, command),
+    const controller = new InboxController({ uid: uid ?? 'local', scope: 'messages', request: command => api.request(uid, command),
       watch: (dirty, badge, error) => api.watch(uid, dirty, badge, error) });
     setOpened({ uid, controller });
     const releaseReads = registerDesktopInboxReads(uid, controller);

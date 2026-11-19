@@ -1,5 +1,5 @@
 <resources>
-    <string name="inbox_title">Chats</string>
+    <string name="inbox_title">Messages</string>
     <string name="inbox_badge">%1$d conversations need attention</string>
     <string name="inbox_assistant">Assistant</string>
     <string name="inbox_service">Services</string>
@@ -35,7 +35,7 @@
     <string name="inbox_completed">Completed</string>
     <string name="inbox_muted">Muted</string>
     <string name="inbox_source_unavailable">Open this conversation on its source device, or pair that device in Bots.</string>
-    <string name="inbox_back">Back to inbox</string>
+    <string name="inbox_back">Back to messages</string>
     <string name="inbox_jump_latest">Jump to latest and mark read</string>
     <string name="inbox_read_receipt">Read</string>
     <string name="inbox_notification_title">LingXi Chats</string>

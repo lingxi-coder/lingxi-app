@@ -348,7 +348,7 @@ internal fun RootScreen(
     onProjectSwitchHandled: () -> Unit = {},
     inbox: com.lingxi.code.inbox.InboxController? = null,
     inboxOpen: Boolean = false,
-    inboxNewRequest: Int = 0,
+    inboxProjectsRequest: Int = 0,
     onOpenInbox: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
@@ -2728,12 +2728,11 @@ internal fun RootScreen(
         }
     }
 
-    var handledInboxNew by rememberSaveable { mutableIntStateOf(0) }
-    LaunchedEffect(inboxNewRequest) {
-        if (inboxNewRequest != handledInboxNew) {
-            handledInboxNew = inboxNewRequest
-            val (targetScope, targetMode) = com.lingxi.code.model.defaultNewChatTarget(activeSessionMode)
-            startNewSessionIn(targetScope, targetMode)
+    var handledInboxProjects by rememberSaveable { mutableIntStateOf(0) }
+    LaunchedEffect(inboxProjectsRequest) {
+        if (inboxProjectsRequest != handledInboxProjects) {
+            handledInboxProjects = inboxProjectsRequest
+            drawerState.open()
         }
     }
 

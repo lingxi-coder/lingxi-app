@@ -19,6 +19,7 @@ export const appRoutes = [
   '/remote',
   '/login/remote',
   '/inbox',
+  '/projects',
   '/teams',
   '/teams/join',
   '/friends',
@@ -109,7 +110,7 @@ export function parseServiceRoute(path: string): string | null {
 export type SecurityZone = 'remote' | 'sign-in' | 'site' | 'teams';
 
 export function securityZone(route: string): SecurityZone {
-  if (route === '/inbox' || route.startsWith('/inbox/') || route === '/teams' || route.startsWith('/teams/') || route === '/friends' || route.startsWith('/friends/') || route === '/services' || route.startsWith('/services/')) return 'teams';
+  if (route === '/projects' || route === '/inbox' || route.startsWith('/inbox/') || route === '/teams' || route.startsWith('/teams/') || route === '/friends' || route.startsWith('/friends/') || route === '/services' || route.startsWith('/services/')) return 'teams';
   if (isRemoteRoute(route)) return 'remote';
   return route === '/login/remote' ? 'sign-in' : 'site';
 }

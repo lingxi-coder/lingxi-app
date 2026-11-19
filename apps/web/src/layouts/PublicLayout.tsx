@@ -61,7 +61,8 @@ export function PublicLayout({
   if (activeRoute === '/') {
     const t = (en: string, zh: string) => pickLocaleText(locale, { en, zh });
     const navigation = <>
-      <RouteLink href="/inbox">{t('Inbox', '收件箱')}</RouteLink>
+      <RouteLink href="/projects">{t('Projects', '项目')}</RouteLink>
+      <RouteLink href="/inbox">{t('Messages', '消息')}</RouteLink>
       <a href="#landing-scenarios">{t('Use cases', '使用场景')}</a>
       <RouteLink href="/download">{t('Download', '下载')}</RouteLink>
       <RouteLink href="/docs">{t('Docs', '文档')}</RouteLink>

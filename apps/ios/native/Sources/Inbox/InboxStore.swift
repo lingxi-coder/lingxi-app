@@ -420,7 +420,7 @@ final class InboxStore {
     }
 
     private func matches(_ row: InboxRow) -> Bool {
-        filter.accepts(row, archivedOnly: showArchived) && (category == nil || row.category == category)
+        filter.accepts(row, archivedOnly: showArchived) && (category.map { row.category == $0 } ?? (row.category != .assistant))
     }
 
     private func rebuild() {
@@ -682,13 +682,8 @@ final class InboxStore {
     func markAllRead() {
         guard canMarkAllRead, let uid else { return }
         let batch = InboxReadBatch(requestedAt: InboxPush.now)
-        let localRows = local.values.map { localRow in
-            var row = localRow
-            row.ref = localAssistantRef(row.ref)
-            return self.row(row.ref) ?? applyingPending(row)
-        }
         var candidate = state
-        candidate.beginReadBatch(batch, localRows: localRows)
+        candidate.beginReadBatch(batch, localRows: [])
         guard commit(candidate) else { return }
         markingAllRead = true
         rebuild()

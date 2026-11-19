@@ -1,7 +1,9 @@
 import {
   freezeRead,
+  matchesInboxCategory,
   orderItems,
   type InboxCategory,
+  type InboxQueryCategory,
   type InboxCursor,
   type InboxNotice,
   type InboxFilter,
@@ -33,6 +35,7 @@ interface Options {
   uid: string;
   request: InboxRequest;
   storage?: InboxStorage;
+  scope?: 'messages' | 'assistant';
   watch?: (dirty: () => void, badge: (n: number) => void, error: (e: Error) => void) => () => void;
 }
 const LEASE_MS = 5 * 60_000;
@@ -80,6 +83,9 @@ export class InboxController {
     this.storage = options.storage ?? browserInboxStorage;
   }
   getSnapshot = () => this.state;
+  get scope() {
+    return this.options.scope;
+  }
   subscribe = (fn: () => void) => {
     this.listeners.add(fn);
     return () => {
@@ -115,7 +121,7 @@ export class InboxController {
     // Render the last authorized first page before the network request. Source access expires when offline.
     try {
       const saved = await this.storage.update(this.options.uid, (record) => ({
-        cache: record.cache,
+        cache: this.scope ? record.scopedCache?.[this.scope] : record.cache,
         batch: record.batch,
         pending: record.queue.length,
       }));
@@ -127,7 +133,7 @@ export class InboxController {
       if (saved.cache && saved.cache.verifiedAt + LEASE_MS > Date.now()) {
         this.next = saved.cache.page.next;
         this.set({
-          items: saved.cache.page.items,
+          items: saved.cache.page.items.filter(item => matchesInboxCategory(item.category, this.scope)),
           hasMore: !!this.next,
           offline: true,
           pending: saved.pending,
@@ -151,6 +157,7 @@ export class InboxController {
           void this.storage
             .update(this.options.uid, (record) => {
               delete record.cache;
+              delete record.scopedCache;
             })
             .catch(() => {});
         }
@@ -170,6 +177,7 @@ export class InboxController {
     archived = false,
     searchPrefix = this.state.searchPrefix,
   ) {
+    if (this.scope === 'assistant' || (this.scope === 'messages' && category === 'assistant')) category = undefined;
     searchPrefix = searchPrefix?.trim().normalize('NFKC').toLowerCase() || undefined;
     if (
       filter === this.state.filter &&
@@ -182,6 +190,10 @@ export class InboxController {
     this.pages = 1;
     this.set({ filter, category, archived, searchPrefix, items: [], hasMore: false });
     await this.refresh();
+  }
+  private queryCategory(category?: InboxCategory): { category?: InboxQueryCategory } {
+    const selected = category ?? this.scope;
+    return selected ? { category: selected } : {};
   }
   draftPreview(item: InboxItem): string {
     if (item.ref.kind !== 'team') return '';
@@ -239,7 +251,7 @@ export class InboxController {
           ...(searchPrefix ? { searchPrefix } : {}),
           filter,
           ...(archived ? { archived } : {}),
-          ...(category ? { category } : {}),
+          ...this.queryCategory(category),
           ...(cursor ? { after: cursor } : {}),
         });
         if (version !== this.revision || this.closed) return;
@@ -252,7 +264,9 @@ export class InboxController {
           }
           for (const item of page.items) this.partialLocal.add(item.key);
         }
-        for (const item of page.items) rows.set(item.key, item);
+        for (const item of page.items) {
+          if (matchesInboxCategory(item.category, this.scope)) rows.set(item.key, item);
+        }
         cursor = page.next ?? null;
         if (!cursor) break;
       }
@@ -284,7 +298,9 @@ export class InboxController {
       if (first && !append && filter === 'all' && !category && !archived && !searchPrefix) {
         const page = first;
         await this.storage.update(this.options.uid, (record) => {
-          record.cache = { page, verifiedAt: Date.now() };
+          const entry = { page, verifiedAt: Date.now() };
+          if (this.scope) (record.scopedCache ??= {})[this.scope] = entry;
+          else record.cache = entry;
         });
       }
     } catch (error) {
@@ -302,6 +318,7 @@ export class InboxController {
         await this.storage
           .update(this.options.uid, (record) => {
             delete record.cache;
+            delete record.scopedCache;
           })
           .catch(() => {});
     }
@@ -413,7 +430,7 @@ export class InboxController {
         requestedAt: pending.startedAt,
         filter,
         ...(archived ? { archived } : {}),
-        ...(category ? { category } : {}),
+        ...this.queryCategory(category),
         ...(searchPrefix ? { searchPrefix } : {}),
       });
       await this.followBatch(pending, job);

@@ -148,7 +148,7 @@ struct InboxListRequest {
 
     var requestValues: [String: Any] {
         var values: [String: Any] = ["action": "list", "filter": filter.rawValue, "archived": archived]
-        if let category { values["category"] = category.rawValue }
+        values["category"] = category?.rawValue ?? "messages"
         if let searchPrefix { values["searchPrefix"] = searchPrefix }
         if let after { values["after"] = after.requestValues }
         return values
@@ -438,7 +438,7 @@ struct InboxReadBatch: Codable, Equatable, Sendable {
     var id = UUID().uuidString
     let requestedAt: Int64
 
-    var createRequest: [String: Any] { ["action": "markAllReadSnapshot", "operationId": id, "requestedAt": requestedAt] }
+    var createRequest: [String: Any] { ["action": "markAllReadSnapshot", "operationId": id, "requestedAt": requestedAt, "category": "messages"] }
     var statusRequest: [String: String] { ["action": "readBatchStatus", "jobId": id] }
 }
 

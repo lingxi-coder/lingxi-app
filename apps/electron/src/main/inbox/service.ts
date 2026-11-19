@@ -3,6 +3,7 @@ import { watchInbox } from '../../../../../packages/inbox/firestore.js';
 import {
   INBOX_PAGE_SIZE,
   isUnread,
+  matchesInboxCategory,
   needsAttention,
   type InboxCommand,
   type InboxItem,
@@ -661,7 +662,7 @@ export class InboxService {
       if (
         (c.searchPrefix !== undefined && (typeof c.searchPrefix !== 'string' || c.searchPrefix.length > 120)) ||
         (c.filter !== undefined && !['all', 'unread', 'attention'].includes(c.filter)) ||
-        (c.category !== undefined && !['assistant', 'team', 'friend', 'service'].includes(c.category)) ||
+        (c.category !== undefined && !['assistant', 'team', 'friend', 'service', 'messages'].includes(c.category)) ||
         (c.archived !== undefined && typeof c.archived !== 'boolean')
       )
         throw new Error('INVALID_INPUT');
@@ -678,7 +679,7 @@ export class InboxService {
           (row) =>
             isUnread(row) &&
             (c.archived === undefined || matchesArchiveView(row.archived, c)) &&
-            (!c.category || c.category === row.category) &&
+            matchesInboxCategory(row.category, c.category) &&
             (!prefix || titleOf(row).startsWith(prefix)) &&
             (c.filter !== 'attention' || needsAttention(row)),
         ),
@@ -860,7 +861,7 @@ export class InboxService {
       if (
         !matchesArchiveView(row.archived, c) ||
         (prefix && !titleOf(row).startsWith(prefix)) ||
-        (c.category && c.category !== row.category) ||
+        !matchesInboxCategory(row.category, c.category) ||
         (c.filter === 'unread' && !isUnread(row)) ||
         (c.filter === 'attention' && !needsAttention(row))
       )

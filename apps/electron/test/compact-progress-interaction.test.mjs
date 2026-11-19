@@ -76,6 +76,7 @@ test('real Electron compaction keeps one minimal row through engine phases and c
       assert.equal(progress.valueNow, null);
       assert.match(progress.elapsed, /^\d+s$/);
       assert.equal(progress.animation, 'text-sweep');
+      assert.equal(progress.animationIterations, 'infinite');
       assert.equal(progress.title, 'Compacting context');
       assert.equal(progress.id, result.preparing.id);
       assert.equal(progress.item.status, 'running');

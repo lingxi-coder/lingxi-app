@@ -1,5 +1,6 @@
 package com.lingxi.code.conversation
 
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -69,9 +70,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -1036,7 +1043,15 @@ private fun CompactionProgressRow(progress: CompactionProgressUi) {
             )
         }
         Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.weight(1f)) {
-            Text(title, color = if (completed) t.text else color, style = MaterialTheme.typography.bodySmall, fontWeight = if (completed) FontWeight.SemiBold else FontWeight.Medium)
+            Text(
+                title,
+                modifier = if (progress.status == CompactionProgressStatus.Running) {
+                    Modifier.compactionTextSweep(t.text)
+                } else Modifier,
+                color = if (completed) t.text else color,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = if (completed) FontWeight.SemiBold else FontWeight.Medium,
+            )
             if (detail.isNotEmpty()) {
                 Text(detail, color = t.text3, style = MaterialTheme.typography.labelSmall, maxLines = if (completed) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis)
             }
@@ -1056,6 +1071,37 @@ private fun CompactionProgressRow(progress: CompactionProgressUi) {
             }
         }
     }
+}
+
+@Composable
+private fun Modifier.compactionTextSweep(highlight: Color): Modifier {
+    val transition = rememberInfiniteTransition(label = "Compaction text sweep")
+    val sweep = transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(2_200, easing = LinearEasing)),
+        label = "Sweep position",
+    )
+    return this
+        .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+        .drawWithCache {
+            val bandWidth = (size.width * 0.2f).coerceAtLeast(1f)
+            val transparent = highlight.copy(alpha = 0f)
+            val brush = Brush.horizontalGradient(
+                colors = listOf(transparent, highlight, transparent),
+                startX = 0f,
+                endX = bandWidth,
+            )
+            val bandSize = Size(bandWidth, size.height)
+            onDrawWithContent {
+                drawContent()
+                // Keep the gradient off the text at both ends of the cycle.
+                val left = (size.width + bandWidth) * sweep.value - bandWidth
+                translate(left = left) {
+                    drawRect(brush, size = bandSize, blendMode = BlendMode.SrcAtop)
+                }
+            }
+        }
 }
 
 /** An actionable configuration state, kept separate from runtime failures. */

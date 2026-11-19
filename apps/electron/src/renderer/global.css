@@ -814,9 +814,6 @@ body {
   line-height: 22px;
   overflow-wrap: anywhere;
 }
-.compact-status-title.running-sweep {
-  animation-iteration-count: 2;
-}
 .compact-status-elapsed {
   font-size: .75rem;
   font-variant-numeric: tabular-nums;

@@ -131,6 +131,8 @@ pub struct BottomPaneStatus {
     /// interrupt/cancel hint and cost are suppressed in this mode. `None` for a
     /// normal turn.
     pub compact_percent: Option<u16>,
+    /// The sweep clock, present for every active compaction phase.
+    pub compact_sweep_ms: Option<u128>,
 }
 
 /// What the owner must do after the pane routed one key or paste. Local
@@ -2255,10 +2257,15 @@ impl BottomPane {
         // cost (compaction runs off the turn loop and isn't Esc-cancellable
         // here). The pill progress bar renders on the row below via
         // [`Self::compact_bar_line`].
-        if self.status.compact_percent.is_some() {
+        if let Some(sweep_ms) = self.status.compact_sweep_ms {
+            let (before, band, after) =
+                crate::spinner_status::compaction_sweep_parts(&self.status.text, sweep_ms);
+            let highlighted = crate::style_adapter::to_ratatui(self.theme.text);
             return Line::from(vec![
                 Span::raw("  "),
-                Span::styled(self.status.text.clone(), Style::default().fg(claude)),
+                Span::styled(before.to_owned(), Style::default().fg(claude)),
+                Span::styled(band.to_owned(), Style::default().fg(highlighted)),
+                Span::styled(after.to_owned(), Style::default().fg(claude)),
             ]);
         }
         // The spinner text carries the verb + live token counter; the interrupt
@@ -3691,6 +3698,7 @@ mod tests {
             text: "Simmering… (esc to interrupt)".to_string(),
             cost: None,
             compact_percent: None,
+            compact_sweep_ms: None,
             retry_message: None,
         });
         let area = Rect::new(0, 0, 80, pane.desired_height(80));
@@ -4558,6 +4566,7 @@ mod tests {
             text: "Working…".to_string(),
             cost: None,
             compact_percent: None,
+            compact_sweep_ms: None,
             retry_message: None,
         });
         assert!(matches!(
@@ -4585,6 +4594,7 @@ mod tests {
             text: "✻ Working… (1s · esc to interrupt)".to_string(),
             cost: None,
             compact_percent: None,
+            compact_sweep_ms: None,
             retry_message: None,
         });
         // Running + no local surface: Esc surfaces the interrupt intent (the
@@ -4757,6 +4767,7 @@ mod tests {
             text: "✻ Working… (3s · esc to interrupt)".to_string(),
             cost: None,
             compact_percent: None,
+            compact_sweep_ms: None,
             retry_message: None,
         });
         let area = Rect::new(0, 0, 80, pane.desired_height(80));
@@ -4808,6 +4819,7 @@ mod tests {
             text: String::new(),
             cost: Some("$0.0123".to_string()),
             compact_percent: None,
+            compact_sweep_ms: None,
             retry_message: None,
         });
         let area = Rect::new(0, 0, 90, pane.desired_height(90));
@@ -4825,6 +4837,7 @@ mod tests {
             text: "✻ Working… (3s · esc to interrupt)".to_string(),
             cost: Some("$0.0123".to_string()),
             compact_percent: None,
+            compact_sweep_ms: None,
             retry_message: None,
         });
         let area = Rect::new(0, 0, 90, pane.desired_height(90));
@@ -4847,6 +4860,7 @@ mod tests {
             text: "· Compacting conversation\u{2026}".to_string(),
             cost: Some("$0.0123".to_string()),
             compact_percent: Some(4),
+            compact_sweep_ms: Some(450),
             retry_message: None,
         });
         let area = Rect::new(0, 0, 90, pane.desired_height(90));
@@ -4855,6 +4869,12 @@ mod tests {
         // Row 0: the message, indented, WITHOUT the interrupt/cancel hint or
         // the cost suffix (both suppressed during compaction).
         let row0 = buffer_row(&buf, 0);
+        let line = pane.status_indicator_line();
+        assert!(!line.spans[2].content.is_empty());
+        assert_eq!(
+            line.spans[2].style.fg,
+            Some(crate::style_adapter::to_ratatui(pane.theme.text))
+        );
         assert!(
             row0.contains("Compacting conversation")
                 && !row0.contains("esc to interrupt")
@@ -4884,6 +4904,7 @@ mod tests {
             cost: None,
             // cols=15 → compact_bar_width None → message-only (1 row).
             compact_percent: Some(10),
+            compact_sweep_ms: Some(0),
             retry_message: None,
         });
         let area = Rect::new(0, 0, 15, pane.desired_height(15));

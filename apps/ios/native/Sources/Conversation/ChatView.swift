@@ -1305,6 +1305,7 @@ private struct CompactionRuntimeFooter: View {
                 icon: .book,
                 color: t.accent,
                 progress: nil,
+                running: true,
                 preparing: true
             )
         case let .running(phase, startedAt, phaseStartedAt, unknownPhase):
@@ -1319,6 +1320,7 @@ private struct CompactionRuntimeFooter: View {
                     icon: .book,
                     color: t.accent,
                     progress: percent,
+                    running: true,
                     preparing: unknownPhase
                 )
             }
@@ -1369,6 +1371,7 @@ private struct CompactionRuntimeFooter: View {
         icon: LXIconName,
         color: Color,
         progress: Int?,
+        running: Bool = false,
         preparing: Bool = false,
         completed: Bool = false
     ) -> some View {
@@ -1386,6 +1389,7 @@ private struct CompactionRuntimeFooter: View {
                     .font(.subheadline.weight(completed ? .semibold : .medium))
                     .foregroundStyle(completed ? t.text : color)
                     .fixedSize(horizontal: false, vertical: true)
+                    .runtimeTextSweep(isActive: running, highlightColor: t.text)
                 if let detail, !detail.isEmpty {
                     Text(detail)
                         .font(.caption)

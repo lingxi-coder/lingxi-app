@@ -28,15 +28,18 @@ async function main() {
     const snapshot = () => webContents.executeJavaScript(`(() => {
       const row = document.querySelector('.compact-status');
       const progress = row?.querySelector('[role="progressbar"]');
+      const title = row?.querySelector('.compact-status-title');
+      const animation = title ? getComputedStyle(title) : null;
       const state = window.compactFixture.state();
       return {
         rowCount: document.querySelectorAll('.compact-status').length,
         text: row?.textContent ?? '',
-        title: row?.querySelector('.compact-status-title')?.textContent ?? '',
+        title: title?.textContent ?? '',
         progressCount: document.querySelectorAll('[role="progressbar"]').length,
         valueNow: progress?.getAttribute('aria-valuenow') ?? null,
         elapsed: row?.querySelector('.compact-status-elapsed')?.textContent ?? null,
-        animation: row ? getComputedStyle(row.querySelector('.compact-status-title')).animationName : null,
+        animation: animation?.animationName ?? null,
+        animationIterations: animation?.animationIterationCount ?? null,
         id: state.items.find((item) => item.type === 'compaction')?.id,
         item: state.items.find((item) => item.type === 'compaction'),
         summaries: state.summaries,

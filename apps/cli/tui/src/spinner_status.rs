@@ -115,6 +115,22 @@ pub(crate) fn status_paren(elapsed_ms: u128, response_chars: u64, receiving: boo
 pub(crate) const COMPACT_BAR_FILL: char = '\u{25B0}';
 pub(crate) const COMPACT_BAR_EMPTY: char = '\u{25B1}';
 
+/// Slice the terminal status into the text before, under, and after the sweep.
+pub(crate) fn compaction_sweep_parts(text: &str, elapsed_ms: u128) -> (&str, &str, &str) {
+    const PERIOD_MS: u128 = 2_200;
+    const BAND: usize = 4;
+    let columns = text.chars().count();
+    let end = (elapsed_ms % PERIOD_MS) as usize * (columns + BAND) / PERIOD_MS as usize;
+    let byte_at = |column| {
+        text.char_indices()
+            .nth(column)
+            .map_or(text.len(), |(byte, _)| byte)
+    };
+    let start = byte_at(end.saturating_sub(BAND));
+    let end = byte_at(end);
+    (&text[..start], &text[start..end], &text[end..])
+}
+
 /// Estimated progress within an engine-confirmed phase. Only success reaches 100%.
 #[must_use]
 pub(crate) fn compact_progress_percent(phase: &str, elapsed_ms: f64) -> Option<u16> {
@@ -153,6 +169,18 @@ pub(crate) fn compact_bar_split(percent: u16, width: u16) -> (u16, u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compaction_sweep_repeats_without_splitting_unicode() {
+        let text = "✻ Compacting context…";
+        let early = compaction_sweep_parts(text, 120);
+        let middle = compaction_sweep_parts(text, 1_100);
+        assert_eq!(early.0, "");
+        assert_eq!(early.1, "✻");
+        assert_ne!(early, middle);
+        assert_eq!(middle, compaction_sweep_parts(text, 7_700));
+        assert_eq!(format!("{}{}{}", middle.0, middle.1, middle.2), text);
+    }
 
     #[test]
     fn compact_progress_matches_shared_hybrid_cases() {

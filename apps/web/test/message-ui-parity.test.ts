@@ -48,3 +48,21 @@ test('LocalApp gets an application icon and an adjacent, readable summary', asyn
     assert.ok(view.texts('.rc-tool-title').some(text => text.startsWith('Local app 全家人的终身学习空间')));
   } finally { await view.unmount(); }
 });
+
+test('compaction animates and shows elapsed time only while active', async () => {
+  const builder = new TranscriptBuilder();
+  builder.apply({ type: 'event', event: { type: 'compaction_status', phase: 'preparing' } });
+  const render = () => createElement(TranscriptView, {
+    locale: 'en', transcript: builder.snapshot(), running: true, deviceName: 'Test', fetchImage: async () => '',
+  });
+  const view = await Mounted.create(render());
+  try {
+    assert.deepEqual(view.texts('.rc-compaction-sweep'), ['Compacting context']);
+    assert.match(view.texts('.rc-compaction-elapsed')[0]!, /^\d+s$/);
+    builder.apply({ type: 'event', event: { type: 'compaction_status', phase: 'complete' } });
+    await view.update(render());
+    assert.deepEqual(view.texts('.rc-note'), ['Context automatically compacted']);
+    assert.equal(view.texts('.rc-compaction-sweep').length, 0);
+    assert.equal(view.texts('.rc-compaction-elapsed').length, 0);
+  } finally { await view.unmount(); }
+});

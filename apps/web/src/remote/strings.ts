@@ -25,6 +25,13 @@ export const strings = {
   toolCalls: text('{count} 次调用', '{count} calls'),
   toolRunningCount: text('{count} 项运行中', '{count} running'),
   toolFailedCount: text('{count} 项未成功', '{count} unsuccessful'),
+  compacting: text('正在压缩上下文', 'Compacting context'),
+  compacted: text('上下文已压缩', 'Context compacted'),
+  automaticallyCompacted: text('上下文已自动压缩', 'Context automatically compacted'),
+  compactionFailed: text('上下文压缩失败', 'Compaction failed'),
+  compactionCancelled: text('已取消上下文压缩', 'Compaction cancelled'),
+  compactionSkipped: text('已跳过上下文压缩', 'Compaction skipped'),
+  compactionElapsed: text('{seconds} 秒', '{seconds}s'),
   // shell
   title: text('远程控制', 'Remote Control'),
   loading: text('正在加载…', 'Loading…'),

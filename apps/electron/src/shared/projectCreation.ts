@@ -8,6 +8,8 @@ export interface ProjectFolderSelection {
 
 export type ProjectCreationPurpose = 'project' | 'local-app';
 
+export const MAX_PROJECT_ADDITIONAL_FOLDERS = 1024;
+
 export const CH_PROJECT_FOLDER_PICK = 'lingxi:project:pick-folder';
 export const CH_PROJECT_APPS_DEFAULT = 'lingxi:project:apps-default';
 export const CH_PROJECT_CREATE = 'lingxi:project:create';

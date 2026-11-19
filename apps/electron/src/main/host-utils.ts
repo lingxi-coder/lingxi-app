@@ -7,6 +7,7 @@ import type { PermissionModeId } from '@lingxi/bridge-client';
 
 import { parseTelemetryEndpoint } from './telemetryPolicy.js';
 import { SETTINGS_VERSION } from '../shared/settings.js';
+import { MAX_PROJECT_ADDITIONAL_FOLDERS } from '../shared/projectCreation.js';
 import type {
   ModelPickerVisibilitySettings,
   PinnedSessionRecord,
@@ -134,6 +135,7 @@ export interface PersistedSettings {
   activeProject?: string;
   activeSession?: SessionRef;
   projects: string[];
+  projectAdditionalFolders?: Record<string, string[]>;
   pinnedSessions: PinnedSessionRecord[];
   trustedWorkspaces: Record<string, TrustRecord>;
   /** One-time acknowledgement that the user accepted Bypass Permissions mode
@@ -283,6 +285,14 @@ export function parseSettings(value: unknown): PersistedSettings {
 
   const persistedProjects = boundedStringArray(value['projects'], MAX_PROJECTS);
   settings.projects = persistedProjects;
+  const additionalFolders = value['projectAdditionalFolders'];
+  if (isPlainObject(additionalFolders)) {
+    settings.projectAdditionalFolders = Object.fromEntries(persistedProjects.flatMap(project => {
+      const folders = boundedStringArray(additionalFolders[project], MAX_PROJECT_ADDITIONAL_FOLDERS)
+        .filter(folder => folder !== project && isAbsolute(folder) && !folder.includes('\0'));
+      return folders.length ? [[project, folders]] : [];
+    }));
+  }
   const requestedActive = boundedString(value['activeProject'], 32_768);
   settings.activeProject = requestedActive && settings.projects.includes(requestedActive)
     ? requestedActive
@@ -544,6 +554,8 @@ export function withoutProject(settings: PersistedSettings, projectPath: string)
   const projects = settings.projects.filter((path) => path !== projectPath);
   const trustedWorkspaces = { ...settings.trustedWorkspaces };
   delete trustedWorkspaces[projectPath];
+  const projectAdditionalFolders = { ...settings.projectAdditionalFolders };
+  delete projectAdditionalFolders[projectPath];
   const activeSession = settings.activeSession?.projectPath === projectPath
     ? undefined
     : settings.activeSession ? { ...settings.activeSession } : undefined;
@@ -552,6 +564,7 @@ export function withoutProject(settings: PersistedSettings, projectPath: string)
     activeProject: settings.activeProject === projectPath ? projects[0] : settings.activeProject,
     activeSession,
     projects,
+    ...(settings.projectAdditionalFolders ? { projectAdditionalFolders } : {}),
     pinnedSessions: settings.pinnedSessions
       .filter((session) => session.projectPath !== projectPath)
       .map((session) => ({ ...session })),

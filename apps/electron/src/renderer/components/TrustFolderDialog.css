@@ -35,6 +35,8 @@
   cursor: pointer;
 }
 .trust-folder-path { margin: 18px 0; color: var(--dialog-text-2); text-align: center; font-size: 14px; line-height: 21px; overflow-wrap: anywhere; }
+.trust-folder-paths { padding-inline: 20px; text-align: start; }
+.trust-folder-paths li + li { margin-top: 4px; }
 .trust-folder-description { margin: 0 5px 13px; color: var(--dialog-text-2); font-size: 14px; line-height: 21px; }
 .trust-folder-actions { display: flex; flex-direction: column; gap: 12px; }
 .trust-folder-actions button { min-height: 36px; padding: 7px 16px; border: 1px solid transparent; border-radius: 999px; font: inherit; font-size: 14px; line-height: 20px; cursor: pointer; }

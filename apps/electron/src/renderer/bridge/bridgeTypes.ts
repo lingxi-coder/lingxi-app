@@ -209,9 +209,9 @@ export interface UseBridge {
   addProject(purpose?: import('../../shared/projectCreation').ProjectCreationPurpose): Promise<WorkspaceMetadata | null>;
   readonly projectCreationOpen: boolean;
   readonly projectCreationPurpose: import('../../shared/projectCreation').ProjectCreationPurpose;
-  pickProjectFolder(): Promise<import('../../shared/projectCreation').ProjectFolderSelection | null>;
+  pickProjectFolder(appendTo?: string): Promise<import('../../shared/projectCreation').ProjectFolderSelection | null>;
   defaultAppProjectFolder(): Promise<import('../../shared/projectCreation').ProjectFolderSelection | null>;
-  confirmProjectCreation(selectionId: string, directoryName?: string): Promise<void>;
+  confirmProjectCreation(selectionId: string, directoryName?: string, additionalSelectionIds?: readonly string[]): Promise<void>;
   cancelProjectCreation(): void;
   activateProject(path: string): Promise<WorkspaceMetadata | null>;
   openProject(path: string): Promise<void>;

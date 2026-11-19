@@ -9,8 +9,8 @@ import './CreateProjectDialog.css';
 export function CreateProjectDialog({ localApp = false, onDefaultFolder, onPickFolder, onCreate, onClose }: {
   localApp?: boolean;
   onDefaultFolder(): Promise<ProjectFolderSelection | null>;
-  onPickFolder(): Promise<ProjectFolderSelection | null>;
-  onCreate(selectionId: string, directoryName?: string): Promise<void>;
+  onPickFolder(appendTo?: string): Promise<ProjectFolderSelection | null>;
+  onCreate(selectionId: string, directoryName?: string, additionalSelectionIds?: readonly string[]): Promise<void>;
   onClose(): void;
 }) {
   const dialog = useRef<HTMLDivElement>(null);
@@ -18,7 +18,8 @@ export function CreateProjectDialog({ localApp = false, onDefaultFolder, onPickF
   const opener = useRef(typeof document !== 'undefined' && document.activeElement instanceof HTMLElement ? document.activeElement : null);
   const requestVersion = useRef(0);
   const busyRef = useRef(false);
-  const [selection, setSelection] = useState<ProjectFolderSelection | null>(null);
+  const [selections, setSelections] = useState<ProjectFolderSelection[]>([]);
+  const [selection, ...additionalSelections] = selections;
   const [directoryName, setDirectoryName] = useState('');
   const [busy, setBusy] = useState<'loading' | 'selecting' | 'creating' | null>(null);
   const [error, setError] = useState('');
@@ -26,9 +27,13 @@ export function CreateProjectDialog({ localApp = false, onDefaultFolder, onPickF
   const newDirectory = Boolean(selection?.createDirectory);
   const canClose = !busy || busy === 'loading';
   const windows = window.lingxi?.platform === 'win32';
-  const name = newDirectory ? directoryName : selection?.path.split(windows ? /[\\/]/ : /\//).filter(Boolean).at(-1) ?? selection?.path ?? '';
-  const path = selection && newDirectory
-    ? `${selection.path.replace(windows ? /[\\/]$/ : /\/$/, '')}${windows ? '\\' : '/'}${directoryName.trim() || tr('desktop_project_name')}` : selection?.path;
+  const folders = selections.map(folder => ({
+    id: folder.id,
+    name: folder.createDirectory ? directoryName : folder.path.split(windows ? /[\\/]/ : /\//).filter(Boolean).at(-1) ?? folder.path,
+    path: folder.createDirectory
+      ? `${folder.path.replace(windows ? /[\\/]$/ : /\/$/, '')}${windows ? '\\' : '/'}${directoryName.trim() || tr('desktop_project_name')}`
+      : folder.path,
+  }));
 
   useEffect(() => {
     dialog.current?.setAttribute('aria-modal', 'true');
@@ -44,14 +49,19 @@ export function CreateProjectDialog({ localApp = false, onDefaultFolder, onPickF
     else nameInput.current?.focus();
   }, [busy]);
 
-  const pickFolder = useCallback(async (picker: () => Promise<ProjectFolderSelection | null>, phase: 'loading' | 'selecting' = 'selecting') => {
+  const pickFolder = useCallback(async (picker: () => Promise<ProjectFolderSelection | null>, phase: 'loading' | 'selecting' = 'selecting', append = false) => {
     if (busyRef.current) return;
     busyRef.current = true;
     const version = ++requestVersion.current;
     setBusy(phase); setError('');
     try {
       const next = await picker();
-      if (requestVersion.current === version && next) setSelection(next);
+      if (requestVersion.current === version && next) {
+        setSelections(current => {
+          if (!append) return [next];
+          return current.some(folder => folder.path === next.path) ? current : [...current, next];
+        });
+      }
     } catch (cause) {
       if (requestVersion.current === version) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -74,7 +84,9 @@ export function CreateProjectDialog({ localApp = false, onDefaultFolder, onPickF
     busyRef.current = true;
     const version = ++requestVersion.current;
     setBusy('creating'); setError('');
-    try { await onCreate(selection.id, newDirectory ? directoryName.trim() : undefined); }
+    try {
+      await onCreate(selection.id, newDirectory ? directoryName.trim() : undefined, additionalSelections.map(folder => folder.id));
+    }
     catch (cause) {
       if (requestVersion.current === version) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -100,20 +112,24 @@ export function CreateProjectDialog({ localApp = false, onDefaultFolder, onPickF
       <label className="create-project-name">
         <span className="create-project-name-icon" aria-hidden="true"><Icon name="folder" size={17} stroke={1.7} /></span>
         <input ref={nameInput} aria-label={tr('desktop_project_name')} title={newDirectory ? tr('desktop_project_create_folder') : tr('desktop_project_use_folder_name')} placeholder={tr('desktop_project_name')}
-          value={name} readOnly={!newDirectory} disabled={Boolean(busy)} onChange={event => { setDirectoryName(event.target.value); setError(''); }} />
+          value={folders[0]?.name ?? ''} readOnly={!newDirectory} disabled={Boolean(busy)} onChange={event => { setDirectoryName(event.target.value); setError(''); }} />
       </label>
       <div className="create-project-sources-heading" id="create-project-sources-heading">{tr('desktop_project_sources')}</div>
       <div className="create-project-sources" role="group" aria-labelledby="create-project-sources-heading">
-        {selection ? <div className="create-project-selected-folder">
+        {folders.length ? folders.map(folder => <div className="create-project-selected-folder" key={folder.id}>
           <Icon name="folder" size={22} stroke={1.6} />
-          <span className="create-project-folder-copy"><strong>{name || tr('desktop_project_new_app')}</strong><span title={path}>{path}</span></span>
-          <button type="button" className="create-project-remove" aria-label={tr('desktop_project_remove_source')} disabled={Boolean(busy)}
-            onClick={() => { setSelection(null); setError(''); }}><Icon name="x" size={15} /></button>
-        </div> : <div className="create-project-source-location"><span>{tr('desktop_project_add_folder')}</span>
+          <span className="create-project-folder-copy"><strong>{folder.name || tr('desktop_project_new_app')}</strong><span id={`create-project-folder-${folder.id}`} title={folder.path}>{folder.path}</span></span>
+          <button type="button" className="create-project-remove" aria-label={tr('desktop_project_remove_source')}
+            aria-describedby={`create-project-folder-${folder.id}`} disabled={Boolean(busy)}
+            onClick={() => { setSelections(current => current.filter(entry => entry.id !== folder.id)); setError(''); }}><Icon name="x" size={15} /></button>
+        </div>) : <div className="create-project-source-location"><span>{tr('desktop_project_add_folder')}</span>
           <span className="create-project-location-select"><select aria-label={tr('desktop_project_source_location')} defaultValue="local" disabled={Boolean(busy)}><option value="local">{tr('desktop_project_on_computer')}</option></select><Icon name="chevron" size={14} stroke={1.7} /></span>
         </div>}
-        <button className="create-project-add-folder" type="button" disabled={Boolean(busy)} onClick={() => void pickFolder(onPickFolder)}>
-          <Icon name="folderPlus" size={17} stroke={1.7} />{busy === 'loading' ? tr('desktop_shell_reading') : busy === 'selecting' ? tr('desktop_project_choosing') : selection ? tr('desktop_project_change') : tr('workspace_confirm_add')}
+        <button className="create-project-add-folder" type="button" disabled={Boolean(busy)} onClick={() => {
+          const appendTo = localApp ? undefined : selection?.id;
+          void pickFolder(() => onPickFolder(appendTo), 'selecting', appendTo !== undefined);
+        }}>
+          <Icon name="folderPlus" size={17} stroke={1.7} />{busy === 'loading' ? tr('desktop_shell_reading') : busy === 'selecting' ? tr('desktop_project_choosing') : selection ? tr(localApp ? 'desktop_project_change' : 'desktop_project_add_more') : tr('workspace_confirm_add')}
         </button>
         {localApp && !newDirectory && <button className="create-project-default-folder" type="button" disabled={Boolean(busy)} onClick={() => void pickFolder(onDefaultFolder, 'loading')}>{tr('desktop_project_use_default')}</button>}
       </div>
@@ -124,7 +140,7 @@ export function CreateProjectDialog({ localApp = false, onDefaultFolder, onPickF
       </div>
     </form>
   </DesktopDialog>
-    {reviewingTrust && path && <TrustFolderDialog path={path}
+    {reviewingTrust && <TrustFolderDialog paths={folders.map(folder => folder.path)}
       onClose={() => { setReviewingTrust(false); requestAnimationFrame(() => dialog.current?.querySelector<HTMLButtonElement>('.create-project-submit')?.focus()); }}
       onConfirm={() => { setReviewingTrust(false); void create(); }} />}
   </>;

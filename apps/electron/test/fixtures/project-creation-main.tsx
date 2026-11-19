@@ -16,9 +16,10 @@ localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en');
 const projectPath = '/fixture/Existing project';
 const projects = [projectPath];
 let ref = { projectPath, sessionId: '11111111-2222-4333-8444-555555555555' };
-let selectedFolder: { id: string; path: string; createDirectory?: true } | null = null;
+const pickedFolders = new Map<string, { id: string; path: string; createDirectory?: true }>();
 let revision = 0;
 const fixture = {
+  additionalFolders: [] as string[],
   mode: (location.search.includes('mode=chat') ? 'chat' : 'code') as 'chat' | 'code', switches: [] as string[],
   pendingPublications: location.search.includes('mode=chat') ? [{ requestId: 'aaaaaaaa-bbbb-4ccc-8ddd-ffffffffffff', expectedRevision: 0 }] : [],
   publicationRecoveries: [] as string[],
@@ -65,21 +66,24 @@ function snapshot() {
     fixture.pickerPurposes.push(purpose);
     fixture.picks++;
     if (fixture.pickerError) throw new Error(fixture.pickerError);
-    if (fixture.nextFolder) selectedFolder = fixture.nextFolder;
+    if (fixture.nextFolder) pickedFolders.set(fixture.nextFolder.id, fixture.nextFolder);
     return fixture.nextFolder;
   },
   defaultAppProjectFolder: async () => {
     fixture.defaults++;
     if (fixture.holdDefaults) await new Promise<void>(resolve => fixture.defaultWaiters.push(resolve));
     if (fixture.defaultError) throw new Error(fixture.defaultError);
-    selectedFolder = { id: `default-${fixture.defaults}`, path: fixture.appsRoot, createDirectory: true };
+    const selectedFolder = { id: `default-${fixture.defaults}`, path: fixture.appsRoot, createDirectory: true as const };
+    pickedFolders.set(selectedFolder.id, selectedFolder);
     return selectedFolder;
   },
-  createProject: async (id: string, directoryName?: string) => {
+  createProject: async (id: string, directoryName?: string, additionalIds: readonly string[] = []) => {
     fixture.creates.push(id);
     if (fixture.createError) throw new Error(fixture.createError);
     if (fixture.holdCreate) await new Promise<void>(resolve => { fixture.finishCreate = resolve; });
-    const path = selectedFolder!.createDirectory ? `${selectedFolder!.path}/${directoryName}` : selectedFolder!.path;
+    const primary = pickedFolders.get(id)!;
+    const path = primary.createDirectory ? `${primary.path}/${directoryName}` : primary.path;
+    fixture.additionalFolders = additionalIds.map(id => pickedFolders.get(id)!.path);
     if (!projects.includes(path)) projects.push(path);
     return { path, trusted: false };
   },

@@ -213,9 +213,9 @@ export interface LingxiApi {
     sidebar?: unknown;
   }): Promise<PublicSettings>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
-  pickProjectFolder(purpose?: ProjectCreationPurpose): Promise<ProjectFolderSelection | null>;
+  pickProjectFolder(purpose?: ProjectCreationPurpose, appendTo?: string): Promise<ProjectFolderSelection | null>;
   defaultAppProjectFolder(): Promise<ProjectFolderSelection | null>;
-  createProject(selectionId: string, directoryName?: string): Promise<WorkspaceMetadata>;
+  createProject(selectionId: string, directoryName?: string, additionalSelectionIds?: readonly string[]): Promise<WorkspaceMetadata>;
   setWorkspace(path: string): Promise<WorkspaceMetadata>;
   openProject(path: string): Promise<BootstrapState>;
   removeProject(path: string): Promise<BootstrapState>;

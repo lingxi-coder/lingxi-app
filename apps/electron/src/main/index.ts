@@ -603,8 +603,12 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   bridge = new SessionRuntimeManager({
     getTelemetryConfig: () => settings.getTelemetryConfig(),
     // A Bot's working directory is not a project: it has its own configuration home and grants.
-    workspaceSettings: (projectPath, ref) => bots?.ownsWorkspace(projectPath)
-      ? bots.launchSettings(projectPath, ref.sessionId) : sessionCatalog.workspaceSettings(projectPath),
+    workspaceSettings: async (projectPath, ref) => {
+      if (bots?.ownsWorkspace(projectPath)) return bots.launchSettings(projectPath, ref.sessionId);
+      const config = await sessionCatalog.workspaceSettings(projectPath);
+      const additionalDirectories = ref.projectId ? settings.getProjectAdditionalFolders(ref.projectId) : [];
+      return additionalDirectories.length ? { ...config, additionalDirectories } : config;
+    },
     appVersion: app.getVersion(),
     ...ownerPreferenceHooks(settings, (ref) => bots?.ownsWorkspace(ref.projectPath) === true),
     resolveSessionMode: async (ref) => {

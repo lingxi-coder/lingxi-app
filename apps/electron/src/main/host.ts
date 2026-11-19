@@ -63,7 +63,7 @@ import { validateNewAuthoringIntent, type AuthoringSessionIntent, type Authoring
 import type { LocalAppNewSessionIntent } from '../shared/localApps.js';
 import type { SessionRuntime } from './bridge.js';
 import { isSessionId } from './sessionIdentity.js';
-import { CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK, type ProjectFolderSelection } from '../shared/projectCreation.js';
+import { CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK, MAX_PROJECT_ADDITIONAL_FOLDERS, type ProjectFolderSelection } from '../shared/projectCreation.js';
 import { CH_SESSION_WORKSPACE, sessionCatalogScope, type SessionCatalogRow, type SessionCatalogScope, type SessionOpenSelection, type SessionMetadataSelection, type SessionWorkspaceOperation } from '../shared/sessionWorkspace.js';
 import { CH_CONVERSATION_SHOWN, CH_CONVERSATION_SPACE, CH_PROJECT_OPEN, CH_SESSION_HANDOFF, CH_SESSION_HANDOFF_CANCEL, type ConversationSpace, type ConversationSpacesSnapshot, type OwnedConversation } from '../shared/conversationSpaces.js';
 import { WorkspaceFileSearch } from './file-search.js';
@@ -592,7 +592,7 @@ export class HostController {
   private readonly closingProjects = new Set<string>();
   private readonly targets = new Map<WebContents, Set<string>>();
   private readonly workspaceFiles = new WorkspaceFileSearch();
-  private readonly projectFolderSelections = new WeakMap<WebContents, ProjectFolderSelection & { localApp: boolean }>();
+  private readonly projectFolderSelections = new WeakMap<WebContents, { localApp: boolean; folders: ProjectFolderSelection[] }>();
   private readonly projectFolderPickRequests = new WeakMap<WebContents, object>();
   private realtimeAudioController?: RealtimeAudioController;
   private realtimeAudioWindow?: WebContents;
@@ -1060,10 +1060,10 @@ export class HostController {
       this.assertSender(event);
       if (this.projectFolderPickRequests.get(event.sender) !== request) return null;
       const selection = { id: randomUUID(), path: appProjectsRoot, createDirectory: true as const };
-      this.projectFolderSelections.set(event.sender, { ...selection, localApp: true });
+      this.projectFolderSelections.set(event.sender, { localApp: true, folders: [selection] });
       return selection;
     });
-    this.ipc.handle(CH_PROJECT_FOLDER_PICK, async (event: IpcMainInvokeEvent, purpose: unknown = 'project') => {
+    this.ipc.handle(CH_PROJECT_FOLDER_PICK, async (event: IpcMainInvokeEvent, purpose: unknown = 'project', appendTo?: unknown) => {
       this.assertSender(event);
       if (purpose !== 'project' && purpose !== 'local-app') throw new Error('Invalid project purpose.');
       if (purpose === 'local-app' && this.currentConversationMode() !== 'code') {
@@ -1072,25 +1072,48 @@ export class HostController {
       ++this.navigationGeneration;
       const request = {};
       this.projectFolderPickRequests.set(event.sender, request);
-      const defaultPath = purpose === 'local-app' ? this.projectFolderSelections.get(event.sender)?.path : undefined;
+      const previous = this.projectFolderSelections.get(event.sender);
+      const folders = appendTo === undefined ? [] : previous?.folders ?? [];
+      if (appendTo !== undefined && (purpose !== 'project' || previous?.localApp
+        || !folders.some(folder => folder.id === appendTo))) {
+        throw new Error('The source folder selection has changed.');
+      }
+      const defaultPath = purpose === 'local-app' ? previous?.folders[0]?.path : undefined;
       const path = await this.directoryDialogs.pickDirectory(defaultPath ?? this.settings.getPublic().activeProject ?? '');
       this.assertSender(event);
       if (this.projectFolderPickRequests.get(event.sender) !== request || path === undefined) return null;
-      const selection = { id: randomUUID(), path: canonicalWorkspace(path) };
-      this.projectFolderSelections.set(event.sender, { ...selection, localApp: purpose === 'local-app' });
+      const canonical = canonicalWorkspace(path);
+      const duplicate = folders.find(folder => folder.path === canonical);
+      if (duplicate) return { ...duplicate };
+      const selection = { id: randomUUID(), path: canonical };
+      this.projectFolderSelections.set(event.sender, { localApp: purpose === 'local-app', folders: [...folders, selection] });
       return { ...selection };
     });
-    this.ipc.handle(CH_PROJECT_CREATE, async (event: IpcMainInvokeEvent, selectionId: unknown, directoryName?: unknown) => {
+    this.ipc.handle(CH_PROJECT_CREATE, async (event: IpcMainInvokeEvent, selectionId: unknown, directoryName?: unknown, additionalIds: unknown = []) => {
       this.assertSender(event);
-      const selection = this.projectFolderSelections.get(event.sender);
-      if (!selection || !selection.path || selection.id !== selectionId) throw new Error('Choose a source folder before creating the project.');
-      if (selection.localApp && this.currentConversationMode() !== 'code') {
+      const staged = this.projectFolderSelections.get(event.sender);
+      const selection = staged?.folders.find(folder => folder.id === selectionId);
+      if (!staged || !selection) throw new Error('Choose a source folder before creating the project.');
+      if (!Array.isArray(additionalIds) || additionalIds.length > MAX_PROJECT_ADDITIONAL_FOLDERS
+        || (staged.localApp && additionalIds.length) || new Set([selectionId, ...additionalIds]).size !== additionalIds.length + 1) {
+        throw new Error('Invalid additional source folders.');
+      }
+      const additionalFolders = additionalIds.map(id => {
+        const folder = staged.folders.find(candidate => candidate.id === id);
+        if (!folder) throw new Error('The source folder selection has changed.');
+        return folder.path;
+      });
+      if (staged.localApp && this.currentConversationMode() !== 'code') {
         throw new Error(nativeTr('local_app_development_requires_code'));
       }
       const generation = ++this.navigationGeneration;
       return this.enqueueNavigation(async () => {
         this.assertSender(event);
-        if (this.projectFolderSelections.get(event.sender) !== selection) throw new Error('The source folder selection has changed.');
+        if (this.projectFolderSelections.get(event.sender) !== staged) throw new Error('The source folder selection has changed.');
+        for (const folder of additionalFolders) {
+          if (canonicalWorkspace(folder) !== folder) throw new Error('The source folder selection has changed.');
+          this.assertNotAppData(folder);
+        }
         let path = selection.path;
         let created: { dev: bigint; ino: bigint } | undefined;
         if (selection.createDirectory) {
@@ -1108,10 +1131,13 @@ export class HostController {
             if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('A folder with this project name already exists. Choose another name or select the existing folder.');
             throw error;
           }
-        } else if (directoryName !== undefined) throw new Error('An existing folder uses its directory name.');
+        } else {
+          if (directoryName !== undefined) throw new Error('An existing folder uses its directory name.');
+          if (canonicalWorkspace(path) !== path) throw new Error('The source folder selection has changed.');
+        }
         try {
-          const workspace = await this.selectWorkspaceInternal(path, true, !selection.localApp, selection.localApp ? 'code' : undefined, generation);
-          if (this.projectFolderSelections.get(event.sender) === selection) this.projectFolderSelections.delete(event.sender);
+          const workspace = await this.selectWorkspaceInternal(path, true, !staged.localApp, staged.localApp ? 'code' : undefined, generation, additionalFolders);
+          if (this.projectFolderSelections.get(event.sender) === staged) this.projectFolderSelections.delete(event.sender);
           return workspace;
         } catch (error) {
           // Remove only our empty, unregistered directory. Never remove source
@@ -2481,14 +2507,14 @@ export class HostController {
   }
 
   private async selectWorkspaceInternal(input: string, addProject: boolean, createInitialSession = true,
-    admittedMode?: ConversationSpace, generation = this.navigationGeneration): Promise<WorkspaceMetadata> {
+    admittedMode?: ConversationSpace, generation = this.navigationGeneration, additionalFolders: readonly string[] = []): Promise<WorkspaceMetadata> {
     const workspace = canonicalWorkspace(input);
     if (this.closingProjects.has(workspace)) throw new Error('project is closing');
     this.workspaceFiles.invalidate();
     if (addProject) {
       this.assertNotAppData(workspace);
       const wasEmpty = this.settings.getPublic().projects.length === 0;
-      this.settings.addProject(workspace);
+      this.settings.addProject(workspace, additionalFolders);
       await this.settings.conversationSpaces.addProject(workspace, admittedMode ?? this.settings.conversationSpaces.snapshot().activeMode);
       // General project creation supplies the first draft. App creation only
       // adds metadata; the renderer explicitly admits its one authoring chat.

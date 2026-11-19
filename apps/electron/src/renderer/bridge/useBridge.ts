@@ -1821,9 +1821,9 @@ export function useBridge(): UseBridge {
     setProjectCreationOpen(false);
   }, []);
 
-  const pickProjectFolder = useCallback(async () => {
+  const pickProjectFolder = useCallback(async (appendTo?: string) => {
     if (!host || !pendingProjectCreation.current) throw new Error('Open Create project before choosing a folder.');
-    return host.pickProjectFolder(pendingProjectCreation.current.purpose);
+    return host.pickProjectFolder(pendingProjectCreation.current.purpose, appendTo);
   }, [host]);
 
   const defaultAppProjectFolder = useCallback(async () => {
@@ -1831,12 +1831,12 @@ export function useBridge(): UseBridge {
     return host.defaultAppProjectFolder();
   }, [host]);
 
-  const confirmProjectCreation = useCallback(async (selectionId: string, directoryName?: string) => {
+  const confirmProjectCreation = useCallback(async (selectionId: string, directoryName?: string, additionalSelectionIds?: readonly string[]) => {
     const request = pendingProjectCreation.current;
     if (!host || !request) throw new Error('Open Create project before choosing a folder.');
     const operationId = beginNavigationOperation();
     try {
-      const workspace = await host.createProject(selectionId, directoryName);
+      const workspace = await host.createProject(selectionId, directoryName, additionalSelectionIds);
       if (pendingProjectCreation.current === request && isCurrentNavigationOperation(operationId)) {
         try {
           const snapshot = await host.bootstrap();

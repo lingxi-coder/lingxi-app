@@ -39,9 +39,9 @@ async function fixture(t: TestContext, existing = false, mode: 'chat' | 'code' =
   t.after(() => { host.dispose(); rmSync(root, { recursive: true, force: true }); });
   return { path, other, settings, previous, calls, host, dialogs, event, handlers, configHome, catalog,
     setPicked: (value?: string) => { picked = value; },
-    pick: (purpose = 'project') => handlers.get(CH_PROJECT_FOLDER_PICK)!(event, purpose),
+    pick: (purpose = 'project', appendTo?: string) => handlers.get(CH_PROJECT_FOLDER_PICK)!(event, purpose, appendTo),
     defaults: () => handlers.get(CH_PROJECT_APPS_DEFAULT)!(event),
-    create: (id: unknown, source = event, name?: unknown) => handlers.get(CH_PROJECT_CREATE)!(source, id, name) };
+    create: (id: unknown, source = event, name?: unknown, additionalIds?: unknown) => handlers.get(CH_PROJECT_CREATE)!(source, id, name, additionalIds) };
 }
 
 test('choosing or cancelling a source folder leaves the project list and session untouched', async t => {
@@ -51,7 +51,7 @@ test('choosing or cancelling a source folder leaves the project list and session
   assert.deepEqual(h.settings.getPublic(), before); assert.deepEqual(h.calls, []);
   h.setPicked(undefined); assert.equal(await h.pick(), null);
   assert.deepEqual(h.settings.getPublic(), before);
-  // Cancelling Change must retain the folder still displayed by the dialog.
+  // Cancelling the picker must retain the folder still displayed by the dialog.
   await h.create(selection.id); assert.deepEqual(h.settings.getPublic().projects, [h.path, h.other]);
 });
 
@@ -63,6 +63,40 @@ test('confirmation creates the first directory project and its initial draft onl
   assert.deepEqual(h.settings.getPublic().activeSession, { projectPath: h.path, projectId: h.path, mode: 'chat', sessionId: h.previous.sessionId });
   assert.deepEqual(h.calls, [h.path]);
   await assert.rejects(h.create(selection.id), /Choose a source folder/);
+});
+
+test('multiple native selections are persisted under one project and survive a settings reload', async t => {
+  const h = await fixture(t);
+  const primary = await h.pick();
+  h.setPicked(h.other);
+  const extra = await h.pick('project', primary.id);
+  assert.deepEqual(await h.pick('project', primary.id), extra, 'choosing the same directory preserves its selection');
+  h.setPicked(undefined);
+  assert.equal(await h.pick('project', primary.id), null);
+  await assert.rejects(h.create(primary.id, h.event, undefined, [h.other]), /selection has changed/);
+  assert.deepEqual(h.settings.getPublic().projects, []);
+
+  await h.create(primary.id, h.event, undefined, [extra.id]);
+  assert.deepEqual(h.settings.getPublic().projects, [h.path]);
+  assert.deepEqual(h.calls, [h.path]);
+  const reopened = new SettingsStore(join(h.path, '..', 'settings'));
+  assert.deepEqual(reopened.getProjectAdditionalFolders(h.path), [h.other]);
+  assert.deepEqual(reopened.getProjectAdditionalFolders(h.other), []);
+  reopened.removeProject(h.path);
+  reopened.addProject(h.path);
+  assert.deepEqual(reopened.getProjectAdditionalFolders(h.path), []);
+});
+
+test('an unavailable additional folder leaves the project uncreated and permits retry', async t => {
+  const h = await fixture(t);
+  const primary = await h.pick();
+  h.setPicked(h.other);
+  const extra = await h.pick('project', primary.id);
+  rmdirSync(h.other);
+  await assert.rejects(h.create(primary.id, h.event, undefined, [extra.id]), /ENOENT|directory/);
+  assert.deepEqual(h.settings.getPublic().projects, []);
+  await h.create(primary.id);
+  assert.deepEqual(h.settings.getPublic().projects, [h.path]);
 });
 
 test('adding another project preserves the current session and all directory ownership', async t => {

@@ -5,11 +5,13 @@ import { randomUUID } from 'node:crypto';
 import type { PermissionModeId } from '@lingxi/bridge-client';
 import { isInside } from './bots/files.js';
 import { isSessionId } from './sessionIdentity.js';
+import { MAX_PROJECT_ADDITIONAL_FOLDERS } from '../shared/projectCreation.js';
 import { ConversationSpaceStore } from './conversationSpaceStore.js';
 
 import {
   MAX_REMOTE_SESSIONS,
   SETTINGS_VERSION,
+  canonicalWorkspace,
   defaultSettings,
   isPermissionModeId,
   parseModelPickerVisibility,
@@ -182,11 +184,24 @@ export class SettingsStore {
     return this.settings.allowTeamOnboarding ?? true;
   }
 
-  addProject(canonical: string): void {
+  addProject(canonical: string, additionalFolders: readonly string[] = []): void {
     const previous = this.settings;
-    this.settings = withAddedProject(this.settings, canonical);
+    const next = withAddedProject(previous, canonical);
+    if (additionalFolders.length) {
+      const folders = [...new Set([...(previous.projectAdditionalFolders?.[canonical] ?? []), ...additionalFolders])];
+      if (folders.length > MAX_PROJECT_ADDITIONAL_FOLDERS) throw new Error('Project source folder limit reached.');
+      next.projectAdditionalFolders = { ...previous.projectAdditionalFolders, [canonical]: folders };
+    }
+    this.settings = next;
     try { this.persist(); }
     catch (error) { this.settings = previous; throw error; }
+  }
+
+  getProjectAdditionalFolders(projectPath: string): string[] {
+    return (this.settings.projectAdditionalFolders?.[projectPath] ?? []).filter(folder => {
+      try { return canonicalWorkspace(folder) === folder && !this.isAppDataFolder(folder); }
+      catch { return false; }
+    });
   }
 
   activateProject(canonical: string): void {

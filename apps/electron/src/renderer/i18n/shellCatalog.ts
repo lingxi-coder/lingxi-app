@@ -2022,6 +2022,13 @@ export const shellCatalog: Record<string, Record<string, string>> = {
     "ja": "選択中…",
     "ko": "선택 중…"
   },
+  "desktop_project_add_more": {
+    "zh-Hans": "添加更多",
+    "zh-Hant": "新增更多",
+    "en": "Add more",
+    "ja": "さらに追加",
+    "ko": "더 추가"
+  },
   "desktop_project_change": {
     "zh-Hans": "更改",
     "zh-Hant": "變更",

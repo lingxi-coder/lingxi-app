@@ -46,6 +46,44 @@ async function main() {
         writeFileSync(join(evidence, 'create-project-preview.png'), (await window.webContents.capturePage(rectangle, { stayHidden: true, stayAwake: true })).toPNG());
       }
     };
+    if (process.argv.includes('--project-folders-only')) {
+      await window.loadURL(url);
+      await wait(`!!document.querySelector('[aria-label="Add project"]') && !document.querySelector('[aria-label="Add project"]').closest('[inert]')`);
+      await open();
+      const pick = async (id, path) => {
+        const folder = id ? { id, path } : null;
+        await run(`window.projectCreationFixture.nextFolder=${JSON.stringify(folder)}; document.querySelector('.create-project-add-folder').click()`);
+        await wait(`!document.querySelector('form[aria-busy=true]')`);
+      };
+      const count = expected => check(
+        `document.querySelectorAll('.create-project-selected-folder').length === ${expected}`,
+        `Expected ${expected} folders in the dialog`,
+      );
+      await pick('primary', '/Users/tester/Projects/Hanzi Play');
+      await count(1);
+      await check(`document.querySelector('.create-project-add-folder').textContent.includes('Add more')`, 'A selected folder must offer Add more');
+      await pick('extra', '/Users/tester/Projects/Shared assets');
+      await count(2);
+      await pick('duplicate', '/Users/tester/Projects/Shared assets');
+      await count(2);
+      await pick(null);
+      await count(2);
+      await pick('removed', '/Users/tester/Projects/Removed assets');
+      await count(3);
+      await run(`document.querySelectorAll('.create-project-remove')[2].click()`);
+      await count(2);
+      await check(`document.querySelector('[aria-label="Project name"]').value === 'Hanzi Play'`, 'Appending and removing folders must preserve the primary name');
+      await screenshot('create-project-add-more');
+
+      await run(`document.querySelector('.create-project-submit').click()`);
+      await wait(`document.querySelectorAll('.trust-folder-paths li').length === 2`);
+      await check(`document.querySelector('.trust-folder-paths').textContent.includes('Hanzi Play') && document.querySelector('.trust-folder-paths').textContent.includes('Shared assets')`, 'Trust review must list both folders');
+      await confirmTrust();
+      await wait(`!document.querySelector('[aria-label="Create project"]') && !!document.querySelector('button[title="/Users/tester/Projects/Hanzi Play"]')`);
+      await check(`window.projectCreationFixture.projects.length === 2 && JSON.stringify(window.projectCreationFixture.additionalFolders) === JSON.stringify(['/Users/tester/Projects/Shared assets'])`, 'Creation must submit the additional folder under the primary project');
+      console.log(JSON.stringify({ multipleSourceFolders: true }));
+      return;
+    }
     await window.loadURL(`${url}?mode=chat`);
     await wait(`!!document.querySelector('button[aria-label="Apps"]')`);
     await run(`window.unmountCodeRequiredTool = window.mountCodeRequiredTool(); true`);

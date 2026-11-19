@@ -305,9 +305,9 @@ export interface LingxiApi {
     sidebar?: unknown;
   }): Promise<PublicSettings>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
-  pickProjectFolder(purpose?: ProjectCreationPurpose): Promise<ProjectFolderSelection | null>;
+  pickProjectFolder(purpose?: ProjectCreationPurpose, appendTo?: string): Promise<ProjectFolderSelection | null>;
   defaultAppProjectFolder(): Promise<ProjectFolderSelection | null>;
-  createProject(selectionId: string, directoryName?: string): Promise<WorkspaceMetadata>;
+  createProject(selectionId: string, directoryName?: string, additionalSelectionIds?: readonly string[]): Promise<WorkspaceMetadata>;
   setWorkspace(path: string): Promise<WorkspaceMetadata>;
   openProject(path: string): Promise<BootstrapState>;
   removeProject(path: string): Promise<BootstrapState>;
@@ -630,9 +630,9 @@ const api: LingxiApi = {
   openSettingsFile: (path) => ipcRenderer.invoke(CH_SETTINGS_FILE_OPEN, path) as Promise<void>,
   updateSettings: (patch) => ipcRenderer.invoke(CH_SETTINGS_UPDATE, patch) as Promise<PublicSettings>,
   pickWorkspace: () => ipcRenderer.invoke(CH_WORKSPACE_PICK) as Promise<WorkspaceMetadata | null>,
-  pickProjectFolder: (purpose) => ipcRenderer.invoke(CH_PROJECT_FOLDER_PICK, purpose) as Promise<ProjectFolderSelection | null>,
+  pickProjectFolder: (purpose, appendTo) => ipcRenderer.invoke(CH_PROJECT_FOLDER_PICK, purpose, appendTo) as Promise<ProjectFolderSelection | null>,
   defaultAppProjectFolder: () => ipcRenderer.invoke(CH_PROJECT_APPS_DEFAULT) as Promise<ProjectFolderSelection | null>,
-  createProject: (selectionId, directoryName) => ipcRenderer.invoke(CH_PROJECT_CREATE, selectionId, directoryName) as Promise<WorkspaceMetadata>,
+  createProject: (selectionId, directoryName, additionalSelectionIds) => ipcRenderer.invoke(CH_PROJECT_CREATE, selectionId, directoryName, additionalSelectionIds) as Promise<WorkspaceMetadata>,
   setWorkspace: (path) => ipcRenderer.invoke(CH_WORKSPACE_SET, path) as Promise<WorkspaceMetadata>,
   openProject: (path) => ipcRenderer.invoke(CH_PROJECT_OPEN, path) as Promise<BootstrapState>,
   removeProject: (path) => ipcRenderer.invoke(CH_PROJECT_REMOVE, path) as Promise<BootstrapState>,

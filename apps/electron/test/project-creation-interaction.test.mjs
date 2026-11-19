@@ -14,7 +14,7 @@ const fixtureRoot = join(electronRoot, 'test', 'fixtures');
 const electronBinary = resolve(electronRoot, 'node_modules/electron/cli.js');
 const electronDriver = join(fixtureRoot, 'project-creation-electron.mjs');
 
-test('Chat rejects Local App recovery and starts creation in Code; project creation preserves its draft flow', async () => {
+async function runCreationFixture(args = []) {
   const viteCacheDir = mkdtempSync(join(tmpdir(), 'lingxi-project-creation-vite-'));
   const temporaryUserData = mkdtempSync(join(tmpdir(), 'lingxi-project-creation-electron-'));
   const vite = await createServer({
@@ -38,7 +38,7 @@ test('Chat rejects Local App recovery and starts creation in Code; project creat
     const fixtureUrl = `http://127.0.0.1:${address.port}/project-creation-fixture.html`;
     const output = [];
     const errors = [];
-    child = spawn(process.execPath, [electronBinary, electronDriver, fixtureUrl], {
+    child = spawn(process.execPath, [electronBinary, electronDriver, fixtureUrl, ...args], {
       cwd: electronRoot,
       env: {
         ...process.env,
@@ -51,7 +51,7 @@ test('Chat rejects Local App recovery and starts creation in Code; project creat
     child.stdout.on('data', (chunk) => output.push(String(chunk)));
     child.stderr.on('data', (chunk) => errors.push(String(chunk)));
 
-    const result = await new Promise((resolveResult, rejectResult) => {
+    return await new Promise((resolveResult, rejectResult) => {
       const timeout = setTimeout(() => {
         child.kill('SIGTERM');
         rejectResult(new Error(`Electron project creation fixture timed out\n${errors.join('')}`));
@@ -69,12 +69,19 @@ test('Chat rejects Local App recovery and starts creation in Code; project creat
       });
     });
 
-    for (const key of ['toolCodeRequired', 'chatRequiresCode', 'chatPendingVisible', 'codeSessionRecovery', 'opening', 'stagedSelection', 'cancel', 'retry', 'busy', 'sidebarRefresh', 'refreshFailure', 'settingsEntry', 'appProject', 'canceledLookup', 'sourceRecovery', 'startupRecovery', 'nativePaths', 'focusAndEscape', 'narrow']) assert.equal(result[key], true, key);
-
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');
     await vite.close();
     rmSync(viteCacheDir, { recursive: true, force: true });
     rmSync(temporaryUserData, { recursive: true, force: true });
   }
+}
+
+test('Chat rejects Local App recovery and starts creation in Code; project creation preserves its draft flow', async () => {
+  const result = await runCreationFixture();
+  for (const key of ['toolCodeRequired', 'chatRequiresCode', 'chatPendingVisible', 'codeSessionRecovery', 'opening', 'stagedSelection', 'cancel', 'retry', 'busy', 'sidebarRefresh', 'refreshFailure', 'settingsEntry', 'appProject', 'canceledLookup', 'sourceRecovery', 'startupRecovery', 'nativePaths', 'focusAndEscape', 'narrow']) assert.equal(result[key], true, key);
+});
+
+test('Create project adds multiple source folders to the same project', async () => {
+  assert.equal((await runCreationFixture(['--project-folders-only'])).multipleSourceFolders, true);
 });

@@ -4,8 +4,8 @@ import { DesktopDialog } from './DesktopDialog';
 import { Icon } from './Icon';
 import './TrustFolderDialog.css';
 
-export function TrustFolderDialog({ path, onClose, onConfirm }: {
-  path: string;
+export function TrustFolderDialog({ paths, onClose, onConfirm }: {
+  paths: readonly string[];
   onClose(): void;
   onConfirm(): void;
 }) {
@@ -19,7 +19,8 @@ export function TrustFolderDialog({ path, onClose, onConfirm }: {
     cancel.current?.focus();
   }, []);
 
-  return <DesktopDialog ref={panel} title={tr('desktop_project_trust_title')} titleId={titleId}
+  const multiple = paths.length > 1;
+  return <DesktopDialog ref={panel} title={tr(multiple ? 'desktop_project_trust_multiple_title' : 'desktop_project_trust_title')} titleId={titleId}
     ariaLabelledBy={titleId} ariaDescribedBy={`${pathId} ${descriptionId}`}
     className="trust-folder-dialog" zIndex={70} onEscape={onClose}
     onKeyDown={event => {
@@ -33,10 +34,12 @@ export function TrustFolderDialog({ path, onClose, onConfirm }: {
     <button type="button" className="trust-folder-close" aria-label={tr('desktop_create_project_close')} onClick={onClose}>
       <Icon name="x" size={20} stroke={1.7} />
     </button>
-    <p id={pathId} className="trust-folder-path" dir="auto">{path}</p>
+    {multiple ? <ul id={pathId} className="trust-folder-path trust-folder-paths">
+      {paths.map(path => <li key={path} dir="auto">{path}</li>)}
+    </ul> : <p id={pathId} className="trust-folder-path" dir="auto">{paths[0]}</p>}
     <p id={descriptionId} className="trust-folder-description">{tr('desktop_project_trust_description')}</p>
     <div className="trust-folder-actions">
-      <button type="button" className="trust-folder-confirm" onClick={onConfirm}>{tr('desktop_project_trust_confirm')}</button>
+      <button type="button" className="trust-folder-confirm" onClick={onConfirm}>{tr(multiple ? 'desktop_project_trust_multiple_confirm' : 'desktop_project_trust_confirm')}</button>
       <button ref={cancel} type="button" className="trust-folder-cancel" onClick={onClose}>{tr('common_cancel')}</button>
     </div>
   </DesktopDialog>;

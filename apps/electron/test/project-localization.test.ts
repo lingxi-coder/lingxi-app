@@ -36,7 +36,7 @@ test('project and conversation dialogs localize in all five languages while pres
     const create = render(React.createElement(CreateProjectDialog, { onDefaultFolder: async () => null, onPickFolder: async () => null, onCreate: async () => {}, onClose: noop }));
     assert.ok(create.includes(translate('desktop_create_project', locale)), locale);
     assert.ok(create.includes(translate('desktop_project_sources', locale)), locale);
-    const trust = render(React.createElement(TrustFolderDialog, { path: '/Users/tester/项目 <keep>', onClose: noop, onConfirm: noop }));
+    const trust = render(React.createElement(TrustFolderDialog, { paths: ['/Users/tester/项目 <keep>'], onClose: noop, onConfirm: noop }));
     assert.notEqual(translate('desktop_project_trust_title', locale), 'desktop_project_trust_title');
     assert.ok(trust.includes(translate('desktop_project_trust_title', locale)), locale);
     assert.ok(trust.includes(translate('desktop_project_trust_description', locale)), locale);

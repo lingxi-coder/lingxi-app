@@ -18,6 +18,20 @@ export const desktopCatalog: Record<string, Record<string, string>> = {
     "ja": "フォルダを信頼",
     "ko": "폴더 신뢰"
   },
+  "desktop_project_trust_multiple_title": {
+    "zh-Hans": "信任这些文件夹？",
+    "zh-Hant": "信任這些資料夾？",
+    "en": "Trust these folders?",
+    "ja": "これらのフォルダを信頼しますか？",
+    "ko": "이 폴더들을 신뢰하시겠어요?"
+  },
+  "desktop_project_trust_multiple_confirm": {
+    "zh-Hans": "信任文件夹",
+    "zh-Hant": "信任資料夾",
+    "en": "Trust folders",
+    "ja": "フォルダを信頼",
+    "ko": "폴더 신뢰"
+  },
   "desktop_project_trust_description": {
     "zh-Hans": "LingXi 可以读取、编辑和执行此处的文件。文件夹设置也可能自动运行代码，即使没有模型请求。请仅在信任这些文件时继续。",
     "zh-Hant": "LingXi 可以讀取、編輯及執行此處的檔案。資料夾設定也可能自動執行程式碼，即使沒有模型請求。請僅在信任這些檔案時繼續。",

@@ -1,6 +1,8 @@
 /** The visible navigation space and the immutable owner of a conversation. */
 export type ConversationSpace = 'chat' | 'code';
 
+export const CH_PROJECT_OPEN = 'lingxi:project:open';
+
 /** `projectId: null` is an ordinary conversation with no project. */
 export interface ConversationOwner {
   mode: ConversationSpace;

@@ -217,6 +217,7 @@ export interface LingxiApi {
   defaultAppProjectFolder(): Promise<ProjectFolderSelection | null>;
   createProject(selectionId: string, directoryName?: string): Promise<WorkspaceMetadata>;
   setWorkspace(path: string): Promise<WorkspaceMetadata>;
+  openProject(path: string): Promise<BootstrapState>;
   removeProject(path: string): Promise<BootstrapState>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<PublicSettings>;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;

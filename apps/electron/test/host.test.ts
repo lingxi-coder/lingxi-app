@@ -6,6 +6,7 @@ import { join } from 'node:path';
 
 import {
   CH_BRIDGE_RESTART,
+  CH_PROJECT_SESSIONS_LIST,
   CH_SESSION_CLEAR,
   CH_SETTINGS_UPDATE,
   CH_WORKSPACE_FILE_PREVIEW,
@@ -14,6 +15,7 @@ import {
 } from '../src/main/host';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 import { SettingsStore } from '../src/main/settings';
+import { CH_PROJECT_OPEN } from '../src/shared/conversationSpaces';
 import { audioConfigurationDefaults } from '../src/shared/generatedAudioConfiguration';
 
 function deferred<T = void>(): { promise: Promise<T>; resolve(value?: T): void; reject(error: unknown): void } {
@@ -596,28 +598,80 @@ test('historical startup opens the catalog session before persisting it active',
   }
 });
 
-test('history-less startup keeps the host-created session volatile until first prompt', async () => {
-  const userData = mkdtempSync(join(tmpdir(), 'lingxi-restore-draft-settings-'));
-  const projectDirectory = mkdtempSync(join(tmpdir(), 'lingxi-restore-draft-project-'));
-  const project = realpathSync.native(projectDirectory);
-  const sessionId = '34343434-4444-4555-8666-777777777777';
-  const settings = new SettingsStore(userData);
-  settings.addProject(project);
+test('opening a project switches the active conversation and treats unowned history as empty', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'lingxi-project-navigation-'));
+  const settings = new SettingsStore(join(root, 'settings'));
+  const history = join(realpathSync.native(root), 'history');
+  const empty = join(realpathSync.native(root), 'empty');
+  const historyId = '33333333-4444-4555-8666-777777777777';
+  const draftId = '34343434-4444-4555-8666-777777777777';
+  const staleDraftId = '35353535-4444-4555-8666-777777777777';
+  const row = { uuid: historyId, title: 'Saved chat', modified_rfc3339: '2026-11-18T00:00:00Z',
+    message_count: 2, mode: 'chat', path: join(history, `${historyId}.jsonl`) };
+  const handlers = new Map<string, (...args: unknown[]) => any>();
+  const ipc = {
+    handle: (channel: string, handler: (...args: unknown[]) => any) => { handlers.set(channel, handler); },
+    removeHandler: (channel: string) => { handlers.delete(channel); },
+  };
+  const calls: string[] = [];
   const bridge = {
-    newSession: async () => ({ projectPath: project, sessionId }),
+    registerIpc: () => undefined, registerWindow: () => undefined, runtimeSummaries: [],
+    get: () => undefined, isProjectClosing: () => false, activateSession: () => undefined,
+    hasOwnedDraft: (ref: { sessionId: string }) => ref.sessionId === draftId,
+    newSession: async (projectPath: string) => { calls.push('draft'); return { projectPath, sessionId: draftId }; },
+    openSession: async () => { calls.push('history'); },
   };
+  let historyReadable = true;
   const catalog = {
-    list: async () => ({ sessions: [] }),
-    invalidate: () => undefined,
+    list: async (projectPath: string) => {
+      if (projectPath === history && historyReadable) return { sessions: [row] };
+      throw new Error('session catalog is unavailable');
+    },
+    find: async (_projectPath: string, sessionId: string) => {
+      assert.equal(sessionId, staleDraftId);
+      return undefined;
+    },
+    select: async () => row,
+    dispose: () => undefined,
   };
-  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any);
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any, ipc as any);
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = { mainFrame: frame, isDestroyed: () => false, once: () => undefined, removeListener: () => undefined };
+  const event = { sender, senderFrame: frame };
+  host.registerWindow(sender as any, frame.url);
+  host.registerIpc();
+
   try {
-    await host.restoreProjectSession(project);
-    assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, projectId: project, sessionId, mode: 'chat' });
-    assert.equal(JSON.parse(readFileSync(settings.settingsPath, 'utf8')).activeSession, undefined);
+    for (const project of [history, empty]) {
+      mkdirSync(project);
+      settings.addProject(project);
+      await settings.conversationSpaces.addProject(project, 'chat');
+    }
+    await settings.conversationSpaces.register({ projectPath: history, projectId: history, sessionId: historyId, mode: 'chat' });
+
+    await settings.conversationSpaces.register({ projectPath: empty, projectId: empty, sessionId: staleDraftId, mode: 'chat' });
+
+    const open = handlers.get(CH_PROJECT_OPEN)!;
+    const list = handlers.get(CH_PROJECT_SESSIONS_LIST)!;
+    const saved = await open(event, history);
+    assert.equal(saved.activeSession.sessionId, historyId);
+    assert.equal(saved.activeSession.projectId, history);
+    const blank = await open(event, empty);
+    assert.equal(blank.activeSession.sessionId, draftId);
+    assert.equal(blank.activeSession.projectId, empty);
+    assert.equal(blank.workspace.path, empty);
+    assert.deepEqual(blank.projectCatalogs[empty], { sessions: [] });
+    assert.equal((await list(event, empty)).error, undefined, 'a live unsent draft is still an empty history');
+    assert.equal(JSON.parse(readFileSync(settings.settingsPath, 'utf8')).activeSession.sessionId, historyId);
+    assert.deepEqual(calls, ['history', 'draft']);
+
+    historyReadable = false;
+    assert.equal((await list(event, history)).error, 'session catalog is unavailable');
+    await assert.rejects(open(event, history), /session catalog is unavailable/);
+    assert.equal(settings.getPublic().activeSession?.sessionId, draftId);
   } finally {
-    rmSync(userData, { recursive: true, force: true });
-    rmSync(projectDirectory, { recursive: true, force: true });
+    host.dispose();
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

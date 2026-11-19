@@ -65,7 +65,7 @@ import type { SessionRuntime } from './bridge.js';
 import { isSessionId } from './sessionIdentity.js';
 import { CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK, type ProjectFolderSelection } from '../shared/projectCreation.js';
 import { CH_SESSION_WORKSPACE, sessionCatalogScope, type SessionCatalogRow, type SessionCatalogScope, type SessionOpenSelection, type SessionMetadataSelection, type SessionWorkspaceOperation } from '../shared/sessionWorkspace.js';
-import { CH_CONVERSATION_SHOWN, CH_CONVERSATION_SPACE, CH_SESSION_HANDOFF, CH_SESSION_HANDOFF_CANCEL, type ConversationSpace, type ConversationSpacesSnapshot, type OwnedConversation } from '../shared/conversationSpaces.js';
+import { CH_CONVERSATION_SHOWN, CH_CONVERSATION_SPACE, CH_PROJECT_OPEN, CH_SESSION_HANDOFF, CH_SESSION_HANDOFF_CANCEL, type ConversationSpace, type ConversationSpacesSnapshot, type OwnedConversation } from '../shared/conversationSpaces.js';
 import { WorkspaceFileSearch } from './file-search.js';
 import { ProjectSessionCatalog, type ProjectSessionCatalogRow } from './session-catalog.js';
 import {
@@ -1135,6 +1135,26 @@ export class HostController {
         if (!this.settings.hasProject(canonical)) throw new Error('project is not in the project list');
         return this.selectWorkspaceInternal(canonical, false, true, undefined, generation);
       });
+    });
+    this.ipc.handle(CH_PROJECT_OPEN, async (event: IpcMainInvokeEvent, projectPath: unknown) => {
+      this.assertSender(event);
+      const project = this.requireProject(projectPath);
+      const mode = this.modeNavigation?.mode ?? this.settings.conversationSpaces.snapshot().activeMode;
+      const generation = ++this.navigationGeneration;
+      const admittedEpoch = this.sessionArchiveEpoch;
+      await this.enqueueNavigation(async () => {
+        if (!this.settings.hasProject(project) || !this.settings.conversationSpaces.snapshot().projects[project]?.includes(mode)) {
+          throw new Error('project is not in this conversation space');
+        }
+      });
+      if (generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === mode) {
+        const active = this.settings.getPublic().activeSession;
+        const owner = active && this.settings.conversationSpaces.find(active);
+        if (owner?.projectId !== project || owner.mode !== mode) {
+          await this.restoreProjectSessionInternal(project, undefined, generation, undefined, admittedEpoch);
+        }
+      }
+      return this.bootstrap();
     });
     this.ipc.handle(CH_PROJECT_SESSIONS_LIST, async (event: IpcMainInvokeEvent, projectPath: unknown, scope: unknown) => {
       this.assertSender(event);
@@ -2577,7 +2597,31 @@ export class HostController {
       if (scope === 'current' && this.catalogEpoch === epoch && this.catalogRequestGenerations.get(key) === generation) this.catalogs.set(projectPath, state);
       return state;
     } catch (error) {
-      const state = { sessions: [], error: sanitizeDiagnostic(error) };
+      const message = sanitizeDiagnostic(error);
+      // Legacy transcripts can make the sidecar report an unreadable catalog
+      // even when this project has no conversations admitted by this host.
+      let empty = false;
+      if (scope === 'current' && this.settings.hasProject(projectPath)
+        && (message === 'session catalog is unavailable' || message.endsWith(': Error: session catalog is unavailable'))) {
+        const { sessions, navigation } = this.settings.conversationSpaces.snapshot();
+        const candidates = sessions.filter(owner => (owner.projectId === projectPath || owner.projectPath === projectPath)
+          && !this.settings.isSessionArchived(owner));
+        empty = true;
+        for (const owner of candidates) {
+          if (this.settings.getSessionTranscriptSelection(owner) || navigation[owner.mode].session?.sessionId === owner.sessionId) {
+            empty = false;
+            break;
+          }
+          if (this.bridge.hasOwnedDraft?.(owner)) continue;
+          // A never-sent draft may still have an ownership record after a restart.
+          // Exact lookup can confirm absence independently of the failed scan.
+          if (await this.sessionCatalog.find(owner.projectPath, owner.sessionId).then(Boolean, () => true)) {
+            empty = false;
+            break;
+          }
+        }
+      }
+      const state: ProjectSessionCatalogState = empty ? { sessions: [] } : { sessions: [], error: message };
       if (scope === 'current' && this.catalogEpoch === epoch && this.catalogRequestGenerations.get(key) === generation) this.catalogs.set(projectPath, state);
       return state;
     }
@@ -3309,44 +3353,33 @@ export class HostController {
       if (!active || active.sessionId !== activeSession.sessionId) throw new Error('restored session is no longer active');
       return active;
     }
-    const catalog = await this.sessionCatalog.list(project, 'current', (session) =>
-      !this.scheduled?.isControllerSession(session.workspace_path ?? project, session.uuid)
-      && !this.settings.isSessionArchived({ projectPath: project, sessionId: session.uuid })
-      && !this.settings.isSessionArchived({ projectPath: session.workspace_path ?? project, sessionId: session.uuid }),
-    (session) => {
-      const owner = this.settings.conversationSpaces.findBySessionId(session.uuid);
-      return JSON.stringify([session.mode, owner?.projectId]);
-    });
-    const unknownCount = catalog.sessions.filter((session) => !this.settings.conversationSpaces.findBySessionId(session.uuid)).length;
-    if (unknownCount) this.diagnostics.add('warn', 'host', `Ignored ${unknownCount} session(s) without an authenticated conversation scope.`);
-    catalog.sessions = catalog.sessions.filter((session) => this.settings.conversationSpaces.findBySessionId(session.uuid)?.mode === session.mode
-      && !this.scheduled?.isControllerSession(session.workspace_path ?? project, session.uuid)
-      && !this.settings.isSessionArchived({ projectPath: project, sessionId: session.uuid })
-      && !this.settings.isSessionArchived({ projectPath: session.workspace_path ?? project, sessionId: session.uuid }));
-    this.catalogs.set(project, {
-      sessions: catalog.sessions.map(({
-        empty_session: _emptySession,
-        resume_model: _resumeModel,
-        workspace_path: _workspacePath,
-        ...session
-      }) => session),
-    });
-    const mode = this.settings.conversationSpaces.snapshot().activeMode;
+    const { activeMode: mode, sessions } = this.settings.conversationSpaces.snapshot();
+    const paths = new Set([project]);
+    const owners = new Map(sessions.filter(owner => owner.mode === mode && owner.projectId === project)
+      .map(owner => [owner.sessionId, owner]));
+    for (const owner of owners.values()) {
+      if (!this.settings.isSessionArchived(owner) && !this.bridge.hasOwnedDraft?.(owner)) paths.add(owner.projectPath);
+    }
+    const catalogs = await Promise.all([...paths].map(async path => ({ path, catalog: await this.loadProjectSessions(path) })));
     if (generation !== this.navigationGeneration) throw new Error('restored session is no longer active');
-    const first = catalog.sessions.find((session) => {
-      const owner = this.settings.conversationSpaces.findBySessionId(session.uuid);
-      return session.mode === mode && owner?.mode === mode && owner.projectId === project;
-    });
+    const first = catalogs.flatMap(({ path, catalog }) => catalog.sessions
+      .filter(session => session.mode === mode && owners.has(session.uuid))
+      .map(session => ({ path, session })))
+      .sort((left, right) => Date.parse(right.session.modified_rfc3339) - Date.parse(left.session.modified_rfc3339))[0];
+    if (!first) {
+      const error = catalogs.find(({ catalog }) => catalog.error)?.catalog.error;
+      if (error) throw new Error(error);
+    }
     const ref = first
-      ? { projectPath: project, sessionId: first.uuid }
+      ? { projectPath: first.path, sessionId: first.session.uuid }
       : await this.bridge.newSession(project, undefined, { mode, projectId: project,
         activate: () => generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === mode });
     if (first) {
       const admitted = this.captureSessionOpen(ref.sessionId, admittedEpoch);
       await this.enqueueSessionOpen(ref.sessionId,
-        current => this.openSessionAndActivateInternal(ref, { scope: 'current', transcriptPath: first.path }, generation, mode, undefined, () => current() && admitted()));
+        current => this.openSessionAndActivateInternal(ref, { scope: 'current', transcriptPath: first.session.path }, generation, mode, undefined, () => current() && admitted()));
       const active = this.settings.getPublic().activeSession;
-      if (!active || active.sessionId !== ref.sessionId) throw new Error('restored session is no longer active');
+      if (generation !== this.navigationGeneration || !active || active.sessionId !== ref.sessionId) throw new Error('restored session is no longer active');
       this.terminals?.migrateScope({ projectPath: project, sessionId: TERMINAL_DRAFT_SESSION }, active);
       return active;
     }
@@ -3498,7 +3531,7 @@ export class HostController {
       CH_GIT_REQUEST, CH_TERMINAL_REQUEST, CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_SETTINGS_FILE_OPEN, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
       CH_PROJECT_FOLDER_PICK, CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE,
       CH_PROJECT_REMOVE, CH_SESSION_PIN_SET, CH_CONVERSATION_SPACE, CH_SESSION_HANDOFF, CH_SESSION_HANDOFF_CANCEL, CH_SESSION_HISTORY,
-      CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
+      CH_PROJECT_OPEN, CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
       CH_SESSION_METADATA_CAPTURE, CH_SESSION_METADATA_RELEASE, CH_SESSION_TOUCH, CH_SESSION_RENAME,
       CH_SESSION_WORKSPACE, CH_NATIVE_AUDIO_FLOW_LEASE,
       CH_WORKSPACE_FILES_SEARCH, CH_COMPUTER_SETTINGS,

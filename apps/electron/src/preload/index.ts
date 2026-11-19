@@ -110,7 +110,7 @@ import type { PublicSettings, SessionPinInput, SessionRef } from '../shared/sett
 import type { MicrophonePermissionStatus } from '../shared/microphoneAccess.js';
 import type { AudioConfigurationV4 } from '../shared/generatedAudioConfiguration.js';
 import { CH_SESSION_WORKSPACE, type SessionCatalogRow, type SessionCatalogScope, type SessionOpenSelection, type SessionMetadataSelection, type SessionWorkspaceOperation } from '../shared/sessionWorkspace.js';
-import { CH_CONVERSATION_SHOWN, CH_CONVERSATION_SPACE, CH_SESSION_HANDOFF, CH_SESSION_HANDOFF_CANCEL, type ConversationSpace, type ConversationSpacesSnapshot } from '../shared/conversationSpaces.js';
+import { CH_CONVERSATION_SHOWN, CH_CONVERSATION_SPACE, CH_PROJECT_OPEN, CH_SESSION_HANDOFF, CH_SESSION_HANDOFF_CANCEL, type ConversationSpace, type ConversationSpacesSnapshot } from '../shared/conversationSpaces.js';
 import type { PluginSecretCleanupResult, PluginSecretMetadata, WorkspaceFilePreview } from '../main/host.js';
 
 export type { AllowedClientCommand } from '../shared/clientCommands.js';
@@ -309,6 +309,7 @@ export interface LingxiApi {
   defaultAppProjectFolder(): Promise<ProjectFolderSelection | null>;
   createProject(selectionId: string, directoryName?: string): Promise<WorkspaceMetadata>;
   setWorkspace(path: string): Promise<WorkspaceMetadata>;
+  openProject(path: string): Promise<BootstrapState>;
   removeProject(path: string): Promise<BootstrapState>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<PublicSettings>;
   searchWorkspaceFiles(query: string): Promise<WorkspaceFileSearchResult>;
@@ -633,6 +634,7 @@ const api: LingxiApi = {
   defaultAppProjectFolder: () => ipcRenderer.invoke(CH_PROJECT_APPS_DEFAULT) as Promise<ProjectFolderSelection | null>,
   createProject: (selectionId, directoryName) => ipcRenderer.invoke(CH_PROJECT_CREATE, selectionId, directoryName) as Promise<WorkspaceMetadata>,
   setWorkspace: (path) => ipcRenderer.invoke(CH_WORKSPACE_SET, path) as Promise<WorkspaceMetadata>,
+  openProject: (path) => ipcRenderer.invoke(CH_PROJECT_OPEN, path) as Promise<BootstrapState>,
   removeProject: (path) => ipcRenderer.invoke(CH_PROJECT_REMOVE, path) as Promise<BootstrapState>,
   setSessionPinned: (session, pinned) => ipcRenderer.invoke(CH_SESSION_PIN_SET, session, pinned) as Promise<PublicSettings>,
   searchWorkspaceFiles: (query) => ipcRenderer.invoke(CH_WORKSPACE_FILES_SEARCH, query) as Promise<WorkspaceFileSearchResult>,

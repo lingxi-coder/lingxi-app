@@ -214,6 +214,7 @@ export interface UseBridge {
   confirmProjectCreation(selectionId: string, directoryName?: string): Promise<void>;
   cancelProjectCreation(): void;
   activateProject(path: string): Promise<WorkspaceMetadata | null>;
+  openProject(path: string): Promise<void>;
   removeProject(path: string): Promise<void>;
   /** Save sidebar preferences; the keys left out keep their saved value. */
   updateSidebarPreferences(preferences: Partial<import('../../shared/settings').SidebarPreferences>): Promise<void>;

@@ -1217,14 +1217,15 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
                     aria-controls={open ? `project-sessions-${encodeURIComponent(projectPath)}` : undefined}
                     title={projectPath}
                     onClick={() => {
+                      const switchingProject = bridge.activeSession?.projectId !== projectPath || bridge.activeBotId !== undefined;
                       onOpenChat?.();
                       setExpandedProjects((current) => {
                         const next = new Set(current);
-                        if (next.has(projectPath)) next.delete(projectPath);
+                        if (!switchingProject && next.has(projectPath)) next.delete(projectPath);
                         else next.add(projectPath);
                         return next;
                       });
-                      if (!active) invoke(() => bridge.activateProject(projectPath));
+                      if (switchingProject) invoke(() => bridge.openProject(projectPath));
                     }}
                     style={{
                       width: '100%', minHeight: 37, display: 'flex', alignItems: 'center', gap: 9,

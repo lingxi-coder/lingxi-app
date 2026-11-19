@@ -1879,6 +1879,31 @@ export function useBridge(): UseBridge {
     }
   }, [beginNavigationOperation, capture, host, isCurrentNavigationOperation, patchBootstrap]);
 
+  const openProject = useCallback(async (projectPath: string) => {
+    if (!host || !bootstrapRef.current) return;
+    const operationId = beginNavigationOperation();
+    const mode = bootstrapRef.current.conversationSpaces.activeMode;
+    const target = { projectPath, projectId: projectPath, mode, sessionId: `pending-project:${operationId}` };
+    pendingSessionRef.current = target;
+    sessionLoadingRef.current = true;
+    setPendingSession(target);
+    setError(null);
+    let snapshot: BootstrapState;
+    try {
+      snapshot = await host.openProject(projectPath);
+    } catch (cause) {
+      if (isCurrentNavigationOperation(operationId)) capture(cause);
+      return;
+    } finally {
+      if (isCurrentNavigationOperation(operationId)) {
+        pendingSessionRef.current = null;
+        sessionLoadingRef.current = false;
+        setPendingSession(null);
+      }
+    }
+    if (isCurrentNavigationOperation(operationId)) applyBootstrap(snapshot);
+  }, [applyBootstrap, beginNavigationOperation, capture, host, isCurrentNavigationOperation]);
+
   const updateSessionWorkspace = useCallback(async (
     sessionId: string,
     operation: SessionWorkspaceOperation,
@@ -2981,6 +3006,7 @@ export function useBridge(): UseBridge {
     confirmProjectCreation,
     cancelProjectCreation,
     activateProject,
+    openProject,
     updateSessionWorkspace,
     removeProject,
     updateSidebarPreferences,

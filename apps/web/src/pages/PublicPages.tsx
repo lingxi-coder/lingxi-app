@@ -3,9 +3,10 @@ import { CodeTabs } from '../components/CodeTabs';
 import { HomeScenarios } from '../components/HomeScenarios';
 import {
   IconArrowRight,
+  IconChat,
   IconCheck,
-  IconDocs,
   IconDownload,
+  IconPhone,
 } from '../components/Icons';
 import { RouteLink } from '../components/RouteLink';
 import { releaseArtifacts, subscriptionPlans } from '../data/mockData';
@@ -56,19 +57,20 @@ export function HomePage({ locale }: { locale: Locale; region: Region }) {
             '你的个人辅助 Agent。帮你梳理想法、查找资料、处理日常任务，与你一起把事情做好。',
           )}
         </p>
-        <div className="landing-actions">
-          <RouteLink href="/download" className="landing-entry landing-entry-primary">
-            <IconDownload width={22} height={22} />
-            <span><strong>{t('Explore downloads', '查看下载选项')}</strong><small>{t('Platform versions & availability', '各平台版本与开放状态')}</small></span>
-            <IconArrowRight width={17} height={17} />
-          </RouteLink>
-          <RouteLink href="/docs" className="landing-entry">
-            <IconDocs width={22} height={22} />
-            <span><strong>{t('Documentation', '使用文档')}</strong><small>{t('Install, sessions, and models', '安装、会话与模型')}</small></span>
-            <IconArrowRight width={17} height={17} />
+        <div className="landing-cards">
+          {/* Chat is a separate document (its own security policy), so this is a plain link, not an in-page route. */}
+          <a href="/chat" className="landing-card landing-card-primary">
+            <span className="landing-card-icon"><IconChat width={24} height={24} /></span>
+            <span className="landing-card-text"><strong>{t('Start chatting', '开始对话')}</strong><small>{t('Talk with models, your teams, friends and Bots', '与模型、团队、好友和 Bot 对话')}</small></span>
+            <IconArrowRight className="landing-card-arrow" width={18} height={18} />
+          </a>
+          <RouteLink href="/download" className="landing-card">
+            <span className="landing-card-icon"><IconPhone width={24} height={24} /></span>
+            <span className="landing-card-text"><strong>{t('Get the app', '下载 App')}</strong><small>{t('For desktop and mobile', '桌面端与手机端，随时继续')}</small></span>
+            <IconArrowRight className="landing-card-arrow" width={18} height={18} />
           </RouteLink>
         </div>
-        <div className="landing-platforms"><span>{t('On the devices you use every day', '在你日常使用的设备上')}</span><span>macOS · Windows · Linux · iOS · Android</span></div>
+        <RouteLink href="/docs" className="landing-docs-link">{t('Read the documentation', '查看使用文档')} <IconArrowRight width={14} height={14} /></RouteLink>
       </section>
 
       <HomeScenarios locale={locale} />

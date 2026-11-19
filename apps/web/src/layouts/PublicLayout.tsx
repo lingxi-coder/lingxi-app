@@ -61,7 +61,6 @@ export function PublicLayout({
   if (activeRoute === '/') {
     const t = (en: string, zh: string) => pickLocaleText(locale, { en, zh });
     const navigation = <>
-      <RouteLink href="/inbox">{t('Inbox', '收件箱')}</RouteLink>
       <a href="#landing-scenarios">{t('Use cases', '使用场景')}</a>
       <RouteLink href="/download">{t('Download', '下载')}</RouteLink>
       <RouteLink href="/docs">{t('Docs', '文档')}</RouteLink>
@@ -79,6 +78,7 @@ export function PublicLayout({
               <IconGlobe width={16} height={16} /><span>{locale === 'en' ? '中文' : 'EN'}</span>
             </button>
             <ThemeToggle theme={theme} onToggle={onThemeToggle} locale={locale} />
+            <a href="/chat" className="landing-cta">{t('Start chatting', '开始对话')}</a>
             <LandingMenu locale={locale}>{navigation}</LandingMenu>
           </div>
         </header>

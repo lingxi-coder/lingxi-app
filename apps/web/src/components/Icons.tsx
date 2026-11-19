@@ -180,3 +180,14 @@ export function IconClose(props: SVGProps<SVGSVGElement>) {
     props,
   );
 }
+
+export function IconChat(props: SVGProps<SVGSVGElement>) {
+  return createIcon(
+    <>
+      <path d="M4.5 6.5A2.5 2.5 0 0 1 7 4h10a2.5 2.5 0 0 1 2.5 2.5v7A2.5 2.5 0 0 1 17 16h-6l-4.5 3.5V16H7a2.5 2.5 0 0 1-2.5-2.5v-7Z" />
+      <path d="M8.5 9h7" />
+      <path d="M8.5 12h4.5" />
+    </>,
+    props,
+  );
+}

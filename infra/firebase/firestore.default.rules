@@ -155,6 +155,9 @@ service cloud.firestore {
     match /users/{uid}/inboxBadges/{shard} { allow read: if isSelf(uid); }
     match /users/{uid}/inboxSignals/{shard} { allow read: if isSelf(uid); }
 
+    // Model-provider keys, sealed. Only llmApi reads or writes them; no client, not even the owner, reads a record.
+    match /llmVault/{document=**} { allow read, write: if false; }
+
     match /users/{uid}/teams/{tid} { allow get, list: if isSelf(uid); }
     match /users/{uid}/friends/{other} { allow get, list: if isSelf(uid); }
     match /users/{uid}/blocks/{other} { allow get, list: if isSelf(uid); }

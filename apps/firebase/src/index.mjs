@@ -25,6 +25,9 @@ import { FriendsStore, friendNotifier } from './friends.mjs';
 import { sweepUploads } from './team-attachments.mjs';
 import { OAuth2Client } from 'google-auth-library';
 import { createTeamMarketEligibilityHandler, TeamMarketEligibilityStore } from './team-market-eligibility.mjs';
+import { createLlmHandler } from './llm-api.mjs';
+import { VaultStore, parseKeyring } from './llm-vault.mjs';
+import { serveStreaming } from './llm-http.mjs';
 
 const app = initializeApp();
 const seed = JSON.parse(readFileSync(new URL('./seed.json', import.meta.url), 'utf8'));
@@ -276,3 +279,19 @@ export const marketTeamEligibility = onRequest({ region: 'us-central1', minInsta
   output.headers.forEach((value, key) => res.set(key, value));
   res.status(output.status).send(Buffer.from(await output.arrayBuffer()));
 });
+
+// Model-provider key vault and proxy. Keys are sealed under the `provider-vault-key` keyring (Secret Manager) and the
+// function runs as its own identity, which alone may read that secret. The Web calls the function URL directly
+// (Hosting rewrites cap at 60 s and may buffer a stream); `/v1/llm` on Hosting serves the rest.
+const vaultKey = defineSecret('provider-vault-key');
+let vaultKeyring;
+const llmHandler = createLlmHandler({
+  vault: new VaultStore(teamsDb, () => (vaultKeyring ??= parseKeyring(vaultKey.value()))),
+  verifyToken: token => getAuth(app).verifyIdToken(token, true),
+  origins: ['https://lingxios.net', 'https://lingxi-5e4b2.web.app', 'https://lingxi-5e4b2.firebaseapp.com',
+    'http://localhost:5173', 'http://127.0.0.1:5173'],
+  observe: entry => info('llm.request', entry),
+});
+export const llmApi = onRequest({ region: 'us-central1', minInstances: 0, maxInstances: 4, memory: '256MiB', timeoutSeconds: 300,
+  invoker: 'public', serviceAccount: 'llm-proxy@lingxi-5e4b2.iam.gserviceaccount.com', secrets: [vaultKey] },
+(req, res) => serveStreaming(llmHandler, req, res, 'https://llm.internal'));

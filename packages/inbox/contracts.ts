@@ -20,6 +20,8 @@ export interface InboxItem extends InboxPreferences {
   ref: InboxRef;
   category: InboxCategory;
   peerUid?: string;
+  /** A team row's conversation kind; absent on rows folded before it existed. */
+  conversationKind?: 'dm' | 'group' | 'channel' | 'bot_dm';
   sourceLabel?: string;
   remoteHostId?: string;
   title: string;

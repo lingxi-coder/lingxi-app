@@ -174,6 +174,29 @@ test('initialTeamId picks the team to open when it is listed', async context => 
   assert.equal(snapshot().team?.generation, 2);
 });
 
+test('openConversation before the list arrives opens that team and conversation', async context => {
+  const { workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
+  workspace.openConversation('team-bbbb', 'chan-b');
+  await until(() => snapshot().selectedTeamId === 'team-bbbb' && snapshot().selectedConversationId === 'chan-b', 'team B, chan-b');
+});
+
+test('openConversation after the list moves to another team and conversation, and within the open team', async context => {
+  const { workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
+  await until(() => snapshot().conversations.length === 2, 'team A');
+  workspace.openConversation('team-aaaa', 'dm-a');
+  await until(() => snapshot().selectedConversationId === 'dm-a', 'dm-a in the open team');
+  workspace.openConversation('team-bbbb', 'chan-b');
+  await until(() => snapshot().selectedTeamId === 'team-bbbb' && snapshot().selectedConversationId === 'chan-b', 'team B, chan-b');
+});
+
+test('openConversation of a team the viewer is not in leaves that team missing from the list', async context => {
+  const { workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
+  workspace.openConversation('team-zzzz', 'chan-z');
+  await until(() => !snapshot().loading, 'the list');
+  assert.ok(!snapshot().teams.some(value => value.id === 'team-zzzz'));
+  assert.notEqual(snapshot().selectedTeamId, 'team-zzzz', 'the chat pane reads this as no access');
+});
+
 test('switching teams closes the previous controller and leaves no listeners on the inactive team', async context => {
   const { fake, workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
   await until(() => snapshot().conversations.length === 2, 'team A');

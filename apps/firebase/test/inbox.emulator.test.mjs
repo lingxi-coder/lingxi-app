@@ -499,6 +499,7 @@ test('friend card uses incoming projection count and pair key with consent-gated
   assert.equal(row.title, 'Friend');
   assert.equal(row.category, 'friend');
   assert.equal(row.key, key);
+  assert.equal(row.conversationKind, 'dm', 'rows say what kind of conversation they are');
   assert.equal((await db.doc('users/me/friends/peer').get()).data().unreadCount, 2);
   await store.fold('peer', ref);
   assert.equal((await db.doc('users/peer/friends/me').get()).data().unreadCount, 0);

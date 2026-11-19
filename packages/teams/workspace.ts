@@ -575,6 +575,18 @@ export class TeamsWorkspace {
   // ── Conversations and messaging ──
 
   selectConversation = (id: string): void => { this.messaging?.select(id); };
+  /**
+   * Open one conversation of one team, from a link or a list outside the workspace: the team is selected now when it is
+   * listed, or once the list arrives. A team the viewer is not in is never replaced by another one; `loading` false with
+   * `teamId` missing from `teams` means the viewer has no access.
+   */
+  openConversation = (teamId: string, conversationId: string): void => {
+    if (this.closed || this.pair) return;
+    this.conversationByTeam.set(teamId, conversationId);
+    if (this.selection === teamId) { this.messaging?.select(conversationId); return; }
+    if (this.teams.some(team => team.id === teamId)) { this.selectTeam(teamId); return; }
+    if (!this.listed) this.initialTeamId = teamId;
+  };
   /** Reconnect the selected team's listeners and retry pending commands. */
   reconnect = (): void => { this.messaging?.reconnect(); };
   refreshBots = (): Promise<void> => this.botCards?.refresh() ?? Promise.resolve();

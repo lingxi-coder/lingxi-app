@@ -81,7 +81,7 @@ export function App() {
     onRegionChange: setRegion,
   };
 
-  if (route === '/chat' || route.startsWith('/chat/')) return <Suspense fallback={<main role="status">{locale === 'zh' ? '正在加载…' : 'Loading…'}</main>}><ChatPage locale={locale} target={parseChatRoute(route) ?? { kind: 'home' }} /></Suspense>;
+  if (route === '/chat' || route.startsWith('/chat/')) return <Suspense fallback={<main role="status">{locale === 'zh' ? '正在加载…' : 'Loading…'}</main>}><ChatPage locale={locale} target={parseChatRoute(route) ?? { kind: 'home' }} theme={theme} onLocaleChange={setLocale} onThemeToggle={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))} /></Suspense>;
   if (route === '/inbox' || route.startsWith('/inbox/')) return <Suspense fallback={null}><InboxPage locale={locale} focusKey={route.startsWith('/inbox/')?decodeURIComponent(route.slice(7)):undefined} /></Suspense>;
   if (route.startsWith('/open/')) return <OpenLinkPage locale={locale} />;
   if (route === '/teams' || route === '/teams/join') return <Suspense fallback={<main role="status">{locale === 'zh' ? '正在加载团队…' : 'Loading teams…'}</main>}><TeamsPage locale={locale} /></Suspense>;

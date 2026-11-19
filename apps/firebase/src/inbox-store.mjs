@@ -871,6 +871,8 @@ export class InboxStore {
         row.mentionCount = capped(row.mentionCount + added.filter(e => e.mention).length);
       }
       row.category = acl.scope.kind === 'pair' ? 'friend' : ref.kind;
+      // Clients group Bot DMs apart from people's chats; rows folded before this field fill it in on their next fold.
+      if (['dm', 'group', 'channel', 'bot_dm'].includes(chat.kind)) row.conversationKind = chat.kind;
       row.title = messagePreview(chat.title) || 'Chat';
       row.sourceLabel = messagePreview(acl.scope.name) || row.title;
       let card;

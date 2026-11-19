@@ -27,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -168,6 +169,12 @@ internal fun TeamConversationScreen(
                     onOpen = { showDetails = true },
                     modifier = Modifier.weight(1f),
                 ) { ConversationLead(conversation, members, bots, uid, strings, 40.dp, label) }
+                // A friendship's Bot chat (D22) has no link of its own: its pair team is not one Teams opens.
+                val shareLink = if (team.id.startsWith("f_")) null else TeamShareLinks.conversation(team.id, conversation)
+                if (shareLink != null) {
+                    val context = androidx.compose.ui.platform.LocalContext.current
+                    IconButton(onClick = { TeamShareLinks.share(context, shareLink, label) }, modifier = Modifier.testTag(TeamsTags.SHARE_LINK)) { Icon(Icons.Outlined.Share, stringResource(R.string.teams_share_link)) }
+                }
                 IconButton(onClick = { showDetails = true }, modifier = Modifier.testTag(TeamsTags.INFO)) { Icon(Icons.Outlined.Info, stringResource(R.string.teams_conversation_details)) }
             } else {
                 Text(

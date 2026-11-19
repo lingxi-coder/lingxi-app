@@ -10,6 +10,9 @@ enum FriendLink: Equatable, Sendable {
     case requests
     /// `friend/chat?uid=<1-128 URL-safe characters>`: the chat with one friend.
     case chat(uid: String)
+    /// A shared friend chat (`team/chat?team=f_…`): the friendship's pair team, whose friend is known once the cards are in.
+    /// Made by the link dispatch, never parsed here: the `friend/*` routes stay what this type reads.
+    case pair(teamID: String)
 
     /// The Friends destination of an already parsed link, or nil for any other route.
     init?(_ link: CanonicalDeepLink) {

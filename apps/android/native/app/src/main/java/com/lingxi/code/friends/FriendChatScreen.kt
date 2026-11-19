@@ -152,7 +152,9 @@ private fun FriendChat(
                     IconButton(onClick = { view = "bots" }, modifier = Modifier.testTag(FriendsTags.BOTS)) {
                         Icon(LXIconName.Bot.materialIcon, stringResource(R.string.friends_bots_title))
                     }
-                    FriendMenu(onProfile = { dialog = "profile" }, onRemove = { dialog = "remove" }, onBlock = { dialog = "block" })
+                    val shareContext = androidx.compose.ui.platform.LocalContext.current
+                    FriendMenu(onProfile = { dialog = "profile" }, onRemove = { dialog = "remove" }, onBlock = { dialog = "block" },
+                        onShare = com.lingxi.code.teams.TeamShareLinks.friendChat(summary.id)?.let { link -> { com.lingxi.code.teams.TeamShareLinks.share(shareContext, link, card.displayName) } })
                 },
             )
         }
@@ -184,14 +186,15 @@ private fun ChatUnavailable(showBack: Boolean, onBack: () -> Unit, modifier: Mod
     }
 }
 
-/** The chat header's menu (D10): View profile, Remove friend, Block. */
+/** The chat header's menu (D10): View profile, Share link, Remove friend, Block. */
 @Composable
-private fun FriendMenu(onProfile: () -> Unit, onRemove: () -> Unit, onBlock: () -> Unit) {
+private fun FriendMenu(onProfile: () -> Unit, onRemove: () -> Unit, onBlock: () -> Unit, onShare: (() -> Unit)? = null) {
     var open by remember { mutableStateOf(false) }
     Box {
         IconButton(onClick = { open = true }, modifier = Modifier.testTag(FriendsTags.CHAT_MENU)) { Icon(Icons.Outlined.MoreVert, stringResource(R.string.teams_conversation_menu)) }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             DropdownMenuItem(text = { Text(stringResource(R.string.friends_menu_view_profile)) }, onClick = { open = false; onProfile() })
+            if (onShare != null) DropdownMenuItem(text = { Text(stringResource(R.string.teams_share_link)) }, onClick = { open = false; onShare() }, modifier = Modifier.testTag(FriendsTags.SHARE_LINK))
             DropdownMenuItem(text = { Text(stringResource(R.string.friends_menu_remove), color = MaterialTheme.colorScheme.error) }, onClick = { open = false; onRemove() })
             DropdownMenuItem(text = { Text(stringResource(R.string.friends_menu_block), color = MaterialTheme.colorScheme.error) }, onClick = { open = false; onBlock() })
         }

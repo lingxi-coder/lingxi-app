@@ -271,6 +271,15 @@ struct FriendsTab: View {
             tabs.friendsRequest = nil
             resetNavigation()
             scrollToRequests += 1
+        case let .pair(teamID):
+            guard friends.cardsLoaded || friends.cardsFailed else { return }
+            tabs.friendsRequest = nil
+            if let uid = friends.cards.first(where: { $0.teamId == teamID })?.uid, friends.friend(uid) != nil {
+                open(.chat(uid))
+            } else {
+                resetNavigation()
+                friends.show(notice: String(localized: "friends_chat_unavailable"))
+            }
         case let .chat(uid):
             // The first snapshot of the cards says whether this is a friend.
             guard friends.cardsLoaded || friends.cardsFailed else { return }

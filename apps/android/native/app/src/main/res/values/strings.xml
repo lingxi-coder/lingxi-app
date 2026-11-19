@@ -3212,4 +3212,5 @@
     <string name="teams_share_link_failed">无法复制链接</string>
     <string name="teams_share_bot_note">每个人打开后进入自己与这个 Bot 的对话</string>
     <string name="teams_share_text_fmt">在灵犀中打开「%1$s」</string>
+    <string name="teams_link_unavailable">无法打开这个对话：你可能不在它所在的团队中，或者它已不再共享。</string>
 </resources>

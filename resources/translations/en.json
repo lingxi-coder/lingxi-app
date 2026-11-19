@@ -3805,5 +3805,6 @@
   "teams_share_link_copied": "Link copied",
   "teams_share_link_failed": "Couldn’t copy the link",
   "teams_share_bot_note": "Everyone who opens it gets their own chat with this Bot",
-  "teams_share_text_fmt": "Open “%1$s” in LingXi"
+  "teams_share_text_fmt": "Open “%1$s” in LingXi",
+  "teams_link_unavailable": "This conversation can’t be opened. You may not be in its team, or it is no longer shared."
 }

@@ -3795,5 +3795,6 @@
   "teams_share_link_copied": "リンクをコピーしました",
   "teams_share_link_failed": "リンクをコピーできませんでした",
   "teams_share_bot_note": "開いた人はそれぞれ自分とこの Bot のチャットに入ります",
-  "teams_share_text_fmt": "LingXi で「%1$s」を開く"
+  "teams_share_text_fmt": "LingXi で「%1$s」を開く",
+  "teams_link_unavailable": "この会話を開けません。そのチームのメンバーでないか、共有が終了しています。"
 }

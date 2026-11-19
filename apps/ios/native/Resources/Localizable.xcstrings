@@ -102264,6 +102264,40 @@
         }
       }
     },
+    "teams_link_unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法打开这个对话：你可能不在它所在的团队中，或者它已不再共享。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法開啟這個對話：你可能不在它所屬的團隊中，或它已不再共享。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This conversation can’t be opened. You may not be in its team, or it is no longer shared."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この会話を開けません。そのチームのメンバーでないか、共有が終了しています。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 대화를 열 수 없습니다. 해당 팀의 멤버가 아니거나 더 이상 공유되지 않습니다."
+          }
+        }
+      }
+    },
     "teams_list_add": {
       "localizations": {
         "zh-Hans": {

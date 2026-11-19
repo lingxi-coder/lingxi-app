@@ -17,6 +17,9 @@ sealed interface FriendLink {
     /** `friend/chat?uid=<1-128 URL-safe characters>`: the chat with one friend. */
     data class Chat(val uid: String, val expectedTeam: String? = null, val expectedGeneration: Long? = null, val conversationId: String? = null) : FriendLink
 
+    /** A shared friend chat (`team/chat?team=f_…`): the friendship's pair team, whose friend is known once the cards are in. */
+    data class Pair(val teamId: String) : FriendLink
+
     companion object {
         /** The Friends destination of an already parsed link, or null for any other route. */
         fun from(link: DeepLink?): FriendLink? {

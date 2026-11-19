@@ -81,6 +81,7 @@ internal object TeamsTags {
     const val SEND = "teams.send"
     const val BACK = "teams.back"
     const val INFO = "teams.info"
+    const val SHARE_LINK = "teams.shareLink"
     const val PILL = "teams.pill"
     const val UNREAD_DIVIDER = "teams.unreadDivider"
     const val COMPOSER_LOCK = "teams.composerLock"

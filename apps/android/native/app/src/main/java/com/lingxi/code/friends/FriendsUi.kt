@@ -76,6 +76,7 @@ internal object FriendsTags {
     const val CHAT = "friends.chat"
     const val CHAT_UNAVAILABLE = "friends.chatUnavailable"
     const val CHAT_MENU = "friends.chatMenu"
+    const val SHARE_LINK = "friends.shareLink"
     const val OFFERS = "friends.offers"
     const val BOTS = "friends.bots"
     const val BOTS_SCREEN = "friends.botsScreen"

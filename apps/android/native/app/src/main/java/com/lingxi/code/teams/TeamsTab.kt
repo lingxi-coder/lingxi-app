@@ -129,6 +129,23 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
             shell?.onInboxTeamHandled(request.id)
         }
     }
+    // A shared link opens its conversation in its own team only; a Bot opens the viewer's chat with it, or the team's details
+    // where starting one is the viewer's choice. A link never creates a chat.
+    val linkRequest = shell?.teamLinkRequest
+    val linkContext = androidx.compose.ui.platform.LocalContext.current
+    LaunchedEffect(linkRequest, uid, teams.loaded, teams.selectedId, teams.teams, messaging.cache?.teamId, messaging.cache?.conversations, messaging.botsLoaded, messaging.bots) {
+        val request = linkRequest ?: return@LaunchedEffect
+        when (val next = TeamShareLinks.step(request.request, uid, teams.loaded, teams.teams.map { it.id }, teams.selectedId, messaging)) {
+            TeamShareLinks.Step.Wait -> Unit
+            TeamShareLinks.Step.SelectTeam -> workspace.selectTeam(request.request.teamId)
+            TeamShareLinks.Step.Unavailable -> {
+                shell.onTeamLinkHandled(request.id)
+                android.widget.Toast.makeText(linkContext, linkContext.getString(R.string.teams_link_unavailable), android.widget.Toast.LENGTH_LONG).show()
+            }
+            is TeamShareLinks.Step.Open -> { setStack(listOf("c:${next.conversationId}")); shell.onTeamLinkHandled(request.id) }
+            TeamShareLinks.Step.Bots -> { setStack(listOf("details")); shell.onTeamLinkHandled(request.id) }
+        }
+    }
     fun dismissTop() {
         val next = stack.dropLast(1)
         setStack(next)

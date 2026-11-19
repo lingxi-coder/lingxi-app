@@ -27,6 +27,7 @@ class FriendLinkTest {
         is FriendLink.Add -> Triple("add", code, null)
         FriendLink.Requests -> Triple("requests", null, null)
         is FriendLink.Chat -> Triple("chat", null, uid)
+        is FriendLink.Pair -> Triple("pair", teamId, null)
     }
 
     @Test fun typedLinksFollowTheSharedVectors() {

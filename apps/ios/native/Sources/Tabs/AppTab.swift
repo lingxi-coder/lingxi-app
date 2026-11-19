@@ -44,6 +44,8 @@ final class TabCoordinator {
     /// fills the join form: a link never joins by itself.
     var teamsJoinCode: String?
     var teamInboxRequest: InboxRef?
+    /// A shared conversation or Bot link (`team/chat`, `team/bot`); `TeamsTab` carries it out once its team is open.
+    var teamLinkRequest: TeamShareLinks.Request?
     var teamServiceInboxRequest: InboxRef?
     var friendsInboxRequest: FriendsInboxRoute?
     /// A `friend/*` link or push; `FriendsTab` consumes it (once someone is signed in) and sets it back to nil. A

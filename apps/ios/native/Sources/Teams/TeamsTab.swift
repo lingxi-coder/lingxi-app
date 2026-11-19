@@ -25,6 +25,8 @@ struct TeamsTab: View {
 
     @State private var path: [TeamsRoute] = []
     @State private var sheet: TeamsSheet?
+    /// A shared link named a team the viewer is not in, or a Bot no longer shared.
+    @State private var linkUnavailable = false
     @State private var inboxService: InboxRef?
     /// What the join sheet starts with: the code of a `team/join` link, else nothing. A link never joins by itself.
     @State private var joinPrefill = ""
@@ -52,6 +54,7 @@ struct TeamsTab: View {
                 restoreOpenConversation()
             }.frame(width: 0, height: 0).allowsHitTesting(false).accessibilityHidden(true))
             .sheet(item: $sheet) { sheetContent($0) }
+            .alert(Text("teams_link_unavailable"), isPresented: $linkUnavailable) { Button("common_ok", role: .cancel) {} }
             .sheet(item: $inboxService) { ref in HostedServicesView(inboxDestination: ref) }
             .onChange(of: tabs.teamInboxRequest, initial: true) { _, _ in consumeInbox() }
             .onChange(of: tabs.teamServiceInboxRequest, initial: true) { _, value in
@@ -61,6 +64,7 @@ struct TeamsTab: View {
                 inboxService = value
             }
             .onChange(of: workspace.teams) { _, _ in consumeInbox() }
+            .onChange(of: linkProgress, initial: true) { _, _ in consumeLink() }
             .onChange(of: tabs.teamsJoinCode, initial: true) { _, _ in consumeJoinCode() }
             .onChange(of: workspace.uid) { _, uid in
                 resetNavigation()
@@ -299,6 +303,34 @@ struct TeamsTab: View {
         }
         tabs.teamInboxRequest = nil
         open(ref.conversationId)
+    }
+
+    /// What a shared link waits on: the request, the team list, the selection, the open team's conversations and Bots.
+    private var linkProgress: [String] {
+        guard let request = tabs.teamLinkRequest else { return [] }
+        let model = workspace.messaging
+        return ["\(request)", "\(workspace.listed)", workspace.teams.map(\.id).joined(separator: ","), workspace.selectedTeamID,
+                model?.cache?.teamId ?? "", "\(model?.botsLoaded ?? false)", "\(model?.bots.count ?? 0)", "\(model?.cache?.conversations.count ?? 0)"]
+    }
+
+    private func consumeLink() {
+        guard let request = tabs.teamLinkRequest else { return }
+        let model = workspace.messaging
+        switch TeamShareLinks.step(request, uid: workspace.uid, listed: workspace.listed, teamIDs: workspace.teams.map(\.id),
+                                   selectedTeamID: workspace.selectedTeamID, cacheTeamID: model?.cache?.teamId, botsLoaded: model?.botsLoaded ?? false,
+                                   bots: model?.bots ?? [], conversations: model?.cache?.conversations ?? []) {
+        case .wait: return
+        case .selectTeam: workspace.selectTeam(request.teamID)
+        case .unavailable:
+            tabs.teamLinkRequest = nil
+            linkUnavailable = true
+        case let .open(id):
+            tabs.teamLinkRequest = nil
+            open(id)
+        case .details:
+            tabs.teamLinkRequest = nil
+            showDetails()
+        }
     }
 
     private func open(_ id: String) {

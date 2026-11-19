@@ -229,6 +229,15 @@ struct TeamConversationView: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("teams.conversation.header")
             }
+            if let link = TeamShareLinks.link(teamID: context.team.id, conversation: conversation) {
+                ToolbarItem(placement: .topBarTrailing) {
+                    ShareLink(item: link, subject: Text(verbatim: context.label)) {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                    .accessibilityLabel(Text("teams_share_link"))
+                    .accessibilityIdentifier("teams.conversation.share")
+                }
+            }
             if context.pair == nil {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(action: openDetails) { Image(systemName: "info.circle") }

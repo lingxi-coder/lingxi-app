@@ -136,6 +136,21 @@ class TabShellState(selected: AppTab = AppTab.Chats, settingsOrigin: AppTab? = n
         if (inboxTeamRequest?.id == id) inboxTeamRequest = null
     }
 
+    /** A shared conversation or Bot link (`team/chat`, `team/bot`), carried out by the Teams tab once its team is open. */
+    internal data class TeamLinkRequest(val id: Long, val request: com.lingxi.code.teams.TeamShareLinks.Request)
+
+    internal var teamLinkRequest: TeamLinkRequest? by mutableStateOf(null)
+        private set
+
+    internal fun openTeamLink(request: com.lingxi.code.teams.TeamShareLinks.Request) {
+        teamLinkRequest = TeamLinkRequest(nextId(), request)
+        selected = AppTab.Teams
+    }
+
+    internal fun onTeamLinkHandled(id: Long) {
+        if (teamLinkRequest?.id == id) teamLinkRequest = null
+    }
+
     fun onTeamsJoinCodeHandled() {
         teamsJoinCode = null
     }

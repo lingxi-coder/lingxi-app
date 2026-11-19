@@ -4056,10 +4056,21 @@ struct RootView: View {
         case "terminal":
             navigation.openTerminal(sessionID: id, initialCommand: target.payload["command"] as? String, projectID: activeScope.projectID)
         case "team":
-            // `team/join?code=` only fills the join form (never joins by itself); `team/inbox` has no code.
+            // `team/join?code=` only fills the join form (never joins by itself); `team/inbox` has no code. A shared
+            // conversation or Bot (`team/chat`, `team/bot`) opens in its own team; a friendship's (`f_…`) in Friends.
             navigation.closeSidebar()
-            navigation.tabs.teamsJoinCode = target.params["code"]
-            navigation.selectedTab = .teams
+            if target.route == "team/chat", let team = target.params["team"], team.hasPrefix("f_") {
+                navigation.tabs.friendsRequest = .pair(teamID: team)
+                navigation.selectedTab = .friends
+            } else if let request = TeamShareLinks.Request(target) {
+                navigation.tabs.teamLinkRequest = request
+                navigation.selectedTab = .teams
+            } else if target.route == "team/chat" || target.route == "team/bot" {
+                return missingLinkedResource("destination")
+            } else {
+                navigation.tabs.teamsJoinCode = target.params["code"]
+                navigation.selectedTab = .teams
+            }
         case "friend":
             // `friend/add?code=` only opens a confirmation (docs/FRIENDS-CLIENTS.md D8); the Friends tab takes the request
             // once someone is signed in. `needsContextRebind` is false for it: no workspace or mode parameter is accepted.

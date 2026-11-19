@@ -430,6 +430,12 @@ class MainActivity : ComponentActivity() {
                     when {
                         link.route.startsWith("market/bot/") -> { botMarketHandoffRaw = raw; com.lingxi.code.apps.BotMarketHandoff(parts[2], link.params["versionId"], link.params["intentId"]).save(applicationContext) }
                         link.route in setOf("team/join", "team/inbox") -> tabState.requestTeams(link.params["code"])
+                        link.route == "team/chat" || link.route == "team/bot" -> when (val request = com.lingxi.code.teams.TeamShareLinks.request(link)) {
+                            null -> handled = false
+                            // A friendship's link names its pair team; Friends finds the friend once its cards are in.
+                            is com.lingxi.code.teams.TeamShareLinks.Request.Pair -> tabState.requestFriends(com.lingxi.code.friends.FriendLink.Pair(request.teamId))
+                            else -> tabState.openTeamLink(request)
+                        }
                         parts.first() == "remote" -> com.lingxi.code.remote.RemoteRoute.fromLink(link)
                             ?.let { tabState.requestBots(it.hostId, it.sessionId) } ?: run { handled = false }
                         parts.first() == "friend" -> com.lingxi.code.friends.FriendLink.from(link)?.let(tabState::requestFriends) ?: run { handled = false }

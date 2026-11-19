@@ -137,6 +137,11 @@ internal fun FriendsTab(
                     inboxConversation = target.conversationId?.takeUnless { it == FriendsLogic.CHAT_CONVERSATION_ID }
                 } else { setStack(emptyList()); workspace.chatUnavailable() }
             }
+            is FriendLink.Pair -> {
+                if (!state.cardsLoaded) return@LaunchedEffect
+                val friend = state.cards.firstOrNull { it.pair?.teamId == target.teamId }?.uid?.takeIf { state.friendCard(it) != null }
+                if (friend != null) openChat(friend) else { setStack(emptyList()); workspace.chatUnavailable() }
+            }
         }
         onRequestHandled(pending.id)
     }

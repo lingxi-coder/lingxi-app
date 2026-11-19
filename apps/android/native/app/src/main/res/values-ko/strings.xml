@@ -3212,4 +3212,5 @@
     <string name="teams_share_link_failed">링크를 복사할 수 없습니다</string>
     <string name="teams_share_bot_note">링크를 연 사람마다 이 Bot과의 자신만의 채팅이 열립니다</string>
     <string name="teams_share_text_fmt">LingXi에서 “%1$s” 열기</string>
+    <string name="teams_link_unavailable">이 대화를 열 수 없습니다. 해당 팀의 멤버가 아니거나 더 이상 공유되지 않습니다.</string>
 </resources>

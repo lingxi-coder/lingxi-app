@@ -3795,5 +3795,6 @@
   "teams_share_link_copied": "已複製連結",
   "teams_share_link_failed": "無法複製連結",
   "teams_share_bot_note": "每個人開啟後會進入自己與這個 Bot 的對話",
-  "teams_share_text_fmt": "在靈犀中開啟「%1$s」"
+  "teams_share_text_fmt": "在靈犀中開啟「%1$s」",
+  "teams_link_unavailable": "無法開啟這個對話：你可能不在它所屬的團隊中，或它已不再共享。"
 }

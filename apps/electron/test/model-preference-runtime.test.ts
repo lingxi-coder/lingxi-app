@@ -302,6 +302,49 @@ test('model confirmation still times out after dispatch and ignores a late ACK',
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('a model switch requested during a long compact is confirmed before the pending prompt is dispatched', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-during-compact-'));
+  const store = new SettingsStore(dir); store.setLastModel('old-model');
+  const { instance, client, commands } = runtime(store, defaultRef, async () => undefined);
+  const dispatched: Array<{ text: string; model: string }> = [];
+  instance.refreshProviderAccounts = async () => undefined;
+  client.emit('event', { type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}' });
+  Object.assign(client, { sendPrompt: (text: string) => dispatched.push({
+    text, model: store.getPublic().model,
+  }) });
+  await instance.dispatchCommand({ type: 'force_compact' });
+  client.emit('event', { type: 'compaction_status', phase: 'preparing' });
+  const earlierPrompt = instance.sendPrompt('already pending');
+  const selection = instance.dispatchCommand({ type: 'set_model', model: 'new-model' });
+  const prompt = instance.sendPrompt('follow up');
+  const settled = Promise.allSettled([earlierPrompt, selection, prompt]);
+  try {
+    await tick();
+    t.mock.timers.tick(90_000);
+    await tick();
+    assert.deepEqual(modelPreferenceCommands(commands), [{ type: 'force_compact' }]);
+    assert.equal(store.getPublic().model, 'old-model');
+    assert.deepEqual(dispatched, []);
+    client.emit('event', { type: 'compaction_status', phase: 'error', error: 'Summary failed' });
+    client.emit('event', { type: 'error', kind: { type: 'internal' }, message: 'force_compact failed: Summary failed' });
+    await tick();
+    assert.deepEqual(modelPreferenceCommands(commands), [{ type: 'force_compact' }, { type: 'set_model', model: 'new-model' }]);
+    t.mock.timers.tick(9_999);
+    client.emit('event', { type: 'model_changed', model: 'new-model' });
+    await Promise.all([earlierPrompt, selection, prompt]);
+    assert.deepEqual(dispatched, [
+      { text: 'already pending', model: 'new-model' },
+      { text: 'follow up', model: 'new-model' },
+    ]);
+  } finally {
+    client.emit('event', { type: 'compaction_status', phase: 'cancelled' });
+    instance.cancelTurn(undefined);
+    await settled;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('cancelling a slow credential wait permits a fresh switch without sending the stale selection', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const dir = mkdtempSync(join(tmpdir(), 'lingxi-model-cancel-credential-'));
@@ -366,7 +409,7 @@ test('failed and interrupted model switches retain the saved choice', async () =
     const { instance, client } = runtime(store);
     const selection = instance.dispatchCommand({ type: 'set_model', model: 'invalid-model' });
     await tick();
-    client.emit('event', { type: 'error', kind: { type: 'rejected' }, message: 'unknown model' });
+    client.emit('event', { type: 'error', kind: { type: 'internal' }, message: 'switch_model failed: unknown model' });
     await assert.rejects(selection, /Model switch failed/);
     const interrupted = instance.dispatchCommand({ type: 'set_model', model: 'new-model' });
     await tick();

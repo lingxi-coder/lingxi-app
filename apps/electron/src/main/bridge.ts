@@ -314,7 +314,8 @@ export class SessionRuntime {
   private readonly latestState = new Map<string, SequencedRuntimeEventEnvelope<ClientEvent>>();
   private remotePendingNotified = false;
   private credentialRoutingSettings: unknown = undefined;
-  private pendingModelSwitch: { model: string; sent: boolean; slash: boolean; turnId?: number; promise: Promise<void>; complete(selected?: string): void; confirmAlias(): void; fail(error: Error): void } | undefined;
+  private pendingModelSwitch: { model: string; sent: boolean; slash: boolean; turnId?: number; promise: Promise<void>; updateConfirmationTimeout(): void; complete(selected?: string): void; confirmAlias(): void; fail(error: Error): void } | undefined;
+  private pendingCompaction: { done: Promise<void>; finish(): void } | undefined;
 
   private pendingPermissionSwitch: {
     mode: PermissionModeId;
@@ -473,6 +474,14 @@ export class SessionRuntime {
     };
     const pending = {
       model, sent: false, slash: !!slashCommand, turnId: slashCommand?.turn_id ?? undefined, promise,
+      updateConfirmationTimeout: (): void => {
+        clearTimeout(timer);
+        // Manual compaction can hold the bridge's command lane. Give the
+        // model acknowledgement its own budget once that lane is available.
+        if (current() && !this.pendingCompaction) {
+          timer = setTimeout(() => finish(new Error('Model switch confirmation timed out.')), 10_000);
+        }
+      },
       complete: (selected = model) => {
         try {
           if (persist) this.opts.onModelSelected?.(selected);
@@ -502,6 +511,12 @@ export class SessionRuntime {
     this.notifyActivityChanged();
     void (async () => {
       try {
+        // Credential RPCs share the model command lane. Wait before starting
+        // any of them so a blocked compact cannot exhaust their own budgets.
+        while (this.pendingCompaction && this.pendingModelSwitch === pending) {
+          await this.pendingCompaction.done;
+        }
+        if (this.pendingModelSwitch !== pending) return;
         if (hydrateCredentials) await this.ensureModelProviderCredential(model);
         if (this.pendingModelSwitch !== pending) return;
         if (generation !== this.generation || client !== this.client || this.archiving) {
@@ -512,7 +527,7 @@ export class SessionRuntime {
         pending.sent = true;
         // Credential hydration has its own I/O budget. Start the model ACK
         // budget only once dispatch is admitted, before any synchronous reply.
-        timer = setTimeout(() => finish(new Error('Model switch confirmation timed out.')), 10_000);
+        pending.updateConfirmationTimeout();
         if (slashCommand) this.sendTrackedSlashCommand(client, slashCommand);
         else client.sendCommand({ type: 'set_model', model });
       } catch (error) {
@@ -520,6 +535,20 @@ export class SessionRuntime {
       }
     })();
     return promise;
+  }
+
+  private setCompactionActive(active: boolean): void {
+    if (Boolean(this.pendingCompaction) === active) return;
+    if (active) {
+      let finish!: () => void;
+      const done = new Promise<void>(resolve => { finish = resolve; });
+      this.pendingCompaction = { done, finish };
+    } else {
+      this.pendingCompaction?.finish();
+      this.pendingCompaction = undefined;
+    }
+    this.pendingModelSwitch?.updateConfirmationTimeout();
+    this.notifyActivityChanged();
   }
 
   private readonly pendingPromptHydrations = new Map<symbol, number | undefined>();
@@ -1219,7 +1248,7 @@ export class SessionRuntime {
   get hasActiveMetadata(): boolean { return this.metadataOperations > 0; }
 
   get hasActiveWork(): boolean {
-    return this.hasActiveAudio || this.metadataOperations > 0 || this.resumeOperationInProgress || this.changingWorkspace || this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0 || this.turnActive || this.pendingSlashCommands.size > 0 || this.hasActiveAgents || this.pendingInteractions > 0;
+    return this.hasActiveAudio || this.metadataOperations > 0 || this.resumeOperationInProgress || this.changingWorkspace || this.liveSideChats.size > 0 || this.pendingSideCreates.size > 0 || this.turnActive || this.pendingCompaction !== undefined || this.pendingSlashCommands.size > 0 || this.hasActiveAgents || this.pendingInteractions > 0;
   }
 
   private currentResumeOwner(): PendingSessionResume | null {
@@ -2957,6 +2986,14 @@ export class SessionRuntime {
       if (event.type === 'error' && event.message.startsWith('set_fast_mode failed:')) {
         this.pendingFastModeSwitch?.fail(new Error(sanitizeDiagnostic(event.message)));
       }
+      if (event.type === 'compaction_status' && event.phase === 'preparing') {
+        this.setCompactionActive(true);
+      } else if (event.type === 'compaction_completed'
+        || event.type === 'compaction_status' && ['complete', 'error', 'cancelled', 'skipped'].includes(event.phase)
+        || event.type === 'error' && /^(?:force_compact failed:|cannot compact the session while a turn is in flight)/i.test(event.message)
+        || event.type === 'turn_ended' || event.type === 'session_ended' || event.type === 'session_started' || event.type === 'session_resumed') {
+        this.setCompactionActive(false);
+      }
       if (event.type === 'error') {
         this.diagnostics.add('error', 'bridge', diagnosticEvent('client_error', {
           sessionId: this.opts.sessionId,
@@ -2967,7 +3004,9 @@ export class SessionRuntime {
           message: event.message,
         }));
         this.pendingCredentialSettings?.reject(new Error('Provider settings loading failed.'));
-        this.pendingModelSwitch?.fail(new Error('Model switch failed.'));
+        if (this.pendingModelSwitch?.sent && /^switch_model failed:/i.test(event.message)) {
+          this.pendingModelSwitch?.fail(new Error('Model switch failed.'));
+        }
       }
       if (event.type === 'slash_command_result' && event.is_error) {
         this.diagnostics.add('error', 'bridge', diagnosticEvent('slash_command_error', {
@@ -3402,17 +3441,25 @@ export class SessionRuntime {
     const context = visualizationContext === undefined || visualizationContext === null
       ? undefined
       : parseVisualizationReference(visualizationContext);
-    if (this.opts.resolveProviderAccounts) {
+    if (this.opts.resolveProviderAccounts || this.pendingModelSwitch || this.pendingCompaction) {
       const generation = this.generation;
       const client = this.requireClient();
-      const token = Symbol('prompt hydration');
+      const token = Symbol('pending prompt');
       this.pendingPromptHydrations.set(token, id);
       this.notifyActivityChanged();
       return (async () => {
         try {
+          // During a compact, leave the prompt pending locally so a model
+          // selected after Send still takes effect before the prompt is sent.
+          while (this.pendingCompaction && this.pendingPromptHydrations.has(token)) {
+            await this.pendingCompaction.done;
+          }
+          if (!this.pendingPromptHydrations.has(token)) throw new Error('Pending prompt was interrupted.');
           if (this.pendingModelSwitch) await this.pendingModelSwitch.promise;
-          if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
-          if (this.selectedModelReference) await this.ensureModelProviderCredential(this.selectedModelReference);
+          if (this.opts.resolveProviderAccounts) {
+            if (this.credentialRoutingSettings === undefined) await this.ensureCredentialSettings();
+            if (this.selectedModelReference) await this.ensureModelProviderCredential(this.selectedModelReference);
+          }
           if (this.archiving || !this.pendingPromptHydrations.has(token) || generation !== this.generation || client !== this.client) throw new Error('Prompt credential loading was interrupted.');
           this.sendPreparedPrompt(prompt, validatedImages, id, context, source, admission, token);
         } finally {
@@ -3875,7 +3922,12 @@ export class SessionRuntime {
     if (validated.type === 'run_slash_command') this.assertModeReadyForSlashCommand();
     authorize?.();
     const client = this.requireClient();
-    if (validated.type === 'run_slash_command') this.sendTrackedSlashCommand(client, validated);
+    if (validated.type === 'force_compact') {
+      if (this.pendingCompaction) return;
+      this.setCompactionActive(true);
+      try { client.sendCommand(validated); }
+      catch (error) { this.setCompactionActive(false); throw error; }
+    } else if (validated.type === 'run_slash_command') this.sendTrackedSlashCommand(client, validated);
     else client.sendCommand(validated);
     this.commitFusionHistory(validated);
     this.journalSlashCommand(validated, source);
@@ -4247,6 +4299,7 @@ export class SessionRuntime {
       this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
       this.pendingFastModeSwitch?.fail(new Error('Fast mode change was interrupted.'));
       this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
+      this.setCompactionActive(false);
       // `runScheduledTurn` sets `activeTurn` by hand and only the
       // `scheduled_run_finished` handler clears it — and that handler needs the
       // pending entry this block is about to delete. Without this the latch
@@ -4299,6 +4352,7 @@ export class SessionRuntime {
     this.pendingPermissionSwitch?.fail(new Error('Permission mode change was interrupted.'));
     this.pendingFastModeSwitch?.fail(new Error('Fast mode change was interrupted.'));
     this.pendingModelSwitch?.fail(new Error('Model switch was interrupted.'));
+    this.setCompactionActive(false);
     this.pendingCredentialSettings?.reject(new Error('Provider settings loading was interrupted.'));
     this.pendingCredentialSettings = undefined;
     this.credentialRoutingSettings = undefined;

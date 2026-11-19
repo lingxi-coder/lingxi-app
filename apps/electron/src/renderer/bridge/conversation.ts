@@ -525,9 +525,11 @@ export function acknowledgePromptDispatch(state: ConversationState, prompt: RunI
   return { ...state, items };
 }
 
-/** Lifecycle events also settle markers when they arrive before the host acknowledgement. */
-function settlePendingPrompts(items: readonly RunItem[]): RunItem[] {
+/** A tracked prompt may still be waiting behind a compact or model switch. */
+function settlePendingPrompts(items: readonly RunItem[], startedTurnId?: number): RunItem[] {
+  const token = startedTurnId === undefined ? undefined : `client-turn:${startedTurnId}`;
   return items.map((item) => item.type === 'narration' && item.delivery === 'pending'
+    && (item.transcriptRowToken === undefined || item.transcriptRowToken === token)
     ? { ...item, delivery: undefined } : item);
 }
 
@@ -650,7 +652,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
         const next = state.pendingSlashPrompt ? appendUserPrompt(state, state.pendingSlashPrompt, [], now) : state;
         return {
           ...next,
-          items: settlePendingPrompts(next.items),
+          items: settlePendingPrompts(next.items, event.turn_id),
           running: true,
           promptSuggestion: undefined,
           suggestionTurn: (state.suggestionTurn ?? 0) + 1,
@@ -951,6 +953,9 @@ export function reduceEvent(state: ConversationState, event: ClientEvent, now = 
         };
         return { ...state, items };
       }
+      // A phase update can arrive after its terminal event. Only an explicit
+      // start can open another operation once this transcript has a compact row.
+      if (phase !== 'preparing' && state.items.some((item) => item.type === 'compaction')) return state;
       const id = itemId(state.nextId);
       return {
         ...state,

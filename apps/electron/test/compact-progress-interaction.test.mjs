@@ -74,17 +74,22 @@ test('real Electron compaction keeps one minimal row through engine phases and c
       assert.equal(progress.rowCount, 1, `${phase} must reuse one progress row`);
       assert.equal(progress.progressCount, 0);
       assert.equal(progress.valueNow, null);
-      assert.equal(progress.elapsed, null);
+      assert.match(progress.elapsed, /^\d+s$/);
+      assert.equal(progress.animation, 'text-sweep');
       assert.equal(progress.title, 'Compacting context');
       assert.equal(progress.id, result.preparing.id);
       assert.equal(progress.item.status, 'running');
     }
     assert.equal(result.aged.title, 'Compacting context');
+    assert.match(result.aged.elapsed, /^1m 3\ds$/);
+    assert.notEqual(result.ticked.elapsed, result.aged.elapsed);
     assert.equal(result.remounted.title, 'Compacting context');
     assert.equal(result.remounted.item.startedAt, result.aged.item.startedAt);
     assert.equal(result.aged.item.phaseStartedAt, result.remounted.item.phaseStartedAt);
     assert.equal(result.complete.progressCount, 0);
     assert.equal(result.complete.title, 'Context automatically compacted');
+    assert.equal(result.complete.elapsed, null);
+    assert.equal(result.complete.animation, 'none');
     assert.doesNotMatch(result.complete.text, /%|\d+s|saved/);
     assert.equal(result.complete.rowCount, 1);
     assert.equal(result.complete.id, result.preparing.id);

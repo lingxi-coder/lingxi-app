@@ -35,7 +35,8 @@ async function main() {
         title: row?.querySelector('.compact-status-title')?.textContent ?? '',
         progressCount: document.querySelectorAll('[role="progressbar"]').length,
         valueNow: progress?.getAttribute('aria-valuenow') ?? null,
-        elapsed: row?.querySelector('.compact-status-elapsed')?.getAttribute('aria-label') ?? null,
+        elapsed: row?.querySelector('.compact-status-elapsed')?.textContent ?? null,
+        animation: row ? getComputedStyle(row.querySelector('.compact-status-title')).animationName : null,
         id: state.items.find((item) => item.type === 'compaction')?.id,
         item: state.items.find((item) => item.type === 'compaction'),
         summaries: state.summaries,
@@ -71,6 +72,8 @@ async function main() {
     }
 
     results.aged = await snapshot();
+    await waitFor(webContents, `document.querySelector('.compact-status-elapsed')?.textContent !== ${JSON.stringify(results.aged.elapsed)}`);
+    results.ticked = await snapshot();
     await webContents.executeJavaScript('window.compactFixture.remount()');
     results.remounted = await snapshot();
 

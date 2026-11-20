@@ -1,7 +1,7 @@
 import type { NarrationRunItem, RunItem, ToolRunItem } from '../model/runItem';
 import { localAppReference } from '../model/localAppReference';
 import { localAppToolRequiresCode } from '../bridge/localAppErrors';
-import { transcriptToolKey } from './toolPresentation';
+import { transcriptToolGroupingKey } from './toolPresentation';
 import { skillInstructionNames } from './localAppInstructionPresentation';
 
 export interface TranscriptToolGroup {
@@ -43,8 +43,8 @@ export function transcriptRows(items: readonly RunItem[], running: boolean, hasP
         group = undefined;
         continue;
       }
-      const key = transcriptToolKey(item);
-      if (!group || !key || key !== transcriptToolKey(group.tools[0]!)) {
+      const key = transcriptToolGroupingKey(item);
+      if (!group || !key || key !== transcriptToolGroupingKey(group.tools[0]!)) {
         group = { type: 'tool-group', id: `tool-group:${item.id}`, tools: [] };
         rows.push(group);
       }

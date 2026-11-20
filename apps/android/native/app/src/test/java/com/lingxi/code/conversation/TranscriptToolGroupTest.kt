@@ -15,10 +15,10 @@ class TranscriptToolGroupTest {
         assertTrue(buildChatRenderItems(state(restored.copy(skillName = null))).single() is ChatRenderItem.Message)
     }
 
-    @Test fun activityTypesNeverReorderOrMergeAcrossOtherCalls() {
+    @Test fun routineActivitiesMergeWithoutReorderingAcrossSpecialTools() {
         val calls = listOf("Read", "Read", "Edit", "Read", "mcp__a__search", "mcp__b__search", "Skill", "skill", "Read", "Skill")
             .mapIndexed { index, name -> ToolCallUi(index.toString(), name) }
-        assertEquals(listOf(listOf("0", "1"), listOf("2"), listOf("3"), listOf("4"), listOf("5"), listOf("6", "7"), listOf("8"), listOf("9")),
+        assertEquals(listOf(listOf("0", "1", "2", "3"), listOf("4"), listOf("5"), listOf("6", "7"), listOf("8"), listOf("9")),
             consecutiveToolGroups(calls).map { group -> group.map { it.id } })
         assertEquals(calls, consecutiveToolGroups(calls).flatten())
     }

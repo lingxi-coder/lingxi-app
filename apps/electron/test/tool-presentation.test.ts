@@ -8,26 +8,28 @@ import { ToolGroup } from '../src/renderer/components/ToolGroup';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
 import type { ToolRunItem } from '../src/renderer/model/runItem';
+import { loadLocaleCatalog } from '../src/renderer/i18n/locale';
 import { withDesktopLocale } from './support/language';
 (globalThis as { React?: typeof React }).React = React;
+await loadLocaleCatalog('zh-Hans');
 const tool = (verb: string, id = verb): ToolRunItem => ({ type: 'tool', id, tool: verb, status: 'done', view: { verb, label: verb, title: verb, primary: '/work/notes.md' } });
 const render = (element: React.ReactElement) => renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(false) }, element));
 
 test('group prose accounts for every activity in first appearance order', () => {
-  assert.equal(toolGroupSummary([tool('update'), tool('read'), tool('read', 'read2'), tool('shell'), tool('shell', 'shell2')]), 'Edit files · 1 call / Read files · 2 calls / Run commands · 2 calls');
-  assert.equal(toolGroupSummary([tool('read')]), 'Read files · 1 call');
+  assert.equal(toolGroupSummary([tool('update'), tool('read'), tool('read', 'read2'), tool('shell'), tool('shell', 'shell2'), tool('read', 'read3')]), 'Edited files, Read files, Ran commands');
+  assert.equal(toolGroupSummary([tool('read')]), 'Read files');
   assert.equal(toolGroupSummary([]), '');
 });
-test('group counts describe calls rather than claim unique files or successful outcomes', () => {
+test('repeated actions share one label and mixed outcomes use neutral wording', () => {
   const repeated = [tool('read', 'first'), { ...tool('read', 'retry'), status: 'error' as const }];
-  assert.equal(withDesktopLocale('zh-Hans', () => toolGroupSummary(repeated)), '读取文件 · 2 次');
-  assert.equal(withDesktopLocale('en', () => toolGroupSummary(repeated)), 'Read files · 2 calls');
+  assert.equal(withDesktopLocale('zh-Hans', () => toolGroupSummary(repeated)), '读取文件');
+  assert.equal(withDesktopLocale('en', () => toolGroupSummary(repeated)), 'Read files');
 });
 
 test('task progress labels are localized without exposing tool payloads', () => {
   const tasks: ToolRunItem[] = ['TaskList', 'TaskUpdate'].map((name) => ({ ...tool('generic', name), tool: name, view: { verb: 'generic', label: name, title: name } }));
-  assert.equal(withDesktopLocale('zh-Hans', () => toolGroupSummary(tasks)), '任务进度 · 2 次');
-  assert.equal(withDesktopLocale('en', () => toolGroupSummary(tasks)), 'Task progress · 2 calls');
+  assert.equal(withDesktopLocale('zh-Hans', () => toolGroupSummary(tasks)), '任务进度');
+  assert.equal(withDesktopLocale('en', () => toolGroupSummary(tasks)), 'Task progress');
 });
 
 test('file rows show a basename, preserve the full path and use lifecycle wording', () => {

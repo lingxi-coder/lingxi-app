@@ -32,6 +32,7 @@ export type {
   TurnFileChange,
 } from '@lingxi/electron/renderer/model/runItem';
 
+export { isImageInspectionTool, toolGroupSummary } from '@lingxi/electron/renderer/components/toolPresentation';
 export { transcriptRows } from '@lingxi/electron/renderer/components/transcriptRows';
 export type { TranscriptRow, TranscriptToolGroup } from '@lingxi/electron/renderer/components/transcriptRows';
 

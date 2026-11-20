@@ -2605,6 +2605,19 @@
     <string name="side_chat_delivery_unconfirmed">Delivery status unconfirmed</string>
     <string name="chat_tool_calls_unsuccessful">Calls unsuccessful</string>
     <string name="chat_tool_group_shell">Run commands</string>
+    <string name="chat_tool_group_read">Read files</string>
+    <string name="chat_tool_group_update">Edit files</string>
+    <string name="chat_tool_group_create">Create files</string>
+    <string name="chat_tool_group_search">Search</string>
+    <string name="chat_tool_group_fetch">Fetch pages</string>
+    <string name="chat_tool_group_read_done">Read files</string>
+    <string name="chat_tool_group_update_done">Edited files</string>
+    <string name="chat_tool_group_create_done">Created files</string>
+    <string name="chat_tool_group_shell_done">Ran commands</string>
+    <string name="chat_tool_group_search_done">Searched</string>
+    <string name="chat_tool_group_fetch_done">Fetched pages</string>
+    <string name="chat_tool_group_image">View images</string>
+    <string name="chat_tool_group_image_done">Viewed images</string>
     <string name="provider_account_rate_limited">Rate limited</string>
     <string name="provider_account_unavailable_auth">A model account needs sign-in or updated authentication. Manage accounts to reconnect.</string>
     <string name="provider_account_model_unverified">Access unverified</string>
@@ -3213,12 +3226,4 @@
     <string name="teams_share_bot_note">Everyone who opens it gets their own chat with this Bot</string>
     <string name="teams_share_text_fmt">Open “%1$s” in LingXi</string>
     <string name="teams_link_unavailable">This conversation can’t be opened. You may not be in its team, or it is no longer shared.</string>
-    <string name="teams_data_open">Open data record</string>
-    <string name="teams_data_json">Record JSON</string>
-    <string name="teams_data_loading">Loading record…</string>
-    <string name="teams_data_unavailable">The record is unavailable or its access has changed.</string>
-    <string name="teams_data_invalid">Enter a valid JSON object.</string>
-    <string name="teams_data_conflict">The record has changed. Open the latest revision before saving.</string>
-    <string name="teams_data_save">Save record</string>
-    <string name="teams_data_latest">Load latest revision</string>
 </resources>

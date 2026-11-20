@@ -29,11 +29,11 @@ test('only live thinking remains in its original position; it never splits tools
 test('tool group identity survives status updates and additional calls', () => {
   assert.equal(transcriptRows([tool('a', 'running')], true)[0]?.id, transcriptRows([tool('a'), thought, tool('b')], true)[0]?.id);
 });
-test('only adjacent calls of the same activity type merge without reordering', () => {
+test('adjacent routine calls merge into one activity without reordering', () => {
   const edit = { ...tool('edit'), tool: 'Edit', view: { verb: 'update' as const, label: 'Edit', title: 'Edit config' } };
   const items = [tool('read-1'), thought, tool('read-2'), edit, tool('read-3')];
   assert.deepEqual(transcriptRows(items, false).flatMap(row => row.type === 'tool-group' ? [row.tools.map(tool => tool.id)] : []), [
-    ['read-1', 'read-2'], ['edit'], ['read-3'],
+    ['read-1', 'read-2', 'edit', 'read-3'],
   ]);
 });
 test('generic tools and MCP endpoints retain distinct groups despite sharing a verb', () => {
@@ -56,7 +56,7 @@ test('interactive calls remain reachable while adjacent skills share a stable di
   assert.equal(transcriptRows([skills[0]!, tool('read'), skills[1]!], false).length, 3);
   assert.equal(transcriptRows([skills[0]!, { type: 'narration', id: 'note', text: 'Progress' }, skills[1]!], false).length, 3);
   assert.equal(transcriptRows([skills[0]!, { ...skills[1]!, agentId: 'child' }], false).length, 2);
-  assert.match(renderGroup(skills), /Skill · 2 calls/);
+  assert.match(renderGroup(skills), /aria-label="Skill"/);
   assert.doesNotMatch(renderGroup(skills), /data-status=/);
   const expanded = renderGroup(skills, true);
   assert.equal((expanded.match(/data-status=/g) ?? []).length, 2);
@@ -90,16 +90,16 @@ function renderGroup(tools: ToolRunItem[], open = false, toolExpanded?: boolean)
   })));
 }
 
-test('task activity stays one collapsed line while running and exposes unsuccessful call counts', () => {
+test('task activity keeps a single running label and preserves individual outcomes', () => {
   const tools = [taskTool('list', 'TaskList'), { ...taskTool('send', 'SendMessage'), status: 'error' as const }, { ...taskTool('update', 'TaskUpdate'), status: 'running' as const }];
   const closed = renderGroup(tools);
-  assert.match(closed, /Task coordination · 3 calls · 1 running · 1 unsuccessful call/);
+  assert.match(closed, /Task coordination · Running/);
   assert.match(closed, /data-tool-icon="tasks"/);
   assert.doesNotMatch(closed, /data-status=|tool-group-calls/);
   const opened = renderGroup(tools, true);
   assert.equal((opened.match(/data-status=/g) ?? []).length, 3);
   assert.match(opened, /Call unsuccessful/);
-  assert.match(renderGroup([taskTool('create', 'TaskCreate'), taskTool('update', 'TaskUpdate')]), /Task progress · 2 calls/);
+  assert.match(renderGroup([taskTool('create', 'TaskCreate'), taskTool('update', 'TaskUpdate')]), /Task progress/);
 });
 test('a lone summary-only tool stays one non-interactive row regardless of group expansion', () => {
   const item: ToolRunItem = {
@@ -135,7 +135,7 @@ test('a lone tool with result details has one disclosure without a repeated grou
 test('running groups keep a stable collapsed summary and show calls only when opened', () => {
   const tools = [tool('finished'), tool('retry', 'error'), tool('active', 'running')];
   const closed = renderGroup(tools);
-  assert.match(closed, /Read files · 3 calls · 1 running/);
+  assert.match(closed, /Read files · Running/);
   assert.match(closed, /aria-expanded="false"/);
   assert.doesNotMatch(closed, /Read active|Read finished|Read retry|unsuccessful|Output|tool-group-calls|data-status=/);
   const opened = renderGroup(tools, true);
@@ -147,7 +147,7 @@ test('running groups keep a stable collapsed summary and show calls only when op
 test('settled mixed results collapse neutrally and preserve unsuccessful attempts in details', () => {
   const tools = [tool('a'), tool('b', 'error')];
   const closed = renderGroup(tools);
-  assert.match(closed, /Read files · 2 calls/);
+  assert.match(closed, /Read files/);
   assert.doesNotMatch(closed, /failed|unsuccessful|Call unsuccessful/);
   assert.doesNotMatch(closed, /Used 2 tools|Read a/);
   assert.match(closed, /aria-expanded="false"/);
@@ -166,7 +166,7 @@ test('a successful final call keeps earlier unsuccessful attempts out of the sum
     const trigger = html.match(/<button\b[^>]*>/)?.[0];
     assert.ok(trigger);
     assert.ok(trigger.includes(`color:${tokens(true).text3}`));
-    assert.match(trigger, /Read files · 3 calls/);
+    assert.match(trigger, /Read files/);
     assert.doesNotMatch(trigger, /failed|unsuccessful/);
   }
 });
@@ -176,7 +176,7 @@ test('a fully unsuccessful group states the call outcome without a task-level fa
   const trigger = html.match(/<button\b[^>]*>/)?.[0];
   assert.ok(trigger?.includes(`color:${tokens(true).text3}`));
   assert.ok(!html.includes(`color:${tokens(true).danger}`));
-  assert.match(html, /Read files · 2 calls · Calls unsuccessful/);
+  assert.match(html, /Read files · Failed/);
 });
 
 test('waiting turns show thinking even before any reasoning delta arrives', () => {
@@ -195,7 +195,7 @@ test('thinking resumes after tools settle without competing with active tools or
 test('summary describes the whole group and uses its first activity icon', () => {
   const last = { ...tool('last'), view: { verb: 'shell', label: 'Run', title: 'Run tests', sub_line: { prefix: '$ ', text: 'npm test' } } };
   const html = renderGroup([tool('first'), last]);
-  assert.match(html, /Read files · 1 call \/ Run commands · 1 call/);
+  assert.match(html, /Read files, Ran commands/);
   assert.doesNotMatch(html, /Read first|npm test|Used 2 tools/);
   assert.equal(html.match(/<svg.*?<\/svg>/s)?.[0], renderGroup([tool('read')]).match(/<svg.*?<\/svg>/s)?.[0]);
   assert.equal(renderGroup([]), '');

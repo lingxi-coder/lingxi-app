@@ -3,7 +3,7 @@ import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
 import { LocalAppCard } from './LocalApps';
 import { localAppReference } from '../model/localAppReference';
-import { isTaskProgressTool, isTaskWorkflowTool, toolRowPresentation } from './toolPresentation';
+import { isImageInspectionTool, isTaskProgressTool, isTaskWorkflowTool, toolRowPresentation } from './toolPresentation';
 /**
  * One tool call in the transcript.
  *
@@ -153,7 +153,9 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
   // Compose from the parts so the argument can be truncated on its own; fall
   // back to the pre-composed English `title` when there is no primary.
   const presentation = permissionRequest ? null : toolRowPresentation(item);
-  const title = denial ? <span>{denialTitle}</span> : presentation ? <>
+  const imageSummary = expandable && item.status === 'done' && !isOpen && isImageInspectionTool(item.tool)
+    ? tr('chat_tool_group_image_done') : '';
+  const title = denial ? <span>{denialTitle}</span> : imageSummary ? imageSummary : presentation ? <>
     <span className="tool-row-action">{presentation.action}</span>
     <span className={presentation.file ? 'tool-row-argument tool-row-file' : 'tool-row-argument'}
       title={presentation.argument} style={{ ...TITLE_STYLE, direction: presentation.file ? 'rtl' : 'ltr', fontWeight: 400 }}>
@@ -241,7 +243,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
       {diffStats && <span className="tool-row-diff-stats" aria-label={tr('desktop_ui_edit_counts', diffStats.additions, diffStats.removals)}>+{diffStats.additions} −{diffStats.removals}</span>}
       {(item.status === 'running' || (item.status === 'done' && diffStats && diffStats.additions + diffStats.removals > 0)) &&
         <span className="tool-row-state-dot" role={item.status === 'running' ? 'status' : undefined} aria-label={item.status === 'running' ? tr("remote_status_running") : tr("desktop_ui_file_changed")} />}
-      {!denial && showResponse && !diffStats && summaryResponse && <span className={compactError ? 'tool-row-status' : 'tool-row-response'}
+      {!denial && !imageSummary && showResponse && !diffStats && summaryResponse && <span className={compactError ? 'tool-row-status' : 'tool-row-response'}
         style={requiresCode ? { flex: '1 0 100%', whiteSpace: 'normal', overflowWrap: 'anywhere' } : undefined}>{summaryResponse}</span>}
     </span>
   );
@@ -356,7 +358,7 @@ export const ToolCall = memo(function ToolCall({ item, modUiSessionId, open, onS
           keepMounted={item.status !== 'running' && Boolean(modUiSessionId)}
           onToggle={() => onSetOpen(item.id, !isOpen)}
           summary={summary}
-          label={denial ? denialTitle : `${presentation ? `${presentation.action} ${presentation.argument}${presentation.qualifier ?? ''}` : view.primary ? `${view.label}(${view.primary})${view.qualifier ?? ''}` : view.title}${!diffStats && summaryResponse && (!isLocalApp || showResponse) ? ` · ${summaryResponse}` : ''}`}
+          label={denial ? denialTitle : imageSummary || `${presentation ? `${presentation.action} ${presentation.argument}${presentation.qualifier ?? ''}` : view.primary ? `${view.label}(${view.primary})${view.qualifier ?? ''}` : view.title}${!diffStats && summaryResponse && (!isLocalApp || showResponse) ? ` · ${summaryResponse}` : ''}`}
           buttonClassName="tool-disclosure-trigger"
           buttonStyle={{ width: permissionRequest ? '100%' : 'fit-content', maxWidth: '100%', minHeight: permissionRequest ? 40 : 28, margin: 0, padding: '2px 0', borderRadius: 7 }}
           bodyStyle={permissionRequest

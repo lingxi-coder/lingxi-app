@@ -109,7 +109,9 @@ internal fun ToolCallView(
     val collapsible = denial != null || (display != null && display.hasExpandableContent)
     val headlineInTitle = call.tool == "LocalApp" && call.status != AgentToolStatus.Failed &&
         (call.header?.primary == null || call.header.primary == headline)
-    val rowTitle = if (denial == null && !collapsible && !requiresCode && headline != null && !headlineInTitle) "$title · $headline" else title
+    val rowTitle = if (denial == null && collapsible && !expanded && call.status == AgentToolStatus.Completed && isImageInspectionTool(call.tool)) {
+        stringResource(R.string.chat_tool_group_image_done)
+    } else if (denial == null && !collapsible && !requiresCode && headline != null && !headlineInTitle) "$title · $headline" else title
     val showsContent = collapsible && expanded
 
     Column(

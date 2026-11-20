@@ -2605,6 +2605,19 @@
     <string name="side_chat_delivery_unconfirmed">提交状态未确认</string>
     <string name="chat_tool_calls_unsuccessful">调用未成功</string>
     <string name="chat_tool_group_shell">执行命令</string>
+    <string name="chat_tool_group_read">读取文件</string>
+    <string name="chat_tool_group_update">修改文件</string>
+    <string name="chat_tool_group_create">创建文件</string>
+    <string name="chat_tool_group_search">搜索</string>
+    <string name="chat_tool_group_fetch">获取网页</string>
+    <string name="chat_tool_group_read_done">已读取文件</string>
+    <string name="chat_tool_group_update_done">已修改文件</string>
+    <string name="chat_tool_group_create_done">已创建文件</string>
+    <string name="chat_tool_group_shell_done">已执行命令</string>
+    <string name="chat_tool_group_search_done">已搜索</string>
+    <string name="chat_tool_group_fetch_done">已获取网页</string>
+    <string name="chat_tool_group_image">查看图片</string>
+    <string name="chat_tool_group_image_done">已查看图片</string>
     <string name="provider_account_rate_limited">请求频率受限</string>
     <string name="provider_account_unavailable_auth">模型账号需要登录或更新认证。请管理账号以重新连接。</string>
     <string name="provider_account_model_unverified">权限未验证</string>
@@ -3213,12 +3226,4 @@
     <string name="teams_share_bot_note">每个人打开后进入自己与这个 Bot 的对话</string>
     <string name="teams_share_text_fmt">在灵犀中打开「%1$s」</string>
     <string name="teams_link_unavailable">无法打开这个对话：你可能不在它所在的团队中，或者它已不再共享。</string>
-    <string name="teams_data_open">打开数据记录</string>
-    <string name="teams_data_json">记录 JSON</string>
-    <string name="teams_data_loading">正在读取记录…</string>
-    <string name="teams_data_unavailable">记录不可用或权限已更改。</string>
-    <string name="teams_data_invalid">请输入有效的 JSON 对象。</string>
-    <string name="teams_data_conflict">记录已有更新。请打开最新修订后再保存。</string>
-    <string name="teams_data_save">保存记录</string>
-    <string name="teams_data_latest">读取最新修订</string>
 </resources>

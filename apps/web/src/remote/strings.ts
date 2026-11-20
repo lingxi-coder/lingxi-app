@@ -1,3 +1,5 @@
+import en from '../../../../resources/translations/en.json';
+import zh from '../../../../resources/translations/zh-Hans.json';
 import { pickLocaleText, type Locale, type LocalizedText } from '../utils/locale';
 
 /**
@@ -20,11 +22,6 @@ export const strings = {
   groupSearch: text('搜索', 'Search'),
   groupShell: text('运行命令', 'Run commands'),
   groupFetch: text('获取页面', 'Fetch pages'),
-  taskProgress: text('任务进度', 'Task progress'),
-  taskCoordination: text('任务协调', 'Task coordination'),
-  toolCalls: text('{count} 次调用', '{count} calls'),
-  toolRunningCount: text('{count} 项运行中', '{count} running'),
-  toolFailedCount: text('{count} 项未成功', '{count} unsuccessful'),
   compacting: text('正在压缩上下文', 'Compacting context'),
   compacted: text('上下文已压缩', 'Context compacted'),
   automaticallyCompacted: text('上下文已自动压缩', 'Context automatically compacted'),
@@ -251,4 +248,10 @@ export type StringKey = keyof typeof strings;
 /** The text for `key` in `locale`, with `{name}` placeholders filled from `values`. */
 export function t(locale: Locale, key: StringKey, values: Record<string, string | number> = {}): string {
   return pickLocaleText(locale, strings[key]).replace(/\{(\w+)\}/gu, (match, name: string) => (name in values ? String(values[name]) : match));
+}
+
+export function toolSummaryText(locale: Locale, key: string): string {
+  const catalog = locale === 'zh' ? zh : en;
+  const text = (catalog as Record<string, unknown>)[key];
+  return typeof text === 'string' ? text : key;
 }

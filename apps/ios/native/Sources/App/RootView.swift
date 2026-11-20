@@ -4056,7 +4056,7 @@ struct RootView: View {
             // `team/join?code=` only fills the join form (never joins by itself); `team/inbox` has no code. A shared
             // conversation or Bot (`team/chat`, `team/bot`) opens in its own team; a friendship's (`f_…`) in Friends.
             navigation.closeSidebar()
-            if target.route == "team/chat", let team = target.params["team"], team.hasPrefix("f_") {
+            if target.route == "team/chat" || target.route == "team/bot", let team = target.params["team"], team.hasPrefix("f_") {
                 navigation.tabs.friendsRequest = .pair(teamID: team)
                 navigation.selectedTab = .friends
             } else if let request = TeamShareLinks.Request(target) {

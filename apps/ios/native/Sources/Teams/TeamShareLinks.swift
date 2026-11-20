@@ -23,7 +23,8 @@ enum TeamShareLinks {
         return url
     }
 
-    /// What a shared team link asks the Teams tab for. A friendship's links (pair team `f_…`) go to Friends instead.
+    /// What a shared team link asks the Teams tab for. A friendship's links (pair team `f_…`, a chat or a Bot link alike)
+    /// go to Friends instead.
     enum Request: Equatable, Sendable {
         case conversation(teamID: String, conversationID: String)
         case bot(teamID: String, botID: String)
@@ -45,18 +46,20 @@ enum TeamShareLinks {
 
     /// The next step toward a team link. A team the viewer is not in is `.unavailable`, never another team; a link never
     /// creates a chat: a Bot without one of the viewer's opens its team's details, where starting one is the viewer's choice.
+    /// A conversation or Bot is judged only on the server's directory (`directoryFromServer`): an unseen conversation is
+    /// `.unavailable` rather than a screen that closes by itself, and a Bot chat is looked for among all conversations.
     enum Step: Equatable {
         case wait, unavailable, selectTeam, open(String), details
     }
 
     static func step(_ request: Request, uid: String?, listed: Bool, teamIDs: [String], selectedTeamID: String,
-                     cacheTeamID: String?, botsLoaded: Bool, bots: [TeamBotCard], conversations: [TeamMessageConversation]) -> Step {
+                     cacheTeamID: String?, directoryFromServer: Bool, botsLoaded: Bool, bots: [TeamBotCard], conversations: [TeamMessageConversation]) -> Step {
         guard let uid, listed else { return .wait }
         guard teamIDs.contains(request.teamID) else { return .unavailable }
         guard selectedTeamID == request.teamID else { return .selectTeam }
-        guard cacheTeamID == request.teamID else { return .wait }
+        guard cacheTeamID == request.teamID, directoryFromServer else { return .wait }
         switch request {
-        case let .conversation(_, id): return .open(id)
+        case let .conversation(_, id): return conversations.contains(where: { $0.id == id }) ? .open(id) : .unavailable
         case let .bot(_, botID):
             guard botsLoaded else { return .wait }
             guard bots.contains(where: { $0.sharedBotId == botID }) else { return .unavailable }

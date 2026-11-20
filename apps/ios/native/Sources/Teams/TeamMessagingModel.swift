@@ -58,6 +58,8 @@ final class TeamMessagingModel {
     private var membershipReady = false
     /// The first directory snapshot of this run has arrived.
     private(set) var directoryReady = false
+    /// The latest directory snapshot came from the server, not the local cache: what is missing from it is really absent.
+    private(set) var directoryFromServer = false
     /// Counts the service's Bot change signals (a Bot, its tasks or its shared list changed). An open list reads itself again on each.
     private(set) var botSignals = 0
     /// Conversations whose first `reads/{uid}` snapshot has not arrived yet. Their `lastReadSeq` is not known, so
@@ -90,7 +92,7 @@ final class TeamMessagingModel {
         stop(); active = true; lifecycle += 1
         self.uid = uid; teamId = team.id; generation = team.generation; revoked = false; offline = true; error = ""; listenersFailed = false
         cache = nil; selected = ""; directoryCached = true; messagesCached = true; botsDirty = true; bots = []; botsLoaded = false; botsUnverified = false; tasks = []; artifact = nil
-        directoryReady = false; readsPending = []
+        directoryReady = false; directoryFromServer = false; readsPending = []
         let life = lifecycle
         authListener = auth.addStateDidChangeListener { [weak self] _, user in
             let current = user?.uid
@@ -146,7 +148,7 @@ final class TeamMessagingModel {
                     self.cache?.threads = retainedThreads
                     self.readsPending.formIntersection(ids)
                     self.directoryReady = true
-                    self.directoryCached = snapshot.metadata.isFromCache; self.updateOffline()
+                    self.directoryCached = snapshot.metadata.isFromCache; self.directoryFromServer = !snapshot.metadata.isFromCache; self.updateOffline()
                     if !snapshot.metadata.isFromCache {
                         if !self.selected.isEmpty, !ids.contains(self.selected), self.cache?.creation?.conversationId != self.selected { self.select("") }
                         self.refresh()
@@ -191,7 +193,7 @@ final class TeamMessagingModel {
         guard active, !revoked else { return }
         error = ""; listenersFailed = false; botsDirty = true
         removeListeners()
-        directoryReady = false; readsPending = []
+        directoryReady = false; directoryFromServer = false; readsPending = []
         directoryCached = true; messagesCached = true; updateOffline()
         watchMembers(life: lifecycle)
         refresh()

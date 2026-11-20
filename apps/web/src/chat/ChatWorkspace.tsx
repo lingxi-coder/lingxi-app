@@ -78,8 +78,10 @@ export function ChatWorkspace({ user, locale, theme, target, onLocaleChange, onT
   const inbox = useSyncExternalStore(apis ? apis.inbox.subscribe : noInbox, apis ? apis.inbox.getSnapshot : noSnapshot);
 
   // The Teams and Friends workspaces open the first time a pane needs them, and stay open while the page lives.
-  const wantsTeams = target.kind === 'bot' || (target.kind === 'team' && !isPairTeam(target.teamId));
-  const wantsFriends = target.kind === 'friend' || (target.kind === 'team' && isPairTeam(target.teamId));
+  // A friendship's pair team (`f_…`) opens in Friends, whether the link names its chat or a Bot (as on every client).
+  const pair = (target.kind === 'team' || target.kind === 'bot') && isPairTeam(target.teamId);
+  const wantsTeams = !pair && (target.kind === 'bot' || target.kind === 'team');
+  const wantsFriends = pair || target.kind === 'friend';
   const [needed, setNeeded] = useState({ teams: wantsTeams, friends: wantsFriends });
   useEffect(() => { if ((wantsTeams && !needed.teams) || (wantsFriends && !needed.friends)) setNeeded(current => ({ teams: current.teams || wantsTeams, friends: current.friends || wantsFriends })); }, [wantsTeams, wantsFriends, needed]);
   const teams = useTeamsWorkspace(needed.teams ? apis?.teams : undefined, user.uid);
@@ -89,7 +91,7 @@ export function ChatWorkspace({ user, locale, theme, target, onLocaleChange, onT
   const follow = useCallback((next: ChatTarget) => openChat(next, true), []);
 
   let pane: ReactNode;
-  if (target.kind === 'team' && isPairTeam(target.teamId)) pane = <FriendPane friends={friends} pairTeamId={target.teamId} locale={locale} />;
+  if (pair) pane = <FriendPane friends={friends} pairTeamId={target.teamId} locale={locale} />;
   else if (target.kind === 'team') pane = <TeamPane teams={teams} teamId={target.teamId} conversationId={target.conversationId} locale={locale} friends={apis?.friends} onFollow={follow} />;
   else if (target.kind === 'friend') pane = <FriendPane friends={friends} uid={target.uid} locale={locale} />;
   else if (target.kind === 'bot') pane = <BotPane teams={teams} teamId={target.teamId} botId={target.botId} locale={locale} onFollow={open} />;

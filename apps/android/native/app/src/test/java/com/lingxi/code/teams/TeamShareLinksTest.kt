@@ -40,8 +40,15 @@ class TeamShareLinksTest {
         assertEquals(TeamShareLinks.Step.Wait, TeamShareLinks.step(chat, "me", true, teams, "design", none))
         val mine = conversation("dm1", "bot_dm", "user:me", "shared_bot:helper")
         val theirs = conversation("dm2", "bot_dm", "user:them", "shared_bot:helper")
-        val open = TeamMessagingState(cache = TeamMessageCache("me", "design", 1, listOf(theirs)))
+        val cached = TeamMessagingState(cache = TeamMessageCache("me", "design", 1, listOf(theirs, conversation("c1", "group"))))
+        // Only the server's directory decides: a cached one, or none yet, waits.
+        assertEquals(TeamShareLinks.Step.Wait, TeamShareLinks.step(chat, "me", true, teams, "design", cached))
+        assertEquals(TeamShareLinks.Step.Wait, TeamShareLinks.step(chat, "me", true, teams, "design", cached.copy(directoryReady = true)))
+        val open = cached.copy(directoryReady = true, directoryCached = false)
         assertEquals(TeamShareLinks.Step.Open("c1"), TeamShareLinks.step(chat, "me", true, teams, "design", open))
+        assertEquals("an unseen conversation says so", TeamShareLinks.Step.Unavailable, TeamShareLinks.step(TeamShareLinks.Request.Conversation("design", "unseen"), "me", true, teams, "design", open))
+        // A Bot list that loads before the directory does not decide "no chat yet" on an empty one.
+        assertEquals(TeamShareLinks.Step.Wait, TeamShareLinks.step(bot, "me", true, teams, "design", cached.copy(botsLoaded = true, bots = listOf(card("helper")))))
         assertEquals(TeamShareLinks.Step.Wait, TeamShareLinks.step(bot, "me", true, teams, "design", open))
         assertEquals(TeamShareLinks.Step.Unavailable, TeamShareLinks.step(bot, "me", true, teams, "design", open.copy(botsLoaded = true)))
         val ready = open.copy(botsLoaded = true, bots = listOf(card("helper")))

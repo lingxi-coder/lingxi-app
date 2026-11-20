@@ -30,7 +30,7 @@ internal object TeamShareLinks {
     }
 
     /** The friend chat of a friendship's pair team, which is the conversation every friend link names. */
-    fun friendChat(pairTeamId: String): String? = runCatching { DeepLink.build("team/chat", mapOf("team" to pairTeamId, "conversation" to "friend_chat")) }.getOrNull()
+    fun friendChat(pairTeamId: String): String? = runCatching { DeepLink.build("team/chat", mapOf("team" to pairTeamId, "conversation" to com.lingxi.code.friends.FriendsLogic.CHAT_CONVERSATION_ID)) }.getOrNull()
 
     /** What a shared conversation link asks for; a friendship's pair team (`f_…`) is opened in Friends. */
     sealed interface Request {
@@ -50,7 +50,12 @@ internal object TeamShareLinks {
         }
     }
 
-    /** The next step toward a team link. A team the viewer is not in is [Step.Unavailable], never another team. */
+    /**
+     * The next step toward a team link. A team the viewer is not in is [Step.Unavailable], never another team. A
+     * conversation or Bot is judged only on the server's directory (not a cached one, and not before it arrives): an
+     * unseen conversation is [Step.Unavailable] rather than a screen that closes by itself, and a Bot chat is looked for
+     * among conversations that are all there.
+     */
     sealed interface Step {
         data object Wait : Step
         data object Unavailable : Step
@@ -64,9 +69,9 @@ internal object TeamShareLinks {
         if (uid == null || !loaded) return Step.Wait
         if (request.teamId !in teamIds) return Step.Unavailable
         if (selectedId != request.teamId) return Step.SelectTeam
-        if (messaging.cache?.teamId != request.teamId) return Step.Wait
+        if (messaging.cache?.teamId != request.teamId || !messaging.directoryReady || messaging.directoryCached) return Step.Wait
         return when (request) {
-            is Request.Conversation -> Step.Open(request.conversationId)
+            is Request.Conversation -> if (messaging.cache?.conversations.orEmpty().any { it.id == request.conversationId }) Step.Open(request.conversationId) else Step.Unavailable
             is Request.Pair -> Step.Unavailable
             is Request.Bot -> when {
                 !messaging.botsLoaded -> Step.Wait

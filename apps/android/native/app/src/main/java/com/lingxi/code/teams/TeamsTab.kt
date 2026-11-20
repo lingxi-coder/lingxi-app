@@ -133,7 +133,7 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
     // where starting one is the viewer's choice. A link never creates a chat.
     val linkRequest = shell?.teamLinkRequest
     val linkContext = androidx.compose.ui.platform.LocalContext.current
-    LaunchedEffect(linkRequest, uid, teams.loaded, teams.selectedId, teams.teams, messaging.cache?.teamId, messaging.cache?.conversations, messaging.botsLoaded, messaging.bots) {
+    LaunchedEffect(linkRequest, uid, teams.loaded, teams.selectedId, teams.teams, messaging.cache?.teamId, messaging.cache?.conversations, messaging.botsLoaded, messaging.bots, messaging.directoryReady, messaging.directoryCached) {
         val request = linkRequest ?: return@LaunchedEffect
         when (val next = TeamShareLinks.step(request.request, uid, teams.loaded, teams.teams.map { it.id }, teams.selectedId, messaging)) {
             TeamShareLinks.Step.Wait -> Unit
@@ -142,8 +142,9 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                 shell.onTeamLinkHandled(request.id)
                 android.widget.Toast.makeText(linkContext, linkContext.getString(R.string.teams_link_unavailable), android.widget.Toast.LENGTH_LONG).show()
             }
-            is TeamShareLinks.Step.Open -> { setStack(listOf("c:${next.conversationId}")); shell.onTeamLinkHandled(request.id) }
-            TeamShareLinks.Step.Bots -> { setStack(listOf("details")); shell.onTeamLinkHandled(request.id) }
+            // A link's screen is not the Chats row's: Back from it returns to the team, not to Chats.
+            is TeamShareLinks.Step.Open -> { fromInbox = false; setStack(listOf("c:${next.conversationId}")); shell.onTeamLinkHandled(request.id) }
+            TeamShareLinks.Step.Bots -> { fromInbox = false; setStack(listOf("details")); shell.onTeamLinkHandled(request.id) }
         }
     }
     fun dismissTop() {
@@ -251,7 +252,8 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
             uid == null -> Unit
             sheet == "switcher" -> TeamSwitcherSheet(
                 teams = teams.teams, selectedId = teams.selectedId, unreadByTeam = unreadByTeam,
-                onSelect = { id -> sheet = ""; setStack(emptyList()); workspace.selectTeam(id) },
+                // Choosing a team drops a link still waiting (a Bot list that will not load), which would pull its team back.
+                onSelect = { id -> sheet = ""; setStack(emptyList()); shell?.teamLinkRequest?.let { shell.onTeamLinkHandled(it.id) }; workspace.selectTeam(id) },
                 onCreate = { workspace.teamsModel.clearError(); sheet = "create" },
                 onJoin = { workspace.teamsModel.clearError(); joinPrefill = ""; sheet = "join" },
                 onDetails = { sheet = ""; openDetails() }, onDismiss = dismiss, onServices = { sheet = "services" },

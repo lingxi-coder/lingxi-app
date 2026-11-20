@@ -46,6 +46,12 @@ export function TeamPane({ teams: { workspace, snapshot }, teamId, conversationI
     text={zh ? '你不是这个团队的成员，或者团队已不存在。请让成员重新邀请你。' : 'You are not a member of this team, or it no longer exists. Ask a member to invite you again.'}
     action={{ href: '/teams/join', label: zh ? '加入团队' : 'Join a team' }} />;
   if (snapshot.selectedTeamId !== teamId) return <PaneNotice busy text={t('teams_loading')} />;
+  // A server-confirmed directory without the conversation (the model then drops the selection): say so, rather than the
+  // team's home. Not while connecting (each selection reconnects) or offline, when the list may be the cache's.
+  if (conversationId && selected !== conversationId && !snapshot.messagingConnecting && !snapshot.offline
+    && !snapshot.conversations.some(conversation => conversation.id === conversationId)) return <PaneNotice
+    title={zh ? '无法打开这个对话' : 'This chat is not available'}
+    text={zh ? '这个对话已不存在，或者你不在其中。' : 'This conversation no longer exists, or you are not in it.'} />;
   return <div className="chat-pane-team">
     <div className="chat-pane-conversation">
       <TeamConversationView workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown}

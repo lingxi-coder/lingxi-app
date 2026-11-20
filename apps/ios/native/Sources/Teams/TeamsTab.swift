@@ -268,6 +268,8 @@ struct TeamsTab: View {
             TeamSwitcherSheet(
                 onSelect: { id in
                     self.sheet = nil
+                    // Choosing a team drops a link still waiting (a Bot list that will not load), which would pull its team back.
+                    tabs.teamLinkRequest = nil
                     workspace.selectTeam(id)
                 },
                 onCreate: { self.sheet = .createTeam },
@@ -314,14 +316,15 @@ struct TeamsTab: View {
         guard let request = tabs.teamLinkRequest else { return [] }
         let model = workspace.messaging
         return ["\(request)", "\(workspace.listed)", workspace.teams.map(\.id).joined(separator: ","), workspace.selectedTeamID,
-                model?.cache?.teamId ?? "", "\(model?.botsLoaded ?? false)", "\(model?.bots.count ?? 0)", "\(model?.cache?.conversations.count ?? 0)"]
+                model?.cache?.teamId ?? "", "\(model?.directoryFromServer ?? false)", "\(model?.botsLoaded ?? false)", "\(model?.bots.count ?? 0)", "\(model?.cache?.conversations.count ?? 0)"]
     }
 
     private func consumeLink() {
         guard let request = tabs.teamLinkRequest else { return }
         let model = workspace.messaging
         switch TeamShareLinks.step(request, uid: workspace.uid, listed: workspace.listed, teamIDs: workspace.teams.map(\.id),
-                                   selectedTeamID: workspace.selectedTeamID, cacheTeamID: model?.cache?.teamId, botsLoaded: model?.botsLoaded ?? false,
+                                   selectedTeamID: workspace.selectedTeamID, cacheTeamID: model?.cache?.teamId,
+                                   directoryFromServer: model?.directoryFromServer ?? false, botsLoaded: model?.botsLoaded ?? false,
                                    bots: model?.bots ?? [], conversations: model?.cache?.conversations ?? []) {
         case .wait: return
         case .selectTeam: workspace.selectTeam(request.teamID)

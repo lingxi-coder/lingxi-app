@@ -5,6 +5,9 @@
     <script>
       try { document.documentElement.dataset.theme = JSON.parse(localStorage.getItem("lingxi.web.theme")) === "dark" ? "dark" : "light"; }
       catch { document.documentElement.dataset.theme = "light"; }
+      // A returning, signed-in person goes straight to Chat before any module loads (src/app/sessionHint.ts has the rule).
+      try { if (location.pathname === "/" && !location.hash && !new URLSearchParams(location.search).has("home") && localStorage.getItem("lingxi.web.session") === "1") location.replace("/chat" + location.search); }
+      catch {}
     </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />

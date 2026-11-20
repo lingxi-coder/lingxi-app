@@ -9,7 +9,7 @@ export const LLM_API_URL: string = (import.meta as { env?: Record<string, string
   || 'https://us-central1-lingxi-5e4b2.cloudfunctions.net/llmApi';
 
 export class LlmError extends Error {
-  constructor(readonly code: string, readonly status = 0) { super(code); }
+  constructor(readonly code: string) { super(code); }
 }
 
 export interface LlmClient {
@@ -29,7 +29,7 @@ export function createLlmClient(token: () => Promise<string>, base = LLM_API_URL
       .catch(error => { if ((error as Error)?.name === 'AbortError') throw error; throw new LlmError('NETWORK'); });
     if (!response.ok) {
       const body = await response.json().catch(() => undefined) as { error?: { code?: unknown } } | undefined;
-      throw new LlmError(typeof body?.error?.code === 'string' ? body.error.code : 'UNAVAILABLE', response.status);
+      throw new LlmError(typeof body?.error?.code === 'string' ? body.error.code : 'UNAVAILABLE');
     }
     return response;
   };

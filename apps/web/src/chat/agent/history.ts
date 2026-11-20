@@ -10,7 +10,7 @@ export interface AgentMessage {
   error?: string;
   /** The answer was stopped by the user. */
   stopped?: boolean;
-  providerId?: string;
+  /** The model that wrote this answer. */
   model?: string;
   at: number;
 }
@@ -112,11 +112,22 @@ export async function openHistory(factory: IDBFactory | undefined = globalThis.i
     db = await done(request);
   } catch { return memoryHistory(limit); }
   const range = (uid: string) => IDBKeyRange.bound([uid, -Infinity], [uid, Infinity]);
+  // The sidebar lists summaries after every save, so they are read from the database once per user and then kept up to
+  // date here; another tab's change (announced on the channel) makes the next list read the database again.
+  const summaries = new Map<string, Map<string, AgentChatSummary>>();
+  const channel = typeof BroadcastChannel === 'function' ? new BroadcastChannel(DB) : undefined;
+  channel?.addEventListener('message', event => { if (typeof event.data === 'string') summaries.delete(event.data); });
+  const changed = (uid: string) => channel?.postMessage(uid);
   return {
     persistent: true,
     async list(uid) {
-      const all = await done(db.transaction(STORE).objectStore(STORE).index('byUser').getAll(range(uid))) as AgentChat[];
-      return all.sort(newestFirst).map(summary);
+      let mine = summaries.get(uid);
+      if (!mine) {
+        const all = await done(db.transaction(STORE).objectStore(STORE).index('byUser').getAll(range(uid))) as AgentChat[];
+        mine = new Map(all.map(chat => [chat.id, summary(chat)]));
+        summaries.set(uid, mine);
+      }
+      return [...mine.values()].sort(newestFirst);
     },
     async get(uid, id) { return await done(db.transaction(STORE).objectStore(STORE).get([uid, id])) as AgentChat | undefined; },
     async put(chat) {
@@ -124,9 +135,20 @@ export async function openHistory(factory: IDBFactory | undefined = globalThis.i
       store.put(chat);
       const keys = await done(store.index('byUser').getAllKeys(range(chat.uid))) as IDBValidKey[];
       // The index is in updatedAt order, oldest first; anything beyond the limit goes.
-      for (const old of keys.slice(0, Math.max(0, keys.length - limit))) store.delete(old);
+      const dropped = keys.slice(0, Math.max(0, keys.length - limit));
+      for (const old of dropped) store.delete(old);
       await finished(tx);
+      const mine = summaries.get(chat.uid);
+      if (mine) {
+        mine.set(chat.id, summary(chat));
+        for (const old of dropped) mine.delete((old as [string, string])[1]);
+      }
+      changed(chat.uid);
     },
-    async remove(uid, id) { const tx = db.transaction(STORE, 'readwrite'); tx.objectStore(STORE).delete([uid, id]); await finished(tx); },
+    async remove(uid, id) {
+      const tx = db.transaction(STORE, 'readwrite'); tx.objectStore(STORE).delete([uid, id]); await finished(tx);
+      summaries.get(uid)?.delete(id);
+      changed(uid);
+    },
   };
 }

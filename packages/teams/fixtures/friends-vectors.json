@@ -1554,7 +1554,7 @@
       },
       {
         "link": "https://lingxios.net/open/friend/chat?uid=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e",
-        "expect": "/friends?chat=Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e"
+        "expect": "/chat/friend/Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e"
       },
       {
         "link": "https://lingxios.net/open/team/inbox",

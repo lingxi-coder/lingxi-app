@@ -1,26 +1,56 @@
 import { buildDeepLink, type DeepLinkTarget } from '../../../../packages/deep-links';
-import { chatRoute, type ChatTarget } from '../app/router';
+import { friendLink } from '../../../../packages/teams/friends';
+import { chatRoute, remoteSessionRoute, type ChatTarget } from '../app/router';
+import { friendViewerPath } from '../friends/viewer';
 
 /** The query a shared link adds when it continues on the web, so the Chat workspace can offer the app instead. */
 export const VIA_LINK = 'via=link';
+const [VIA_KEY, VIA_VALUE] = VIA_LINK.split('=') as [string, string];
+
+/** `/chat#prompt=…` becomes `/chat?via=link#prompt=…`. */
+export function withViaLink(path: string): string {
+  const at = path.indexOf('#');
+  return at < 0 ? `${path}?${VIA_LINK}` : `${path.slice(0, at)}?${VIA_LINK}${path.slice(at)}`;
+}
+
+/** Whether this page was reached from a shared link that the app did not take. */
+export const cameViaLink = (search: string): boolean => new URLSearchParams(search).get(VIA_KEY) === VIA_VALUE;
+/** `search` without the shared-link marker (with its `?`, or empty). */
+export function withoutViaLink(search: string): string {
+  const query = new URLSearchParams(search);
+  query.delete(VIA_KEY);
+  const rest = query.toString();
+  return rest ? `?${rest}` : '';
+}
 
 /**
- * Where a shared link continues in this browser when the app did not take it: the conversation in the Chat workspace, or
- * a new Agent chat with the shared prompt in its composer (never sent). `null` keeps the "Open LingXi" page, which is
- * also where a new-chat link bound to a project or mode stays: only the app can open it as it was meant.
+ * Where a shared link goes in this browser when the app did not take it, the one table for every route:
+ * - `now`: a conversation continues in the Chat workspace at once (a shared prompt goes into a new chat's composer, never
+ *   sent), and the workspace offers the app;
+ * - `offer`: the "Open LingXi" page stays, with this page as the browser alternative;
+ * - `null`: the app only. A new-chat link bound to a project or mode is that: only the app can open it as it was meant.
  */
-export function openLinkTarget(target: DeepLinkTarget): string | null {
-  const { team, conversation, bot, uid } = target.params;
+export function linkInBrowser(target: DeepLinkTarget): { path: string; at: 'now' | 'offer' } | null {
+  const { team, conversation, bot, uid, code } = target.params;
+  const now = (path: string) => ({ path, at: 'now' as const }), offer = (path: string) => ({ path, at: 'offer' as const });
   switch (target.route) {
-    case 'team/chat': return chatRoute({ kind: 'team', teamId: team!, conversationId: conversation! });
-    case 'team/bot': return chatRoute({ kind: 'bot', teamId: team!, botId: bot! });
-    case 'friend/chat': return chatRoute({ kind: 'friend', uid: uid! });
+    case 'team/chat': return now(chatRoute({ kind: 'team', teamId: team!, conversationId: conversation! }));
+    case 'team/bot': return now(chatRoute({ kind: 'bot', teamId: team!, botId: bot! }));
+    case 'friend/chat': return now(chatRoute({ kind: 'friend', uid: uid! }));
     case 'new': {
       if (Object.keys(target.params).length) return null;
       const prompt = typeof target.payload?.prompt === 'string' ? target.payload.prompt : '';
-      return prompt ? `/chat#prompt=${encodeURIComponent(prompt)}` : '/chat';
+      return now(prompt ? `/chat#prompt=${encodeURIComponent(prompt)}` : '/chat');
     }
-    default: return null;
+    // A full page load, so /remote starts under its own strict policy.
+    case 'team/inbox': return offer('/teams');
+    case 'team/join': return offer(`/teams/join?code=${encodeURIComponent(code!)}`);
+    default: {
+      const [kind, hostId, sessionId] = target.route.split('/');
+      if (kind === 'remote' && hostId && sessionId) return offer(remoteSessionRoute(hostId, sessionId));
+      const friend = friendLink(target);
+      return friend && friend.kind !== 'chat' ? offer(friendViewerPath(friend)) : null;
+    }
   }
 }
 

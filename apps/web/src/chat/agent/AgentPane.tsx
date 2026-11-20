@@ -1,14 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import type { ChatEvent, VaultProvider } from '../../../../../packages/llm-vault/contracts';
 import { ComposerEditor, ComposerSurface, ComposerToolbar } from '../../../../../packages/chat-ui/ComposerSurface';
 import { sendsOnEnter } from '../../../../../packages/teams/compose';
+import { ShareLinkButton } from '../../../../../packages/teams/ShareLinkButton';
 import type { ChatTarget } from '../../app/router';
-import { IconArrowUp, IconCheck, IconCopy, IconLink, IconRefresh, IconSliders, IconStop, IconTrash } from '../../components/Icons';
+import { IconArrowUp, IconCopy, IconRefresh, IconSliders, IconStop, IconTrash } from '../../components/Icons';
 import { Markdown } from '../../remote/markdown';
-import type { AgentChatEntry } from '../ChatSidebar';
 import { LlmError, type LlmClient } from './client';
 import { errorText } from './errors';
-import { contextOf, newId, titleOf, type AgentChat, type AgentHistory, type AgentMessage } from './history';
+import { contextOf, newId, titleOf, type AgentChat, type AgentChatSummary, type AgentHistory, type AgentMessage } from './history';
 import { ProviderSettings } from './ProviderSettings';
 import { agentShareLink } from './share';
 
@@ -19,15 +19,42 @@ export interface AgentHostProps {
   target: ChatTarget;
   client: LlmClient;
   history: AgentHistory;
-  onAgentChats(chats: AgentChatEntry[]): void;
+  /** The account's model services, loaded once per page (`useModelServices`) so moving between panes does not refetch them. */
+  models: ModelServices;
+  onAgentChats(chats: AgentChatSummary[]): void;
   open(target: ChatTarget, replace?: boolean): void;
   /** A prompt to put in the composer of a new chat (a shared `new` link); never sent by itself. */
   initialPrompt?: string;
+  /** The composer took `initialPrompt`: it is not offered again when the pane comes back. */
+  onPromptTaken?(): void;
   /** Schedules a render of streamed text; tests pass a synchronous one. */
   frame?(callback: () => void): void;
 }
 
-type Providers = { state: 'loading' } | { state: 'ready'; list: VaultProvider[] } | { state: 'error'; code: string };
+export type Providers = { state: 'loading' } | { state: 'ready'; list: VaultProvider[] } | { state: 'error'; code: string };
+export interface ModelServices { providers: Providers; load(): void; saved(provider: VaultProvider | undefined): void }
+
+/** The account's model services: loaded on first use, then kept current by what this page saves or deletes. */
+export function useModelServices(client: LlmClient): ModelServices {
+  const [providers, setProviders] = useState<Providers>({ state: 'loading' });
+  const load = useCallback(() => {
+    setProviders(current => current.state === 'error' ? { state: 'loading' } : current);
+    client.listProviders().then(list => setProviders({ state: 'ready', list }), error => setProviders({ state: 'error', code: error instanceof LlmError ? error.code : 'UNAVAILABLE' }));
+  }, [client]);
+  useEffect(load, [load]);
+  // A save is folded into a loaded list; before the list has loaded (or after it failed) the whole list is read again,
+  // so one saved service never stands in for the others.
+  const saved = useCallback((provider: VaultProvider | undefined) => {
+    if (!provider) { load(); return; }
+    let reload = false;
+    setProviders(current => {
+      if (current.state !== 'ready') { reload = true; return current; }
+      return { state: 'ready', list: [...current.list.filter(p => p.id !== provider.id), provider] };
+    });
+    if (reload) load();
+  }, [load]);
+  return useMemo(() => ({ providers, load, saved }), [providers, load, saved]);
+}
 interface Choice { providerId: string; model: string }
 const choiceKey = (uid: string) => `lingxi.agent.model.${uid}`;
 const readChoice = (uid: string): Choice | undefined => { try { const value = JSON.parse(localStorage.getItem(choiceKey(uid)) ?? 'null'); return value?.providerId && value?.model ? value : undefined; } catch { return undefined; } };
@@ -42,32 +69,52 @@ const defaultFrame = (callback: () => void) => { if (typeof requestAnimationFram
 
 /** The Agent side of the Chat workspace: model settings, the new-chat home and saved Agent chats. */
 export function AgentHost(props: AgentHostProps) {
-  const { uid, client, history, onAgentChats, locale } = props;
-  const [providers, setProviders] = useState<Providers>({ state: 'loading' });
-  const load = useCallback(() => {
-    client.listProviders().then(list => setProviders({ state: 'ready', list }), error => setProviders({ state: 'error', code: error instanceof LlmError ? error.code : 'UNAVAILABLE' }));
-  }, [client]);
-  useEffect(load, [load]);
+  const { uid, client, history, onAgentChats, locale, models } = props;
+  const { providers, load } = models;
   const refreshChats = useCallback(() => { void history.list(uid).then(list => onAgentChats(list), () => undefined); }, [history, uid, onAgentChats]);
   useEffect(refreshChats, [refreshChats]);
   const [dialog, setDialog] = useState(false);
 
   const list = providers.state === 'ready' ? providers.list : [];
-  const settings = (onClose?: () => void) => <ProviderSettings locale={locale} client={client} providers={list} onClose={onClose}
-    onChanged={saved => saved ? setProviders(current => ({ state: 'ready', list: [...(current.state === 'ready' ? current.list.filter(p => p.id !== saved.id) : []), saved] })) : load()} />;
+  const settings = (onClose?: () => void) => <ProviderSettings locale={locale} client={client} providers={list} onClose={onClose} onChanged={models.saved} />;
 
   if (props.target.kind === 'providers') return <div className="agent-pane agent-pane-settings">{settings()}</div>;
   return <>
     <AgentPane {...props} providers={providers} onRetryProviders={load} onSetup={() => setDialog(true)} onSaved={refreshChats} />
-    {dialog ? <div className="agent-dialog-backdrop" onClick={event => { if (event.target === event.currentTarget) setDialog(false); }}>
-      <div className="agent-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-settings-title">{settings(() => setDialog(false))}</div>
-    </div> : null}
+    {dialog ? <SettingsDialog title={locale === 'zh' ? '模型服务' : 'Model services'} onClose={() => setDialog(false)}>{settings(() => setDialog(false))}</SettingsDialog> : null}
   </>;
 }
 
 interface PaneProps extends AgentHostProps { providers: Providers; onRetryProviders(): void; onSetup(): void; onSaved(): void }
 
-function AgentPane({ uid, name, locale, target, client, history, open, initialPrompt, providers, onRetryProviders, onSetup, onSaved, frame = defaultFrame }: PaneProps) {
+/**
+ * The model settings as a modal on the native `<dialog>`: focus moves in and stays inside, Escape or a click outside the
+ * panel closes it, and focus goes back to what opened it.
+ */
+function SettingsDialog({ title, onClose, children }: { title: string; onClose(): void; children: ReactNode }) {
+  const ref = useRef<HTMLDialogElement>(null), id = useId();
+  const close = useRef(onClose);
+  close.current = onClose;
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (typeof node.showModal === 'function') { if (!node.open) node.showModal(); } else node.setAttribute('open', '');
+    node.querySelector<HTMLElement>('button, input, select, textarea')?.focus();
+    return () => { if (node.open && typeof node.close === 'function') node.close(); opener?.focus(); };
+  }, []);
+  return <dialog ref={ref} className="agent-dialog" aria-labelledby={id}
+    onCancel={event => { event.preventDefault(); close.current(); }}
+    onClick={event => { if (event.target === event.currentTarget) close.current(); }}>
+    <h2 id={id} className="sr-only">{title}</h2>
+    {children}
+  </dialog>;
+}
+
+/** An answer's Markdown, parsed again only when its text changes, not on every streamed frame of a later answer. */
+const AnswerText = memo(function AnswerText({ text }: { text: string }) { return <Markdown text={text} />; });
+
+function AgentPane({ uid, name, locale, target, client, history, open, initialPrompt, onPromptTaken, providers, onRetryProviders, onSetup, onSaved, frame = defaultFrame }: PaneProps) {
   const zh = locale === 'zh';
   const t = (en: string, cn: string) => zh ? cn : en;
   const chatId = target.kind === 'agent' ? target.id : undefined;
@@ -95,9 +142,14 @@ function AgentPane({ uid, name, locale, target, client, history, open, initialPr
     return () => { current = false; };
   }, [chatId, uid, history]);
   useEffect(() => () => live.current?.abort(), []);
-  useEffect(() => { if (initialPrompt) { setDraft(initialPrompt); editor.current?.focus(); } }, [initialPrompt]);
+  useEffect(() => {
+    if (!initialPrompt) return;
+    setDraft(initialPrompt); editor.current?.focus(); onPromptTaken?.();
+  // Taken once, when it arrives.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialPrompt]);
 
-  const usable = providers.state === 'ready' ? providers.list.filter(provider => provider.webUsable && modelsOf(provider).length) : [];
+  const usable = useMemo(() => providers.state === 'ready' ? providers.list.filter(provider => provider.webUsable && modelsOf(provider).length) : [], [providers]);
   const selected = useMemo(() => {
     const wanted = chat?.providerId && chat.model ? { providerId: chat.providerId, model: chat.model } : choice;
     const provider = usable.find(p => p.id === wanted?.providerId) ?? usable[0];
@@ -112,7 +164,7 @@ function AgentPane({ uid, name, locale, target, client, history, open, initialPr
   useEffect(() => { scroller.current?.scrollTo?.({ top: scroller.current.scrollHeight }); }, [chat?.messages.length]);
 
   const run = async (base: AgentChat, pick: { provider: VaultProvider; model: string }) => {
-    const answer: AgentMessage = { id: newId(), role: 'assistant', content: '', providerId: pick.provider.id, model: pick.model, at: Date.now() };
+    const answer: AgentMessage = { id: newId(), role: 'assistant', content: '', model: pick.model, at: Date.now() };
     let current: AgentChat = { ...base, providerId: pick.provider.id, model: pick.model, updatedAt: Date.now(), messages: [...base.messages, answer] };
     update(current);
     void persist(current);
@@ -151,7 +203,8 @@ function AgentPane({ uid, name, locale, target, client, history, open, initialPr
   const send = () => {
     const text = draft.trim();
     if (!text || streaming) return;
-    if (!selected) { onSetup(); return; }
+    // Until the services have loaded there is nothing to choose from yet; a failed load shows its own card and retry.
+    if (!selected) { if (providers.state === 'ready') onSetup(); return; }
     const now = Date.now(), message: AgentMessage = { id: newId(), role: 'user', content: text, at: now };
     const base: AgentChat = chat ? { ...chat, messages: [...chat.messages, message] }
       : { uid, id: newId(), title: titleOf(text), createdAt: now, updatedAt: now, messages: [message] };
@@ -201,11 +254,12 @@ function AgentPane({ uid, name, locale, target, client, history, open, initialPr
           </optgroup>)}
           <option value={'\u0000settings'}>{t('Manage model services…', '管理模型服务…')}</option>
         </select>
-      </label> : <button type="button" className="agent-model-chip agent-model-setup" onClick={onSetup}><IconSliders width={15} height={15} />{t('Set up a model', '配置模型')}</button>}
+      </label> : providers.state === 'ready' ? <button type="button" className="agent-model-chip agent-model-setup" onClick={onSetup}><IconSliders width={15} height={15} />{t('Set up a model', '配置模型')}</button>
+        : providers.state === 'loading' ? <span className="agent-model-chip agent-model-loading" role="status">{t('Loading models…', '正在加载模型…')}</span> : null}
       <span className="agent-toolbar-gap" />
       {streaming
         ? <button type="button" className="agent-send agent-stop" aria-label={t('Stop', '停止')} onClick={() => streaming.abort()}><IconStop width={16} height={16} /></button>
-        : <button type="button" className="agent-send" aria-label={t('Send', '发送')} disabled={!draft.trim()} onClick={send}><IconArrowUp width={18} height={18} /></button>}
+        : <button type="button" className="agent-send" aria-label={t('Send', '发送')} disabled={!draft.trim() || providers.state !== 'ready'} onClick={send}><IconArrowUp width={18} height={18} /></button>}
     </ComposerToolbar>
   </ComposerSurface>;
 
@@ -240,7 +294,7 @@ function AgentPane({ uid, name, locale, target, client, history, open, initialPr
     <header className="agent-head">
       <h2>{chat.title || t('New chat', '新对话')}</h2>
       <div className="agent-head-actions">
-      <ShareQuestion chat={chat} zh={zh} />
+      <ShareQuestion chat={chat} locale={locale} />
       <button type="button" className="chat-icon-button" aria-label={t('Delete this chat', '删除这个对话')} onClick={() => void remove()}><IconTrash width={16} height={16} /></button>
       </div>
     </header>
@@ -253,7 +307,7 @@ function AgentPane({ uid, name, locale, target, client, history, open, initialPr
               <summary>{streaming && message === last && !message.content ? t('Thinking…', '思考中…') : t('Thought process', '思考过程')}</summary>
               <p>{message.reasoning}</p>
             </details> : null}
-            {message.content ? <Markdown text={message.content} /> : streaming && message === last && !message.reasoning ? <span className="agent-typing" aria-label={t('Answering', '正在回答')}><i /><i /><i /></span> : null}
+            {message.content ? <AnswerText text={message.content} /> : streaming && message === last && !message.reasoning ? <span className="agent-typing" aria-label={t('Answering', '正在回答')}><i /><i /><i /></span> : null}
             {message.error ? <p className="agent-status agent-status-error" role="alert">{errorText(message.error, zh)}</p> : null}
             {message.stopped ? <p className="agent-stopped">{t('Stopped', '已停止')}</p> : null}
             {!(streaming && message === last) ? <div className="agent-answer-tools">
@@ -269,17 +323,9 @@ function AgentPane({ uid, name, locale, target, client, history, open, initialPr
 }
 
 /** Shares the chat's first question as a link that opens a new chat with it in the composer; the answers stay in this browser. */
-function ShareQuestion({ chat, zh }: { chat: AgentChat; zh: boolean }) {
-  const [status, setStatus] = useState<'copied' | 'failed'>();
-  useEffect(() => { if (!status) return; const timer = setTimeout(() => setStatus(undefined), 2400); return () => clearTimeout(timer); }, [status]);
+function ShareQuestion({ chat, locale }: { chat: AgentChat; locale: string }) {
   const link = agentShareLink(chat);
   if (!link) return null;
-  const label = zh ? '分享问题链接（只包含第一个问题，不含回答）' : 'Share the question as a link (the first question only, without answers)';
-  const share = async () => {
-    try { await navigator.clipboard.writeText(link); setStatus('copied'); } catch { setStatus('failed'); }
-  };
-  return <span className="agent-share">
-    <button type="button" className="chat-icon-button" aria-label={label} title={label} onClick={() => void share()}>{status === 'copied' ? <IconCheck width={16} height={16} /> : <IconLink width={16} height={16} />}</button>
-    <span className="agent-share-status" role="status">{status === 'copied' ? (zh ? '链接已复制' : 'Link copied') : status === 'failed' ? (zh ? '无法复制链接' : 'Couldn’t copy the link') : ''}</span>
-  </span>;
+  return <ShareLinkButton link={link} title={chat.title} locale={locale}
+    note={locale === 'zh' ? '只包含第一个问题，不含回答' : 'the first question only, without answers'} />;
 }

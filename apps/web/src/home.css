@@ -56,7 +56,6 @@
 .landing-cta { display: inline-flex; align-items: center; min-height: 38px; padding: 8px 16px; border-radius: 100px; background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 600; white-space: nowrap; transition: background .18s, transform .18s; }
 .landing-cta:hover { background: var(--accent-strong); }
 .landing-cta:active { transform: scale(.97); }
-.landing-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 14px; margin-top: 33px; }
 .landing-scenarios { position: relative; width: min(1060px, calc(100% - 80px)); margin-inline: auto; padding: 24px 0 45px; scroll-margin-top: 102px; }
 .landing-scenario-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 28px; margin-bottom: 27px; }
 .landing-scenario-heading h2 { margin: 9px 0 0; font-size: 29px; line-height: 1.35; font-weight: 550; letter-spacing: -.035em; }
@@ -200,6 +199,8 @@
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .landing-shell *, .landing-shell *::before, .landing-shell *::after { transition: none !important; }
+  .landing-card:hover, .landing-card:active, .landing-card:hover .landing-card-arrow, .landing-cta:active,
+  .landing-sdk:hover, .landing-sdk:active, .landing-sdk:hover .landing-sdk-top > svg { transform: none; }
 }
 @media (prefers-reduced-transparency: reduce) {
   .landing-header { background: var(--surface); backdrop-filter: none; -webkit-backdrop-filter: none; }

@@ -48,7 +48,7 @@ export function FriendsWorkspaceView({ notificationTarget,friends, teams, uid, l
       <div className="teams-web-sidebar"><FriendsSidebar workspace={workspace} snapshot={snapshot} locale={locale} /></div>
       <div className="teams-web-conversation">
         {snapshot.page !== 'home' ? <ChatTopbarControl><button type="button" className="teams-web-back" onClick={() => workspace.show('home')}>{t('tw_back_friends')}</button></ChatTopbarControl> : null}
-        <FriendsMain shareLink notificationTarget={notificationTarget} workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown} />
+        <FriendsMain notificationTarget={notificationTarget} workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown} />
       </div>
       {code ? <FriendLinkDialog workspace={workspace} locale={locale} code={code} onClose={onCodeHandled} /> : null}
     </div>

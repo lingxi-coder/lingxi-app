@@ -1,16 +1,7 @@
 import { useLayoutEffect, useState } from 'react';
 import { buildDeepLink, parseDeepLink } from '../../../../packages/deep-links';
-import { remoteSessionRoute } from '../app/router';
-import { friendViewerPath } from '../friends/viewer';
-import { friendLink } from '../../../../packages/teams/friends';
 import type { Locale } from '../utils/locale';
-import { openLinkTarget, VIA_LINK } from './openLinkTarget';
-
-/** `/chat#prompt=…` becomes `/chat?via=link#prompt=…`. */
-export function withViaLink(path: string): string {
-  const at = path.indexOf('#');
-  return at < 0 ? `${path}?${VIA_LINK}` : `${path.slice(0, at)}?${VIA_LINK}${path.slice(at)}`;
-}
+import { linkInBrowser, withViaLink } from './openLinkTarget';
 
 export function OpenLinkPage({ locale }: { locale: Locale }) {
   const zh = locale === 'zh';
@@ -24,14 +15,8 @@ export function OpenLinkPage({ locale }: { locale: Locale }) {
     const target = parseDeepLink(`https://lingxios.net${location.pathname}${location.search}${location.hash}`);
     scheme = buildDeepLink(target, 'scheme');
     canonical = buildDeepLink(target);
-    web = openLinkTarget(target);
-    const [kind, hostId, sessionId] = target.route.split('/');
-    // A full page load, so /remote starts under its own strict policy.
-    if (kind === 'remote') viewer = remoteSessionRoute(hostId!, sessionId!);
-    if (target.route === 'team/inbox') viewer = '/teams';
-    if (target.route === 'team/join') viewer = `/teams/join?code=${encodeURIComponent(target.params.code!)}`;
-    const friend = friendLink(target);
-    if (friend) viewer = friendViewerPath(friend);
+    const place = linkInBrowser(target);
+    if (place?.at === 'now') web = place.path; else viewer = place?.path ?? '';
   } catch { /* Invalid links never become executable hrefs. */ }
   // Where the app did not take the link, a conversation continues in this browser at once; the workspace offers the app.
   useLayoutEffect(() => { if (web) window.location.replace(withViaLink(web)); }, [web]);

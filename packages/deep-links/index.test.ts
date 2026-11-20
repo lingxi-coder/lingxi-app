@@ -81,10 +81,10 @@ test('the Friends client vectors agree with the canonical grammar', async () => 
   };
   assert.ok(vectors.links.push.length >= 20);
   for (const row of vectors.links.push) assert.equal(push(row.route), row.expect, row.route);
-  // Web viewer paths (D17) for the three open links.
+  // Web viewer paths (D17) for the three open links; a friend chat opens in the Chat workspace.
   const viewer = (raw: string) => {
     const target = typed(raw);
-    return target?.kind === 'add' ? `/friends/add?code=${encodeURIComponent(target.code!)}` : target?.kind === 'requests' ? '/friends' : target?.kind === 'chat' ? `/friends?chat=${encodeURIComponent(target.uid!)}` : null;
+    return target?.kind === 'add' ? `/friends/add?code=${encodeURIComponent(target.code!)}` : target?.kind === 'requests' ? '/friends' : target?.kind === 'chat' ? `/chat/friend/${encodeURIComponent(target.uid!)}` : null;
   };
   for (const row of vectors.links.webViewer) assert.equal(viewer(row.link), row.expect, row.link);
 });

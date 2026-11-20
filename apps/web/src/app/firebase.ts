@@ -1,5 +1,6 @@
 import { initializeApp, getApps } from 'firebase/app';
-import { browserLocalPersistence, browserSessionPersistence, connectAuthEmulator, getAuth, indexedDBLocalPersistence, initializeAuth } from 'firebase/auth';
+import { browserLocalPersistence, browserSessionPersistence, connectAuthEmulator, getAuth, indexedDBLocalPersistence, initializeAuth, onAuthStateChanged } from 'firebase/auth';
+import { setSessionHint } from './sessionHint';
 
 // Shared by the admin console and Remote Control: both sign in against the same
 // Firebase app, so a session started on one page is visible to the other.
@@ -24,3 +25,5 @@ export const auth = strictDocument
   ? initializeAuth(app, { persistence: [indexedDBLocalPersistence, browserLocalPersistence, browserSessionPersistence] })
   : getAuth(app);
 if (emulator) connectAuthEmulator(auth, emulator, { disableWarnings: true });
+// Every page that signs in or out imports this module, so the landing page's session hint follows them all.
+onAuthStateChanged(auth, user => setSessionHint(!!user));

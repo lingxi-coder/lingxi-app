@@ -1,14 +1,20 @@
 import type { ChatEvent } from '../../../../../packages/llm-vault/contracts';
 
-/** An incremental parser for llmApi's server-sent events: feed it text as it arrives, it returns the events completed. */
+/** One frame larger than this is not llmApi talking (its deltas are small): the stream is treated as broken. */
+export const MAX_SSE_FRAME_CHARS = 4 * 1024 * 1024;
+
+/**
+ * An incremental parser for llmApi's server-sent events: feed it text as it arrives, it returns the events completed.
+ * A frame over `MAX_SSE_FRAME_CHARS` ends the stream with one `UNAVAILABLE` error instead of growing without bound.
+ */
 export function createSseParser(): { push(text: string): ChatEvent[]; end(): ChatEvent[] } {
-  let buffer = '', event = '', data: string[] = [];
+  let buffer = '', event = '', data: string[] = [], dataChars = 0, broken = false;
   const out: ChatEvent[] = [];
   const flush = () => {
     if (data.length && event) {
       try { out.push({ type: event, ...JSON.parse(data.join('\n')) } as ChatEvent); } catch { /* a malformed frame is skipped */ }
     }
-    event = ''; data = [];
+    event = ''; data = []; dataChars = 0;
   };
   const line = (text: string) => {
     if (text === '') { flush(); return; }
@@ -17,7 +23,7 @@ export function createSseParser(): { push(text: string): ChatEvent[]; end(): Cha
     let value = colon < 0 ? '' : text.slice(colon + 1);
     if (value.startsWith(' ')) value = value.slice(1);
     if (field === 'event') event = value;
-    else if (field === 'data') data.push(value);
+    else if (field === 'data') { data.push(value); dataChars += value.length + 1; }
   };
   const drain = (final: boolean) => {
     for (;;) {
@@ -28,8 +34,14 @@ export function createSseParser(): { push(text: string): ChatEvent[]; end(): Cha
     }
     return out.splice(0);
   };
+  const guard = (events: ChatEvent[]): ChatEvent[] => {
+    if (broken) return [];
+    if (buffer.length + dataChars <= MAX_SSE_FRAME_CHARS) return events;
+    broken = true; buffer = ''; data = []; dataChars = 0;
+    return [...events, { type: 'error', code: 'UNAVAILABLE' }];
+  };
   return {
-    push(text) { buffer += text; return drain(false); },
-    end() { const events = drain(true); if (buffer) { line(buffer); buffer = ''; } flush(); return [...events, ...out.splice(0)]; },
+    push(text) { if (broken) return []; buffer += text; return guard(drain(false)); },
+    end() { if (broken) return []; const events = drain(true); if (buffer) { line(buffer); buffer = ''; } flush(); return [...events, ...out.splice(0)]; },
   };
 }

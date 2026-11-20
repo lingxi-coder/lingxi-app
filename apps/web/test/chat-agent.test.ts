@@ -5,7 +5,7 @@ import test from 'node:test';
 import { createElement } from 'react';
 import type { ChatEvent, ChatTurn, VaultProvider, VaultUpsert } from '../../../packages/llm-vault/contracts';
 import { protocolOfDesktopType, desktopTypeOfProtocol, isProviderId } from '../../../packages/llm-vault/contracts';
-import { AgentHost } from '../src/chat/agent/AgentPane';
+import { AgentHost, useModelServices } from '../src/chat/agent/AgentPane';
 import { createLlmClient, LlmError, type LlmClient } from '../src/chat/agent/client';
 import { contextOf, memoryHistory, titleOf, type AgentMessage } from '../src/chat/agent/history';
 import { PRESETS } from '../src/chat/agent/ProviderSettings';
@@ -26,6 +26,18 @@ test('agent sse: events come out whole however the text is split', () => {
   }
 });
 
+test('agent sse: a frame that never ends stops the stream with one error instead of growing', () => {
+  const parser = createSseParser();
+  assert.deepEqual(parser.push('event: delta\ndata: {"text":"a"}\n\n'), [{ type: 'delta', text: 'a' }]);
+  const chunk = 'x'.repeat(1024 * 1024);
+  const out: ChatEvent[] = [];
+  out.push(...parser.push('event: delta\ndata: '));
+  for (let i = 0; i < 5; i++) out.push(...parser.push(chunk));
+  assert.deepEqual(out, [{ type: 'error', code: 'UNAVAILABLE' }]);
+  assert.deepEqual(parser.push('\n\nevent: done\ndata: {}\n\n'), [], 'nothing after the break');
+  assert.deepEqual(parser.end(), []);
+});
+
 const streamOf = (...parts: string[]) => new ReadableStream<Uint8Array>({ start(controller) { for (const part of parts) controller.enqueue(new TextEncoder().encode(part)); controller.close(); } });
 test('agent client: requests carry the token and no cookies, and a stream ends with its last event', async () => {
   const seen: { url: string; init: RequestInit }[] = [];
@@ -44,7 +56,7 @@ test('agent client: requests carry the token and no cookies, and a stream ends w
   assert.equal(seen[0]!.url, 'https://llm.example/llmApi/providers');
   assert.equal((seen[0]!.init.headers as Record<string, string>).Authorization, 'Bearer id-token');
   assert.equal(seen[0]!.init.credentials, 'omit');
-  await assert.rejects(client.testProvider('deepseek'), (error: unknown) => error instanceof LlmError && error.code === 'UPSTREAM_AUTH' && error.status === 502);
+  await assert.rejects(client.testProvider('deepseek'), (error: unknown) => error instanceof LlmError && error.code === 'UPSTREAM_AUTH');
 });
 
 test('agent client: a stream that stops without done or error is INTERRUPTED, and a lost connection is NETWORK', async () => {
@@ -107,9 +119,11 @@ function mount(client: LlmClient, target: ChatTarget = { kind: 'home' }, history
   const opened: [ChatTarget, boolean | undefined][] = [], lists: unknown[] = [];
   const props = { uid: 'alice', name: 'Alice', locale: 'en', client, history, frame,
     onAgentChats: (chats: unknown) => lists.push(chats), open: (next: ChatTarget, replace?: boolean) => opened.push([next, replace]) };
+  // The workspace owns the model services; the test hosts them the same way.
+  const Host = ({ target }: { target: ChatTarget }) => createElement(AgentHost, { ...props, target, models: useModelServices(client) });
   let root: any;
-  act(() => { root = create(createElement(AgentHost, { ...props, target })); });
-  return { root, opened, lists, history, rerender: (next: ChatTarget) => act(() => root.update(createElement(AgentHost, { ...props, target: next }))) };
+  act(() => { root = create(createElement(Host, { target })); });
+  return { root, opened, lists, history, rerender: (next: ChatTarget) => act(() => root.update(createElement(Host, { target: next }))) };
 }
 const type = (root: any, text: string) => act(() => root.root.findByType('textarea').props.onChange({ target: { value: text } }));
 const button = (root: any, label: string) => root.root.find((node: any) => node.type === 'button' && (node.props['aria-label'] === label || textOf(node) === label));
@@ -121,7 +135,7 @@ test('agent pane: without a model service it says so, and sending opens the setu
   assert.match(textOf(root.toJSON()), /Connect a model service to start chatting/u);
   type(root, 'Draft question');
   act(() => button(root, 'Send').props.onClick());
-  const dialog = root.root.findByProps({ role: 'dialog' });
+  const dialog = root.root.findByType('dialog');
   assert.match(textOf(dialog), /DeepSeek/u);
   assert.equal(root.root.findByType('textarea').props.value, 'Draft question');
 });

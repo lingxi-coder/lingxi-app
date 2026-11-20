@@ -578,7 +578,7 @@ export class TeamsWorkspace {
   /**
    * Open one conversation of one team, from a link or a list outside the workspace: the team is selected now when it is
    * listed, or once the list arrives. A team the viewer is not in is never replaced by another one; `loading` false with
-   * `teamId` missing from `teams` means the viewer has no access.
+   * `teamId` missing from `teams` means the viewer has no access, unless `loadError` says the list itself failed to load.
    */
   openConversation = (teamId: string, conversationId: string): void => {
     if (this.closed || this.pair) return;

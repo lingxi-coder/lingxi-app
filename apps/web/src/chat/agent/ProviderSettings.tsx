@@ -94,7 +94,7 @@ export function ProviderSettings({ locale, client, providers, onChanged, onClose
             {provider.presetId && PRESETS.some(p => p.id === provider.presetId) ? <button type="button" className="chat-button chat-button-quiet"
               onClick={() => { setReady(undefined); setStatus(undefined); setForm({ kind: 'preset', preset: PRESETS.find(p => p.id === provider.presetId)!, existing: provider }); }}>{t('Replace key', '更换 key')}</button> : null}
             {confirming === provider.id
-              ? <button type="button" className="chat-button chat-button-danger" onClick={() => void remove(provider)}>{t('Delete for all devices', '从所有设备删除')}</button>
+              ? <button type="button" className="chat-button chat-button-danger" onClick={() => void remove(provider)}>{t('Delete from my account (copies already pulled to a desktop app stay there)', '从账号中删除（已拉取到桌面端的副本仍会保留）')}</button>
               : <button type="button" className="chat-icon-button" aria-label={t(`Delete ${provider.label}`, `删除 ${provider.label}`)} onClick={() => setConfirming(provider.id)}><IconTrash width={16} height={16} /></button>}
           </span>
         </li>;

@@ -17,8 +17,6 @@ export interface FriendChatViewProps extends FriendsViewProps {
   renderMarkdown?: RenderMarkdown;
   /** The current time for "Today" and "Yesterday". Defaults to now. */
   now?: number | Date;
-  /** The friend chat's header offers its link, which either friend can open (in the app, or on the web). */
-  shareLink?: boolean;
 }
 
 /**
@@ -51,7 +49,7 @@ function Unavailable({ locale, onBack }: { locale: string; onBack(): void }): Re
   </section>;
 }
 
-function PairChat({ notificationTarget,workspace, snapshot, renderAvatar, renderMarkdown, locale, now, chat, pair, shareLink }: FriendChatViewProps & { chat: FriendChat; pair: TeamsWorkspace }): ReactElement {
+function PairChat({ notificationTarget,workspace, snapshot, renderAvatar, renderMarkdown, locale, now, chat, pair }: FriendChatViewProps & { chat: FriendChat; pair: TeamsWorkspace }): ReactElement {
   const t = useTeamsText(locale);
   const view = useSyncExternalStore(pair.subscribe, pair.getSnapshot);
   const hasTopbar = useContext(ChatTopbarTarget) !== undefined;
@@ -99,7 +97,7 @@ function PairChat({ notificationTarget,workspace, snapshot, renderAvatar, render
       {welcome ? <p className="tw-banner" role="status">{nowFriends(chat.name, locale)}</p> : null}
       <TeamConversationView notificationTarget={notificationTarget} workspace={pair} snapshot={view} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} locale={locale} now={now}
         friend={friendChat ? { uid: chat.uid, name: chat.name, handle: chat.handle, actions, onOpenProfile: () => setProfile(true) } : undefined}
-        onBack={friendChat ? undefined : toChat} shareLink={shareLink} />
+        onBack={friendChat ? undefined : toChat} />
     </div>
     {panel && friendChat ? <FriendBotsPanel id={botsId} pair={pair} view={view} chat={chat} locale={locale} renderAvatar={renderAvatar} onClose={close} /> : null}
     {profile && friendChat ? <FriendProfileDialog workspace={workspace} uid={chat.uid} name={chat.name} handle={chat.handle}

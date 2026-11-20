@@ -4,6 +4,10 @@ import { pathToFileURL } from 'node:url';
 const uiRoot = new URL('../../../../packages/', import.meta.url).href;
 const webRequire = createRequire(import.meta.url);
 
+// tsx compiles UI source outside apps/web (no tsconfig of its own there) with the classic JSX transform, which reads a
+// global React; the Web bundler uses the automatic runtime everywhere. Give that transform the same single React.
+(globalThis as { React?: unknown }).React ??= webRequire('react');
+
 // Match the Web bundler's React deduplication for UI source outside apps/web.
 registerHooks({
   resolve(specifier, context, nextResolve) {

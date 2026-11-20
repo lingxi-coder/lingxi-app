@@ -12,10 +12,11 @@ import { webFriendsApi } from '../friends/api';
 import { webInboxRequest } from '../inbox/session';
 import { webTeamsApi } from '../teams/api';
 import { teamsDatabase } from '../teams/firestore';
-import { sharedPrompt } from '../pages/openLinkTarget';
+import { cameViaLink, sharedPrompt, withoutViaLink } from '../pages/openLinkTarget';
 import type { Locale } from '../utils/locale';
 import { OpenInAppBanner } from './OpenInAppBanner';
-import { ChatSidebar, type AgentChatEntry } from './ChatSidebar';
+import type { AgentChatSummary } from './agent/history';
+import { ChatSidebar } from './ChatSidebar';
 import { BotPane } from './panes/BotPane';
 import { FriendPane } from './panes/FriendPane';
 import { TeamPane } from './panes/TeamPane';
@@ -35,9 +36,9 @@ export interface ChatWorkspaceProps {
   onLocaleChange(locale: Locale): void;
   onThemeToggle(): void;
   /** The saved Agent chats, for the sidebar whichever pane is open; an open Agent pane keeps the list current after that. */
-  listAgentChats?(): Promise<AgentChatEntry[]>;
+  listAgentChats?(): Promise<AgentChatSummary[]>;
   /** The centre of the workspace for the targets the people panes do not handle: the Agent chat and model settings. */
-  renderAgent(props: { target: ChatTarget; onAgentChats(chats: AgentChatEntry[]): void; open(target: ChatTarget, replace?: boolean): void }): ReactNode;
+  renderAgent(props: { target: ChatTarget; onAgentChats(chats: AgentChatSummary[]): void; open(target: ChatTarget, replace?: boolean): void }): ReactNode;
 }
 
 /** Move inside the Chat workspace; `replace` follows a change without a new history entry. */
@@ -52,17 +53,14 @@ export function openChat(target: ChatTarget, replace = false): void {
 export function ChatWorkspace({ user, locale, theme, target, onLocaleChange, onThemeToggle, listAgentChats, renderAgent }: ChatWorkspaceProps) {
   const zh = locale === 'zh';
   const [apis, setApis] = useState<{ teams: ReturnType<typeof webTeamsApi>; friends: ReturnType<typeof webFriendsApi>; inbox: InboxController }>();
-  const [agentChats, setAgentChats] = useState<AgentChatEntry[]>([]);
+  const [agentChats, setAgentChats] = useState<AgentChatSummary[]>([]);
   const [drawer, setDrawer] = useState(false);
   // A shared link that continued here offers the app once, with the prompt a new-chat link brought; the marker leaves the
   // address straight away.
-  const [viaLink, setViaLink] = useState(() => new URLSearchParams(window.location.search).get('via') === 'link' ? { prompt: sharedPrompt(window.location.hash) } : undefined);
+  const [viaLink, setViaLink] = useState(() => cameViaLink(window.location.search) ? { prompt: sharedPrompt(window.location.hash) } : undefined);
   useEffect(() => {
-    const query = new URLSearchParams(window.location.search);
-    if (!query.has('via')) return;
-    query.delete('via');
-    const search = query.toString();
-    window.history.replaceState(window.history.state, '', `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`);
+    if (!cameViaLink(window.location.search)) return;
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}${withoutViaLink(window.location.search)}${window.location.hash}`);
   }, []);
   useEffect(() => {
     let live = true;

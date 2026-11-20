@@ -51,8 +51,6 @@ export interface TeamConversationViewProps {
   friend?: FriendHeader;
   /** A Back button at the start of the header: a friendship's Bot DM returns to the friend chat (D22). */
   onBack?(): void;
-  /** The header offers the conversation's link, which opens it in the app where installed and on the web otherwise. */
-  shareLink?: boolean;
 }
 
 /** The second line of the header: who is in the conversation, or whether its Bot is reachable. */
@@ -124,7 +122,7 @@ export function CreationBanner({ workspace, snapshot, locale }: { workspace: Tea
 
 type Pane = TeamConversationViewProps & { conversation: TeamConversation; model: NonNullable<TeamsSnapshot['messaging']>; team: NonNullable<TeamsSnapshot['team']> };
 
-function ConversationPane({ workspace, snapshot, conversation, model, team, detailsOpen, onToggleDetails, renderAvatar, renderMarkdown, locale, now, friend, onBack, shareLink }: Pane): ReactElement {
+function ConversationPane({ workspace, snapshot, conversation, model, team, detailsOpen, onToggleDetails, renderAvatar, renderMarkdown, locale, now, friend, onBack }: Pane): ReactElement {
   const t = useTeamsText(locale);
   const hasTopbar = useContext(ChatTopbarTarget) !== undefined;
   const uid = snapshot.uid, messages = snapshot.messages, tag = intlTag(locale);
@@ -288,7 +286,9 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   const subtitle = conversationSubtitle(conversation, snapshot, locale);
   const auto = friend ? { bots: [], on: [] } : autoReplyBots(conversation, snapshot);
   // A friendship's Bot DM (D22) has no link of its own: its pair team is not one the Teams workspace opens.
-  const link = shareLink && !(onBack && conversation.kind === 'bot_dm') ? conversationShareLink(team.id, conversation) : null;
+  // The header offers the conversation's link, which opens it in the app where installed and on the web otherwise; a
+  // friendship's Bot DM (reached with Back) has no link of its own.
+  const link = !(onBack && conversation.kind === 'bot_dm') ? conversationShareLink(team.id, conversation) : null;
 
   return <section className="tw-scope tw-conv" aria-label={label}>
     <ChatTopbarHeader><header className="tw-conv-head">

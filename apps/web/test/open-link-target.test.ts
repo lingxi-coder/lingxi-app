@@ -6,10 +6,11 @@ import { buildDeepLink, parseDeepLink } from '../../../packages/deep-links/index
 import { parseChatRoute } from '../src/app/router';
 import { agentShareLink, SHARED_PROMPT_LIMIT } from '../src/chat/agent/share';
 import { OpenInAppBanner } from '../src/chat/OpenInAppBanner';
-import { withViaLink } from '../src/pages/OpenLinkPage';
-import { appLinkForChat, openLinkTarget, sharedPrompt } from '../src/pages/openLinkTarget';
+import { appLinkForChat, linkInBrowser, sharedPrompt, withViaLink } from '../src/pages/openLinkTarget';
 
-const web = (link: string) => openLinkTarget(parseDeepLink(link));
+const place = (link: string) => linkInBrowser(parseDeepLink(link));
+/** Where the link continues at once in this browser, or null when the Open LingXi page stays. */
+const web = (link: string) => { const found = place(link); return found?.at === 'now' ? found.path : null; };
 
 test('a shared conversation link continues at the same conversation in the Chat workspace', () => {
   assert.equal(web('https://lingxios.net/open/team/chat?team=design-team&conversation=c_1'), '/chat/team/design-team/c_1');
@@ -31,6 +32,11 @@ test('a shared prompt becomes a new chat with the prompt in the composer; other 
   assert.equal(web(`https://lingxios.net/open/team/join?code=${'A'.repeat(32)}`), null);
   assert.equal(web('https://lingxios.net/open/team/inbox'), null);
   assert.equal(web(`https://lingxios.net/open/friend/add?code=${'B'.repeat(32)}`), null);
+  // The Open LingXi page's browser alternative comes from the same table.
+  assert.deepEqual(place(`https://lingxios.net/open/team/join?code=${'A'.repeat(32)}`), { path: `/teams/join?code=${'A'.repeat(32)}`, at: 'offer' });
+  assert.deepEqual(place('https://lingxios.net/open/team/inbox'), { path: '/teams', at: 'offer' });
+  assert.deepEqual(place(`https://lingxios.net/open/friend/add?code=${'B'.repeat(32)}`), { path: `/friends/add?code=${'B'.repeat(32)}`, at: 'offer' });
+  assert.deepEqual(place('https://lingxios.net/open/friend/requests'), { path: '/friends', at: 'offer' });
   assert.equal(withViaLink('/chat/team/t/c'), '/chat/team/t/c?via=link');
   assert.equal(withViaLink('/chat#prompt=hi%23'), '/chat?via=link#prompt=hi%23', 'the marker goes before the fragment');
 });

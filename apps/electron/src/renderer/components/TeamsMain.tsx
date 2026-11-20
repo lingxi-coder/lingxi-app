@@ -61,7 +61,7 @@ export function TeamsMain({ teams, friends, locale, drawer, services, inboxTarge
     <div className="teams-page">
       <div className="teams-conversation">
         {invited ? <InviteNotice names={invited} locale={locale} onDone={() => setInvited(undefined)} /> : null}
-        <TeamConversationView shareLink workspace={workspace} snapshot={snapshot} locale={locale} notificationTarget={notificationTarget} renderAvatar={renderTeamAvatar} renderMarkdown={renderTeamMarkdown}
+        <TeamConversationView workspace={workspace} snapshot={snapshot} locale={locale} notificationTarget={notificationTarget} renderAvatar={renderTeamAvatar} renderMarkdown={renderTeamMarkdown}
           detailsOpen={drawer.open} onToggleDetails={drawer.toggle} />
       </div>
       {drawer.open ? <TeamDetailsDrawer workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar}

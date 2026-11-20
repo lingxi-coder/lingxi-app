@@ -6,6 +6,7 @@ import { friendLink } from '../../../packages/teams/friends';
 import { appRoutes, resolveRoute, securityZone } from '../src/app/router';
 import { clearAddIntent, readAddIntent, retainAddIntent } from '../src/friends/add-intent';
 import { friendViewerPath } from '../src/friends/viewer';
+import { linkInBrowser } from '../src/pages/openLinkTarget';
 
 const vectors = JSON.parse(readFileSync(new URL('../../../packages/teams/fixtures/friends-vectors.json', import.meta.url), 'utf8'));
 const code = 'aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-', other = 'zY9-zY9-zY9-zY9-zY9-zY9-zY9-zY9_', url = `https://lingxios.net/friends/add?code=${code}`, DAY = 86400000;
@@ -69,14 +70,12 @@ test('/friends and /friends/add are routes of the Teams security zone and nothin
 test('links.webViewer: a canonical friend link opens its page, and one that is not a friend link has no friend page', () => {
   assert.ok(vectors.links.webViewer.length >= 4);
   for (const row of vectors.links.webViewer) {
-    const link = friendLink(parseDeepLink(row.link));
-    assert.equal(link ? friendViewerPath(link) : null, row.expect, row.link);
+    const target = parseDeepLink(row.link);
+    assert.equal(friendLink(target) ? linkInBrowser(target)?.path ?? null : null, row.expect, row.link);
   }
 });
 
 test('the viewer path carries the code only on the page that consumes it, and escapes what it carries', () => {
   assert.equal(friendViewerPath({ kind: 'requests' }), '/friends');
   assert.equal(friendViewerPath({ kind: 'add', code }), `/friends/add?code=${code}`);
-  assert.equal(friendViewerPath({ kind: 'chat', uid: 'a_b-9' }), '/friends?chat=a_b-9');
-  assert.equal(friendViewerPath({ kind: 'chat', uid: 'a&b=c' }), '/friends?chat=a%26b%3Dc');
 });

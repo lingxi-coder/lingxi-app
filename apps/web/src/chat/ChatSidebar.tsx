@@ -1,19 +1,18 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { isUnread, type InboxItem } from '../../../../packages/inbox/contracts';
+import { inboxErrorText } from '../../../../packages/inbox/errors';
 import type { ChatTarget } from '../app/router';
 import { IconChat, IconGlobe, IconMoon, IconSun } from '../components/Icons';
 import type { Locale } from '../utils/locale';
+import type { AgentChatSummary } from './agent/history';
 import { destinationOf, isOpen, sectionOf, type ChatSection, type RowDestination } from './routeFromInbox';
-
-/** An Agent chat kept in this browser, as the sidebar lists it. */
-export interface AgentChatEntry { id: string; title: string; updatedAt: number }
 
 export interface ChatSidebarProps {
   locale: Locale;
   theme: 'light' | 'dark';
   target: ChatTarget;
   rows: readonly InboxItem[];
-  agentChats: readonly AgentChatEntry[];
+  agentChats: readonly AgentChatSummary[];
   /** The inbox could not be listed: its error code. */
   rowsError?: string;
   account: string;
@@ -26,14 +25,13 @@ export interface ChatSidebarProps {
   onSignOut(): void;
 }
 
-const DAY = 86_400_000;
-/** Today, Yesterday, the last 7 days, or Earlier, by the viewer's local midnight. */
+/** Local midnight `days` calendar days before `now`'s day (a day is not always 24 hours: daylight saving). */
+const midnightBefore = (now: number, days: number) => { const day = new Date(now); day.setHours(0, 0, 0, 0); day.setDate(day.getDate() - days); return day.getTime(); };
+/** Today, Yesterday, the last 7 days, or Earlier, by the viewer's local calendar days. */
 export function agentGroup(updatedAt: number, now = Date.now()): 'today' | 'yesterday' | 'week' | 'earlier' {
-  const midnight = new Date(now); midnight.setHours(0, 0, 0, 0);
-  const start = midnight.getTime();
-  if (updatedAt >= start) return 'today';
-  if (updatedAt >= start - DAY) return 'yesterday';
-  if (updatedAt >= start - 6 * DAY) return 'week';
+  if (updatedAt >= midnightBefore(now, 0)) return 'today';
+  if (updatedAt >= midnightBefore(now, 1)) return 'yesterday';
+  if (updatedAt >= midnightBefore(now, 6)) return 'week';
   return 'earlier';
 }
 
@@ -52,13 +50,27 @@ export function ChatSidebar(props: ChatSidebarProps) {
   const zh = locale === 'zh';
   const t = (en: string, cn: string) => zh ? cn : en;
   const [menu, setMenu] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null), trigger = useRef<HTMLButtonElement>(null);
+  const items = () => [...(menuRef.current?.querySelectorAll<HTMLElement>('[role=menuitem]') ?? [])];
+  // The account menu: focus moves to its first item, arrow keys, Home and End move, Escape closes and returns to the
+  // trigger, and a click or Tab elsewhere closes it.
   useEffect(() => {
     if (!menu) return;
-    const close = (event: Event) => { if (event instanceof KeyboardEvent ? event.key === 'Escape' : !(event.target instanceof Node && menuRef.current?.contains(event.target))) setMenu(false); };
-    document.addEventListener('keydown', close); document.addEventListener('pointerdown', close);
-    return () => { document.removeEventListener('keydown', close); document.removeEventListener('pointerdown', close); };
+    items()[0]?.focus();
+    const outside = (event: Event) => { if (!(event.target instanceof Node && menuRef.current?.contains(event.target))) setMenu(false); };
+    document.addEventListener('pointerdown', outside);
+    return () => document.removeEventListener('pointerdown', outside);
   }, [menu]);
+  const onMenuKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const list = items(), at = list.indexOf(document.activeElement as HTMLElement);
+    const go = (index: number) => { event.preventDefault(); list[(index + list.length) % list.length]?.focus(); };
+    if (event.key === 'ArrowDown') go(at + 1);
+    else if (event.key === 'ArrowUp') go(at - 1);
+    else if (event.key === 'Home') go(0);
+    else if (event.key === 'End') go(list.length - 1);
+    else if (event.key === 'Escape') { event.preventDefault(); setMenu(false); trigger.current?.focus(); }
+    else if (event.key === 'Tab') setMenu(false);
+  };
 
   const bySection: Record<ChatSection, InboxItem[]> = { teams: [], friends: [], bots: [], computers: [] };
   for (const row of rows) if (!row.archived) bySection[sectionOf(row)].push(row);
@@ -72,7 +84,7 @@ export function ChatSidebar(props: ChatSidebarProps) {
         onClick={() => destination && props.onOpenRow(destination)}>
         <span className="chat-side-avatar" aria-hidden="true">{initial(row.title)}</span>
         <span className="chat-side-text"><span className="chat-side-title">{row.title || t('Chat', '对话')}</span>{subtitle ? <span className="chat-side-sub">{subtitle}</span> : null}</span>
-        {unread ? <span className="chat-side-unread" aria-label={t(`${row.unreadCount} unread`, `${row.unreadCount} 条未读`)}>{row.unreadCount > 99 ? '99+' : row.unreadCount || ''}</span> : null}
+        {unread ? <span className="chat-side-unread" aria-label={row.unreadCount > 0 ? t(`${row.unreadCount} unread`, `${row.unreadCount} 条未读`) : t('Unread', '未读')}>{row.unreadCount > 99 ? '99+' : row.unreadCount || ''}</span> : null}
       </button>
     </li>;
   };
@@ -80,7 +92,7 @@ export function ChatSidebar(props: ChatSidebarProps) {
   const groups = { today: t('Today', '今天'), yesterday: t('Yesterday', '昨天'), week: t('Previous 7 days', '7 天内'), earlier: t('Earlier', '更早') };
   const agentItems: ReactNode[] = [];
   let last = '';
-  for (const chat of [...agentChats].sort((a, b) => b.updatedAt - a.updatedAt)) {
+  for (const chat of agentChats) {
     const group = agentGroup(chat.updatedAt);
     if (group !== last) { agentItems.push(<li key={`g:${group}`} className="chat-side-group" aria-hidden="true">{groups[group]}</li>); last = group; }
     agentItems.push(<li key={chat.id}><button type="button" className="chat-side-row chat-side-agent" aria-current={target.kind === 'agent' && target.id === chat.id ? 'page' : undefined} onClick={() => props.onOpenAgent(chat.id)}>
@@ -97,7 +109,7 @@ export function ChatSidebar(props: ChatSidebarProps) {
     </div>
     <button type="button" className="chat-side-new" onClick={props.onNewChat}><IconChat width={18} height={18} />{t('New chat', '开启新对话')}</button>
     <div className="chat-side-scroll">
-      {props.rowsError ? <p className="chat-side-empty" role="alert">{t('Conversations could not be loaded.', '对话列表暂时无法加载。')}</p> : null}
+      {props.rowsError ? <p className="chat-side-empty" role="alert">{inboxErrorText(props.rowsError, zh)}</p> : null}
       <Section title={t('Agent', 'Agent 对话')}>{agentItems}</Section>
       <Section title={t('Teams', '团队')}>{bySection.teams.map(rowItem)}</Section>
       <Section title={t('Friends', '好友')}>{bySection.friends.map(rowItem)}</Section>
@@ -105,10 +117,10 @@ export function ChatSidebar(props: ChatSidebarProps) {
       <Section title={t('My computers', '我的电脑')}>{bySection.computers.map(rowItem)}</Section>
     </div>
     <div className="chat-side-account" ref={menuRef}>
-      <button type="button" className="chat-side-me" aria-expanded={menu} aria-haspopup="menu" onClick={() => setMenu(open => !open)}>
+      <button ref={trigger} type="button" className="chat-side-me" aria-expanded={menu} aria-haspopup="menu" onClick={() => setMenu(open => !open)}>
         <span className="chat-side-avatar" aria-hidden="true">{initial(props.account)}</span><span className="chat-side-title">{props.account}</span>
       </button>
-      {menu ? <div className="chat-side-menu" role="menu">
+      {menu ? <div className="chat-side-menu" role="menu" aria-label={t('Account', '账号')} onKeyDown={onMenuKey}>
         <button type="button" role="menuitem" onClick={() => { setMenu(false); props.onOpen('/chat/settings/providers'); }}>{t('Model providers', '模型服务')}</button>
         <button type="button" role="menuitem" onClick={() => { setMenu(false); props.onOpen('/teams'); }}>{t('Manage teams', '管理团队')}</button>
         <button type="button" role="menuitem" onClick={() => { setMenu(false); props.onOpen('/friends/add'); }}>{t('Add a friend', '添加好友')}</button>

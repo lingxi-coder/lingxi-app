@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { TeamMember } from '../../../../../packages/teams';
 import type { FriendsApi } from '../../../../../packages/teams/friends';
 import { TeamConversationView } from '../../../../../packages/teams/TeamConversationView';
@@ -37,14 +37,18 @@ export function TeamPane({ teams: { workspace, snapshot }, teamId, conversationI
     if (selected === conversationId) { settled.current = requested; return; }
     if (selected && settled.current === requested) onFollow({ kind: 'team', teamId, conversationId: selected });
   }, [selected, conversationId, teamId, onFollow]);
+  const retry = useMemo(() => workspace ? { label: zh ? '重试' : 'Try again', run: () => void workspace.refresh() } : undefined, [workspace, zh]);
   if (!workspace || !snapshot || snapshot.loading) return <PaneNotice busy text={t('teams_loading')} />;
+  // A list that failed to load says nothing about membership: that is a retry, not "you are not a member".
+  if (snapshot.loadError && !snapshot.teams.some(team => team.id === teamId)) return <PaneNotice title={zh ? '暂时无法打开这个对话' : 'This chat could not be loaded'}
+    text={zh ? '团队列表加载失败，请检查网络后重试。' : 'Your teams could not be loaded. Check your connection and try again.'} retry={retry} />;
   if (!snapshot.teams.some(team => team.id === teamId)) return <PaneNotice title={zh ? '无法打开这个对话' : 'This chat is not available'}
     text={zh ? '你不是这个团队的成员，或者团队已不存在。请让成员重新邀请你。' : 'You are not a member of this team, or it no longer exists. Ask a member to invite you again.'}
     action={{ href: '/teams/join', label: zh ? '加入团队' : 'Join a team' }} />;
   if (snapshot.selectedTeamId !== teamId) return <PaneNotice busy text={t('teams_loading')} />;
   return <div className="chat-pane-team">
     <div className="chat-pane-conversation">
-      <TeamConversationView shareLink workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown}
+      <TeamConversationView workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown}
         detailsOpen={drawer.open} onToggleDetails={() => setDrawer(current => ({ ...current, open: !current.open }))} />
     </div>
     {drawer.open ? <TeamDetailsDrawer workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} tab={drawer.tab}

@@ -49,12 +49,19 @@ test('vault: provider ids follow the Desktop profile-name rule', () => {
   for (const bad of ['', 'Deepseek', '-x', 'builtin', 'claude', '__proto__', 'a/b', 'x'.repeat(65)]) assert.equal(providerId.safeParse(bad).success, false, bad);
 });
 
-test('vault: a base URL is https to a public host name', () => {
-  for (const ok of ['https://api.deepseek.com', 'https://my-gateway.example.com/v1', 'https://x.example.com:443/v1'])
-    assert.equal(baseUrl.safeParse(ok).success, true, ok);
-  for (const bad of ['http://api.deepseek.com', 'https://127.0.0.1/v1', 'https://[::1]/v1', 'https://localhost/v1', 'https://user:pw@api.example.com',
-    'https://api.example.com/v1?key=1', 'https://api.example.com:8443', 'https://metadata.google.internal/', 'https://printer.local', 'https://intranet', 'ftp://x.example.com'])
-    assert.equal(baseUrl.safeParse(bad).success, false, bad);
+test('vault: a base URL is https to a public host name (the table clients check with isVaultBaseUrl too)', () => {
+  const table = JSON.parse(readFileSync(new URL('../../../packages/llm-vault/fixtures/base-urls.json', import.meta.url), 'utf8'));
+  for (const ok of table.accept) assert.equal(baseUrl.safeParse(ok).success, true, ok);
+  for (const bad of table.reject) assert.equal(baseUrl.safeParse(bad).success, false, bad);
+});
+
+test('vault: Azure\'s API version and Bedrock\'s region are taken in their own shapes only', () => {
+  const upsert = extra => upsertInput.safeParse({ action: 'upsert', id: 'gw', protocol: 'other', desktopType: 'azure-openai', baseUrl: 'https://x.openai.azure.com', apiKey: 'k', ...extra }).success;
+  assert.equal(upsert({ apiVersion: '2024-10-21' }), true);
+  assert.equal(upsert({ apiVersion: '2024-10-21-preview' }), true);
+  assert.equal(upsert({ region: 'us-east-1' }), true);
+  assert.equal(upsert({ region: 'ap-southeast-2' }), true);
+  for (const extra of [{ apiVersion: '' }, { apiVersion: '2024/10' }, { region: 'US-EAST-1' }, { region: 'east' }, { region: 'us-east-1/../x' }]) assert.equal(upsert(extra), false, JSON.stringify(extra));
 });
 
 test('vault: an upsert rejects keys with whitespace or control characters and unknown fields', () => {

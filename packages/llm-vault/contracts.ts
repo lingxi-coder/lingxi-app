@@ -3,11 +3,12 @@
  * A provider record never carries its key, except in a native export.
  */
 export type VaultProtocol = 'open_ai_chat' | 'open_ai_responses' | 'anthropic_messages' | 'gemini_generate_content' | 'other';
-export const WEB_PROTOCOLS: readonly VaultProtocol[] = ['open_ai_chat', 'open_ai_responses', 'anthropic_messages', 'gemini_generate_content'];
 export type VaultSource = 'web' | 'desktop' | 'android' | 'ios' | 'unknown';
-/** The Desktop custom-provider types (`customProviderImport.ts`). */
-export type DesktopProviderType = 'openai' | 'openai-responses' | 'anthropic' | 'gemini' | 'azure-openai'
-  | 'bedrock-claude' | 'vertex-claude' | 'vertex-gemini' | 'foundry-claude';
+/** The Desktop custom-provider types (`customProviderImport.ts`), which the vault server lists too (`llm-vault.mjs`). */
+export const DESKTOP_PROVIDER_TYPES = ['openai', 'openai-responses', 'anthropic', 'gemini', 'azure-openai',
+  'bedrock-claude', 'vertex-claude', 'vertex-gemini', 'foundry-claude'] as const;
+export type DesktopProviderType = (typeof DESKTOP_PROVIDER_TYPES)[number];
+export const isDesktopProviderType = (value: unknown): value is DesktopProviderType => (DESKTOP_PROVIDER_TYPES as readonly unknown[]).includes(value);
 
 export interface VaultModel { id: string; name?: string }
 export interface VaultProvider {
@@ -19,6 +20,10 @@ export interface VaultProvider {
   baseUrl: string;
   models: VaultModel[];
   defaultModel: string | null;
+  /** Azure OpenAI's API version, which Desktop needs beside the base URL. */
+  apiVersion: string | null;
+  /** Bedrock's AWS region. */
+  region: string | null;
   keyHint: string;
   source: VaultSource;
   revision: number;
@@ -39,6 +44,8 @@ export interface VaultUpsert {
   baseUrl?: string;
   models?: VaultModel[];
   defaultModel?: string;
+  apiVersion?: string;
+  region?: string;
   /** Omitted on a change that keeps the stored key. */
   apiKey?: string;
   expectedRevision?: number;
@@ -62,6 +69,19 @@ export interface ProviderTestResult { ok: boolean; code?: string; model?: string
 export const PROVIDER_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
 const RESERVED_IDS = new Set(['builtin', 'claude', '__proto__', 'prototype', 'constructor']);
 export const isProviderId = (value: string) => PROVIDER_ID.test(value) && !RESERVED_IDS.has(value);
+
+/**
+ * Whether the vault stores this base URL (the server's rule, `llm-vault.mjs` `baseUrl`): https on 443, a host name with a
+ * dot (no IP literal, no localhost, `.local` or `.internal`), no credentials, query or fragment. DNS is checked per call.
+ */
+export function isVaultBaseUrl(value: string): boolean {
+  if (value.trim().length > 512) return false;
+  let url: URL;
+  try { url = new URL(value.trim()); } catch { return false; }
+  const host = url.hostname.toLowerCase();
+  return url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash && (!url.port || url.port === '443')
+    && host.includes('.') && !/^[\d.]+$/u.test(host) && !host.startsWith('[') && !/(^|\.)(localhost|internal|local)$/u.test(host);
+}
 
 /** The vault protocol a Desktop custom provider speaks through the proxy, or `other` when only Desktop can call it. */
 export function protocolOfDesktopType(type: DesktopProviderType): VaultProtocol {

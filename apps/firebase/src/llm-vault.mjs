@@ -91,7 +91,10 @@ export const providerId = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/u).refin
 const text = max => z.string().trim().min(1).max(max).refine(value => !/[\u0000-\u001f\u007f]/u.test(value));
 const apiKey = z.string().trim().min(1).max(4096).refine(value => !/[\s\u0000-\u001f\u007f]/u.test(value));
 const modelId = text(200);
-/** A base URL the proxy may call: https, a host name (no IP literal, no credentials, no query). DNS is checked per call. */
+/**
+ * A base URL the proxy may call: https, a host name (no IP literal, no credentials, no query). DNS is checked per call.
+ * Clients check the same rule first (`packages/llm-vault/contracts.ts` `isVaultBaseUrl`).
+ */
 export const baseUrl = z.string().trim().max(512).refine(value => {
   let url;
   try { url = new URL(value); } catch { return false; }
@@ -103,7 +106,9 @@ export const upsertInput = z.object({
   action: z.literal('upsert'), id: providerId, presetId: z.string().max(64).optional(), label: text(80).optional(),
   protocol: z.enum([...WEB_PROTOCOLS, 'other']).optional(), desktopType: z.enum(DESKTOP_TYPES).optional(),
   baseUrl: baseUrl.optional(), models: z.array(z.object({ id: modelId, name: text(120).optional() }).strict()).max(100).optional(),
-  defaultModel: modelId.optional(), apiKey: apiKey.optional(), expectedRevision: z.number().int().min(0).optional(),
+  defaultModel: modelId.optional(), apiVersion: z.string().regex(/^[A-Za-z0-9._-]{1,40}$/u).optional(),
+  region: z.string().regex(/^[a-z]{2}(?:-[a-z0-9]+)+-\d{1,2}$/u).optional(),
+  apiKey: apiKey.optional(), expectedRevision: z.number().int().min(0).optional(),
 }).strict();
 export const removeInput = z.object({ action: z.literal('delete'), id: providerId, expectedRevision: z.number().int().min(0).optional() }).strict();
 export const exportInput = z.object({ ids: z.array(providerId).min(1).max(PROVIDER_LIMIT).optional() }).strict();
@@ -112,7 +117,8 @@ const millis = value => value instanceof Timestamp ? value.toMillis() : value in
 /** The part of a record any signed-in client of its owner may see. */
 export function metadataOf(id, data) {
   return { id, presetId: data.presetId ?? null, label: data.label, protocol: data.protocol, desktopType: data.desktopType ?? null,
-    baseUrl: data.baseUrl, models: data.models ?? [], defaultModel: data.defaultModel ?? null, keyHint: data.keyHint,
+    baseUrl: data.baseUrl, models: data.models ?? [], defaultModel: data.defaultModel ?? null,
+    apiVersion: data.apiVersion ?? null, region: data.region ?? null, keyHint: data.keyHint,
     source: data.source, revision: data.revision,
     webUsable: WEB_PROTOCOLS.includes(data.protocol), createdAt: millis(data.createdAt), updatedAt: millis(data.updatedAt) };
 }
@@ -163,6 +169,8 @@ export class VaultStore {
         presetId: input.presetId ?? old?.presetId ?? null, label: input.label ?? old?.label ?? preset?.label ?? input.id,
         protocol, desktopType: input.desktopType ?? old?.desktopType ?? null, baseUrl: base, models,
         defaultModel: input.defaultModel ?? keptDefault ?? models[0]?.id ?? null,
+        // Azure's API version and Bedrock's region, which Desktop needs to call the provider; the proxy does not use them.
+        apiVersion: input.apiVersion ?? old?.apiVersion ?? null, region: input.region ?? old?.region ?? null,
         ...(sealedKey ?? {}), source: old && !sealedKey ? old.source : source, revision: (old?.revision ?? 0) + 1,
         createdAt: old?.createdAt ?? now, updatedAt: now,
       };

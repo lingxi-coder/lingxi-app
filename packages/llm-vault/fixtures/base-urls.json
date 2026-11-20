@@ -1,0 +1,6 @@
+{
+  "accept": ["https://api.deepseek.com", "https://my-gateway.example.com/v1", "https://x.example.com:443/v1", "https://bedrock-runtime.us-east-1.amazonaws.com"],
+  "reject": ["http://api.deepseek.com", "https://127.0.0.1/v1", "https://10.0.0.5/v1", "https://[::1]/v1", "https://localhost/v1", "https://user:pw@api.example.com",
+    "https://api.example.com/v1?key=1", "https://api.example.com/v1#x", "https://api.example.com:8443", "https://metadata.google.internal/", "https://gw.corp.internal",
+    "https://printer.local", "https://intranet", "ftp://x.example.com", "not a url"]
+}

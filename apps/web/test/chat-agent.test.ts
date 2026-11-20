@@ -4,7 +4,8 @@ import { createRequire } from 'node:module';
 import test from 'node:test';
 import { createElement } from 'react';
 import type { ChatEvent, ChatTurn, VaultProvider, VaultUpsert } from '../../../packages/llm-vault/contracts';
-import { protocolOfDesktopType, desktopTypeOfProtocol, isProviderId } from '../../../packages/llm-vault/contracts';
+import { protocolOfDesktopType, desktopTypeOfProtocol, isProviderId, isVaultBaseUrl } from '../../../packages/llm-vault/contracts';
+import baseUrls from '../../../packages/llm-vault/fixtures/base-urls.json' with { type: 'json' };
 import { AgentHost, useModelServices } from '../src/chat/agent/AgentPane';
 import { createLlmClient, LlmError, type LlmClient } from '../src/chat/agent/client';
 import { contextOf, memoryHistory, titleOf, type AgentMessage } from '../src/chat/agent/history';
@@ -100,7 +101,7 @@ test('agent history: a long chat sends at most the proxy\'s 200 messages, still 
 });
 
 const deepseek: VaultProvider = { id: 'deepseek', presetId: 'deepseek', label: 'DeepSeek', protocol: 'open_ai_chat', desktopType: null, baseUrl: 'https://api.deepseek.com',
-  models: [{ id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash' }], defaultModel: 'deepseek-flash', keyHint: 'sk-…0001', source: 'desktop',
+  models: [{ id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash' }], defaultModel: 'deepseek-flash', apiVersion: null, region: null, keyHint: 'sk-…0001', source: 'desktop',
   revision: 1, webUsable: true, createdAt: 0, updatedAt: 0 };
 
 function fakeClient(providers: VaultProvider[], stream: LlmClient['streamChat'] = async (_turn, onEvent) => { onEvent({ type: 'delta', text: 'Hel' }); onEvent({ type: 'delta', text: 'lo **there**' }); const done: ChatEvent = { type: 'done', reason: 'stop' }; onEvent(done); return done; }) {
@@ -352,4 +353,9 @@ test('model settings: saved services show where their key came from and never th
   const text = textOf(root.toJSON());
   assert.match(text, /sk-…0001 · From the desktop app/u);
   assert.match(text, /Desktop only/u);
+});
+
+test('contracts: clients refuse the base URLs the vault refuses, by the same table', () => {
+  for (const ok of baseUrls.accept) assert.equal(isVaultBaseUrl(ok), true, ok);
+  for (const bad of baseUrls.reject) assert.equal(isVaultBaseUrl(bad), false, bad);
 });

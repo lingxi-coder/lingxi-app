@@ -1,5 +1,4 @@
-import { desktopTypeOfProtocol, protocolOfDesktopType, type DesktopProviderType, type VaultExport, type VaultProvider, type VaultUpsert } from '../../../../packages/llm-vault/contracts';
-import { providerById } from '../shared/providers.js';
+import { desktopTypeOfProtocol, isDesktopProviderType, isProviderId, isVaultBaseUrl, protocolOfDesktopType, type DesktopProviderType, type VaultExport, type VaultProvider, type VaultUpsert } from '../../../../packages/llm-vault/contracts';
 import { VAULT_PRESET_IDS } from '../shared/providerVault.js';
 
 /** The account the vault is called as. The ID token stays in the main process. */
@@ -12,9 +11,6 @@ export interface VaultAccount {
 export class ProviderVaultError extends Error {
   constructor(readonly code: string, readonly status = 0) { super(code); this.name = 'ProviderVaultError'; }
 }
-
-const DESKTOP_TYPES: readonly DesktopProviderType[] = ['openai', 'openai-responses', 'anthropic', 'gemini', 'azure-openai',
-  'bedrock-claude', 'vertex-claude', 'vertex-gemini', 'foundry-claude'];
 
 /**
  * The model-provider vault for this Mac (`apps/firebase/src/llm-api.mjs`). Calls come from the main process with no Origin
@@ -73,48 +69,90 @@ const modelIds = (models: unknown): string[] => Array.isArray(models)
   : [];
 
 /**
- * The vault record for a key just saved on this Mac, or `null` when the vault cannot hold it: a built-in provider the vault
- * has no preset for (GitHub Copilot, a ChatGPT login), or a custom provider without an https base URL. `profile` is the
- * custom provider's settings entry, absent for a built-in provider.
+ * Whether a provider id is one of this Mac's built-in providers, by the runtime's official catalog (which has providers,
+ * such as Qwen and MiniMax, that the static list does not). The host passes it in.
  */
-export function vaultUpsertFor(providerId: string, profile: unknown, apiKey: string): VaultUpsert | null {
-  const builtin = providerById(providerId);
-  if (builtin) return VAULT_PRESET_IDS.has(providerId) ? { action: 'upsert', id: providerId, presetId: providerId, label: builtin.label, apiKey } : null;
-  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return null;
-  const { type, baseUrl, models } = profile as { type?: unknown; baseUrl?: unknown; models?: unknown };
-  if (!DESKTOP_TYPES.includes(type as DesktopProviderType) || typeof baseUrl !== 'string' || !/^https:\/\//iu.test(baseUrl.trim())) return null;
-  const ids = modelIds(models);
-  return { action: 'upsert', id: providerId, label: providerId, protocol: protocolOfDesktopType(type as DesktopProviderType),
-    desktopType: type as DesktopProviderType, baseUrl: baseUrl.trim(), models: ids.map(id => ({ id })), ...(ids[0] ? { defaultModel: ids[0] } : {}), apiKey };
+export type BuiltinProviders = (id: string) => boolean;
+
+const API_VERSION = /^[A-Za-z0-9._-]{1,40}$/u, REGION = /^[a-z]{2}(?:-[a-z0-9]+)+-\d{1,2}$/u;
+const text = (value: unknown) => typeof value === 'string' ? value.trim() : '';
+/** Bedrock is addressed by region; the vault keeps a base URL for every record, so it stores the region's endpoint. */
+const bedrockBaseUrl = (region: string) => `https://bedrock-runtime.${region}.amazonaws.com`;
+
+/**
+ * The vault id for one provider account of this Mac: the record it is already linked to, else the provider's own id while no
+ * other account of this Mac holds that one, else an id of its own, so a second account never replaces the first one's key.
+ */
+export function vaultIdForAccount(providerId: string, accountId: string, linked: string | undefined, heldByAnother: (vaultId: string) => boolean): string | null {
+  if (linked) return linked;
+  if (isProviderId(providerId) && !heldByAnother(providerId)) return providerId;
+  const suffix = accountId.toLowerCase().replace(/[^a-z0-9]/gu, '').slice(0, 8);
+  const id = `${providerId.slice(0, 55)}.${suffix}`;
+  return suffix && isProviderId(id) ? id : null;
 }
 
+/**
+ * The vault record for one provider account of this Mac, or `null` when the vault cannot hold it: a built-in provider the
+ * vault has no preset for (GitHub Copilot, a ChatGPT login), or a custom provider whose endpoint the vault would refuse (not
+ * https on 443, an IP or local host name) or that lacks what Desktop needs to call it again (Azure's API version, Bedrock's
+ * region). `profile` is the custom provider's settings entry, absent for a built-in provider. Without `apiKey` it is a
+ * change that keeps the stored key (a custom provider's models, say).
+ */
+export function vaultUpsertFor(account: { vaultId: string; providerId: string; displayName: string }, builtin: BuiltinProviders, profile: unknown, apiKey?: string): VaultUpsert | null {
+  const label = account.displayName.trim().slice(0, 80) || account.providerId;
+  const key = apiKey === undefined ? {} : { apiKey };
+  if (builtin(account.providerId)) return VAULT_PRESET_IDS.has(account.providerId) ? { action: 'upsert', id: account.vaultId, presetId: account.providerId, label, ...key } : null;
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return null;
+  const { type, models } = profile as { type?: unknown; models?: unknown };
+  if (!isDesktopProviderType(type)) return null;
+  const region = text((profile as { region?: unknown }).region), apiVersion = text((profile as { apiVersion?: unknown }).apiVersion);
+  if (type === 'bedrock-claude' && !REGION.test(region)) return null;
+  if (type === 'azure-openai' && !API_VERSION.test(apiVersion)) return null;
+  const baseUrl = text((profile as { baseUrl?: unknown }).baseUrl) || (type === 'bedrock-claude' ? bedrockBaseUrl(region) : '');
+  if (!isVaultBaseUrl(baseUrl)) return null;
+  const ids = modelIds(models);
+  return { action: 'upsert', id: account.vaultId, label, protocol: protocolOfDesktopType(type), desktopType: type, baseUrl,
+    models: ids.map(id => ({ id })), ...(ids[0] ? { defaultModel: ids[0] } : {}),
+    ...(type === 'azure-openai' ? { apiVersion } : {}), ...(type === 'bedrock-claude' ? { region } : {}), ...key };
+}
+
+/** A custom provider's settings entry as a pull writes it. */
+export interface VaultInstallProfile { type: DesktopProviderType; baseUrl: string; models: Array<{ id: string }>; apiVersion?: string; region?: string }
 /** How a vault provider lands on this Mac: as an account of a built-in provider, or of a custom provider (added when missing). */
 export type VaultInstallPlan =
   | { kind: 'builtin'; providerId: string; displayName: string }
-  | { kind: 'custom'; providerId: string; displayName: string; profile: { type: DesktopProviderType; baseUrl: string; models: Array<{ id: string }> } | null }
-  | { kind: 'unsupported'; code: 'ID_CONFLICT' | 'UNSUPPORTED_PROVIDER' | 'NO_MODELS' };
+  | { kind: 'custom'; providerId: string; displayName: string; profile: VaultInstallProfile | null }
+  | { kind: 'unsupported'; code: 'ID_CONFLICT' | 'UNSUPPORTED_PROVIDER' | 'NO_MODELS' | 'PROVIDER_INCOMPLETE' };
 
-export function vaultInstallPlan(provider: VaultProvider, profiles: Readonly<Record<string, unknown>>): VaultInstallPlan {
+export function vaultInstallPlan(provider: VaultProvider, profiles: Readonly<Record<string, unknown>>, builtin: BuiltinProviders): VaultInstallPlan {
   const displayName = provider.label.slice(0, 128);
-  if (provider.presetId && providerById(provider.presetId) && VAULT_PRESET_IDS.has(provider.presetId)) return { kind: 'builtin', providerId: provider.presetId, displayName };
+  if (provider.presetId && VAULT_PRESET_IDS.has(provider.presetId)) {
+    return builtin(provider.presetId) ? { kind: 'builtin', providerId: provider.presetId, displayName } : { kind: 'unsupported', code: 'UNSUPPORTED_PROVIDER' };
+  }
   // A custom vault provider never becomes an account of the built-in provider that happens to share its id.
-  if (providerById(provider.id)) return { kind: 'unsupported', code: 'ID_CONFLICT' };
+  if (builtin(provider.id)) return { kind: 'unsupported', code: 'ID_CONFLICT' };
   const type = provider.desktopType ?? desktopTypeOfProtocol(provider.protocol);
-  // Nor of a custom provider of this Mac that only shares its name: the key would go to that provider's endpoint.
-  if (Object.hasOwn(profiles, provider.id)) return sameEndpoint(profiles[provider.id], type, provider.baseUrl)
-    ? { kind: 'custom', providerId: provider.id, displayName, profile: null } : { kind: 'unsupported', code: 'ID_CONFLICT' };
   if (!type) return { kind: 'unsupported', code: 'UNSUPPORTED_PROVIDER' };
+  const extra = type === 'azure-openai' ? (provider.apiVersion ? { apiVersion: provider.apiVersion } : null)
+    : type === 'bedrock-claude' ? (provider.region ? { region: provider.region } : null) : {};
+  if (!extra) return { kind: 'unsupported', code: 'PROVIDER_INCOMPLETE' };
+  // Nor of a custom provider of this Mac that only shares its name: the key would go to that provider's endpoint.
+  if (Object.hasOwn(profiles, provider.id)) return sameEndpoint(profiles[provider.id], type, provider.baseUrl, extra)
+    ? { kind: 'custom', providerId: provider.id, displayName, profile: null } : { kind: 'unsupported', code: 'ID_CONFLICT' };
   const ids = modelIds(provider.models);
   // The provider's default model leads, so it is also the first model Desktop offers.
   if (provider.defaultModel) { const at = ids.indexOf(provider.defaultModel); if (at > 0) ids.splice(at, 1); if (at !== 0) ids.unshift(provider.defaultModel); }
   if (!ids.length) return { kind: 'unsupported', code: 'NO_MODELS' };
-  return { kind: 'custom', providerId: provider.id, displayName, profile: { type, baseUrl: provider.baseUrl, models: ids.map(id => ({ id })) } };
+  return { kind: 'custom', providerId: provider.id, displayName, profile: { type, baseUrl: provider.baseUrl, models: ids.map(id => ({ id })), ...extra } };
 }
 
 const withoutTrailingSlash = (url: string) => url.trim().replace(/\/+$/u, '');
-/** Whether this Mac's custom provider settings call the same kind of endpoint at the same base URL as the vault record. */
-function sameEndpoint(profile: unknown, type: DesktopProviderType | null, baseUrl: string): boolean {
-  if (!type || !profile || typeof profile !== 'object' || Array.isArray(profile)) return false;
-  const local = profile as { type?: unknown; baseUrl?: unknown };
-  return local.type === type && typeof local.baseUrl === 'string' && withoutTrailingSlash(local.baseUrl) === withoutTrailingSlash(baseUrl);
+/** Whether this Mac's custom provider settings call the same endpoint as the vault record: kind, base URL, version, region. */
+function sameEndpoint(profile: unknown, type: DesktopProviderType, baseUrl: string, extra: { apiVersion?: string; region?: string }): boolean {
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return false;
+  const local = profile as { type?: unknown; baseUrl?: unknown; apiVersion?: unknown; region?: unknown };
+  if (local.type !== type || (extra.apiVersion !== undefined && text(local.apiVersion) !== extra.apiVersion) || (extra.region !== undefined && text(local.region) !== extra.region)) return false;
+  // A Bedrock provider of this Mac may name only its region; the vault keeps that region's endpoint.
+  const localBase = text(local.baseUrl) || (type === 'bedrock-claude' && extra.region ? bedrockBaseUrl(extra.region) : '');
+  return !!localBase && withoutTrailingSlash(localBase) === withoutTrailingSlash(baseUrl);
 }

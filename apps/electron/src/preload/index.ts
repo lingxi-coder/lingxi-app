@@ -648,7 +648,14 @@ const api: LingxiApi = {
     cancel: operationId => ipcRenderer.invoke('lingxi:provider-accounts:cancel', operationId),
   },
   providerSettings: (patch, expected) => ipcRenderer.invoke('lingxi:provider-settings', patch, expected),
-  providerVault: { command: command => ipcRenderer.invoke('lingxi:provider-vault', command) },
+  providerVault: {
+    command: command => ipcRenderer.invoke('lingxi:provider-vault', command),
+    onSynced: callback => {
+      const listener = (_event: Electron.IpcRendererEvent, result: import('../shared/providerVault.js').ProviderVaultSynced) => callback(result);
+      ipcRenderer.on('lingxi:provider-vault:synced', listener);
+      return () => { ipcRenderer.removeListener('lingxi:provider-vault:synced', listener); };
+    },
+  },
   pluginSecret: (pluginId, key) => ipcRenderer.invoke(CH_PLUGIN_SECRET_GET, pluginId, key) as Promise<PluginSecretMetadata>,
   setPluginSecret: (pluginId, key, secret) => ipcRenderer.invoke(CH_PLUGIN_SECRET_SET, pluginId, key, secret) as Promise<PluginSecretMetadata>,
   clearPluginSecret: (pluginId, key) => ipcRenderer.invoke(CH_PLUGIN_SECRET_CLEAR, pluginId, key) as Promise<PluginSecretMetadata>,

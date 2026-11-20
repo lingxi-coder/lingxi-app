@@ -77,18 +77,26 @@ interface TeamLinkSnapshot {
 }
 /**
  * The next step toward a team link once Teams can carry it out. A team the viewer is not in is `unavailable`, never another team.
- * A Bot opens the viewer's own chat with it when there is one, else the team's Bots, where starting a chat is the viewer's choice.
+ * A conversation opens once the team's conversations are in, and one the viewer cannot see is `unavailable` rather than the
+ * team's home. A Bot opens the viewer's own chat with it when there is one, else the team's Bots, where starting a chat is
+ * the viewer's choice; selecting its team (`team`) keeps the conversation that team remembers.
  */
 export type TeamLinkStep =
   | { step: 'wait' } | { step: 'unavailable' }
-  | { step: 'open'; teamId: string; conversationId: string; done: boolean }
+  | { step: 'open'; teamId: string; conversationId: string }
+  | { step: 'team'; teamId: string }
   | { step: 'select'; conversationId: string } | { step: 'bots' };
 
 export function teamLinkStep(request: Exclude<TeamLinkRequest, { kind: 'pair' }>, snapshot: TeamLinkSnapshot): TeamLinkStep {
   if (snapshot.loading) return { step: 'wait' };
   if (!snapshot.teams.some(team => team.id === request.teamId)) return { step: 'unavailable' };
-  if (request.kind === 'conversation') return { step: 'open', teamId: request.teamId, conversationId: request.conversationId, done: true };
-  if (snapshot.selectedTeamId !== request.teamId) return { step: 'open', teamId: request.teamId, conversationId: '', done: false };
+  if (snapshot.selectedTeamId !== request.teamId) return request.kind === 'conversation'
+    ? { step: 'open', teamId: request.teamId, conversationId: request.conversationId } : { step: 'team', teamId: request.teamId };
+  if (request.kind === 'conversation') {
+    if (snapshot.messagingConnecting) return { step: 'wait' };
+    return snapshot.conversations.some(conversation => conversation.id === request.conversationId)
+      ? { step: 'select', conversationId: request.conversationId } : { step: 'unavailable' };
+  }
   if (!snapshot.botsLoaded || snapshot.messagingConnecting) return { step: 'wait' };
   if (!snapshot.bots.some(card => card.sharedBotId === request.botId)) return { step: 'unavailable' };
   const existing = findBotDm(snapshot.conversations, snapshot.uid, request.botId, snapshot.bots);

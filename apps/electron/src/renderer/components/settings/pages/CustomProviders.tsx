@@ -14,6 +14,7 @@ import {
 import { ghostButtonStyle } from './ghostButton';
 import { ProviderAccounts } from './ProviderAccounts';
 import { readVaultSyncPreference, vaultCodeText, writeVaultSyncPreference } from './CloudProviders';
+import { vaultSyncResult, watchVaultSyncs } from '../../../bridge/vaultSync';
 import { useAccountState } from '../../../bridge/useAccountState';
 import { providerById } from '../../../../shared/providers';
 import { ProviderRegion } from './ProviderRegion';
@@ -90,7 +91,8 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer,
   const [apiKey, setApiKey] = useState('');
   const signedIn = Boolean(useAccountState().state?.user);
   const [cloudSync, setCloudSync] = useState(readVaultSyncPreference);
-  const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  /** The cloud sync of the last save: under way or done (neutral), or failed (an alert, the key is still saved here). */
+  const [syncNotice, setSyncNotice] = useState<{ text: string; failed: boolean } | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState('');
@@ -101,6 +103,8 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer,
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [pendingCredentials, setPendingCredentials] = useState<Record<string, string>>({});
+  /** Whether the save that left `pendingCredentials` asked for cloud sync, so its retry does too. */
+  const [pendingSync, setPendingSync] = useState(false);
   const generation = useRef(0);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -158,19 +162,26 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer,
         if (generation.current !== token) return false;
         if (!bridge.providerAccounts) throw new Error(tr('provider_accounts_status_error'));
         const accounts = await bridge.providerAccounts.snapshot();
+        if (sync) watchVaultSyncs();
         const saved = await bridge.providerAccounts.command({ action: 'add', expectedRevision: accounts.configRevision, providerId: name, executionBindingId: name, authKind: 'api_key', displayName: name, ...(sync ? { cloudSync: true } : {}) }, key);
         delete remaining[name];
-        if (saved.cloudSync && generation.current === token) setSyncNotice(saved.cloudSync.ok ? tr('provider_vault_synced') : tr('provider_vault_sync_failed', vaultCodeText(saved.cloudSync.code)));
+        // The key is saved here; the cloud sync reports on its own and never holds up the save.
+        if (saved.cloudSync && generation.current === token) {
+          setSyncNotice({ text: tr('provider_vault_syncing'), failed: false });
+          void vaultSyncResult(saved.cloudSync.syncId).then(result => {
+            if (generation.current === token) setSyncNotice(result.ok ? { text: tr('provider_vault_synced'), failed: false } : { text: tr('provider_vault_sync_failed', vaultCodeText(result.code)), failed: true });
+          });
+        }
       }
       if (generation.current !== token) return false;
       if (removedProviderId) await bridge.setModelPickerVisibility(withoutProviderModelPickerVisibility(modelPickerVisibility, removedProviderId));
       if (generation.current === token) {
-        resetForm(); setImportOpen(false); setImportText(''); setEntries(null); setPendingCredentials({});
+        resetForm(); setImportOpen(false); setImportText(''); setEntries(null); setPendingCredentials({}); setPendingSync(false);
       }
       return true;
     } catch {
       if (generation.current === token) {
-        setPendingCredentials(configSaved ? remaining : {});
+        setPendingCredentials(configSaved ? remaining : {}); setPendingSync(configSaved && sync);
         setSaveError(configSaved ? removedProviderId ? tr('desktop_settings_a131e886ff') : tr('desktop_settings_df8a4e50ad') : tr('desktop_settings_dce9e3b7a8'));
       }
       return false;
@@ -302,10 +313,10 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer,
         })}
       </Card>}
         {saveError && <div role="alert" style={{ padding: 18, color: t.danger }}>{saveError}
-          {Object.keys(pendingCredentials).length > 0 && <button disabled={busy} onClick={() => void persist(null, pendingCredentials)} style={ghostButtonStyle(t)}>{tr('desktop_settings_65f36ab91c')}</button>}
+          {Object.keys(pendingCredentials).length > 0 && <button disabled={busy} onClick={() => void persist(null, pendingCredentials, undefined, pendingSync)} style={ghostButtonStyle(t)}>{tr('desktop_settings_65f36ab91c')}</button>}
         </div>}
       {editorOpen && originalName && bridge.providerAccounts && <ProviderAccounts api={bridge.providerAccounts} provider={{ ...providerById('openai')!, id: originalName, label: originalName, credentialManagementUrl: '', authMethod: 'api_key', authMethods: ['api_key'] }} running={bridge.running || busy} onConfigured={() => bridge.refreshModelPicker('manual')} usageRows={bridge.cost?.by_account} cloudSyncable />}
-      {syncNotice && <p role="status" style={{ padding: '0 18px', color: t.text3, fontSize: 13 }}>{syncNotice}</p>}
+      {syncNotice && <p role={syncNotice.failed ? 'alert' : 'status'} style={{ padding: '0 18px', color: syncNotice.failed ? t.danger : t.text3, fontSize: 13 }}>{syncNotice.text}</p>}
       {editorOpen && <Card title={originalName ? tr('desktop_settings_39e42e9346', originalName) : tr('desktop_settings_7add78b882')}>
         <fieldset disabled={busy} style={{ border: 0, padding: 20, margin: 0, minWidth: 0 }}>
           <ProviderEditorFields key={originalName ?? "new"} name={profileName} onName={setProfileName} nameLocked={originalName !== null} draft={draft} onDraft={setDraft} apiKey={apiKey} onApiKey={setApiKey} credentialConfigured={credentialConfigured(profileName)} />

@@ -17,16 +17,20 @@ export function writeVaultSyncPreference(value: boolean): void {
   try { globalThis.localStorage?.setItem(SYNC_PREFERENCE, value ? '1' : '0'); } catch { /* the choice is a convenience */ }
 }
 
-/** A vault error code as a short phrase; an unknown code is shown as itself. */
+/** A vault error code as a short phrase; a code without one says something went wrong and names the code. */
 export function vaultCodeText(code: string | undefined): string {
   switch (code) {
     case 'NETWORK': case 'UNAVAILABLE': case 'TIMEOUT': return tr('provider_vault_code_network');
-    case 'UNSUPPORTED_PROVIDER': case 'NO_MODELS': case 'PROVIDER_INCOMPLETE': case 'INVALID_INPUT': return tr('provider_vault_code_unsupported');
+    case 'UNSUPPORTED_PROVIDER': case 'NO_MODELS': case 'PROVIDER_INCOMPLETE': case 'INVALID_INPUT': case 'KEY_REQUIRED': case 'UNKNOWN_PRESET': return tr('provider_vault_code_unsupported');
     case 'PROVIDER_LIMIT': return tr('provider_vault_code_limit');
     case 'RATE_LIMITED': return tr('provider_vault_code_rate');
     case 'ID_CONFLICT': return tr('provider_vault_code_conflict');
-    case 'SIGN_IN_REQUIRED': case 'INVALID_SESSION': return tr('provider_vault_code_session');
-    default: return code ?? 'INTERNAL';
+    case 'SIGN_IN_REQUIRED': case 'INVALID_SESSION': case 'REAUTH_REQUIRED': return tr('provider_vault_code_session');
+    case 'INSTALL_FAILED': return tr('provider_vault_code_install');
+    case 'PROVIDER_NOT_FOUND': return tr('provider_vault_code_missing');
+    case 'REVISION_CONFLICT': return tr('provider_vault_code_changed');
+    case 'INTERNAL': case 'INVALID_RESPONSE': case 'VAULT_UNREADABLE': return tr('provider_vault_code_server');
+    default: return code && /^HTTP_5\d\d$/u.test(code) ? tr('provider_vault_code_server') : tr('provider_vault_code_failed', code ?? 'INTERNAL');
   }
 }
 
@@ -57,7 +61,9 @@ export function CloudProviders({ api = bridgeGlobal()?.providerVault, account = 
   const apply = useCallback((reply: ProviderVaultReply, current: number) => {
     if (generation.current !== current) return false;
     if (!reply.ok) { setError(tr('provider_vault_error', vaultCodeText(reply.code))); return false; }
-    setProviders(reply.providers); setError(undefined);
+    // A pull whose keys are in but whose list could not be read keeps the list shown.
+    if (reply.providers) setProviders(reply.providers);
+    setError(undefined);
     return true;
   }, []);
   useEffect(() => {
@@ -81,7 +87,7 @@ export function CloudProviders({ api = bridgeGlobal()?.providerVault, account = 
       if (!reply.ok && reply.code === 'REAUTH_REQUIRED') { setPassword(''); setReauthError(undefined); setReauth(ids); return; }
       if (!apply(reply, current) || !reply.ok) return;
       const failed = (reply.pulled ?? []).filter(item => !item.ok);
-      const label = (id: string) => reply.providers.find(provider => provider.id === id)?.label ?? id;
+      const label = (id: string) => (reply.providers ?? providers)?.find(provider => provider.id === id)?.label ?? id;
       if (failed.length) setError(failed.map(item => tr('provider_vault_pull_failed', label(item.id), vaultCodeText(item.code))).join('\n'));
       if ((reply.pulled ?? []).some(item => item.ok)) { setNotice(tr('provider_vault_pulled')); await onPulled?.(); }
     } catch (cause) {
@@ -102,6 +108,11 @@ export function CloudProviders({ api = bridgeGlobal()?.providerVault, account = 
     setReauth(undefined);
     await pull(ids);
   };
+  /** Closing the dialog also ends a browser sign-in it started, which would otherwise hold the account for minutes. */
+  const closeReauth = () => {
+    if (busy === 'reauth') void account?.request({ type: 'cancel' }).catch(() => undefined);
+    setReauth(undefined);
+  };
   const remove = async (provider: VaultProvider) => {
     if (!api || busy) return;
     const current = generation.current;
@@ -112,6 +123,9 @@ export function CloudProviders({ api = bridgeGlobal()?.providerVault, account = 
   };
 
   if (!api || !account || !state) return null;
+  // Only the ways this account signs in; all of them while they are not known yet.
+  const methods = user?.signInMethods, offers = (method: 'password' | 'google.com' | 'apple.com') => !methods || methods.length === 0 || methods.includes(method);
+  const passwordOffered = Boolean(user?.email) && offers('password');
   const theme = { '--pa-bg': t.surface, '--pa-text': t.text, '--pa-secondary': t.text3, '--pa-border': t.border, '--pa-accent': t.accent, '--pa-ok': t.ok, '--pa-danger': t.danger } as CSSProperties;
   return <section className="pa-panel cloud-providers" style={theme} aria-label={tr('provider_vault_title')} aria-busy={Boolean(busy)} data-testid="cloud-providers">
     <header className="pa-section-heading"><div><h3>{tr('provider_vault_title')} {providers && <span className="pa-count">{providers.length}</span>}</h3><p>{user ? tr('provider_vault_desc') : tr('provider_vault_sign_in')}</p></div></header>
@@ -135,20 +149,20 @@ export function CloudProviders({ api = bridgeGlobal()?.providerVault, account = 
     </div>}
     {error && <p className="pa-feedback pa-error" role="alert" style={{ whiteSpace: 'pre-line' }}>{error}</p>}
     {notice && <p className="pa-feedback pa-success" role="status"><Icon name="check" size={15} />{notice}</p>}
-    <dialog ref={dialog} className="pa-dialog" aria-labelledby="cloud-reauth-title" onCancel={event => { event.preventDefault(); if (busy !== 'reauth') setReauth(undefined); }}>
-      {reauth && <form onSubmit={event => { event.preventDefault(); if (password && busy !== 'reauth') void confirmIdentity({ type: 'signIn', password }); }}>
+    <dialog ref={dialog} className="pa-dialog" aria-labelledby="cloud-reauth-title" onCancel={event => { event.preventDefault(); closeReauth(); }}>
+      {reauth && <form onSubmit={event => { event.preventDefault(); if (passwordOffered && password && busy !== 'reauth') void confirmIdentity({ type: 'signIn', password }); }}>
         <header><h3 id="cloud-reauth-title">{tr('provider_vault_reauth_title')}</h3></header>
         <p className="pa-dialog-note">{tr('provider_vault_reauth_desc', user?.email ?? user?.displayName ?? '')}</p>
-        {user?.email && <label className="pa-field">{tr('provider_vault_reauth_password')}<input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} disabled={busy === 'reauth'} /></label>}
+        {passwordOffered && <label className="pa-field">{tr('provider_vault_reauth_password')}<input type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} disabled={busy === 'reauth'} /></label>}
         <div className="pa-reauth-oauth">
-          <button type="button" className="pa-button" disabled={busy === 'reauth'} onClick={() => void confirmIdentity({ type: 'oauth', provider: 'google.com' })}>{tr('provider_vault_reauth_google')}</button>
-          <button type="button" className="pa-button" disabled={busy === 'reauth'} onClick={() => void confirmIdentity({ type: 'oauth', provider: 'apple.com' })}>{tr('provider_vault_reauth_apple')}</button>
+          {offers('google.com') && <button type="button" className="pa-button" disabled={busy === 'reauth'} onClick={() => void confirmIdentity({ type: 'oauth', provider: 'google.com' })}>{tr('provider_vault_reauth_google')}</button>}
+          {offers('apple.com') && <button type="button" className="pa-button" disabled={busy === 'reauth'} onClick={() => void confirmIdentity({ type: 'oauth', provider: 'apple.com' })}>{tr('provider_vault_reauth_apple')}</button>}
         </div>
         {busy === 'reauth' && <p className="pa-progress" role="status"><span className="pa-spinner" />{tr('provider_vault_pulling')}</p>}
         {reauthError && <p className="pa-feedback pa-error" role="alert">{reauthError}</p>}
         <footer>
-          <button type="button" className="pa-button" disabled={busy === 'reauth'} onClick={() => setReauth(undefined)}>{tr('provider_accounts_cancel')}</button>
-          {user?.email && <button type="submit" className="pa-button pa-primary" disabled={busy === 'reauth' || !password}>{tr('provider_vault_reauth_submit')}</button>}
+          <button type="button" className="pa-button" onClick={closeReauth}>{tr('provider_accounts_cancel')}</button>
+          {passwordOffered && <button type="submit" className="pa-button pa-primary" disabled={busy === 'reauth' || !password}>{tr('provider_vault_reauth_submit')}</button>}
         </footer>
       </form>}
     </dialog>

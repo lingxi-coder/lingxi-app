@@ -276,15 +276,16 @@ test('provider popup cancellation settles the service and closes the origin-chec
 test('re-authentication accepts only the signed-in account and keeps its session epoch', async () => {
   const saved = store(session());
   let response: Record<string, unknown> = { ...authResponse, idToken: 'fresh-id', refreshToken: 'fresh-refresh' };
-  const service = new AccountService(config, saved, async () => {}, mockFetch(url => Response.json(url.includes('lookup') ? { users: [{ localId: 'u1', email: 'a@example.com' }] } : response)));
+  const service = new AccountService(config, saved, async () => {}, mockFetch(url => Response.json(url.includes('lookup') ? { users: [{ localId: 'u1', email: 'a@example.com' }] }
+    : url.includes('securetoken') ? { id_token: 'restored-id', refresh_token: 'refresh-secret', expires_in: '3600', user_id: 'u1' } : response)));
   await service.execute({ type: 'status' });
   const epoch = service.sessionEpoch();
-  assert.equal(service.recentlyAuthenticated(), false, 'a restored session never counts as a fresh sign-in');
+  assert.equal(await service.recentlyAuthenticated(), false, 'a restored session counts only by its token\'s auth_time, and this one has none');
 
   const ok = await service.execute({ type: 'signIn', email: 'a@example.com', password: 'pw', expectUid: 'u1' });
   assert.equal(ok.error, null);
   assert.equal(service.sessionEpoch(), epoch);
-  assert.equal(service.recentlyAuthenticated(), true);
+  assert.equal(await service.recentlyAuthenticated(), true);
   assert.equal(await service.getIdToken(), 'fresh-id');
 
   response = { ...authResponse, localId: 'u2', idToken: 'other-id', refreshToken: 'other-refresh' };
@@ -307,4 +308,48 @@ test('expectUid is accepted only on sign-in and OAuth commands', () => {
   assert.deepEqual(parseAccountCommand({ type: 'signIn', email: 'a@example.com', password: 'p', expectUid: 'u1' }), { type: 'signIn', email: 'a@example.com', password: 'p', expectUid: 'u1' });
   for (const input of [{ type: 'register', email: 'a@example.com', password: 'p', expectUid: 'u1' }, { type: 'status', expectUid: 'u1' }, { type: 'oauth', provider: 'google.com', expectUid: '../u' }, { type: 'oauth', provider: 'google.com', expectUid: 7 }])
     assert.throws(() => parseAccountCommand(input), JSON.stringify(input));
+});
+
+test('after a restart, a sign-in is fresh by the ID token\'s auth_time, as the vault measures it', async () => {
+  const token = (authTime: number) => `h.${Buffer.from(JSON.stringify({ auth_time: authTime })).toString('base64url')}.s`;
+  for (const [age, fresh] of [[30, true], [600, false]] as const) {
+    const service = new AccountService(config, store(session()), async () => {}, mockFetch(() => Response.json({ id_token: token(Math.floor(Date.now() / 1000) - age), refresh_token: 'r2', expires_in: '3600', user_id: 'u1' })));
+    await service.execute({ type: 'status' });
+    assert.equal(await service.recentlyAuthenticated(), fresh, `signed in ${age} s ago`);
+  }
+});
+
+test('a re-authentication with another identity is refused in the page, and an account that sign-in just created is deleted', { timeout: 10_000 }, async t => {
+  for (const isNewUser of [true, false]) {
+    let opened!: (url: string) => void;
+    const started = new Promise<string>(resolve => { opened = resolve; });
+    const service = new AccountService(config, store(session()), async url => { opened(url); }, mockFetch(() => { throw Error('a mismatch must not exchange credentials'); }));
+    t.after(() => service.dispose());
+    await service.execute({ type: 'status' });
+    const pending = service.execute({ type: 'oauth', provider: 'google.com', expectUid: 'u1' });
+    const url = await started;
+    const html = await (await fetch(url)).text();
+    const script = html.match(/<script type="module"[^>]*>([\s\S]*?)<\/script>/)?.[1];
+    assert.ok(script);
+    const button = { disabled: false, onclick: async () => {} };
+    const status = { textContent: '' };
+    const hints: unknown[] = [], deleted: unknown[] = [];
+    const other = { uid: 'someone-else' };
+    vm.runInNewContext(script.replace(/^const \{.*\} = await import\('\/firebase-(?:app|auth)\.js'\);$/gm, ''), {
+      initializeApp: () => ({}), initializeAuth: () => ({}), inMemoryPersistence: {}, browserPopupRedirectResolver: {},
+      GoogleAuthProvider: class { addScope() {} setCustomParameters(value: unknown) { hints.push(value); } },
+      document: { getElementById: (id: string) => id === 'login' ? button : status },
+      signInWithPopup: async () => ({ user: other }),
+      getAdditionalUserInfo: () => ({ isNewUser }),
+      deleteUser: async (user: unknown) => { deleted.push(user); },
+      signOut: async () => {},
+      fetch: (path: string, init: RequestInit) => fetch(new URL(path, url), { ...init, headers: { ...init.headers, Origin: new URL(url).origin } }),
+    });
+    await button.onclick();
+    const state = await pending;
+    assert.equal(JSON.stringify(hints), JSON.stringify([{ login_hint: 'a@example.com' }]), 'Google preselects the signed-in account');
+    assert.equal(state.error, '请使用当前登录的灵犀账号验证身份。');
+    assert.equal(state.user?.uid, 'u1', 'the session stays');
+    assert.deepEqual(deleted, isNewUser ? [other] : [], isNewUser ? 'the account this sign-in created is removed' : 'an account that existed before is never touched');
+  }
 });

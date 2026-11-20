@@ -45,9 +45,13 @@ test('a shared team conversation opens in its own team only; a Bot opens the vie
   const base = { loading: false, uid: 'me', selectedTeamId: 'other', botsLoaded: false, messagingConnecting: true, teams: [{ id: 'design' }, { id: 'other' }], bots: [], conversations: [] };
   assert.deepEqual(teamLinkStep(chat, { ...base, loading: true }), { step: 'wait' });
   assert.deepEqual(teamLinkStep(chat, { ...base, teams: [{ id: 'other' }] }), { step: 'unavailable' }, 'never another team');
-  assert.deepEqual(teamLinkStep(chat, base), { step: 'open', teamId: 'design', conversationId: 'c1', done: true });
-  assert.deepEqual(teamLinkStep(bot, base), { step: 'open', teamId: 'design', conversationId: '', done: false });
+  assert.deepEqual(teamLinkStep(chat, base), { step: 'open', teamId: 'design', conversationId: 'c1' });
+  assert.deepEqual(teamLinkStep(bot, base), { step: 'team', teamId: 'design' }, 'a Bot link selects the team, keeping its remembered conversation');
   const selected = { ...base, selectedTeamId: 'design' };
+  assert.deepEqual(teamLinkStep(chat, selected), { step: 'wait' }, 'waits for the team\'s conversations');
+  const listed = { ...selected, messagingConnecting: false };
+  assert.deepEqual(teamLinkStep(chat, listed), { step: 'unavailable' }, 'a conversation the viewer cannot see is not the team home');
+  assert.deepEqual(teamLinkStep(chat, { ...listed, conversations: [{ id: 'c1' } as any] }), { step: 'select', conversationId: 'c1' });
   assert.deepEqual(teamLinkStep(bot, selected), { step: 'wait' }, 'waits for the Bots and the conversations');
   const ready = { ...selected, botsLoaded: true, messagingConnecting: false };
   assert.deepEqual(teamLinkStep(bot, ready), { step: 'unavailable' }, 'a Bot no longer shared');

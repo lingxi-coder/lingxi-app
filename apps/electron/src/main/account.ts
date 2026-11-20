@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { parseAccountCommand, type AccountState, type AccountUser } from '../shared/account.js';
+import { ACCOUNT_SIGN_IN_METHODS, parseAccountCommand, type AccountSignInMethod, type AccountState, type AccountUser } from '../shared/account.js';
 import { browserSignIn } from './account-browser.js';
 
 export interface AccountSessionStore {
@@ -9,6 +9,18 @@ export interface AccountSessionStore {
   remove(): Promise<void>;
 }
 type Session = { projectId: string; refreshToken: string; user: AccountUser };
+type LookupUser = { localId: string; email?: string; displayName?: string; emailVerified?: boolean; providerUserInfo?: Array<{ providerId?: string }> };
+const signInMethodsOf = (user: LookupUser): AccountSignInMethod[] =>
+  ACCOUNT_SIGN_IN_METHODS.filter(method => user.providerUserInfo?.some(info => info.providerId === method));
+const methodsOf = (value: unknown): AccountSignInMethod[] | undefined => Array.isArray(value)
+  ? ACCOUNT_SIGN_IN_METHODS.filter(method => value.includes(method)) : undefined;
+/** The `auth_time` (seconds) of an ID token: when its account last entered credentials, kept across token refreshes. */
+function authTimeOf(idToken: string): number | null {
+  try {
+    const payload = JSON.parse(Buffer.from(idToken.split('.')[1] ?? '', 'base64url').toString('utf8')) as { auth_time?: unknown };
+    return typeof payload.auth_time === 'number' && Number.isFinite(payload.auth_time) ? payload.auth_time : null;
+  } catch { return null; }
+}
 type AuthResponse = { localId: string; idToken: string; refreshToken: string; expiresIn: string; email?: string; displayName?: string; emailVerified?: boolean; needConfirmation?: boolean };
 
 export function accountError(error: unknown): string {
@@ -64,6 +76,7 @@ export class AccountService {
       this.session = { projectId: value.projectId, refreshToken: value.refreshToken, user: {
         uid: value.user.uid, email: typeof value.user.email === 'string' ? value.user.email : null,
         displayName: typeof value.user.displayName === 'string' ? value.user.displayName : null, emailVerified: value.user.emailVerified === true,
+        ...(methodsOf(value.user.signInMethods) ? { signInMethods: methodsOf(value.user.signInMethods) } : {}),
       } };
       this.authenticationEpoch++;
     } catch { this.sessionExpired = true; this.error = '无法恢复已保存的登录状态，请重新登录。'; }
@@ -73,10 +86,16 @@ export class AccountService {
   /** Main-only authentication identity; normal ID/refresh-token rotation retains it. */
   sessionEpoch(): number { return this.authenticationEpoch; }
   /**
-   * Main-only: whether the account signed in with its credentials within `maxMs`, the freshness the vault asks of a key
-   * export (five minutes, measured by the server from the token's `auth_time`; this keeps a margin under it).
+   * Main-only: whether the account entered its credentials within `maxMs`, the freshness the vault asks of a key export
+   * (five minutes, which the server measures from the ID token's `auth_time`; this keeps a margin under it). A sign-in in
+   * this process counts at once; otherwise the token's own `auth_time` decides, so a restart right after signing in does too.
    */
-  recentlyAuthenticated(maxMs = 240_000): boolean { return this.session !== null && Date.now() - this.authenticatedAt < maxMs; }
+  async recentlyAuthenticated(maxMs = 240_000): Promise<boolean> {
+    if (!this.session) return false;
+    if (Date.now() - this.authenticatedAt < maxMs) return true;
+    try { const authTime = authTimeOf(await this.getIdToken()); return authTime !== null && Date.now() - authTime * 1000 < maxMs; }
+    catch { return false; }
+  }
   onChanged(callback: (state: AccountState) => void): () => void {
     this.events.on('change', callback);
     return () => { this.events.off('change', callback); };
@@ -124,9 +143,12 @@ export class AccountService {
     if (!value.localId || !value.refreshToken || !value.idToken) throw new Error('INVALID_IDP_RESPONSE');
     if (expectUid !== undefined && (this.session?.user.uid !== expectUid || value.localId !== expectUid)) throw new Error('ACCOUNT_MISMATCH');
     const previous = this.session;
+    // A re-authentication keeps what is known of the account; a new sign-in learns it with `reload`.
+    const signInMethods = expectUid !== undefined ? previous?.user.signInMethods : undefined;
     const previousToken = this.idToken, previousExpiry = this.expiresAt, previousExpired = this.sessionExpired, previousAuthenticatedAt = this.authenticatedAt;
     this.session = { projectId: this.config.projectId, refreshToken: value.refreshToken, user: {
       uid: value.localId, email: value.email ?? null, displayName: value.displayName ?? null, emailVerified: value.emailVerified === true,
+      ...(signInMethods ? { signInMethods } : {}),
     } };
     if (expectUid === undefined) this.authenticationEpoch++;
     this.tokenRequest = undefined;
@@ -177,10 +199,11 @@ export class AccountService {
   }
   private async reload(): Promise<void> {
     const session = this.session;
-    const response = await this.authenticatedRequest<{ users?: Array<{ localId: string; email?: string; displayName?: string; emailVerified?: boolean }> }>('lookup');
+    const response = await this.authenticatedRequest<{ users?: LookupUser[] }>('lookup');
     const user = response.users?.[0];
     if (session && this.session === session && user?.localId === session.user.uid) {
-      session.user = { uid: user.localId, email: user.email ?? null, displayName: user.displayName ?? null, emailVerified: user.emailVerified === true };
+      session.user = { uid: user.localId, email: user.email ?? null, displayName: user.displayName ?? null, emailVerified: user.emailVerified === true,
+        signInMethods: signInMethodsOf(user) };
       await this.save();
     }
   }
@@ -203,7 +226,9 @@ export class AccountService {
         case 'oauth': {
           if (command.expectUid !== undefined && this.session?.user.uid !== command.expectUid) throw new Error('ACCOUNT_MISMATCH');
           this.abort = new AbortController();
-          const credential = await browserSignIn(this.config, command.provider, this.openExternal, this.abort.signal);
+          // A re-authentication names the account, so the page preselects it and never leaves another account behind.
+          const credential = await browserSignIn(this.config, command.provider, this.openExternal, this.abort.signal,
+            command.expectUid !== undefined ? { uid: command.expectUid, email: this.session?.user.email ?? null } : undefined);
           const postBody = new URLSearchParams({ providerId: credential.providerId });
           if (credential.idToken) postBody.set('id_token', credential.idToken);
           if (credential.accessToken) postBody.set('access_token', credential.accessToken);
@@ -214,6 +239,7 @@ export class AccountService {
           });
           if (this.abort.signal.aborted) throw new Error('登录已取消。');
           await this.accept(response, command.expectUid);
+          if (command.expectUid === undefined) await this.reload().catch(() => undefined);
           break;
         }
         case 'signOut':

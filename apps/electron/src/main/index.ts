@@ -19,6 +19,7 @@ import { LOCAL_APP_SCHEME } from '../shared/localApps.js';
 import { installDeepLinks, workspaceLinkKey, type SessionLinkOwner } from './deepLinks.js';
 import { isSessionId } from './sessionIdentity.js';
 import { installCrashReporting } from './crashReporting.js';
+import { ProviderVaultLinks } from './provider-vault-links.js';
 import { AccountService } from './account.js';
 import { TeamsService } from './teams/service.js';
 import { installTeamsIpc } from './teams/ipc.js';
@@ -803,7 +804,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   const account = new AccountService(firebaseConfig, credentialBroker
     ? brokerAccountSessionStore(credentialBroker, diagnosticAccountScope)
     : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
-  host.attachAccount(account);
+  host.attachAccount(account, undefined, new ProviderVaultLinks(app.getPath('userData')));
   const teamsService = new TeamsService(account, firebaseConfig);
   notificationAccountUid = account.snapshot().user?.uid ?? null;
   notificationAccountEpoch = account.sessionEpoch();

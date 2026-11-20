@@ -4,8 +4,9 @@ import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
 import { CH_SESSION_HISTORY, historyCursor } from '../shared/sessionHistory.js';
 import { CH_PROVIDER_ACCOUNTS, CH_PROVIDER_ACCOUNTS_CANCEL, type ProviderAccountCommand } from '../shared/providerAccounts.js';
 import type { DesktopProviderAccounts } from './provider-accounts.js';
-import { ProviderVaultClient, ProviderVaultError, vaultInstallPlan, vaultUpsertFor } from './provider-vault.js';
-import { CH_PROVIDER_VAULT, parseProviderVaultCommand, type ProviderVaultCommand, type ProviderVaultPull, type ProviderVaultReply, type ProviderVaultSyncResult } from '../shared/providerVault.js';
+import { ProviderVaultClient, ProviderVaultError, vaultIdForAccount, vaultInstallPlan, vaultUpsertFor } from './provider-vault.js';
+import { ProviderVaultLinks } from './provider-vault-links.js';
+import { CH_PROVIDER_VAULT, CH_PROVIDER_VAULT_SYNCED, parseProviderVaultCommand, type ProviderVaultCommand, type ProviderVaultPull, type ProviderVaultReply, type ProviderVaultSynced, type ProviderVaultSyncResult } from '../shared/providerVault.js';
 import type { VaultExport } from '../../../../packages/llm-vault/contracts';
 import { CH_ACCOUNT, CH_ACCOUNT_CHANGED } from '../shared/account.js';
 import { CH_IMAGE_SAVE } from '../shared/imageSave.js';
@@ -658,10 +659,12 @@ export class HostController {
   private account?: HostAccount;
   private offAccount?: () => void;
   private providerVault?: ProviderVaultClient;
-  attachAccount(service: HostAccount, vault = new ProviderVaultClient(service)): void {
+  private vaultLinks = new ProviderVaultLinks();
+  attachAccount(service: HostAccount, vault = new ProviderVaultClient(service), links = new ProviderVaultLinks()): void {
     this.offAccount?.();
     this.account = service;
     this.providerVault = vault;
+    this.vaultLinks = links;
     this.offAccount = service.onChanged(state => {
       for (const target of this.targets.keys()) if (!target.isDestroyed()) target.send(CH_ACCOUNT_CHANGED, state);
     });
@@ -1619,6 +1622,7 @@ export class HostController {
       if (patch !== undefined) {
         try { await this.bridge.applyProviderSettings(); }
         catch { throw new Error('Provider settings were saved but could not be applied. Retry when active work has finished.'); }
+        void this.resyncVaultProfiles(result.effective.providers);
       }
       return result;
     });
@@ -1643,13 +1647,20 @@ export class HostController {
       const abort = new AbortController();
       const cancel = () => abort.abort();
       event.sender.once('destroyed', cancel);
+      const before = cloudSync && command.action === 'add' ? new Set((await this.providerAccounts.snapshot()).accounts.map(account => account.accountId)) : undefined;
       let result: ProviderAccountSnapshot;
       try { result = await this.providerAccounts.command(command, credential as string | undefined, abort.signal); }
       finally { event.sender.removeListener('destroyed', cancel); }
-      // The key is saved on this Mac first; a vault that cannot take it is reported, never undoes the local save.
+      // The key is saved on this Mac first and the reply goes now; the cloud sync runs behind it, reports through
+      // CH_PROVIDER_VAULT_SYNCED, and a vault that cannot take the key never undoes the local save.
       if (!cloudSync || typeof credential !== 'string' || !credential.trim()) return result;
-      const providerId = command.action === 'add' ? command.providerId : result.accounts.find(account => account.accountId === command.accountId)?.providerId;
-      return { ...result, cloudSync: providerId ? await this.syncProviderToVault(providerId, credential.trim()) : { ok: false, code: 'UNSUPPORTED_PROVIDER' } };
+      const account = command.action === 'add'
+        ? result.accounts.find(candidate => !before!.has(candidate.accountId) && candidate.providerId === command.providerId)
+        : result.accounts.find(candidate => candidate.accountId === command.accountId);
+      const syncId = randomUUID(), sender = event.sender, key = credential.trim();
+      void (account ? this.syncAccountToVault(account, key) : Promise.resolve({ ok: false, code: 'UNSUPPORTED_PROVIDER' }))
+        .then(outcome => { if (!sender.isDestroyed()) sender.send(CH_PROVIDER_VAULT_SYNCED, { syncId, ...outcome } satisfies ProviderVaultSynced); });
+      return { ...result, cloudSync: { syncId } };
     });
     this.ipc.handle(CH_PROVIDER_VAULT, async (event: IpcMainInvokeEvent, value?: unknown) => {
       this.assertSender(event);
@@ -2192,17 +2203,52 @@ export class HostController {
     };
   }
 
-  /** Stores a key just saved on this Mac in the signed-in account's vault, so the Web (and later this account's other devices) can use it. */
-  private async syncProviderToVault(providerId: string, apiKey: string): Promise<ProviderVaultSyncResult> {
+  /** Whether `id` is a built-in provider of this Mac, by the runtime's official catalog (which the static list lags). */
+  private readonly isBuiltinProvider = (id: string): boolean =>
+    providersFromCatalog(this.currentRuntime()?.officialProviderCatalog ?? []).some(provider => provider.id === id) || !!providerById(id);
+
+  private async customProfiles(): Promise<Record<string, unknown>> {
+    const providers = (await this.sessionCatalog.providerSettings()).effective.providers;
+    return providers && typeof providers === 'object' && !Array.isArray(providers) ? providers as Record<string, unknown> : {};
+  }
+
+  /**
+   * Stores a key just saved on this Mac in the signed-in account's vault, so the Web (and later this account's other devices)
+   * can use it. Each account of this Mac has its own vault record (`vaultIdForAccount`), linked to it here.
+   */
+  private async syncAccountToVault(account: { accountId: string; providerId: string; displayName: string }, apiKey: string): Promise<ProviderVaultSyncResult> {
     const uid = this.account?.snapshot().user?.uid;
     if (!uid || !this.providerVault) return { ok: false, code: 'SIGN_IN_REQUIRED' };
     try {
-      const profile = providerById(providerId) ? undefined : (await this.sessionCatalog.providerSettings()).effective.providers;
-      const input = vaultUpsertFor(providerId, profile && typeof profile === 'object' ? (profile as Record<string, unknown>)[providerId] : undefined, apiKey);
+      const accounts = new Set((await this.providerAccounts!.snapshot()).accounts.map(entry => entry.accountId));
+      const vaultId = vaultIdForAccount(account.providerId, account.accountId, this.vaultLinks.vaultIdFor(uid, account.accountId), id => {
+        const holder = this.vaultLinks.accountFor(uid, id);
+        return !!holder && holder !== account.accountId && accounts.has(holder);
+      });
+      const profile = this.isBuiltinProvider(account.providerId) ? undefined : (await this.customProfiles())[account.providerId];
+      const input = vaultId ? vaultUpsertFor({ vaultId, ...account }, this.isBuiltinProvider, profile, apiKey) : null;
       if (!input) return { ok: false, code: 'UNSUPPORTED_PROVIDER' };
       await this.providerVault.upsert(uid, input);
+      this.vaultLinks.link(uid, input.id, account.accountId);
       return { ok: true };
     } catch (error) { return { ok: false, code: error instanceof ProviderVaultError ? error.code : 'INTERNAL' }; }
+  }
+
+  /**
+   * A saved change to custom providers reaches the vault records linked to their accounts (models, say), keeping the stored
+   * key. Best effort: the vault refuses a new endpoint without its key, and the record then keeps calling the old one.
+   */
+  private async resyncVaultProfiles(providers: unknown): Promise<void> {
+    const uid = this.account?.snapshot().user?.uid, vault = this.providerVault;
+    if (!uid || !vault || !this.providerAccounts || !providers || typeof providers !== 'object' || Array.isArray(providers)) return;
+    try {
+      for (const account of (await this.providerAccounts.snapshot()).accounts) {
+        const vaultId = this.vaultLinks.vaultIdFor(uid, account.accountId);
+        if (!vaultId || this.isBuiltinProvider(account.providerId)) continue;
+        const input = vaultUpsertFor({ vaultId, ...account }, this.isBuiltinProvider, (providers as Record<string, unknown>)[account.providerId]);
+        if (input) await vault.upsert(uid, input).catch(() => undefined);
+      }
+    } catch { /* the local save stands; the vault catches up on the next sync */ }
   }
 
   private async providerVaultCommand(command: ProviderVaultCommand): Promise<ProviderVaultReply> {
@@ -2212,42 +2258,54 @@ export class HostController {
       if (!this.providerAccounts) throw new Error('Secure provider account storage is unavailable.');
       this.assertNoActiveTurn();
       // The vault checks the token's auth_time too; asking first saves the round trip and its daily export allowance.
-      if (!this.account.recentlyAuthenticated()) return { ok: false, code: 'REAUTH_REQUIRED' };
+      if (!await this.account.recentlyAuthenticated()) return { ok: false, code: 'REAUTH_REQUIRED' };
     }
+    let pulled: ProviderVaultPull[] | undefined;
     try {
       if (command.action === 'remove') await vault.remove(uid, command.id, command.expectedRevision);
-      let pulled: ProviderVaultPull[] | undefined;
       if (command.action === 'pull') {
         const exported = await vault.exportKeys(uid, command.ids);
         pulled = [];
-        for (const provider of exported) pulled.push(await this.installVaultProvider(provider));
+        this.vaultLinks.prune(uid, (await this.providerAccounts!.snapshot()).accounts.map(account => account.accountId));
+        for (const provider of exported) pulled.push(await this.installVaultProvider(uid, provider));
         for (const id of command.ids) if (!exported.some(provider => provider.id === id)) pulled.push({ id, ok: false, code: 'PROVIDER_NOT_FOUND' });
       }
-      return { ok: true, providers: await vault.list(uid), ...(pulled ? { pulled } : {}) };
     } catch (error) {
+      if (error instanceof ProviderVaultError) return { ok: false, code: error.code };
+      throw error;
+    }
+    // The keys are in by now: a list that cannot be read only leaves the renderer's list as it was.
+    try { return { ok: true, providers: await vault.list(uid), ...(pulled ? { pulled } : {}) }; }
+    catch (error) {
+      if (pulled && error instanceof ProviderVaultError) return { ok: true, pulled };
       if (error instanceof ProviderVaultError) return { ok: false, code: error.code };
       throw error;
     }
   }
 
-  /** One exported provider into this Mac's settings and credential store; the key lives in this call only. */
-  private async installVaultProvider(exported: VaultExport): Promise<ProviderVaultPull> {
+  /**
+   * One exported provider into this Mac's settings and credential store; the key lives in this call only. Pulling again
+   * replaces the key of the account an earlier pull or sync linked to this record, never of a hand-added account.
+   */
+  private async installVaultProvider(uid: string, exported: VaultExport): Promise<ProviderVaultPull> {
     const { apiKey, ...provider } = exported;
     try {
       const settings = await this.sessionCatalog.providerSettings();
       const record = (value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
-      const plan = vaultInstallPlan(provider, record(settings.effective.providers));
+      const plan = vaultInstallPlan(provider, record(settings.effective.providers), this.isBuiltinProvider);
       if (plan.kind === 'unsupported') return { id: provider.id, ok: false, code: plan.code };
       if (plan.kind === 'custom' && plan.profile) {
         await this.sessionCatalog.providerSettings({ providers: { ...record(settings.raw.providers), [plan.providerId]: plan.profile } }, settings.raw);
         await this.bridge.applyProviderSettings();
       }
       const accounts = await this.providerAccounts!.snapshot();
-      // Pulling again replaces the key of the account an earlier pull added rather than adding another.
-      const existing = accounts.accounts.find(account => account.providerId === plan.providerId && account.authKind === 'api_key' && account.displayName === plan.displayName);
-      await this.providerAccounts!.command(existing
-        ? { action: 'reconnect', expectedRevision: accounts.configRevision, accountId: existing.accountId, providerId: plan.providerId, displayName: plan.displayName, authKind: 'api_key', executionBindingId: plan.providerId }
+      const linked = this.vaultLinks.accountFor(uid, provider.id);
+      const existing = accounts.accounts.find(account => account.accountId === linked && account.providerId === plan.providerId && account.authKind === 'api_key');
+      const next = await this.providerAccounts!.command(existing
+        ? { action: 'reconnect', expectedRevision: accounts.configRevision, accountId: existing.accountId, providerId: plan.providerId, displayName: existing.displayName, authKind: 'api_key', executionBindingId: plan.providerId }
         : { action: 'add', expectedRevision: accounts.configRevision, providerId: plan.providerId, displayName: plan.displayName, authKind: 'api_key', executionBindingId: plan.providerId }, apiKey);
+      const accountId = existing?.accountId ?? next.accounts.find(account => account.providerId === plan.providerId && !accounts.accounts.some(old => old.accountId === account.accountId))?.accountId;
+      if (accountId) this.vaultLinks.link(uid, provider.id, accountId);
       return { id: provider.id, ok: true, localProviderId: plan.providerId };
     } catch { return { id: provider.id, ok: false, code: 'INSTALL_FAILED' }; }
   }

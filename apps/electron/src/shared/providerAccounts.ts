@@ -54,8 +54,8 @@ export interface ProviderAccountSnapshot {
   modelEntitlements?: ProviderAccountModelEntitlement[];
   modelAvailability?: ProviderAccountModelAvailability[];
   providerPolicies?: Record<string, { allowSubscriptionToMetered: boolean }>;
-  /** Present after an add or reconnect asked for `cloudSync`. */
-  cloudSync?: { ok: boolean; code?: string };
+  /** After an add or reconnect asked for `cloudSync`: the sync under way, whose result comes as `CH_PROVIDER_VAULT_SYNCED`. */
+  cloudSync?: { syncId: string };
 }
 export interface ProviderAccountCommand {
   action: 'list' | 'add' | 'update' | 'reorder' | 'enable' | 'remove' | 'test' | 'logout' | 'reconnect' | 'set_credential' | 'set_policy';

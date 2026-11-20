@@ -11,6 +11,7 @@ import { Icon } from '../../Icon';
 import { useAccountState } from '../../../bridge/useAccountState';
 import type { AccountApi } from '../../../../shared/account';
 import { readVaultSyncPreference, vaultCodeText, writeVaultSyncPreference } from './CloudProviders';
+import { vaultSyncResult, watchVaultSyncs } from '../../../bridge/vaultSync';
 
 export function providerAccountHealthLabel(health?: ProviderAccountHealth): string {
   if (!health) return tr('provider_accounts_health_unknown');
@@ -38,6 +39,8 @@ export function ProviderAccounts({ api, provider, running, onConfigured, usageRo
   const t = useT();
   const signedIn = Boolean(useAccountState(account).state?.user);
   const [cloudSync, setCloudSync] = useState(readVaultSyncPreference);
+  /** A cloud sync that failed: the key is saved on this Mac, so this is a warning beside the success, not instead of it. */
+  const [syncWarning, setSyncWarning] = useState<string>();
   const [routing, setRouting] = useState<ProviderAccountRouting>();
   const [snapshot, setSnapshot] = useState<ProviderAccountSnapshot>();
   const [name, setName] = useState('');
@@ -112,14 +115,21 @@ export function ProviderAccounts({ api, provider, running, onConfigured, usageRo
     activeOperation.current = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
     busyRef.current = true; setBusy(true); setPending({ action: command.action, accountId: command.accountId });
     setOauthBusy(command.authKind === 'oauth' || (command.action === 'reconnect' && accounts.find(a => a.accountId === command.accountId)?.authKind === 'oauth'));
-    setError(undefined); setNotice(undefined);
+    setError(undefined); setNotice(undefined); setSyncWarning(undefined);
+    if (command.cloudSync) watchVaultSyncs();
     try {
       const next = await api.command({ ...command, operationId: activeOperation.current, expectedRevision: snapshot.configRevision }, credential);
       if (generation.current !== current) return;
       setSnapshot(next);
       if (command.action === 'add' || command.action === 'reconnect') {
         setKey(''); setName(''); setReplacementId(undefined); setFormOpen(false);
-        setNotice(!next.cloudSync ? tr('provider_accounts_connected') : next.cloudSync.ok ? tr('provider_vault_synced') : tr('provider_vault_sync_failed', vaultCodeText(next.cloudSync.code)));
+        setNotice(tr(next.cloudSync ? 'provider_vault_syncing' : 'provider_accounts_connected'));
+        // The key is saved here and the account is usable now; the cloud sync reports on its own.
+        if (next.cloudSync) void vaultSyncResult(next.cloudSync.syncId).then(result => {
+          if (generation.current !== current) return;
+          if (result.ok) setNotice(tr('provider_vault_synced'));
+          else { setNotice(undefined); setSyncWarning(tr('provider_vault_sync_failed', vaultCodeText(result.code))); }
+        });
         await onConfigured?.();
       }
       if (command.action === 'remove') setRemovalId(undefined);
@@ -195,6 +205,7 @@ export function ProviderAccounts({ api, provider, running, onConfigured, usageRo
     {logicalProviderId(provider.id) === 'openai' && snapshot && accounts.length > 0 && <div className="pa-billing"><div><h4>{tr('provider_accounts_billing')}</h4><p>{tr('provider_accounts_billing_desc')}</p></div><label className="pa-switch"><input type="checkbox" role="switch" aria-label={tr('provider_accounts_billing_allow')} checked={snapshot.providerPolicies?.openai?.allowSubscriptionToMetered === true} disabled={locked} onChange={event => void perform({ action: 'set_policy', providerId: 'openai', allowSubscriptionToMetered: event.currentTarget.checked })} /><span /></label></div>}
     {error && !showForm && !removalId && <p className="pa-feedback pa-error" role="alert">{error}</p>}
     {notice && <p className="pa-feedback pa-success" role="status"><Icon name="check" size={15} />{notice}</p>}
+    {syncWarning && <p className="pa-feedback pa-error" role="alert">{syncWarning}</p>}
     <dialog ref={accountDialog} className="pa-dialog pa-account-dialog" aria-labelledby="pa-form-title" onCancel={event => { event.preventDefault(); if (busy && oauthBusy) cancelLogin(); else closeForm(); }}>
     {showForm && <form ref={form} aria-labelledby="pa-form-title" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (busy && oauthBusy) cancelLogin(); else closeForm(); } }} onSubmit={event => { event.preventDefault(); if (!locked && (authKind === 'oauth' || key.trim())) { setFormOpen(true); void perform({ action: replacementId ? 'reconnect' : 'add', accountId: replacementId, providerId: logicalProviderId(provider.id), displayName: name.trim() || provider.label, authKind, executionBindingId: authKind === 'oauth' ? 'openai-chatgpt' : logicalProviderId(provider.id), ...(offerCloudSync && cloudSync ? { cloudSync: true } : {}) }, authKind === 'api_key' ? key : undefined); } }}>
         <header><h3 id="pa-form-title">{tr(replacementId ? authKind === 'oauth' ? 'provider_accounts_reconnect' : 'provider_accounts_replace' : 'provider_accounts_add')}</h3></header>

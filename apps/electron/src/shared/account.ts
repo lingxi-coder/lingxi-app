@@ -6,7 +6,14 @@ export interface AccountUser {
   email: string | null;
   displayName: string | null;
   emailVerified: boolean;
+  /**
+   * How this account signs in (`password`, `google.com`, `apple.com`), from the account's linked providers; absent until
+   * the host has looked them up. Re-authentication offers only these.
+   */
+  signInMethods?: AccountSignInMethod[];
 }
+export type AccountSignInMethod = 'password' | 'google.com' | 'apple.com';
+export const ACCOUNT_SIGN_IN_METHODS: readonly AccountSignInMethod[] = ['password', 'google.com', 'apple.com'];
 export interface AccountState {
   user: AccountUser | null;
   busy: boolean;

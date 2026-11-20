@@ -29,12 +29,19 @@ export function parseBrowserCredential(value: unknown, provider: BrowserCredenti
   return result;
 }
 
-// Only the system browser sees the provider UI. The renderer never receives tokens.
+/**
+ * Only the system browser sees the provider UI. The renderer never receives tokens.
+ * `reauth` names the signed-in account a re-authentication must be: the provider preselects it where it can (Google's
+ * login_hint), and another account is refused in the page (`ACCOUNT_MISMATCH`). The page's sign-in creates a Firebase
+ * user for an identity that had none, so such a user, which Firebase reports as new to this very sign-in, is deleted there
+ * rather than left behind as an empty account.
+ */
 export async function browserSignIn(
   config: { apiKey: string; authDomain: string; projectId: string; appId: string },
   provider: BrowserCredential['providerId'],
   openExternal: (url: string) => Promise<void>,
   signal: AbortSignal,
+  reauth?: { uid: string; email: string | null },
 ): Promise<BrowserCredential> {
   const secret = randomBytes(32).toString('hex');
   const path = `/${secret}`;
@@ -75,15 +82,24 @@ export async function browserSignIn(
         // browser imports inside this HTML string as imports of the Node bundle.
         res.end(`<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LingXi 登录</title><style nonce="${secret}">body{font:16px system-ui;max-width:440px;margin:15vh auto;padding:24px;color:#202124}button{font:inherit;padding:12px 24px;border-radius:10px;border:1px solid #ccc;background:#fff;cursor:pointer}p{line-height:1.6}</style><h1>登录 LingXi</h1><p>使用 ${label} 账号继续。</p><button id="login">通过 ${label} 登录</button><p id="status" role="status"></p><script type="module" nonce="${secret}">
 const { initializeApp } = await import('/firebase-app.js');
-const { initializeAuth, inMemoryPersistence, browserPopupRedirectResolver, GoogleAuthProvider, OAuthProvider, signInWithPopup, signOut } = await import('/firebase-auth.js');
+const { initializeAuth, inMemoryPersistence, browserPopupRedirectResolver, GoogleAuthProvider, OAuthProvider, signInWithPopup, signOut, getAdditionalUserInfo, deleteUser } = await import('/firebase-auth.js');
+const reauth = ${JSON.stringify(reauth ?? null).replaceAll('<', '\\u003c')};
 const auth = initializeAuth(initializeApp(${JSON.stringify(config).replaceAll('<', '\\u003c')}), { persistence: inMemoryPersistence, popupRedirectResolver: browserPopupRedirectResolver });
 const provider = ${provider === 'google.com' ? 'new GoogleAuthProvider()' : "new OAuthProvider('apple.com')"};
 provider.addScope('email');
+if (reauth?.email && ${provider === 'google.com'}) provider.setCustomParameters({ login_hint: reauth.email });
 const button = document.getElementById('login'), status = document.getElementById('status');
 button.onclick = async () => {
  button.disabled = true; status.textContent = '正在登录…';
  try {
   const result = await signInWithPopup(auth, provider);
+  if (reauth && result.user.uid !== reauth.uid) {
+   // Created by this sign-in only: nothing else can be in it yet.
+   if (getAdditionalUserInfo(result)?.isNewUser) await deleteUser(result.user).catch(() => {});
+   await fetch('${path}/mismatch', {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).catch(() => {});
+   status.textContent = '这不是当前登录的灵犀账号，请返回 LingXi 使用该账号验证。'; button.disabled = false;
+   return;
+  }
   const credential = ${provider === 'google.com' ? 'GoogleAuthProvider' : 'OAuthProvider'}.credentialFromResult(result);
   if (!credential) throw new Error('没有收到登录凭据。');
   const response = await fetch('${path}/complete', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(credential.toJSON())});
@@ -103,7 +119,7 @@ button.onclick = async () => {
 </script></html>`);
         return;
       }
-      if (req.method !== 'POST' || ![`${path}/complete`, `${path}/cancel`].includes(req.url ?? '') || req.headers.origin !== origin || req.headers['content-type'] !== 'application/json') {
+      if (req.method !== 'POST' || ![`${path}/complete`, `${path}/cancel`, `${path}/mismatch`].includes(req.url ?? '') || req.headers.origin !== origin || req.headers['content-type'] !== 'application/json') {
         res.writeHead(403).end(); return;
       }
       try {
@@ -115,6 +131,10 @@ button.onclick = async () => {
         const value: unknown = JSON.parse(body);
         if (req.url === `${path}/cancel`) {
           res.writeHead(200).end('{}', () => finish(new Error('登录已取消。')));
+          return;
+        }
+        if (req.url === `${path}/mismatch`) {
+          res.writeHead(200).end('{}', () => finish(new Error('ACCOUNT_MISMATCH')));
           return;
         }
         const credential = parseBrowserCredential(value, provider);

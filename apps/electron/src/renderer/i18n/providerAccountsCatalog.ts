@@ -783,5 +783,47 @@ export const providerAccountsCatalog: Record<string, Record<string, string>> = {
     "zh-Hant": "請重新登入",
     "ja": "再度サインインしてください",
     "ko": "다시 로그인하세요"
+  },
+  "provider_vault_syncing": {
+    "en": "Saved on this Mac. Syncing to your LingXi account…",
+    "zh-Hans": "已保存到本机，正在同步到灵犀账号…",
+    "zh-Hant": "已儲存到本機，正在同步到靈犀帳號…",
+    "ja": "この Mac に保存しました。LingXi アカウントに同期しています…",
+    "ko": "이 Mac에 저장했습니다. LingXi 계정에 동기화하는 중…"
+  },
+  "provider_vault_code_install": {
+    "en": "it could not be added to this Mac",
+    "zh-Hans": "无法添加到本机",
+    "zh-Hant": "無法新增到本機",
+    "ja": "この Mac に追加できませんでした",
+    "ko": "이 Mac에 추가할 수 없습니다"
+  },
+  "provider_vault_code_missing": {
+    "en": "it is no longer in your LingXi account",
+    "zh-Hans": "它已不在你的灵犀账号中",
+    "zh-Hant": "它已不在你的靈犀帳號中",
+    "ja": "LingXi アカウントにもうありません",
+    "ko": "더 이상 LingXi 계정에 없습니다"
+  },
+  "provider_vault_code_changed": {
+    "en": "it was changed elsewhere; try again",
+    "zh-Hans": "它已在别处被修改，请重试",
+    "zh-Hant": "它已在別處被修改，請重試",
+    "ja": "別の場所で変更されました。もう一度お試しください",
+    "ko": "다른 곳에서 변경되었습니다. 다시 시도하세요"
+  },
+  "provider_vault_code_server": {
+    "en": "the LingXi service had a problem; try again later",
+    "zh-Hans": "灵犀服务出现问题，请稍后重试",
+    "zh-Hant": "靈犀服務出現問題，請稍後重試",
+    "ja": "LingXi サービスで問題が発生しました。後でもう一度お試しください",
+    "ko": "LingXi 서비스에 문제가 발생했습니다. 나중에 다시 시도하세요"
+  },
+  "provider_vault_code_failed": {
+    "en": "something went wrong (%@)",
+    "zh-Hans": "出了点问题（%@）",
+    "zh-Hant": "出了點問題（%@）",
+    "ja": "問題が発生しました（%@）",
+    "ko": "문제가 발생했습니다(%@)"
   }
 };

@@ -445,7 +445,9 @@ export function App() {
     const next = teamLinkStep(teamLink, teams.snapshot);
     if (next.step === 'wait') return;
     if (next.step === 'unavailable') { unavailable(); return; }
-    if (next.step === 'open') { teams.workspace.openConversation(next.teamId, next.conversationId); if (next.done) setTeamLink(undefined); return; }
+    // Opening or selecting the team is a step on the way: the effect runs again with the team's conversations.
+    if (next.step === 'open') { teams.workspace.openConversation(next.teamId, next.conversationId); return; }
+    if (next.step === 'team') { teams.workspace.selectTeam(next.teamId); return; }
     if (next.step === 'select') teams.workspace.selectConversation(next.conversationId);
     else showTeamDetails('bots');
     setTeamLink(undefined);
@@ -670,8 +672,9 @@ export function App() {
         if (route === 'team/join' || route === 'team/inbox') { setTeamInvite(params.code); setPage('teams'); setSidebarCollapsed(false); }
         else if (friend) { setFriendTarget(friend); setPage('friends'); setSidebarCollapsed(false); }
         else if (teamLinkRequest(delivery.target)) {
+          // Like a friend link, it waits for its workspace: on a cold start the account may still be loading, and a
+          // signed-out viewer is asked to sign in on the page it opens.
           const request = teamLinkRequest(delivery.target)!;
-          if (!teams.workspace && !friends.workspace) throw new Error(tr('desktop_link_destination_unavailable'));
           setTeamLink(request); setBotServices(false); setSidebarMode('home'); setPage(request.kind === 'pair' ? 'friends' : 'teams');
         }
         else if (settingsTarget) { linkSurfacePending.current = true; openSettings(settingsTarget); }

@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactElement } from 'react';
 import type { TeamSummary, TeamsApi } from '../../../../../packages/teams/index.js';
-import type { DataScope, ManagedDataSource, SourceDraft, TeamDataScope } from '../../../../../packages/teams/lingxi-data.js';
+import { DATA_SOURCE_KINDS, type DataScope, type ManagedDataSource, type SourceDraft, type TeamDataScope } from '../../../../../packages/teams/lingxi-data.js';
 import type { TeamConversation } from '../../../../../packages/teams/messages.js';
 import { ReportPublisher } from '../../../../../packages/teams/ReportViews.js';
 
@@ -86,7 +86,7 @@ export function DesktopDataSources({ api, uid, teams, locale }: { api: TeamsApi;
         <h2 id={heading}>{title}</h2>
         {status && <p role="status">{status}</p>}
         {rows.length > 0 && <ul>{rows.map(source => <li key={source.source}>
-          <strong>{source.name}</strong> · {source.kind} · {source.running ? (zh ? '宿主运行中' : 'Host running') :
+          <strong>{source.name}</strong> · {DATA_SOURCE_KINDS[source.kind] ?? source.kind} · {source.running ? (zh ? '宿主运行中' : 'Host running') :
             source.enabled ? (zh ? '已启用' : 'Enabled') : (zh ? '已停用' : 'Disabled')}
           <div>
             <button type="button" disabled={running} onClick={() => void run(async () => {
@@ -150,7 +150,7 @@ export function DesktopDataSources({ api, uid, teams, locale }: { api: TeamsApi;
             return result;
           }} />}
         {draft && <form key={draft.source + (editing ? '-edit' : '-add')} method="post" onSubmit={add}>
-          <p>{editing?.name ?? draft.source} · {draft.kind}</p>
+          <p>{editing?.name ?? draft.source} · {DATA_SOURCE_KINDS[draft.kind] ?? draft.kind}</p>
           {!editing && <label>{zh ? '名称' : 'Name'}<input name="name" required maxLength={120} /></label>}
           <label>{zh ? '范围' : 'Scope'}<select name="scope" value={teamId} disabled={Boolean(editing)} onChange={event => {
             setTeamId(event.currentTarget.value); setRoomId(''); setRooms([]);

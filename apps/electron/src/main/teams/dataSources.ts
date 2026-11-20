@@ -6,42 +6,14 @@ import { isAbsolute, join } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { dialog, type BrowserWindow } from 'electron';
-import type { LocalDataSourceAnswer, LocalDataSourceCommand, ManagedDataSource, SourceDraft } from '../../../../../packages/teams/lingxi-data.js';
+import type { LocalDataSourceAnswer, LocalDataSourceCommand, ManagedDataSource } from '../../../../../packages/teams/lingxi-data.js';
 import type { Account, TeamsService } from './service.js';
 import type { ReportCapture, ReportDraft } from '../../../../../packages/teams/reports.js';
 import { readPrivateDataPage } from './dataPreview.js';
+import { id, readDefinition } from './dataSourceDefinition.js';
 
 const exec = promisify(execFile);
-const id = /^[A-Za-z0-9_-]{1,64}$/u;
 const childEnv = { PATH: '/usr/bin:/bin' };
-
-function object(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function keychain(value: unknown, service: string, account: string): boolean {
-  if (!object(value) || Object.keys(value).length !== 1 || !object(value.keychain)) return false;
-  return value.keychain.service === service && value.keychain.account === account;
-}
-
-function readDefinition(content: string, uid: string): SourceDraft {
-  const value: unknown = JSON.parse(content);
-  if (!object(value) || value.owner !== uid || typeof value.source !== 'string' || !id.test(value.source)
-    || !keychain(value.key, 'com.lingxi.data.host-key', value.source) || value.proxy != null
-    || !object(value.presets) || Object.keys(value.presets).length !== 1 || !object(value.presets.main)) throw new Error('INVALID_INPUT');
-  const preset = value.presets.main, { fields, input } = preset;
-  if (!Array.isArray(fields) || !fields.length || fields.length > 64 || fields.some(field => typeof field !== 'string' || !id.test(field))
-    || !object(input) || !['mysql', 'json', 'csv'].includes(String(input.kind))) throw new Error('INVALID_INPUT');
-  for (const item of Object.values(value.presets)) {
-    if (!object(item) || !object(item.input)) throw new Error('INVALID_INPUT');
-    if (item.input.kind === 'mysql') {
-      if (!keychain(item.input.dsn, 'com.lingxi.data.mysql', value.source) || item.input.isolatedLoopback === true) throw new Error('INVALID_INPUT');
-    } else if (!['csv', 'json'].includes(String(item.input.kind)) || typeof item.input.path !== 'string' || !isAbsolute(item.input.path)) {
-      throw new Error('INVALID_INPUT');
-    }
-  }
-  return { source: value.source, kind: input.kind as SourceDraft['kind'], fields: [...new Set(fields)] as string[] };
-}
 
 function launcher(): { bin: string; endpoint: string; ca: string[] } {
   const { LINGXI_DATA_PREVIEW_BIN: bin, LINGXI_DATA_PREVIEW_ORIGIN: origin, LINGXI_DATA_PREVIEW_CA: ca } = process.env;

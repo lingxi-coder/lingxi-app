@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { createReportGateway } from './lingxi-data-reports.mjs';
 
-export const LINGXI_DATA_BASELINE = '99db9958ab5a59252b977e550bf57e610fa24770';
+export const LINGXI_DATA_BASELINE = '4905f6ac3bbc997932d5024d7df52c0b5883f481';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/u);
 const positive = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);

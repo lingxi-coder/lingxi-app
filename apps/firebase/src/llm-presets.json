@@ -88,7 +88,8 @@
       "regions": [
         "china_mainland",
         "international"
-      ]
+      ],
+      "streamUsage": true
     },
     {
       "id": "gemini",
@@ -237,7 +238,8 @@
       "keyUrl": "https://bailian.console.aliyun.com/?tab=model#/api-key",
       "regions": [
         "china_mainland"
-      ]
+      ],
+      "streamUsage": true
     },
     {
       "id": "minimax",
@@ -257,7 +259,8 @@
       "keyUrl": "https://platform.minimaxi.com/user-center/basic-information/interface-key",
       "regions": [
         "china_mainland"
-      ]
+      ],
+      "auth": "bearer"
     },
     {
       "id": "openrouter",
@@ -277,7 +280,8 @@
       "keyUrl": "https://openrouter.ai/settings/keys",
       "regions": [
         "international"
-      ]
+      ],
+      "streamUsage": true
     },
     {
       "id": "xai",
@@ -297,7 +301,8 @@
       "keyUrl": "https://console.x.ai",
       "regions": [
         "international"
-      ]
+      ],
+      "streamUsage": true
     }
   ]
 }

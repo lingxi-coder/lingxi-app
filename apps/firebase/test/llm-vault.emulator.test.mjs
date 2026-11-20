@@ -56,7 +56,7 @@ test('vault store: a change without a key keeps the key, and a stale revision is
   await assert.rejects(vault.upsert('alice', { action: 'upsert', id: 'deepseek', label: 'x', expectedRevision: 1 }, 'web'), { code: 'REVISION_CONFLICT' });
   const rekeyed = await vault.upsert('alice', { ...deepseek, apiKey: 'sk-test-deepseek-0002' }, 'desktop');
   assert.equal(rekeyed.source, 'desktop');
-  assert.notEqual(rekeyed.keyFingerprint, renamed.keyFingerprint);
+  assert.equal(rekeyed.keyHint, 'sk-…0002');
   assert.equal((await vault.openKey('alice', 'deepseek')).apiKey, 'sk-test-deepseek-0002');
 });
 

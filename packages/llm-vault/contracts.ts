@@ -20,7 +20,6 @@ export interface VaultProvider {
   models: VaultModel[];
   defaultModel: string | null;
   keyHint: string;
-  keyFingerprint: string;
   source: VaultSource;
   revision: number;
   /** Whether the Web proxy can call it; Desktop-only kinds (Azure, Bedrock, Vertex, Foundry) are stored but not proxied. */

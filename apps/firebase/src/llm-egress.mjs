@@ -1,4 +1,4 @@
-import { request as httpsRequest } from 'node:https';
+import { Agent, request as httpsRequest } from 'node:https';
 import { lookup as dnsLookup } from 'node:dns';
 import { BlockList, isIP } from 'node:net';
 
@@ -42,8 +42,11 @@ export function publicLookup(lookup = dnsLookup) {
       if (error) { callback(new EgressError('UNAVAILABLE')); return; }
       const list = Array.isArray(addresses) ? addresses : [{ address: addresses, family: isIP(addresses) }];
       if (!list.length || list.some(entry => !isPublicAddress(entry.address))) { callback(new EgressError('EGRESS_DENIED')); return; }
-      const chosen = list[0];
-      if (options?.all) callback(null, [chosen]); else callback(null, chosen.address, chosen.family);
+      // Every address passed the check, so connection racing (autoSelectFamily) may try any of them.
+      const family = options?.family === 4 || options?.family === 6 ? options.family : 0;
+      const usable = family ? list.filter(entry => entry.family === family) : list;
+      if (!usable.length) { callback(new EgressError('UNAVAILABLE')); return; }
+      if (options?.all) callback(null, usable); else callback(null, usable[0].address, usable[0].family);
     });
   };
 }
@@ -57,13 +60,20 @@ export function checkUrl(value) {
   return url;
 }
 
-export const LIMITS = { connectMs: 15_000, idleMs: 60_000, totalMs: 300_000, maxBytes: 32 * 1024 * 1024 };
+/**
+ * The total is below llmApi's 300 s function timeout, so a slow answer ends with a TIMEOUT event rather than a cut
+ * connection; reasoning models can think for minutes before their first byte, hence the long idle limit.
+ */
+export const LIMITS = { connectMs: 15_000, idleMs: 180_000, totalMs: 280_000, maxBytes: 32 * 1024 * 1024 };
+
+/** Pooled connections: a reused socket is one this module already connected to a checked public address. */
+const pool = new Agent({ keepAlive: true, maxSockets: 64, maxFreeSockets: 16, timeout: 60_000 });
 
 /**
  * POSTs `body` to `url` and resolves with the status and an async iterable of the response body. `signal` aborts it;
  * the connect, idle and total limits end it with TIMEOUT. Never reads more than `maxBytes`.
  */
-export function upstreamTransport({ lookup, request = httpsRequest, limits = LIMITS } = {}) {
+export function upstreamTransport({ lookup, request = httpsRequest, limits = LIMITS, agent = pool } = {}) {
   const resolve = publicLookup(lookup);
   return ({ url, headers, body, signal }) => new Promise((done, reject) => {
     let target;
@@ -72,14 +82,16 @@ export function upstreamTransport({ lookup, request = httpsRequest, limits = LIM
     let settled = false, connected = false, reason;
     const kill = code => { reason ??= code; req.destroy(new EgressError(reason)); };
     const fail = error => { if (!settled) { settled = true; reject(error); } };
-    const req = request(target, { method: 'POST', headers: { ...headers, 'Content-Length': Buffer.byteLength(body) }, lookup: resolve, agent: false });
+    const req = request(target, { method: 'POST', headers: { ...headers, 'Content-Length': Buffer.byteLength(body) }, lookup: resolve, agent });
     const total = setTimeout(() => kill('TIMEOUT'), limits.totalMs);
     const connect = setTimeout(() => { if (!connected) kill('TIMEOUT'); }, limits.connectMs);
     const onAbort = () => kill('ABORTED');
     const cleanup = () => { clearTimeout(total); clearTimeout(connect); signal?.removeEventListener('abort', onAbort); };
     signal?.addEventListener('abort', onAbort, { once: true });
+    // The request's own timeout follows the socket only while this request holds it, so a pooled socket carries no stale timer.
+    req.setTimeout(limits.idleMs, () => kill('TIMEOUT'));
     req.on('socket', socket => {
-      socket.setTimeout(limits.idleMs, () => kill('TIMEOUT'));
+      if (!socket.connecting) { connected = true; clearTimeout(connect); return; }
       socket.once('secureConnect', () => { connected = true; clearTimeout(connect); });
     });
     req.on('error', error => { cleanup(); fail(new EgressError(reason ?? (error instanceof EgressError ? error.code : 'UNAVAILABLE'))); });
@@ -89,6 +101,8 @@ export function upstreamTransport({ lookup, request = httpsRequest, limits = LIM
       done({ status: res.statusCode ?? 0, headers: res.headers, body: limited(res, limits.maxBytes, kill, () => reason) });
     });
     req.end(body);
+    // The body and the key-bearing headers are not needed past here; the closures above outlive the request.
+    body = headers = undefined;
   });
 }
 

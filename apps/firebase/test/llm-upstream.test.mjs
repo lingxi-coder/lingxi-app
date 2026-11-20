@@ -42,7 +42,7 @@ test('upstream: OpenAI-compatible chat streams text, DeepSeek reasoning, usage a
     'data: [DONE]\n\n', { data: { choices: [{ delta: { content: 'after done' } }] } });
   assert.deepEqual(await events('open_ai_chat', text), [
     { type: 'reasoning', text: '想一想' }, { type: 'reasoning', text: 'router style' }, { type: 'delta', text: 'Hello' }, { type: 'delta', text: ' world' },
-    { type: 'finish', reason: 'stop' }, { type: 'usage', input: 3, output: 2 }, { type: 'done' }]);
+    { type: 'usage', input: 3, output: 2 }, { type: 'done', reason: 'stop' }]);
 });
 
 test('upstream: an OpenAI-compatible stream without [DONE] still ends once, and an error frame is a code', async () => {
@@ -69,7 +69,7 @@ test('upstream: Anthropic Messages streams text, thinking, usage and stop', asyn
     { event: 'message_delta', data: { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 4 } } },
     { event: 'message_stop', data: { type: 'message_stop' } });
   assert.deepEqual(await events('anthropic_messages', text, 3), [{ type: 'usage', input: 9 }, { type: 'reasoning', text: 'hmm' }, { type: 'delta', text: 'Bonjour' },
-    { type: 'usage', output: 4 }, { type: 'finish', reason: 'end_turn' }, { type: 'done' }]);
+    { type: 'usage', output: 4 }, { type: 'done', reason: 'end_turn' }]);
   assert.deepEqual(await events('anthropic_messages', sse({ event: 'error', data: { type: 'error', error: { type: 'overloaded_error', message: 'busy' } } })), [{ type: 'error', code: 'UPSTREAM_RATE_LIMITED' }]);
 });
 
@@ -85,7 +85,7 @@ test('upstream: Gemini streams text and thought parts and ends with the stream',
     { data: { candidates: [{ content: { parts: [{ text: 'considering', thought: true }] } }] } },
     { data: { candidates: [{ content: { parts: [{ text: 'Ciao' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 1 } } });
   assert.deepEqual(await events('gemini_generate_content', text), [{ type: 'reasoning', text: 'considering' }, { type: 'delta', text: 'Ciao' },
-    { type: 'usage', input: 2, output: 1 }, { type: 'finish', reason: 'STOP' }, { type: 'done' }]);
+    { type: 'usage', input: 2, output: 1 }, { type: 'done', reason: 'STOP' }]);
 });
 
 test('upstream: requests carry the key only in the protocol auth header', () => {
@@ -112,4 +112,28 @@ test('upstream: requests carry the key only in the protocol auth header', () => 
 test('upstream: HTTP statuses map to codes', () => {
   assert.deepEqual([401, 403, 404, 429, 402, 400, 422, 504, 500, 503, 302].map(statusCode),
     ['UPSTREAM_AUTH', 'UPSTREAM_AUTH', 'MODEL_NOT_FOUND', 'UPSTREAM_RATE_LIMITED', 'UPSTREAM_QUOTA', 'UPSTREAM_REJECTED', 'UPSTREAM_REJECTED', 'TIMEOUT', 'UNAVAILABLE', 'UNAVAILABLE', 'UNAVAILABLE']);
+});
+
+test('upstream: an Anthropic or Responses stream that ends without its end event was cut off', async () => {
+  const anthropic = sse({ data: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hal' } } });
+  assert.deepEqual(await events('anthropic_messages', anthropic), [{ type: 'delta', text: 'Hal' }, { type: 'error', code: 'INTERRUPTED' }]);
+  const responses = sse({ data: { type: 'response.output_text.delta', delta: 'Hal' } });
+  assert.deepEqual(await events('open_ai_responses', responses), [{ type: 'delta', text: 'Hal' }, { type: 'error', code: 'INTERRUPTED' }]);
+  // OpenAI-compatible servers may omit [DONE], so their stream ending is an ordinary end.
+  assert.deepEqual(await events('open_ai_chat', sse({ data: { choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] } })),
+    [{ type: 'delta', text: 'ok' }, { type: 'done', reason: 'stop' }]);
+});
+
+test('upstream: per-preset wire details — MiniMax takes a Bearer key, usage is asked for where it must be', () => {
+  const input = { model: 'm', messages: [{ role: 'user', content: 'hi' }] };
+  const minimax = buildRequest({ presetId: 'minimax', protocol: 'anthropic_messages', baseUrl: 'https://api.minimaxi.com/anthropic' }, 'k', input);
+  assert.equal(minimax.headers.Authorization, 'Bearer k');
+  assert.equal(minimax.headers['x-api-key'], undefined);
+  const anthropic = buildRequest({ presetId: 'anthropic', protocol: 'anthropic_messages', baseUrl: 'https://api.anthropic.com' }, 'k', input);
+  assert.equal(anthropic.headers['x-api-key'], 'k');
+  assert.equal(anthropic.headers.Authorization, undefined);
+  const deepseek = JSON.parse(buildRequest({ presetId: 'deepseek', protocol: 'open_ai_chat', baseUrl: 'https://api.deepseek.com' }, 'k', input).body);
+  assert.deepEqual(deepseek.stream_options, { include_usage: true });
+  const custom = JSON.parse(buildRequest({ presetId: null, protocol: 'open_ai_chat', baseUrl: 'https://llm.example.com/v1' }, 'k', input).body);
+  assert.equal(custom.stream_options, undefined, 'unknown servers may reject unknown fields');
 });

@@ -88,7 +88,7 @@ test('agent history: a long chat sends at most the proxy\'s 200 messages, still 
 });
 
 const deepseek: VaultProvider = { id: 'deepseek', presetId: 'deepseek', label: 'DeepSeek', protocol: 'open_ai_chat', desktopType: null, baseUrl: 'https://api.deepseek.com',
-  models: [{ id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash' }], defaultModel: 'deepseek-flash', keyHint: 'sk-…0001', keyFingerprint: 'k1:x', source: 'desktop',
+  models: [{ id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash' }], defaultModel: 'deepseek-flash', keyHint: 'sk-…0001', source: 'desktop',
   revision: 1, webUsable: true, createdAt: 0, updatedAt: 0 };
 
 function fakeClient(providers: VaultProvider[], stream: LlmClient['streamChat'] = async (_turn, onEvent) => { onEvent({ type: 'delta', text: 'Hel' }); onEvent({ type: 'delta', text: 'lo **there**' }); const done: ChatEvent = { type: 'done', reason: 'stop' }; onEvent(done); return done; }) {

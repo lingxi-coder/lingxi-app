@@ -25,6 +25,9 @@ const resolveWith = (lookup, all = false) => new Promise(resolve => publicLookup
 test('egress: the lookup answers with a checked public address, and refuses if any answer is private', async () => {
   assert.deepEqual(await resolveWith(lookupWith([{ address: '8.8.8.8', family: 4 }, { address: '1.1.1.1', family: 4 }])), [null, '8.8.8.8', 4]);
   assert.deepEqual(await resolveWith(lookupWith([{ address: '2606:4700::1', family: 6 }]), true), [null, [{ address: '2606:4700::1', family: 6 }]]);
+  const both = [{ address: '2606:4700::1', family: 6 }, { address: '8.8.8.8', family: 4 }];
+  assert.deepEqual(await resolveWith(lookupWith(both), true), [null, both], 'every checked address, for connection racing');
+  assert.deepEqual(await new Promise(resolve => publicLookup(lookupWith(both))('h.example.com', { family: 4 }, (...args) => resolve(args))), [null, '8.8.8.8', 4]);
   for (const answer of [[{ address: '8.8.8.8', family: 4 }, { address: '10.0.0.1', family: 4 }], [{ address: '169.254.169.254', family: 4 }], []])
     assert.equal((await resolveWith(lookupWith(answer)))[0].code, 'EGRESS_DENIED');
   assert.equal((await resolveWith(lookupWith(new Error('ENOTFOUND'))))[0].code, 'UNAVAILABLE');
@@ -35,7 +38,8 @@ function fakeRequest(behave) {
   const calls = [];
   const request = (url, options) => {
     const req = new EventEmitter(), socket = new EventEmitter();
-    socket.setTimeout = (ms, fn) => { socket.idle = fn; };
+    socket.connecting = true;
+    req.setTimeout = (ms, fn) => { socket.idle = fn; };
     req.destroy = error => { req.destroyed = error; req.response?.destroy(error); setImmediate(() => req.emit('error', error)); };
     req.end = body => { calls.push({ url: String(url), options, body }); setImmediate(() => { req.emit('socket', socket); behave({ req, socket, options }); }); };
     return req;
@@ -51,16 +55,28 @@ const respond = (status, parts) => ({ req, socket }) => {
 };
 const read = async body => { let text = ''; for await (const chunk of body) text += chunk; return text; };
 
-test('egress transport: posts once with the pinned lookup and no agent reuse, and streams the body', async () => {
+test('egress transport: posts once through the pooled agent with the pinned lookup, and streams the body', async () => {
   const { request, calls } = fakeRequest(respond(200, ['data: 1\n\n', 'data: 2\n\n']));
   const response = await upstreamTransport({ request })({ url: 'https://api.deepseek.com/chat/completions', headers: { Authorization: 'Bearer k' }, body: '{"a":1}' });
   assert.equal(response.status, 200);
   assert.equal(await read(response.body), 'data: 1\n\ndata: 2\n\n');
   assert.equal(calls.length, 1);
   assert.equal(calls[0].options.method, 'POST');
-  assert.equal(calls[0].options.agent, false);
+  assert.ok(calls[0].options.agent?.options?.keepAlive, 'pooled keep-alive agent');
   assert.equal(typeof calls[0].options.lookup, 'function');
   assert.equal(calls[0].options.headers['Content-Length'], 7);
+});
+
+test('egress transport: a reused pooled socket counts as connected at once', async () => {
+  const { request } = fakeRequest(({ req, socket }) => {
+    const res = new PassThrough(); res.statusCode = 200; res.headers = {};
+    req.response = res; req.emit('response', res); res.end('ok');
+  });
+  const reuse = (url, options) => { const req = request(url, options); const emit = req.emit.bind(req);
+    req.emit = (name, socket, ...rest) => { if (name === 'socket') socket.connecting = false; return emit(name, socket, ...rest); }; return req; };
+  const response = await upstreamTransport({ request: reuse, limits: { connectMs: 1, idleMs: 1000, totalMs: 1000, maxBytes: 100 } })({ url: 'https://h.example.com/x', headers: {}, body: '' });
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(await read(response.body), 'ok');
 });
 
 test('egress transport: a refused URL never makes a request', async () => {

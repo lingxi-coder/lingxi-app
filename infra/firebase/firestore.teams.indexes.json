@@ -734,6 +734,12 @@
       "indexes": []
     },
     {
+      "collectionGroup": "vaultAudit",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
       "collectionGroup": "conversations",
       "fieldPath": "memberUids",
       "indexes": [

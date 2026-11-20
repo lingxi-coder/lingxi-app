@@ -130,8 +130,8 @@ test('chat: rate limits, unknown providers and Desktop-only providers are refuse
 test('provider test: a working key answers ok, a refused one its code', async () => {
   const ok = await (await fixture().call('/providers', { action: 'test', id: 'deepseek' })).json();
   assert.deepEqual(ok, { ok: true, model: 'deepseek-flash' });
-  const bad = await (await fixture({ upstream: () => ({ status: 401, body: frames('{}') }) }).call('/providers', { action: 'test', id: 'deepseek', model: 'x' })).json();
-  assert.deepEqual(bad, { ok: false, code: 'UPSTREAM_AUTH', model: 'x' });
+  const bad = await (await fixture({ upstream: () => ({ status: 401, body: frames('{}') }) }).call('/providers', { action: 'test', id: 'deepseek' })).json();
+  assert.deepEqual(bad, { ok: false, code: 'UPSTREAM_AUTH', model: 'deepseek-flash' });
   assert.equal((await fixture().call('/providers', { action: 'test', id: 'missing' })).status, 404);
 });
 

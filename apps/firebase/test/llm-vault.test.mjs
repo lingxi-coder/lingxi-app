@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { PRESETS, VaultError, baseUrl, keyFingerprint, keyHint, open, parseKeyring, providerId, seal, upsertInput } from '../src/llm-vault.mjs';
+import { PRESETS, VaultError, baseUrl, keyHint, open, parseKeyring, providerId, seal, upsertInput } from '../src/llm-vault.mjs';
 
 const k1 = randomBytes(32).toString('base64'), k2 = randomBytes(32).toString('base64');
 const ring = parseKeyring(JSON.stringify({ current: 'k1', keys: { k1 } }));
@@ -38,15 +38,10 @@ test('vault: the keyring must name a current 32-byte key', () => {
     assert.throws(() => parseKeyring(text));
 });
 
-test('vault: hints and fingerprints never carry the key', () => {
+test('vault: hints never carry the key', () => {
   assert.equal(keyHint('sk-ant-api03-abcdefghijklmnop-WXYZ'), 'sk-ant-…WXYZ');
   assert.equal(keyHint('AIzaSyD-0123456789abcd'), 'AIza…abcd');
   assert.equal(keyHint('short-key'), '…ey');
-  const one = keyFingerprint(ring, 'alice', 'sk-secret-value-1'), again = keyFingerprint(ring, 'alice', 'sk-secret-value-1');
-  assert.equal(one, again);
-  assert.notEqual(one, keyFingerprint(ring, 'bob', 'sk-secret-value-1'));
-  assert.notEqual(one, keyFingerprint(ring, 'alice', 'sk-secret-value-2'));
-  assert.doesNotMatch(one, /secret/u);
 });
 
 test('vault: provider ids follow the Desktop profile-name rule', () => {
@@ -80,5 +75,15 @@ test('presets: every preset matches the model catalog it was generated from', ()
     assert.deepEqual(preset.models.map(model => model.id), models, preset.id);
     assert.ok(models.includes(preset.defaultModel), preset.id);
     assert.equal(baseUrl.safeParse(preset.baseUrl).success, true, preset.id);
+    // Everything the Web shows or the proxy sends also follows the catalog.
+    assert.equal(preset.label, provider.name, preset.id);
+    assert.equal(preset.defaultModel, provider.defaultModelId, preset.id);
+    assert.deepEqual(preset.regions, provider.regions, preset.id);
+    const names = new Map(seed.models.filter(model => model.providerId === preset.id).map(model => [model.id, model.name]));
+    for (const model of preset.models) assert.equal(model.name, names.get(model.id), `${preset.id}/${model.id}`);
+    const definition = provider.executionDefinition.source;
+    assert.equal(preset.keyUrl, /^api_key_url = "([^"]+)"/mu.exec(definition)?.[1], preset.id);
+    if (preset.protocol === 'anthropic_messages')
+      assert.equal(preset.auth === 'bearer', /^auth = "bearer"/mu.test(definition), `${preset.id} auth`);
   }
 });

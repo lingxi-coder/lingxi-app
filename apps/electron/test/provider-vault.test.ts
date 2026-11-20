@@ -15,7 +15,7 @@ import type { VaultProvider } from '../../../packages/llm-vault/contracts';
 
 const provider = (over: Partial<VaultProvider> = {}): VaultProvider => ({
   id: 'deepseek', presetId: 'deepseek', label: 'DeepSeek', protocol: 'open_ai_chat', desktopType: null, baseUrl: 'https://api.deepseek.com',
-  models: [{ id: 'deepseek-flash' }], defaultModel: 'deepseek-flash', keyHint: 'ab12', keyFingerprint: 'k1:x', source: 'web', revision: 1,
+  models: [{ id: 'deepseek-flash' }], defaultModel: 'deepseek-flash', keyHint: 'ab12', source: 'web', revision: 1,
   webUsable: true, createdAt: 1, updatedAt: 1, ...over,
 });
 const account = (uid = 'u1') => {

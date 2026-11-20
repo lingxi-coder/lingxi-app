@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { z } from 'zod';
@@ -79,12 +79,6 @@ export function open(keyring, uid, providerId, sealed) {
   finally { dek?.fill(0); }
 }
 
-/** A stable, keyed fingerprint of a key, so clients can tell whether a key they hold is the one stored without seeing it. */
-export function keyFingerprint(keyring, uid, secret) {
-  const derived = createHmac('sha256', keyring.keys.get(keyring.current)).update(`${AAD}|fingerprint`).digest();
-  return `${keyring.current}:${createHmac('sha256', derived).update(`${uid}\n${secret}`).digest('base64url').slice(0, 22)}`;
-}
-
 /** What a list may show of a key: a short known prefix and the last four characters. */
 export function keyHint(secret) {
   if (secret.length < 12) return `…${secret.slice(-2)}`;
@@ -119,9 +113,12 @@ const millis = value => value instanceof Timestamp ? value.toMillis() : value in
 export function metadataOf(id, data) {
   return { id, presetId: data.presetId ?? null, label: data.label, protocol: data.protocol, desktopType: data.desktopType ?? null,
     baseUrl: data.baseUrl, models: data.models ?? [], defaultModel: data.defaultModel ?? null, keyHint: data.keyHint,
-    keyFingerprint: data.keyFingerprint, source: data.source, revision: data.revision,
+    source: data.source, revision: data.revision,
     webUsable: WEB_PROTOCOLS.includes(data.protocol), createdAt: millis(data.createdAt), updatedAt: millis(data.updatedAt) };
 }
+
+export const AUDIT_DAYS = 400;
+const auditExpiry = now => new Date(now.getTime() + AUDIT_DAYS * 86400000);
 
 /** The day and minute windows a limit counts in (UTC). */
 const windows = now => ({ day: new Date(now).toISOString().slice(0, 10), minute: Math.floor(now / 60000) });
@@ -131,6 +128,8 @@ export class VaultStore {
   root(uid) { return this.db.doc(`llmVault/${uid}`); }
   ref(uid, id) { return this.db.doc(`llmVault/${uid}/providers/${id}`); }
   ring() { return typeof this.keyring === 'function' ? this.keyring() : this.keyring; }
+  /** One audit row. `vaultAudit` is its own collection group so its TTL policy (on `expiresAt`) reaches nothing else. */
+  audit(uid) { return this.root(uid).collection('vaultAudit').doc(); }
 
   async list(uid) {
     const snapshot = await this.root(uid).collection('providers').orderBy('createdAt').get();
@@ -142,7 +141,7 @@ export class VaultStore {
     const ring = this.ring(), now = new Date(this.clock());
     const preset = input.presetId === undefined ? undefined : presetOf(input.presetId) ?? fail(400, 'UNKNOWN_PRESET');
     const sealedKey = input.apiKey === undefined ? undefined
-      : { sealed: seal(ring, uid, input.id, input.apiKey), keyHint: keyHint(input.apiKey), keyFingerprint: keyFingerprint(ring, uid, input.apiKey) };
+      : { sealed: seal(ring, uid, input.id, input.apiKey), keyHint: keyHint(input.apiKey) };
     return this.db.runTransaction(async tx => {
       const ref = this.ref(uid, input.id), current = await tx.get(ref), old = current.data();
       if (input.expectedRevision !== undefined && (old?.revision ?? 0) !== input.expectedRevision) fail(409, 'REVISION_CONFLICT');
@@ -158,17 +157,20 @@ export class VaultStore {
       if (old && !sealedKey && (protocol !== old.protocol || base !== old.baseUrl)) fail(400, 'KEY_REQUIRED');
       if (protocol === 'other' && !(input.desktopType ?? old?.desktopType)) fail(400, 'PROVIDER_INCOMPLETE');
       const models = input.models ?? old?.models ?? preset?.models ?? [];
+      // A kept default must still be one of the models; a new list without a default starts from its first model.
+      const keptDefault = [old?.defaultModel, preset?.defaultModel].find(id => id && models.some(model => model.id === id));
       const data = {
         presetId: input.presetId ?? old?.presetId ?? null, label: input.label ?? old?.label ?? preset?.label ?? input.id,
         protocol, desktopType: input.desktopType ?? old?.desktopType ?? null, baseUrl: base, models,
-        defaultModel: input.defaultModel ?? old?.defaultModel ?? preset?.defaultModel ?? models[0]?.id ?? null,
+        defaultModel: input.defaultModel ?? keptDefault ?? models[0]?.id ?? null,
         ...(sealedKey ?? {}), source: old && !sealedKey ? old.source : source, revision: (old?.revision ?? 0) + 1,
         createdAt: old?.createdAt ?? now, updatedAt: now,
       };
-      tx.set(ref, { ...old, ...data });
-      tx.set(this.root(uid).collection('audit').doc(), { action: old ? 'update' : 'create', providerId: input.id, client: source,
-        keyChanged: !!sealedKey, at: now, expireAt: new Date(now.getTime() + 400 * 86400000) });
-      return metadataOf(input.id, { ...old, ...data });
+      const { keyFingerprint: _dropped, ...kept } = old ?? {};
+      tx.set(ref, { ...kept, ...data });
+      tx.set(this.audit(uid), { action: old ? 'update' : 'create', providerId: input.id, client: source,
+        keyChanged: !!sealedKey, at: now, expiresAt: auditExpiry(now) });
+      return metadataOf(input.id, { ...kept, ...data });
     });
   }
 
@@ -179,8 +181,8 @@ export class VaultStore {
       if (!current.exists) return;
       if (input.expectedRevision !== undefined && current.get('revision') !== input.expectedRevision) fail(409, 'REVISION_CONFLICT');
       tx.delete(ref);
-      tx.set(this.root(uid).collection('audit').doc(), { action: 'delete', providerId: input.id, client: source, at: now,
-        expireAt: new Date(now.getTime() + 400 * 86400000) });
+      tx.set(this.audit(uid), { action: 'delete', providerId: input.id, client: source, at: now,
+        expiresAt: auditExpiry(now) });
     });
     return { ok: true };
   }
@@ -193,7 +195,7 @@ export class VaultStore {
     return { provider: metadataOf(id, data), apiKey: open(this.ring(), uid, id, data.sealed) };
   }
 
-  /** Plaintext keys for a native client, each export audited. */
+  /** Plaintext keys for a native client, each export audited. A record that does not open is left out, not fatal. */
   async exportKeys(uid, ids, client) {
     const providers = ids ? ids.map(id => this.ref(uid, id)) : (await this.root(uid).collection('providers').listDocuments());
     const snapshots = providers.length ? await this.db.getAll(...providers) : [];
@@ -201,9 +203,11 @@ export class VaultStore {
     for (const snapshot of snapshots) {
       if (!snapshot.exists) continue;
       const data = snapshot.data();
-      out.push({ ...metadataOf(snapshot.id, data), apiKey: open(ring, uid, snapshot.id, data.sealed) });
-      batch.set(this.root(uid).collection('audit').doc(), { action: 'export', providerId: snapshot.id, client, at: now,
-        expireAt: new Date(now.getTime() + 400 * 86400000) });
+      let apiKey;
+      try { apiKey = open(ring, uid, snapshot.id, data.sealed); } catch { continue; }
+      out.push({ ...metadataOf(snapshot.id, data), apiKey });
+      batch.set(this.audit(uid), { action: 'export', providerId: snapshot.id, client, at: now,
+        expiresAt: auditExpiry(now) });
     }
     if (out.length) await batch.commit();
     return out;

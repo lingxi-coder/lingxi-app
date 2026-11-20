@@ -9,8 +9,15 @@ export async function serveStreaming(handler, req, res, base) {
   res.on('close', () => { if (!res.writableFinished) controller.abort(); });
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) if (value) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
-  const output = await handler(new Request(new URL(req.url, base), { method: req.method, headers, signal: controller.signal,
-    ...(!['GET', 'HEAD'].includes(req.method) ? { body: req.rawBody } : {}) }), controller.signal);
+  let request;
+  try {
+    request = new Request(new URL(req.url, base), { method: req.method, headers, signal: controller.signal,
+      ...(!['GET', 'HEAD'].includes(req.method) ? { body: req.rawBody } : {}) });
+  } catch {
+    res.status(400).set('Content-Type', 'application/json').set('Cache-Control', 'no-store').send(JSON.stringify({ error: { code: 'INVALID_REQUEST' } }));
+    return;
+  }
+  const output = await handler(request, controller.signal);
   output.headers.forEach((value, key) => res.set(key, value));
   res.status(output.status);
   if (!output.body) { res.end(); return; }

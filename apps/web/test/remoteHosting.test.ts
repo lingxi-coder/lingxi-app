@@ -61,27 +61,26 @@ test('the sign-in page has its own, lighter policy and the strict one does not a
 
 test('security zones have disjoint policy patterns', () => {
   const withPolicy = config.hosting.headers.filter((entry) => entry.headers.some((header) => header.key === 'Content-Security-Policy')).map((entry) => entry.source);
-  assert.deepEqual(withPolicy, ['/{inbox,projects}{,/**}', '/chat{,/**}', '/remote', '/remote/**', '/login/remote', '/teams', '/teams/**', '/friends', '/friends/**', '/services', '/services/**']);
+  assert.deepEqual(withPolicy, ['/remote', '/remote/**', '/login/remote', WORKSPACE]);
 });
 
-test('Teams and Friends alone get Firestore connectivity and invitation and friend links suppress referrers', () => {
-  const teamPolicy = policyFor('/teams');
+test('the workspace alone gets Firestore connectivity and invitation and friend links suppress referrers', () => {
+  // Chat, Messages, Projects, Teams, Friends and Bot services are one security zone with one policy: the router moves
+  // between them with pushState, so a document keeps the policy it was first loaded with. Never cached, and never leaking
+  // a conversation, team or friend id in a referrer (D1).
+  const teamPolicy = policyFor(WORKSPACE);
   assert.ok(teamPolicy);
-  assert.equal(policyFor('/teams/**'), teamPolicy);
-  assert.ok(directives(policyFor('/{inbox,projects}{,/**}')!).get('connect-src')!.includes('https://firestore.googleapis.com'));
-  // Friends is in the teams security zone: the same policy, never cached, never leaking a friend code in a referrer (D1).
-  assert.equal(policyFor('/friends'), teamPolicy);
-  assert.equal(policyFor('/friends/**'), teamPolicy);
-  // Bot services are in the same zone: a stranger's Bot writes what the page shows, and a service link is never leaked in a referrer.
-  assert.equal(policyFor('/services'), teamPolicy);
-  assert.equal(policyFor('/services/**'), teamPolicy);
+  for (const route of ['/chat', '/chat/team/a/b', '/inbox', '/projects/x', '/teams', '/teams/t', '/friends', '/friends/requests', '/services', '/services/s'])
+    assert.ok(matches(WORKSPACE, route), route);
+  assert.ok(!matches(WORKSPACE, '/chatter') && !matches(WORKSPACE, '/remote'));
   assert.ok(directives(teamPolicy).get('connect-src')!.includes('https://firestore.googleapis.com'));
   assert.ok(!directives(policyFor('/remote')!).get('connect-src')!.includes('https://firestore.googleapis.com'));
-  assert.equal(policyFor('/chat{,/**}'), teamPolicy, 'Chat shares the workspace policy');
-  assert.equal(policyFor('/{inbox,projects}{,/**}'), teamPolicy, 'Messages and Projects share the workspace policy');
   assert.ok(directives(teamPolicy).get('connect-src')!.includes('https://us-central1-lingxi-5e4b2.cloudfunctions.net'), 'the model proxy is reachable from the workspace');
   assert.ok(!directives(policyFor('/remote')!).get('connect-src')!.includes('https://us-central1-lingxi-5e4b2.cloudfunctions.net'));
-  for (const source of ['/chat{,/**}', '/teams', '/teams/**', '/friends', '/friends/**', '/services', '/services/**', '/open/team/join', '/open/friend/add']) {
+  // Hosting applies every matching header rule in order, so these must come after the catch-all `**`, which sets a laxer referrer policy.
+  const catchAll = config.hosting.headers.findIndex(entry => entry.source === '**');
+  for (const source of [WORKSPACE, '/open/team/join', '/open/friend/add']) {
+    assert.ok(config.hosting.headers.findIndex(entry => entry.source === source) > catchAll, `${source} after **`);
     const headers = config.hosting.headers.find(entry => entry.source === source)?.headers;
     assert.equal(headers?.find(header => header.key === 'Referrer-Policy')?.value, 'no-referrer', source);
     assert.equal(headers?.find(header => header.key === 'Cache-Control')?.value, 'no-store', source);
@@ -89,13 +88,14 @@ test('Teams and Friends alone get Firestore connectivity and invitation and frie
 });
 
 // Firebase Hosting's globs, as far as firebase.json uses them: `**` crosses `/`, `*` does not, `{a,b}` is either.
+const WORKSPACE = '/{chat,inbox,projects,teams,friends,services}{,/**}';
 const escapeLiteral = (text: string): string => text.replace(/[.+?^${}()|[\]\\]/gu, '\\$&');
 const globBody = (glob: string): string => glob.split('**').map((part) => part.split('*').map(escapeLiteral).join('[^/]*')).join('.*');
-const globToRegExp = (glob: string): RegExp => {
+const braceBody = (glob: string): string => {
   const brace = /^(?<head>[^{]*)\{(?<options>[^}]*)\}(?<tail>.*)$/u.exec(glob);
-  const body = brace ? `${globBody(brace.groups!.head!)}(?:${brace.groups!.options!.split(',').map(globBody).join('|')})${globBody(brace.groups!.tail!)}` : globBody(glob);
-  return new RegExp(`^${body}$`, 'u');
+  return brace ? `${globBody(brace.groups!.head!)}(?:${brace.groups!.options!.split(',').map(globBody).join('|')})${braceBody(brace.groups!.tail!)}` : globBody(glob);
 };
+const globToRegExp = (glob: string): RegExp => new RegExp(`^${braceBody(glob)}$`, 'u');
 const matches = (source: string, route: string): boolean => globToRegExp(source).test(route);
 
 test('membership and friend requests reach teamsApi before the general catalog rewrite', () => {

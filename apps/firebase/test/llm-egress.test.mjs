@@ -41,7 +41,8 @@ function fakeRequest(behave) {
     socket.connecting = true;
     req.setTimeout = (ms, fn) => { socket.idle = fn; };
     req.destroy = error => { req.destroyed = error; req.response?.destroy(error); setImmediate(() => req.emit('error', error)); };
-    req.end = body => { calls.push({ url: String(url), options, body }); setImmediate(() => { req.emit('socket', socket); behave({ req, socket, options }); }); };
+    // The socket comes on the next tick, as Node's does: before any timer, however short (a reused one must beat a 1 ms connect limit).
+    req.end = body => { calls.push({ url: String(url), options, body }); process.nextTick(() => { req.emit('socket', socket); behave({ req, socket, options }); }); };
     return req;
   };
   return { request, calls };

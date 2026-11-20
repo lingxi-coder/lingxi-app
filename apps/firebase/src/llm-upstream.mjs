@@ -44,22 +44,33 @@ export function statusCode(status) {
   return 'UNAVAILABLE';
 }
 
-/** Server-sent events from byte chunks, split anywhere: yields `{ event, data }` per event. */
+/**
+ * Server-sent events from byte chunks, split anywhere: yields `{ event, data }` per event. Each character is looked at
+ * once, so an upstream that sends one long line costs linear time, not a rescan of everything buffered per chunk.
+ */
 export async function* parseSse(chunks) {
   const decoder = new TextDecoder();
-  let buffer = '', event = '', data = [];
+  let tail = [], afterCr = false, event = '', data = [];
   const flush = function* () {
     if (data.length) yield { event: event || 'message', data: data.join('\n') };
     event = ''; data = [];
   };
-  const lines = function* (final) {
-    for (;;) {
-      const match = /\r\n|\r|\n/u.exec(buffer);
-      if (!match || (!final && match[0] === '\r' && match.index === buffer.length - 1)) return;
-      const line = buffer.slice(0, match.index);
-      buffer = buffer.slice(match.index + match[0].length);
+  // The complete lines of `text`; an unfinished last line waits in `tail`. A `\r` ending a chunk may be half of `\r\n`.
+  const lines = function* (text) {
+    let start = afterCr && text.startsWith('\n') ? 1 : 0;
+    afterCr = false;
+    for (let i = start; i < text.length; i++) {
+      const char = text.charCodeAt(i);
+      if (char !== 10 && char !== 13) continue;
+      tail.push(text.slice(start, i));
+      const line = tail.join('');
+      tail = [];
+      if (char === 13 && i + 1 === text.length) afterCr = true;
+      else if (char === 13 && text.charCodeAt(i + 1) === 10) i++;
+      start = i + 1;
       yield line;
     }
+    if (start < text.length) tail.push(text.slice(start));
   };
   const take = function* (line) {
     if (line === '') { yield* flush(); return; }
@@ -71,18 +82,17 @@ export async function* parseSse(chunks) {
     else if (field === 'data') data.push(value);
   };
   for await (const chunk of chunks) {
-    buffer += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true });
-    for (const line of lines(false)) yield* take(line);
+    for (const line of lines(typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true }))) yield* take(line);
   }
-  buffer += decoder.decode();
-  for (const line of lines(true)) yield* take(line);
-  if (buffer) yield* take(buffer);
+  for (const line of lines(decoder.decode())) yield* take(line);
+  if (tail.length) yield* take(tail.join(''));
   yield* flush();
 }
 
 const parsed = text => { try { return JSON.parse(text); } catch { return undefined; } };
 const upstreamError = value => {
-  const type = String(value?.type ?? value?.code ?? value?.status ?? '').toLowerCase();
+  // Providers spread the kind over type, code and status (Gemini: a numeric code and a status name), so all of them count.
+  const type = [value?.type, value?.code, value?.status].filter(part => part !== undefined && part !== null).join(' ').toLowerCase();
   if (/auth|permission|invalid_api_key|unauthenticated/u.test(type)) return 'UPSTREAM_AUTH';
   if (/rate|overloaded|resource_exhausted/u.test(type)) return 'UPSTREAM_RATE_LIMITED';
   if (/not_found/u.test(type)) return 'MODEL_NOT_FOUND';

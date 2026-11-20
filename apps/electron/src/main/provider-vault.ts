@@ -99,12 +99,22 @@ export function vaultInstallPlan(provider: VaultProvider, profiles: Readonly<Rec
   if (provider.presetId && providerById(provider.presetId) && VAULT_PRESET_IDS.has(provider.presetId)) return { kind: 'builtin', providerId: provider.presetId, displayName };
   // A custom vault provider never becomes an account of the built-in provider that happens to share its id.
   if (providerById(provider.id)) return { kind: 'unsupported', code: 'ID_CONFLICT' };
-  if (Object.hasOwn(profiles, provider.id)) return { kind: 'custom', providerId: provider.id, displayName, profile: null };
   const type = provider.desktopType ?? desktopTypeOfProtocol(provider.protocol);
+  // Nor of a custom provider of this Mac that only shares its name: the key would go to that provider's endpoint.
+  if (Object.hasOwn(profiles, provider.id)) return sameEndpoint(profiles[provider.id], type, provider.baseUrl)
+    ? { kind: 'custom', providerId: provider.id, displayName, profile: null } : { kind: 'unsupported', code: 'ID_CONFLICT' };
   if (!type) return { kind: 'unsupported', code: 'UNSUPPORTED_PROVIDER' };
   const ids = modelIds(provider.models);
   // The provider's default model leads, so it is also the first model Desktop offers.
   if (provider.defaultModel) { const at = ids.indexOf(provider.defaultModel); if (at > 0) ids.splice(at, 1); if (at !== 0) ids.unshift(provider.defaultModel); }
   if (!ids.length) return { kind: 'unsupported', code: 'NO_MODELS' };
   return { kind: 'custom', providerId: provider.id, displayName, profile: { type, baseUrl: provider.baseUrl, models: ids.map(id => ({ id })) } };
+}
+
+const withoutTrailingSlash = (url: string) => url.trim().replace(/\/+$/u, '');
+/** Whether this Mac's custom provider settings call the same kind of endpoint at the same base URL as the vault record. */
+function sameEndpoint(profile: unknown, type: DesktopProviderType | null, baseUrl: string): boolean {
+  if (!type || !profile || typeof profile !== 'object' || Array.isArray(profile)) return false;
+  const local = profile as { type?: unknown; baseUrl?: unknown };
+  return local.type === type && typeof local.baseUrl === 'string' && withoutTrailingSlash(local.baseUrl) === withoutTrailingSlash(baseUrl);
 }

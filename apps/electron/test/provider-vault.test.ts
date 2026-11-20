@@ -108,7 +108,11 @@ test('a vault provider lands on this Mac as a built-in account or a custom provi
   });
   const custom = provider({ id: 'gw', presetId: null, label: 'Gateway', protocol: 'anthropic_messages', baseUrl: 'https://gw.example.com', models: [], defaultModel: 'claude-x' });
   assert.deepEqual(vaultInstallPlan(custom, {}), { kind: 'custom', providerId: 'gw', displayName: 'Gateway', profile: { type: 'anthropic', baseUrl: 'https://gw.example.com', models: [{ id: 'claude-x' }] } });
-  assert.deepEqual(vaultInstallPlan(custom, { gw: { type: 'anthropic' } }), { kind: 'custom', providerId: 'gw', displayName: 'Gateway', profile: null });
+  assert.deepEqual(vaultInstallPlan(custom, { gw: { type: 'anthropic', baseUrl: 'https://gw.example.com/' } }), { kind: 'custom', providerId: 'gw', displayName: 'Gateway', profile: null });
+  // A provider of this Mac that only shares the name never gets the key: it would send it to its own endpoint.
+  for (const local of [{ type: 'anthropic', baseUrl: 'https://other.example.com' }, { type: 'openai', baseUrl: 'https://gw.example.com' }, { type: 'anthropic' }, 'gw']) {
+    assert.deepEqual(vaultInstallPlan(custom, { gw: local }), { kind: 'unsupported', code: 'ID_CONFLICT' }, JSON.stringify(local));
+  }
   assert.deepEqual(vaultInstallPlan({ ...custom, id: 'openai' }, {}), { kind: 'unsupported', code: 'ID_CONFLICT' });
   assert.deepEqual(vaultInstallPlan({ ...custom, protocol: 'other' }, {}), { kind: 'unsupported', code: 'UNSUPPORTED_PROVIDER' });
   assert.deepEqual(vaultInstallPlan({ ...custom, protocol: 'other', desktopType: 'bedrock-claude' }, {}).kind, 'custom');

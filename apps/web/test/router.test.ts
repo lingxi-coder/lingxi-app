@@ -121,6 +121,11 @@ test('chat routes keep id case, round-trip, and reject other shapes', () => {
   }
   assert.equal(resolveRoute('/CHAT'), '/chat');
   assert.equal(resolveRoute('/chat/team/a'), '/chat', 'a malformed chat path opens the workspace home');
+  for (const other of ['/open/friend/add?code=AbC', '/open/friend/requests', '/open/friend/chat', '/docs/agent/x', '/inbox/team/a/b']) {
+    assert.equal(parseChatRoute(other), null, `${other} is not a chat path`);
+  }
+  assert.equal(resolveRoute('/open/friend/add?code=AbC'), '/open/friend/add', 'a friend invite stays an open-link page');
+  assert.equal(resolveRoute('/open/friend/requests'), '/open/friend/requests');
 });
 
 test('the chat workspace shares one security zone with Inbox, Teams, Friends and Services', () => {

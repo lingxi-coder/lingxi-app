@@ -12,6 +12,7 @@ import { webFriendsApi } from '../friends/api';
 import { webInboxRequest } from '../inbox/session';
 import { webTeamsApi } from '../teams/api';
 import { teamsDatabase } from '../teams/firestore';
+import { sharedPrompt } from '../pages/openLinkTarget';
 import type { Locale } from '../utils/locale';
 import { OpenInAppBanner } from './OpenInAppBanner';
 import { ChatSidebar, type AgentChatEntry } from './ChatSidebar';
@@ -33,6 +34,8 @@ export interface ChatWorkspaceProps {
   target: ChatTarget;
   onLocaleChange(locale: Locale): void;
   onThemeToggle(): void;
+  /** The saved Agent chats, for the sidebar whichever pane is open; an open Agent pane keeps the list current after that. */
+  listAgentChats?(): Promise<AgentChatEntry[]>;
   /** The centre of the workspace for the targets the people panes do not handle: the Agent chat and model settings. */
   renderAgent(props: { target: ChatTarget; onAgentChats(chats: AgentChatEntry[]): void; open(target: ChatTarget, replace?: boolean): void }): ReactNode;
 }
@@ -46,13 +49,14 @@ export function openChat(target: ChatTarget, replace = false): void {
   window.dispatchEvent(new PopStateEvent('popstate'));
 }
 
-export function ChatWorkspace({ user, locale, theme, target, onLocaleChange, onThemeToggle, renderAgent }: ChatWorkspaceProps) {
+export function ChatWorkspace({ user, locale, theme, target, onLocaleChange, onThemeToggle, listAgentChats, renderAgent }: ChatWorkspaceProps) {
   const zh = locale === 'zh';
   const [apis, setApis] = useState<{ teams: ReturnType<typeof webTeamsApi>; friends: ReturnType<typeof webFriendsApi>; inbox: InboxController }>();
   const [agentChats, setAgentChats] = useState<AgentChatEntry[]>([]);
   const [drawer, setDrawer] = useState(false);
-  // A shared link that continued here offers the app once; the marker leaves the address straight away.
-  const [viaLink, setViaLink] = useState(() => new URLSearchParams(window.location.search).get('via') === 'link');
+  // A shared link that continued here offers the app once, with the prompt a new-chat link brought; the marker leaves the
+  // address straight away.
+  const [viaLink, setViaLink] = useState(() => new URLSearchParams(window.location.search).get('via') === 'link' ? { prompt: sharedPrompt(window.location.hash) } : undefined);
   useEffect(() => {
     const query = new URLSearchParams(window.location.search);
     if (!query.has('via')) return;
@@ -60,6 +64,11 @@ export function ChatWorkspace({ user, locale, theme, target, onLocaleChange, onT
     const search = query.toString();
     window.history.replaceState(window.history.state, '', `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`);
   }, []);
+  useEffect(() => {
+    let live = true;
+    void listAgentChats?.().then(list => { if (live) setAgentChats(list); }, () => undefined);
+    return () => { live = false; };
+  }, [listAgentChats]);
   useEffect(() => {
     const db = teamsDatabase(auth.app);
     const inbox = new InboxController({ uid: user.uid, request: webInboxRequest(user), watch: (...args) => watchInbox(sdk, db, user.uid, ...args) });
@@ -98,7 +107,7 @@ export function ChatWorkspace({ user, locale, theme, target, onLocaleChange, onT
     <button type="button" className="chat-drawer-scrim" aria-label={zh ? '关闭对话列表' : 'Close the conversation list'} onClick={() => setDrawer(false)} />
     <main className="chat-main">
       <button type="button" className="chat-drawer-toggle" aria-label={zh ? '打开对话列表' : 'Open the conversation list'} aria-expanded={drawer} onClick={() => setDrawer(true)}><span /><span /><span /></button>
-      {viaLink && <OpenInAppBanner target={target} locale={locale} onClose={() => setViaLink(false)} />}
+      {viaLink && <OpenInAppBanner target={target} prompt={viaLink.prompt} locale={locale} onClose={() => setViaLink(undefined)} />}
       {pane}
     </main>
   </div>;

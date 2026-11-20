@@ -771,11 +771,11 @@ export const providerAccountsCatalog: Record<string, Record<string, string>> = {
     "ko": "오늘 요청이 너무 많습니다. 나중에 다시 시도하세요"
   },
   "provider_vault_code_conflict": {
-    "en": "a built-in provider already uses this name",
-    "zh-Hans": "已有同名的内置服务",
-    "zh-Hant": "已有同名的內建服務",
-    "ja": "同じ名前の組み込みサービスがあります",
-    "ko": "같은 이름의 기본 제공 서비스가 있습니다"
+    "en": "this Mac already has a different provider with this name",
+    "zh-Hans": "这台 Mac 上已有同名的其他服务",
+    "zh-Hant": "這台 Mac 上已有同名的其他服務",
+    "ja": "この Mac には同じ名前の別のサービスがあります",
+    "ko": "이 Mac에 같은 이름의 다른 서비스가 있습니다"
   },
   "provider_vault_code_session": {
     "en": "sign in again",

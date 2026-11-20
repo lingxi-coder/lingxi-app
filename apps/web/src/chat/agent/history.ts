@@ -38,6 +38,8 @@ export interface AgentHistory {
 
 export const CHAT_LIMIT = 300;
 export const CONTEXT_CHARS = 100_000;
+/** The proxy takes at most this many messages in one turn (`apps/firebase/src/llm-chat.mjs`). */
+export const CONTEXT_MESSAGES = 200;
 
 export const newId = () => (globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
 
@@ -48,14 +50,16 @@ export function titleOf(prompt: string): string {
 }
 
 /**
- * The messages sent with a new turn: the latest ones that fit `budget` characters, starting at a user message, without
- * answers that failed before saying anything. The newest message is always sent, cut to the budget if it must be.
+ * The messages sent with a new turn: the latest ones that fit `budget` characters and the proxy's message limit, starting
+ * at a user message, without answers that failed before saying anything. The newest message is always sent, cut to the
+ * budget if it must be.
  */
 export function contextOf(messages: readonly AgentMessage[], budget = CONTEXT_CHARS): ChatTurnMessage[] {
-  const usable = messages.filter(message => message.role === 'user' || message.content);
+  // An answer that is only whitespace (stopped or failed early) is dropped too: Anthropic-style upstreams refuse one.
+  const usable = messages.filter(message => message.role === 'user' || message.content.trim());
   const out: ChatTurnMessage[] = [];
   let used = 0;
-  for (let i = usable.length - 1; i >= 0; i--) {
+  for (let i = usable.length - 1; i >= 0 && out.length < CONTEXT_MESSAGES; i--) {
     const { role, content } = usable[i]!;
     if (out.length && used + content.length > budget) break;
     out.unshift({ role, content: out.length ? content : content.slice(-budget) });

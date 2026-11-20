@@ -60,6 +60,16 @@ test('vault store: a change without a key keeps the key, and a stale revision is
   assert.equal((await vault.openKey('alice', 'deepseek')).apiKey, 'sk-test-deepseek-0002');
 });
 
+test('vault store: a stored key never follows a provider to a new endpoint', options, async () => {
+  await vault.upsert('alice', deepseek, 'web');
+  for (const change of [{ baseUrl: 'https://collector.example.com/v1' }, { protocol: 'anthropic_messages' }, { presetId: 'openai' }])
+    await assert.rejects(vault.upsert('alice', { action: 'upsert', id: 'deepseek', ...change }, 'web'), { code: 'KEY_REQUIRED' }, JSON.stringify(change));
+  assert.equal((await vault.openKey('alice', 'deepseek')).provider.baseUrl, 'https://api.deepseek.com');
+  const moved = await vault.upsert('alice', { action: 'upsert', id: 'deepseek', baseUrl: 'https://api2.example.com/v1', apiKey: 'sk-test-deepseek-0003' }, 'web');
+  assert.equal(moved.baseUrl, 'https://api2.example.com/v1');
+  assert.equal((await vault.openKey('alice', 'deepseek')).apiKey, 'sk-test-deepseek-0003');
+});
+
 test('vault store: a new provider needs a key, a complete endpoint and room', options, async () => {
   await assert.rejects(vault.upsert('alice', { action: 'upsert', id: 'deepseek', presetId: 'deepseek' }, 'web'), { code: 'KEY_REQUIRED' });
   await assert.rejects(vault.upsert('alice', { action: 'upsert', id: 'mine', apiKey: 'k-123' }, 'web'), { code: 'PROVIDER_INCOMPLETE' });

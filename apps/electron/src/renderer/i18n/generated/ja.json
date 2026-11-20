@@ -124,7 +124,7 @@
   "provider_vault_code_unsupported": "このサービスはアカウントに保存できません",
   "provider_vault_code_limit": "アカウントのモデルサービスが上限の 20 件に達しています",
   "provider_vault_code_rate": "本日のリクエストが多すぎます。しばらくしてから再試行してください",
-  "provider_vault_code_conflict": "同じ名前の組み込みサービスがあります",
+  "provider_vault_code_conflict": "この Mac には同じ名前の別のサービスがあります",
   "provider_vault_code_session": "再度サインインしてください",
   "bots_assist_title": "Bot に何を手伝ってほしいですか？",
   "bots_assist_body": "アイデアを伝えて、Bot の役割、ペルソナ、作業の進め方を一緒に考えましょう。",

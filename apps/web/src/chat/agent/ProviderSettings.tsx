@@ -12,7 +12,8 @@ export const PRESETS = (presetFile as { presets: Preset[] }).presets;
 const SOURCE: Record<string, [string, string]> = { web: ['Saved on the Web', '网页添加'], desktop: ['From the desktop app', '来自桌面端'], android: ['From Android', '来自 Android'], ios: ['From iOS', '来自 iOS'], unknown: ['Saved', '已保存'] };
 const PROTOCOLS: [VaultProtocol, string][] = [['open_ai_chat', 'OpenAI Chat Completions'], ['open_ai_responses', 'OpenAI Responses'], ['anthropic_messages', 'Anthropic Messages'], ['gemini_generate_content', 'Gemini']];
 
-type Form = { kind: 'preset'; preset: Preset; existing?: VaultProvider } | { kind: 'custom' };
+/** `existing` is the record this form changes: a second save after a failed check updates it at its new revision. */
+type Form = { kind: 'preset'; preset: Preset; existing?: VaultProvider } | { kind: 'custom'; existing?: VaultProvider };
 type Status = { tone: 'busy' | 'ok' | 'error'; text: string } | undefined;
 
 export interface ProviderSettingsProps {
@@ -42,6 +43,7 @@ export function ProviderSettings({ locale, client, providers, onChanged, onClose
     let saved: VaultProvider;
     try { saved = await client.upsertProvider(input); } catch (error) { setStatus({ tone: 'error', text: failure(error) }); return; }
     onChanged(saved);
+    setForm(current => current && { ...current, existing: saved });
     setStatus({ tone: 'busy', text: t('Saved. Checking the key…', '已保存，正在验证 key…') });
     try {
       const result = saved.webUsable ? await client.testProvider(saved.id) : { ok: true };
@@ -137,14 +139,16 @@ function ProviderForm({ form, zh, status, taken, onCancel, onSave }: { form: For
       return;
     }
     const models = custom.models.split(/[\s,]+/u).filter(Boolean).slice(0, 100);
+    const existing = form.existing?.id === custom.id ? form.existing : undefined;
     if (!isProviderId(custom.id)) { setProblem(t('The id uses lowercase letters, digits, dots, dashes and underscores.', 'ID 只能使用小写字母、数字、点、连字符和下划线。')); return; }
-    if (taken(custom.id)) { setProblem(t('A service with this id already exists.', '已有同样 ID 的服务。')); return; }
+    if (PRESETS.some(preset => preset.id === custom.id)) { setProblem(t('This id belongs to a listed service; connect it from the list, or pick another id.', '这个 ID 属于列表中的服务，请从列表连接，或换一个 ID。')); return; }
+    if (taken(custom.id) && !existing) { setProblem(t('A service with this id already exists.', '已有同样 ID 的服务。')); return; }
     if (!/^https:\/\/[^/\s]+\.[^/\s]+/u.test(custom.baseUrl.trim())) { setProblem(t('The base URL must start with https://.', '服务地址必须以 https:// 开头。')); return; }
     if (!models.length) { setProblem(t('Add at least one model id.', '至少填写一个模型 ID。')); return; }
     if (!apiKey) { setProblem(t('Paste the API key.', '请粘贴 API key。')); return; }
     setKey(''); setProblem('');
     onSave({ action: 'upsert', id: custom.id, label: custom.label.trim() || custom.id, protocol: custom.protocol, baseUrl: custom.baseUrl.trim(),
-      models: models.map(id => ({ id })), defaultModel: models[0], apiKey });
+      models: models.map(id => ({ id })), defaultModel: models[0], apiKey, ...(existing ? { expectedRevision: existing.revision } : {}) });
   };
   const title = form.kind === 'preset' ? form.preset.label : t('Custom service', '自定义服务');
   return <form className="agent-form" onSubmit={submit} aria-label={title}>

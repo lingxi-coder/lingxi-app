@@ -22,6 +22,15 @@ test('sse: a multi-byte character split across chunks decodes whole', async () =
   assert.deepEqual(await collect(parseSse(split())), [{ event: 'message', data: '你好' }]);
 });
 
+test('sse: one line as long as the 32 MiB body limit, in 16 KiB chunks, parses in linear time', async () => {
+  const long = 'x'.repeat(32 * 1024 * 1024), started = performance.now();
+  const got = await collect(parseSse(chunks(`data: ${long}\n\n`, 16 * 1024)));
+  assert.equal(got.length, 1);
+  assert.equal(got[0].data.length, long.length);
+  // A rescan of the whole buffer per chunk took over 5 s here; one pass takes well under 0.5 s.
+  assert.ok(performance.now() - started < 2000, `took ${Math.round(performance.now() - started)} ms`);
+});
+
 test('upstream: OpenAI-compatible chat streams text, DeepSeek reasoning, usage and finish', async () => {
   const text = sse(
     { data: { choices: [{ delta: { role: 'assistant', content: '' } }] } },
@@ -62,6 +71,13 @@ test('upstream: Anthropic Messages streams text, thinking, usage and stop', asyn
   assert.deepEqual(await events('anthropic_messages', text, 3), [{ type: 'usage', input: 9 }, { type: 'reasoning', text: 'hmm' }, { type: 'delta', text: 'Bonjour' },
     { type: 'usage', output: 4 }, { type: 'finish', reason: 'end_turn' }, { type: 'done' }]);
   assert.deepEqual(await events('anthropic_messages', sse({ event: 'error', data: { type: 'error', error: { type: 'overloaded_error', message: 'busy' } } })), [{ type: 'error', code: 'UPSTREAM_RATE_LIMITED' }]);
+});
+
+test('upstream: in-stream errors are classified by their type, code and status together', async () => {
+  assert.deepEqual(await events('open_ai_responses', sse({ event: 'error', data: { type: 'error', code: 'rate_limit_exceeded', message: 'slow down' } })), [{ type: 'error', code: 'UPSTREAM_RATE_LIMITED' }]);
+  assert.deepEqual(await events('open_ai_chat', sse({ data: { error: { type: 'invalid_request_error', code: 'invalid_api_key' } } })), [{ type: 'error', code: 'UPSTREAM_AUTH' }]);
+  assert.deepEqual(await events('gemini_generate_content', sse({ data: { error: { code: 429, status: 'RESOURCE_EXHAUSTED' } } })), [{ type: 'error', code: 'UPSTREAM_RATE_LIMITED' }]);
+  assert.deepEqual(await events('gemini_generate_content', sse({ data: { error: { code: 403, status: 'PERMISSION_DENIED' } } })), [{ type: 'error', code: 'UPSTREAM_AUTH' }]);
 });
 
 test('upstream: Gemini streams text and thought parts and ends with the stream', async () => {

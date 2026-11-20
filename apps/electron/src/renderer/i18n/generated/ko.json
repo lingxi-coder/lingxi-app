@@ -124,7 +124,7 @@
   "provider_vault_code_unsupported": "이 서비스는 계정에 저장할 수 없습니다",
   "provider_vault_code_limit": "계정의 모델 서비스가 최대 20개에 도달했습니다",
   "provider_vault_code_rate": "오늘 요청이 너무 많습니다. 나중에 다시 시도하세요",
-  "provider_vault_code_conflict": "같은 이름의 기본 제공 서비스가 있습니다",
+  "provider_vault_code_conflict": "이 Mac에 같은 이름의 다른 서비스가 있습니다",
   "provider_vault_code_session": "다시 로그인하세요",
   "bots_assist_title": "Bot이 어떤 일을 도와주면 좋을까요?",
   "bots_assist_body": "아이디어를 설명하고 Bot의 역할, 페르소나, 작업 방식을 함께 다듬어 보세요.",

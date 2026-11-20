@@ -7,7 +7,7 @@ import { parseChatRoute } from '../src/app/router';
 import { agentShareLink, SHARED_PROMPT_LIMIT } from '../src/chat/agent/share';
 import { OpenInAppBanner } from '../src/chat/OpenInAppBanner';
 import { withViaLink } from '../src/pages/OpenLinkPage';
-import { appLinkForChat, openLinkTarget } from '../src/pages/openLinkTarget';
+import { appLinkForChat, openLinkTarget, sharedPrompt } from '../src/pages/openLinkTarget';
 
 const web = (link: string) => openLinkTarget(parseDeepLink(link));
 
@@ -23,6 +23,11 @@ test('a shared prompt becomes a new chat with the prompt in the composer; other 
   const link = buildDeepLink({ route: 'new', params: {}, payload: { prompt: '解释 #1 & 50% 的含义?' } });
   assert.equal(web(link), `/chat#prompt=${encodeURIComponent('解释 #1 & 50% 的含义?')}`);
   assert.equal(web('https://lingxios.net/open/new'), '/chat');
+  assert.equal(web('https://lingxios.net/open/new?workspace=project.X'), null, 'a new chat in a project is for the app');
+  assert.equal(web(buildDeepLink({ route: 'new', params: { mode: 'code' }, payload: { prompt: 'fix it' } })), null);
+  assert.equal(sharedPrompt(`#prompt=${encodeURIComponent('解释 #1')}`), '解释 #1');
+  assert.equal(sharedPrompt(''), undefined);
+  assert.equal(sharedPrompt('#prompt=%E0%A4%A'), undefined);
   assert.equal(web(`https://lingxios.net/open/team/join?code=${'A'.repeat(32)}`), null);
   assert.equal(web('https://lingxios.net/open/team/inbox'), null);
   assert.equal(web(`https://lingxios.net/open/friend/add?code=${'B'.repeat(32)}`), null);
@@ -35,6 +40,8 @@ test('the workspace offers the app at the same place, and nothing for places the
   assert.equal(appLinkForChat({ kind: 'bot', teamId: 'design-team', botId: 'helper' }), 'lingxi://team/bot?bot=helper&team=design-team');
   assert.equal(appLinkForChat({ kind: 'friend', uid: 'UidB' }), 'lingxi://friend/chat?uid=UidB');
   assert.equal(appLinkForChat({ kind: 'home' }), 'lingxi://new');
+  assert.deepEqual(parseDeepLink(appLinkForChat({ kind: 'home' }, 'What is a monad?')!).payload, { prompt: 'What is a monad?' }, 'the shared prompt goes on to the app');
+  assert.equal(appLinkForChat({ kind: 'home' }, 'x'.repeat(40_000)), 'lingxi://new', 'a prompt too long for a link is left out');
   assert.equal(appLinkForChat({ kind: 'agent', id: 'x' }), null);
   assert.equal(appLinkForChat({ kind: 'team', teamId: 'bad:id', conversationId: 'c' }), null, 'an id a link cannot carry is no link');
   const banner = renderToStaticMarkup(createElement(OpenInAppBanner, { target: { kind: 'friend', uid: 'UidB' }, locale: 'zh', onClose() {} }));

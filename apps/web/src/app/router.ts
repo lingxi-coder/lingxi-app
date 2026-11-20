@@ -136,6 +136,7 @@ export function parseChatRoute(path: string): ChatTarget | null {
   const pathname = (path.split(/[?#]/u)[0] ?? '').replace(/\/$/u, '');
   if (pathname === '/chat') return { kind: 'home' };
   if (pathname === '/chat/settings/providers') return { kind: 'providers' };
+  if (pathname.split('/')[1]?.toLowerCase() !== 'chat') return null;
   const parts = pathname.split('/').slice(2);
   let ids: string[];
   try { ids = parts.slice(1).map((part) => decodeURIComponent(part)); } catch { return null; }

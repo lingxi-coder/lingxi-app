@@ -53,7 +53,10 @@ export function createChat({ vault, transport, pingMs = 15_000, limits = CHAT_LI
     const parsed = chatInput.safeParse(body);
     if (!parsed.success) throw new VaultError(400, 'INVALID_INPUT');
     const input = parsed.data;
-    const { provider, events } = await start(user.uid, input, signal);
+    // The upstream call stops when the caller leaves or the answer stream is cancelled, whichever comes first.
+    const turn = new AbortController(), leave = () => turn.abort();
+    if (signal?.aborted) turn.abort(); else signal?.addEventListener('abort', leave, { once: true });
+    const { provider, events } = await start(user.uid, input, turn.signal);
     const encoder = new TextEncoder();
     let ping;
     const stream = new ReadableStream({
@@ -71,13 +74,14 @@ export function createChat({ vault, transport, pingMs = 15_000, limits = CHAT_LI
             else if (event.type === 'done') { send(sse('done', { reason: event.reason ?? reason ?? 'stop' })); break; }
           }
         } catch (error) {
-          if (!signal?.aborted) send(sse('error', { code: failure(error).code }));
+          if (!turn.signal.aborted) send(sse('error', { code: failure(error).code }));
         } finally {
           clearInterval(ping);
+          signal?.removeEventListener('abort', leave);
           try { controller.close(); } catch { /* closed */ }
         }
       },
-      cancel() { clearInterval(ping); },
+      cancel() { clearInterval(ping); turn.abort(); },
     });
     const out = new Headers(headers);
     out.set('Content-Type', 'text/event-stream; charset=utf-8');

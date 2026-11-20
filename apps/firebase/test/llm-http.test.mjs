@@ -44,6 +44,21 @@ test('serveStreaming: a caller that leaves aborts the handler signal and stops t
   assert.equal(res.ended, true);
 });
 
+test('serveStreaming: the handler gets the caller signal, and a quiet stream stops as soon as the caller leaves', async () => {
+  const res = fakeResponse();
+  let given, cancelled = false;
+  const served = serveStreaming(async (request, signal) => {
+    given = signal;
+    return new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('first\n')); }, cancel() { cancelled = true; } }), { status: 200 });
+  }, req(), res, 'https://llm.internal');
+  while (!res.chunks.length) await new Promise(resolve => setImmediate(resolve));
+  res.emit('close');
+  await served;
+  assert.equal(given.aborted, true);
+  assert.equal(cancelled, true, 'the body is cancelled without waiting for another chunk');
+  assert.equal(res.ended, true);
+});
+
 test('serveStreaming: a body-less GET answer just ends', async () => {
   const res = fakeResponse();
   await serveStreaming(async request => { assert.equal(request.method, 'GET'); return new Response(null, { status: 204 }); }, req('GET'), res, 'https://llm.internal');

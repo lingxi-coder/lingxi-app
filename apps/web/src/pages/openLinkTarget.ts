@@ -6,7 +6,8 @@ export const VIA_LINK = 'via=link';
 
 /**
  * Where a shared link continues in this browser when the app did not take it: the conversation in the Chat workspace, or
- * a new Agent chat with the shared prompt in its composer (never sent). `null` keeps the "Open LingXi" page.
+ * a new Agent chat with the shared prompt in its composer (never sent). `null` keeps the "Open LingXi" page, which is
+ * also where a new-chat link bound to a project or mode stays: only the app can open it as it was meant.
  */
 export function openLinkTarget(target: DeepLinkTarget): string | null {
   const { team, conversation, bot, uid } = target.params;
@@ -15,6 +16,7 @@ export function openLinkTarget(target: DeepLinkTarget): string | null {
     case 'team/bot': return chatRoute({ kind: 'bot', teamId: team!, botId: bot! });
     case 'friend/chat': return chatRoute({ kind: 'friend', uid: uid! });
     case 'new': {
+      if (Object.keys(target.params).length) return null;
       const prompt = typeof target.payload?.prompt === 'string' ? target.payload.prompt : '';
       return prompt ? `/chat#prompt=${encodeURIComponent(prompt)}` : '/chat';
     }
@@ -22,14 +24,27 @@ export function openLinkTarget(target: DeepLinkTarget): string | null {
   }
 }
 
-/** The app link for a place in the Chat workspace, for "Open in the LingXi app"; `null` where the app has no such place. */
-export function appLinkForChat(target: ChatTarget): string | null {
+/** The prompt a shared `new` link brought to `/chat#prompt=…`, if any. Reading it leaves the address as it is. */
+export function sharedPrompt(hash: string): string | undefined {
+  const match = /^#prompt=(.*)$/su.exec(hash);
+  if (!match) return undefined;
+  try { return decodeURIComponent(match[1]!).slice(0, 20_000) || undefined; } catch { return undefined; }
+}
+
+/**
+ * The app link for a place in the Chat workspace, for "Open in the LingXi app"; `null` where the app has no such place. A
+ * new chat carries the prompt its shared link brought, unless that no longer fits in a link.
+ */
+export function appLinkForChat(target: ChatTarget, prompt?: string): string | null {
   let link: DeepLinkTarget;
   switch (target.kind) {
     case 'team': link = { route: 'team/chat', params: { team: target.teamId, conversation: target.conversationId } }; break;
     case 'bot': link = { route: 'team/bot', params: { team: target.teamId, bot: target.botId } }; break;
     case 'friend': link = { route: 'friend/chat', params: { uid: target.uid } }; break;
-    case 'home': link = { route: 'new', params: {} }; break;
+    case 'home':
+      link = { route: 'new', params: {} };
+      if (prompt) try { return buildDeepLink({ ...link, payload: { prompt } }, 'scheme'); } catch { /* the app opens a new chat without it */ }
+      break;
     default: return null;
   }
   try { return buildDeepLink(link, 'scheme'); } catch { return null; }

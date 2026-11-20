@@ -17,7 +17,7 @@ export const EXPORTS_PER_DAY = 10;
 const uid = z.string().min(1).max(128).regex(/^[^/\u0000-\u001f\u007f]+$/u);
 
 export function createLlmHandler({ vault, verifyToken, origins = [], clock = Date.now, observe = () => undefined, chat, test }) {
-  return async request => {
+  return async (request, signal = request.signal) => {
     const started = clock();
     const headers = new Headers({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
       'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', Vary: 'Origin' });
@@ -51,7 +51,7 @@ export function createLlmHandler({ vault, verifyToken, origins = [], clock = Dat
       if (route === 'GET /providers') return finish(reply({ providers: await vault.list(user.uid) }));
 
       const body = await readJson(request, route === 'POST /chat' ? 1_200_000 : 65_536);
-      if (route === 'POST /chat') return finish(await chat({ user, body, headers, signal: request.signal }));
+      if (route === 'POST /chat') return finish(await chat({ user, body, headers, signal }));
       if (route === 'POST /providers/export') {
         if (origin) throw new VaultError(403, 'BROWSER_NOT_ALLOWED');
         if (!CLIENTS.includes(client)) throw new VaultError(400, 'CLIENT_REQUIRED');
@@ -63,7 +63,7 @@ export function createLlmHandler({ vault, verifyToken, origins = [], clock = Dat
       }
       if (body?.action === 'upsert') return finish(reply({ provider: await vault.upsert(user.uid, parse(upsertInput, body), source) }));
       if (body?.action === 'delete') return finish(reply(await vault.remove(user.uid, parse(removeInput, body), source)));
-      if (body?.action === 'test' && test) return finish(reply(await test(user.uid, body, request.signal)));
+      if (body?.action === 'test' && test) return finish(reply(await test(user.uid, body, signal)));
       throw new VaultError(400, 'INVALID_INPUT');
     } catch (error) {
       if (error instanceof VaultError || (Number.isInteger(error?.status) && typeof error?.code === 'string'))

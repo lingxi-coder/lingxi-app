@@ -96,6 +96,17 @@ test('chat: quiet upstreams get pings, and the caller leaving aborts the upstrea
   await reader.cancel().catch(() => undefined);
 });
 
+test('chat: cancelling the answer stream aborts the upstream call even when the caller signal never fires', async () => {
+  let upstreamSignal;
+  const { call } = fixture({ upstream: request => { upstreamSignal = request.signal;
+    return { status: 200, body: frames('data: {"choices":[{"delta":{"content":"a"}}]}\n\n', () => new Promise((_, reject) => request.signal.addEventListener('abort', () => reject(new EgressError('ABORTED'))))) }; } });
+  const response = await call('/chat', turn());
+  const reader = response.body.getReader();
+  await reader.read();
+  await reader.cancel();
+  assert.equal(upstreamSignal.aborted, true);
+});
+
 test('chat: input is checked before the vault is touched', async () => {
   const { call, sent } = fixture();
   for (const body of [turn({ messages: [] }), turn({ messages: [{ role: 'assistant', content: 'x' }] }), turn({ messages: [{ role: 'system', content: 'x' }] }),

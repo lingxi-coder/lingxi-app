@@ -137,7 +137,7 @@ export class VaultStore {
     return snapshot.docs.map(doc => metadataOf(doc.id, doc.data()));
   }
 
-  /** Adds or changes a provider. A new one needs a key; a change without one keeps the stored key. */
+  /** Adds or changes a provider. A new one needs a key, and so does a new endpoint; any other change keeps the stored key. */
   async upsert(uid, input, source) {
     const ring = this.ring(), now = new Date(this.clock());
     const preset = input.presetId === undefined ? undefined : presetOf(input.presetId) ?? fail(400, 'UNKNOWN_PRESET');
@@ -154,6 +154,8 @@ export class VaultStore {
       const protocol = input.protocol ?? preset?.protocol ?? old?.protocol;
       const base = input.baseUrl ?? preset?.baseUrl ?? old?.baseUrl;
       if (!protocol || !base) fail(400, 'PROVIDER_INCOMPLETE');
+      // A stored key is only ever sent where it was given for, so a change of protocol or base URL must bring the key again.
+      if (old && !sealedKey && (protocol !== old.protocol || base !== old.baseUrl)) fail(400, 'KEY_REQUIRED');
       if (protocol === 'other' && !(input.desktopType ?? old?.desktopType)) fail(400, 'PROVIDER_INCOMPLETE');
       const models = input.models ?? old?.models ?? preset?.models ?? [];
       const data = {

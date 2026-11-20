@@ -27,6 +27,9 @@ struct TeamsTab: View {
     @State private var sheet: TeamsSheet?
     /// A shared link named a team the viewer is not in, or a Bot no longer shared.
     @State private var linkUnavailable = false
+    /// The team whose conversation (or details) a shared link just opened. The selection change of that same update,
+    /// which selected the link's team, keeps it instead of resetting navigation.
+    @State private var linkOpenedTeam: String?
     @State private var inboxService: InboxRef?
     /// What the join sheet starts with: the code of a `team/join` link, else nothing. A link never joins by itself.
     @State private var joinPrefill = ""
@@ -71,8 +74,9 @@ struct TeamsTab: View {
                 sheet = nil
                 if uid != nil { consumeJoinCode() }
             }
-            .onChange(of: workspace.selectedTeamID) { _, _ in
-                resetNavigation()
+            .onChange(of: workspace.selectedTeamID) { _, team in
+                if linkOpenedTeam != team { resetNavigation() }
+                linkOpenedTeam = nil
                 consumeInbox()
             }
             .onChange(of: path) { _, routes in
@@ -326,9 +330,11 @@ struct TeamsTab: View {
             linkUnavailable = true
         case let .open(id):
             tabs.teamLinkRequest = nil
+            linkOpenedTeam = workspace.selectedTeamID
             open(id)
         case .details:
             tabs.teamLinkRequest = nil
+            linkOpenedTeam = workspace.selectedTeamID
             showDetails()
         }
     }

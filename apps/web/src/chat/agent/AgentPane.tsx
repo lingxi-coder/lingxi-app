@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type { ChatEvent, VaultProvider } from '../../../../../packages/llm-vault/contracts';
 import { ComposerEditor, ComposerSurface, ComposerToolbar } from '../../../../../packages/chat-ui/ComposerSurface';
+import { sendsOnEnter } from '../../../../../packages/teams/compose';
 import type { ChatTarget } from '../../app/router';
 import { IconArrowUp, IconCheck, IconCopy, IconLink, IconRefresh, IconSliders, IconStop, IconTrash } from '../../components/Icons';
 import { Markdown } from '../../remote/markdown';
@@ -32,6 +33,11 @@ const choiceKey = (uid: string) => `lingxi.agent.model.${uid}`;
 const readChoice = (uid: string): Choice | undefined => { try { const value = JSON.parse(localStorage.getItem(choiceKey(uid)) ?? 'null'); return value?.providerId && value?.model ? value : undefined; } catch { return undefined; } };
 const writeChoice = (uid: string, choice: Choice) => { try { localStorage.setItem(choiceKey(uid), JSON.stringify(choice)); } catch { /* per-browser convenience only */ } };
 const modelsOf = (provider: VaultProvider) => provider.models.length ? provider.models : provider.defaultModel ? [{ id: provider.defaultModel }] : [];
+/** `wanted` when the provider still offers it, else its default model, else its first. */
+const modelOf = (provider: VaultProvider, wanted?: string) => {
+  const models = modelsOf(provider);
+  return (models.find(model => model.id === wanted) ?? models.find(model => model.id === provider.defaultModel) ?? models[0])!.id;
+};
 const defaultFrame = (callback: () => void) => { if (typeof requestAnimationFrame === 'function') requestAnimationFrame(callback); else setTimeout(callback, 16); };
 
 /** The Agent side of the Chat workspace: model settings, the new-chat home and saved Agent chats. */
@@ -71,6 +77,8 @@ function AgentPane({ uid, name, locale, target, client, history, open, initialPr
   const [streaming, setStreaming] = useState<AbortController>();
   const [choice, setChoice] = useState<Choice | undefined>(() => readChoice(uid));
   const chatRef = useRef<AgentChat>();
+  // Chats deleted here: an answer still streaming into one of them is not saved back.
+  const removed = useRef(new Set<string>());
   const scroller = useRef<HTMLDivElement>(null);
   const editor = useRef<HTMLTextAreaElement>(null);
 
@@ -92,13 +100,14 @@ function AgentPane({ uid, name, locale, target, client, history, open, initialPr
   const usable = providers.state === 'ready' ? providers.list.filter(provider => provider.webUsable && modelsOf(provider).length) : [];
   const selected = useMemo(() => {
     const wanted = chat?.providerId && chat.model ? { providerId: chat.providerId, model: chat.model } : choice;
-    const provider = usable.find(p => p.id === wanted?.providerId);
-    if (provider && wanted) return { provider, model: wanted.model };
-    const first = usable[0];
-    return first ? { provider: first, model: first.defaultModel ?? modelsOf(first)[0]!.id } : undefined;
+    const provider = usable.find(p => p.id === wanted?.providerId) ?? usable[0];
+    return provider ? { provider, model: modelOf(provider, provider.id === wanted?.providerId ? wanted.model : undefined) } : undefined;
   }, [usable, chat?.providerId, chat?.model, choice]);
 
-  const persist = async (next: AgentChat) => { try { await history.put(next); onSaved(); } catch { /* kept in memory for this page */ } };
+  const persist = async (next: AgentChat) => {
+    if (removed.current.has(next.id)) return;
+    try { await history.put(next); onSaved(); } catch { /* kept in memory for this page */ }
+  };
   const update = (next: AgentChat) => { chatRef.current = next; setChat(next); };
   useEffect(() => { scroller.current?.scrollTo?.({ top: scroller.current.scrollHeight }); }, [chat?.messages.length]);
 
@@ -111,11 +120,14 @@ function AgentPane({ uid, name, locale, target, client, history, open, initialPr
     live.current = controller;
     setStreaming(controller);
     let content = '', reasoning = '', scheduled = false, ended: Partial<AgentMessage> = {};
+    // The answer is kept whole while another chat is open, so what is saved at the end is all of it. A model picked
+    // while it streams is kept for the chat's next turn.
     const paint = () => {
       scheduled = false;
-      if (chatRef.current?.id !== current.id) return;
-      current = { ...current, messages: current.messages.map(message => message.id === answer.id ? { ...message, content, ...(reasoning ? { reasoning } : {}), ...ended } : message) };
-      update(current);
+      const shown = chatRef.current?.id === current.id ? chatRef.current : undefined;
+      current = { ...current, ...(shown ? { providerId: shown.providerId, model: shown.model } : {}),
+        messages: current.messages.map(message => message.id === answer.id ? { ...message, content, ...(reasoning ? { reasoning } : {}), ...ended } : message) };
+      if (shown) update(current);
     };
     const onEvent = (event: ChatEvent) => {
       if (event.type === 'delta') content += event.text;
@@ -155,6 +167,7 @@ function AgentPane({ uid, name, locale, target, client, history, open, initialPr
   };
   const remove = async () => {
     if (!chat) return;
+    removed.current.add(chat.id);
     streaming?.abort();
     await history.remove(uid, chat.id).catch(() => undefined);
     onSaved();
@@ -170,7 +183,7 @@ function AgentPane({ uid, name, locale, target, client, history, open, initialPr
     if (chat) { const changed = { ...chat, providerId, model }; update(changed); void persist(changed); }
   };
   const onKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send(); }
+    if (sendsOnEnter({ key: event.key, shiftKey: event.shiftKey, isComposing: event.nativeEvent.isComposing, keyCode: event.keyCode })) { event.preventDefault(); send(); }
   };
 
   const composer = <ComposerSurface className="agent-composer">

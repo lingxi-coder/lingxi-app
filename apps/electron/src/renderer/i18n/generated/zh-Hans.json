@@ -161,7 +161,7 @@
   "provider_vault_code_unsupported": "此服务无法保存到账号",
   "provider_vault_code_limit": "账号中的模型服务已达 20 个上限",
   "provider_vault_code_rate": "今日请求次数过多，请稍后重试",
-  "provider_vault_code_conflict": "已有同名的内置服务",
+  "provider_vault_code_conflict": "这台 Mac 上已有同名的其他服务",
   "provider_vault_code_session": "请重新登录",
   "bots_assist_title": "想让 Bot 帮你做什么？",
   "bots_assist_body": "说说你的想法，一起完善 Bot 的职责、人设和工作方式。",

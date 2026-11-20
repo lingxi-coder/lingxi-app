@@ -161,7 +161,7 @@
   "provider_vault_code_unsupported": "this provider can't be stored in your account",
   "provider_vault_code_limit": "your account already has 20 model services",
   "provider_vault_code_rate": "too many requests today; try again later",
-  "provider_vault_code_conflict": "a built-in provider already uses this name",
+  "provider_vault_code_conflict": "this Mac already has a different provider with this name",
   "provider_vault_code_session": "sign in again",
   "bots_assist_title": "What would you like your Bot to do?",
   "bots_assist_body": "Describe your idea, then shape your Bot’s role, persona and workflow together.",

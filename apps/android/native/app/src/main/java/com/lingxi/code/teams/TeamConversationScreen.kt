@@ -590,6 +590,9 @@ private fun MessageCell(
                     }
                     // Attachments and their controls remain reachable independently of the message text.
                     if (message.files.isNotEmpty()) TeamMessageFiles(message, own, workspace, pictures)
+                    if (!message.recalled) message.dataRef?.let { reference ->
+                        TeamDataRecordButton(reference, conversation.id, workspace.messagingModel)
+                    }
                     // What the Bot's model was given, as the service checked it.
                     if (!message.recalled && message.readFiles.isNotEmpty()) Text(stringResource(R.string.teams_files_read_fmt, message.readFiles.joinToString(", ") { it.name }), Modifier.testTag("teams.message.read.${message.id}"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }

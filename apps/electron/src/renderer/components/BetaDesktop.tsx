@@ -1523,7 +1523,8 @@ export function SummaryContextActions({ bridge }: { bridge: UseBridge }) {
   </section>;
 }
 
-export function BetaTopBar({ bridge, bot, app, runtimeCenterOpen, onToggleRuntimeCenter, terminalOpen = false, terminalAvailable = false, onToggleTerminal, sideChatOpen = false, sideChatAvailable = false, onToggleSideChat }: {
+export function BetaTopBar({ bridge, bot, app, dataActions, runtimeCenterOpen, onToggleRuntimeCenter, terminalOpen = false, terminalAvailable = false, onToggleTerminal, sideChatOpen = false, sideChatAvailable = false, onToggleSideChat }: {
+  dataActions?: ReactNode;
   sideChatOpen?: boolean;
   sideChatAvailable?: boolean;
   onToggleSideChat?(): void;
@@ -1581,6 +1582,7 @@ export function BetaTopBar({ bridge, bot, app, runtimeCenterOpen, onToggleRuntim
           {remote.text}
         </span>
       )}
+      {dataActions}
       <button
         className="no-drag desktop-topbar-action"
         type="button"

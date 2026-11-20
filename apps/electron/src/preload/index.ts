@@ -464,6 +464,8 @@ const api: LingxiApi = {
   },
   localApps: {
     list: async () => (await ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'list' })).apps,
+    dataBinding: (id, revision, alias) => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'data-binding', id, revision, alias }),
+    setDataBinding: (id, revision, alias, binding) => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'set-data-binding', id, revision, alias, binding }),
     remoteSettings: () => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'remote-settings' }),
     remoteConfiguration: () => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'remote-configuration' }),
     setRemoteAccess: (id, enabled) => ipcRenderer.invoke(CH_LOCAL_APPS, { action: 'remote-access', id, enabled }),
@@ -537,6 +539,8 @@ const api: LingxiApi = {
     acceptSharedBot: (uid, input) => teamsRequest({ type: 'acceptSharedBot', uid, input }),
     list: uid => teamsRequest({ type: 'list', uid }),
     detail: (uid, teamId) => teamsRequest({ type: 'detail', uid, teamId }),
+    data: (uid, request) => teamsRequest({ type: 'data', uid, request }),
+    localDataSource: (uid, request) => teamsRequest({ type: 'localDataSource', uid, request }),
     messages: (uid, command) => teamsRequest({ type: 'messages', uid, command }),
     services: (uid, command) => teamsRequest({ type: 'services', uid, command }),
     serviceMessages: (uid, command) => teamsRequest({ type: 'serviceMessages', uid, command }),

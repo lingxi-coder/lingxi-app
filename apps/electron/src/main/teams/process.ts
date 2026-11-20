@@ -9,10 +9,15 @@ import type { TeamDataRef, TeamModelRoute } from './privateStore.js';
 export interface BotChatScope { teamId: string; sharedBotId: string; conversationId: string; sessionEpoch: number }
 export interface BotChatCursor { scope: BotChatScope | null; sessionRevision: number; lastMessageSeq: number; lastChangeSeq: number; bootstrapFromSeq: number }
 export type TeamChatQuery = { kind: 'before'; before_seq: number; limit: number } | { kind: 'range'; from_seq_exclusive: number; to_seq_inclusive: number } | { kind: 'by_id'; message_id: string };
+export interface TeamDatasetOffer { dataset: string; version: number; write: boolean; handoffTargets?: string[] }
+export interface TeamDataProof {
+  teamId: string; generation: number; deploymentId: string; hostId: string; accountEpoch: number;
+  taskId: string; permitId: string; expectedLastChangeSeq: number;
+}
 /** `continue` only. A waiting task continues with the reply to exactly its wait: the answer to its question, or (`approved`) the decision on the change it proposed. */
 export interface TeamContinuation { epoch: number; expected_checkpoint_digest: string; answer?: { wait_id: string; message_id: string; text: string; approved?: boolean } }
 export interface TeamHostBootstrap {
-  version: 3; type: 'inspect_scope' | 'inspect_result' | 'inspect_task' | 'run' | 'continue'; storageRoot: string; workerExecutable: string; scope: BotChatScope;
+  version: 3; type: 'inspect_scope' | 'inspect_result' | 'inspect_task' | 'run' | 'run_private' | 'continue'; storageRoot: string; workerExecutable: string; scope: BotChatScope;
   taskId?: string; invocationId?: string; instructions?: string; inputBatchRef?: TeamDataRef;
   continuation?: TeamContinuation;
   /** Offer the Bot the ask-the-requester tool (`run` and `continue`). */
@@ -20,6 +25,7 @@ export interface TeamHostBootstrap {
   /** Offer the Bot its shared list (`run` and `continue`): the title, and what the Bot is told the list is for.
    * With `approval: 'requester'` the Bot can only propose a change and the task waits for the requester's decision; this needs `askRequester`. */
   sharedList?: { title: string; description: string; approval?: 'requester' };
+  sharedData?: TeamDatasetOffer[];
   /** Nobody asked the Bot for this task (`run` and `continue`): offer it the tool that leaves the message unanswered. */
   mayDecline?: boolean;
   knowledge?: Array<{ id: string; title: string; text: string }>;
@@ -57,7 +63,11 @@ function wait(value: unknown): value is TeamTaskWait {
 }
 /** One request of the running Bot to its shared list. A write names the durable step it belongs to, which is its identity in the operation ledger,
  * and on a list whose changes the requester approves also the wait in which they approved it. */
-export type TeamOperation = { tool: 'list_read' } | { tool: 'list_write'; logicalStepId: string; approvalRef?: string; arguments: Record<string, unknown> };
+export type TeamOperation = { tool: 'list_read' }
+  | { tool: 'list_write'; logicalStepId: string; approvalRef?: string; arguments: Record<string, unknown> }
+  | { tool: 'data_read'; offer: TeamDatasetOffer; arguments: Record<string, unknown> }
+  | { tool: 'data_write'; offer: TeamDatasetOffer; logicalStepId: string; arguments: Record<string, unknown> }
+  | { tool: 'data_handoff'; offer: TeamDatasetOffer; logicalStepId: string; arguments: Record<string, unknown> };
 /** `established: false` says nobody knows whether the write happened: the worker then stops with the call unfinished instead of telling the model a guess. */
 export interface TeamOperationOutcome { established: boolean; succeeded: boolean; result: Record<string, unknown> }
 const OPERATION_BYTES = 64 * 1024;
@@ -123,6 +133,7 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
     const frame = (line: Buffer) => {
       options.assertCurrent(); const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(line));
       if (!object(value) || value.version !== 3 || result) throw new Error('TEAM_HOST_PROTOCOL');
+      if (options.bootstrap.type === 'run_private' && (value.type === 'read_chat' || value.type === 'operation')) throw new Error('TEAM_HOST_PROTOCOL');
       if (['provider_account_refresh', 'read_chat', 'authorize', 'operation'].includes(value.type as string)) {
         if (value.type === 'operation') exact(value, ['version','type','id','tool','arguments'], ['logicalStepId','approvalRef']);
         else exact(value, value.type === 'provider_account_refresh' ? ['version','type','id','account_id','identity_generation','credential_revision'] : value.type === 'read_chat' ? ['version','type','id','query'] : ['version','type','id']);
@@ -141,14 +152,33 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
             if (q.kind === 'before') exact(q, ['kind', 'before_seq', 'limit']); else if (q.kind === 'range') exact(q, ['kind', 'from_seq_exclusive', 'to_seq_inclusive']); else if (q.kind === 'by_id') exact(q, ['kind', 'message_id']); else throw new Error('TEAM_HOST_PROTOCOL');
             await options.authorize?.(); const reference = await options.readChat(q as unknown as TeamChatQuery); send({ version: 3, type: 'chat_read', id: value.id, reference });
           } else if (value.type === 'operation') {
-            const write = value.tool === 'list_write', step = value.logicalStepId, approval = value.approvalRef, taskId = options.bootstrap.taskId, list = options.bootstrap.sharedList;
-            // A write on an approved list names its approval, and no other request does.
-            if (!options.operate || !list || !taskId || !object(value.arguments)
-              || (write ? typeof step !== 'string' || !step.startsWith(`${taskId}/t`) || !/^\/t[0-9]{1,10}\/c[0-9]{1,10}$/u.test(step.slice(taskId.length))
-                  || (list.approval === 'requester' ? typeof approval !== 'string' || !WAIT_ID.test(approval) : approval !== undefined)
-                : value.tool !== 'list_read' || step !== undefined || approval !== undefined || Object.keys(value.arguments).length > 0)) throw new Error('TEAM_HOST_PROTOCOL');
+            const { tool, arguments: args, logicalStepId: step, approvalRef: approval } = value;
+            const { taskId, sharedList, sharedData } = options.bootstrap;
+            if (!options.operate || !taskId || !object(args)) throw new Error('TEAM_HOST_PROTOCOL');
+            const stableStep = typeof step === 'string' && step.startsWith(`${taskId}/t`)
+              && /^\/t[0-9]{1,10}\/c[0-9]{1,10}$/u.test(step.slice(taskId.length)) ? step : undefined;
+            let operation: TeamOperation;
+            if (tool === 'data_read' || tool === 'data_write' || tool === 'data_handoff') {
+              const dataset = ['get', 'handoff'].includes(args.action as string) && object(args.reference) ? args.reference.dataset : args.dataset;
+              const offer = sharedData?.find(entry => entry.dataset === dataset);
+              if (!offer || approval !== undefined) throw new Error('TEAM_HOST_PROTOCOL');
+              if (tool === 'data_write' && stableStep && offer.write && args.action === 'put') {
+                operation = { tool, offer, arguments: args, logicalStepId: stableStep };
+              } else if (tool === 'data_handoff' && stableStep && args.action === 'handoff'
+                && typeof args.sharedBotId === 'string' && offer.handoffTargets?.includes(args.sharedBotId)) {
+                exact(args, ['action', 'sharedBotId', 'reference']);
+                operation = { tool, offer, arguments: args, logicalStepId: stableStep };
+              } else if (tool === 'data_read' && step === undefined && ['describe', 'get', 'list'].includes(args.action as string)) {
+                operation = { tool, offer, arguments: args };
+              } else throw new Error('TEAM_HOST_PROTOCOL');
+            } else if (tool === 'list_write' && sharedList && stableStep
+              && (sharedList.approval === 'requester' ? typeof approval === 'string' && WAIT_ID.test(approval) : approval === undefined)) {
+              operation = { tool, logicalStepId: stableStep, ...(typeof approval === 'string' ? { approvalRef: approval } : {}), arguments: args };
+            } else if (tool === 'list_read' && sharedList && step === undefined && approval === undefined && !Object.keys(args).length) {
+              operation = { tool };
+            } else throw new Error('TEAM_HOST_PROTOCOL');
             await options.authorize?.();
-            const outcome = await options.operate(write ? { tool: 'list_write', logicalStepId: step as string, ...(typeof approval === 'string' ? { approvalRef: approval } : {}), arguments: value.arguments } : { tool: 'list_read' });
+            const outcome = await options.operate(operation);
             if (!object(outcome.result) || Buffer.byteLength(JSON.stringify(outcome.result)) > OPERATION_BYTES) throw new Error('TEAM_HOST_PROTOCOL');
             send({ version: 3, type: 'operation_result', id: value.id, established: outcome.established, succeeded: outcome.established && outcome.succeeded, result: outcome.established ? outcome.result : {} });
           } else { if (!options.authorize) throw new Error('TEAM_HOST_PROTOCOL'); await options.authorize(); send({ version: 3, type: 'authorized', id: value.id }); }
@@ -157,7 +187,8 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
       } else if (value.type === 'result') {
         const kind = options.bootstrap.type, allowed = kind === 'inspect_scope' ? ['inspected'] : kind === 'inspect_result' ? ['not_found','completed','failed','declined'] : kind === 'inspect_task' ? ['task_checkpoint']
           : [...(options.bootstrap.askRequester === true ? ['completed','failed','waiting'] : ['completed','failed']), ...(options.bootstrap.mayDecline === true ? ['declined'] : [])];
-        if (typeof value.status !== 'string' || !allowed.includes(value.status)) throw new Error('TEAM_HOST_PROTOCOL');
+        if (typeof value.status !== 'string' || !allowed.includes(value.status)
+          || (kind === 'run_private' && value.document !== undefined)) throw new Error('TEAM_HOST_PROTOCOL');
         if (value.status === 'task_checkpoint') {
           exact(value,['version','type','status','taskId','phase','cursor','attempts','dispatchesObserved','pendingToolCalls','continuable','checkpointDigest'],['reason','wait']);
           if(!object(value.cursor)||Object.keys(value.cursor).sort().join(',')!=='lastChangeSeq,lastMessageSeq,sessionRevision'

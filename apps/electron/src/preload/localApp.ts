@@ -28,6 +28,7 @@ async function chatResourceInvoke<T>(method: string, input: Record<string, unkno
  */
 contextBridge.exposeInMainWorld('__lingxiLocalAppBridge', Object.freeze({
   info: () => invoke('info'),
+  data: (binding: string, command: Record<string, unknown>, operation?: string) => invoke('data.request', { binding, command, operation }),
   clipboard: Object.freeze({
     read: () => invoke('clipboard.read'),
     write: (text: string) => invoke('clipboard.write', { text }),

@@ -17,6 +17,7 @@ import { PAIR_CONVERSATION_ID, createTeamsHandler, TeamsStore } from './teams.mj
 import { FriendsStore, friendNotifier } from './friends.mjs';
 import { sweepUploads } from './team-attachments.mjs';
 import { OAuth2Client } from 'google-auth-library';
+import { createProductDataTransport } from './lingxi-data-product.mjs';
 import { createTeamMarketEligibilityHandler, TeamMarketEligibilityStore } from './team-market-eligibility.mjs';
 
 const app = initializeApp();
@@ -65,6 +66,7 @@ export const prunePushRegistrations = onSchedule({ schedule: 'every 24 hours', t
   serviceAccount: pushServiceAccount }, async () => { await pushStore.prune(); await friendsStore.prune(); await sweepUploads(teamsDb); });
 
 const teamsHandler = createTeamsHandler({ store: new TeamsStore(teamsDb), friends: friendsStore,
+  data: createProductDataTransport(process.env.LINGXI_DATA_PRODUCT_ORIGIN),
   verifyToken: token => getAuth(app).verifyIdToken(token, true),
   createCustomToken: uid => getAuth(app).createCustomToken(uid),
   origins: ['https://lingxios.net', 'https://lingxi-5e4b2.web.app', 'https://lingxi-5e4b2.firebaseapp.com',

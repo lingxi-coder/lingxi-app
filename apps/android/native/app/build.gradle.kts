@@ -76,6 +76,7 @@ android {
         buildConfigField("String", "BOT_MARKET_API_ROOT", groovy.json.JsonOutput.toJson(botMarketApiRoot))
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        providers.gradleProperty("lingxiTestApplicationId").orNull?.let { testApplicationId = it }
         ndk {
             // MobileLinux/PTY/legacy shell artifacts are release-gated for
             // exactly these two architectures.

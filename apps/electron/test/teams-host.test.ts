@@ -32,7 +32,7 @@ function fakeService(){
  else if(command.action==='getTask')result={...tasks.find(t=>t.taskId===p.taskId)};
  else if(command.action==='prepareTask'||command.action==='validateTask'||command.action==='startTask'){const task=tasks.find(t=>t.taskId===p.taskId);
   if(command.action==='validateTask'&&(task.state==='queued'||task._permit&&task._permit!==p.permitId))throw new TeamsApiError('EXECUTION_PERMIT_REQUIRED',403);
-  result={task:{...task},messageId:task.messageId,messageSeq:task.messageSeq,inputs,deployment};if(command.action==='startTask'){if(task.state==='running')return {execute:false,taskId:task.taskId} as T;task.state='running';task.epoch=1;task._permit=commandPermit(command,1);result={...result,task:{...task},execute:true,permitId:task._permit};}}
+  result={task:{...task},messageId:task.messageId,messageSeq:task.messageSeq,inputs,deployment,...(task.privateDataSource?{privateDataSource:task.privateDataSource,sourceLastChangeSeq:task.messageSeq}:{})};if(command.action==='startTask'){if(task.state==='running')return {execute:false,taskId:task.taskId} as T;task.state='running';task.epoch=1;task._permit=commandPermit(command,1);result={...result,task:{...task},execute:true,permitId:task._permit};}}
  else if(command.action==='completeTask'){const task=tasks.find(t=>t.taskId===p.taskId);if(task)task.state='completed';}
  return result as T;},
  hostReadChat:async(_c,request)=>{reads.push(request);if(request.mode==='changes')return {messages:[],lastSeq:1000,lastChangeSeq:1000,hasMore:false};const through=request.mode==='recent'?request.throughSeq:request.mode==='range'?request.toSeqInclusive:1;const from=request.mode==='recent'?Math.max(0,through-200):request.mode==='range'?request.fromSeqExclusive:0;
@@ -125,6 +125,82 @@ test('snapshots reject content tampering and store modes reject public directori
 test('large input is a verified private transport reference, not a JSONL frame',async t=>{
  const f=fixture(t),value={messages:Array.from({length:450},(_,i)=>({seq:i+1,text:'x'.repeat(1000)}))},ref=await f.privateStore.dataRef('owner',value);assert.ok(ref.bytes>256*1024);assert.ok(ref.path.startsWith((await f.privateStore.owner('owner')).runtime));assert.equal(digest(readFileSync(ref.path,'utf8')),ref.sha256);await f.privateStore.releaseDataRef('owner',ref);assert.equal(existsSync(ref.path),false);
 });
+test('Bot model preflight uses its isolated run and commits admission before worker input', async t => {
+  let reference: { path: string } | undefined;
+  const f = fixture(t, async options => {
+    const boot = options.bootstrap;
+    assert.equal(boot.type, 'run_private');
+    assert.equal(boot.scope.conversationId, boot.taskId);
+    assert.match(boot.storageRoot, /data-private\/[-\w]+$/u);
+    assert.ok(existsSync(join(boot.storageRoot, 'admission.json')));
+    assert.equal(options.readChat, undefined);
+    assert.equal(options.operate, undefined);
+    reference = boot.inputBatchRef;
+    assert.ok(reference && reference.path.startsWith(join(boot.storageRoot, 'transport')));
+    assert.match(readFileSync(reference.path, 'utf8'), /confirm this model/u);
+    return { status: 'completed', cursor, text: 'READY' };
+  }, { validateModel: undefined });
+  await f.connector.publishLocalBot('owner', f.input);
+  assert.ok(reference && !existsSync(reference.path));
+  const paths = await f.privateStore.owner('owner');
+  assert.ok(reference && !reference.path.startsWith(paths.runtime));
+});
+
+for (const restart of [false, true]) test(`a private source run delivers only a redacted receipt (${restart ? 'host restarted before model' : 'uninterrupted'})`, async t => {
+  const taskId = 'private-task01';
+  let modelReads = 0;
+  let pageReads = 0;
+  const f = fixture(t, async options => {
+    const boot = options.bootstrap;
+    if (boot.type === 'inspect_result') return { status: 'not_found', cursor };
+    if (boot.type === 'inspect_task') return { status: 'task_checkpoint', taskId, phase: 'absent',
+      cursor, attempts: 0, dispatchesObserved: 0, continuable: false, checkpointDigest: 'a'.repeat(64) };
+    assert.equal(boot.type, 'run_private');
+    await options.authorize?.();
+    assert.equal(options.operate, undefined);
+    assert.equal(options.readChat, undefined);
+    assert.match(readFileSync(boot.inputBatchRef!.path, 'utf8'), /PRIVATE_PROJECTED_ROW/u);
+    modelReads++;
+    return { status: 'completed', cursor, text: 'PRIVATE_DRAFT', finishedAt: Date.now() };
+  });
+  f.mock.service.hostPrivatePreviewPermit = async (_context, proof) => {
+    assert.equal(proof.taskId, taskId);
+    assert.ok(proof.permitId);
+    return { token: 'x'.repeat(43), expires: Date.now() + 10000 };
+  };
+  f.mock.service.hostPrivatePreviewPage = async (_context, proof, directory) => {
+    assert.equal(proof.source, 'private-orders');
+    assert.ok(existsSync(join(directory, 'admission.json')));
+    const [execution] = await f.privateStore.executions('owner');
+    assert.equal(execution?.grant?.phase, 'validated');
+    assert.doesNotMatch(readFileSync(execution!.batch.path, 'utf8'), /PRIVATE_PROJECTED_ROW/u);
+    pageReads++;
+    if (restart && pageReads === 1) f.connector.close();
+    return { rows: [{ title: 'PRIVATE_PROJECTED_ROW' }], cursor: null, truncated: false };
+  };
+  await f.connector.publishLocalBot('owner', f.input);
+  f.mock.tasks.push({ taskId, conversationId, sharedBotId, requester: { uid: 'member', generation: 1 }, state: 'queued',
+    messageId: 'message000001', messageSeq: 1, createdAt: Date.now(), deadline: Date.now() + 300000, privateDataSource: 'private-orders' });
+  f.mock.wake();
+  if (restart) {
+    await settle(() => pageReads === 1 && (f.connector as any).active.size === 0);
+    assert.equal(modelReads, 0);
+    const restarted = new TeamConnector({ ...(f.connector as any).options, retryMs: 10 });
+    t.after(() => restarted.close());
+    await finished({ ...f, connector: restarted });
+  }
+  await settle(() => completions(f).length === 1);
+  assert.equal(modelReads, 1);
+  assert.equal(pageReads, restart ? 2 : 1);
+  assert.equal(f.mock.commands.filter(command => command.action === 'startTask').length, 1);
+  const completion = completions(f)[0].payload;
+  assert.equal(completion.text, '');
+  assert.equal(completion.privateData, true);
+  assert.equal(completion.document, undefined);
+  assert.doesNotMatch(JSON.stringify(f.mock.commands), /PRIVATE_PROJECTED_ROW|PRIVATE_DRAFT/u);
+  assert.deepEqual(f.mock.reads, []);
+});
+
 test('delivery outbox is immutable and account-private',async t=>{
  const f=fixture(t),delivery={schemaVersion:1 as const,teamId,generation:1,taskId:'task00001',deadlineAt:Date.now()+1000,commandId:'delivery001',payload:{text:'One result'}};await f.privateStore.saveDelivery('owner',delivery);await f.privateStore.saveDelivery('owner',delivery);await assert.rejects(f.privateStore.saveDelivery('owner',{...delivery,payload:{text:'changed'}}),/UNSAFE_TEAM_STORAGE/);assert.deepEqual(await f.privateStore.deliveries('other'),[]);
 });

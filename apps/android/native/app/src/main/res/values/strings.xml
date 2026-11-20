@@ -3207,4 +3207,12 @@
     <string name="teams_bot_remaining_today">本人今日剩余请求</string>
     <string name="teams_bot_resets">重置于</string>
     <string name="teams_bot_examples_hint">示例会加入草稿，请检查后自行发送。</string>
+    <string name="teams_data_open">打开数据记录</string>
+    <string name="teams_data_json">记录 JSON</string>
+    <string name="teams_data_loading">正在读取记录…</string>
+    <string name="teams_data_unavailable">记录不可用或权限已更改。</string>
+    <string name="teams_data_invalid">请输入有效的 JSON 对象。</string>
+    <string name="teams_data_conflict">记录已有更新。请打开最新修订后再保存。</string>
+    <string name="teams_data_save">保存记录</string>
+    <string name="teams_data_latest">读取最新修订</string>
 </resources>

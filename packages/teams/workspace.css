@@ -588,3 +588,36 @@
   .tw-bot-member-details button, .tw-task-export button { min-height: 44px; }
   .tw-task-export a { display: inline-flex; align-items: center; min-height: 44px; }
 }
+
+.tw-data-record:modal {
+  overscroll-behavior: contain;
+}
+.tw-data-record::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+.tw-data-table-scroll { overflow: auto; max-block-size: 20rem; }
+.tw-data-table { border-collapse: collapse; inline-size: 100%; }
+.tw-data-table caption { padding-block: .35rem; text-align: start; }
+.tw-data-table th, .tw-data-table td {
+  padding: .375rem .5rem; border-block-end: 1px solid var(--tw-line, currentColor);
+  text-align: start; vertical-align: top; max-inline-size: 18rem; overflow-wrap: anywhere;
+}
+.tw-data-chart li { display: grid; grid-template-columns: minmax(3rem, 1fr) minmax(4rem, 2fr) auto; gap: .5rem; align-items: center; }
+.tw-data-bar { block-size: .75rem; border-radius: .2rem; background: var(--tw-accent, currentColor); }
+.tw-data-workspace { display: grid; gap: .85rem; max-block-size: 75vh; overflow: auto; }
+.tw-data-workspace form { display: grid; gap: .65rem; align-items: start; }
+.tw-data-workspace form > button { justify-self: start; }
+.tw-data-workspace label:has(> input:not([type="checkbox"]), > textarea, > select) { display: grid; gap: .25rem; }
+.tw-data-workspace textarea, .tw-data-workspace select, .tw-data-workspace input:not([type="checkbox"]) {
+  min-inline-size: 0; max-inline-size: 100%; padding: .4rem .5rem; color: var(--tw-fg);
+  background: var(--tw-bg); border: 1px solid var(--tw-line); border-radius: .25rem;
+}
+.tw-data-workspace textarea { resize: vertical; }
+.tw-data-fields {
+  overflow-wrap: anywhere;
+}
+.tw-data-fields dd {
+  margin-inline-start: 0;
+  white-space: pre-wrap;
+}

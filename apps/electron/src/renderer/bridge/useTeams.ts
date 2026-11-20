@@ -29,6 +29,7 @@ export function desktopTeamsApi(desktop: DesktopTeamsApi, uid: string, backgroun
     list: () => desktop.list(uid), detail: teamId => desktop.detail(uid, teamId), execute: command => desktop.execute(uid, command),
     watchMessages: (scope, conversationId, next) => desktop.watchMessages(uid, scope, conversationId, next),
     services: command => desktop.services(uid, command), serviceMessages: command => desktop.serviceMessages(uid, command),
+    data: request => desktop.data(uid, request),
     messages: command => desktop.messages(uid, command), onMessagesChanged: callback => desktop.onMessagesChanged(callback),
     onChanged: callback => desktop.onChanged(callback),
   };

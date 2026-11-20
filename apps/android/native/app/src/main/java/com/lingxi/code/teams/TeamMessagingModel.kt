@@ -515,16 +515,26 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
     internal var uploadRetryMs = 500L
 
     private suspend fun execute(action: String, payload: JSONObject, life: Long) = call(executionCommand(action, payload), life)
-    private suspend fun call(input: JSONObject, life: Long, seconds: Long = 20): JSONObject {
+    suspend fun data(conversationId: String, command: JSONObject, operation: String? = null): JSONObject =
+        call(JSONObject().put("command", command).apply { if (operation != null) put("operation", operation) },
+            lifecycle, dataConversation = conversationId)
+
+    private suspend fun call(input: JSONObject, life: Long, seconds: Long = 20, dataConversation: String? = null): JSONObject {
         val owner = uid
         val user = auth.currentUser
         if (!active || life != lifecycle || user?.uid != owner) throw TeamMessageFailure("INVALID_SESSION")
         val token = requireNotNull(user.getIdToken(false).await().token)
         if (!active || life != lifecycle || auth.currentUser?.uid != owner) throw TeamMessageFailure("INVALID_SESSION")
-        val body = JSONObject(input.toString()).put("teamId", teamId).put("generation", generation)
+        if (dataConversation != null && mutable.value.selected != dataConversation) throw TeamMessageFailure("CONVERSATION_REQUIRED")
+        val body = JSONObject(input.toString())
+        if (dataConversation == null) body.put("teamId", teamId).put("generation", generation)
+        else body.put("scope", JSONObject().put("kind", "team").put("teamId", teamId)
+            .put("generation", generation).put("conversationId", dataConversation))
         if (body.has("schemaVersion")) TeamExecutionContract.validate(body)
-        val result = TeamHttp.request("$apiRoot/v1/teams/messages", token, body, seconds)
+        val path = if (dataConversation == null) "messages" else "data"
+        val result = TeamHttp.request("$apiRoot/v1/teams/$path", token, body, seconds)
         if (!active || life != lifecycle || auth.currentUser?.uid != owner) throw TeamMessageFailure("INVALID_SESSION")
+        if (dataConversation != null && mutable.value.selected != dataConversation) throw TeamMessageFailure("CONVERSATION_REQUIRED")
         return result
     }
 }

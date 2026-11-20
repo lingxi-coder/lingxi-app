@@ -6,7 +6,10 @@ import type { MessageSignal, MessageSnapshot, MessageCommand } from '../../../..
 import type { AcceptSharedBotInput, LocalPublishableBot, OfferSharedBotInput, PublishLocalBotInput, PublishedKnowledge, SharedHostStatus, SelectedSharedFile } from '../../../../../packages/teams/execution';
 import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source';
 import { createServiceChatReader, isServiceId, isServiceMessageCommand, servicesTransport, type ServiceCommand } from '../../../../../packages/teams/hosted-service';
+import { readPrivateDataPage, validPreviewLease, type PrivatePreviewLease, type PrivatePreviewPage, type PrivatePreviewProof } from './dataPreview.js';
+import type { DataRequest } from '../../../../../packages/teams/lingxi-data.js';
 import type { TeamsFirestoreSession, TeamsFirestoreOptions } from './firestore.js';
+import type { TeamDataProof, TeamDatasetOffer } from './process.js';
 
 export interface Account {
   snapshot(): { user: { uid: string } | null };
@@ -173,6 +176,9 @@ export class TeamsService {
     if (epoch !== this.epoch) throw new Error('INVALID_SESSION');
     return result;
   }
+  async data<T>(input: DataRequest, expectedUid: string): Promise<T> {
+    return this.checked<T>(expectedUid, '/data', input);
+  }
   async list(expectedUid: string): Promise<{ teams: TeamSummary[] }> { await this.connect(expectedUid); return this.checked(expectedUid); }
   async detail(teamId: string, expectedUid: string): Promise<TeamDetail> {
     if (!/^[A-Za-z0-9_-]{8,64}$/u.test(teamId)) throw new Error('INVALID_INPUT');
@@ -262,6 +268,56 @@ export class TeamsService {
     this.syncAccount();
     if (!this.uid || context.uid !== this.uid || context.epoch !== this.epoch || this.account.snapshot().user?.uid !== context.uid) throw new Error('INVALID_SESSION');
   }
+  async hostPrivatePreviewPermit(context: TeamAccountContext, proof: PrivatePreviewProof): Promise<PrivatePreviewLease> {
+    this.assertHostContext(context);
+    const result = await this.checked<PrivatePreviewLease>(context.uid, '/data', { action: 'privatePreviewPermit', ...proof });
+    this.assertHostContext(context);
+    if (!validPreviewLease(result)) throw new Error('DATA_PREVIEW_UNAVAILABLE');
+    return result;
+  }
+
+  async hostPrivatePreviewPage(context: TeamAccountContext, proof: PrivatePreviewProof, directory: string, signal: AbortSignal): Promise<PrivatePreviewPage> {
+    const lease = await this.hostPrivatePreviewPermit(context, proof);
+    const token = await this.account.getIdToken();
+    this.assertHostContext(context);
+    const page = await readPrivateDataPage(proof.source, lease, token, directory, signal);
+    this.assertHostContext(context);
+    await this.hostPrivatePreviewPermit(context, proof);
+    return page;
+  }
+
+  async hostDataOffers(context: TeamAccountContext, proof: TeamDataProof): Promise<TeamDatasetOffer[]> {
+    if (process.env.LINGXI_DATA_BOT_TOOLS !== '1') return [];
+    this.assertHostContext(context);
+    const result = await this.checked<{ datasets: TeamDatasetOffer[] }>(context.uid, '/data', { action: 'botDataOffers', ...proof });
+    this.assertHostContext(context);
+    const values = result.datasets;
+    if (!Array.isArray(values) || values.length > 32
+      || new Set(values.map(value => value?.dataset)).size !== values.length
+      || values.some(value => !value || !/^[A-Za-z0-9_-]{1,64}$/u.test(value.dataset)
+        || !Number.isSafeInteger(value.version) || value.version < 1 || typeof value.write !== 'boolean'
+        || (value.handoffTargets !== undefined && (!Array.isArray(value.handoffTargets) || value.handoffTargets.length > 8
+          || value.handoffTargets.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/u.test(id)))))) throw new Error('TEAM_HOST_PROTOCOL');
+    return values;
+  }
+
+  async manageSources<T>(context: TeamAccountContext, command: Record<string, unknown>): Promise<T> {
+    this.assertHostContext(context);
+    const result = await this.checked<T>(context.uid, '/data', command);
+    this.assertHostContext(context);
+    return result;
+  }
+
+  async hostDataOperation(context: TeamAccountContext, proof: TeamDataProof, accessVersion: number,
+    operation: Record<string, unknown>, stepId?: string): Promise<Record<string, unknown>> {
+    this.assertHostContext(context);
+    const result = await this.checked<Record<string, unknown>>(context.uid, '/data', operation.action === 'handoff'
+      ? { action: 'botDataHandoff', ...proof, accessVersion, stepId, reference: operation.reference, sharedBotId: operation.sharedBotId }
+      : { action: 'botDataOperation', ...proof, accessVersion, operation, ...(stepId ? { stepId } : {}) });
+    this.assertHostContext(context);
+    return result;
+  }
+
   async hostMessages<T>(context: TeamAccountContext, command: Record<string, unknown>): Promise<T> {
     this.assertHostContext(context);
     if (command.schemaVersion !== 1 || ![

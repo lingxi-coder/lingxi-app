@@ -1,18 +1,18 @@
 import assert from 'node:assert/strict';
-import { createServer, request as proxyRequest } from 'node:http';
+import { request as proxyRequest } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { build } from 'esbuild';
 import test from 'node:test';
 import { LocalAppRemoteGateway } from '../src/main/local-apps/remoteGateway.ts';
 import { REMOTE_LOCAL_APP_SDK } from '../src/preload/localAppSdk.ts';
 import { withFakeChatCheckpoint } from './fixtures/local-app-chat-checkpoint.ts';
+import { freePort, loadSourceHost } from './fixtures/local-app-source-host.mjs';
 
 // Opt in with an installed Playwright module. The test uses only a loopback gateway and test identities.
 const playwrightModule = process.env.LINGXI_TEST_PLAYWRIGHT_MODULE;
@@ -20,41 +20,6 @@ const appId = `a${'1'.repeat(32)}`;
 const otherId = `a${'2'.repeat(32)}`;
 const owner = { accountUid: 'test-account', deviceId: 'test-device', hostId: 'test-host' };
 const run = { appId, revision: 1, runId: 'test-run' };
-async function freePort() {
-  const server = createServer();
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  const port = server.address().port;
-  await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-  return port;
-}
-
-async function loadSourceHost() {
-  const bundled = await build({
-    stdin: { contents: "export { LocalAppHost } from './host.ts'; export { LocalAppAgentBroker } from './agentBroker.ts';", resolveDir: new URL('../src/main/local-apps/', import.meta.url).pathname, loader: 'ts' },
-    bundle: true, write: false, platform: 'node', format: 'cjs', external: ['electron'], metafile: true,
-    // esbuild has its own package resolver. Carry the test process's isolated
-    // bridge-client resolution into the source Host bundle as well.
-    plugins: [{ name: 'bridge-client-test-resolution', setup(builder) {
-      builder.onResolve({ filter: /^@lingxi\/bridge-client(?:\/|$)/ }, args => ({ path: fileURLToPath(import.meta.resolve(args.path)) }));
-    } }],
-  });
-  if (process.env.LINGXI_TEST_ARTIFACT_DIR) await writeFile(join(process.env.LINGXI_TEST_ARTIFACT_DIR, 'source-host-inputs.json'), JSON.stringify({
-    bridgeClientEntry: import.meta.resolve('@lingxi/bridge-client'), inputs: Object.keys(bundled.metafile.inputs),
-  }, null, 2));
-  const require = createRequire(import.meta.url);
-  const electron = {
-    BrowserWindow: class { static getAllWindows() { return []; } },
-    ipcMain: { removeHandler() {} },
-    session: { fromPartition: () => ({ flushStorageData() {} }) },
-    dialog: { showMessageBox: async () => ({ response: 1 }) },
-    net: { fetch: async url => new Response(await readFile(new URL(url)), { headers: { 'content-type': 'text/html; charset=utf-8' } }) },
-  };
-  const module = { exports: {} };
-  // Use the Node test realm, as the existing Host suite does for real HTTP.
-  new Function('module', 'exports', 'require', bundled.outputFiles[0].text)(module, module.exports, name => name === 'electron' ? electron : require(name));
-  return module.exports;
-}
-
 test('real browser: remote gateway bootstrap, SDK, app cookies, isolation and revocation', { skip: !playwrightModule && 'Set LINGXI_TEST_PLAYWRIGHT_MODULE to an installed Playwright entry point', timeout: 60_000 }, async () => {
   const { chromium } = await import(pathToFileURL(playwrightModule).href);
   const port = await freePort();
@@ -260,10 +225,53 @@ test('real browser: HTTPS proxy accepts secure host-only cookies and isolates re
   }
 });
 
+
+async function connectProductData(file) {
+  const { createProductDataBrowserFixture } = await import('../../firebase/test/lingxi-data-browser-fixture.mjs');
+  return createProductDataBrowserFixture(JSON.parse(await readFile(file, 'utf8')));
+}
+
+async function verifyConversationDataView(page, product, reference) {
+  const bundle = await build({
+    stdin: { contents: [
+      "import { createRoot } from 'react-dom/client';",
+      "import { ConversationData } from './ConversationData.tsx';",
+      "const scope = JSON.parse(document.querySelector('#test-data').textContent);",
+      "createRoot(document.querySelector('main')).render(<ConversationData api={{ data: window.requestProductData }} scope={scope} locale='en'/>);",
+    ].join('\n'), resolveDir: fileURLToPath(new URL('../../../packages/teams/', import.meta.url)), loader: 'tsx' },
+    nodePaths: [fileURLToPath(new URL('../node_modules/', import.meta.url))],
+    jsx: 'automatic', bundle: true, write: false, platform: 'browser',
+  });
+  page.setDefaultTimeout(8000);
+  await page.exposeFunction('requestProductData', product.request);
+  await page.evaluate(scope => {
+    const config = document.createElement('script');
+    config.type = 'application/json';
+    config.id = 'test-data';
+    config.textContent = JSON.stringify(scope);
+    document.body.append(config);
+  }, product.binding.scope);
+  await page.addScriptTag({ content: bundle.outputFiles[0].text });
+  await page.getByRole('button', { name: 'Conversation data', exact: true }).click();
+  await page.getByRole('button', { name: reference.dataset, exact: true }).click();
+  await page.getByRole('button', { name: 'Open record', exact: true }).click();
+  await page.getByRole('textbox', { name: 'title', exact: true }).fill('Packed and reviewed');
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Data record', exact: true }).waitFor({ state: 'hidden' });
+  const updated = await product.request({ scope: product.binding.scope, command: {
+    action: 'get', reference: { ...reference, revision: reference.revision + 1 },
+  } });
+  assert.equal(updated.record.value.title, 'Packed and reviewed');
+  await page.getByRole('button', { name: 'Show history', exact: true }).click();
+  await page.getByText(reference.record + ' · Revision ' + reference.revision, { exact: false }).waitFor();
+  await page.close();
+}
+
 test('real browser: HTTPS Agent Chat recovery and revocation use source Host and durable Broker', { skip: !playwrightModule && 'Set LINGXI_TEST_PLAYWRIGHT_MODULE to an installed Playwright entry point', timeout: 60_000 }, async () => {
   const { chromium } = await import(pathToFileURL(playwrightModule).href);
   const directory = await mkdtemp(join(tmpdir(), 'lingxi-remote-agent-browser-'));
-  let gateway, host, broker, browser, proxy;
+  let gateway, host, broker, browser, proxy, product;
+  let browserOwner = owner;
   try {
     const { LocalAppHost, LocalAppAgentBroker } = await loadSourceHost();
     const source = join(directory, 'release'), root = join(directory, 'local-apps', 'v2');
@@ -272,12 +280,25 @@ test('real browser: HTTPS Agent Chat recovery and revocation use source Host and
     const model = { providerId: 'synthetic', modelId: 'test', label: 'Test model', canSelect: true, supportsAttachments: true, supportsVision: true, supportsStructuredOutput: true };
     const row = {
       id: appId, name: 'Remote Agent contract', summary: '', revision: 1, currentRevision: 1, releaseDigest: 'd'.repeat(64), background: false, grants: ['agent'],
-      manifest: { schema: 2, targets: [], name: 'Remote Agent contract', entry: { type: 'static', path: 'index.html' }, capabilities: ['agent'], agent: { tools: [], skills: [] } },
+      manifest: { schema: 2, targets: [], name: 'Remote Agent contract', entry: { type: 'static', path: 'index.html' }, capabilities: ['agent'], dataBindings: { orders: 'edit' }, agent: { tools: [], skills: [] } },
       agent: { enabled: true, model, tools: [], skills: [], background: false, maxTurns: 5, timeoutMs: 60_000 },
     };
-    host = new LocalAppHost({ core: { onDisconnected() {}, async dispose() {} }, configHome: directory, appProjectsRoot: join(directory, '.apps'), currentConversationMode: () => 'code', preload: '/unused', mainWindow: () => undefined, edit: async () => {}, agentCatalog: async () => ({ models: [model], tools: [], skills: [] }) });
+    if (process.env.LINGXI_DATA_FIXTURE) {
+      product = await connectProductData(process.env.LINGXI_DATA_FIXTURE);
+      browserOwner = { ...owner, accountUid: product.uid };
+    }
+    let currentUid = browserOwner.accountUid;
+    const binding = product?.binding ?? { dataset: 'orders', scope: { kind: 'personal' } };
+    const dataOperations = [];
+    host = new LocalAppHost({ accountId: () => currentUid, dataRequest: async (request, uid) => {
+      assert.equal(uid, browserOwner.accountUid);
+      assert.equal(request.command.dataset, binding.dataset);
+      dataOperations.push(request);
+      return product ? product.request(request) : { revision: 2 };
+    }, core: { onDisconnected() {}, async dispose() {} }, configHome: directory, appProjectsRoot: join(directory, '.apps'), currentConversationMode: () => 'code', preload: '/unused', mainWindow: () => undefined, edit: async () => {}, agentCatalog: async () => ({ models: [model], tools: [], skills: [] }) });
     host.store = {
       root, get: async () => structuredClone(row), getRevision: async () => structuredClone(row), list: async () => [structuredClone(row)],
+      directory: id => join(root, 'host', id),
       save: async value => Object.assign(row, structuredClone(value)), assertTarget: async () => {}, revisionPath: () => source,
       core: { request: async () => ({ digest: row.releaseDigest, files: [] }) },
     };
@@ -321,8 +342,8 @@ test('real browser: HTTPS Agent Chat recovery and revocation use source Host and
     gateway = new LocalAppRemoteGateway(`https://{appId}-{sessionId}.localhost:${tlsPort}`, backendPort, {
       current: candidate => host.remoteCurrent(candidate),
       invokeGuard: (candidate, method) => host.remoteInvokeGuard(candidate, method),
-      invoke: async (candidate, method, args, signal, sessionId) => {
-        const result = await host.remoteInvoke(candidate, method, args, signal, sessionId);
+      invoke: async (candidate, method, args, signal, sessionId, sessionOwner) => {
+        const result = await host.remoteInvoke(candidate, method, args, signal, sessionId, sessionOwner);
         if (method === 'agent.chats.create') {
           createCalls++;
           // Drop only the HTTP acknowledgement after the real Host/Broker have
@@ -338,7 +359,7 @@ test('real browser: HTTPS Agent Chat recovery and revocation use source Host and
     });
     host.remoteGateway = gateway;
     await host.setRemoteAccess(appId, true);
-    const opened = await host.remoteOpen(appId, owner);
+    const opened = await host.remoteOpen(appId, browserOwner);
     const origin = new URL(opened.url).origin;
     browser = await chromium.launch({ headless: true, ...(process.env.LINGXI_TEST_CHROME ? { executablePath: process.env.LINGXI_TEST_CHROME } : {}) });
     const context = await browser.newContext({ ignoreHTTPSErrors: true });
@@ -351,6 +372,31 @@ test('real browser: HTTPS Agent Chat recovery and revocation use source Host and
     await ready(page, opened.url);
     assert.equal(await page.evaluate(async () => (await window.localApp.info()).id), appId);
     assert.notEqual(new URL(origin).hostname, appId);
+    const dataAccess = { action: 'set-data-binding', id: appId, revision: 1, alias: 'orders' };
+    await host.request({ ...dataAccess, binding }, undefined, { kind: 'native', mode: 'chat' });
+    const expected = product ? 2 : 1;
+    const record = product?.record ?? 'first';
+    const form = { action: 'put', dataset: 'ignored', record, schemaVersion: 1, expectedRevision: expected,
+      value: { title: 'Packed in browser' } };
+    const saved = await page.evaluate(input => window.localApp.data.request('orders', input, 'browser-write'), form);
+    assert.equal(saved.revision, expected + 1);
+    assert.deepEqual(dataOperations.at(-1), {
+      scope: binding.scope, operation: 'browser-write', command: { ...form, dataset: binding.dataset },
+    });
+    if (product) {
+      const visible = await product.request({ scope: binding.scope, command: { action: 'get', reference: saved } });
+      assert.equal(visible.record.value.title, 'Packed in browser');
+      assert.equal(visible.record.actor.id, browserOwner.accountUid);
+      const dataView = await context.newPage();
+      await dataView.goto(origin);
+      await verifyConversationDataView(dataView, product, saved);
+    }
+    currentUid = 'other-account';
+    assert.equal(await page.evaluate(() => window.localApp.data.request('orders', { action: 'describe' }).then(() => false, () => true)), true);
+    currentUid = browserOwner.accountUid;
+    await host.request({ ...dataAccess, binding: null }, undefined, { kind: 'native', mode: 'chat' });
+    assert.equal(await page.evaluate(() => window.localApp.data.request('orders', { action: 'describe' }).then(() => false, () => true)), true);
+    assert.equal(dataOperations.length, 2);
     const creation = { requestId: 'b7777777-7777-4777-8777-777777777777', title: '  Browser recovery  ' };
     const createResult = await page.evaluate(async input => {
       try { await window.localApp.agent.chats.create(input); return { unexpectedlyAccepted: true }; }
@@ -393,7 +439,7 @@ test('real browser: HTTPS Agent Chat recovery and revocation use source Host and
     assert.deepEqual(await page.evaluate(afterSequence => window.localApp.agent.tasks.events({ runId: 'complete-remote-chat', afterSequence }), cursor), { events: [], sequence: cursor });
 
     await page.evaluate(() => localStorage.setItem('business-data', 'first-origin-only'));
-    const secondOwner = { ...owner, deviceId: 'second-test-device' };
+    const secondOwner = { ...browserOwner, deviceId: 'second-test-device' };
     const reopened = await host.remoteOpen(appId, secondOwner);
     const newOrigin = new URL(reopened.url).origin;
     assert.notEqual(newOrigin, origin);
@@ -429,14 +475,14 @@ test('real browser: HTTPS Agent Chat recovery and revocation use source Host and
       reader.read().then(value => { window.streamOutcome = value.done ? 'closed' : 'unexpected'; }, () => { window.streamOutcome = 'closed'; });
     });
     if (process.env.LINGXI_TEST_ARTIFACT_DIR) await reopenedPage.screenshot({ path: join(process.env.LINGXI_TEST_ARTIFACT_DIR, 'remote-agent-tls.png') });
-    host.remoteRevokeOwner(owner);
+    host.remoteRevokeOwner(browserOwner);
     await page.waitForFunction(() => window.streamOutcome === 'closed', null, { timeout: 5000 });
     await reopenedPage.waitForFunction(async () => (await window.localApp.agent.tasks.get('first-session-active')).state === 'cancelled', null, { timeout: 5000 });
     assert.equal(firstExecution.signal.aborted, true);
     assert.equal(await page.evaluate(async () => (await fetch('/')).status), 401);
     await startTask(reopenedPage, 'second-session-active');
     const secondExecution = await waitExecution('second-session-active');
-    host.remoteRevokeOwner(owner);
+    host.remoteRevokeOwner(browserOwner);
     assert.equal(secondExecution.signal.aborted, false, 'a revoked session must not acquire the replacement session admission');
     assert.equal(await reopenedPage.evaluate(async () => (await window.localApp.agent.tasks.get('second-session-active')).state), 'running');
     await host.cancelAgentApp(appId, 'test permission withdrawal');
@@ -447,6 +493,7 @@ test('real browser: HTTPS Agent Chat recovery and revocation use source Host and
     await browser?.close();
     if (host) await host.dispose(); else { await gateway?.dispose(); await broker?.dispose(); }
     if (proxy) { proxy.closeAllConnections(); await new Promise(resolve => proxy.close(resolve)); }
+    await product?.close();
     await rm(directory, { recursive: true, force: true });
   }
 });

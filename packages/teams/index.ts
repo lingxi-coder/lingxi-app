@@ -1,3 +1,4 @@
+import type { DataRequest, LocalDataSourceAnswer, LocalDataSourceCommand } from './lingxi-data.js';
 import type { MessageApi, MessageCommand } from './messages';
 import type { LocalPublishableBot, SelectedSharedFile, PublishLocalBotInput, PublishedKnowledge, SharedHostStatus, OfferSharedBotInput, AcceptSharedBotInput } from './execution';
 export * from './execution';
@@ -19,6 +20,7 @@ export type TeamCommand =
   | { action: 'handOver'; teamId: string; uid: string; generation: number };
 export interface TeamResult { teamId?: string; code?: string; generation?: number; alreadyMember?: boolean; ok?: boolean }
 export interface TeamsApi extends MessageApi {
+  data?<T>(request: DataRequest): Promise<T>;
   openBotMarket?(): Promise<void>;
   localBots?(): Promise<LocalPublishableBot[]>;
   selectSharedFiles?(instanceId: string): Promise<SelectedSharedFile[]>;
@@ -45,6 +47,8 @@ export interface TeamsApi extends MessageApi {
   onChanged(callback: (event: { invalidated?: boolean }) => void): () => void;
 }
 export interface DesktopTeamsApi {
+  localDataSource(uid: string, request: LocalDataSourceCommand): Promise<LocalDataSourceAnswer>;
+  data<T>(uid: string, request: DataRequest): Promise<T>;
   openBotMarket(uid: string): Promise<void>;
   localBots(uid: string): Promise<LocalPublishableBot[]>;
   selectSharedFiles(uid: string, instanceId: string): Promise<SelectedSharedFile[]>;

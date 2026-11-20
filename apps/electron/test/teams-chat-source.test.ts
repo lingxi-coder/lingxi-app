@@ -163,3 +163,11 @@ test('a source message names the files it carries; a recalled one names none, an
     [{ ...file, name: '' }], [{ ...file, name: 'a\u0000b' }], [{ ...file, attachmentId: 'short' }], [{ ...file, revoked: 'yes' }], Array(6).fill(file), 'plan.png', [null]])
     assert.throws(() => chatSourceMessage('message_0001', { ...value, attachments: wrong }), /INVALID_DATA/u);
 });
+
+test('shared Bot Chat source keeps only the exact Data reference and removes it at recall', () => {
+  const row = { seq: 1, changeSeq: 1, changeId: 'change_0001', text: '', author: { kind: 'user', uid: 'human1' }, createdAt: { toMillis: () => 1000 } };
+  const dataRef = { dataset: 'orders', record: 'order-1', revision: 2, schemaVersion: 1 };
+  assert.deepEqual(chatSourceMessage('message_0001', { ...row, dataRef }).dataRef, dataRef);
+  assert.equal(chatSourceMessage('message_0001', { ...row, recalled: true, dataRef }).dataRef, undefined);
+  assert.throws(() => chatSourceMessage('message_0001', { ...row, dataRef: { ...dataRef, value: { private: true } } }), /INVALID_DATA/u);
+});

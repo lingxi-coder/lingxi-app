@@ -3,17 +3,19 @@ import { MarketLinkInstaller } from './marketLinkInstaller.js';
 import { nativeTr } from '../../shared/nativeLocale.js';
 import { BrowserWindow, dialog, session, net, shell, clipboard, Notification, ipcMain, systemPreferences, type IpcMainInvokeEvent } from 'electron';
 import { createServer, type Server } from 'node:http';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { promises as fs, constants as fsConstants } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { DesktopAppManifest, DesktopLocalApp, DesktopAuthoringRef, LocalAppCapability, LocalAppAgentQuestion, LocalAppEditRequest } from '../../shared/localApps.js';
+import type { DesktopAppManifest, DesktopLocalApp, DesktopAuthoringRef, LocalAppCapability, LocalAppDataBinding, LocalAppAgentQuestion, LocalAppEditRequest } from '../../shared/localApps.js';
 import { isDesktopAuthoringRef } from '../../shared/localApps.js';
 import type { AskQuestionDto } from '@lingxi/bridge-client';
 import { LOCAL_APP_AGENT_MAX_FILE_BYTES, LOCAL_APP_AGENT_MAX_FILES, LOCAL_APP_AGENT_MAX_TOTAL_FILE_BYTES, type LocalAppAgentCatalog, type LocalAppAgentSettings } from '../../shared/localAppAgent.js';
 import type { LocalAppAgentBroker, LocalAppAgentOwner, LocalAppAgentAuthorization } from './agentBroker.js';
 import { canonicalJson, LocalAppAgentError, sameAgentGrant, validateAgentSettings } from './agentPolicy.js';
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, LOCAL_APP_SCHEME } from '../../shared/localApps.js';
+import type { DataRequest } from '../../../../../packages/teams/lingxi-data.js';
+import { localAppDataRequest, parseLocalAppDataBinding } from './dataBinding.js';
 import { CH_LOCAL_APP_NATIVE } from '../../shared/localAppNative.js';
 import { appId, atomicJson, containedFile } from './store.js';
 import { CoreLocalAppStore, type DesktopAuthoringGrant, type DesktopAuthoringSourceProof } from './coreStore.js';
@@ -446,6 +448,7 @@ export interface LocalAppHostOptions extends RuntimeOptions {
   core: LocalAppCoreTransport;
   accountToken?: () => Promise<string>;
   accountId?: () => string | undefined;
+  dataRequest?: (input: DataRequest, uid: string) => Promise<unknown>;
   /** Trusted, host-owned current mode; captured once when an IPC request arrives. */
   currentConversationMode: () => 'chat' | 'code' | undefined;
   resolveAuthoringBinding?: (appId: string | undefined, session: { projectPath: string; sessionId: string }, source?: AuthoringSessionSource) => Promise<Omit<DesktopAuthoringRef, 'workspaceId' | 'appId'>>;
@@ -502,6 +505,7 @@ export class LocalAppHost {
   private readonly token = randomBytes(32).toString('hex');
   private readonly windows = new Map<string, BrowserWindow>();
   private readonly windowRuns = new WeakMap<BrowserWindow, string>();
+  private readonly dataWindowOwners = new WeakMap<BrowserWindow, string>();
   private readonly opening = new Map<string, { promise: Promise<void>; controller: AbortController; intent: string; waiters: number }>();
   private readonly waitingOpenings = new Map<string, Set<AbortController>>();
   private readonly openingEpochs = new Map<string, number>();
@@ -991,7 +995,8 @@ export class LocalAppHost {
   setRemoteRtc(rtc: LocalAppRtc): void { this.remoteRtc?.dispose(); this.remoteRtc = rtc; }
   private remoteInvokeGuard(run: RemoteRun, method: string): () => boolean {
     const agentEpoch = this.agentEpochs.get(run.appId) ?? 0;
-    return () => !this.shuttingDown && !this.unavailable && this.runtime.revision(run.appId) === run.revision
+    const uid = this.options.accountId?.();
+    return () => (!method.startsWith('data.') || (!!uid && this.options.accountId?.() === uid)) && !this.shuttingDown && !this.unavailable && this.runtime.revision(run.appId) === run.revision
       && this.runtime.phase(run.appId) === 'running' && this.runtime.invocationId(run.appId) === run.runId
       && (!method.startsWith('agent.') || (!this.blockedAgentApps.has(run.appId) && (this.agentEpochs.get(run.appId) ?? 0) === agentEpoch));
   }
@@ -1001,7 +1006,7 @@ export class LocalAppHost {
       if (!origin || !rawPort || !/^\d+$/.test(rawPort)) throw new Error('Remote Local App gateway is not configured');
       this.remoteGateway = new LocalAppRemoteGateway(origin, Number(rawPort), {
         current: run => this.remoteCurrent(run), resource: (run, request) => this.remoteResource(run, request),
-        invoke: (run, method, args, signal, sessionId) => this.remoteInvoke(run, method, args, signal, sessionId),
+        invoke: (run, method, args, signal, sessionId, owner) => this.remoteInvoke(run, method, args, signal, sessionId, owner),
         invokeGuard: (run, method) => this.remoteInvokeGuard(run, method),
         socket: async (run, name) => {
           if (!await this.remoteCurrent(run)) return;
@@ -1193,7 +1198,7 @@ export class LocalAppHost {
       this.remoteHtmlBytes -= size; signal.removeEventListener('abort', abort); await reader.cancel().catch(() => undefined);
     }
   }
-  private async remoteInvoke(run: RemoteRun, method: string, args: Record<string, unknown>, signal: AbortSignal, sessionId: string): Promise<unknown> {
+  private async remoteInvoke(run: RemoteRun, method: string, args: Record<string, unknown>, signal: AbortSignal, sessionId: string, sessionOwner: RemoteOwner): Promise<unknown> {
     const invokeCurrent = this.remoteInvokeGuard(run, method);
     const current = async () => !signal.aborted && await this.remoteCurrent(run) && !signal.aborted && invokeCurrent();
     const guardedRead = async <T>(operation: Promise<T>): Promise<T> => {
@@ -1209,6 +1214,7 @@ export class LocalAppHost {
     if (signal.aborted || !await this.remoteCurrent(run) || signal.aborted) throw new Error('Application operation is no longer active');
     const row = await this.store.getRevision(run.appId, run.revision);
     if (method === 'info') return { id: run.appId, name: row.name, runId: run.runId, revision: run.revision, platform: 'browser' };
+    if (method === 'data.request') return this.invokeData(row, run.revision, args, sessionOwner.accountUid, current);
     if (method === 'capability.clipboard' && row.grants.includes('clipboard') && this.launchGrants.get(run.appId)?.includes('clipboard')) return;
     if (!method.startsWith('agent.') || !row.grants.includes('agent') || !this.launchGrants.get(run.appId)?.includes('agent') || this.blockedAgentApps.has(run.appId)) throw new Error('Application capability is unavailable');
     const active = this.runtime.owner(run.appId), broker = this.agentBroker;
@@ -1567,6 +1573,10 @@ export class LocalAppHost {
       return catalog;
     }
     const id = appId(input.id);
+    if (action === 'data-binding' || action === 'set-data-binding') {
+      if (origin.kind !== 'native') throw new Error('Change data bindings from the Apps library');
+      return this.dataBindingSettings(id, input, action === 'set-data-binding');
+    }
     if (action === 'versions') return this.store.core.request({ op: 'releases', appId: id });
     if (action === 'useVersion') {
       if (!Number.isSafeInteger(input.revision) || Number(input.revision) < 1 || !Number.isSafeInteger(input.expectedCurrentRevision) || Number(input.expectedCurrentRevision) < 1) throw new Error('Choose a version from the current release list');
@@ -1688,7 +1698,9 @@ export class LocalAppHost {
     } else if (action === 'revoke') {
       this.launchGrants.delete(id);
       await this.stopManagedApp(id, 'Application permissions revoked', () => this.runtime.exclusive(id, async () => {
-        await this.store.revoke(id); await fs.rm(join(this.store.directory(id), 'file-grants.json'), { force: true });
+        await this.store.revoke(id);
+        await fs.rm(join(this.store.directory(id), 'file-grants.json'), { force: true });
+        await fs.rm(join(this.store.directory(id), 'lingxi-data-bindings'), { force: true, recursive: true });
       }), true);
     } else if (action === 'remove') {
       const parent = this.options.mainWindow();
@@ -1896,6 +1908,8 @@ export class LocalAppHost {
       webPreferences: { partition: `persist:local-app-${id}`, preload: this.options.preload, contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, navigateOnDragDrop: false } });
     this.windows.set(id, window);
     this.windowRuns.set(window, invocation!);
+    const accountUid = this.options.accountId?.();
+    if (accountUid) this.dataWindowOwners.set(window, accountUid);
     window.webContents.on('did-start-navigation', (_event, _url, inPlace, mainFrame) => { if (mainFrame && !inPlace) this.navigationEpoch.set(window.webContents.id, (this.navigationEpoch.get(window.webContents.id) ?? 0) + 1); });
     const contentsId = window.webContents.id;
     const origin = `${LOCAL_APP_SCHEME}://${id}`;
@@ -2023,6 +2037,7 @@ export class LocalAppHost {
     if (!pair || event.senderFrame !== event.sender.mainFrame || !event.senderFrame?.url.startsWith(`${LOCAL_APP_SCHEME}://${pair[0]}/`)) throw new Error('Unauthorized application caller');
     const id = pair[0], invocation = this.windowRuns.get(pair[1]), epoch = this.navigationEpoch.get(event.sender.id), revision = this.runtime.revision(id), args = input.args ?? {};
     const agentEpoch = this.agentEpochs.get(id) ?? 0;
+    const accountUid = this.dataWindowOwners.get(pair[1]);
     if (!revision) throw new Error('Application operation is no longer active');
     const row = await this.store.getRevision(id, revision);
     const current = () => {
@@ -2031,6 +2046,10 @@ export class LocalAppHost {
     current();
     const need = (cap: LocalAppCapability) => { current(); if (!row.grants.includes(cap) || !this.launchGrants.get(id)?.includes(cap)) throw new Error(`Application capability not granted: ${cap}`); };
     if (input.method === 'info') return { id, name: row.name, runId: invocation, revision: this.runtime.revision(id), platform: process.platform, dataDirectory: this.store.dataPath(id) };
+    if (input.method === 'data.request') return this.invokeData(row, revision, args, accountUid, () => {
+      current();
+      return this.runtime.revision(id) === revision && this.runtime.owner(id)?.releaseDigest === row.releaseDigest;
+    });
     if (input.method.startsWith('agent.')) {
       need('agent');
       if (this.blockedAgentApps.has(id) || (this.agentEpochs.get(id) ?? 0) !== agentEpoch) throw new Error('Application Agent access is no longer active');
@@ -2154,6 +2173,60 @@ export class LocalAppHost {
     }
     throw new Error('Unknown application API');
   }
+  private dataBindingPath(row: DesktopLocalApp, alias: unknown, uid: string) {
+    if (typeof alias !== 'string' || !row.manifest.dataBindings || !Object.hasOwn(row.manifest.dataBindings, alias)
+      || !row.releaseDigest) throw new Error('The application release does not declare this data binding');
+    const key = createHash('sha256').update(JSON.stringify([uid, row.releaseDigest, alias])).digest('hex');
+    return { path: join(this.store.directory(row.id), 'lingxi-data-bindings', key + '.json'), access: row.manifest.dataBindings[alias]! };
+  }
+
+  private async readDataBinding(path: string): Promise<LocalAppDataBinding | null> {
+    try { return parseLocalAppDataBinding(JSON.parse(await fs.readFile(path, 'utf8'))); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+  }
+
+  private async dataBindingSettings(id: string, input: Record<string, unknown>, write: boolean): Promise<LocalAppDataBinding | null> {
+    const uid = this.options.accountId?.(), request = this.options.dataRequest;
+    if (!uid || !request) throw new Error('Sign in to manage application data');
+    return this.runtime.exclusive(id, async () => {
+      const row = await this.store.get(id);
+      if (row.revision !== input.revision || this.options.accountId?.() !== uid) throw new Error('Application or account changed');
+      const { path } = this.dataBindingPath(row, input.alias, uid);
+      if (write) {
+        if (input.binding === null) await fs.rm(path, { force: true });
+        else {
+          const binding = parseLocalAppDataBinding(input.binding);
+          await request({ scope: binding.scope, command: { action: 'describe', dataset: binding.dataset } }, uid);
+          if (this.options.accountId?.() !== uid) throw new Error('Application account changed');
+          await atomicJson(path, binding);
+        }
+      }
+      const result = await this.readDataBinding(path);
+      if (this.options.accountId?.() !== uid) throw new Error('Application account changed');
+      return result;
+    });
+  }
+
+  private async invokeData(row: DesktopLocalApp, revision: number, args: Record<string, unknown>, uid: string | undefined,
+    runCurrent: () => boolean | Promise<boolean>): Promise<unknown> {
+    const request = this.options.dataRequest;
+    if (!uid || !request || this.options.accountId?.() !== uid) throw new Error('Application data access is unavailable');
+    const { path, access } = this.dataBindingPath(row, args.binding, uid);
+    const binding = await this.readDataBinding(path);
+    if (!binding) throw new Error('Bind this dataset in the Apps library');
+    const command = localAppDataRequest(binding, access, args.command, args.operation);
+    const current = async (): Promise<void> => {
+      const latest = await this.store.get(row.id);
+      if (latest.revision !== revision || latest.releaseDigest !== row.releaseDigest
+        || JSON.stringify(await this.readDataBinding(path)) !== JSON.stringify(binding)
+        || !await runCurrent() || this.options.accountId?.() !== uid) throw new Error('Application data access changed');
+    };
+    await current();
+    const result = await request(command, uid);
+    await current();
+    return result;
+  }
+
   private async fileGrants(id: string): Promise<Record<string, string>> { try { return JSON.parse(await fs.readFile(join(this.store.directory(id), 'file-grants.json'), 'utf8')); } catch { return {}; } }
   hasRemoteAccess(): boolean { return this.remoteOpening.size > 0 || !!this.remoteGateway?.hasAccess(); }
   async hasBackgroundApps(): Promise<boolean> {

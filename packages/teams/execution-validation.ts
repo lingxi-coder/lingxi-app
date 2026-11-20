@@ -31,7 +31,7 @@ const payloads: Record<string, Check> = {
   listSharedBots: shape({}),
   createConversation: shape({ conversationId: id, kind: v => ['bot_dm', 'group', 'channel'].includes(String(v)), title: v => typeof v === 'string' && v.trim().length >= 1 && v.trim().length <= 120, participantUids: list(uid, 1, 200), sharedBotIds: list(id, 1, 8) }),
   // Text for Bots, files, or both: a message with neither is an ordinary message and is not a command.
-  submit: v => shape({ conversationId: id, messageId: id, changeId: id, text: t => typeof t === 'string' && bytes(t) <= 8192, targets: list(id, 0, 8), replyTo: optional(id), attachments: optional(list(id, 1, 5)) })(v)
+  submit: v => shape({ conversationId: id, messageId: id, changeId: id, text: t => typeof t === 'string' && bytes(t) <= 8192, targets: list(id, 0, 8), replyTo: optional(id), attachments: optional(list(id, 1, 5)), privateDataSource: optional(t => typeof t === 'string' && /^[A-Za-z0-9_-]{1,64}$/u.test(t)) })(v)
     && record(v) && (v.attachments !== undefined || ((v.targets as unknown[]).length >= 1 && (v.text as string).length >= 1)),
   createUpload: shape({ conversationId: id, uploadId: id, name: v => typeof v === 'string' && v.length >= 1 && v.length <= 120 && v === v.trim() && !/[/\\\u0000-\u001f\u007f]/u.test(v) && v !== '.' && v !== '..',
     mime: oneOf('image/png', 'image/jpeg', 'application/pdf', 'text/plain'), byteLength: v => positive(v) && (v as number) <= 10 * 1024 * 1024, sha256 }),

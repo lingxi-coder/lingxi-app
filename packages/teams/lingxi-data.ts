@@ -1,5 +1,6 @@
-/** Pinned Step 1 transport contract. Credentials are supplied by a trusted host. */
-export const LINGXI_DATA_BASELINE = 'd18563624a7745587250fdc1047b3e3ef2a31f55';
+import type { ReportCapture, ReportDraft, ReportPlan, ReportRequest } from './reports.js';
+
+export const LINGXI_DATA_BASELINE = '99db9958ab5a59252b977e550bf57e610fa24770';
 
 export interface DataRef {
   dataset: string;
@@ -32,7 +33,7 @@ export interface DataWrite {
   archive?: boolean;
 }
 
-export type DataRequest = { scope: DataScope; command: DataRead; operation?: never }
+export type DataRequest = ReportRequest | { scope: DataScope; command: DataRead; operation?: never }
   | { scope: DataScope; command: DataWrite; operation: string }
   | { scope: DataScope; operation: string; command: { action: 'setView'; dataset: string; view: string;
     expectedEpoch: number; definition: { kind: 'table' | 'chart' | 'form'; fields: string[] } | null } }
@@ -47,7 +48,7 @@ export type DataRequest = { scope: DataScope; command: DataRead; operation?: nev
   | { scope: TeamDataScope; command: { action: 'privateSourceOffers' }; operation?: never }
   | { scope: TeamDataScope; command: { action: 'dataAutomation'; dataset: string }; operation?: never }
   | { action: 'setBotDataAccess'; scope: TeamDataScope; dataset: string; sharedBotId: string;
-    expectedVersion: number; access: 'read' | 'edit' | null; handoff?: { targets: string[]; dailyLimit: number } }
+    expectedVersion: number; access: 'read' | 'edit' | null; reportReview?: true; handoff?: { targets: string[]; dailyLimit: number } }
   | { action: 'setDataRule'; scope: TeamDataScope; dataset: string; rule: string; expectedVersion: number; config: DataRuleConfig | null }
   | { scope: TeamDataScope; command: { action: 'createTeam'; schema: Record<string, unknown>; editors: string[]; audienceRevision: string }; operation: string }
   | { scope: TeamDataScope; command: { action: 'publishPersonal'; dataset: string; schemaVersion: number;
@@ -59,7 +60,7 @@ export type PrivateSourceOffer = { source: string; name: string; sharedBotId: st
 export type DataRuleConfig = { sharedBotId: string; dailyLimit: number; definition: { kind: 'created' }
   | { kind: 'transition'; field: string; equals: string | number | boolean | null } };
 export interface DataAutomationSettings {
-  bots: { sharedBotId: string; name: string; version: number; access: 'read' | 'edit' | null; handoff?: { targets: string[]; dailyLimit: number } }[];
+  bots: { sharedBotId: string; name: string; version: number; access: 'read' | 'edit' | null; reportReview?: true; handoff?: { targets: string[]; dailyLimit: number } }[];
   rules: { rule: string; version: number; config: DataRuleConfig | null }[];
 }
 
@@ -75,9 +76,10 @@ export type LocalDataSourceCommand =
   | { action: 'import' }
   | { action: 'list' }
   | { action: 'configure'; input: SourceConfiguration }
+  | { action: 'captureReport'; source: string; dataset: string; scope: TeamDataScope; plan: ReportPlan }
   | { action: 'details' | 'check' | 'start' | 'stop' | 'preview'; source: string };
 export type LocalDataSourceAnswer = SourceDraft | (ManagedDataSource & { running: boolean })[] | { running: boolean }
-  | { rows: Record<string, unknown>[] } | null;
+  | { rows: Record<string, unknown>[] } | (ReportDraft & { capture: ReportCapture }) | null;
 
 export interface DataAudience {
   audienceRevision: string;

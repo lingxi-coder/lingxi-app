@@ -791,6 +791,19 @@ final class TeamMessagingModel {
         return latest
     }
 
+    func readReport(conversation: String, link: TeamReportLink, latest: Bool) async throws -> TeamPublishedReport {
+        let release: Any = latest ? NSNull() as Any : link.release as Any
+        let data = try await dataCommand(conversationId: conversation, command: ["action": "getReport", "dataset": link.dataset, "release": release])
+        let report = try JSONDecoder().decode(TeamPublishedReport.self, from: data)
+        guard report.dataset == link.dataset, latest || report.release == link.release else { throw TeamMessageFailure(code: "INVALID_DATA") }
+        return report
+    }
+
+    func openReportReview(conversation: String, report: TeamPublishedReport, cell: TeamPublishedReport.Cell) async throws {
+        _ = try await dataCommand(conversationId: conversation, command: ["action": "openReportReview", "dataset": report.dataset,
+            "release": report.release, "partition": cell.partition, "group": cell.group])
+    }
+
     private func dataCommand(conversationId: String, command: [String: Any], operation: String? = nil) async throws -> Data {
         var body: [String: Any] = ["command": command]
         if let operation { body["operation"] = operation }

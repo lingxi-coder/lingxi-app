@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { createReportGateway } from './lingxi-data-reports.mjs';
 
-export const LINGXI_DATA_BASELINE = 'd18563624a7745587250fdc1047b3e3ef2a31f55';
+export const LINGXI_DATA_BASELINE = '99db9958ab5a59252b977e550bf57e610fa24770';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/u);
 const positive = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
@@ -202,8 +203,12 @@ export function createPinnedDataClient(endpoint, fetchRequest = fetch) {
 export function createLingxiDataGateway({ db, endpoint, projectActor, fetchRequest = fetch }) {
   if (!endpoint) return null;
   const forward = createPinnedDataClient(endpoint, fetchRequest);
+  const reports = createReportGateway({ db, forward, projectActor, readTeamAudience });
 
   return async function forwardLingxiData(uid, token, raw) {
+    if (['reportContext', 'prepareReport', 'publishReport', 'limitReportReader', 'getReport', 'openReportReview'].includes(raw?.command?.action)) {
+      return reports(uid, token, raw);
+    }
     if (personalDiscovery.safeParse(raw).success) {
       const result = await db.collection('lingxiDataBindings').where('ownerUid', '==', uid).limit(100).get();
       return { datasets: result.docs.filter(row => personalBinding.safeParse(row.data()).success)

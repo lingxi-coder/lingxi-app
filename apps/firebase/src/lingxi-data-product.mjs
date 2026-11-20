@@ -2,6 +2,7 @@ import { LingxiDataError } from './lingxi-data.mjs';
 
 const path = '/v1/product-data';
 const maxBody = 131072;
+const maxReportBody = 3 * 1024 * 1024;
 const liveUid = /^[A-Za-z0-9_-]{1,64}$/u;
 
 export function createProductDataTransport(endpoint, fetchRequest = fetch) {
@@ -54,7 +55,7 @@ export function createProductDataListener({ verifyToken, gateway, preview, botRe
       let size = 0;
       for await (const chunk of req.iterator({ destroyOnReturn: false })) {
         size += chunk.length;
-        if (size > maxBody) {
+        if (size > (signaling ? maxBody : maxReportBody)) {
           res.setHeader('Connection', 'close');
           return reply(413, { error: { code: 'INVALID_DATA_REQUEST' } });
         }
@@ -63,6 +64,7 @@ export function createProductDataListener({ verifyToken, gateway, preview, botRe
       let body;
       try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
       catch { return reply(400, { error: { code: 'INVALID_DATA_REQUEST' } }); }
+      if (size > maxBody && body?.command?.action !== 'publishReport') return reply(413, { error: { code: 'INVALID_DATA_REQUEST' } });
       if (signaling) {
         const taskToken = req.headers['x-lingxi-task-token'];
         if (taskToken === undefined && sources) {

@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { dialog, type BrowserWindow } from 'electron';
 import type { LocalDataSourceAnswer, LocalDataSourceCommand, ManagedDataSource, SourceDraft } from '../../../../../packages/teams/lingxi-data.js';
 import type { Account, TeamsService } from './service.js';
+import type { ReportCapture, ReportDraft } from '../../../../../packages/teams/reports.js';
 import { readPrivateDataPage } from './dataPreview.js';
 
 const exec = promisify(execFile);
@@ -121,11 +122,30 @@ export class DesktopDataSources {
       }
       return { running: this.processes.has(processKey) };
     }
-    if (request.action !== 'start' && request.action !== 'preview') throw new Error('INVALID_INPUT');
+    if (request.action !== 'start' && request.action !== 'preview' && request.action !== 'captureReport') throw new Error('INVALID_INPUT');
     const { sources } = await this.teams.manageSources<{ sources: ManagedDataSource[] }>(context, { action: 'dataSources' });
     const configured = sources.find(row => row.source === source && row.enabled);
     if (!configured) throw new Error('DATA_ACCESS_REQUIRED');
     const { bin, endpoint, ca } = launcher();
+    if (request.action === 'captureReport') {
+      const { plan, scope, dataset } = request;
+      if (plan.origin.kind !== 'source' || plan.origin.source !== source || plan.origin.version !== configured.version) throw new Error('DATA_CONFLICT');
+      const { binding } = await this.teams.data<{ binding: string }>({ scope, command: { action: 'prepareReport', dataset, plan } }, uid);
+      current();
+      const attempt = await mkdtemp(join(tmpdir(), 'lingxi-report-'));
+      try {
+        const path = join(attempt, 'intent.json');
+        await writeFile(path, JSON.stringify({ binding, spec: plan.spec }), { mode: 0o600, flag: 'wx' });
+        const { stdout } = await exec(bin, ['capture-report', '--config', config, '--request', path],
+          { cwd: directory, env: childEnv, maxBuffer: 3 * 1024 * 1024, timeout: 45_000 });
+        const capture: ReportCapture = JSON.parse(stdout);
+        const bytes = Buffer.from(capture.payload, 'base64url');
+        const body: Pick<ReportDraft, 'facts' | 'binding'> = JSON.parse(bytes.toString('utf8'));
+        if (body.binding !== binding || !Array.isArray(body.facts)) throw new Error('INVALID_INPUT');
+        current();
+        return { binding, capture, facts: body.facts, confirmation: createHash('sha256').update(bytes).digest('hex') };
+      } finally { await rm(attempt, { recursive: true, force: true }); }
+    }
     const token = await this.account.getIdToken();
     current();
     if (request.action === 'preview') {

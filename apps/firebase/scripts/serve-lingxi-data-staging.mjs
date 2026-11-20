@@ -28,6 +28,7 @@ const db = getFirestore(app);
 const data = createProductDataTransport(fixture.endpoint);
 const webOrigin = `http://${host}:${webPort}`;
 const teams = createTeamsHandler({ store: new TeamsStore(db), data, verifyToken: token => getAuth(app).verifyIdToken(token, true),
+  createCustomToken: uid => getAuth(app).createCustomToken(uid),
   origins: [webOrigin] });
 const ownerToken = (await readFile(fixture.owner[1], 'utf8')).trim();
 const readerToken = (await readFile(fixture.reader[1], 'utf8')).trim();

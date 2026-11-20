@@ -9,7 +9,7 @@ import type { TeamDataRef, TeamModelRoute } from './privateStore.js';
 export interface BotChatScope { teamId: string; sharedBotId: string; conversationId: string; sessionEpoch: number }
 export interface BotChatCursor { scope: BotChatScope | null; sessionRevision: number; lastMessageSeq: number; lastChangeSeq: number; bootstrapFromSeq: number }
 export type TeamChatQuery = { kind: 'before'; before_seq: number; limit: number } | { kind: 'range'; from_seq_exclusive: number; to_seq_inclusive: number } | { kind: 'by_id'; message_id: string };
-export interface TeamDatasetOffer { dataset: string; version: number; write: boolean; handoffTargets?: string[] }
+export interface TeamDatasetOffer { dataset: string; version: number; write: boolean; reportReview?: true; handoffTargets?: string[] }
 export interface TeamDataProof {
   teamId: string; generation: number; deploymentId: string; hostId: string; accountEpoch: number;
   taskId: string; permitId: string; expectedLastChangeSeq: number;
@@ -164,13 +164,14 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
               const dataset = ['get', 'handoff'].includes(args.action as string) && object(args.reference) ? args.reference.dataset : args.dataset;
               const offer = sharedData?.find(entry => entry.dataset === dataset);
               if (!offer || approval !== undefined) throw new Error('TEAM_HOST_PROTOCOL');
-              if (tool === 'data_write' && stableStep && offer.write && args.action === 'put') {
+              if (tool === 'data_write' && stableStep && offer.write
+                && (args.action === 'put' || (args.action === 'openReportReview' && offer.reportReview))) {
                 operation = { tool, offer, arguments: args, logicalStepId: stableStep };
               } else if (tool === 'data_handoff' && stableStep && args.action === 'handoff'
                 && typeof args.sharedBotId === 'string' && offer.handoffTargets?.includes(args.sharedBotId)) {
                 exact(args, ['action', 'sharedBotId', 'reference']);
                 operation = { tool, offer, arguments: args, logicalStepId: stableStep };
-              } else if (tool === 'data_read' && step === undefined && ['describe', 'get', 'list'].includes(args.action as string)) {
+              } else if (tool === 'data_read' && step === undefined && ['describe', 'get', 'list', 'getReport'].includes(args.action as string)) {
                 operation = { tool, offer, arguments: args };
               } else throw new Error('TEAM_HOST_PROTOCOL');
             } else if (tool === 'list_write' && sharedList && stableStep

@@ -3221,4 +3221,8 @@
     <string name="teams_data_conflict">记录已有更新。请打开最新修订后再保存。</string>
     <string name="teams_data_save">保存记录</string>
     <string name="teams_data_latest">读取最新修订</string>
+    <string name="teams_report_open">查看发布时的报表</string>
+    <string name="teams_report_latest">查看最新报表</string>
+    <string name="teams_report_review">打开复核单</string>
+    <string name="teams_report_reviewed">复核单已打开</string>
 </resources>

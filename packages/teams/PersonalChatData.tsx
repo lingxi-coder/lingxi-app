@@ -3,6 +3,7 @@ import { DataRecordButton } from './DataRecordButton.js';
 import { DataTable } from './DataTable.js';
 import { DataTemplate, DataTemplateSettings } from './DataTemplate.js';
 import { DataViewSettings } from './DataViewSettings.js';
+import { ReportPublisher } from './ReportViews.js';
 import type { TeamSummary, TeamsApi } from './index.js';
 import { parseDataRef, type DataAudience, type DataDescription, type DataRecordPage, type DataRef, type DataTemplateView, type TeamDataScope, type VisibleDataSet } from './lingxi-data.js';
 import type { TeamConversation } from './messages.js';
@@ -199,6 +200,10 @@ export function PersonalChatData({ api, uid, teams, locale, chatReply }: {
               <DataTemplate spec={entry.definition} value={record.value} />
             </details>;
           })}
+          {target && room && <ReportPublisher api={api} locale={locale}
+            scope={{ kind: 'team', teamId: team, generation: target.generation, conversationId: room }}
+            origin={{ kind: 'personal', dataset: active.dataset, epoch: active.description.epoch }}
+            fields={Object.keys(active.description.schema.properties ?? {})} />}
           <details><summary>{zh ? '添加记录' : 'Add record'}</summary>
             <form method="post" onSubmit={newRecord}>
               <label>{zh ? '记录 ID' : 'Record ID'}<input name="record" required pattern="[A-Za-z0-9_\-]{1,64}" maxLength={64} /></label>

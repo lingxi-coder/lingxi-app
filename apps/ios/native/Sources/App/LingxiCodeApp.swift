@@ -75,7 +75,7 @@ struct LingxiCodeApp: App {
     }
 
     @ViewBuilder private var normalRoot: some View {
-        #if DEBUG && targetEnvironment(simulator)
+        #if DEBUG && (targetEnvironment(simulator) || LINGXI_DEVICE_DATA_STAGING)
         if let staging = LingxiDataStagingConfiguration.current {
             LingxiDataStagingView(configuration: staging)
         } else {

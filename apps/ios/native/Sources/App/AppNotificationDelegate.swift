@@ -13,6 +13,8 @@ enum IsolatedSimulatorTesting {
     static var enabled: Bool {
         #if DEBUG && targetEnvironment(simulator)
         ProcessInfo.processInfo.environment["LINGXI_ISOLATED_SIM_TEST"] == "1"
+        #elseif DEBUG && LINGXI_DEVICE_DATA_STAGING
+        Bundle.main.bundleIdentifier == "com.lingxi.data.reportqa" && ProcessInfo.processInfo.environment["LINGXI_ISOLATED_SIM_TEST"] == "1"
         #else
         false
         #endif

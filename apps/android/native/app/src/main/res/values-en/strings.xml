@@ -3221,4 +3221,8 @@
     <string name="teams_data_conflict">The record has changed. Open the latest revision before saving.</string>
     <string name="teams_data_save">Save record</string>
     <string name="teams_data_latest">Load latest revision</string>
+    <string name="teams_report_open">Open published report</string>
+    <string name="teams_report_latest">Open latest report</string>
+    <string name="teams_report_review">Open review case</string>
+    <string name="teams_report_reviewed">Review case open</string>
 </resources>

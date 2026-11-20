@@ -676,6 +676,9 @@ private fun MessageCell(
                     if (!message.recalled) message.dataRef?.let { reference ->
                         TeamDataRecordButton(reference, conversation.id, workspace.messagingModel)
                     }
+                    if (!message.recalled) reportLink.matchEntire(message.text)?.let { link ->
+                        TeamReportButton(link, conversation.id, workspace.messagingModel)
+                    }
                     // What the Bot's model was given, as the service checked it.
                     if (!message.recalled && message.readFiles.isNotEmpty()) Text(stringResource(R.string.teams_files_read_fmt, message.readFiles.joinToString(", ") { it.name }), Modifier.testTag("teams.message.read.${message.id}"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }

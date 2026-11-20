@@ -11,7 +11,9 @@ const [fixturePath] = process.argv.slice(2);
 if (!fixturePath) throw new Error('Data model fixture required');
 const { endpoint, ownerFile, folder, offer, proof, scope, desired } = JSON.parse(await readFile(fixturePath, 'utf8')) as {
   endpoint: string; ownerFile: string; folder: string; offer: TeamDatasetOffer; proof: TeamDataProof; scope: BotChatScope;
-  desired: { action: 'put'; record: string } | { action: 'handoff'; reference: unknown; sharedBotId: string };
+  desired: { action: 'put'; record: string }
+    | { action: 'openReportReview'; release: string; partition: string; group: string }
+    | { action: 'handoff'; reference: unknown; sharedBotId: string };
 };
 const modelEndpoint = process.env.LINGXI_TEST_MODEL_ENDPOINT;
 const modelId = process.env.LINGXI_TEST_MODEL_ID;
@@ -20,7 +22,7 @@ const configuredWorker = process.env.TEAM_V3_WORKER_BIN;
 assert.ok(modelEndpoint && modelId && configuredHost && configuredWorker);
 assert.equal(new URL(modelEndpoint).hostname, '127.0.0.1', 'the fixture only sends data to a loopback model');
 const [host, worker, token] = await Promise.all([realpath(configuredHost), realpath(configuredWorker), readFile(ownerFile, 'utf8')]);
-const userData = join(folder, 'model-desktop', proof.taskId);
+const userData = join(folder, 'model-desktop', proof.taskId, desired.action);
 const accountHome = join(userData, 'provider-home');
 await mkdir(accountHome, { recursive: true, mode: 0o700 });
 const privateStore = new TeamPrivateStore(userData);
@@ -44,7 +46,8 @@ const profile = { provider_id: 'fixture', profile_name: profileName, base_url: m
   credential: { source: 'host_managed', key: 'team-selected-model' },
   models: [{ display_model: modelId, request_model: modelId, billing_model: modelId,
     capability_support: { streaming: 'supported', tools: 'supported' } }], extra: {} };
-const tool = desired.action === 'put' ? 'TeamDataWrite' : 'TeamDataHandoff';
+const handoff = desired.action === 'handoff';
+const tool = handoff ? 'TeamDataHandoff' : 'TeamDataWrite';
 const message = { messageId: 'model-message', seq: 1, changeSeq: 1, changeId: 'model-change',
   author: { kind: 'user', uid: 'fixture-requester', displayName: 'Requester' }, createdAt: Date.now(),
   text: `请用 ${tool} 执行一次操作。字段和值如下。\n` + JSON.stringify(desired) + '\n/no_think' };
@@ -71,30 +74,40 @@ const result = await runTeamHost({ executable: host, home: paths.home, tmp: path
   },
   bootstrap: { version: 3, type: 'run', storageRoot: paths.runtime, workerExecutable: worker, scope, taskId: proof.taskId,
     invocationId: randomUUID(), knowledge: [], inputBatchRef, deadlineAt: Date.now() + 100000, sharedData: [offer],
-    instructions: `Use ${tool} exactly once with the requested arguments. Confirm briefly after success.`,
+    instructions: `Use ${tool} exactly once with the requested arguments. After the tool succeeds, reply with the word Done.`,
     model: { model_provider: profileName, model_protocol: 'open_ai_chat', model_id: modelId, model_endpoint: modelEndpoint, model_profile: profile },
     credentials: { provider_account_home: accountHome, provider_accounts: providerAccounts, provider_account_profiles: [profile],
       provider_account_credentials: { [accountId]: { credential_revision: 1, identity_generation: 1, kind: { kind: 'api_key', key: 'loopback' } } } },
-    limits: { max_turns: 3, context_window_tokens: 8192, output_tokens_per_request: 2048, physical_dispatches: 3 },
+    limits: { max_turns: 3, context_window_tokens: 8192, output_tokens_per_request: 768, physical_dispatches: 3 },
   },
   operate: async operation => {
-    assert.equal(operation.tool, desired.action === 'put' ? 'data_write' : 'data_handoff');
-    if (operation.tool === 'data_read' || operation.tool === 'list_read' || operation.tool === 'list_write') throw new Error('Expected the authorized Data operation');
+    assert.equal(operation.tool, handoff ? 'data_handoff' : 'data_write');
     assert.deepEqual(operation.arguments, desired);
     stepId = createHash('sha256').update(operation.logicalStepId).digest('hex');
-    const saved = await callProduct(desired.action === 'put'
-      ? { action: 'botDataOperation', ...proof, accessVersion: offer.version, operation: operation.arguments, stepId }
-      : { action: 'botDataHandoff', ...proof, accessVersion: offer.version, stepId, reference: desired.reference, sharedBotId: desired.sharedBotId });
+    const saved = await callProduct(desired.action === 'handoff'
+      ? { action: 'botDataHandoff', ...proof, accessVersion: offer.version, stepId, reference: desired.reference, sharedBotId: desired.sharedBotId }
+      : { action: 'botDataOperation', ...proof, accessVersion: offer.version, operation: operation.arguments, stepId });
     effects.push(saved);
     return { established: true, succeeded: true, result: saved };
   },
 });
-assert.equal(result.status, 'completed');
-assert.equal(effects.length, 1);
+assert.equal(result.status, 'completed', JSON.stringify({ action: desired.action, status: result.status,
+  effects: effects.length, dispatches: result.status !== 'task_checkpoint' && result.dispatchedRequests,
+  deniedTools: result.status !== 'task_checkpoint' && result.deniedTools }));
+if (desired.action === 'openReportReview') {
+  assert.ok(effects.length >= 1);
+  for (const retry of effects.slice(1)) assert.deepEqual(retry, effects[0]);
+} else {
+  assert.equal(effects.length, 1);
+}
 if (desired.action === 'put') {
   assert.deepEqual(effects[0], { dataset: offer.dataset, record: desired.record, schemaVersion: 1, revision: 1 });
+} else if (desired.action === 'openReportReview') {
+  const key = createHash('sha256').update(JSON.stringify([desired.release, desired.partition, desired.group, 'review'])).digest('hex');
+  assert.deepEqual(effects[0], { review: key, state: 'open' });
 } else {
   assert.equal(typeof effects[0]?.taskId, 'string');
   assert.deepEqual(effects[0]?.reference, desired.reference);
 }
-console.log(JSON.stringify({ model: modelId, tool, task: proof.taskId, stepId, result: effects[0] }));
+console.log(JSON.stringify({ model: modelId, tool, action: desired.action, calls: effects.length,
+  task: proof.taskId, stepId, result: effects[0] }));

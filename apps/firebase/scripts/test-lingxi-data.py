@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 
-REVISION = "d18563624a7745587250fdc1047b3e3ef2a31f55"
+REVISION = "99db9958ab5a59252b977e550bf57e610fa24770"
 
 
 def main():

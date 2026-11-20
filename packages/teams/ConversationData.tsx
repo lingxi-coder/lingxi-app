@@ -4,13 +4,15 @@ import { DataChart, DataTable } from './DataTable.js';
 import { DataTemplate, DataTemplateSettings } from './DataTemplate.js';
 import { DataViewSettings } from './DataViewSettings.js';
 import { DataAutomationSettings } from './DataAutomationSettings.js';
+import { ReportPublisher } from './ReportViews.js';
 import type { TeamsApi } from './index.js';
 import { parseDataRef, type DataDescription, type DataEventsPage, type DataRecordPage, type DataRef, type DataScope, type DataTemplateView, type VisibleDataSet } from './lingxi-data.js';
 
 type Scope = Extract<DataScope, { kind: 'team' }>;
 
-export function ConversationData({ api, scope, locale, share }: {
+export function ConversationData({ api, scope, locale, share, shareReport }: {
   api: TeamsApi; scope: Scope; locale: string; share?: (reference: DataRef, text: string) => Promise<boolean>;
+  shareReport?: (link: string) => Promise<boolean>;
 }): ReactElement | null {
   const dialog = useRef<HTMLDialogElement>(null);
   const headingId = useId();
@@ -142,6 +144,9 @@ export function ConversationData({ api, scope, locale, share }: {
           {page.cursor && <button type="button" className="tw-link" disabled={waiting} onClick={() => void show(selected, page.cursor!)}>{zh ? '下一页' : 'Next page'}</button>}
         </>}
         {selected && description && <>
+          {selected.access === 'manage' && <ReportPublisher api={api} scope={scope} locale={locale} dataset={selected.dataset}
+            fields={Object.keys(description.schema.properties ?? {})} share={shareReport}
+            origin={{ kind: 'team', dataset: selected.dataset, epoch: description.epoch }} />}
           <p>{zh ? 'Schema 版本 ' : 'Schema version '}{description.schemaVersion}</p>
           {selected.access === 'manage' && <DataViewSettings api={api} scope={scope} dataset={selected.dataset}
             description={description} locale={locale} saved={() => { void show(selected); }} />}

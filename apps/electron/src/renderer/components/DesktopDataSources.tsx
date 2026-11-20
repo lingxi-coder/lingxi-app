@@ -1,7 +1,8 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactElement } from 'react';
 import type { TeamSummary, TeamsApi } from '../../../../../packages/teams/index.js';
-import type { DataScope, ManagedDataSource, SourceDraft } from '../../../../../packages/teams/lingxi-data.js';
+import type { DataScope, ManagedDataSource, SourceDraft, TeamDataScope } from '../../../../../packages/teams/lingxi-data.js';
 import type { TeamConversation } from '../../../../../packages/teams/messages.js';
+import { ReportPublisher } from '../../../../../packages/teams/ReportViews.js';
 
 type Row = ManagedDataSource & { running: boolean };
 
@@ -16,6 +17,7 @@ export function DesktopDataSources({ api, uid, teams, locale }: { api: TeamsApi;
   const [draft, setDraft] = useState<SourceDraft>();
   const [editing, setEditing] = useState<Row>();
   const [preview, setPreview] = useState<{ source: string; rows: Record<string, unknown>[] }>();
+  const [reportSource, setReportSource] = useState<{ row: Row; fields: string[] }>();
   const [teamId, setTeamId] = useState('');
   const [roomId, setRoomId] = useState('');
   const [rooms, setRooms] = useState<TeamConversation[]>([]);
@@ -24,6 +26,11 @@ export function DesktopDataSources({ api, uid, teams, locale }: { api: TeamsApi;
   const team = teams.find(value => value.id === teamId && value.role !== 'member');
   const generation = team?.generation;
   const room = rooms.find(value => value.id === roomId);
+  let destination: TeamDataScope | undefined;
+  if (reportSource?.row.scope.kind === 'team') destination = reportSource.row.scope;
+  else if (reportSource && team && room) {
+    destination = { kind: 'team', teamId: team.id, conversationId: room.id, generation: team.generation };
+  }
 
   useEffect(() => {
     if (!open || !teamId || generation === undefined) return;
@@ -74,7 +81,7 @@ export function DesktopDataSources({ api, uid, teams, locale }: { api: TeamsApi;
       dialog.current?.showModal(); setOpen(true); void run(refresh);
     }}>{title}</button>
     <dialog ref={dialog} className="tw-dialog tw-data-record no-drag" aria-labelledby={heading}
-      onClose={event => { if (event.currentTarget === event.target) { setOpen(false); setPreview(undefined); } }}>
+      onClose={event => { if (event.currentTarget === event.target) { setOpen(false); setPreview(undefined); setReportSource(undefined); } }}>
       <div className="tw-dialog-panel tw-data-workspace">
         <h2 id={heading}>{title}</h2>
         {status && <p role="status">{status}</p>}
@@ -94,13 +101,19 @@ export function DesktopDataSources({ api, uid, teams, locale }: { api: TeamsApi;
                 const result = await send(uid, { action: 'preview', source: source.source });
                 if (dialog.current?.open && result && !Array.isArray(result) && 'rows' in result) setPreview({ source: source.source, rows: result.rows });
               })}>{zh ? '测试并预览' : 'Test and preview'}</button>}
+            {source.enabled && !source.pending && <button type="button" disabled={running} onClick={() => void run(async () => {
+              const result = await send(uid, { action: 'details', source: source.source });
+              if (!dialog.current?.open || !result || Array.isArray(result) || !('fields' in result)) return;
+              setDraft(undefined); setTeamId(''); setRoomId(''); setRooms([]);
+              setReportSource({ row: source, fields: result.fields });
+            })}>{zh ? '准备报表' : 'Prepare report'}</button>}
             {source.scope.kind === 'team' && !source.pending && <button type="button" disabled={running}
               onClick={() => void run(async () => {
                 const result = await send(uid, { action: 'details', source: source.source });
                 if (source.scope.kind !== 'team' || !result || Array.isArray(result) || !('fields' in result)) return;
                 if (source.scope.teamId !== teamId) setRooms([]);
                 setTeamId(source.scope.teamId); setRoomId(source.scope.conversationId);
-                setEditing(source); setDraft(result);
+                setReportSource(undefined); setEditing(source); setDraft(result);
               })}>{zh ? '编辑预览许可' : 'Edit preview permissions'}</button>}
             <button type="button" disabled={running} onClick={() => void run(async () => {
               const { source: id, scope, name, version, enabled, requesters, grants, pending } = source;
@@ -116,9 +129,26 @@ export function DesktopDataSources({ api, uid, teams, locale }: { api: TeamsApi;
         <button type="button" disabled={running} onClick={() => void run(async () => {
           const result = await send(uid, { action: 'import' });
           if (result && !Array.isArray(result) && 'fields' in result) {
-            setTeamId(''); setRoomId(''); setRooms([]); setEditing(undefined); setDraft(result);
+            setTeamId(''); setRoomId(''); setRooms([]); setReportSource(undefined); setEditing(undefined); setDraft(result);
           }
         })}>{zh ? '选择宿主配置文件' : 'Choose host configuration'}</button>
+        {reportSource?.row.scope.kind === 'personal' && <fieldset><legend>{zh ? '个人数据源的发布目标' : 'Destination for this personal source'}</legend>
+          <label>{zh ? '团队' : 'Team'}<select value={teamId} onChange={event => {
+            setTeamId(event.currentTarget.value); setRoomId(''); setRooms([]);
+          }}><option value="">{zh ? '选择团队' : 'Choose a team'}</option>
+            {teams.filter(item => item.role !== 'member').map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+          {team && <label>{zh ? '会话' : 'Conversation'}<select value={roomId} onChange={event => setRoomId(event.currentTarget.value)}>
+            <option value="">{zh ? '选择会话' : 'Choose a conversation'}</option>
+            {rooms.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>}
+        </fieldset>}
+        {reportSource && destination && <ReportPublisher api={api} locale={locale} scope={destination}
+          fields={reportSource.fields} origin={{ kind: 'source', source: reportSource.row.source, version: reportSource.row.version }}
+          capture={async (dataset, plan) => {
+            const { row } = reportSource;
+            const result = await send(uid, { action: 'captureReport', scope: destination, source: row.source, plan, dataset });
+            if (!result || Array.isArray(result) || !('capture' in result)) throw new Error('Capture failed');
+            return result;
+          }} />}
         {draft && <form key={draft.source + (editing ? '-edit' : '-add')} method="post" onSubmit={add}>
           <p>{editing?.name ?? draft.source} · {draft.kind}</p>
           {!editing && <label>{zh ? '名称' : 'Name'}<input name="name" required maxLength={120} /></label>}

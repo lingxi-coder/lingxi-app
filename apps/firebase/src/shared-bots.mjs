@@ -3,6 +3,8 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { admissionId, sharedBotPermits } from './team-execution-contract.mjs';
 import { serviceBotCommand, sharedBotCommand } from './shared-bot-commands.mjs';
 import { serviceScope } from './hosted-bot-service.mjs';
+import { authorizeDataBinding } from './lingxi-data.mjs';
+import { allowedPrivateSource } from './lingxi-data-sources.mjs';
 import { messagePreview } from './team-message-preview.mjs';
 import { prepareSharedConversation } from './team-conversations.mjs';
 import { attachable, cancelUpload, createUpload, finalizeUpload, putUploadPart, readAttachmentPart, revokeAttachment, taskFiles } from './team-attachments.mjs';
@@ -26,6 +28,8 @@ const transferMs = 7 * 24 * 60 * 60 * 1000, openTransfer = state => state === 'o
 const revisionLimit = 200;
 const byUid = members => [...members].sort((a, b) => a.uid.localeCompare(b.uid));
 /** An interrupted operation of these categories may be sent again: the receiver returns the same receipt. */
+const privateTaskBlocked = new Set(['pauseTask', 'continueTask', 'recordOperation', 'settleOperation',
+  'resolveOperation', 'readTaskList', 'writeTaskList']);
 const replaySafe = new Set(['read', 'store_idempotent', 'provider_idempotent']);
 const operationLimit = 64;
 /** An operation whose outcome nobody has established: it blocks every further model execution of its task. */
@@ -141,6 +145,9 @@ export class SharedBotsStore {
         if (grantsCapability(action) && receipt.granted === true) return { execute: false, taskId: p.taskId };
         // Reads recheck current ACL below; a cached read receipt must not bypass revocation.
         if (!grantsCapability(action) && !readActions.has(action)) return receipt.response;
+      }
+      if (privateTaskBlocked.has(action) && (await tx.get(team.collection('tasks').doc(p.taskId))).data()?.privateDataSource) {
+        deny(403, 'DATA_PRIVATE_TASK');
       }
       const context = { tx, team, self, identity, user, command, now, service };
       // A service takes only the commands its scope lists and applies its own gates; what it returns runs after the command.
@@ -491,17 +498,23 @@ export class SharedBotsStore {
     if (!value?.memberUids?.includes(identity.uid) || (mustParticipate && !value.participants.includes(`user:${identity.uid}`))) deny(403, 'CONVERSATION_REQUIRED');
     return { ref, value };
   }
-  async submit({ tx, team, identity, self, command: { payload: p }, now }) {
+  async submit({ tx, team, identity, self, command: { payload: p }, now, service, dataCause }) {
     const { ref, value: c } = await this.conversation(tx, team, p.conversationId, identity, true);
-    if (p.messageId.startsWith('bot_') || p.changeId.startsWith('bot_')) deny(400, 'INVALID_INPUT');
+    if (!dataCause && (p.messageId.startsWith('bot_') || p.changeId.startsWith('bot_'))) deny(400, 'INVALID_INPUT');
     if (p.targets.some(id => !c.participants.includes(`shared_bot:${id}`))) deny(403, 'BOT_PARTICIPANT_REQUIRED');
     if (c.kind === 'bot_dm' && (p.targets.length !== 1 || p.targets[0] !== c.sharedBotId)) deny(400, 'INVALID_BOT_TARGET');
     if (c.executionPolicy && p.targets.some(id => !c.executionPolicy.targets.includes(id))) deny(403, 'CONVERSATION_POLICY_REQUIRED');
     const [message, change] = await tx.getAll(ref.collection('messages').doc(p.messageId), ref.collection('changes').doc(p.changeId));
-    const digest = hash({ requester: identity, ...p, targets: [...p.targets].sort() });
+    const digest = hash({ requester: identity, ...p, targets: [...p.targets].sort(), ...(dataCause ? { dataCause } : {}) });
     if (message.exists || change.exists) {
       if (change.data()?.submissionDigest !== digest) deny(409, 'MESSAGE_ID_CONFLICT');
       return change.data().submissionReceipt;
+    }
+    let privateData;
+    if (p.privateDataSource) {
+      if (service) deny(403, 'DATA_PRIVATE_TASK');
+      const { binding } = await allowedPrivateSource(tx, this.db, team, p.privateDataSource, p.conversationId, p.targets[0], identity);
+      privateData = { privateDataSource: p.privateDataSource, privateDataVersion: binding.version };
     }
     if (p.replyTo && !(await tx.get(ref.collection('messages').doc(p.replyTo))).exists) deny(400, 'REPLY_REQUIRED');
     const files = await attachable(tx, team, identity, p.conversationId, p.attachments, now);
@@ -516,43 +529,49 @@ export class SharedBotsStore {
       // already reads. A Bot DM was created for one member and one maintainer, so after a handover a new one is opened.
       const maintainer = bot.identity.maintainer.uid;
       if (!c.memberUids.includes(maintainer) || (c.kind === 'bot_dm' && c.memberUids.some(uid => uid !== maintainer && uid !== identity.uid))) deny(409, 'BOT_MAINTAINER_CHANGED');
-      if (!d?.enabled || !d.ready || d.onlineUntil <= now) deny(409, 'HOST_UNAVAILABLE');
+      if (!d?.enabled || (!dataCause && (!d.ready || d.onlineUntil <= now))) deny(409, 'HOST_UNAVAILABLE');
       if (bot.grants.some(grant => !this.grantPermits(grant, identity))) deny(403, 'INPUT_GRANT_REQUIRED');
     }
     // A message that asks no Bot uses no request quota.
-    const day = nowDay(now), quotaKeys = p.targets.length ? [hash([day, 'team']), hash([day, 'member', identity.uid, identity.generation]),
+    const day = nowDay(now), quotaKeys = p.targets.length ? [hash([day, 'team']),
+      dataCause ? hash([day, dataCause.kind, dataCause.quotaOwner]) : hash([day, 'member', identity.uid, identity.generation]),
       ...p.targets.map(id => hash([day, 'bot', id]))] : [];
     const quotaRefs = quotaKeys.map(id => team.collection('requestQuotas').doc(id));
     const quotas = await all(quotaRefs);
-    const limits = [Math.min(...bots.map(doc => doc.data().quotas.team)), Math.min(...bots.map(doc => doc.data().quotas.member)),
+    const limits = [Math.min(...bots.map(doc => doc.data().quotas.team)), dataCause?.dailyLimit ?? Math.min(...bots.map(doc => doc.data().quotas.member)),
       ...bots.map(doc => doc.data().quotas.bot)];
     const increments = [p.targets.length, p.targets.length, ...p.targets.map(() => 1)];
     // A request queued behind a live lock (running or waiting) must outlive it.
     const locks = await all(p.targets.map(id => team.collection('chatExecutionLocks').doc(hash([id, p.conversationId]))));
     for (const [i, snapshot] of quotas.entries()) if ((snapshot.data()?.used ?? 0) + increments[i] > limits[i]) deny(429, 'REQUEST_QUOTA_EXCEEDED');
     // In a Bot DM every message asks the Bot; with auto-reply on there, the Bot may still decide that one needs no answer.
-    const dmOptional = c.kind === 'bot_dm' && !!c.autoReply?.targets.includes(c.sharedBotId) && !!bots[0]?.data().autoReply;
-    const unaskedTasks = await this.optionalTasks(tx, team, c, p, identity, p.targets, now);
+    const dmOptional = !p.privateDataSource && !dataCause && c.kind === 'bot_dm' && !!c.autoReply?.targets.includes(c.sharedBotId) && !!bots[0]?.data().autoReply;
+    const unaskedTasks = p.privateDataSource || dataCause ? null : await this.optionalTasks(tx, team, c, p, identity, p.targets, now);
     const seq = c.lastSeq + 1, changeSeq = c.lastChangeSeq + 1;
     if (!Number.isSafeInteger(seq) || !Number.isSafeInteger(changeSeq)) deny(409, 'CURSOR_LIMIT');
     const tasks = p.targets.map(sharedBotId => ({ sharedBotId, taskId: admissionId(p.messageId, sharedBotId) }));
     const response = { messageId: p.messageId, changeId: p.changeId, changeSeq, tasks };
-    const author = { kind: 'user', uid: identity.uid, displayName: self.displayName || 'Member' }, at = new Date(now);
-    tx.create(ref.collection('messages').doc(p.messageId), { seq, changeSeq, changeId: p.changeId, text: p.text, kind: 'text', author,
+    const author = dataCause?.author ?? { kind: 'user', uid: identity.uid, displayName: self.displayName || 'Member' }, at = new Date(now);
+    const sharedText = p.privateDataSource ? 'Private data preview requested.' : p.text;
+    tx.create(ref.collection('messages').doc(p.messageId), { seq, changeSeq, changeId: p.changeId, text: sharedText, kind: 'text', author,
       createdAt: at, ...(tasks.length ? { taskIds: tasks.map(task => task.taskId), mentions: p.targets.map(id => `shared_bot:${id}`) } : {}),
+      ...(dataCause ? { dataRef: dataCause.reference } : {}),
       ...(p.replyTo ? { replyTo: p.replyTo } : {}), ...(files.attachments.length ? { attachments: files.attachments } : {}) });
     files.attach(p.messageId);
     tx.create(ref.collection('changes').doc(p.changeId), { seq: changeSeq, messageId: p.messageId, operation: 'create',
-      actorUid: identity.uid, generation: identity.generation, textDigest: createHash('sha256').update(p.text).digest('hex'), at,
+      actorUid: identity.uid, generation: identity.generation, textDigest: createHash('sha256').update(sharedText).digest('hex'), at,
       submissionDigest: digest, submissionReceipt: response });
     tx.update(ref, { lastSeq: seq, lastChangeSeq: changeSeq, lastChange: { id: p.changeId, seq: changeSeq },
       // A message of files alone is listed by their names.
-      lastMessage: { id: p.messageId, seq, at, author, preview: messagePreview(p.text || files.attachments.map(file => file.name).join(', ')) } });
+      lastMessage: { id: p.messageId, seq, at, author, preview: messagePreview(sharedText || files.attachments.map(file => file.name).join(', ')) } });
     for (const [i, target] of tasks.entries()) {
-      tx.create(team.collection('tasks').doc(target.taskId), queuedTask({ ...target, conversationId: p.conversationId, messageId: p.messageId,
-        changeId: p.changeId, seq, requester: identity, bot: bots[i].data(), lockUntil: locks[i].data()?.until ?? 0, now, optional: dmOptional, visibility: 'asked' }));
+      const task = queuedTask({ ...target, conversationId: p.conversationId, messageId: p.messageId,
+        changeId: p.changeId, seq, requester: identity, bot: bots[i].data(), lockUntil: locks[i].data()?.until ?? 0, now, optional: dmOptional, visibility: 'asked' });
+      tx.create(team.collection('tasks').doc(target.taskId), { ...task, ...privateData, ...(dataCause ? {
+        rootTaskId: dataCause.rootTaskId ?? task.taskId, dataCause,
+      } : {}) });
     }
-    unaskedTasks.write(seq);
+    unaskedTasks?.write(seq);
     for (const [i, quotaRef] of quotaRefs.entries()) tx.set(quotaRef, { day, used: (quotas[i].data()?.used ?? 0) + increments[i], limit: limits[i] });
     return response;
   }
@@ -606,24 +625,30 @@ export class SharedBotsStore {
       messageId: doc.data().messageId, messageSeq: doc.data().messageSeq, ...(doc.data().resume ? { resume: doc.data().resume } : {}) })).sort((a, b) => a.messageSeq - b.messageSeq),
       nextCursor: tasks.size === 100 ? tasks.docs.at(-1).id : null };
   }
-  async taskContext({ tx, team, identity, command: { action, payload: p }, now }) {
+  async taskContext({ tx, team, identity, command: { action, payload: p }, now, storedPermitDigest }) {
     const { bot, deployment } = await this.checkHost(tx, team, identity, p);
     const task = (await tx.get(team.collection('tasks').doc(p.taskId))).data();
     if (!task || task.deploymentId !== p.deploymentId) deny(404, 'TASK_REQUIRED');
-    if (action === 'validateTask' && (task.state !== 'running' || task.permitDigest !== hash(p.permitId))) deny(403, 'EXECUTION_PERMIT_REQUIRED');
+    if (action === 'validateTask' && (task.state !== 'running' || task.permitDigest !== (storedPermitDigest ?? hash(p.permitId)))) deny(403, 'EXECUTION_PERMIT_REQUIRED');
     if (action === 'validateTask' && task.cancelRequestedAt) deny(409, 'TASK_CANCELLED');
     if (action === 'prepareTask' && task.state !== 'queued') deny(409, 'TASK_ALREADY_STARTED');
     if (task.deadline <= now) deny(409, 'TASK_EXPIRED');
     if (!this.requesterAuthorized(bot, task)) deny(403, 'TASK_REVOKED');
     const conversation = await this.validateTask(tx, team, task);
+    if (task.privateDataSource) await this.checkPrivateSource(tx, team, task);
     if (action === 'validateTask') {
       if (p.expectedLastChangeSeq > conversation.data().lastChangeSeq) deny(409, 'INVALID_CHANGE_CURSOR');
       // A newer caller watermark cannot erase an edit/recall after the input actually admitted for this task.
       if (!await this.sourceWatermarkCurrent(tx, conversation, task, Math.min(task.inputLastChangeSeq, p.expectedLastChangeSeq))) deny(409, 'SOURCE_CHANGED');
     }
     return { task: taskView(task, now), messageId: task.messageId, messageSeq: task.messageSeq,
+      ...(task.privateDataSource ? { privateDataSource: task.privateDataSource } : {}),
       inputs: bot.grants, deployment, sourceLastChangeSeq: conversation.data().lastChangeSeq, conversationKind: conversation.data().kind,
       physicalDispatchesSpent: task.physicalDispatchesSpent, ...this.listOffer(bot, deployment) };
+  }
+  async checkPrivateSource(tx, team, task) {
+    const { binding } = await allowedPrivateSource(tx, this.db, team, task.privateDataSource, task.conversationId, task.sharedBotId, task.requester);
+    if (binding.version !== task.privateDataVersion) deny(403, 'TASK_REVOKED');
   }
   async sourceWatermarkCurrent(tx, conversation, task, watermark) {
     const current = conversation.data().lastChangeSeq;
@@ -652,6 +677,28 @@ export class SharedBotsStore {
       // An unasked task stands only while the Chat still lets its Bot answer unasked. A Bot DM task was asked for, and charged: it stands.
       || (unasked(task, conversation.data()) && !conversation.data().autoReply?.targets.includes(task.sharedBotId))
       || message.data()?.recalled || message.data()?.changeId !== task.changeId) deny(403, 'TASK_REVOKED');
+    if (task.dataCause) {
+      const { reference, targetGrantVersion } = task.dataCause;
+      const grant = (await tx.get(team.collection('sharedBots').doc(task.sharedBotId).collection('dataGrants').doc(reference.dataset))).data();
+      if (!grant?.access || grant.version !== targetGrantVersion || grant.conversationId !== task.conversationId
+        || grant.botRevision !== task.botRevision) deny(403, 'TASK_REVOKED');
+      const issuer = (await tx.get(team.collection('members').doc(grant.issuedBy.uid))).data();
+      if (!['owner', 'admin'].includes(issuer?.role)) deny(403, 'TASK_REVOKED');
+      const scope = { kind: 'team', teamId: team.id, conversationId: task.conversationId };
+      await authorizeDataBinding(tx, this.db, grant.issuedBy.uid, { ...scope, generation: grant.issuedBy.generation }, reference.dataset, true, true);
+      await authorizeDataBinding(tx, this.db, task.requester.uid, { ...scope, generation: task.requester.generation }, reference.dataset, false);
+      if (task.dataCause.ruleId) {
+        const [spec, head] = (await tx.getAll(this.db.collection('lingxiDataRules').doc(task.dataCause.ruleId),
+          team.collection('dataRuleHeads').doc(hash([reference.dataset, reference.record])))).map(row => row.data());
+        const causedByParent = task.dataCause.parentTaskId && head?.actorTask === task.dataCause.parentTaskId;
+        if (!spec?.enabled || spec.version !== task.dataCause.ruleVersion || spec.admin !== task.requester.uid
+          || !['owner', 'admin'].includes(member.data()?.role) || spec.scope.generation !== task.requester.generation
+          || spec.scope.teamId !== team.id || spec.scope.conversationId !== task.conversationId || spec.dataset !== reference.dataset
+          || (head?.revision !== reference.revision && head?.actorTask !== task.taskId && !causedByParent)) {
+          deny(403, 'TASK_REVOKED');
+        }
+      }
+    }
     return conversation;
   }
   requesterAuthorized(bot, task) {
@@ -690,6 +737,8 @@ export class SharedBotsStore {
     const { deployment, bot } = await this.checkHost(tx, team, identity, p);
     const ref = team.collection('tasks').doc(p.taskId), snapshot = await tx.get(ref), task = snapshot.data();
     if (!task || task.deploymentId !== p.deploymentId) deny(404, 'TASK_REQUIRED');
+    if (Boolean(task.privateDataSource) !== (p.privateData === true)) deny(403, 'DATA_PRIVATE_TASK');
+    if (task.privateDataSource) await this.checkPrivateSource(tx, team, task);
     if (task.state !== 'queued' || task.epoch >= 1) return { execute: false, taskId: p.taskId };
     if (task.deadline <= now) { tx.update(ref, { state: 'expired' }); return { execute: false, taskId: p.taskId }; }
     if (task.botRevision !== bot.identity.revision) deny(403, 'TASK_REVOKED');
@@ -715,7 +764,8 @@ export class SharedBotsStore {
     tx.update(ref, started);
     tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
     return { execute: true, permitId, task: taskView({ ...task, ...started }, now), deployment,
-      inputs: bot.grants, messageId: task.messageId, messageSeq: task.messageSeq, ...this.listOffer(bot, deployment) };
+      inputs: bot.grants, messageId: task.messageId, messageSeq: task.messageSeq,
+      ...(task.privateDataSource ? { privateDataSource: task.privateDataSource } : this.listOffer(bot, deployment)) };
   }
   async continueRun({ tx, team, identity, command, now }) {
     const p = command.payload;
@@ -806,6 +856,7 @@ export class SharedBotsStore {
     const { bot } = await this.checkHost(tx, team, identity, p);
     const ref = team.collection('tasks').doc(p.taskId), task = (await tx.get(ref)).data();
     if (!task || task.deploymentId !== p.deploymentId || task.permitDigest !== hash(p.permitId)) deny(403, 'EXECUTION_PERMIT_REQUIRED');
+    if (Boolean(task.privateDataSource) !== (p.privateData === true)) deny(403, 'DATA_PRIVATE_TASK');
     const { accountEpoch: _accountEpoch, ...stableResult } = p;
     const resultDigest = hash(stableResult);
     if (task.resultDigest) {
@@ -821,6 +872,13 @@ export class SharedBotsStore {
       tx.update(ref, { state: 'cancelled', resultDigest, replyId: null, artifactId: null, usage: p.usage, finishedAt: p.finishedAt, deliveredAt: now });
       if (lock?.taskId === p.taskId) tx.delete(lockRef);
       return { taskId: task.taskId, state: 'cancelled', replyId: null, artifactId: null };
+    }
+    if (task.privateDataSource) {
+      if (p.text || p.document || p.readFiles || p.revises || p.outcome === 'declined') deny(403, 'DATA_PRIVATE_TASK');
+      tx.update(ref, { state: p.outcome, resultDigest, replyId: null, artifactId: null, usage: p.usage,
+        finishedAt: p.finishedAt, deliveredAt: now });
+      if (lock?.taskId === p.taskId) tx.delete(lockRef);
+      return { taskId: task.taskId, state: p.outcome, replyId: null, artifactId: null };
     }
     // An unasked run whose Chat no longer lets its Bot answer, or whose message was edited or recalled, ends the same way: nobody asked it,
     // so nothing is posted, and the Chat is free for its Bot again at once instead of when the run's deadline passes.

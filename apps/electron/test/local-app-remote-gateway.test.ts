@@ -78,6 +78,26 @@ test('single use fragment tickets, app origin isolation, owner revocation and ru
   } finally { await gateway.dispose(); }
 });
 
+test('remote Data dispatch uses the redeemed account identity', async () => {
+  const { port, gateway, adapter } = await setup();
+  try {
+    const opened = await session(gateway, port);
+    adapter.invoke = async (run, method, args, _signal, sessionId, boundOwner) => {
+      assert.equal(run.appId, id);
+      assert.equal(method, 'data.request');
+      assert.equal(args.accountUid, 'another-person');
+      assert.ok(sessionId);
+      return { accountUid: boundOwner.accountUid };
+    };
+    const result = await request(port, opened.host, '/__lingxi_remote_invoke', {
+      method: 'POST', cookie: opened.cookie, origin: 'https://' + opened.host,
+      body: JSON.stringify({ method: 'data.request', args: { accountUid: 'another-person' } }),
+    });
+    assert.equal(result.status, 200);
+    assert.equal(JSON.parse(result.body).result.accountUid, owner.accountUid);
+  } finally { await gateway.dispose(); }
+});
+
 test('bootstrap admission isolates anonymous bodies from authenticated control budget', async () => {
   const {port, gateway} = await setup(128);
   let held: ReturnType<typeof httpRequest> | undefined;

@@ -99,8 +99,10 @@ const payloads = {
   // A message that asks Bots, carries files, or both. A message with neither is an ordinary message and is not sent here.
   submit: z.object({ ...thread, messageId: executionId, changeId: executionId, text: z.string().refine(value => Buffer.byteLength(value, 'utf8') <= 8192),
     targets: z.array(executionId).max(8).refine(unique), replyTo: executionId.optional(),
+    privateDataSource: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/u).optional(),
     attachments: z.array(executionId).min(1).max(attachmentLimits.messageFiles).refine(unique).optional() }).strict()
-    .refine(value => value.targets.length > 0 || value.attachments !== undefined).refine(value => value.text.length > 0 || value.attachments !== undefined),
+    .refine(value => value.targets.length > 0 || value.attachments !== undefined).refine(value => value.text.length > 0 || value.attachments !== undefined)
+    .refine(value => !value.privateDataSource || (value.targets.length === 1 && !value.replyTo && !value.attachments)),
   // Files in a message (detailed design 19): uploaded for one Chat in parts of at most 700 KiB, checked as a whole, then carried by a message.
   createUpload: z.object({ ...thread, uploadId: executionId, name: fileName, mime: z.enum(attachmentTypes),
     byteLength: z.number().int().min(1).max(attachmentLimits.fileBytes), sha256: digest }).strict(),
@@ -110,10 +112,10 @@ const payloads = {
   readAttachmentPart: z.object({ attachmentId: executionId, index: partIndex }).strict(),
   revokeAttachment: z.object({ attachmentId: executionId, changeId: executionId }).strict(),
   listHostTasks: z.object({ ...host, after: executionId.optional() }).strict(),
-  startTask: z.object({ ...host, ...task, expectedLastChangeSeq: cursor, permitNonce: permitNonce.optional() }).strict(),
+  startTask: z.object({ ...host, ...task, expectedLastChangeSeq: cursor, permitNonce: permitNonce.optional(), privateData: z.literal(true).optional() }).strict(),
   prepareTask: z.object({ ...host, ...task }).strict(),
   validateTask: z.object({ ...host, ...task, permitId: executionId, expectedLastChangeSeq: cursor }).strict(),
-  completeTask: z.object({ ...host, ...task, permitId: executionId,
+  completeTask: z.object({ ...host, ...task, permitId: executionId, privateData: z.literal(true).optional(),
     // `declined`: the Bot of an optional task chose not to answer. Nothing is posted, so there is no text or document.
     outcome: z.enum(['completed', 'failed', 'declined']), text: replyText, finishedAt: cursor,
     inputGrantIds: grantIds, outputAudience,
@@ -128,8 +130,8 @@ const payloads = {
         costMicros: cursor.optional(), currency: z.string().length(3).optional() }).strict(),
     ]),
   }).strict().refine(value => !value.revises || value.document, 'A revision needs its document')
-    .refine(value => value.outcome === 'declined' ? value.text === '' && !value.document && !value.readFiles : value.text.length > 0,
-      'Only a declined run has no reply'),
+    .refine(value => value.privateData || value.outcome === 'declined' ? value.text === '' && !value.document && !value.readFiles : value.text.length > 0,
+      'Only a private or declined run has no reply'),
   // The host leaves an optional task unanswered before any model runs: its triage said no, or a later message of the
   // same Chat superseded it.
   declineTask: z.object({ ...host, ...task, reason: z.enum(['triage', 'superseded', 'revoked']) }).strict(),

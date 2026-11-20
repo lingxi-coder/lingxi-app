@@ -174,6 +174,7 @@ struct StreamUnreadDivider: View {
 struct TeamMessageCell: View {
     @Environment(\.locale) private var locale
     @ScaledMetric(relativeTo: .body) private var percent: CGFloat = 100
+    @State private var openedData: TeamDataRef?
     let message: TeamMessage
     let grouped: Bool
     let context: TeamConversationContext
@@ -216,6 +217,9 @@ struct TeamMessageCell: View {
         .padding(.horizontal, 12)
         .padding(.top, grouped ? 1 : 8)
         .padding(.bottom, 1)
+        .sheet(item: $openedData) { reference in
+            TeamDataRecordSheet(reference: reference, conversationId: context.conversation.id, model: context.model)
+        }
         .frame(maxWidth: 832)
         .frame(maxWidth: .infinity)
         .contextMenu {
@@ -241,6 +245,12 @@ struct TeamMessageCell: View {
             GridRow { words(identity, name: name, clock: clock) }
             if !message.files.isEmpty {
                 GridRow { TeamMessageFilesView(message: message, context: context) }
+            }
+            if !recalled, let reference = message.dataRef, reference.valid {
+                GridRow {
+                    Button("Open data record") { openedData = reference }
+                        .accessibilityIdentifier("teams.message.data.\(message.id)")
+                }
             }
             if !recalled, let read = message.readFiles, !read.isEmpty {
                 GridRow {
@@ -463,5 +473,188 @@ struct TeamOutboxCell: View {
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.outbox.\(intent.id)")
+    }
+}
+private struct TeamDataRecordSheet: View {
+    private struct Save: Identifiable {
+        let id = UUID()
+        let text: String
+        let operation: String
+    }
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var savedReference: TeamDataRef?
+    @State private var content = ""
+    @State private var fields: [String: String] = [:]
+    @State private var views: [TeamDataTemplateView] = []
+    @State private var selectedView = ""
+    @State private var editable = false
+    @State private var editing = false
+    @State private var loaded = false
+    @State private var error: String?
+    @State private var save: Save?
+    @State private var lastAttempt: Save?
+    @State private var conflict = false
+    @State private var reloading: UUID?
+    let reference: TeamDataRef
+    let conversationId: String
+    let model: TeamMessagingModel
+
+    private var currentReference: TeamDataRef { savedReference ?? reference }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let error { Text(error).foregroundStyle(.red) }
+                if conflict {
+                    Button("Load latest revision") { reloading = UUID() }.disabled(reloading != nil)
+                }
+                if loaded {
+                    if editing {
+                        TextEditor(text: $content)
+                            .font(.system(.body, design: .monospaced))
+                            .frame(minHeight: 160)
+                            .disabled(save != nil)
+                            .accessibilityLabel("Record JSON")
+                            .accessibilityIdentifier("teams.data.editor")
+                    } else {
+                        if !views.isEmpty {
+                            Picker("View", selection: $selectedView) {
+                                Text("Record JSON").tag("")
+                                ForEach(views, id: \.view) { view in Text(verbatim: view.view).tag(view.view) }
+                            }
+                            .accessibilityIdentifier("teams.data.view")
+                        }
+                        if let view = views.first(where: { $0.view == selectedView }) {
+                            ForEach(view.definition.nodes.indices, id: \.self) { index in
+                                TeamDataTemplateNodeView(node: view.definition.nodes[index], fields: fields, depth: 0)
+                            }
+                        } else {
+                            Text(verbatim: content).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                        }
+                    }
+                } else if error == nil {
+                    ProgressView("Loading record")
+                }
+            }
+            .navigationTitle(currentReference.record)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }.accessibilityIdentifier("teams.data.close")
+                }
+                if editable && loaded {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button(editing ? "Save record" : "Edit") { activate() }.disabled(save != nil)
+                            .accessibilityIdentifier("teams.data.save")
+                    }
+                }
+            }
+            .task(id: currentReference) { await load() }
+            .task(id: save?.id) { if let save { await write(save) } }
+            .task(id: reloading) { if reloading != nil { await reload() } }
+        }
+    }
+
+    private func activate() {
+        guard editing else { editing = true; return }
+        let operation = lastAttempt?.text == content ? lastAttempt?.operation : nil
+        let intent = Save(text: content, operation: operation ?? UUID().uuidString)
+        lastAttempt = intent
+        save = intent
+    }
+
+    private func load() async {
+        loaded = false
+        content = ""
+        fields = [:]; views = []; selectedView = ""
+        do {
+            let record = try await model.dataRecord(conversationId: conversationId, reference: currentReference)
+            try Task.checkCancellation()
+            content = record.value; fields = record.fields; views = record.views
+            editable = record.editable; loaded = true; error = nil
+        } catch where !Task.isCancelled {
+            self.error = String(localized: "The record is unavailable or its access has changed.")
+        } catch {}
+    }
+
+    private func write(_ intent: Save) async {
+        defer { save = nil }
+        guard let value = (try? JSONSerialization.jsonObject(with: Data(intent.text.utf8))) as? [String: Any] else {
+            error = String(localized: "Enter a valid JSON object.")
+            return
+        }
+        conflict = false
+        do {
+            let written = try await model.writeDataRecord(conversationId: conversationId, reference: currentReference,
+                                                          value: value, operation: intent.operation)
+            try Task.checkCancellation()
+            savedReference = written; editing = false; error = nil; lastAttempt = nil
+        } catch where !Task.isCancelled {
+            showFailure(error)
+        } catch {}
+    }
+
+    private func reload() async {
+        defer { reloading = nil }
+        do {
+            let latest = try await model.latestDataRecord(conversationId: conversationId, reference: currentReference)
+            try Task.checkCancellation()
+            guard latest != currentReference else { return }
+            conflict = false; editing = false; lastAttempt = nil; error = nil
+            savedReference = latest
+        } catch where !Task.isCancelled {
+            showFailure(error)
+        } catch {}
+    }
+
+    private func showFailure(_ failure: Error) {
+        let code = (failure as? TeamMessageFailure)?.code ?? ""
+        if ["DATA_ACCESS_REQUIRED", "INVALID_SESSION", "CONVERSATION_REQUIRED", "MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP"].contains(code) {
+            loaded = false; editable = false; editing = false; lastAttempt = nil
+            content = ""; fields = [:]; views = []; selectedView = ""
+        }
+        conflict = code == "DATA_CONFLICT"
+        error = conflict
+            ? String(localized: "The record has changed. Open the latest revision before saving.")
+            : String(localized: "The record is unavailable or its access has changed.")
+    }
+}
+
+private struct TeamDataTemplateNodeView: View {
+    let node: TeamDataTemplateView.Node
+    let fields: [String: String]
+    let depth: Int
+    var emphasis = ""
+
+    var body: some View {
+        if depth <= 10 {
+            switch node.kind {
+            case "text":
+                label(node.text ?? "")
+            case "field":
+                label(fields[node.field ?? ""] ?? "—")
+            case "element":
+                if let tag = node.tag, let children = node.children,
+                   ["section", "div", "h3", "p", "span", "strong", "small", "ul", "li"].contains(tag) {
+                    let emphasis = tag == "h3" || tag == "strong" ? tag : emphasis
+                    let horizontal = node.style?["display"] == "flex" && node.style?["flexDirection"] != "column"
+                    let layout = horizontal ? AnyLayout(HStackLayout()) : AnyLayout(VStackLayout(alignment: .leading))
+                    layout {
+                        ForEach(children.indices, id: \.self) { index in
+                            TeamDataTemplateNodeView(node: children[index], fields: fields, depth: depth + 1, emphasis: emphasis)
+                        }
+                    }
+                }
+            default:
+                EmptyView()
+            }
+        }
+    }
+
+    private func label(_ text: String) -> some View {
+        Text(verbatim: text)
+            .font(emphasis == "h3" ? .headline : .body)
+            .fontWeight(emphasis == "strong" ? .bold : nil)
+            .textSelection(.enabled)
     }
 }

@@ -75,6 +75,18 @@ struct LingxiCodeApp: App {
     }
 
     @ViewBuilder private var normalRoot: some View {
+        #if DEBUG && targetEnvironment(simulator)
+        if let staging = LingxiDataStagingConfiguration.current {
+            LingxiDataStagingView(configuration: staging)
+        } else {
+            conversationRoot
+        }
+        #else
+        conversationRoot
+        #endif
+    }
+
+    @ViewBuilder private var conversationRoot: some View {
         #if canImport(harness_runtimeFFI)
                 RootView(
                     voiceCapability: voice,

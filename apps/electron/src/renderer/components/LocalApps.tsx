@@ -1,5 +1,6 @@
 import { ErrorBanner } from './ErrorBanner';
 import { Icon } from './Icon';
+import { LocalAppDataSettings } from './LocalAppDataSettings';
 import { LocalAppPublish } from './LocalAppPublish';
 import { desktopHost } from '../bridge/bridgeConnection';
 import { localAppErrorMessage } from '../bridge/localAppErrors';
@@ -122,6 +123,8 @@ export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop 
       <h3>Versions</h3><p>Switching code keeps application data. Data format changes require a verified migration.</p>
       {versions.map(version => { const app = apps.find(a => a.id === selected); return <div key={version.revision} className="local-app-actions"><span>v{version.revision} · {new Date(version.createdAtMs).toLocaleString(locale)}{app?.currentRevision === version.revision ? ' · Current' : ''}</span><button disabled={busy === selected || !app || app.currentRevision === undefined || app.currentRevision === version.revision} onClick={() => app?.currentRevision !== undefined && void act(selected, () => appsApi().useVersion(selected, version.revision, app.currentRevision!))}>Use version</button></div>; })}
       <h3>Permissions</h3><p>{apps.find(a => a.id === selected)?.grants.join(', ') || 'No capabilities granted for the latest release.'}</p>
+      {apps.filter(app => app.id === selected && Object.keys(app.manifest.dataBindings ?? {}).length > 0).map(app =>
+        <LocalAppDataSettings key={app.id + ':' + app.revision} app={app} api={appsApi()}/>)}
       <h3>{tr('desktop_logs')}</h3><pre>{logs.length ? logs.map(l => `[${new Date(l.time).toLocaleTimeString(locale)}] ${l.process}: ${l.text}`).join('\n') : tr('desktop_apps_log_empty')}</pre></aside>}
     {publication && <LocalAppPublish key={publication.id} app={publication} canDevelop={canDevelop} onClose={() => setPublication(undefined)}/>}
     {agentSettings && apps.find(app => app.id === agentSettings) && <LocalAppAgentSettingsDialog key={agentSettings} app={apps.find(app => app.id === agentSettings)!} onClose={() => setAgentSettings(null)} onSaved={() => void refresh()}/>}

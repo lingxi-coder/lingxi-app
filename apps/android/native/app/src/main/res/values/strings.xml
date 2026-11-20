@@ -3213,4 +3213,12 @@
     <string name="teams_share_bot_note">每个人打开后进入自己与这个 Bot 的对话</string>
     <string name="teams_share_text_fmt">在灵犀中打开「%1$s」</string>
     <string name="teams_link_unavailable">无法打开这个对话：你可能不在它所在的团队中，或者它已不再共享。</string>
+    <string name="teams_data_open">打开数据记录</string>
+    <string name="teams_data_json">记录 JSON</string>
+    <string name="teams_data_loading">正在读取记录…</string>
+    <string name="teams_data_unavailable">记录不可用或权限已更改。</string>
+    <string name="teams_data_invalid">请输入有效的 JSON 对象。</string>
+    <string name="teams_data_conflict">记录已有更新。请打开最新修订后再保存。</string>
+    <string name="teams_data_save">保存记录</string>
+    <string name="teams_data_latest">读取最新修订</string>
 </resources>

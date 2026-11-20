@@ -17,7 +17,7 @@ final class TeamMessageRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchec
 @MainActor @Observable
 final class TeamMessagingModel {
     static let conversationFields: Set<String> = ["kind", "title", "participants", "lastSeq", "lastChangeSeq", "lastMessage", "sharedBotId", "autoReply"]
-    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "targets", "taskId", "taskIds", "artifactId", "waitId", "approval", "decision"]
+    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "targets", "taskId", "taskIds", "artifactId", "waitId", "approval", "decision", "dataRef"]
     private(set) var cache: TeamMessageProjection?
     private(set) var offline = true
     private(set) var error = ""
@@ -738,23 +738,90 @@ final class TeamMessagingModel {
         try await call(["schemaVersion": 1, "commandId": commandId, "action": action, "payload": payload], life: life, timeout: timeout)
     }
     private func call<T: Decodable>(_ body: [String: Any], life: Int, timeout: TimeInterval = 20) async throws -> T {
+        try JSONDecoder().decode(T.self, from: await response(body, life: life, timeout: timeout))
+    }
+
+    func dataRecord(conversationId: String, reference: TeamDataRef) async throws -> (value: String, fields: [String: String], editable: Bool, views: [TeamDataTemplateView]) {
+        let data = try await dataCommand(conversationId: conversationId, command: ["action": "get", "reference": reference.body])
+        guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let confirmation = result["reference"] as? [String: Any],
+              try JSONDecoder().decode(TeamDataRef.self, from: JSONSerialization.data(withJSONObject: confirmation)) == reference,
+              let record = result["record"] as? [String: Any], let value = record["value"] as? [String: Any] else {
+            throw TeamMessageFailure(code: "INVALID_DATA")
+        }
+        let datasets = try await dataCommand(conversationId: conversationId, command: ["action": "datasets"])
+        let access = (try JSONSerialization.jsonObject(with: datasets) as? [String: Any])?["datasets"] as? [[String: Any]]
+        let editable = record["archived"] as? Bool != true && access?.contains {
+            $0["dataset"] as? String == reference.dataset && ["manage", "edit"].contains($0["access"] as? String ?? "")
+        } == true
+        let views: [TeamDataTemplateView]
+        do {
+            let layouts = try await dataCommand(conversationId: conversationId, command: ["action": "templateViews", "dataset": reference.dataset])
+            views = try JSONDecoder().decode(TeamDataTemplateList.self, from: layouts).views
+                .filter { $0.schemaVersion == reference.schemaVersion && $0.definition.version == 1 }
+        } catch let failure as TeamMessageFailure where failure.code == "INVALID_DATA_REQUEST" {
+            views = []
+        }
+        let fields = try value.mapValues { field in
+            if let text = field as? String { return text }
+            let json = try JSONSerialization.data(withJSONObject: field, options: [.fragmentsAllowed, .sortedKeys])
+            return String(decoding: json, as: UTF8.self)
+        }
+        return (String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]), as: UTF8.self),
+                fields, editable, views)
+    }
+
+    func writeDataRecord(conversationId: String, reference: TeamDataRef, value: [String: Any], operation: String) async throws -> TeamDataRef {
+        let data = try await dataCommand(conversationId: conversationId, command: ["action": "put", "dataset": reference.dataset,
+            "record": reference.record, "schemaVersion": reference.schemaVersion, "expectedRevision": reference.revision,
+            "value": value], operation: operation)
+        let written = try JSONDecoder().decode(TeamDataRef.self, from: data)
+        guard written.valid, written.dataset == reference.dataset, written.record == reference.record else {
+            throw TeamMessageFailure(code: "INVALID_DATA")
+        }
+        return written
+    }
+
+    func latestDataRecord(conversationId: String, reference: TeamDataRef) async throws -> TeamDataRef {
+        let data = try await dataCommand(conversationId: conversationId, command: ["action": "latest", "dataset": reference.dataset, "record": reference.record])
+        let latest = try JSONDecoder().decode(TeamDataRef.self, from: data)
+        guard latest.valid, latest.dataset == reference.dataset, latest.record == reference.record else {
+            throw TeamMessageFailure(code: "INVALID_DATA")
+        }
+        return latest
+    }
+
+    private func dataCommand(conversationId: String, command: [String: Any], operation: String? = nil) async throws -> Data {
+        var body: [String: Any] = ["command": command]
+        if let operation { body["operation"] = operation }
+        return try await response(body, life: lifecycle, dataConversation: conversationId)
+    }
+
+    private func response(_ body: [String: Any], life: Int, timeout: TimeInterval = 20, dataConversation: String? = nil) async throws -> Data {
         guard active, life == lifecycle, let user = auth.currentUser, user.uid == uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
         let token = try await user.getIDToken()
         guard active, life == lifecycle, auth.currentUser?.uid == uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
-        var body = body; body["teamId"] = teamId; body["generation"] = generation
+        var body = body
+        if let dataConversation {
+            guard dataConversation == selected else { throw TeamMessageFailure(code: "CONVERSATION_REQUIRED") }
+            body["scope"] = ["kind": "team", "teamId": teamId, "generation": generation, "conversationId": dataConversation]
+        } else {
+            body["teamId"] = teamId; body["generation"] = generation
+        }
         if body["schemaVersion"] != nil { try TeamExecutionContract.validate(body) }
-        var request = URLRequest(url: apiRoot)
+        var request = URLRequest(url: dataConversation == nil ? apiRoot : apiRoot.deletingLastPathComponent().appendingPathComponent("data"))
         request.httpMethod = "POST"; request.timeoutInterval = timeout; request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, response) = try await session.data(for: request)
         guard active, life == lifecycle, auth.currentUser?.uid == uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
+        if let dataConversation, dataConversation != selected { throw TeamMessageFailure(code: "CONVERSATION_REQUIRED") }
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             let code = (object?["error"] as? [String: Any])?["code"] as? String ?? "SERVICE_UNAVAILABLE"
             if ["MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP", "INVALID_SESSION", "SIGN_IN_REQUIRED", "CONVERSATION_REQUIRED"].contains(code) { invalidate() }
             throw TeamMessageFailure(code: code)
         }
-        return try JSONDecoder().decode(T.self, from: data)
+        return data
     }
 }

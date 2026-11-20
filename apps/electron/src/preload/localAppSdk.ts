@@ -481,6 +481,7 @@ const localAppBootstrap = String.raw`(() => {
     value: Object.freeze({
       info: () => bridge.info(),
       agent,
+      data: Object.freeze({request: (binding, command, operation) => bridge.data(binding, command, operation)}),
       clipboard: Object.freeze({read: () => bridge.clipboard.read(), write: text => bridge.clipboard.write(text)}),
       notify: body => bridge.notify(body),
       process: Object.freeze({exec: command => bridge.process.exec(command)}),
@@ -518,6 +519,7 @@ const remoteBridge = String.raw`(() => {
   const chat = (method, args) => invoke('agent.chats.' + method, args);
   window.__lingxiLocalAppBridge = Object.freeze({
     info: () => invoke('info'),
+    data: (binding, command, operation) => invoke('data.request', {binding, command, operation}),
     clipboard: Object.freeze({read: async () => { await invoke('capability.clipboard'); return navigator.clipboard.readText(); }, write: async text => { await invoke('capability.clipboard'); return navigator.clipboard.writeText(text); }}),
     notify: unsupported, process: Object.freeze({exec: unsupported}),
     files: Object.freeze({

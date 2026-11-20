@@ -1,3 +1,4 @@
+import { parseDataRef, type DataRef } from './lingxi-data.js';
 import { isMemberExecutionCommand } from './execution-validation.js';
 import { executionCommand, type MemberExecutionCommand } from './execution.js';
 import { ATTACHMENT_MESSAGE_FILES, type MessageAttachment } from './attachments.js';
@@ -34,12 +35,13 @@ export interface TeamMessage {
   mentions?: string[];
   /** Files the message carries, in the order they were added. */
   attachments?: MessageAttachment[];
+  dataRef?: DataRef;
   /** On a Bot's reply: the files of this conversation its model was given, as the service checked them. */
   readFiles?: { attachmentId: string; name: string }[];
 }
 export interface MessageScope { teamId: string; generation: number }
 export type MessageMutation = MessageScope & { action: 'mutate'; conversationId: string; messageId: string; changeId: string;
-  operation: 'create' | 'edit' | 'recall'; text: string; replyTo?: string };
+  operation: 'create' | 'edit' | 'recall'; text: string; replyTo?: string; dataRef?: DataRef };
 export type MessageCommand = MessageMutation | MemberExecutionCommand
   | MessageScope & { action: 'create'; conversationId: string; kind: TeamConversation['kind']; title: string; participantUids: string[];  }
   | MessageScope & { action:'history';conversationId:string;before?:number }
@@ -138,7 +140,7 @@ function failedCommand<T extends CommandMetadata>(intent: T, error: unknown, per
 /** Server verdicts that end an answer to a Bot's question for good: the wait is over, is not the viewer's, or the task lost its authority. */
 export const ANSWER_REFUSED = ['WAIT_CLOSED', 'WAIT_RECIPIENT_REQUIRED', 'WAIT_REQUIRED', 'TASK_REVOKED'];
 const isRevokedAccessError = (error: unknown) => error instanceof Error && ['MEMBERSHIP_REQUIRED', 'STALE_MEMBERSHIP', 'INVALID_SESSION', 'SIGN_IN_REQUIRED', 'CONVERSATION_REQUIRED'].includes(error.message);
-const isPermanentMessageError = (error: unknown) => error instanceof Error && ['MESSAGE_ID_CONFLICT', 'MESSAGE_RECALLED', 'MESSAGE_AUTHOR_REQUIRED', 'REPLY_REQUIRED', 'INVALID_INPUT', 'BOT_USE_REQUIRED', 'BOT_PARTICIPANT_REQUIRED', 'INVALID_BOT_TARGET', 'HOST_UNAVAILABLE', 'REQUEST_QUOTA_EXCEEDED', 'CONVERSATION_POLICY_REQUIRED', 'INPUT_GRANT_REQUIRED', 'BOT_RETIRED', 'COMMAND_ID_CONFLICT', ...ANSWER_REFUSED].includes(error.message);
+const isPermanentMessageError = (error: unknown) => error instanceof Error && ['MESSAGE_ID_CONFLICT', 'DATA_REFERENCE_UNAVAILABLE', 'DATA_ACCESS_REQUIRED', 'DATA_NOT_FOUND', 'MESSAGE_RECALLED', 'MESSAGE_AUTHOR_REQUIRED', 'REPLY_REQUIRED', 'INVALID_INPUT', 'BOT_USE_REQUIRED', 'BOT_PARTICIPANT_REQUIRED', 'INVALID_BOT_TARGET', 'HOST_UNAVAILABLE', 'REQUEST_QUOTA_EXCEEDED', 'CONVERSATION_POLICY_REQUIRED', 'INPUT_GRANT_REQUIRED', 'BOT_RETIRED', 'COMMAND_ID_CONFLICT', ...ANSWER_REFUSED].includes(error.message);
 /** Persist command identities before transport; Firestore owns message history. */
 export class TeamMessaging {
   state: MessageProjection;
@@ -302,7 +304,7 @@ export class TeamMessaging {
     return conversationId;
   }
   /** `attachments`: checked uploads of this sender for the open conversation. A new message may be files alone. */
-  async queue(operation: MessageMutation['operation'], text: string, messageId: string = crypto.randomUUID(), replyTo?: string, targets: string[] = [], attachments: string[] = []) {
+  async queue(operation: MessageMutation['operation'], text: string, messageId: string = crypto.randomUUID(), replyTo?: string, targets: string[] = [], attachments: string[] = [], dataRef?: DataRef, privateDataSource?: string) {
     if (this.closed || !this.selected || (operation !== 'recall' && ((!text.trim() && !attachments.length) || new TextEncoder().encode(text).length > 8192))) throw new Error('INVALID_INPUT');
     if (operation !== 'create' && (targets.length || attachments.length)) throw new Error('INVALID_BOT_TARGET');
     if (attachments.length > ATTACHMENT_MESSAGE_FILES || new Set(attachments).size !== attachments.length) throw new Error('ATTACHMENT_LIMIT');
@@ -310,12 +312,16 @@ export class TeamMessaging {
     const conversation = this.state.conversations.find(value => value.id === this.selected);
     const selectedTargets = targets.length ? targets : operation === 'create' && conversation?.kind === 'bot_dm'
       ? conversation.participants.filter(value => value.startsWith('shared_bot:')).map(value => value.slice(11)) : [];
+    if (dataRef && (!parseDataRef(dataRef) || operation !== 'create' || selectedTargets.length || attachments.length)) throw new Error('INVALID_INPUT');
+    if (privateDataSource && (!/^[A-Za-z0-9_-]{1,64}$/u.test(privateDataSource)
+      || operation !== 'create' || replyTo || selectedTargets.length !== 1 || attachments.length || dataRef)) throw new Error('INVALID_INPUT');
     const changeId = crypto.randomUUID();
     // Files alone carry no text: surrounding spaces are not a message.
     const command: OutboxCommand = operation === 'create' && (selectedTargets.length || attachments.length)
       ? executionCommand(this.scope, 'submit', { conversationId: this.selected, messageId, changeId, text: text.trim() ? text : '', targets: [...selectedTargets],
-        ...(replyTo ? { replyTo } : {}), ...(attachments.length ? { attachments: [...attachments] } : {}) })
-      : { action: 'mutate', ...this.scope, conversationId: this.selected, messageId, changeId, operation, text, ...(replyTo ? { replyTo } : {}) };
+        ...(replyTo ? { replyTo } : {}), ...(attachments.length ? { attachments: [...attachments] } : {}),
+        ...(privateDataSource ? { privateDataSource } : {}) })
+      : { action: 'mutate', ...this.scope, conversationId: this.selected, messageId, changeId, operation, text, ...(replyTo ? { replyTo } : {}), ...(dataRef ? { dataRef } : {}) };
     await this.commit(old => ({ ...old, outbox: [...old.outbox, { command }] }));
     void this.refresh();
   }

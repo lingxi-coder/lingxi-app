@@ -75,6 +75,22 @@ struct TeamWaitDecision: Decodable, Equatable, Sendable {
         approved = raw == "approve" ? true : raw == "deny" ? false : nil
     }
 }
+struct TeamDataRef: Decodable, Equatable, Identifiable, Sendable {
+    let dataset: String
+    let record: String
+    let revision: Int
+    let schemaVersion: Int
+    var id: String { "\(dataset)/\(record)/\(revision)/\(schemaVersion)" }
+    var valid: Bool {
+        let pattern = "^[A-Za-z0-9_-]{1,64}$"
+        return dataset.range(of: pattern, options: .regularExpression) != nil
+            && record.range(of: pattern, options: .regularExpression) != nil
+            && (1...9_007_199_254_740_991).contains(revision)
+            && (1...9_007_199_254_740_991).contains(schemaVersion)
+    }
+    var body: [String: Any] { ["dataset": dataset, "record": record, "revision": revision, "schemaVersion": schemaVersion] }
+}
+
 struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
     struct Author: Decodable, Equatable, Sendable {
         let kind: String; let uid: String; let sharedBotId: String?; let displayName: String?
@@ -117,6 +133,7 @@ struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
     var attachments: [TeamMessageAttachment]? = nil
     /// On a Bot's reply: the files of this conversation its model was given.
     var readFiles: [TeamReadFile]? = nil
+    var dataRef: TeamDataRef? = nil
     /// The files to show: none on a recalled message.
     var files: [TeamMessageAttachment] { recalled == true ? [] : attachments ?? [] }
     /// The request to show under this message, if it is one a Bot made and it can be read.
@@ -258,4 +275,27 @@ actor TeamCommandFiles {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         return value
     }
+}
+struct TeamDataTemplateList: Decodable {
+    let views: [TeamDataTemplateView]
+}
+
+struct TeamDataTemplateView: Decodable {
+    struct Definition: Decodable {
+        let version: Int
+        let nodes: [Node]
+    }
+
+    struct Node: Decodable {
+        let kind: String
+        let text: String?
+        let field: String?
+        let tag: String?
+        let style: [String: String]?
+        let children: [Node]?
+    }
+
+    let view: String
+    let schemaVersion: Int
+    let definition: Definition
 }

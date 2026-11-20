@@ -140,7 +140,16 @@ export function parseManifest(value: unknown): DesktopAppManifest {
     return t as unknown as LocalAppTarget;
   });
   if (Object.keys(mcpServers).length && targets.some(t => !['macos', 'windows', 'linux'].includes(t.platform) || t.environment !== 'native')) throw new Error('MCP servers require Desktop native targets');
-  return { schema: 2, targets, ...(agent ? { agent } : {}),
+  const dataBindings: NonNullable<DesktopAppManifest['dataBindings']> = Object.create(null);
+  if (v.dataBindings !== undefined) {
+    const bindings = Object.entries(object(v.dataBindings));
+    if (bindings.length > 16) throw new Error('At most 16 data bindings are supported');
+    for (const [alias, access] of bindings) {
+      if (!/^[A-Za-z0-9_-]{1,64}$/u.test(alias) || (access !== 'read' && access !== 'edit')) throw new Error('Invalid data binding declaration');
+      dataBindings[alias] = access;
+    }
+  }
+  return { schema: 2, targets, ...(Object.keys(dataBindings).length ? { dataBindings } : {}), ...(agent ? { agent } : {}),
     ...(v.dataSchema ? { dataSchema: v.dataSchema as DesktopAppManifest['dataSchema'] } : {}),
     ...(v.remix ? { remix: v.remix as DesktopAppManifest['remix'] } : {}),
     ...(v.package ? { package: v.package as DesktopAppManifest['package'] } : {}), name: text(v.name, 'application name', 60), summary: typeof v.summary === 'string' ? v.summary.slice(0, 160) : '',

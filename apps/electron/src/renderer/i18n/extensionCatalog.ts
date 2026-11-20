@@ -1077,6 +1077,13 @@ export const extensionCatalog: Record<string, Record<string, string>> = {
     "ja": "開発",
     "ko": "개발"
   },
+  "desktop_extension_category_database": {
+    "zh-Hans": "数据库",
+    "zh-Hant": "資料庫",
+    "en": "Database",
+    "ja": "データベース",
+    "ko": "데이터베이스"
+  },
   "desktop_extension_category_productivity": {
     "zh-Hans": "效率",
     "zh-Hant": "效率",

@@ -8,7 +8,7 @@ export interface PublicExtensionItem {
   kind: 'mcp' | 'plugin';
   name: string;
   publisher: string;
-  category: 'browser' | 'development' | 'productivity';
+  category: 'browser' | 'development' | 'database' | 'productivity';
   platforms: readonly PublicExtensionPlatform[];
   description: PublicExtensionText;
   requirements?: PublicExtensionText;

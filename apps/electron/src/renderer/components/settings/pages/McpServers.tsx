@@ -55,7 +55,7 @@ const MCP_SCOPE_DESCRIPTIONS: Record<WritableScopeDto, string> = {
 const MCP_SCOPE_VS_LAYERS_NOTE = 'mcp_scope_vs_layers_note';
 
 const DESKTOP_PLATFORMS = new Set(['macos', 'windows', 'linux']);
-const PUBLIC_MCP_CATEGORIES = ['browser', 'development', 'productivity'] as const;
+const PUBLIC_MCP_CATEGORIES = ['browser', 'development', 'database', 'productivity'] as const;
 const DEFAULT_MCP_CONFIG = { command: 'npx', args: ['-y', 'package-name'] };
 type PublicDirectoryText = (typeof publicExtensionItems)[number]['description'];
 type McpRuntimeStatusDto = McpStatusDto | 'connected' | 'disconnected';
@@ -68,6 +68,7 @@ function publicMcpCategoryLabel(category: string): string {
   const key = {
     browser: 'desktop_extension_category_browser',
     development: 'desktop_extension_category_development',
+    database: 'desktop_extension_category_database',
     productivity: 'desktop_extension_category_productivity',
   }[category];
   return key ? tr(key) : category;

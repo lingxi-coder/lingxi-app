@@ -93,6 +93,22 @@ final class PublicExtensionDirectoryTests: XCTestCase {
         XCTAssertEqual(plugin.marketplace?.plugin, "one")
     }
 
+    func testBundledDirectoryKeepsEveryIOSEntry() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        while !FileManager.default.fileExists(atPath: root.appendingPathComponent("resources/extensions/public-directory.json").path), root.path != "/" { root.deleteLastPathComponent() }
+        let url = Bundle.main.url(forResource: "public-directory", withExtension: "json") ?? root.appendingPathComponent("resources/extensions/public-directory.json")
+        let data = try Data(contentsOf: url)
+        let raw = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let expected = try XCTUnwrap(raw["items"] as? [[String: Any]])
+            .filter { ($0["platforms"] as? [String])?.contains("ios") == true }
+            .compactMap { $0["id"] as? String }
+
+        let directory = try XCTUnwrap(PublicExtensionDirectory.parse(data))
+        XCTAssertEqual(directory.items.map(\.id), expected)
+        XCTAssertTrue(directory.items.contains { $0.category == .database && $0.kind == .plugin })
+        XCTAssertTrue(directory.items.contains { $0.category == .database && $0.mcpName == "neon" })
+    }
+
     func testRejectsUnsupportedSchemaAndSkipsMalformedEntries() throws {
         XCTAssertNil(PublicExtensionDirectory.parse(Data(#"{"schemaVersion":2,"items":[]}"#.utf8)))
 

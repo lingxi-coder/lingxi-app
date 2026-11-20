@@ -9,6 +9,7 @@ enum PublicExtensionKind: String, Hashable {
 enum PublicExtensionCategory: String, CaseIterable, Identifiable, Hashable {
     case browser
     case development
+    case database
     case productivity
 
     var id: String { rawValue }
@@ -17,6 +18,7 @@ enum PublicExtensionCategory: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .browser: "public_extensions_category_browser"
         case .development: "public_extensions_category_development"
+        case .database: "public_extensions_category_database"
         case .productivity: "public_extensions_category_productivity"
         }
     }

@@ -20,6 +20,8 @@ import { FriendsPanel } from './components/FriendsPanel';
 // The Teams workspace's stylesheet (sidebar, page, panel and dialogs), imported once, here, as the package asks. Its rules are scoped to its own classes.
 import '../../../../packages/teams/styles';
 import { ChatTopbarTarget } from '../../../../packages/teams/ChatTopbar';
+import { PersonalChatData } from '../../../../packages/teams/PersonalChatData.js';
+import { DesktopDataSources } from './components/DesktopDataSources.js';
 import { useTeams } from './bridge/useTeams';
 import { useFriends } from './bridge/useFriends';
 import { useDesktopInbox, useAssistantInboxReading } from './bridge/useDesktopInbox';
@@ -765,6 +767,16 @@ export function App() {
   }, []);
 
   const hasChatTopbar = page === 'teams' || page === 'friends' || page === 'bots';
+  let lastChatReply: string | undefined;
+  if (page === 'chat' && !botChat && !appChat && !bridge.sessionLoading && !bridge.conversation.running
+    && bridge.activeSession?.sessionId === bridge.conversation.sessionKey) {
+    for (let index = bridge.conversation.items.length - 1; index >= 0; index -= 1) {
+      const item = bridge.conversation.items[index];
+      if (item?.type !== 'narration') continue;
+      if (item.role === 'user') break;
+      if (item.role === 'assistant') { lastChatReply = item.text; break; }
+    }
+  }
 
   const emptyMessage = bridge.sessionLoading
     ? tr('desktop_shell_loading_session')
@@ -852,6 +864,12 @@ export function App() {
               <div style={{ display: page === 'chat' && (sidebarMode === 'home' || sidebarMode === 'apps' || botChat) ? 'contents' : 'none' }}>
                 <BetaTopBar
                   bridge={bridge}
+                  dataActions={page === 'chat' && !botChat && !appChat && teams.workspace && teams.snapshot &&
+                    <div className="no-drag" style={teamsTheme} key={teams.snapshot.uid}>
+                      <PersonalChatData uid={teams.snapshot.uid} api={teams.workspace.api} teams={teams.snapshot.teams}
+                        locale={locale} chatReply={lastChatReply} />
+                      <DesktopDataSources uid={teams.snapshot.uid} api={teams.workspace.api} teams={teams.snapshot.teams} locale={locale} />
+                    </div>}
                   app={appChat ? { name: appWorkspace.activeGroup?.name ?? bridge.activeSession!.projectPath.split(/[\\/]+/).at(-1) ?? '', onOpen: showAppLibrary } : undefined}
                   bot={activeBotId !== undefined ? { botId: activeBotId, name: activeBot?.name ?? '', onOpen: () => openBot(activeBotId) } : undefined}
                   sideChatOpen={sideChats.open && Boolean(sideChats.selected)}

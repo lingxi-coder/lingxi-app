@@ -26,6 +26,7 @@ import { FriendsService } from './teams/friends.js';
 import { installFriendsIpc } from './teams/friendsIpc.js';
 import { TeamConnector } from './teams/connector.js';
 import { TeamPrivateStore } from './teams/privateStore.js';
+import { DesktopDataSources } from './teams/dataSources.js';
 import { resolveTeamBinaries } from './teams/process.js';
 import { accountSessionStore } from './account-storage.js';
 import { accountSessionDiagnosticScope, brokerAccountSessionStore } from './account-broker-storage.js';
@@ -868,8 +869,17 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   const stopInboxInvalidation = sessionCatalog.onInvalidated(() => inboxService?.invalidateLocal());
   // Friends listens in the Teams service's Firestore session, so it stops first.
   const stopFriendsIpc = installFriendsIpc(new FriendsService(account, teamsService), () => [...mainWindows]);
-  const stopTeamsIpc = installTeamsIpc(teamsService, () => [...mainWindows]);
-  stopTeams = () => { stopInboxInvalidation(); stopInboxAccount(); stopInboxIpc(); inboxService = null; stopFriendsIpc(); stopTeamsIpc(); };
+  const dataSources = new DesktopDataSources(account, teamsService, userData);
+  const stopTeamsIpc = installTeamsIpc(teamsService, () => [...mainWindows], dataSources);
+  stopTeams = () => {
+    stopInboxInvalidation();
+    stopInboxAccount();
+    stopInboxIpc();
+    inboxService = null;
+    dataSources.close();
+    stopFriendsIpc();
+    stopTeamsIpc();
+  };
   // Off unless the user (or, unpackaged, LINGXI_REMOTE_CONTROL=1) turns it on.
   const remoteDiagnostics = (level: 'info' | 'warn' | 'error', message: string): void => {
     diagnostics.add(level, 'host', `remote control: ${message}`);
@@ -1128,6 +1138,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       onRemoteAccessEnded: quitIfNothingNeedsTheApp,
       accountToken: () => account.getIdToken(),
       accountId: () => account.snapshot().user?.uid ?? undefined,
+      dataRequest: (input, uid) => teamsService.data(input, uid),
       currentConversationMode: () => host?.currentConversationMode(),
       core: new LocalAppCoreClient(resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }), productPaths.brandHome, message => diagnostics.add('warn', 'host', message)),
       resolveAuthoringBinding: async (_appId, session, source) => {

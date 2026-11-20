@@ -85,7 +85,8 @@ internal data class TeamMessage(val id: String, val seq: Long, val authorUid: St
     /** Files the message carries, in the order they were added. */
     val attachments: List<TeamMessageAttachment> = emptyList(),
     /** On a Bot's reply: the files of this conversation its model was given. */
-    val readFiles: List<TeamReadFile> = emptyList()) {
+    val readFiles: List<TeamReadFile> = emptyList(),
+    val dataRef: TeamDataRef? = null) {
     /** The files to show: none on a recalled message. */
     val files: List<TeamMessageAttachment> get() = if (recalled) emptyList() else attachments
     /** The request to show under this message, if it is one a Bot made. */
@@ -100,7 +101,7 @@ internal data class TeamMessage(val id: String, val seq: Long, val authorUid: St
             v.stringOrNull("taskId"), v.stringOrNull("artifactId"), v.optJSONArray("targets")?.strings() ?: emptyList(), v.stringOrNull("createdAt"), v.optJSONArray("taskIds")?.strings() ?: emptyList(), author.stringOrNull("displayName"), v.stringOrNull("waitId"),
             TeamListApproval.parse(v.opt("approval")), when (v.opt("decision")) { "approve" -> true; "deny" -> false; else -> null },
             if (v.has("attachments") && !v.isNull("attachments")) TeamMessageAttachment.list(v.optJSONArray("attachments") ?: throw TeamMessageFailure("INVALID_DATA")) else emptyList(),
-            TeamReadFile.list(v.optJSONArray("readFiles")))
+            TeamReadFile.list(v.optJSONArray("readFiles")), TeamDataRef.parse(v.optJSONObject("dataRef")))
     } }
 }
 internal data class TeamMessageThread(val messages: List<TeamMessage> = emptyList(), val hasEarlier: Boolean = false, val hasLater: Boolean = false)

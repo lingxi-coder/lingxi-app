@@ -29,6 +29,7 @@ export interface SavedGrantIntent {
  * Replaced in place as the task moves on: a new attempt, a question, an answer. */
 export interface SavedExecution { schemaVersion: 2; scope: BotChatScope; teamId: string; generation: number; taskId: string;
   grant?: SavedGrantIntent;
+  privateData?: { source: string; requesterUid: string };
   /** End of the current attempt's active budget. */ deadlineAt: number; commandId: string;
   /** Host fields, the current permit and the input grants: the base of every host command for the task. */ payload: Record<string, unknown>;
   /** Attempt number of the current permit: 1 after startTask, then one more per granted continueTask. */ epoch: number;
@@ -226,11 +227,39 @@ export class TeamPrivateStore {
     if (digest(text) !== key) throw new Error('INVALID_TEAM_SNAPSHOT');
     const value = JSON.parse(text) as TeamPersonaSnapshot; this.validateSnapshot(value); return value;
   }); }
+  async privateDataTask(uid: string, principal: { taskId: string; requesterUid: string; teamId: string; sharedBotId: string }): Promise<string> {
+    if (![principal.taskId, principal.teamId, principal.sharedBotId].every(value => /^[A-Za-z0-9_-]{8,64}$/u.test(value))
+      || !/^[A-Za-z0-9_-]{1,128}$/u.test(principal.requesterUid)) throw new Error('INVALID_PRIVATE_DATA_TASK');
+    const run = await directory(join(await directory(join((await this.owner(uid)).root, 'data-private')), principal.taskId));
+    const admission = join(run, 'admission.json');
+    const identity = JSON.stringify([1, uid, principal.requesterUid, principal.teamId, principal.sharedBotId, principal.taskId]);
+    try { await create(admission, identity); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    if (await read(admission, 2048) !== identity) throw new Error('INVALID_PRIVATE_DATA_TASK');
+    return run;
+  }
+
+  async privateDataInput(uid: string, principal: Parameters<TeamPrivateStore['privateDataTask']>[1], value: unknown): Promise<TeamDataRef> {
+    const run = await this.privateDataTask(uid, principal);
+    return this.writeDataRef(await directory(join(run, 'transport')), value);
+  }
+
+  async releasePrivateDataInput(uid: string, principal: Parameters<TeamPrivateStore['privateDataTask']>[1], reference: TeamDataRef): Promise<void> {
+    const run = await this.privateDataTask(uid, principal);
+    const root = await directory(join(run, 'transport'));
+    if (!this.transportPath(root, reference)) throw new Error('UNSAFE_TEAM_STORAGE');
+    await unlink(reference.path).catch(error => { if (error.code !== 'ENOENT') throw error; });
+  }
+
   /** Immutable, digest checked transport spool. Runtime journal remains the input authority. */
   async dataRef(uid: string, value: unknown): Promise<TeamDataRef> {
+    return this.writeDataRef((await this.owner(uid)).transport, value);
+  }
+
+  private async writeDataRef(root: string, value: unknown): Promise<TeamDataRef> {
     const text = JSON.stringify(value), sha256 = digest(text), bytes = Buffer.byteLength(text);
     if (bytes > 64 * 1024 * 1024) throw new Error('TEAM_INPUT_CAPACITY');
-    const path = join((await this.owner(uid)).transport, `${sha256}-${randomBytes(16).toString('hex')}`);
+    const path = join(root, `${sha256}-${randomBytes(16).toString('hex')}`);
     try { await create(path, text); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
     if (await read(path, bytes) !== text) throw new Error('UNSAFE_TEAM_STORAGE'); return { path, sha256, bytes };
   }

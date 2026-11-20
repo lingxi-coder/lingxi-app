@@ -47,14 +47,17 @@ try {
  const run=async(bootstrap:TeamHostBootstrap)=>{console.log(JSON.stringify({phase:bootstrap.type,root}));return runTeamHost({executable:host,home:paths.home,tmp:paths.tmp,bootstrap,signal:AbortSignal.timeout(310000),assertCurrent:()=>{},authorize:async()=>{authorizations++;}}).catch(error=>{console.error(JSON.stringify({failedPhase:bootstrap.type,authorizations,modelCalls:requests.length,httpRequests,headerNames,root,code:error.code??error.message}));throw error;});};
  let inspected=await run({...common,type:'inspect_scope'});assert.equal(inspected.cursor.sessionRevision,0);
  const input=(from:number,through:number)=>Array.from({length:through-from},(_,i)=>{const seq=from+i+1;return {messageId:`message${String(seq).padStart(6,'0')}`,seq,changeSeq:seq,changeId:`change${String(seq).padStart(6,'0')}`,author:{kind:'user',uid:seq%2?'member-one':'member-two',displayName:'Same name'},createdAt:1700000000000+seq,text:`Source ${seq}: ${'shared text '.repeat(64)}`};});
+ const launch: Pick<TeamHostBootstrap, 'model' | 'credentials'> = {
+   model:{model_provider:'anthropic',model_protocol:'anthropic_messages',model_id:'claude-sonnet-4-20250514',model_endpoint:endpoint,model_profile:profile},
+   credentials:{provider_account_home:configHome,provider_accounts:snapshot,provider_account_profiles:[profile],provider_account_credentials:{[account.accountId]:{credential_revision:1,identity_generation:account.identityGeneration,kind:{kind:'api_key',key:'synthetic-model-key'}}}},
+ };
  const results:TeamHostResult[]=[];const workerDurationsMs:number[]=[];
  for(const [index,to] of [200,650].entries()){
   const from=inspected.cursor.lastMessageSeq,taskId=`taskfixture0${index+1}`,messages=input(from,to);
   const batch=await privateStore.dataRef('fixture-owner',{schemaVersion:1,batchId:taskId,...scope,expectedSessionRevision:inspected.cursor.sessionRevision,fromSeqExclusive:from,toSeqInclusive:to,lastChangeSeq:to,bootstrap:index===0,currentMessageId:messages.at(-1)!.messageId,messages,changes:[]});
   const workerStarted=performance.now();
   const result=await run({...common,type:'run',taskId,invocationId:randomUUID(),instructions:'Use only published shared information. Answer briefly. Do not call tools.',inputBatchRef:batch,knowledge:[],deadlineAt:Date.now()+300000,
-   model:{model_provider:'anthropic',model_protocol:'anthropic_messages',model_id:'claude-sonnet-4-20250514',model_endpoint:endpoint,model_profile:profile},
-   credentials:{provider_account_home:configHome,provider_accounts:snapshot,provider_account_profiles:[profile],provider_account_credentials:{[account.accountId]:{credential_revision:1,identity_generation:account.identityGeneration,kind:{kind:'api_key',key:'synthetic-model-key'}}}},
+   ...launch,
    limits:{max_turns:2,context_window_tokens:2000000,output_tokens_per_request:64,physical_dispatches:2}});
   workerDurationsMs.push(Math.round(performance.now()-workerStarted));
   assert.equal(result.status,'completed');assert.equal(result.cursor.lastMessageSeq,to);results.push(result);await privateStore.releaseDataRef('fixture-owner',batch);
@@ -62,7 +65,26 @@ try {
   const recovered=await run({...common,type:'inspect_result',taskId});assert.equal(recovered.text,result.text);assert.equal(recovered.finishedAt,result.finishedAt);assert.equal(requests.length,index+1,'result observation must not call model');
  }
  assert.equal(requests.length,2);const modelInput=JSON.stringify(requests[1]);assert.ok(modelInput.includes('member-one')&&modelInput.includes('member-two'));assert.ok(modelInput.includes('1700000000650'));assert.ok(modelInput.includes('Fixture reply 1'));assert.ok(!modelInput.includes('OWNER_PRIVATE_SENTINEL_DO_NOT_COPY'));assert.ok(authorizations>=4);
+ const taskId='privatefixture01', requesterUid='fixture-requester';
+ const privateScope={...scope,conversationId:taskId};
+ const principal={taskId,requesterUid,teamId:scope.teamId,sharedBotId:scope.sharedBotId};
+ const storageRoot=await privateStore.privateDataTask('fixture-owner',principal);
+ const message={...input(0,1)[0]!,text:'PRIVATE_DATA_FIXTURE_SENTINEL',author:{kind:'user',uid:requesterUid,displayName:'Private requester'}};
+ const reference=await privateStore.privateDataInput('fixture-owner',principal,{schemaVersion:1,batchId:taskId,...privateScope,
+   expectedSessionRevision:0,fromSeqExclusive:0,toSeqInclusive:1,lastChangeSeq:1,bootstrap:true,currentMessageId:message.messageId,messages:[message],changes:[]});
+ const privateCommon={...common,scope:privateScope,storageRoot};
+ const privateResult=await run({...privateCommon,type:'run_private',taskId,invocationId:randomUUID(),instructions:'Return a short private draft.',
+   inputBatchRef:reference,knowledge:[],deadlineAt:Date.now()+45000,...launch,
+   limits:{max_turns:1,context_window_tokens:32768,output_tokens_per_request:64,physical_dispatches:1}});
+ assert.equal(privateResult.status,'completed');assert.ok(!('document' in privateResult));
+ assert.equal(requests.length,3);assert.ok(JSON.stringify(requests[2]).includes('PRIVATE_DATA_FIXTURE_SENTINEL'));
+ assert.equal(requests[2].tools?.length??0,0);
+ const recoveredPrivate=await run({...privateCommon,type:'inspect_result',taskId});
+ assert.equal(recoveredPrivate.status,'completed');
+ assert.equal((await run({...common,scope:privateScope,type:'inspect_result',taskId})).status,'not_found');
+ assert.equal(requests.length,3);
+ await privateStore.releasePrivateDataInput('fixture-owner',principal,reference);
  const hashes=binaryHashes();assert.deepEqual(hashes,initialHashes,'runtime binaries changed during validation');
- const receipt={schemaVersion:1,privateProtocol:3,executionVersion:2,root,hashes,modelCalls:requests.length,authorizations,sourceRows:[200,450],workerDurationsMs,taskDeadlineMs:300000,sessionRevisions:results.map(r=>r.cursor.sessionRevision),resultRecovery:'no new model dispatch',acceptance:'synthetic provider + actual isolated processes only'};
+ const receipt={schemaVersion:1,privateProtocol:3,executionVersion:2,root,hashes,modelCalls:requests.length,authorizations,sourceRows:[200,450],workerDurationsMs,taskDeadlineMs:300000,sessionRevisions:results.map(r=>r.cursor.sessionRevision),resultRecovery:'no new model dispatch',privateResultRecovery:true,acceptance:'synthetic provider + actual isolated processes only'};
  writeFileSync(join(root,'receipt.json'),JSON.stringify(receipt,null,2),{mode:0o600});console.log(JSON.stringify(receipt));
 }finally{model.closeAllConnections();await new Promise<void>(resolve=>model.close(()=>resolve()));}

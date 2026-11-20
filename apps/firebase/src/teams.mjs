@@ -1,3 +1,4 @@
+import { LingxiDataError } from './lingxi-data.mjs';
 import { FieldValue } from 'firebase-admin/firestore';
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
@@ -247,7 +248,7 @@ export class TeamsStore {
 }
 
 /** HTTP authorization is deliberately independent from owner-only Remote Control. */
-export function createTeamsHandler({ store, friends, inbox, verifyToken, createCustomToken, origins = [] }) {
+export function createTeamsHandler({ store, friends, inbox, data, verifyToken, createCustomToken, origins = [] }) {
   return async request => {
     const headers = new Headers({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
       'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', Vary: 'Origin' });
@@ -283,16 +284,17 @@ export function createTeamsHandler({ store, friends, inbox, verifyToken, createC
       if (friends && path === '/v1/friends/profile' && request.method === 'GET') return reply(await friends.profile(user));
       const detail = /^\/v1\/teams\/([A-Za-z0-9_-]{8,64})$/u.exec(path);
       if (detail && detail[1] !== 'session' && request.method === 'GET') return reply(await store.detail(user.uid, detail[1]));
-      if (request.method !== 'POST' || !['/v1/teams', '/v1/teams/session', '/v1/teams/messages', '/v1/services', ...(friends ? ['/v1/friends'] : [])].includes(path)) fail(404, 'NOT_FOUND');
+      if (request.method !== 'POST' || !['/v1/teams', '/v1/teams/session', '/v1/teams/messages', '/v1/services', ...(data ? ['/v1/teams/data'] : []), ...(friends ? ['/v1/friends'] : [])].includes(path)) fail(404, 'NOT_FOUND');
       const raw = await request.text();
-      if (Buffer.byteLength(raw) > (path === '/v1/teams/messages' ? 1048576 : 16384)) fail(413, 'REQUEST_TOO_LARGE');
+      if (Buffer.byteLength(raw) > (path === '/v1/teams/messages' ? 1048576 : path === '/v1/teams/data' ? 131072 : 16384)) fail(413, 'REQUEST_TOO_LARGE');
       let body;
       try { body = JSON.parse(raw); } catch { fail(400, 'INVALID_JSON'); }
       if (path === '/v1/teams/session') {
         z.object({}).strict().parse(body);
         return reply({ uid: user.uid, customToken: await createCustomToken(user.uid) });
       }
-      if (path === '/v1/teams/messages') return reply(await new TeamMessagesStore(store.db, store.clock).execute(user, body));
+      if (path === '/v1/teams/data') return reply(await data(user.uid, bearer[1], body));
+      if (path === '/v1/teams/messages') return reply(await new TeamMessagesStore(store.db, store.clock, data && (request => data(user.uid, bearer[1], request))).execute(user, body));
       // Hosted Bot services: the commands about a service itself. Its sessions use /v1/teams/messages with `serviceId`.
       if (path === '/v1/services') return reply(await new HostedBotServices(store.db, store.clock).execute(user, body));
       if (path === '/v1/friends') return reply(await friends.execute(user, body));
@@ -302,6 +304,7 @@ export function createTeamsHandler({ store, friends, inbox, verifyToken, createC
       if (error instanceof TeamMessageError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof SharedBotError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof HostedBotServiceError) return reply({ error: { code: error.code } }, error.status);
+      if (error instanceof LingxiDataError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof TeamsError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof TeamConversationError) return reply({ error: { code: error.code } }, error.status);
       return reply({ error: { code: 'SERVICE_UNAVAILABLE' } }, 503);

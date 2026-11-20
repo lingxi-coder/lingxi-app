@@ -1,17 +1,23 @@
 import { ipcMain, type BrowserWindow } from 'electron';
 import type { TeamsService } from './service.js';
+import type { DesktopDataSources } from './dataSources.js';
 
-export function installTeamsIpc(service: TeamsService, windows: () => readonly BrowserWindow[]): () => void {
+export function installTeamsIpc(service: TeamsService, windows: () => readonly BrowserWindow[], sources?: DesktopDataSources): () => void {
   const channel = 'lingxi:teams';
   const senders = new Map<number, () => void>();
   ipcMain.handle(channel, async (event, input: unknown) => {
-    if (!windows().some(target => event.sender === target.webContents && event.senderFrame === target.webContents.mainFrame)) throw new Error('Invalid sender');
+    const window = windows().find(target => event.sender === target.webContents && event.senderFrame === target.webContents.mainFrame);
+    if (!window) throw new Error('Invalid sender');
     if (!input || typeof input !== 'object') throw new Error('Invalid Team command');
     const command = input as Record<string, unknown>;
     if (typeof command.uid !== 'string' || !command.uid || command.uid.length > 128) throw new Error('Invalid account');
     try {
       let value: unknown;
       switch (command.type) {
+        case 'localDataSource':
+          if (!sources || !command.request || typeof command.request !== 'object') throw new Error('INVALID_INPUT');
+          value = await sources.execute(command.uid, command.request as Parameters<DesktopDataSources['execute']>[1], window);
+          break;
         case 'watchMessages':
         case 'unwatchMessages': {
           if (typeof command.leaseId !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/u.test(command.leaseId)) throw new Error('INVALID_INPUT');
@@ -66,6 +72,10 @@ export function installTeamsIpc(service: TeamsService, windows: () => readonly B
         case 'historyPage':
           value = await service.historyPage(command.uid,command.scope as Parameters<TeamsService['historyPage']>[1],
             command.conversationId as string, command.beforeSeq as number);
+          break;
+        case 'data':
+          if (!command.request || typeof command.request !== 'object') throw new Error('INVALID_INPUT');
+          value = await service.data(command.request as Parameters<TeamsService['data']>[0], command.uid);
           break;
         case 'messages':
           if (!command.command || typeof command.command !== 'object') throw new Error('INVALID_INPUT');

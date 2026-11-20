@@ -13,6 +13,9 @@ import { snippet } from './compose.js';
 import { Composer, composerLock } from './Composer';
 import { messageErrorText } from './errors.js';
 import { ApprovalCard } from './ApprovalCard';
+import { ConversationData } from './ConversationData.js';
+import { PrivatePreviewRequest } from './PrivatePreviewRequest.js';
+import { DataRecordButton } from './DataRecordButton.js';
 import { MessageFiles } from './MessageFiles';
 import type { MessageAttachment } from './attachments.js';
 import { executionCommand } from './execution.js';
@@ -312,6 +315,14 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
           disabled={snapshot.messageBusy || snapshot.offline} onClick={() => void workspace.markRead()}><Icon name="check" /><span>{t('tw_mark_as_read')}</span></button> : null}
         {link ? <ShareLinkButton link={link} title={label} locale={locale} note={conversation.kind === 'bot_dm' ? t('teams_share_bot_note') : undefined} /> : null}
         {friend?.actions}
+        {!friend && <ConversationData api={workspace.api} scope={{ kind: 'team', ...scope, conversationId: conversation.id }} locale={locale}
+          share={participant && !lock && !snapshot.offline && conversation.kind !== 'bot_dm'
+            ? (reference, text) => workspace.run(() => model.queue('create', text, undefined, undefined, [], [], reference))
+            : undefined}/>}
+        {!friend && participant && !lock && !snapshot.offline && <PrivatePreviewRequest key={conversation.id}
+          api={workspace.api} scope={{ kind: 'team', ...scope, conversationId: conversation.id }} locale={locale}
+          request={offer => workspace.run(() => model.queue('create', 'Private data preview requested.', undefined,
+            undefined, [offer.sharedBotId], [], undefined, offer.source))} />}
         {auto.bots.length ? <button type="button" className="tw-icon-btn" aria-pressed={auto.on.length > 0} aria-label={t('teams_auto_reply_title')} title={t('teams_auto_reply_title')} onClick={() => setAutoReplyOpen(true)}><Icon name="bot" /></button> : null}
         {onToggleDetails && !friend ? <button type="button" className="tw-icon-btn" aria-pressed={!!detailsOpen} aria-label={t('teams_team_details')} title={t('teams_team_details')} onClick={onToggleDetails}><Icon name="panel" /></button> : null}
       </div>
@@ -354,6 +365,9 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
               {mine && peerRead!==null && peerRead>=message.seq && message===tail?<small>{locale.startsWith('zh')?'已读':'Read'}</small>:null}
               {message.readFiles?.length && !message.recalled ? <p className="tw-msg-sources" title={message.readFiles.map(file => file.name).join('\n')}>
                 <Icon name="clip" size={12} /> {t('tw_conv_read_files_fmt', message.readFiles.map(file => file.name).join(t('tw_list_separator')))}</p> : null}
+              {message.dataRef && !message.recalled ? <DataRecordButton
+                api={workspace.api} scope={{ kind: 'team', teamId: team.id, conversationId: conversation.id, generation: team.generation }}
+                reference={message.dataRef} locale={locale} allowEdit /> : null}
               {message.attachments?.length && !message.recalled ? <MessageFiles api={workspace.api} scope={scope} files={message.attachments} locale={locale} onRevoke={mine && participant ? file => setTakeBack(file) : undefined} /> : null}
               {approval ? <div className="tw-embed"><ApprovalCard api={workspace.api} scope={scope} conversationId={conversation.id} message={message} approval={approval} locale={locale} onChanged={runs.refresh} {...approvalOf(message, waiting)} /></div> : null}
               {answering && !answerPending(message.waitId!)

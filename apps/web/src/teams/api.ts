@@ -6,6 +6,7 @@ import { InboxController } from '../../../../packages/inbox/controller';
 import { createInboxRequest } from '../../../../packages/inbox/client';
 import { readFirestoreMessagePage, watchFirestoreMessages } from '../../../../packages/teams/firestore.js';
 import type { MessageSignal, MessageCommand } from '../../../../packages/teams/messages';
+import type { DataRequest } from '../../../../packages/teams/lingxi-data.js';
 import { getAuth, type User } from 'firebase/auth';
 
 export function webTeamsApi(user: User, db: Firestore, currentUid: () => string | undefined = () => getAuth(db.app).currentUser?.uid): TeamsApi & { close(): void } {
@@ -47,6 +48,7 @@ export function webTeamsApi(user: User, db: Firestore, currentUid: () => string 
       watch(teamId, ['teams', teamId, 'members'], current.team.generation); return current;
     },
     execute: (command: TeamCommand) => checked<TeamResult>('', command),
+    data: <T>(input: DataRequest) => checked<T>('/data', input),
     messages: <T>(command: MessageCommand) => checked<T>('/messages', command),
     async historyPage(scope,conversationId,beforeSeq) {
       if(closed || currentUid()!==user.uid) throw new Error('INVALID_SESSION');

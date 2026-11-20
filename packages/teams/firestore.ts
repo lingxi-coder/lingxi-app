@@ -1,3 +1,4 @@
+import { parseDataRef } from './lingxi-data.js';
 import type { DocumentData, Firestore, FirestoreError } from 'firebase/firestore';
 import { ATTACHMENT_TYPES, type MessageAttachment } from './attachments.js';
 import type { BlockEntry, FriendCard, TeamOffer } from './friends.js';
@@ -73,6 +74,7 @@ export function firestoreFriendName(value: DocumentData | undefined): { displayN
 }
 
 export function firestoreMessage(id: string, value: DocumentData): TeamMessage {
+  const dataRef = value.recalled ? undefined : parseDataRef(value.dataRef);
   return { id, seq: value.seq, author: pointerAuthor(value.author), kind: value.kind, text: value.text, changeSeq: value.changeSeq, changeId: value.changeId,
     createdAt: timestamp(value.createdAt), editedAt: timestamp(value.editedAt), ...(value.replyTo ? { replyTo: value.replyTo } : {}),
     ...(value.recalled ? { recalled: true } : {}), ...(value.mentions ? { mentions: value.mentions } : {}),
@@ -81,6 +83,7 @@ export function firestoreMessage(id: string, value: DocumentData): TeamMessage {
     ...(approvalOf(value.approval) ? { approval: approvalOf(value.approval)! } : {}),
     ...(value.decision === 'approve' || value.decision === 'deny' ? { decision: value.decision } : {}),
     ...(attachmentsOf(value.attachments).length ? { attachments: attachmentsOf(value.attachments) } : {}),
+    ...(dataRef ? { dataRef } : {}),
     ...(readFilesOf(value.readFiles).length ? { readFiles: readFilesOf(value.readFiles) } : {}) };
 }
 function readFilesOf(value: unknown): { attachmentId: string; name: string }[] {

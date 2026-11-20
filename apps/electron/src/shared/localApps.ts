@@ -1,4 +1,5 @@
 import type { LocalAppAgentCatalog, LocalAppAgentSettings } from './localAppAgent.js';
+import type { DataScope } from '../../../../packages/teams/lingxi-data.js';
 import type { AskUserQuestionRequestDto } from '@lingxi/bridge-client';
 /** Shared schema-2 application contract; platform execution remains host-owned. */
 export const CH_LOCAL_APPS = 'lingxi:local-apps';
@@ -23,9 +24,14 @@ export interface LocalAppProcess extends LocalAppStep {
 }
 export type LocalAppMcpServer = ({ type: 'stdio' } & LocalAppStep) | { type: 'http'; process: string; path: string };
 export interface LocalAppMcpStatus { server: string; state: 'connecting' | 'connected' | 'reconnecting'; tools: number }
+export interface LocalAppDataBinding {
+  dataset: string;
+  scope: DataScope;
+}
 export interface DesktopAppManifest {
   schema: 2;
   targets: LocalAppTarget[];
+  dataBindings?: Record<string, 'read' | 'edit'>;
   dataSchema?: { version: number; compatibleFrom: number };
   remix?: { allowed: boolean; license?: string };
   package?: { files: string[]; dependencyLocks: string[] };
@@ -119,6 +125,8 @@ export interface LocalAppsApi {
   list(): Promise<DesktopLocalApp[]>;
   remoteSettings(): Promise<Record<string, boolean>>;
   remoteConfiguration(): Promise<{ configured: boolean; originTemplate?: string; port?: number; error?: string }>;
+  dataBinding(id: string, revision: number, alias: string): Promise<LocalAppDataBinding | null>;
+  setDataBinding(id: string, revision: number, alias: string, binding: LocalAppDataBinding | null): Promise<void>;
   setRemoteAccess(id: string, enabled: boolean): Promise<void>;
   open(id: string): Promise<void>;
   stop(id: string): Promise<void>;

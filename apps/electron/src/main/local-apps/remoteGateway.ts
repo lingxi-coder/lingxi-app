@@ -10,7 +10,7 @@ interface PendingGrant extends RemoteRun { owner: RemoteOwner; revoked: boolean 
 export interface RemoteGatewayAdapter {
   current(run: RemoteRun): Promise<boolean>;
   resource(run: RemoteRun, request: Request): Promise<Response>;
-  invoke(run: RemoteRun, method: string, args: Record<string, unknown>, signal: AbortSignal, sessionId: string): Promise<unknown>;
+  invoke(run: RemoteRun, method: string, args: Record<string, unknown>, signal: AbortSignal, sessionId: string, owner: RemoteOwner): Promise<unknown>;
   /** Capture a trusted synchronous check to run immediately before writing the response. */
   invokeGuard(run: RemoteRun, method: string): () => boolean;
   socket(run: RemoteRun, name: string): Promise<number | undefined>;
@@ -240,7 +240,7 @@ export class LocalAppRemoteGateway {
           if (session.controller.signal.aborted) throw new Error('Session expired');
           const invokeCurrent = this.adapter.invokeGuard(session, value.method);
           if (typeof invokeCurrent !== 'function' || invokeCurrent() !== true) throw new Error('Application access changed');
-          const result = await this.adapter.invoke(session, value.method, value.args as Record<string, unknown>, session.controller.signal, session.sessionId);
+          const result = await this.adapter.invoke(session, value.method, value.args as Record<string, unknown>, session.controller.signal, session.sessionId, session.owner);
           if (session.controller.signal.aborted || !await this.adapter.current(session) || session.controller.signal.aborted
             || res.destroyed || invokeCurrent() !== true) throw new Error('Session expired');
           res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({ result: result ?? null })); return;

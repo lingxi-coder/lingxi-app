@@ -27,29 +27,29 @@ struct ProviderAccountsPage: View {
                             Text(account.authKind == "oauth" ? String(localized: "provider_account_auth_chatgpt") : String(localized: "provider_account_auth_api_key")).font(.caption).foregroundStyle(.secondary)
                             Text(accountStatus(account)).font(.caption).foregroundStyle(.secondary)
                             if repository.wasLastUsed(account) {
-                                Text("Last used").font(.caption).foregroundStyle(.secondary)
+                                Text("provider_account_last_selected").font(.caption).foregroundStyle(.secondary)
                             }
                         }
                     }
                     .accessibilityIdentifier("provider.account.\(account.accountId)")
                 }
                 .onMove(perform: reorder)
-                Button("Add account", systemImage: "person.crop.circle.badge.plus") { sheet = .add }
+                Button("provider_account_add_title", systemImage: "person.crop.circle.badge.plus") { sheet = .add }
                     .disabled(!repository.available || repository.snapshot.storeScope.isEmpty || (!allowsAPIKey && !(allowsOAuth && repository.oauthSupported)))
                     .accessibilityIdentifier("provider.account.add")
             } header: {
-                if accounts.count > 1 { Text("Account priority") }
+                if accounts.count > 1 { Text("provider_accounts_priority") }
             } footer: {
                 if accounts.count > 1 {
-                    Text("Requests use the highest priority available account. Temporary failures do not change this order.")
+                    Text("provider_accounts_order_hint")
                 }
                 if !repository.oauthSupported {
-                    Text("OAuth sign-in must be completed on the execution Host.")
+                    Text("provider_account_remote_oauth_hint")
                 }
             }
             if providerId == "openai" {
                 Section {
-                    Toggle("Allow subscription fallback to metered API", isOn: Binding(
+                    Toggle("provider_account_allow_metered", isOn: Binding(
                         get: { repository.snapshot.providerPolicies?[providerId]?.allowSubscriptionToMetered ?? false },
                         set: { allowed in
                             if allowed { confirmMetered = true }
@@ -60,23 +60,23 @@ struct ProviderAccountsPage: View {
                         }
                     ))
                 } footer: {
-                    Text("May incur API charges when subscription accounts are unavailable.")
+                    Text("provider_account_metered_fee_hint")
                 }
             }
             if let error = repository.errorMessage {
                 Section { Text(error).foregroundStyle(.red) }
             }
         }
-        .confirmationDialog("Allow subscription fallback to metered API", isPresented: $confirmMetered, titleVisibility: .visible) {
+        .confirmationDialog("provider_account_allow_metered", isPresented: $confirmMetered, titleVisibility: .visible) {
             Button("provider_account_allow_api_charges") {
                 Task { await repository.perform(.init(action: "set_policy", providerId: providerId,
                     allowSubscriptionToMetered: true)) }
             }
-            Button("Cancel", role: .cancel) {}
+            Button("common_cancel", role: .cancel) {}
         } message: {
-            Text("May incur API charges when subscription accounts are unavailable.")
+            Text("provider_account_metered_consent")
         }
-        .navigationTitle("Accounts")
+        .navigationTitle("provider_accounts_title")
         .toolbar { EditButton().disabled(repository.busy) }
         .disabled(repository.busy)
         .overlay { if repository.busy { ProgressView() } }
@@ -110,9 +110,9 @@ struct ProviderAccountsPage: View {
         if !account.enabled { return String(localized: "provider_account_disabled") }
         if let health = repository.health(for: account) {
             let reason = health.displayReason.map { " · \($0)" } ?? ""
-            return "\(account.authKind == "oauth" ? "OAuth" : "API key") · \(health.displayStatus)\(reason)"
+            return "\(account.authKind == "oauth" ? "OAuth" : String(localized: "provider_account_auth_api_key")) · \(health.displayStatus)\(reason)"
         }
-        return account.authKind == "oauth" ? "OAuth" : "API key"
+        return account.authKind == "oauth" ? "OAuth" : String(localized: "provider_account_auth_api_key")
     }
 
     private func reorder(from source: IndexSet, to destination: Int) {
@@ -132,20 +132,20 @@ private struct ProviderDeviceCodePage: View {
                 Section {
                     Text(flow.userCode).font(.title.monospaced()).textSelection(.enabled)
                         .accessibilityIdentifier("provider.account.device-code")
-                    Button("Copy code", systemImage: "doc.on.doc") { UIPasteboard.general.string = flow.userCode }
-                    Link(destination: flow.verificationURL) { Label("Open authorization page", systemImage: "safari") }
+                    Button("provider_account_device_copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = flow.userCode }
+                    Link(destination: flow.verificationURL) { Label("provider_account_device_open_browser", systemImage: "safari") }
                         .accessibilityIdentifier("provider.account.verify")
-                    Text("Choose the upstream account you want to add in the browser, then approve this code.")
-                    LabeledContent("Code expires") { Text(flow.expiresAt, style: .relative) }
-                    ProgressView("Waiting for authorization")
+                    Text("provider_account_device_choose_account")
+                    LabeledContent("provider_account_device_expires") { Text(flow.expiresAt, style: .relative) }
+                    ProgressView("provider_account_device_waiting")
                 }
             }
             if let error = repository.errorMessage { Text(error).foregroundStyle(.red) }
         }
-        .navigationTitle("Sign in to ChatGPT")
+        .navigationTitle("provider_account_device_title")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") { repository.cancelDeviceOAuth() }
+                Button("common_cancel") { repository.cancelDeviceOAuth() }
                     .accessibilityIdentifier("provider.account.oauth.cancel")
             }
         }
@@ -202,15 +202,15 @@ private struct ProviderAccountAddPage: View {
                     }.disabled(createdAccountID != nil)
                 }
                 if allowsAPIKey && allowsOAuth {
-                    Picker("Authentication", selection: $oauth) {
-                        Text("API key").tag(false)
-                        Text("ChatGPT").tag(true)
+                    Picker("provider_account_auth_method", selection: $oauth) {
+                        Text("provider_account_auth_api_key").tag(false)
+                        Text(verbatim: "ChatGPT").tag(true)
                     }
                     .pickerStyle(.segmented)
                     .disabled(createdAccountID != nil)
                 }
                 if allowsAPIKey && !usesOAuth {
-                    SecureField("API key", text: $secret)
+                    SecureField("provider_account_auth_api_key", text: $secret)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .accessibilityIdentifier("provider.account.api-key")
                         .disabled(createdAccountID != nil)
@@ -222,7 +222,7 @@ private struct ProviderAccountAddPage: View {
             } header: {
                 Text(defaultAccountName)
             } footer: {
-                if usesOAuth { Text("Choose the upstream account in the browser before approving your device code.") }
+                if usesOAuth { Text("provider_account_device_choose_account") }
             }
             Section {
                 Button { showAccountOptions.toggle() } label: {
@@ -243,10 +243,10 @@ private struct ProviderAccountAddPage: View {
             if let error = validationError ?? repository.errorMessage {
                 Section { Text(error).foregroundStyle(.red).accessibilityIdentifier("provider.account.add.error") }
             }
-            if submitting { Section { ProgressView("Adding account") } }
+            if submitting { Section { ProgressView("provider_account_adding") } }
         }
         .disabled(submitting || repository.busy)
-        .navigationTitle("Add account")
+        .navigationTitle("provider_account_add_title")
         .toolbar {
             #if DEBUG
             if ProcessInfo.processInfo.environment["LINGXI_PROVIDER_ACCOUNT_COMPONENT_TEST"] == "1" {
@@ -257,11 +257,11 @@ private struct ProviderAccountAddPage: View {
             }
             #endif
             ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") { dismiss() }.disabled(submitting || repository.busy)
+                Button("common_cancel") { dismiss() }.disabled(submitting || repository.busy)
                     .accessibilityIdentifier("provider.account.cancel")
             }
             ToolbarItem(placement: .confirmationAction) {
-                Button(usesOAuth ? "Add and sign in" : "Add", action: add)
+                Button(usesOAuth ? "provider_account_add_and_sign_in" : "workspace_confirm_add", action: add)
                     .disabled(submitting || repository.busy)
                     .accessibilityIdentifier("provider.account.submit")
             }
@@ -283,7 +283,7 @@ private struct ProviderAccountAddPage: View {
         let enteredName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let submittedName = enteredName.isEmpty ? defaultAccountName : enteredName
         guard authenticatesWithOAuth || !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            validationError = String(localized: "Enter an API key."); return
+            validationError = String(localized: "provider_account_api_key_required"); return
         }
         validationError = nil
         guard !submitting else { return }
@@ -296,7 +296,7 @@ private struct ProviderAccountAddPage: View {
         Task {
             defer { submitting = false }
             guard submissionGeneration == repository.generation else {
-                validationError = String(localized: "The execution Host changed. Close this form and try again."); return
+                validationError = String(localized: "provider_account_host_changed"); return
             }
             if isRetry {
                 guard await repository.refresh(), submissionGeneration == repository.generation else { return }
@@ -305,7 +305,7 @@ private struct ProviderAccountAddPage: View {
                 guard verifyIdentity(existing, binding: actualBinding, kind: kind, name: submittedName) else { return }
             } else {
                 guard accountIdentityGeneration == nil else {
-                    validationError = String(localized: "The account no longer matches this request. Close this form and try again."); return
+                    validationError = String(localized: "provider_account_identity_changed"); return
                 }
                 let added = await repository.perform(.init(action: "add", providerId: providerId,
                     accountId: accountID, displayName: submittedName,
@@ -316,7 +316,7 @@ private struct ProviderAccountAddPage: View {
                 }
                 guard added else { return }
                 guard accountIdentityGeneration != nil else {
-                    validationError = String(localized: "The account could not be confirmed. Try again."); return
+                    validationError = String(localized: "provider_account_unconfirmed"); return
                 }
             }
             guard submissionGeneration == repository.generation else { return }
@@ -332,7 +332,7 @@ private struct ProviderAccountAddPage: View {
         guard account.providerId == providerId, account.executionBindingId == binding,
               account.authKind == kind, account.displayName == name,
               accountIdentityGeneration == nil || accountIdentityGeneration == account.identityGeneration else {
-            validationError = String(localized: "The account no longer matches this request. Close this form and try again.")
+            validationError = String(localized: "provider_account_identity_changed")
             return false
         }
         accountIdentityGeneration = account.identityGeneration
@@ -356,44 +356,44 @@ private struct ProviderAccountDetailPage: View {
         Form {
             if let account {
                 Section {
-                    TextField("Account name", text: $name)
-                    Button("Rename") { run(.init(action: "update", accountId: accountId, displayName: name)) }
+                    TextField("provider_account_name", text: $name)
+                    Button("provider_account_rename") { run(.init(action: "update", accountId: accountId, displayName: name)) }
                         .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name == account.displayName)
-                    Toggle("Enabled", isOn: Binding(get: { account.enabled }, set: {
+                    Toggle("plugins_enabled", isOn: Binding(get: { account.enabled }, set: {
                         run(.init(action: "set_enabled", accountId: accountId, enabled: $0))
                     }))
-                    LabeledContent("Authentication", value: account.authKind == "oauth" ? "OAuth" : "API key")
+                    LabeledContent("provider_account_auth_method", value: account.authKind == "oauth" ? "OAuth" : String(localized: "provider_account_auth_api_key"))
                     if let health = repository.health(for: account) {
-                        LabeledContent("Status", value: health.displayStatus)
+                        LabeledContent("session_details_status", value: health.displayStatus)
                         if let reason = health.displayReason { Text(reason).foregroundStyle(.secondary) }
                         if let until = health.cooldownUntilMs {
-                            LabeledContent("Retry after") { Text(Date(timeIntervalSince1970: Double(until) / 1000), style: .relative) }
+                            LabeledContent("provider_account_retry_after") { Text(Date(timeIntervalSince1970: Double(until) / 1000), style: .relative) }
                         }
                     }
                 }
                 Section {
                     if account.authKind == "oauth" {
                         if allowsOAuth {
-                            Button("Reconnect") { run(.init(action: "begin_oauth", accountId: accountId)) }
+                            Button("mcp_reconnect") { run(.init(action: "begin_oauth", accountId: accountId)) }
                         }
-                        Button("Sign out", role: .destructive) { run(.init(action: "logout", accountId: accountId)) }
+                        Button("provider_account_logout", role: .destructive) { run(.init(action: "logout", accountId: accountId)) }
                     } else {
-                        SecureField("Replacement API key", text: $secret)
+                        SecureField("provider_account_replacement_key", text: $secret)
                             .textInputAutocapitalization(.never).autocorrectionDisabled()
                         if let url = providerCredentialManagementURL(account.executionBindingId) {
                             Link("provider_account_manage_api_key", destination: url)
                         }
-                        Button("Replace API key") {
+                        Button("provider_account_replace_key") {
                             Task {
                                 if await repository.perform(.init(action: "set_credential", accountId: accountId), credential: secret) { secret = "" }
                             }
                         }.disabled(secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
-                    Button("Test account") { run(.init(action: "test", accountId: accountId)) }
+                    Button("provider_account_test") { run(.init(action: "test", accountId: accountId)) }
                         .accessibilityIdentifier("provider.account.test")
                 }
                 if !repository.scopedHealth(for: account).isEmpty {
-                    Section("Temporary unavailability") {
+                    Section("provider_account_temporarily_unavailable") {
                         ForEach(repository.scopedHealth(for: account)) { health in
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(health.scopeKind == "model" ? String(localized: "session_details_model") : String(localized: "provider_account_scope_connection"))
@@ -402,37 +402,37 @@ private struct ProviderAccountDetailPage: View {
                                 Text(health.reason.replacingOccurrences(of: "_", with: " "))
                                     .font(.caption).foregroundStyle(.secondary)
                                 if let until = health.unavailableUntilMs {
-                                    LabeledContent("Retry after") { Text(Date(timeIntervalSince1970: Double(until) / 1000), style: .relative) }
+                                    LabeledContent("provider_account_retry_after") { Text(Date(timeIntervalSince1970: Double(until) / 1000), style: .relative) }
                                 }
                             }
                         }
                     }
                 }
-                Section("Models") {
+                Section("settings_group_models_hub") {
                     let entitlements = repository.modelEntitlements(for: account)
-                    if entitlements.isEmpty { Text("Model access unverified").foregroundStyle(.secondary) }
+                    if entitlements.isEmpty { Text("provider_account_model_unverified").foregroundStyle(.secondary) }
                     ForEach(entitlements) { entitlement in
                         LabeledContent(entitlement.modelId, value: entitlement.displayStatus)
                         if let retry = entitlement.retryAtMs, entitlement.status == "forbidden" {
-                            LabeledContent("Retry after") { Text(Date(timeIntervalSince1970: Double(retry) / 1000), style: .relative) }
+                            LabeledContent("provider_account_retry_after") { Text(Date(timeIntervalSince1970: Double(retry) / 1000), style: .relative) }
                         }
                     }
-                    Text("A provider catalog lists models; account access is confirmed only after a successful request.")
+                    Text("provider_account_models_verification_hint")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section {
-                    Button("Delete account", role: .destructive) { confirmingDelete = true }
+                    Button("provider_account_remove", role: .destructive) { confirmingDelete = true }
                 }
             }
             if let error = repository.errorMessage { Section { Text(error).foregroundStyle(.red) } }
         }
         .disabled(repository.busy)
-        .navigationTitle(account?.displayName ?? "Account")
+        .navigationTitle(account?.displayName ?? String(localized: "provider_accounts_title"))
         .task { name = account?.displayName ?? "" }
         .onChange(of: repository.snapshot.storeScope) { _, _ in secret = ""; name = ""; dismiss() }
         .onDisappear { secret = "" }
-        .confirmationDialog("Delete this account and its credentials?", isPresented: $confirmingDelete, titleVisibility: .visible) {
-            Button("Delete account", role: .destructive) {
+        .confirmationDialog("provider_account_remove_confirm_title", isPresented: $confirmingDelete, titleVisibility: .visible) {
+            Button("provider_account_remove", role: .destructive) {
                 Task { if await repository.perform(.init(action: "remove", accountId: accountId)) { dismiss() } }
             }
         }

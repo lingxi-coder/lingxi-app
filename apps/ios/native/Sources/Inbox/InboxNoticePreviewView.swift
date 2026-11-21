@@ -16,23 +16,23 @@ struct InboxNoticePreviewView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     if loading {
-                        ProgressView("Loading conversation update")
+                        ProgressView("inbox_notice_loading")
                     } else if let message {
                         if let name = message.author.displayName, !name.isEmpty {
                             Text(verbatim: name).font(.headline)
                         }
                         if !message.text.isEmpty { Text(verbatim: message.text).textSelection(.enabled) }
                         if message.text.isEmpty && !message.files.isEmpty {
-                            Label("Attachment", systemImage: "paperclip")
+                            Label("inbox_notice_attachment", systemImage: "paperclip")
                         }
                     } else if !assistantText.isEmpty {
                         ForEach(Array(assistantText.enumerated()), id: \.offset) { _, text in
                             Text(verbatim: text).textSelection(.enabled)
                         }
                     } else {
-                        Label("This update is unavailable", systemImage: "text.bubble")
+                        Label("inbox_notice_unavailable", systemImage: "text.bubble")
                     }
-                    Button("Open conversation", action: openConversation)
+                    Button("inbox_open_conversation", action: openConversation)
                         .buttonStyle(.borderedProminent)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -42,7 +42,7 @@ struct InboxNoticePreviewView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
+                    Button("common_close") { dismiss() }
                 }
             }
         }

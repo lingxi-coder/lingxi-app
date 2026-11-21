@@ -148,7 +148,7 @@ struct AskUserQuestionCard: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)
                     .background(t.text.opacity(0.05), in: Capsule())
-                    .accessibilityLabel("\(answeredCount) of \(questions.count) answered")
+                    .accessibilityLabel("ask_question_answered \(answeredCount) \(questions.count)")
             }
             Button {
                 resolve { await onCancel() }

@@ -770,14 +770,14 @@ struct EngineProfileAccountsEditor: View {
         return rows.compactMap { ($0["id"] as? String).map { "\(selectedBinding):\($0)" } }
     }
     var body: some View {
-        GroupBox("Accounts") {
+        GroupBox("provider_accounts_title") {
             VStack(alignment: .leading, spacing: 12) {
                 Picker("settings_credential_profile_id", selection: $selectedBinding) {
                     Text("settings_provider_choose").tag("")
                     ForEach(bindings, id: \.self) { Text($0).tag($0) }
                 }
                 if !selectedBinding.isEmpty {
-                    NavigationLink("Accounts") {
+                    NavigationLink("provider_accounts_title") {
                         ProviderAccountsPage(
                             providerId: selectedBinding == "openai-chatgpt" ? "openai" : selectedBinding,
                             executionBindingId: selectedBinding, executionBindingIds: connections,

@@ -119,7 +119,11 @@ string; it becomes the key's plural variations in `Localizable.xcstrings`, so
 use it only on an iOS key (one with a space, like `"chat_asked_questions %lld"`)
 and only in the locales that need it — the others keep a plain string. Android
 plurals are not generated: they live in the hand-written
-`values*/ask_question.xml` `<plurals>` resources.
+`values*/ask_question.xml` `<plurals>` resources. Where Android and the
+Desktop/Web Teams text pick between two plain keys by count instead, name them
+`<stem>_one_fmt` and `<stem>_other_fmt` (`teams_bots_count_one_fmt`).
+`scripts/checks/check_i18n_pairing.py` accepts `<stem>_fmt`, a `<plurals>` named
+`<stem>`, or that one/other pair as the Android counterpart of an iOS key.
 
 ## Desktop and Web Teams text
 
@@ -152,7 +156,7 @@ when the bundle is stale.
   in its name) cannot be named from TypeScript, and the generator rejects the
   reference; reference its `_fmt` sibling instead, which `scripts/checks/check_i18n_pairing.py`
   requires for every new `%@` key.
-- A count that changes the words takes two keys, `<name>_one` and `<name>_other`.
+- A count that changes the words takes two keys, `<name>_one_fmt` and `<name>_other_fmt`.
 - A table of keys (labels, run states) lists them with `tk('key')`, so the
   scan and the compiler see each one; `useTeamsText` belongs in components and
   `teamsText(locale)` in helpers that are not components.

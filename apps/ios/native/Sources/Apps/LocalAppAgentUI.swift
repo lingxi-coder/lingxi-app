@@ -100,61 +100,61 @@ struct LocalAppAgentSettingsView: View {
         NavigationStack {
             Form {
                 if let catalog {
-                    Section("Agent 模型") {
-                        Picker("模型", selection: $model) {
-                            Text("请选择模型").tag("")
+                    Section("local_app_agent_model") {
+                        Picker("session_details_model", selection: $model) {
+                            Text("local_app_agent_choose_model").tag("")
                             ForEach(catalog.models.filter(\.canSelect)) { choice in
                                 Text("\(choice.label) · \(choice.providerId)").tag(choice.id)
                             }
                         }
                         if !catalog.models.contains(where: { $0.canSelect }) {
-                            Text("尚无可用模型。请先在灵犀设置中配置模型和账号。").foregroundStyle(.secondary)
+                            Text("local_app_agent_no_models").foregroundStyle(.secondary)
                         }
-                        Text("任务独立运行，只读取本次输入；使用你在灵犀配置的模型账号。").font(.footnote)
+                        Text("local_app_agent_model_hint").font(.footnote)
                     }
                     if !catalog.servers.isEmpty {
-                        Section("已有 MCP 连接") {
+                        Section("local_app_agent_mcp_section") {
                             ForEach(catalog.servers) { server in
-                                if server.available { Button("读取 \(server.name) 的工具目录") { connect(server.id) }.disabled(busy) }
-                                else { Text("\(server.name)：此连接需要桌面端").foregroundStyle(.secondary) }
+                                if server.available { Button("local_app_agent_mcp_read \(server.name)") { connect(server.id) }.disabled(busy) }
+                                else { Text("local_app_agent_mcp_desktop_only \(server.name)").foregroundStyle(.secondary) }
                             }
-                            Text("连接后仍需逐项授权本应用请求的工具。").font(.footnote)
+                            Text("local_app_agent_mcp_hint").font(.footnote)
                         }
                     }
-                    Section("允许此应用使用的工具") {
-                        if declared.isEmpty { Text("此版本不请求业务工具。").foregroundStyle(.secondary) }
+                    Section("local_app_agent_tools_section") {
+                        if declared.isEmpty { Text("local_app_agent_tools_none").foregroundStyle(.secondary) }
                         ForEach(declared.filter { catalog.tools[$0] != nil }, id: \.self) { id in
                             Toggle(catalog.labels[id] ?? id, isOn: Binding(get: { tools.contains(id) }, set: { value in
                                 if value { tools.insert(id) } else { tools.remove(id) }
                             }))
                         }
-                        Text("允许工具后，敏感操作仍由灵犀请求批准。工具或连接配置变化后需要重新授权。").font(.footnote)
+                        Text("local_app_agent_tools_hint").font(.footnote)
                     }
                     if !declaredSkills.isEmpty {
-                        Section("允许此应用使用的 Skills") {
+                        Section("local_app_agent_skills_section") {
                             ForEach(declaredSkills) { skill in
                                 Toggle(skill.id, isOn: Binding(get: { skills.contains(skill.id) }, set: { value in
                                     if value { skills.insert(skill.id) } else { skills.remove(skill.id) }
                                 }))
                                 Text(skill.path).font(.caption.monospaced()).foregroundStyle(.secondary)
                             }
-                            Text("Skill 指令来自此不可变发布版本；Skill 不会额外授予工具权限。").font(.footnote)
+                            Text("local_app_agent_skills_hint").font(.footnote)
                         }
                     }
-                    Section("每次任务限额") {
-                        Stepper("最多 \(turns) 轮", value: $turns, in: 1...100)
-                        Stepper("最多 \(minutes) 分钟", value: $minutes, in: 1...60)
-                        Text("停止应用或撤销授权会停止任务。浏览器页面关闭不等于停止；模型费用按实际用量计量。").font(.footnote)
+                    Section("local_app_agent_limits") {
+                        Stepper("local_app_agent_max_turns \(turns)", value: $turns, in: 1...100)
+                        Stepper("local_app_agent_max_minutes \(minutes)", value: $minutes, in: 1...60)
+                        Text("local_app_agent_limits_hint").font(.footnote)
                     }
                     Section {
-                        Button("保存授权", action: save).disabled(model.isEmpty || busy)
-                        Button("撤销 Agent 授权", role: .destructive, action: revoke).disabled(busy)
+                        Button("local_app_agent_save", action: save).disabled(model.isEmpty || busy)
+                        Button("local_app_agent_revoke", role: .destructive, action: revoke).disabled(busy)
                     }
-                } else { ProgressView("读取宿主模型与工具…") }
+                } else { ProgressView("local_app_agent_loading") }
                 if let error { Section { Text(error).foregroundStyle(.red) } }
             }
-            .navigationTitle("Agent 授权")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
+            .navigationTitle("local_app_agent_title")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("common_close") { dismiss() } } }
             .task { await load() }
         }
     }
@@ -270,9 +270,9 @@ private struct LocalAppAgentInteractionSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("请求来源") { Text(interaction.appId).font(.caption).textSelection(.enabled) }
+                Section("local_app_agent_request_source") { Text(interaction.appId).font(.caption).textSelection(.enabled) }
                 if permission {
-                    Section("工具请求：\(interaction.toolName ?? "Agent")") {
+                    Section("local_app_agent_tool_request \(interaction.toolName ?? "Agent")") {
                         Text(input).font(.system(.footnote, design: .monospaced)).textSelection(.enabled)
                     }
                 } else {
@@ -289,17 +289,17 @@ private struct LocalAppAgentInteractionSheet: View {
                                         icon: { Image(systemName: selected[question.question, default: []].contains(option.label) ? "checkmark.circle.fill" : "circle") }
                                 }
                             }
-                            TextField("其他回答", text: Binding(get: { custom[question.question] ?? "" }, set: { custom[question.question] = $0 }))
+                            TextField("local_app_agent_other_answer", text: Binding(get: { custom[question.question] ?? "" }, set: { custom[question.question] = $0 }))
                         }
                     }
                 }
                 if let error { Text(error).foregroundStyle(.red) }
                 Section {
-                    Button(permission ? "仅允许此次操作" : "提交回答") { respond(approved: true) }.disabled(busy || (!permission && !complete))
-                    Button(permission ? "拒绝" : "取消任务", role: .destructive) { respond(approved: false) }.disabled(busy)
+                    Button(permission ? "local_app_agent_allow_once" : "local_app_agent_submit_answer") { respond(approved: true) }.disabled(busy || (!permission && !complete))
+                    Button(permission ? "permission_deny" : "teams_task_cancel", role: .destructive) { respond(approved: false) }.disabled(busy)
                 }
             }
-            .navigationTitle(permission ? "灵犀工具审批" : "Agent 需要回答")
+            .navigationTitle(permission ? "local_app_agent_approval_title" : "local_app_agent_question_title")
         }
     }
     private var complete: Bool { (interaction.questions ?? []).allSatisfy { !(custom[$0.question] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !(selected[$0.question] ?? []).isEmpty } }
@@ -330,15 +330,20 @@ enum LocalAppAgentTaskStatusText {
         if state == "interrupted" {
             switch errorCode {
             case "ios_background_expired":
-                return String(localized: "iOS 已结束后台执行，任务已中断。请检查已完成操作后，再决定是否手动开始新任务。")
+                return String(localized: "local_app_agent_interrupted_background")
             case "host_restarted":
-                return String(localized: "宿主重新启动，任务已中断，原因未知。请检查已完成操作后，再决定是否手动开始新任务。")
+                return String(localized: "local_app_agent_interrupted_restart")
             default:
-                return String(localized: "已中断")
+                return String(localized: "chat_result_interrupted")
             }
         }
-        if state == "cancelled" { return String(localized: "已取消") }
-        return state
+        switch state {
+        case "cancelled": return String(localized: "chat_status_cancelled")
+        case "running": return String(localized: "chat_status_running")
+        case "succeeded": return String(localized: "chat_status_completed")
+        case "failed": return String(localized: "chat_status_failed")
+        default: return state
+        }
     }
 }
 
@@ -356,7 +361,7 @@ struct LocalAppAgentTasks: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if tasks.isEmpty && error == nil {
-                Text("No Agent tasks for this app version.").font(.footnote).foregroundStyle(.secondary)
+                Text("local_app_agent_tasks_empty").font(.footnote).foregroundStyle(.secondary)
             }
             ForEach(tasks) { task in
                 VStack(alignment: .leading, spacing: 6) {
@@ -375,7 +380,7 @@ struct LocalAppAgentTasks: View {
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                     if let progress = task.progress, progress.turnLimit > 0 {
-                        Text("Completed \(progress.completedModelTurns) model turns; limit \(progress.turnLimit)")
+                        Text("local_app_agent_turns_progress \(progress.completedModelTurns) \(progress.turnLimit)")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -395,7 +400,7 @@ struct LocalAppAgentTasks: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     if !task.isTerminal {
-                        Button("Stop", role: .destructive) { cancel(task) }
+                        Button("composer_stop", role: .destructive) { cancel(task) }
                             .disabled(cancelling.contains(task.runId))
                     }
                 }
@@ -414,7 +419,7 @@ struct LocalAppAgentTasks: View {
                         "revision": .number(Double(revision))
                     ], as: LocalAppAgentTaskListResponse.self)
                     guard response.appId == appID, response.revision == revision else {
-                        throw LocalAppServiceFailure("INVALID_AGENT_TASK", "The host returned tasks for another app version.")
+                        throw LocalAppServiceFailure("INVALID_AGENT_TASK", String(localized: "local_app_agent_tasks_mismatch"))
                     }
                     tasks = response.tasks.sorted { $0.sequence > $1.sequence }
                     error = nil
@@ -423,7 +428,7 @@ struct LocalAppAgentTasks: View {
                     // A failed lookup must not leave a stale running task on
                     // screen or imply that the host has no saved tasks.
                     tasks = []
-                    self.error = "\(String(localized: "无法确认任务状态，请重新打开灵犀后检查。")) \(error.localizedDescription)"
+                    self.error = "\(String(localized: "local_app_agent_tasks_unknown")) \(error.localizedDescription)"
                 }
                 do { try await Task.sleep(for: .seconds(1)) } catch { return }
             }

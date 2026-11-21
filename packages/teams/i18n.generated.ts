@@ -389,7 +389,8 @@ export type TeamsKey =
   | 'teams_make_owner'
   | 'teams_member'
   | 'teams_members'
-  | 'teams_members_count_fmt'
+  | 'teams_members_count_one_fmt'
+  | 'teams_members_count_other_fmt'
   | 'teams_message_actions'
   | 'teams_message_confirming'
   | 'teams_message_discard'
@@ -1220,7 +1221,8 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_make_owner: { en: 'Make owner', 'zh-Hans': '设为所有者', 'zh-Hant': '設為擁有者', ja: 'オーナーにする', ko: '소유자로 지정' },
   teams_member: { en: 'Member', 'zh-Hans': '成员', 'zh-Hant': '成員', ja: 'メンバー', ko: '멤버' },
   teams_members: { en: 'Members', 'zh-Hans': '成员', 'zh-Hant': '成員', ja: 'メンバー', ko: '멤버' },
-  teams_members_count_fmt: { en: '%1$d members', 'zh-Hans': '%1$d 位成员', 'zh-Hant': '%1$d 位成員', ja: 'メンバー %1$d 人', ko: '멤버 %1$d명' },
+  teams_members_count_one_fmt: { en: '%1$d member', 'zh-Hans': '%1$d 位成员', 'zh-Hant': '%1$d 位成員', ja: 'メンバー %1$d 人', ko: '멤버 %1$d명' },
+  teams_members_count_other_fmt: { en: '%1$d members', 'zh-Hans': '%1$d 位成员', 'zh-Hant': '%1$d 位成員', ja: 'メンバー %1$d 人', ko: '멤버 %1$d명' },
   teams_message_actions: { en: 'Message actions', 'zh-Hans': '消息操作', 'zh-Hant': '訊息操作', ja: 'メッセージの操作', ko: '메시지 작업' },
   teams_message_confirming: { en: 'Waiting for confirmation. Retrying won’t send it twice.', 'zh-Hans': '正在等待确认，重试不会重复发送。', 'zh-Hant': '正在等待確認，重試不會重複傳送。', ja: '確認を待っています。再試行しても二重に送信されることはありません。', ko: '확인을 기다리는 중입니다. 다시 시도해도 중복 전송되지 않습니다.' },
   teams_message_discard: { en: 'Discard', 'zh-Hans': '丢弃', 'zh-Hant': '捨棄', ja: '破棄', ko: '삭제' },

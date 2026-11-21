@@ -27,10 +27,10 @@ struct ProviderAccountHealth: Codable, Equatable {
     var displayStatus: String {
         switch status {
         case "ready": return String(localized: "provider_account_ready")
-        case "needs_auth": return String(localized: "Sign-in required")
-        case "cooling_down": return String(localized: "Cooling down")
-        case "quota_exhausted": return String(localized: "Quota exhausted")
-        case "storage_unavailable": return String(localized: "Secure storage unavailable")
+        case "needs_auth": return String(localized: "provider_account_needs_auth")
+        case "cooling_down": return String(localized: "provider_account_cooldown")
+        case "quota_exhausted": return String(localized: "provider_account_quota")
+        case "storage_unavailable": return String(localized: "provider_account_storage_unavailable")
         case "disabled": return String(localized: "provider_account_disabled")
         default: return status
         }
@@ -53,9 +53,9 @@ struct ProviderAccountModelEntitlement: Codable, Equatable, Identifiable {
     var id: String { "\(accountId)/\(identityGeneration)/\(modelId)" }
     var displayStatus: String {
         switch status {
-        case "confirmed": String(localized: "Model access confirmed")
-        case "forbidden": String(localized: "Model access forbidden")
-        default: String(localized: "Model access unverified")
+        case "confirmed": String(localized: "provider_account_model_confirmed")
+        case "forbidden": String(localized: "provider_account_model_forbidden")
+        default: String(localized: "provider_account_model_unverified")
         }
     }
 }
@@ -170,10 +170,10 @@ enum ProviderAccountError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .unavailable: return String(localized: "Account management is unavailable for this Host.")
-        case .operationInProgress: return String(localized: "An account operation is already in progress.")
-        case .authorizationExpired: return String(localized: "Authorization code expired. Reconnect to get a new code.")
-        case .invalidResponse: return String(localized: "The Host returned an invalid account response.")
+        case .unavailable: return String(localized: "provider_account_error_unavailable")
+        case .operationInProgress: return String(localized: "provider_account_error_busy")
+        case .authorizationExpired: return String(localized: "provider_account_error_code_expired")
+        case .invalidResponse: return String(localized: "provider_account_error_invalid_response")
         }
     }
 }
@@ -318,9 +318,9 @@ final class ProviderAccountRepository {
         let label: String
         if enabled.isEmpty { label = String(localized: "provider_account_disabled") }
         else if statuses.contains("ready") { label = String(localized: "settings_provider_status_configured") }
-        else if statuses.contains("storage_unavailable") { label = String(localized: "Secure storage unavailable") }
+        else if statuses.contains("storage_unavailable") { label = String(localized: "provider_account_storage_unavailable") }
         else if statuses.contains("cooling_down") || statuses.contains("quota_exhausted") { label = String(localized: "provider_account_temporarily_unavailable") }
-        else if statuses.contains("needs_auth") { label = String(localized: "Sign-in required") }
+        else if statuses.contains("needs_auth") { label = String(localized: "provider_account_needs_auth") }
         else { label = String(localized: "provider_account_status_unverified") }
         return "\(label) · \(enabled.count)/\(rows.count)"
     }
@@ -537,18 +537,18 @@ final class ProviderAccountRepository {
         }
         if row.eligibleAccountIds.isEmpty && row.confirmedAccountIds.isEmpty
             && row.unverifiedAccountIds.isEmpty && row.forbiddenAccountIds.isEmpty {
-            return String(localized: "No eligible account currently")
+            return String(localized: "provider_account_model_no_eligible")
         }
-        let groups = [(row.confirmedAccountIds, String(localized: "Model access confirmed")),
-            (row.unverifiedAccountIds, String(localized: "Model access unverified")),
-            (row.forbiddenAccountIds, String(localized: "Model access forbidden"))]
+        let groups = [(row.confirmedAccountIds, String(localized: "provider_account_model_confirmed")),
+            (row.unverifiedAccountIds, String(localized: "provider_account_model_unverified")),
+            (row.forbiddenAccountIds, String(localized: "provider_account_model_forbidden"))]
         let labels = groups.flatMap { ids, status in
             ids.compactMap { id -> String? in
                 guard let account = snapshot.accounts.first(where: { $0.accountId == id }) else { return nil }
                 return "\(account.displayName): \(status)"
             }
         }
-        return labels.isEmpty ? String(localized: "Model access unverified") : labels.joined(separator: " · ")
+        return labels.isEmpty ? String(localized: "provider_account_model_unverified") : labels.joined(separator: " · ")
     }
 
     private func accept(_ result: ProviderAccountSnapshot) {

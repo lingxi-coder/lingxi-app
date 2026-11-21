@@ -49,14 +49,14 @@ final class ProviderAccountsNativeUITests: XCTestCase {
         let restoredEnabled = app.switches["Enabled"]
         XCTAssertTrue(restoredEnabled.waitForExistence(timeout: 8), app.debugDescription)
         waitValue(restoredEnabled, equals: "0")
-        let delete = app.buttons["Delete account"]
+        let delete = app.buttons["Remove this account"]
         for _ in 0..<8 {
             if delete.isHittable { break }
             app.collectionViews.firstMatch.swipeUp()
         }
         XCTAssertTrue(delete.isHittable, app.debugDescription)
         delete.tap()
-        let confirmation = app.sheets.buttons["Delete account"]
+        let confirmation = app.sheets.buttons["Remove this account"]
         XCTAssertTrue(confirmation.waitForExistence(timeout: 5), app.debugDescription)
         confirmation.tap()
         let removed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: accountRow(app, name: name))

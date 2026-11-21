@@ -178,7 +178,7 @@ private struct HostedServiceSessionView: View {
                                     .frame(maxWidth: .infinity).padding(.vertical, 24)
                             }
                             if model.hasOlder {
-                                Button("Load earlier messages") { Task { await model.loadOlder() } }
+                                Button("remote_load_older") { Task { await model.loadOlder() } }
                                     .disabled(model.loadingOlder).padding()
                             }
                             ForEach(model.messages) { message in

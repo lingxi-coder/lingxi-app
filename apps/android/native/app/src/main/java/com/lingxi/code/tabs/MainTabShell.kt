@@ -361,7 +361,7 @@ private fun Modifier.tabBadgeState(tab: AppTab, badge: Int): Modifier {
     if (badge <= 0) return this
     val description = when (tab) {
         AppTab.Teams, AppTab.Friends -> stringResource(R.string.tabs_badge_unread_fmt, badge)
-        AppTab.Chats -> stringResource(R.string.inbox_badge, badge)
+        AppTab.Chats -> stringResource(if (badge == 1) R.string.inbox_badge_one_fmt else R.string.inbox_badge_other_fmt, badge)
         AppTab.Bots -> stringResource(R.string.remote_bot_waiting_fmt, badge)
         AppTab.Settings -> ""
     }

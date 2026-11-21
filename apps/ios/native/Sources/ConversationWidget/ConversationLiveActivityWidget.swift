@@ -13,7 +13,7 @@ import SwiftUI
             } dynamicIsland: { context in
                 DynamicIsland {
                     DynamicIslandExpandedRegion(.leading) {
-                        Label("Lingxi", systemImage: "sparkles")
+                        Label("app_name", systemImage: "sparkles")
                             .font(.headline)
                     }
                     DynamicIslandExpandedRegion(.trailing) {

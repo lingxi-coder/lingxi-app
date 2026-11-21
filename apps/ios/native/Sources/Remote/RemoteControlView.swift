@@ -221,7 +221,7 @@ private struct RemoteAppsSection: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(app.name)
                         if !app.summary.isEmpty { Text(app.summary).font(.caption).foregroundStyle(.secondary) }
-                        Text(verbatim: TeamsStreamLogic.joinedLine([TeamsText.localized("remote_apps_desktop"), TeamsText.localized(phaseKey(app.phase))]))
+                        Text(verbatim: TeamsStreamLogic.joinedLine([TeamsText.localized("remote_apps_desktop"), TeamsText.localized(localAppPhaseKey(app.phase))]))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -241,18 +241,6 @@ private struct RemoteAppsSection: View {
         } header: { Text("remote_apps_title") }
         .task { await refresh() }
         .onDisappear { request &+= 1; invalidateBrowserLaunch() }
-    }
-
-    private func phaseKey(_ value: String) -> String {
-        switch value {
-        case "installing": "remote_apps_phase_installing"
-        case "building": "remote_apps_phase_building"
-        case "starting": "remote_apps_phase_starting"
-        case "running": "remote_apps_phase_running"
-        case "stopping": "remote_apps_phase_stopping"
-        case "failed": "remote_apps_phase_failed"
-        default: "remote_apps_phase_stopped"
-        }
     }
 
     private func refresh() async {
@@ -390,7 +378,7 @@ struct RemoteSessionView: View {
                     .font(.caption).foregroundStyle(.secondary).padding(8)
             }
             if let notice = inbox.inlineNotice, notice.ref == activeRef {
-                Label("Conversation update", systemImage: "bell").font(.caption).padding(5)
+                Label("inbox_notice", systemImage: "bell").font(.caption).padding(5)
             }
             if source.hasOmittedContent { Text("remote_omitted_note").font(.caption).padding(8) }
             RemoteSessionModeLabel(model: source.model)

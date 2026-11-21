@@ -45,7 +45,7 @@ struct BotMarketHandoff: Codable, Equatable {
         guard let botAPIURL, let endpoint = Self.validatedAPIRoot(botAPIURL.absoluteString) else { throw MarketFailure("MARKET_NOT_CONFIGURED") }
         let api = try MarketAPI(baseURL: endpoint, followsRedirects: false)
         if intentID == nil && !create { return self }
-        guard let user = Auth.auth().currentUser else { throw MarketFailure("SIGN_IN_REQUIRED", "Sign in to track this Desktop download.") }
+        guard let user = Auth.auth().currentUser else { throw MarketFailure("SIGN_IN_REQUIRED", String(localized: "bot_market_sign_in_required")) }
         let owner = user.uid
         let token = try await user.getIDToken()
         guard Auth.auth().currentUser?.uid == owner else { throw MarketFailure("ACCOUNT_CHANGED") }
@@ -100,25 +100,25 @@ struct BotMarketHandoffPage: View {
     }
     var body: some View {
         List {
-            Section("Bot download") {
-                Text(handoff.stage == "installed" ? "Downloaded on Desktop" : "Continue on Desktop").font(.headline)
-                Text("Choose your own model and authorize your resources on Desktop before sharing this Bot with a Team.")
-                Text("Listing: \(listingID)").textSelection(.enabled)
-                if let versionID = handoff.versionID { Text("Release: \(versionID)").textSelection(.enabled) }
+            Section("bot_market_download") {
+                Text(handoff.stage == "installed" ? "bot_market_downloaded_desktop" : "bot_market_continue_desktop").font(.headline)
+                Text("bot_market_desktop_setup_hint")
+                LabeledContent("bot_market_listing") { Text(verbatim: listingID).textSelection(.enabled) }
+                if let versionID = handoff.versionID { LabeledContent("bot_market_release") { Text(verbatim: versionID).textSelection(.enabled) } }
             }
             Section {
-                if let detailURL { Button("View in market") { handoff.save(); openURL(detailURL) { accepted in if !accepted { error = "The system browser could not open the market." } } } }
-                Button("Prepare Desktop handoff") { Task { await refresh(create: true) } }.disabled(busy)
+                if let detailURL { Button("bot_market_view") { handoff.save(); openURL(detailURL) { accepted in if !accepted { error = String(localized: "bot_market_browser_failed") } } } }
+                Button("bot_market_prepare_handoff") { Task { await refresh(create: true) } }.disabled(busy)
                 if handoff.intentID != nil, let desktopURL = handoff.desktopURL {
-                    ShareLink(item: desktopURL) { Label("Send to Desktop", systemImage: "square.and.arrow.up") }
-                    Button("Check Desktop download") { Task { await refresh(create: false) } }.disabled(busy)
+                    ShareLink(item: desktopURL) { Label("bot_market_send_desktop", systemImage: "square.and.arrow.up") }
+                    Button("bot_market_check_download") { Task { await refresh(create: false) } }.disabled(busy)
                     Text(desktopURL.absoluteString).font(.caption).textSelection(.enabled)
                 }
-                Text(handoff.stage == "installed" ? "Desktop confirmed the personal Bot was created. Enable and share it there. No worker runs on this phone." : "Handoff saved. This page checks the authenticated Desktop receipt when you return. No Bot is installed on this phone.").foregroundStyle(.secondary)
+                Text(handoff.stage == "installed" ? "bot_market_installed_note" : "bot_market_handoff_saved_note").foregroundStyle(.secondary)
             }
             if let error { Text(error).foregroundStyle(.red) }
         }
-        .navigationTitle("Bot Market")
+        .navigationTitle("bot_market_title")
         .task(id: scenePhase) { handoff.save(); if scenePhase == .active, handoff.intentID != nil { await refresh(create: false) } }
     }
     private func refresh(create: Bool) async {

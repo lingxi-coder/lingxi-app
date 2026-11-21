@@ -1,9 +1,12 @@
 {
-  "totalKeys": 2032,
-  "androidIllegal": 118,
+  "totalKeys": 4095,
+  "androidIllegal": 264,
   "androidIllegalUnpaired": 93,
   "iosSourceOrphans": 0,
   "androidSourceOrphans": 0,
+  "androidGeneratedResourceRefs": [
+    "default_web_client_id"
+  ],
   "androidCompanionLocaleGapsTotal": 0,
   "empty": {
     "zh-Hans": 0,
@@ -14,10 +17,10 @@
   },
   "identicalToBase": {
     "zh-Hans": 0,
-    "zh-Hant": 235,
-    "en": 19,
-    "ja": 42,
-    "ko": 13
+    "zh-Hant": 215,
+    "en": 13,
+    "ja": 39,
+    "ko": 11
   },
   "unpairedKeys": [
     "chat_active_agents %u",
@@ -116,5 +119,6 @@
   ],
   "iosSourceOrphanKeys": [],
   "androidSourceOrphanKeys": [],
-  "androidCompanionLocaleGaps": {}
+  "androidCompanionLocaleGaps": {},
+  "androidDuplicateStrings": {}
 }

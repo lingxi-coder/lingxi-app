@@ -580,8 +580,7 @@ impl StyledCell for ActivityFoldCell {
         let label = if self.entries.is_empty() || (self.thinking && running == 0) {
             self.reasoning
                 .lines()
-                .filter(|line| !line.trim().is_empty())
-                .last()
+                .rfind(|line| !line.trim().is_empty())
                 .unwrap_or("Thinking…")
                 .to_owned()
         } else if self.key == "activity" {
@@ -2256,11 +2255,10 @@ mod denial_presentation_tests {
             ),
             Some(("Automatic approval review failed: Bad Request".into(), true))
         );
-        assert_eq!(
-            tool_denial_reason(true, Some("Permission to use Bash has been denied."), None)
+        assert!(
+            !tool_denial_reason(true, Some("Permission to use Bash has been denied."), None)
                 .unwrap()
-                .1,
-            false
+                .1
         );
     }
     #[test]

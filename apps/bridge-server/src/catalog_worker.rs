@@ -575,7 +575,7 @@ mod tests {
             .sessions
             .remove(0);
             let permissions = std::fs::metadata(&path).unwrap().permissions();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0)).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
             // A privileged test runner may still read mode-000 files. Only
             // assert denial where the OS actually enforces that revocation.
             if fs

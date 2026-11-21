@@ -36,15 +36,30 @@ test('public directory links are HTTPS and configuration drafts contain no crede
 });
 
 test('desktop process recipes are pinned argument arrays, never shell scripts', () => {
-  const recipes = publicExtensionItems.flatMap((item) => item.mcp?.config.command ? [item.mcp.config] : []);
-  assert(recipes.length > 0);
-  for (const recipe of recipes) {
-    assert.equal(recipe.command, 'npx');
+  const recipes = publicExtensionItems.flatMap((item) => item.mcp?.config.command ? [{ item, recipe: item.mcp.config }] : []);
+  assert(recipes.some(({ recipe }) => recipe.command === 'npx'));
+  assert(recipes.some(({ recipe }) => recipe.command === 'uvx'));
+  for (const { item, recipe } of recipes) {
     assert(Array.isArray(recipe.args));
-    assert.equal(recipe.args[0], '-y');
-    assert.match(String(recipe.args[1]), /@\d+\.\d+\.\d+$/);
     assert(recipe.args.every((arg) => typeof arg === 'string' && !/[\r\n]/.test(arg)));
+    if (recipe.command === 'npx') {
+      assert.equal(recipe.args[0], '-y');
+      assert.match(String(recipe.args[1]), new RegExp(`.@${item.version!.replace(/\./g, '\\.')}$`));
+    } else {
+      assert.equal(recipe.command, 'uvx', `${item.id} must run through npx or uvx`);
+      assert.equal(recipe.args[0], '--from');
+      assert.match(String(recipe.args[1]), new RegExp(`^[a-z0-9][a-z0-9._-]*==${item.version!.replace(/\./g, '\\.')}$`));
+      assert.match(String(recipe.args[2]), /^[a-z0-9][a-z0-9._-]*$/);
+    }
   }
+});
+
+test('every directory category is one the Desktop, iOS and Android settings pages render', () => {
+  // Each client drops an entry whose category it does not know; add a new category to all three first.
+  const rendered = new Set(['browser', 'development', 'database', 'productivity']);
+  for (const item of publicExtensionItems) assert(rendered.has(item.category), `${item.id} has unknown category ${item.category}`);
+  assert(publicExtensionItems.some((item) => item.category === 'database' && item.kind === 'mcp'));
+  assert(publicExtensionItems.some((item) => item.category === 'database' && item.kind === 'plugin'));
 });
 
 test('mobile directory never offers a desktop process configuration', () => {
@@ -83,7 +98,7 @@ test('recommended skills link to complete upstream packages on every supported p
 });
 
 test('remote recommendations have usable HTTPS templates without placeholder credentials', () => {
-  for (const id of ['notion', 'linear', 'figma', 'supabase']) {
+  for (const id of ['notion', 'linear', 'figma', 'supabase', 'neon']) {
     const item = publicExtensionItems.find((entry) => entry.id === id)!;
     assert.equal(item.mcp?.config.type, 'http');
     const url = new URL(String(item.mcp?.config.url));

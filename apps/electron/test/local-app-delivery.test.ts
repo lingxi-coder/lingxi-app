@@ -50,7 +50,7 @@ test('non-publish and failed LocalApp results stay ordinary grouped tools', () =
 
 test('a Code-required LocalApp failure remains visible while tool details and surrounding groups are collapsed', () => {
   const reason = 'local_app_development_requires_code: Code required';
-  const item: ToolRunItem = { ...published, nativeOutput: undefined, status: 'error', result: { headline: reason, body: reason } };
+  const item: ToolRunItem = { ...published, nativeOutput: undefined, status: 'error', result: { headline: reason, body: "Run this operation in Code mode." } };
   const before = structuredClone(item);
   const rows = transcriptRows([shell, item, { ...shell, id: 'next' }], false);
   assert.deepEqual(rows.filter(row => row.type === 'tool-group').map(row => row.tools.map(tool => tool.id)), [['install'], ['publish'], ['next']]);
@@ -71,7 +71,7 @@ test('a Code-required LocalApp failure remains visible while tool details and su
   }
   assert.deepEqual(item, before, 'presentation does not mutate raw diagnostics');
   const ordinary = renderToStaticMarkup(React.createElement(Theme.Provider, { value: tokens(true) },
-    React.createElement(ToolCall, { item: { ...item, result: { headline: 'Other failure', body: 'Other failure' } }, open: false, onSetOpen: () => {} })));
+    React.createElement(ToolCall, { item: { ...item, result: { headline: 'Other failure', body: 'Details of the other failure' } }, open: false, onSetOpen: () => {} })));
   assert.match(ordinary, />Call unsuccessful<\/span>/);
   assert.doesNotMatch(ordinary, /Switch to Code mode/);
 });

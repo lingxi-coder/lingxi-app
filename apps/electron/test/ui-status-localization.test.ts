@@ -71,10 +71,10 @@ test('activity summaries localize current work and keep unsuccessful attempts in
   const group = { type: 'tool-group' as const, id: 'tools', tools: [item('r1', 'running'), item('r2', 'running'), item('f1', 'error')] };
   for (const locale of DESKTOP_LOCALES) inLocale(locale, () => {
     const html = render(React.createElement(ToolGroup, { group, open: false, toolOpen: () => false, onSetOpen() {} }));
-    assert.ok(html.includes(textHTML(translate('desktop_ui_running_count', locale, 2))), locale);
+    assert.ok(html.includes(textHTML(translate('chat_status_running', locale))), locale);
     assert.ok(!html.includes(textHTML(translate('desktop_ui_failed_count', locale, 1))), locale);
     const failed = render(React.createElement(ToolGroup, { group: { ...group, tools: [item('f1', 'error'), item('f2', 'error')] }, open: false, toolOpen: () => false, onSetOpen() {} }));
-    assert.ok(failed.includes(textHTML(translate('desktop_ui_tool_calls_unsuccessful', locale))), locale);
+    assert.ok(failed.includes(textHTML(translate('chat_status_failed', locale))), locale);
     assert.doesNotMatch(html + failed, /desktop_ui_/);
   });
 });

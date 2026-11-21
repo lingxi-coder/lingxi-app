@@ -251,7 +251,7 @@ internal fun conversationSubtitle(conversation: TeamMessageConversation, bots: L
         val members = conversation.participants.count { it.startsWith("user:") }
         val botCount = conversation.participants.count { it.startsWith("shared_bot:") }
         listOfNotNull(
-            members.takeIf { it > 0 }?.let { stringResource(R.string.teams_members_count_fmt, it) },
+            members.takeIf { it > 0 }?.let { stringResource(if (it == 1) R.string.teams_members_count_one_fmt else R.string.teams_members_count_other_fmt, it) },
             botCount.takeIf { it > 0 }?.let { stringResource(if (it == 1) R.string.teams_bots_count_one_fmt else R.string.teams_bots_count_other_fmt, it) },
         ).joinToString(" · ").ifEmpty { null }
     }

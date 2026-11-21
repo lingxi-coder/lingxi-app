@@ -18,7 +18,7 @@ const previewOffers = z.object({
 const configure = z.object({
   action: z.literal('configureDataSource'), source: dataId, scope,
   expectedVersion: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
-  name: z.string().trim().min(1).max(120), kind: z.enum(['mysql', 'csv', 'json']),
+  name: z.string().trim().min(1).max(120), kind: z.enum(['mysql', 'postgres', 'sqlite', 'mongodb', 'redis', 'csv', 'json']),
   key: z.string().regex(/^(?:[A-Za-z0-9_-]{44}|[A-Za-z0-9_-]{87})$/u),
   fields: fields.optional(),
   enabled: z.boolean(), requesters: z.array(dataId).max(100).refine(values => new Set(values).size === values.length),

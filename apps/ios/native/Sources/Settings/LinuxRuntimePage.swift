@@ -452,7 +452,7 @@ struct LinuxRuntimePage: View {
             footer: String(localized: "settings_linux_maintenance_footer")
         ) {
             if let maintenanceError { Text(maintenanceError).font(.footnote).foregroundStyle(.red).padding(.horizontal, 16).textSelection(.enabled) }
-            Text("修复和重置使用共享 Linux 用户空间。请先停止正在使用它的应用、会话任务和终端；不会自动替你停止它们。").font(.footnote).foregroundStyle(t.text3).padding(.horizontal, 16)
+            Text("settings_linux_maintenance_hint").font(.footnote).foregroundStyle(t.text3).padding(.horizontal, 16)
             ForEach(LocalApps.library.runs.values.filter(\.isLive).sorted { $0.appId < $1.appId }) { run in
                 Text("\(LocalApps.library.record(run.appId)?.name ?? run.appId) · \(run.runId)").font(.caption.monospaced()).foregroundStyle(t.text3).padding(.horizontal, 16)
             }

@@ -143,6 +143,18 @@ class IntentionalIdenticalTranslationTests(unittest.TestCase):
         )
 
 
+class AndroidPairingTests(unittest.TestCase):
+    def test_ios_key_pairs_with_fmt_plurals_or_one_and_other(self):
+        legal = {"a_count_fmt", "b_count_one_fmt", "b_count_other_fmt", "c_count_one_fmt"}
+        paired = check_i18n_pairing._android_paired
+        self.assertTrue(paired("a_count %lld", legal, set()))
+        self.assertTrue(paired("b_count %lld", legal, set()))
+        self.assertTrue(paired("d_count %lld", legal, {"d_count"}))
+        # Half of a one/other pair is not a counterpart.
+        self.assertFalse(paired("c_count %lld", legal, set()))
+        self.assertFalse(paired("Open published report", legal, set()))
+
+
 class AndroidHandwrittenResourceTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()

@@ -298,10 +298,10 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
         XCTAssertEqual(Set(projected.map(\.id)).count, projected.count)
     }
 
-    func testDesktopToolSummaryUsesLastToolAndShowsOnlyActiveWork() {
+    func testToolSummaryUsesNeutralWordingWhileWorkIsRunning() {
         let tools = [ConversationToolTrace(id: "done", tool: "Read", status: .completed), ConversationToolTrace(id: "live", tool: "Read", status: .running)]
         XCTAssertEqual(ConversationDesktopTimeline.activeTools(tools).map(\.id), ["live"])
-        XCTAssertTrue(ConversationDesktopTimeline.summary(tools).hasPrefix("Read · "))
+        XCTAssertEqual(ConversationDesktopTimeline.summary(tools), String(localized: "chat_tool_group_read"))
     }
 
     #if canImport(harness_runtimeFFI)

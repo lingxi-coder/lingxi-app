@@ -131,13 +131,11 @@ final class LocalAppAgentHostLifecycleTests: XCTestCase {
         let expired = LocalAppAgentTaskStatusText.status(state: "interrupted", errorCode: "ios_background_expired")
         let restarted = LocalAppAgentTaskStatusText.status(state: "interrupted", errorCode: "host_restarted")
         let cancelled = LocalAppAgentTaskStatusText.status(state: "cancelled", errorCode: "cancelled")
-        XCTAssertTrue(expired.contains("后台执行"))
-        XCTAssertTrue(expired.contains("已中断"))
-        XCTAssertTrue(expired.contains("检查已完成操作"))
-        XCTAssertTrue(restarted.contains("原因未知"))
-        XCTAssertFalse(restarted.contains("后台执行"))
-        XCTAssertEqual(cancelled, "已取消")
-        XCTAssertEqual(LocalAppAgentTaskStatusText.status(state: "running", errorCode: "ios_background_expired"), "running")
+        XCTAssertEqual(expired, String(localized: "local_app_agent_interrupted_background"))
+        XCTAssertEqual(restarted, String(localized: "local_app_agent_interrupted_restart"))
+        XCTAssertNotEqual(expired, restarted)
+        XCTAssertEqual(cancelled, String(localized: "chat_status_cancelled"))
+        XCTAssertEqual(LocalAppAgentTaskStatusText.status(state: "running", errorCode: "ios_background_expired"), String(localized: "chat_status_running"))
     }
 
     @MainActor

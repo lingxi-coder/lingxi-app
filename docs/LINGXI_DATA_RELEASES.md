@@ -4,7 +4,8 @@
 
 ## 输入与冻结
 
-- Desktop 私有源由数据源所有者在本机采集。MySQL 对指定视图执行一条有界的只读查询，CSV 和 JSON 从一次文件读取取得数据。普通 WebRTC 和 HTTPS 预览许可继续只允许预览。发布还需目标 Team 会话的数据集管理权。
+- Desktop 私有源由数据源所有者在本机采集，每次采集只做一次一致读取。MySQL 对指定视图执行一条有界的只读查询。PostgreSQL 在只读的 REPEATABLE READ 事务中执行一条查询，SQLite 执行一条 SELECT。MongoDB 在一个快照会话中读取，需要 MongoDB 5.0 以上的副本集或分片集群，单机部署只能预览。Redis 在一次 MULTI/EXEC 事务中读取前缀下的键，最多 20,000 个，扫描之后新建的键不计入。CSV 和 JSON 从一次文件读取取得数据。普通 WebRTC 和 HTTPS 预览许可继续只允许预览。发布还需目标 Team 会话的数据集管理权。
+- Desktop 导入宿主配置时，MySQL、PostgreSQL、MongoDB 和 Redis 的连接信息只能引用钥匙串项 `com.lingxi.data.<kind>`，账户为源 ID，且不接受回环测试模式。SQLite、CSV 和 JSON 使用绝对路径。
 - 宿主按权限分区和图表分组执行计数或定点十进制求和。它用本机密钥签署获批指标定义、目标及受众绑定、分区汇总和输入摘要。连接信息与原始行留在宿主。相同查询涉及多个独立数据源时，应分别发布和引用各自的采集结果。
 - 个人或 Team 协作记录由 Data 服务从同一次读取到的数据集状态汇总。请求携带预期 epoch，发生并发变更时重新预览。受保护的源导入须从源所有者的发布流程取得新授权。
 - 分区和分组使用文本字段。金额使用十进制文本或整数，保留最多 12 位小数。精度不足、溢出或超过捕获限额会中止发布。单次源采集最多 100,000 行、8 MiB 投影，文件源当前上限为 1 MiB，每个版本最多有 4,096 个分区与分组组合。
@@ -26,7 +27,7 @@
 
 共享 Bot 同时受任务许可、部署版本、数据集授权和发布者的报表 Bot 名单限制。计算输入取会话成员当前均可接收的分区交集。创建复核单另外要求显式授予该动作。私有源预览任务仍受独立执行边界约束。Local App 通过已绑定的数据集别名调用同一服务，受应用声明的读写级别和当前账号约束。
 
-验收使用隔离的 Firebase 与 MySQL。检查超过一个记录页的输入、超出 JavaScript 安全整数的金额、并发发布、读者权限变化、原始快照和最新版本、源离线、Bot 任务与独立业务回执。Web、Desktop 和原生移动端均从消息中的引用打开报表。移动端 Local App 通过系统默认浏览器进入。
+验收使用隔离的 Firebase 与 MySQL。`apps/firebase/scripts/test-lingxi-data.py` 加 `--private-preview --postgres-bin` 时，另用真实 PostgreSQL 源依次走通注册、本机宿主、预览和签名报表发布，并确认每种新数据库类型都能注册。LingXi Data 自身的 `tests/acceptance.py` 对 PostgreSQL、SQLite、Redis 和 MongoDB 各启动一个真实服务。检查超过一个记录页的输入、超出 JavaScript 安全整数的金额、并发发布、读者权限变化、原始快照和最新版本、源离线、Bot 任务与独立业务回执。Web、Desktop 和原生移动端均从消息中的引用打开报表。移动端 Local App 通过系统默认浏览器进入。
 
 签名 Desktop 联验使用 Flare 的 development 通道。构建时将 `LINGXI_SIGNED_REPORT_STAGING` 指向 staging 输出的端点日志。运行验收时设置 `LINGXI_DATA_SIGNED_REPORT_QA=1`、`LINGXI_DATA_STAGING_ENDPOINTS`、已发到 Chat 的 `LINGXI_TEST_REPORT_LINK` 和数据源启动参数。验收包只在独立诊断账号槽位中连接本机 demo 项目。测试先以读者和所有者各打开一次 Chat 报表，再用系统钥匙串里的临时签名密钥生成一个新版本，并独立检查持久复核单。
 

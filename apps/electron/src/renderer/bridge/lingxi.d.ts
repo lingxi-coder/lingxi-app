@@ -182,6 +182,7 @@ export interface LingxiApi {
   computerSettings: import('../../shared/computerSettings').ComputerSettingsApi;
   saveImage(request: import('../../shared/imageSave').ImageSaveRequest): Promise<boolean>;
   applicationIcon: import('../../shared/applicationIcon').ApplicationIconApi;
+  mcpPrepare?: import('../../shared/mcpPrepare').McpPrepareApi;
   desktopUpdates?: import('../../shared/desktopUpdates').DesktopUpdatesApi;
   localApps?: LocalAppsApi;
   onLocalAppEdit?(listener: (app: LocalAppEditRequest) => void): () => void;

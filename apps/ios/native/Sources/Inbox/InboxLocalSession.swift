@@ -66,9 +66,9 @@ struct InboxLocalSession: Equatable, Sendable {
                 result.activity[ref.key] = activity
                 row = InboxAssistantSummary(activity: activity).updating(row)
                 switch activity.previewKind {
-                case "reply": row.preview = String(localized: "Assistant reply")
-                case "taskResult": row.preview = String(localized: "Task completed")
-                case "failure": row.preview = String(localized: "Task failed")
+                case "reply": row.preview = String(localized: "inbox_preview_reply")
+                case "taskResult": row.preview = String(localized: "inbox_preview_task_completed")
+                case "failure": row.preview = String(localized: "inbox_preview_task_failed")
                 default: break
                 }
             }

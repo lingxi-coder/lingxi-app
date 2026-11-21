@@ -105,7 +105,7 @@ internal fun TeamDetailsScreen(
         teams.error?.let { TeamsErrorBanner(it) }
         DetailIdentity(
             current.name,
-            "${teamRoleLabel(current.role)} · ${stringResource(R.string.teams_members_count_fmt, current.memberCount)}",
+            "${teamRoleLabel(current.role)} · ${stringResource(if (current.memberCount == 1) R.string.teams_members_count_one_fmt else R.string.teams_members_count_other_fmt, current.memberCount)}",
             Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
         ) { TeamTile(current.id, current.name, 56.dp) }
         val segments = buildList { add(R.string.teams_members); if (privileged) add(R.string.teams_invites); add(R.string.teams_bots_title) }

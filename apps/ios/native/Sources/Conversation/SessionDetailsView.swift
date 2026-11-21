@@ -119,7 +119,7 @@ struct SessionDetailsView: View {
                         ForEach(tasks) { task in
                             Button { selectedTask = task } label: { taskRow(task) }
                                 .buttonStyle(.plain)
-                                .accessibilityHint("Open task details")
+                                .accessibilityHint("session_details_open_task_hint")
                         }
                     }
                 }

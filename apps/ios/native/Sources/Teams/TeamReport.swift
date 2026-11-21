@@ -41,9 +41,9 @@ struct TeamReportSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                Picker("Report version", selection: $latest) {
-                    Text("Published version").tag(false)
-                    Text("Latest version").tag(true)
+                Picker("teams_report_version", selection: $latest) {
+                    Text("teams_report_version_published").tag(false)
+                    Text("teams_report_version_latest").tag(true)
                 }.pickerStyle(.segmented).disabled(sending)
                 if let report {
                     let maxValue = report.points.compactMap { Double($0.value).map(abs) }.max() ?? 0
@@ -59,7 +59,7 @@ struct TeamReportSheet: View {
                         }
                     }
                     if report.canReview {
-                        Section("Review a partition") {
+                        Section("teams_report_review_partition") {
                             ForEach(report.cells, id: \.self) { cell in
                                 Button(cell.partition + " · " + cell.group) {
                                     sending = true
@@ -67,8 +67,8 @@ struct TeamReportSheet: View {
                                         defer { sending = false }
                                         do {
                                             try await model.openReportReview(conversation: conversation, report: report, cell: cell)
-                                            status = "Review case open"
-                                        } catch { self.report = nil; status = "Report unavailable" }
+                                            status = "teams_report_reviewed"
+                                        } catch { self.report = nil; status = "teams_report_unavailable" }
                                     }
                                 }.disabled(sending)
                             }
@@ -77,8 +77,8 @@ struct TeamReportSheet: View {
                 }
                 if let status { Text(status) }
             }
-            .navigationTitle("Published report")
-            .toolbar { Button("Done") { dismiss() } }
+            .navigationTitle("teams_report_title")
+            .toolbar { Button("common_done") { dismiss() } }
             .task(id: latest) {
                 report = nil; status = nil
                 do {
@@ -86,7 +86,7 @@ struct TeamReportSheet: View {
                     try Task.checkCancellation()
                     report = value
                 } catch is CancellationError { }
-                catch { if !Task.isCancelled { status = "Report unavailable" } }
+                catch { if !Task.isCancelled { status = "teams_report_unavailable" } }
             }
         }
     }

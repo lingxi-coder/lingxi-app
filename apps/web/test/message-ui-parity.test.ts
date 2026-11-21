@@ -23,7 +23,7 @@ test('task coordination stays collapsed while running and preserves individual f
   const view = await Mounted.create(element('mixed'));
   try {
     const summary = view.texts('button').find(text => text.includes('Task coordination'))!;
-    assert.match(summary, /4 calls.*1 running.*1 unsuccessful/);
+    assert.equal(summary, 'Task coordination Running›');
     assert.equal(view.texts('.rc-tool').length, 2);
     await view.click(summary);
     assert.equal(view.texts('.rc-tool').length, 6);

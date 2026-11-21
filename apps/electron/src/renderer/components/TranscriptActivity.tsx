@@ -23,17 +23,12 @@ export function TranscriptActivity({ activity, open, toolOpen, onSetOpen, modUiS
 }) {
   const t = useT();
   useI18n();
-  const running = activity.tools.filter(tool => tool.status === 'running').length;
-  const thought = activity.thoughts.at(-1);
-  const thinking = activity.active && !running;
-  const thoughtLabel = thought?.text.trim().slice(-240).replace(/[\r\n]+/g, ' ');
-  const label = activity.skill ? `${activity.skill.name} · ${tr('desktop_ui_tool_call_count', activity.tools.length)}`
-    : thinking && thoughtLabel ? thoughtLabel
-    : activity.tools.length ? toolGroupSummary(activity.tools)
-    : thoughtLabel || (activity.active ? 'Thinking…' : tr('desktop_activity'));
-  const failed = activity.tools.filter(tool => tool.status === 'error').length;
-  const runningState = running > 0 ? tr('desktop_ui_running_count', running) : '';
-  const failedState = failed > 0 ? tr('desktop_ui_tool_call_unsuccessful_count', failed) : '';
+  const running = activity.tools.some(tool => tool.status === 'running');
+  const label = activity.skill?.name
+    || (activity.tools.length ? toolGroupSummary(activity.tools) : tr(activity.active ? 'chat_thinking' : 'desktop_activity'));
+  const status = running ? tr('chat_status_running')
+    : activity.active && activity.tools.length ? tr('chat_thinking')
+    : activity.tools.length && activity.tools.every(tool => tool.status === 'error') ? tr('chat_status_failed') : '';
   const first = activity.tools[0];
   // A lone tool owns its details; another disclosure only repeats its header.
   if (activity.tools.length === 1 && first && !activity.thoughts.some(thought => thought.text.trim()) && !retry) {
@@ -53,16 +48,15 @@ export function TranscriptActivity({ activity, open, toolOpen, onSetOpen, modUiS
   }
   return <div className="transcript-activity" data-activity-id={activity.id} data-active={activity.active || undefined}
     style={{ '--activity-text': t.text3, '--activity-highlight': t.text, '--activity-ring': t.accent,
-      '--activity-border': t.border, '--activity-danger': t.danger } as CSSProperties}>
+      '--activity-border': t.border } as CSSProperties}>
     <Disclosure id={activity.id} open={open} onToggle={() => onSetOpen(activity.id, !open)}
-      buttonClassName="transcript-activity-trigger" buttonStyle={{ fontSize: 13, lineHeight: '20px' }} label={[label, runningState, failedState].filter(Boolean).join(' · ')}
+      buttonClassName="transcript-activity-trigger" buttonStyle={{ fontSize: 13, lineHeight: '20px' }} label={[label, status].filter(Boolean).join(' · ')}
       summary={<>
         <ToolActivityIcon name={first ? toolIconName(first.view.verb, first.tool, first.view.icon) : 'spark'} />
         <span className={`transcript-activity-label${activity.active ? ' running-sweep' : ''}`}
-          role={activity.active ? 'status' : undefined} title={label}
+          role={activity.active && !status ? 'status' : undefined} title={label}
           style={{ '--sweep-base': t.text3, '--sweep-highlight': t.text } as CSSProperties}>{label}</span>
-        {runningState && <span className="transcript-activity-state">{runningState}</span>}
-        {failedState && <span className="transcript-activity-failed">{failedState}</span>}
+        <span className="transcript-activity-state" role="status">{status}</span>
       </>}>
       <div className="transcript-activity-details">
         <TranscriptLeafWindow items={activity.skill?.items ?? [...activity.tools, ...activity.thoughts.filter(thought => thought.text.trim())]}

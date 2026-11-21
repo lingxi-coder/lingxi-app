@@ -262,7 +262,7 @@ struct TeamMessageCell: View {
             }
             if !recalled, let reference = message.dataRef, reference.valid {
                 GridRow {
-                    Button("Open data record") { openedData = reference }
+                    Button("teams_data_open") { openedData = reference }
                         .accessibilityIdentifier("teams.message.data.\(message.id)")
                 }
             }
@@ -284,7 +284,7 @@ struct TeamMessageCell: View {
                 }
             }
             if !recalled, let reference = TeamReportLink(message.text) {
-                GridRow { Button("Open published report") { openedReport = reference }
+                GridRow { Button("teams_report_open") { openedReport = reference }
                     .accessibilityIdentifier("teams.report.open." + message.id) }
             }
             if !recalled, let read = message.readFiles, !read.isEmpty {
@@ -555,7 +555,7 @@ private struct TeamDataRecordSheet: View {
             Form {
                 if let error { Text(error).foregroundStyle(.red) }
                 if conflict {
-                    Button("Load latest revision") { reloading = UUID() }.disabled(reloading != nil)
+                    Button("teams_data_latest") { reloading = UUID() }.disabled(reloading != nil)
                 }
                 if loaded {
                     if editing {
@@ -563,12 +563,12 @@ private struct TeamDataRecordSheet: View {
                             .font(.system(.body, design: .monospaced))
                             .frame(minHeight: 160)
                             .disabled(save != nil)
-                            .accessibilityLabel("Record JSON")
+                            .accessibilityLabel("teams_data_json")
                             .accessibilityIdentifier("teams.data.editor")
                     } else {
                         if !views.isEmpty {
-                            Picker("View", selection: $selectedView) {
-                                Text("Record JSON").tag("")
+                            Picker("teams_data_view", selection: $selectedView) {
+                                Text("teams_data_json").tag("")
                                 ForEach(views, id: \.view) { view in Text(verbatim: view.view).tag(view.view) }
                             }
                             .accessibilityIdentifier("teams.data.view")
@@ -582,17 +582,17 @@ private struct TeamDataRecordSheet: View {
                         }
                     }
                 } else if error == nil {
-                    ProgressView("Loading record")
+                    ProgressView("teams_data_loading")
                 }
             }
             .navigationTitle(currentReference.record)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }.accessibilityIdentifier("teams.data.close")
+                    Button("common_close") { dismiss() }.accessibilityIdentifier("teams.data.close")
                 }
                 if editable && loaded {
                     ToolbarItem(placement: .confirmationAction) {
-                        Button(editing ? "Save record" : "Edit") { activate() }.disabled(save != nil)
+                        Button(editing ? "teams_data_save" : "teams_message_edit") { activate() }.disabled(save != nil)
                             .accessibilityIdentifier("teams.data.save")
                     }
                 }
@@ -621,14 +621,14 @@ private struct TeamDataRecordSheet: View {
             content = record.value; fields = record.fields; views = record.views
             editable = record.editable; loaded = true; error = nil
         } catch where !Task.isCancelled {
-            self.error = String(localized: "The record is unavailable or its access has changed.")
+            self.error = String(localized: "teams_data_unavailable")
         } catch {}
     }
 
     private func write(_ intent: Save) async {
         defer { save = nil }
         guard let value = (try? JSONSerialization.jsonObject(with: Data(intent.text.utf8))) as? [String: Any] else {
-            error = String(localized: "Enter a valid JSON object.")
+            error = String(localized: "teams_data_invalid")
             return
         }
         conflict = false
@@ -663,8 +663,8 @@ private struct TeamDataRecordSheet: View {
         }
         conflict = code == "DATA_CONFLICT"
         error = conflict
-            ? String(localized: "The record has changed. Open the latest revision before saving.")
-            : String(localized: "The record is unavailable or its access has changed.")
+            ? String(localized: "teams_data_conflict")
+            : String(localized: "teams_data_unavailable")
     }
 }
 

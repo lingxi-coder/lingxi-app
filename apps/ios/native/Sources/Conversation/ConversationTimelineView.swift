@@ -497,59 +497,49 @@ private struct ConversationToolBatchRow: View {
                 ToolCallView(trace: trace, isExpanded: expandedToolCalls.contains(trace.id), compact: true,
                              onToggle: { onToggleTool(trace.id) })
             } else if unified || !ordinaryTools.isEmpty {
-            Button(action: onToggleBatch) {
-                HStack(spacing: 8) {
-                    LXIcon(name: batchIcon, size: 18, color: t.text3, stroke: 1.6).frame(width: 20)
+                Button(action: onToggleBatch) {
                     HStack(spacing: 8) {
+                        LXIcon(name: batchIcon, size: 18, color: t.text3, stroke: 1.6).frame(width: 20)
                         Text(summary)
                             .font(.footnote)
-                            .foregroundStyle(t.text3)
+                            .foregroundStyle(isExpanded || isFocused || isHovering ? t.text : t.text3)
                             .lineLimit(1)
+                            .runtimeTextSweep(isActive: active || containsRunningTool, highlightColor: t.text)
+                        if let status {
+                            Text(status).font(.caption).foregroundStyle(t.text3).lineLimit(1).layoutPriority(1)
+                        }
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(t.text4)
+                            .timelineChevron(
+                                isHighlighted: isFocused || isHovering,
+                                isExpanded: isExpanded,
+                                reduceMotion: reduceMotion
+                            )
                     }
-                    .runtimeTextSweep(isActive: active || containsRunningTool, highlightColor: t.text)
-                    if containsRunningTool {
-                        Text(String(localized: "chat_tool_running_count \(activeTools.count)"))
-                            .font(.caption).foregroundStyle(t.text3)
-                    }
-                    if (unified || ordinaryTools.allSatisfy({ $0.isTaskWorkflow })), ordinaryTools.contains(where: { $0.status == .failed }) {
-                        Text("\(ordinaryTools.filter { $0.status == .failed }.count) \(String(localized: "chat_tool_calls_unsuccessful"))")
-                            .font(.caption).foregroundStyle(t.danger).lineLimit(1).layoutPriority(1)
-                    } else if !ordinaryTools.isEmpty && !containsRunningTool && ordinaryTools.allSatisfy({ $0.status == .failed }) {
-                        Text(String(localized: "chat_tool_calls_unsuccessful"))
-                            .font(.caption).foregroundStyle(t.text3)
-                    }
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(t.text4)
-                        .timelineChevron(
-                            isHighlighted: true,
-                            isExpanded: isExpanded,
-                            reduceMotion: reduceMotion
-                        )
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
                 }
-                .frame(minHeight: 44)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .focused($isFocused)
-            .onHover { isHovering = $0 }
-            .accessibilityLabel(unified ? summary : String(localized: "chat_tool_batch_count \(tools.count)"))
-            .accessibilityValue(isExpanded
-                ? String(localized: "chat_agent_details_collapse")
-                : String(localized: "chat_agent_details_expand"))
-            .accessibilityIdentifier("conversation.timeline.tool-batch.\(id)")
+                .buttonStyle(.plain)
+                .focused($isFocused)
+                .onHover { isHovering = $0 }
+                .accessibilityLabel([summary, status].compactMap { $0 }.joined(separator: ", "))
+                .accessibilityValue(isExpanded
+                    ? String(localized: "chat_agent_details_collapse")
+                    : String(localized: "chat_agent_details_expand"))
+                .accessibilityIdentifier("conversation.timeline.tool-batch.\(id)")
 
-            if isExpanded {
-                ForEach(ordinaryTools) { trace in
-                    ToolCallView(
-                        trace: trace,
-                        isExpanded: expandedToolCalls.contains(trace.id),
-                        compact: true,
-                        onToggle: { onToggleTool(trace.id) }
-                    )
-                    .id("\(id):\(trace.id)")
+                if isExpanded {
+                    ForEach(ordinaryTools) { trace in
+                        ToolCallView(
+                            trace: trace,
+                            isExpanded: expandedToolCalls.contains(trace.id),
+                            compact: true,
+                            onToggle: { onToggleTool(trace.id) }
+                        )
+                        .id("\(id):\(trace.id)")
+                    }
                 }
-            }
             }
             if isExpanded && !reasoning.isEmpty { AIText(markdown: reasoning).padding(.leading, 24) }
             ForEach(tools.filter { $0.planDocument != nil }) { trace in
@@ -559,13 +549,18 @@ private struct ConversationToolBatchRow: View {
     }
 
     private var ordinaryTools: [ConversationToolTrace] { tools.filter { $0.planDocument == nil } }
-    private var activeTools: [ConversationToolTrace] { ConversationDesktopTimeline.activeTools(ordinaryTools) }
 
     private var summary: String {
-        if unified && (ordinaryTools.isEmpty || (active && !containsRunningTool && !reasoning.isEmpty)) {
-            return reasoning.isEmpty ? String(localized: "chat_thinking") : String(reasoning.suffix(240)).replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+        ordinaryTools.isEmpty ? String(localized: "chat_thinking") : ConversationDesktopTimeline.summary(ordinaryTools)
+    }
+
+    private var status: String? {
+        if containsRunningTool { return String(localized: "chat_status_running") }
+        if active && !ordinaryTools.isEmpty { return String(localized: "chat_thinking") }
+        if !ordinaryTools.isEmpty && ordinaryTools.allSatisfy({ $0.status == .failed }) {
+            return String(localized: "chat_status_failed")
         }
-        return ConversationDesktopTimeline.summary(ordinaryTools)
+        return nil
     }
 
     private var containsRunningTool: Bool {
@@ -709,20 +704,59 @@ enum ConversationDesktopTimeline {
             }
             return first.header.map(ToolDisplayText.title) ?? first.tool
         }
-        let keys = Set(tools.compactMap(\.groupingKey))
-        if keys.count > 1 {
-            var labels: [String] = []
-            for trace in tools {
-                let label = trace.header.map(ToolDisplayText.verbLabel) ?? trace.tool
-                if !labels.contains(label) { labels.append(label) }
-            }
-            return "\(labels.joined(separator: ", ")) · \(String(localized: "chat_tool_calls_count \(tools.count)"))"
+        var order: [String] = []
+        var actions: [String: [ConversationToolTrace]] = [:]
+        for trace in tools {
+            let action = summaryAction(trace)
+            if actions[action] == nil { order.append(action) }
+            actions[action, default: []].append(trace)
         }
-        let label = tools.allSatisfy({ $0.isTaskWorkflow })
-            ? String(localized: tools.allSatisfy({ ConversationToolTrace.isTaskProgressTool($0.tool) }) ? "chat_tool_group_tasks" : "chat_tool_group_coordination")
-            : first.header.map { header in
-            header.verb == .shell ? String(localized: "chat_tool_group_shell") : ToolDisplayText.verbLabel(header)
-        } ?? first.tool
-        return "\(label) · \(String(localized: "chat_tool_calls_count \(tools.count)"))"
+        var seen = Set<String>()
+        return order.compactMap { action -> String? in
+            guard let calls = actions[action], let call = calls.first else { return nil }
+            let done = calls.allSatisfy { $0.status == .completed }
+            let label: String
+            switch action {
+            case "task-workflow":
+                label = String(localized: calls.allSatisfy { ConversationToolTrace.isTaskProgressTool($0.tool) }
+                    ? "chat_tool_group_tasks" : "chat_tool_group_coordination")
+            case "read", "update", "create", "search", "fetch", "shell", "image":
+                let key = "chat_tool_group_\(action)\(done ? "_done" : "")"
+                label = String(localized: String.LocalizationValue(key))
+            default:
+                label = call.header.map(ToolDisplayText.verbLabel) ?? call.tool
+            }
+            return seen.insert(label).inserted ? label : nil
+        }.joined(separator: ", ")
+    }
+
+    static func isImageInspectionTool(_ name: String) -> Bool {
+        let tool = name.lowercased()
+        return ["view_image", "viewimage", "read_image", "readimage"].contains(tool.components(separatedBy: "__").last ?? tool)
+    }
+
+    private static func summaryAction(_ trace: ConversationToolTrace) -> String {
+        if trace.isTaskWorkflow { return "task-workflow" }
+        let tool = trace.tool.lowercased()
+        if isImageInspectionTool(trace.tool) { return "image" }
+        switch trace.header?.verb {
+        case .read: return "read"
+        case .update: return "update"
+        case .create: return "create"
+        case .shell: return "shell"
+        case .search: return "search"
+        case .fetch: return "fetch"
+        case nil, .generic:
+            switch tool {
+            case "read": return "read"
+            case "edit", "multiedit": return "update"
+            case "write": return "create"
+            case "bash", "shell", "powershell": return "shell"
+            case "grep", "glob": return "search"
+            case "webfetch": return "fetch"
+            default: return trace.tool
+            }
+        default: return trace.tool
+        }
     }
 }

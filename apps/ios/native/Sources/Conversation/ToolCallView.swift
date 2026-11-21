@@ -106,6 +106,9 @@ struct ToolCallView: View {
 
     private var compactSummary: String {
         if let denial { return denial.title }
+        if isCollapsible, !isExpanded, trace.status == .completed, ConversationDesktopTimeline.isImageInspectionTool(trace.tool) {
+            return String(localized: "chat_tool_group_image_done")
+        }
         var summary = ConversationDesktopTimeline.summary([trace])
         if let display = trace.display, let headline = ToolDisplayText.headline(display, trace: trace) {
             let headlineInTitle = trace.status != .failed

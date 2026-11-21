@@ -75,7 +75,7 @@ export function conversationSubtitle(conversation: TeamConversation, snapshot: P
   // Participants mix people (`user:`) and shared Bots (`shared_bot:`); only people are members.
   const members = conversation.participants.filter(id => id.startsWith('user:')).length;
   const bots = conversation.participants.filter(id => id.startsWith('shared_bot:')).length;
-  const people = members ? t('teams_members_count_fmt', members) : '';
+  const people = members ? t(members === 1 ? 'teams_members_count_one_fmt' : 'teams_members_count_other_fmt', members) : '';
   const botText = bots ? t(bots === 1 ? 'teams_bots_count_one_fmt' : 'teams_bots_count_other_fmt', bots) : '';
   return [people, botText].filter(Boolean).join(' · ');
 }

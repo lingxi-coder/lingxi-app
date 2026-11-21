@@ -70,12 +70,13 @@ type PluginSelection =
   | { kind: 'policies' };
 
 const DESKTOP_PLATFORMS = new Set(['macos', 'windows', 'linux']);
-const PUBLIC_EXTENSION_CATEGORIES = ['browser', 'development', 'productivity'] as const;
+const PUBLIC_EXTENSION_CATEGORIES = ['browser', 'development', 'database', 'productivity'] as const;
 
 function publicCategoryLabel(category: string): string {
   const key = {
     browser: 'desktop_extension_category_browser',
     development: 'desktop_extension_category_development',
+    database: 'desktop_extension_category_database',
     productivity: 'desktop_extension_category_productivity',
   }[category];
   return key ? tr(key) : category;

@@ -4,8 +4,8 @@ import type { SessionAgentSummaryDto, StructuredDiffDto } from '@lingxi/bridge-c
 import type { Locale } from '../utils/locale';
 import { Markdown } from './markdown';
 import { imageRefOf, itemsWithExtras, type ExtraRow, type PromptMeta, type Transcript } from './sessionModel';
-import { AGENT_AVATARS, agentAvatarIndex, anchorTranscriptAgents, placeTranscriptAgents, isTaskProgressTool, isTaskWorkflowTool, transcriptRows, toolDisplayHeader, toolHasBody, toolTruncationNotice, type RunItem, type ToolRunItem, type AgentTranscriptRow } from './reuse';
-import { t } from './strings';
+import { AGENT_AVATARS, agentAvatarIndex, anchorTranscriptAgents, placeTranscriptAgents, isImageInspectionTool, isTaskProgressTool, isTaskWorkflowTool, toolGroupSummary, transcriptRows, toolDisplayHeader, toolHasBody, toolTruncationNotice, type RunItem, type ToolRunItem, type AgentTranscriptRow } from './reuse';
+import { t, toolSummaryText } from './strings';
 import { displayText } from './text';
 
 interface TranscriptViewProps {
@@ -162,9 +162,10 @@ function RemoteImage({ url, locale, fetchImage }: { url: string; locale: Locale;
 function ToolGlyph({ tool }: { tool: ToolRunItem }) {
   const task = isTaskProgressTool(tool.tool);
   const send = /(?:^|__)(?:SendMessage|send_message)$/i.test(tool.tool);
-  const kind = tool.tool === 'LocalApp' ? 'local-app' : tool.tool.toLowerCase() === 'browser' ? 'globe' : task ? 'tasks' : send ? 'send' : tool.tool === 'ToolSearch' ? 'search' : tool.view.verb;
+  const kind = tool.tool === 'LocalApp' ? 'local-app' : tool.tool.toLowerCase() === 'browser' ? 'globe' : task ? 'tasks' : send ? 'send' : tool.tool === 'ToolSearch' ? 'search' : isImageInspectionTool(tool.tool) ? 'image' : tool.view.verb;
   let artwork;
   switch (kind) {
+    case 'image': artwork = <><rect x="1.5" y="2" width="13" height="12" rx="2" /><circle cx="5.5" cy="5.5" r="1" /><path d="m2 12 3.5-3.5 2.3 2.3 3-4L14 10" /></>; break;
     case 'local-app': artwork = <><rect x="2" y="2" width="4.5" height="4.5" rx="1.2" /><rect x="9.5" y="2" width="4.5" height="4.5" rx="1.2" /><rect x="2" y="9.5" width="4.5" height="4.5" rx="1.2" /><rect x="9.5" y="9.5" width="4.5" height="4.5" rx="1.2" /></>; break;
     case 'tasks': artwork = <><path d="m1.8 3.3 1.1 1.1 2-2.2M7 3.5h7M7 8h7M7 12.5h7" /><circle cx="3.2" cy="8" r="1.1" /><circle cx="3.2" cy="12.5" r="1.1" /></>; break;
     case 'send': artwork = <path d="m14 2-4.5 12-2.6-5-5-2.5L14 2ZM7 9l7-7" />; break;
@@ -221,18 +222,17 @@ function ToolGroup({ locale, tools, trimmed }: { locale: Locale; tools: ToolRunI
   if (tools.length === 1) return <ToolCard locale={locale} tool={tools[0]!} trimmed={trimmed.has(tools[0]!.id)} />;
   const workflow = tools.every(isTaskWorkflowTool);
   const first = tools[0]!;
-  const running = tools.filter(tool => tool.status === 'running').length;
-  const failed = tools.filter(tool => tool.status === 'error').length;
-  const label = workflow ? t(locale, tools.every(tool => isTaskProgressTool(tool.tool)) ? 'taskProgress' : 'taskCoordination') : groupLabel(locale, first);
+  const running = tools.some(tool => tool.status === 'running');
+  const failed = tools.every(tool => tool.status === 'error');
+  const label = toolGroupSummary(tools, key => toolSummaryText(locale, key));
   return <div className="rc-tools">
-    <button className="rc-inline-row" type="button" aria-expanded={open} onClick={() => setOpen(!open)}>
+    <button className="rc-inline-row" type="button" aria-expanded={open} onClick={() => setOpen(value => !value)}>
       <ToolGlyph tool={workflow ? { ...first, tool: 'TaskList' } : first} />
-      <span className="rc-inline-label">{label} · {t(locale, 'toolCalls', { count: tools.length })}</span>
-      {running ? <span className="rc-inline-state">{t(locale, 'toolRunningCount', { count: running })}</span> : null}
-      {workflow && failed ? <span className="rc-danger">{t(locale, 'toolFailedCount', { count: failed })}</span> : null}
+      <span className="rc-inline-label" title={label}>{label}</span>{' '}
+      <span className="rc-inline-state rc-tool-group-status" role="status">{running ? t(locale, 'toolRunning') : failed ? t(locale, 'toolFailed') : ''}</span>
       <span className="rc-inline-arrow" aria-hidden="true">{open ? '⌄' : '›'}</span>
     </button>
-    {open || (!workflow && running > 0) ? <div className="rc-inline-members">{tools.filter(tool => open || tool.status === 'running').map(tool => <ToolCard key={tool.id} locale={locale} tool={tool} trimmed={trimmed.has(tool.id)} />)}</div> : null}
+    {open ? <div className="rc-inline-members">{tools.map(tool => <ToolCard key={tool.id} locale={locale} tool={tool} trimmed={trimmed.has(tool.id)} />)}</div> : null}
   </div>;
 }
 
@@ -259,10 +259,12 @@ function ToolCard({ locale, tool, trimmed }: { locale: Locale; tool: ToolRunItem
   const [open, setOpen] = useState(false);
   const body = toolHasBody(tool);
   const notice = toolTruncationNotice(tool);
+  const label = body && !open && tool.status === 'done' && isImageInspectionTool(tool.tool)
+    ? toolSummaryText(locale, 'chat_tool_group_image_done') : toolLabel(locale, tool);
   return (
     <div className={`rc-tool rc-tool-${tool.status}`}>
       <button type="button" className="rc-tool-head" onClick={() => setOpen((value) => !value)} disabled={!body} aria-expanded={body ? open : undefined}>
-        <ToolGlyph tool={tool} /><span className="rc-tool-title" title={displayText(toolLabel(locale, tool), 1000)}>{displayText(toolLabel(locale, tool), 300)}</span>
+        <ToolGlyph tool={tool} /><span className="rc-tool-title" title={displayText(label, 1000)}>{displayText(label, 300)}</span>
         {tool.status === 'running' ? <span className="rc-tool-state">{t(locale, 'toolRunning')}</span> : null}
         {tool.status === 'error' ? <span className="rc-tool-state rc-danger">{t(locale, 'toolFailed')}</span> : null}
         {body ? <span className="rc-inline-arrow" aria-hidden="true">{open ? '⌄' : '›'}</span> : null}

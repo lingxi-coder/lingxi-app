@@ -245,7 +245,7 @@ export function TeamDetailsDrawer({ workspace, snapshot, tab, onTabChange, width
       <TeamMark id={team.id} name={team.name} size={56} />
       <div className="tw-drawer-title">
         <h2 ref={heading} tabIndex={-1}>{team.name}</h2>
-        <p>{role(team.role)} · {t('teams_members_count_fmt', team.memberCount)}</p>
+        <p>{role(team.role)} · {t(team.memberCount === 1 ? 'teams_members_count_one_fmt' : 'teams_members_count_other_fmt', team.memberCount)}</p>
       </div>
       <button type="button" className="tw-icon-btn" aria-label={t('tw_team_close_details')} title={t('tw_team_close_details')} onClick={onClose}><Icon name="x" /></button>
     </header>

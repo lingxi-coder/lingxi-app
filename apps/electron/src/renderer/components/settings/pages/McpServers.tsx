@@ -8,6 +8,7 @@ import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
 import { parseJsonObjectInput } from '../jsonInput';
 import { publicExtensionItems, publicExtensionText, type PublicExtensionItem } from '../../../../shared/publicExtensionDirectory';
+import { mcpPrepareRequest } from '../../../../shared/mcpPrepare';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
 import { ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, useExtensionHubNavigation } from './ExtensionHub';
 import { ExtensionDetails, ExtensionRemovalConfirmation } from './ExtensionDetails';
@@ -55,7 +56,7 @@ const MCP_SCOPE_DESCRIPTIONS: Record<WritableScopeDto, string> = {
 const MCP_SCOPE_VS_LAYERS_NOTE = 'mcp_scope_vs_layers_note';
 
 const DESKTOP_PLATFORMS = new Set(['macos', 'windows', 'linux']);
-const PUBLIC_MCP_CATEGORIES = ['browser', 'development', 'productivity'] as const;
+const PUBLIC_MCP_CATEGORIES = ['browser', 'development', 'database', 'productivity'] as const;
 const DEFAULT_MCP_CONFIG = { command: 'npx', args: ['-y', 'package-name'] };
 type PublicDirectoryText = (typeof publicExtensionItems)[number]['description'];
 type McpRuntimeStatusDto = McpStatusDto | 'connected' | 'disconnected';
@@ -68,6 +69,7 @@ function publicMcpCategoryLabel(category: string): string {
   const key = {
     browser: 'desktop_extension_category_browser',
     development: 'desktop_extension_category_development',
+    database: 'desktop_extension_category_database',
     productivity: 'desktop_extension_category_productivity',
   }[category];
   return key ? tr(key) : category;
@@ -283,6 +285,8 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
   const [pendingHubPage, setPendingHubPage] = useState<{ pageId: string; pluginId?: string } | null>(null);
   const [removingEntry, setRemovingEntry] = useState<McpEntry | null>(null);
   const [removing, setRemoving] = useState(false);
+  /** The server whose npx/uvx package is being installed before it is saved. */
+  const [preparing, setPreparing] = useState<string | null>(null);
 
   useEffect(() => {
     if (adminAvailable) void callMcpAdmin(bridge, adminRecordCommand('get_snapshot'));
@@ -474,7 +478,8 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
     .map((category) => ({ category, items: filteredPublicMcpItems.filter((item) => item.category === category) }))
     .filter((group) => group.items.length > 0);
 
-  const save = () => {
+  const save = async () => {
+    if (preparing !== null) return;
     const parsed = parseJsonObjectInput(draftConfigText, tr('mcp_section_configuration'));
     if ('error' in parsed) {
       setPageError(parsed.error);
@@ -490,11 +495,22 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
       return;
     }
     setPageError(null);
+    const name = draftName.trim();
+    // The runtime allows a new server 30 seconds, less than a first npx/uvx install can take. A project server
+    // waits for its approval before anything starts it. The save goes ahead whatever the outcome; the runtime
+    // reports a server that cannot start.
+    const prepare = draftScope === 'project' ? null : mcpPrepareRequest(parsed.config);
+    const prepareApi = window.lingxi?.mcpPrepare;
+    if (prepare && prepareApi) {
+      setPreparing(name);
+      await prepareApi.prepare(prepare).catch(() => undefined);
+      setPreparing(null);
+    }
     void callMcpAdmin(bridge, adminRecordCommand('save_server', {
       operation_id: nextConfigurationOperationId(),
       scope: draftScope,
       revision: scopeSnapshot.revision_sha256,
-      payload_json: JSON.stringify({ scope: draftScope, name: draftName.trim(), config: parsed.config }),
+      payload_json: JSON.stringify({ scope: draftScope, name, config: parsed.config }),
     })).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_mcp_save_failed')));
   };
 
@@ -766,9 +782,10 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
               </div>
             )}
             <div className="mcp-editor-actions">
-              <button type="button" onClick={save} style={{ ...ghostButtonStyle(t), background: t.text, color: t.surface, borderColor: t.text }}>{linkRequest?.payload && selection.kind === 'create' ? tr('desktop_extension_confirm_mcp_import') : sameScopePublicMcpConflict ? tr('desktop_extension_mcp_replace_configuration') : tr('settings_save')}</button>
+              <button type="button" onClick={() => void save()} disabled={preparing !== null} style={{ ...ghostButtonStyle(t), background: t.text, color: t.surface, borderColor: t.text, ...(preparing !== null ? { opacity: 0.65, cursor: 'progress' } : {}) }}>{preparing !== null ? tr('desktop_extension_mcp_preparing') : linkRequest?.payload && selection.kind === 'create' ? tr('desktop_extension_confirm_mcp_import') : sameScopePublicMcpConflict ? tr('desktop_extension_mcp_replace_configuration') : tr('settings_save')}</button>
               {selected && <button type="button" onClick={remove} style={ghostButtonStyle(t, false, true)}>{tr('desktop_extension_remove')}</button>}
             </div>
+            {preparing !== null && <div role="status" style={secondaryMetaStyle(t)}>{tr('desktop_extension_mcp_preparing_note', preparing)}</div>}
             <div style={noteStyle(t)}>
               <div style={{ fontWeight: 700, marginBottom: 6 }}>{tr('desktop_extension_project_approvals')}</div>
               <div style={secondaryMetaStyle(t)}>{tr('desktop_extension_approved')}{asStringArray(approval.enabled_servers).join(', ') || tr('desktop_extension_none')}</div>

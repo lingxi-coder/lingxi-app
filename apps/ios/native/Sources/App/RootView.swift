@@ -883,9 +883,9 @@ struct RootView: View {
         .safeAreaInset(edge: .top, spacing: 0) {
             if let notice = inbox.notice {
                 HStack {
-                    Button("Conversation update", systemImage: "bell") { Task { await inbox.open(notice) } }
+                    Button("inbox_notice", systemImage: "bell") { Task { await inbox.open(notice) } }
                     Spacer()
-                    Button("Dismiss", systemImage: "xmark") { inbox.clearNotice() }.labelStyle(.iconOnly)
+                    Button("inbox_dismiss", systemImage: "xmark") { inbox.clearNotice() }.labelStyle(.iconOnly)
                 }
                 .padding(.horizontal).padding(.vertical, 8)
                 .background(.regularMaterial)
@@ -1055,14 +1055,14 @@ struct RootView: View {
                 navigation.tabs.select(.bots)
             } else {
                 inbox.dismissNotificationPreview()
-                externalLinkError = String(localized: "The source device is unavailable")
+                externalLinkError = String(localized: "inbox_source_unavailable")
             }
         case .team:
             if row.category == .friend {
                 guard let peer = row.peerUid ?? friendsWorkspace.list.first(where: {
                     $0.teamId == row.ref.sourceId && $0.generation == row.ref.generation
                 })?.uid, InboxRef.safe(peer) else {
-                    externalLinkError = String(localized: "This friendship is unavailable")
+                    externalLinkError = String(localized: "friends_chat_unavailable")
                     return
                 }
                 navigation.tabs.friendsInboxRequest = FriendsInboxRoute(ref: row.ref, peer: peer)
@@ -1760,7 +1760,7 @@ struct RootView: View {
             )
             .safeAreaInset(edge: .top, spacing: 0) {
                 if let notice = inbox.inlineNotice, notice.ref == localInboxContext {
-                    Label("Conversation update", systemImage: "bell").font(.caption).padding(5)
+                    Label("inbox_notice", systemImage: "bell").font(.caption).padding(5)
                 }
             }
             .environment(\.openLocalApp, { id in
@@ -4219,7 +4219,7 @@ struct RootView: View {
                     guard owner.matches(saved) else { throw SessionHost.OwnershipError.sourceIdentityMismatch }
                     let request = LocalAppDevelopmentRequest(appId: app.appId, name: app.name,
                         sourceDirectory: result.sourceDirectory, sourceID: sourceID, sourceRequestID: nil,
-                        authoring: authoring, prompt: "继续开发这个应用。")
+                        authoring: authoring, prompt: String(localized: "local_app_continue_prompt"))
                     let entry = try await prepareParkedExistingAuthoringOwner(project: project, row: row,
                                                                               request: request, context: context)
                     if isCurrentLocalAppNavigation(context),
@@ -4239,7 +4239,7 @@ struct RootView: View {
                 }
                 let intent = LocalAppSourceCreateIntent(requestId: UUID().uuidString.lowercased(),
                     projectId: project?.id ?? UUID().uuidString.lowercased(), mode: initiatingMode,
-                    name: app.name, prompt: "继续开发这个应用。",
+                    name: app.name, prompt: String(localized: "local_app_continue_prompt"),
                     operation: .bind, appId: app.appId, sourceId: canonicalSessionID(sourceID),
                     sourceDirectory: result.sourceDirectory)
                 try await projectStore.storeLocalAppSourceCreateIntent(intent)
@@ -4261,7 +4261,7 @@ struct RootView: View {
         }
         let context = beginLocalAppNavigation(key: "app:" + app.appId)
         let intent = LocalAppSourceCreateIntent(requestId: UUID().uuidString.lowercased(),
-            projectId: UUID().uuidString.lowercased(), mode: initiatingMode, name: app.name, prompt: "继续开发这个应用。",
+            projectId: UUID().uuidString.lowercased(), mode: initiatingMode, name: app.name, prompt: String(localized: "local_app_continue_prompt"),
             operation: .restore, appId: app.appId, revision: revision)
         Task { @MainActor in
             do {

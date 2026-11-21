@@ -89,7 +89,7 @@ async function main() {
     const skillGroup = '.transcript-activity[data-activity-id="skill-group:skill-1"]';
     const skillTrigger = `${skillGroup} > .transcript-activity-trigger`;
     assert.equal(await run('document.querySelectorAll(".transcript-row").length'), 1);
-    assert.match(await run(`document.querySelector(${JSON.stringify(skillTrigger)}).textContent`), /lingxi-api · 3 calls/);
+    assert.match(await run(`document.querySelector(${JSON.stringify(skillTrigger)}).textContent.trim()`), /^lingxi-api$/);
     assert.equal(await run(`document.querySelector(${JSON.stringify(skillTrigger)}).getAttribute('aria-expanded')`), 'false');
     assert.equal(await run('document.querySelectorAll(".local-app-instructions-toggle").length'), 0);
     await run('window.activityFixture.reveal("instructions-2")');

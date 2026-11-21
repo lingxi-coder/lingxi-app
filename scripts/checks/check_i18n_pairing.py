@@ -145,8 +145,8 @@ INTENTIONAL_IDENTICAL_TO_BASE = {
     ("zh-Hant", "friends_request_accept"): "接受",
     ("zh-Hant", "friends_relation_friends"): "已是好友",
     # Friends team offers and shared Bots: the same characters in both Chinese variants.
-    ("zh-Hant", "friends_offer_expires %@"): "%@ 到期",
-    ("zh-Hant", "friends_offer_expires_fmt"): "%1$s 到期",
+    ("zh-Hant", "friends_offer_expires %@"): "%@到期",
+    ("zh-Hant", "friends_offer_expires_fmt"): "%1$s到期",
     ("zh-Hant", "friends_offer_join"): "加入",
     ("zh-Hant", "friends_offer_dismiss"): "移除",
     ("zh-Hant", "friends_bots_title"): "共享的 Bot",
@@ -195,6 +195,97 @@ INTENTIONAL_IDENTICAL_TO_BASE = {
     ("ja", "tw_list_separator"): "、",
     ("ja", "tw_conv_latest"): "最新",
     ("ja", "tw_list_change_separator"): "；",
+    # Reviewed 2026-11-20 (values added after the 17792c4f6 baseline). zh-Hant:
+    # every character here is also the Traditional form, and the wording is
+    # what zh-Hant uses elsewhere. en/ja/ko: token units, MCP, and Japanese
+    # words written with the same kanji.
+    ("zh-Hant", "chat_agent_finished"): "已完成",
+    ("zh-Hant", "chat_summary_tools"): "工具",
+    ("zh-Hant", "composer_fast_mode"): "快速模式",
+    ("zh-Hant", "extension_directory_category_all"): "全部",
+    ("zh-Hant", "extension_directory_category_productivity"): "效率",
+    ("zh-Hant", "extension_directory_included_skills"): "包含的 Skills",
+    ("zh-Hant", "extension_directory_kind_mcp"): "MCP",
+    ("zh-Hant", "image_preview_zoom_in"): "放大",
+    ("zh-Hant", "inbox_all"): "全部",
+    ("zh-Hant", "inbox_completed"): "已完成",
+    ("zh-Hant", "inbox_notice_attachment"): "附件",
+    ("zh-Hant", "public_extensions_category_all"): "全部",
+    ("zh-Hant", "public_extensions_category_productivity"): "效率",
+    ("zh-Hant", "public_extensions_included_skills"): "包含的 Skills",
+    ("zh-Hant", "remote_app_revision"): "版本 %1$s",
+    ("zh-Hant", "remote_apps_phase_stopped"): "已停止",
+    ("zh-Hant", "remote_apps_phase_stopping"): "停止中",
+    ("zh-Hant", "remote_back"): "返回",
+    ("zh-Hant", "remote_needs_question"): "等待回答",
+    ("zh-Hant", "remote_status_requires_action"): "等待你",
+    ("zh-Hant", "services_leave"): "退出",
+    ("zh-Hant", "services_leave_title %@"): "退出 %@？",
+    ("zh-Hant", "services_leave_title_fmt"): "退出 %1$s？",
+    ("zh-Hant", "services_lookup_action"): "查看",
+    ("zh-Hant", "services_offered_by %@"): "提供者：%@",
+    ("zh-Hant", "services_offered_by_fmt"): "提供者：%1$s",
+    ("zh-Hant", "services_report_other"): "其他",
+    ("zh-Hant", "services_state_available"): "可用",
+    ("zh-Hant", "services_task_running"): "Bot 正在回答…",
+    ("zh-Hant", "settings_group_models_hub"): "模型",
+    ("zh-Hant", "side_chat_actions"): "旁聊操作",
+    ("zh-Hant", "side_chat_hide"): "收起旁聊",
+    ("zh-Hant", "side_chat_number"): "旁聊 %1$d",
+    ("zh-Hant", "side_chats_title"): "旁聊",
+    ("zh-Hant", "teams_approval_remove %@"): "移除%@",
+    ("zh-Hant", "teams_approval_remove_fmt"): "移除%1$s",
+    ("zh-Hant", "teams_day"): "1 天",
+    ("zh-Hant", "teams_doc_revision %lld"): "版本 %lld",
+    ("zh-Hant", "teams_doc_revision_fmt"): "版本 %1$d",
+    ("zh-Hant", "teams_doc_show_latest"): "查看最新版本",
+    ("zh-Hant", "teams_file_remove %@"): "移除 %@",
+    ("zh-Hant", "teams_file_remove_fmt"): "移除 %1$s",
+    ("zh-Hant", "teams_file_take_back"): "收回",
+    ("zh-Hant", "teams_file_take_back_confirm %@"): "收回 %@？",
+    ("zh-Hant", "teams_file_take_back_confirm_fmt"): "收回 %1$s？",
+    ("zh-Hant", "teams_list_done"): "已完成",
+    ("zh-Hant", "teams_list_history_kept"): "保留最近 200 次修改。",
+    ("zh-Hant", "teams_list_history_you"): "你",
+    ("zh-Hant", "teams_list_history_you_inline"): "你",
+    ("zh-Hant", "teams_list_not_done"): "未完成",
+    ("zh-Hant", "teams_list_remove"): "移除",
+    ("zh-Hant", "teams_ops_view"): "查看操作",
+    ("zh-Hant", "teams_report_version_latest"): "最新版本",
+    ("zh-Hant", "teams_task_cancelled"): "已取消",
+    ("zh-Hant", "teams_task_cancelling"): "正在取消…",
+    ("zh-Hant", "teams_usage_partial"): "用量不完整",
+    ("zh-Hant", "teams_usage_tokens %lld %lld"): "%1$lld / %2$lld tokens",
+    ("zh-Hant", "teams_usage_tokens_fmt"): "%1$d / %2$d tokens",
+    ("zh-Hant", "teams_week"): "7 天",
+    ("en", "composer_effort_budget %@"): "%@ tokens",
+    ("en", "composer_effort_budget_fmt"): "%1$s tokens",
+    ("en", "composer_reasoning_budget_range %@ %@"): "%@–%@ tokens",
+    ("en", "composer_reasoning_budget_range_fmt"): "%1$s–%2$s tokens",
+    ("en", "extension_directory_kind_mcp"): "MCP",
+    ("en", "teams_usage_tokens %lld %lld"): "%1$lld / %2$lld tokens",
+    ("en", "teams_usage_tokens_fmt"): "%1$d / %2$d tokens",
+    ("ja", "common_save"): "保存",
+    ("ja", "extension_directory_kind_mcp"): "MCP",
+    ("ja", "remote_apps_phase_stopping"): "停止中",
+    ("ja", "teams_doc_field_body"): "内容（Markdown）",
+    ("ko", "extension_directory_kind_mcp"): "MCP",
+    # Workflow and Local App labels whose words are the same in both scripts.
+    ("zh-Hant", "chat_workflow_agent_fallback %llu"): "Agent %llu",
+    ("zh-Hant", "chat_workflow_agent_fallback_fmt"): "Agent %1$d",
+    ("en", "chat_workflow_agent_fallback %llu"): "Agent %llu",
+    ("en", "chat_workflow_agent_fallback_fmt"): "Agent %1$d",
+    ("ja", "chat_workflow_agent_fallback %llu"): "Agent %llu",
+    ("ja", "chat_workflow_agent_fallback_fmt"): "Agent %1$d",
+    ("ko", "chat_workflow_agent_fallback %llu"): "Agent %llu",
+    ("ko", "chat_workflow_agent_fallback_fmt"): "Agent %1$d",
+    ("zh-Hant", "chat_workflow_agents_done %lld %lld"): "%lld/%lld 完成",
+    ("zh-Hant", "chat_workflow_agents_done_fmt"): "%1$d/%2$d 完成",
+    ("zh-Hant", "chat_workflow_tokens %llu"): "%llu token",
+    ("zh-Hant", "chat_workflow_tokens_fmt"): "%1$d token",
+    ("zh-Hant", "local_app_revision %llu"): "版本 %llu",
+    ("zh-Hant", "local_app_revision_fmt"): "版本 %1$d",
+    ("zh-Hant", "local_app_agent_model"): "Agent 模型",
 }
 
 
@@ -555,6 +646,21 @@ def _android_plurals_names(repo_root):
     return names
 
 
+def _android_paired(key, legal, plurals):
+    """Whether an Android-illegal (iOS-only) key has its Android counterpart.
+
+    The counterpart is `<stem>_fmt`, a hand-maintained `<plurals>` named
+    `<stem>`, or the `<stem>_one_fmt` / `<stem>_other_fmt` pair that Android and
+    the Web Teams UI pick between by count (`teams_bots_count_one_fmt`).
+    """
+    stem = key.split(" ")[0].split("%")[0].rstrip("_ ")
+    return (
+        stem + ANDROID_PAIR_SUFFIX in legal
+        or stem in plurals
+        or (stem + "_one" + ANDROID_PAIR_SUFFIX in legal and stem + "_other" + ANDROID_PAIR_SUFFIX in legal)
+    )
+
+
 def load(directory):
     directory = Path(directory)
     out = {}
@@ -578,14 +684,8 @@ def measure(locales, repo_root):
     legal = {k for k in keys if ANDROID_NAME.match(k)}
     illegal = [k for k in keys if k not in legal]
 
-    def stem(k):
-        return k.split(" ")[0].split("%")[0].rstrip("_ ")
-
     plurals = _android_plurals_names(repo_root)
-    unpaired = [
-        k for k in illegal
-        if stem(k) + ANDROID_PAIR_SUFFIX not in legal and stem(k) not in plurals
-    ]
+    unpaired = [k for k in illegal if not _android_paired(k, legal, plurals)]
 
     ios_refs = _ios_source_refs(repo_root)
     if len(ios_refs) < MIN_IOS_SOURCE_REFS:

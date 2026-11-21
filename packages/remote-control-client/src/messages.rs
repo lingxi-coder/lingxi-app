@@ -747,33 +747,49 @@ pub struct SessionHistoryResult {
 /// Semantic result positions strictly after the caller's acknowledged cursor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionActivityParams {
+    /// Session id.
     pub session_id: String,
+    /// Last activity cursor the caller has acknowledged; the page starts after it.
     pub after: u64,
 }
 
+/// One semantic result position in a session's activity log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionActivityEntry {
+    /// Position in the log; consecutive within a page.
     pub cursor: u64,
+    /// Durable transcript UUIDs of the messages that make up this result (1 to 16).
     pub result_uuids: Vec<String>,
+    /// What kind of result this position records.
     pub kind: SessionActivityKind,
+    /// When the result was recorded, in Unix milliseconds.
     pub at: i64,
 }
 
+/// Kind of a session activity entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SessionActivityKind {
+    /// A finished assistant reply.
     Reply,
+    /// A background task's result.
     TaskResult,
+    /// A turn or task that ended in failure.
     Failure,
 }
 
+/// `session.activity` result: a bounded page of positions after the caller's cursor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionActivityPage {
+    /// Entries in cursor order, at most 50.
     pub items: Vec<SessionActivityEntry>,
+    /// Latest cursor the host has recorded for the session.
     pub cursor: u64,
+    /// Oldest cursor the host still retains; earlier positions are gone.
     pub baseline_cursor: u64,
+    /// Whether positions remain beyond this page.
     pub has_more: bool,
 }
 
@@ -803,15 +819,21 @@ impl SessionActivityPage {
     }
 }
 
+/// `session.activityPreview` (request): text of the results up to a cursor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionActivityPreviewParams {
+    /// Session id.
     pub session_id: String,
+    /// Cursor of the last activity entry to preview.
     pub through: u64,
 }
 
+/// `session.activityPreview` result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionActivityPreview {
+    /// Whether the host could still produce the preview; when false, `messages` is empty.
     pub available: bool,
+    /// Assistant text messages only, each with its durable transcript UUID.
     pub messages: Vec<MessageDto>,
 }
 

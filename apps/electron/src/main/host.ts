@@ -12,6 +12,8 @@ import { CH_ACCOUNT, CH_ACCOUNT_CHANGED } from '../shared/account.js';
 import { CH_IMAGE_SAVE } from '../shared/imageSave.js';
 import { registerImageSave } from './imageSave.js';
 import { CH_APPLICATION_ICON } from '../shared/applicationIcon.js';
+import { CH_MCP_PREPARE, mcpPrepareRequest, type McpPrepareRequest, type McpPrepareStatus } from '../shared/mcpPrepare.js';
+import { MCP_PREPARE_DEADLINE_MS, prepareMcpServer } from './mcpPrepare.js';
 import { CH_INTERFACE_LOCALE } from '../shared/interfaceLocale.js';
 import { nativeTr, setNativeLocale } from '../shared/nativeLocale.js';
 import { CH_COMPUTER_SETTINGS } from '../shared/computerSettings.js';
@@ -52,6 +54,7 @@ import {
   rmdirSync,
   writeFileSync,
 } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import type { AskUserQuestionRequestDto, CronJobDto, SessionRowDto } from '@lingxi/bridge-client';
@@ -79,6 +82,7 @@ import {
   type ProviderCredentialBroker,
 } from './credential-broker.js';
 import {
+  buildBridgeEnvironment,
   canonicalWorkspace,
   DiagnosticBuffer,
   diagnosticEvent,
@@ -888,6 +892,14 @@ export class HostController {
       const icon = await applicationIcon(bundleId);
       this.assertSender(event);
       return icon;
+    });
+    this.ipc.handle(CH_MCP_PREPARE, async (event: IpcMainInvokeEvent, value: unknown) => {
+      this.assertSender(event);
+      const request = mcpPrepareRequest(value);
+      if (!request) throw new Error('invalid MCP prepare request');
+      const status = await this.prepareMcpServer(request);
+      this.assertSender(event);
+      return status;
     });
     registerImageSave(this.ipc, event => this.assertSender(event), options => dialog!.showSaveDialog(options));
     this.registerRemoteControlIpc();
@@ -1966,6 +1978,25 @@ export class HostController {
     if (!origins || !frame || frame !== event.sender.mainFrame) throw new Error('unauthorized IPC sender');
     const senderOrigin = origin(frame.url);
     if (!senderOrigin || !origins.has(senderOrigin)) throw new Error('unauthorized IPC origin');
+  }
+
+  /** Start an npx/uvx server once with the environment the runtime gives it, so its package is installed. */
+  private async prepareMcpServer(request: McpPrepareRequest): Promise<McpPrepareStatus> {
+    const workspace = this.workspace();
+    const cwd = workspace.trusted && workspace.path ? workspace.path : homedir();
+    const settings = await this.sessionCatalog.workspaceSettings(cwd).catch((error: unknown) => {
+      this.diagnostics.add('warn', 'host', `MCP package preparation could not read the workspace settings: ${sanitizeDiagnostic(error)}`);
+      return undefined;
+    });
+    const status = await prepareMcpServer({
+      command: request.command,
+      args: request.args,
+      cwd,
+      env: { ...buildBridgeEnvironment(process.env), ...settings?.environment, ...request.env },
+      deadlineMs: MCP_PREPARE_DEADLINE_MS,
+    });
+    if (status !== 'ready') this.diagnostics.add('warn', 'host', `MCP package preparation through ${request.command} ended: ${status}`);
+    return status;
   }
 
   private workspace(): WorkspaceMetadata {

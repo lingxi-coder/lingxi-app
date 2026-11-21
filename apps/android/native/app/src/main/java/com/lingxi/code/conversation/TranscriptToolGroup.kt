@@ -71,8 +71,41 @@ internal fun toolGroupingKey(call: ToolCallUi): String? {
     return call.header?.verb?.takeIf { it != ToolVerbUi.Generic }?.name ?: call.tool.takeIf { it.isNotEmpty() }
 }
 
+internal fun isImageInspectionTool(name: String): Boolean =
+    name.substringAfterLast("__").lowercase() in setOf("view_image", "viewimage", "read_image", "readimage")
+
+private fun summaryAction(call: ToolCallUi): String? {
+    if (isTaskWorkflow(call)) return "task-workflow"
+    if (isImageInspectionTool(call.tool)) return "image"
+    return when (call.header?.verb) {
+        ToolVerbUi.Read -> "read"
+        ToolVerbUi.Search -> "search"
+        ToolVerbUi.Update -> "update"
+        ToolVerbUi.Create -> "create"
+        ToolVerbUi.Fetch -> "fetch"
+        ToolVerbUi.Shell -> "shell"
+        null, ToolVerbUi.Generic -> when (call.tool.lowercase()) {
+            "read" -> "read"
+            "grep", "glob" -> "search"
+            "edit", "multiedit" -> "update"
+            "write" -> "create"
+            "webfetch" -> "fetch"
+            "bash", "shell", "powershell" -> "shell"
+            else -> null
+        }
+        else -> null
+    }
+}
+
+private val routineActions = setOf("read", "search", "update", "create", "fetch", "shell")
+
+private fun activityGroupingKey(call: ToolCallUi): String? {
+    val key = toolGroupingKey(call) ?: return null
+    return if (!call.tool.startsWith("mcp", ignoreCase = true) && summaryAction(call) in routineActions) "file-and-command-activity" else key
+}
+
 internal fun sameToolGroup(first: ToolCallUi, next: ToolCallUi): Boolean =
-    toolGroupingKey(first)?.let { it == toolGroupingKey(next) } == true
+    activityGroupingKey(first)?.let { it == activityGroupingKey(next) } == true
 
 internal fun consecutiveToolGroups(calls: List<ToolCallUi>): List<List<ToolCallUi>> {
     val groups = mutableListOf<MutableList<ToolCallUi>>()
@@ -159,15 +192,26 @@ internal fun ToolGroupView(group: TranscriptBlock.Tools, expandedIds: Set<String
     val hovered by interaction.collectIsHoveredAsState()
     val first = group.calls.first()
     val workflow = group.calls.all(::isTaskWorkflow)
-    val label = if (workflow) stringResource(if (group.calls.all { isTaskProgressTool(it.tool) }) R.string.chat_tool_group_tasks else R.string.chat_tool_group_coordination) else first.header?.verb?.let { verb -> when (verb) {
-        ToolVerbUi.Read -> stringResource(R.string.chat_tool_verb_read)
-        ToolVerbUi.Search -> stringResource(R.string.chat_tool_verb_search)
-        ToolVerbUi.Update -> stringResource(R.string.chat_tool_verb_update)
-        ToolVerbUi.Create -> stringResource(R.string.chat_tool_verb_create)
-        ToolVerbUi.Fetch -> stringResource(R.string.chat_tool_verb_fetch)
-        ToolVerbUi.Shell -> stringResource(R.string.chat_tool_group_shell)
-        else -> first.header.label
-    } } ?: first.tool
+    val labels = mutableListOf<String>()
+    for ((action, calls) in group.calls.groupBy { summaryAction(it) ?: it.tool }) {
+        val done = calls.all { it.status == AgentToolStatus.Completed }
+        labels += when (action) {
+            "read" -> stringResource(if (done) R.string.chat_tool_group_read_done else R.string.chat_tool_group_read)
+            "search" -> stringResource(if (done) R.string.chat_tool_group_search_done else R.string.chat_tool_group_search)
+            "update" -> stringResource(if (done) R.string.chat_tool_group_update_done else R.string.chat_tool_group_update)
+            "create" -> stringResource(if (done) R.string.chat_tool_group_create_done else R.string.chat_tool_group_create)
+            "fetch" -> stringResource(if (done) R.string.chat_tool_group_fetch_done else R.string.chat_tool_group_fetch)
+            "shell" -> stringResource(if (done) R.string.chat_tool_group_shell_done else R.string.chat_tool_group_shell)
+            "image" -> stringResource(if (done) R.string.chat_tool_group_image_done else R.string.chat_tool_group_image)
+            "task-workflow" -> stringResource(if (calls.all { isTaskProgressTool(it.tool) }) R.string.chat_tool_group_tasks else R.string.chat_tool_group_coordination)
+            else -> calls.first().let { it.header?.label ?: it.tool }
+        }
+    }
+    val status = when {
+        group.running -> stringResource(R.string.chat_status_running)
+        group.calls.all { it.status == AgentToolStatus.Failed } -> stringResource(R.string.chat_status_failed)
+        else -> ""
+    }
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp)
@@ -178,13 +222,10 @@ internal fun ToolGroupView(group: TranscriptBlock.Tools, expandedIds: Set<String
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             LXIcon(if (workflow) LXIconName.ListChecks else toolIconName(first.header?.verb, first.tool), size = 18.dp, color = t.text3)
-            Text(label + " · " + stringResource(R.string.chat_tool_calls_count_fmt, group.calls.size),
+            Text(labels.distinct().joinToString(", "),
                 modifier = Modifier.weight(1f, fill = false), color = if (open || focused || hovered) t.text else t.text3,
                 fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (group.running) Text(stringResource(R.string.chat_tool_running_count_fmt, group.calls.count { it.status == AgentToolStatus.Running }), color = t.text3, fontSize = 12.sp)
-            else if (group.calls.all { it.status == AgentToolStatus.Failed }) Text(stringResource(R.string.chat_tool_calls_unsuccessful), color = t.text3, fontSize = 12.sp)
-            if (workflow && group.calls.any { it.status == AgentToolStatus.Failed }) Text(
-                stringResource(R.string.chat_tool_calls_unsuccessful), color = t.danger, fontSize = 12.sp, maxLines = 1)
+            if (status.isNotEmpty()) Text(status, color = t.text3, fontSize = 12.sp, maxLines = 1)
             LXIcon(if (open) LXIconName.Chevron else LXIconName.ChevronR,
                 modifier = Modifier.alpha(if (open || focused || hovered) 1f else 0.75f), size = 12.dp, color = t.text4)
         }

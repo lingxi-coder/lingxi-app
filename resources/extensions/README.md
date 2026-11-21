@@ -47,9 +47,29 @@ mobile process configurations.
 
 Keep descriptions in `en`, `zh-Hans`, `zh-Hant`, `ja` and `ko`. Verify upstream
 sources and actual published package versions before changing executable MCP
-recipes. Pin npm package versions rather than using `@latest`; allow only HTTPS
-source/documentation links. Do not add secrets, shell scripts, automatic
-installation hooks or provider credentials.
+recipes. A process recipe is an argument array in one of two forms, with the
+pinned version equal to the entry's `version`: `npx -y <package>@<version> …`
+or `uvx --from <package>==<version> <entry point> …`. Never use `@latest`;
+allow only HTTPS source/documentation links. Do not add secrets, shell scripts,
+automatic installation hooks or provider credentials.
+
+`category` is one of `browser`, `development`, `database` and `productivity`.
+Desktop, Android and iOS each drop an entry whose category they do not know, so
+a new category needs all three clients and both translation sets first.
+
+The `database` category was added on 2026-11-20 after checking the published
+packages and setup documentation of bytebase/dbhub,
+mongodb-js/mongodb-mcp-server, redis/mcp-redis and neondatabase/mcp-server-neon,
+and the mongodb, redis-development, neon and supabase plugins in
+anthropics/claude-plugins-official. The DBHub, MongoDB and Redis process
+recipes were each started against a throwaway local server and answered
+`initialize`, `tools/list` and one read call. The drafts stay read-only where
+the server allows it (MongoDB `--readOnly`, Neon `?readonly=true`); DBHub needs
+a `readonly = true` config file and Redis MCP has write tools, so their
+requirements ask for a read-only database account. crystaldba/postgres-mcp is
+not listed: every release from 0.1.0rc1 to the current 0.3.0 pins
+`pglast==7.2.0`, which PyPI no longer serves, so `uvx` cannot install it
+(0.1.0, the one release without that pin, documents no restricted access mode).
 
 The recommendations were expanded on 2026-11-12 after checking Anthropic's
 published marketplace and skill manifests, Superpowers, and the official Notion,

@@ -85,7 +85,7 @@ internal fun TeamSwitcherSheet(
                 TeamTile(team.id, team.name, 40.dp)
                 Column(Modifier.weight(1f)) {
                     Text(team.name, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text("${teamRoleLabel(team.role)} · ${stringResource(R.string.teams_members_count_fmt, team.memberCount)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("${teamRoleLabel(team.role)} · ${stringResource(if (team.memberCount == 1) R.string.teams_members_count_one_fmt else R.string.teams_members_count_other_fmt, team.memberCount)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 UnreadBadge(unreadByTeam[team.id] ?: 0)
                 if (team.id == selectedId) Icon(Icons.Outlined.Check, null, tint = MaterialTheme.colorScheme.primary)

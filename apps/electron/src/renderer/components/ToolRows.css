@@ -31,8 +31,8 @@
   width: fit-content !important; max-width: 100%; background: transparent !important; touch-action: manipulation; transition: color 120ms ease, opacity 120ms ease;
 }
 .tool-group-icon { width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
-.tool-group-state { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-variant-numeric: tabular-nums; }
-.tool-group-state[data-unsuccessful] { color: var(--tool-group-danger); }
+.tool-group-state { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.tool-group-state:empty { position: absolute; }
 .tool-group-calls { display: flex; flex-direction: column; gap: 2px; margin: 2px 0 4px; min-width: 0; }
 .transcript-tool-group > .tool-group-trigger:is(:hover, :focus, :focus-visible, :active) {
   background: transparent !important; color: var(--tool-focus-color) !important; opacity: 1; outline: none; scale: 1;

@@ -11788,7 +11788,10 @@ mod tests {
         assert_eq!(first.entries.len(), 1);
         assert_eq!(first.entries[0].id, "read");
         assert_eq!(first.entries[0].tool, "Read");
-        assert_eq!(first.entries[0].input, serde_json::json!({"file_path":"/a"}));
+        assert_eq!(
+            first.entries[0].input,
+            serde_json::json!({"file_path":"/a"})
+        );
         assert_eq!(first.entries[0].result, Some(serde_json::json!("ok")));
         let first_summary = first
             .display_lines(

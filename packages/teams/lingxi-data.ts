@@ -1,6 +1,6 @@
 import type { ReportCapture, ReportDraft, ReportPlan, ReportRequest } from './reports.js';
 
-export const LINGXI_DATA_BASELINE = '99db9958ab5a59252b977e550bf57e610fa24770';
+export const LINGXI_DATA_BASELINE = '4905f6ac3bbc997932d5024d7df52c0b5883f481';
 
 export interface DataRef {
   dataset: string;
@@ -64,8 +64,14 @@ export interface DataAutomationSettings {
   rules: { rule: string; version: number; config: DataRuleConfig | null }[];
 }
 
+/** The inputs a LingXi Data host reads, with their product names. */
+export const DATA_SOURCE_KINDS = {
+  mysql: 'MySQL', postgres: 'PostgreSQL', sqlite: 'SQLite', mongodb: 'MongoDB', redis: 'Redis', csv: 'CSV', json: 'JSON',
+} as const;
+export type DataSourceKind = keyof typeof DATA_SOURCE_KINDS;
+
 export interface ManagedDataSource {
-  source: string; scope: DataScope; name: string; kind: 'mysql' | 'csv' | 'json';
+  source: string; scope: DataScope; name: string; kind: DataSourceKind;
   enabled: boolean; version: number; requesters: string[];
   pending?: true; desiredEnabled?: boolean;
   grants: { sharedBotId: string; fields: string[]; preset: string }[];

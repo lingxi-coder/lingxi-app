@@ -305,7 +305,7 @@ struct ModelsSettingsPage: View {
             NavigationLink {
                 EngineAccountsPage()
             } label: {
-                Text("Accounts")
+                Text("provider_accounts_title")
             }
         }
         .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
@@ -341,7 +341,7 @@ private struct EngineAccountsPage: View {
             EngineProfileAccountsEditor().padding(16)
         }
         .background(Color(uiColor: .systemGroupedBackground))
-        .navigationTitle("Accounts")
+        .navigationTitle("provider_accounts_title")
         .navigationBarTitleDisplayMode(.inline)
     }
 }
@@ -555,7 +555,7 @@ struct ProviderEditorForm: View {
 
     private var statusSection: some View {
         Section {
-            LabeledContent("Status") {
+            LabeledContent("session_details_status") {
                 Text(statusLabel).font(.subheadline).foregroundStyle(statusColor)
             }
         } footer: {
@@ -616,8 +616,8 @@ struct ProviderEditorForm: View {
     private var accountsSection: some View {
         Section {
             if needsInitialProfileSave {
-                Button("Save provider first", action: save)
-                Text("Save this provider, then add accounts.")
+                Button("provider_account_save_first", action: save)
+                Text("provider_account_save_first_hint")
                     .font(.footnote).foregroundStyle(.secondary)
             } else {
                 NavigationLink {
@@ -628,7 +628,7 @@ struct ProviderEditorForm: View {
                         allowsAPIKey: !isOAuthOnly,
                         allowsOAuth: repository.accountOAuthAvailable(for: draft.profile))
                 } label: {
-                    Label("Accounts and priority", systemImage: "person.2")
+                    Label("provider_accounts_manage", systemImage: "person.2")
                 }
                 .accessibilityIdentifier("provider.accounts")
             }

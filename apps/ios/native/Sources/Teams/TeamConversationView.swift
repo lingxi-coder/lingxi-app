@@ -186,10 +186,10 @@ struct TeamConversationView: View {
         return VStack(spacing: 0) {
             banners(context)
             if let notice = inbox.inlineNotice, notice.ref == activeInboxRef {
-                Label("Conversation update", systemImage: "bell").font(.caption).padding(5)
+                Label("inbox_notice", systemImage: "bell").font(.caption).padding(5)
             }
             if let peerRead, let lastSent = messages.last(where: context.isMine), peerRead >= lastSent.seq {
-                Text("Read").font(.caption).foregroundStyle(.secondary)
+                Text("inbox_read_receipt").font(.caption).foregroundStyle(.secondary)
             }
             if conversation.kind == "bot_dm", let bot = context.bots.first(where: { conversation.participants.contains("shared_bot:\($0.sharedBotId)") }) {
                 TeamBotMemberInfo(bot: bot, unverified: model.botsUnverified).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal).padding(.vertical, 6)

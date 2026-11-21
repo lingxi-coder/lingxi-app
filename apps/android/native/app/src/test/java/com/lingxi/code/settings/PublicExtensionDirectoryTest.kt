@@ -5,6 +5,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import com.lingxi.code.plugins.PluginMarketplace
+import java.io.File
+import org.json.JSONObject
 
 class PublicExtensionDirectoryTest {
     @Test
@@ -189,5 +191,21 @@ class PublicExtensionDirectoryTest {
         assertFalse(publicMcpNameConflicts("server", "user", "server", "user", null, expected, sameEndpointWithCustomHeaders))
         assertTrue(publicMcpNameConflicts("server", "project", "server", "user", null, expected, different))
         assertFalse(publicMcpNameConflicts("server-copy", "user", "server", null, expected, expected, null))
+    }
+
+    @Test
+    fun bundledDirectoryKeepsEveryAndroidEntry() {
+        val root = generateSequence(File(checkNotNull(System.getProperty("user.dir")))) { it.parentFile }
+            .first { File(it, "resources/extensions/public-directory.json").isFile }
+        val raw = File(root, "resources/extensions/public-directory.json").readText()
+        val items = JSONObject(raw).getJSONArray("items")
+        val expected = (0 until items.length()).map(items::getJSONObject)
+            .filter { row -> row.getJSONArray("platforms").let { platforms -> (0 until platforms.length()).any { platforms.getString(it) == "android" } } }
+            .map { it.getString("id") }
+
+        val entries = parsePublicExtensionDirectory(raw)
+        assertEquals(expected, entries.map { it.id })
+        assertTrue(entries.any { it.category == "database" && it.kind == "plugin" })
+        assertTrue(entries.any { it.category == "database" && it.mcpName == "neon" })
     }
 }

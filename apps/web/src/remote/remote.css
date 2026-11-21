@@ -256,3 +256,5 @@
 .rc-tool-state.rc-danger { color: var(--danger); }
 
 .rc-tool-head:disabled { opacity: 1; }
+
+.rc-tool-group-status:empty { position: absolute; }

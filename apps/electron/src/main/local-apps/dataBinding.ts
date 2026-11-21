@@ -29,6 +29,15 @@ export function parseLocalAppDataBinding(input: unknown): LocalAppDataBinding {
 export function localAppDataRequest(binding: LocalAppDataBinding, access: 'read' | 'edit', input: unknown, operation: unknown): DataRequest {
   const raw = object(input), { scope, dataset } = binding;
   switch (raw.action) {
+    case 'getReport':
+    case 'openReportReview': {
+      if (scope.kind !== 'team') throw new Error('A Team dataset is required');
+      const release = raw.release;
+      if (release !== null && (typeof release !== 'string' || !/^[a-f0-9]{64}$/u.test(release))) throw new Error('Invalid release');
+      if (raw.action === 'getReport') return { scope, command: { action: 'getReport', dataset, release } };
+      if (access !== 'edit' || !release || typeof raw.partition !== 'string' || typeof raw.group !== 'string') throw new Error('Invalid report review');
+      return { scope, command: { action: 'openReportReview', dataset, release, partition: raw.partition, group: raw.group } };
+    }
     case 'describe': return { scope, command: { action: 'describe', dataset } };
     case 'get': {
       const reference = parseDataRef({ dataset, record: raw.record, revision: raw.revision, schemaVersion: raw.schemaVersion });

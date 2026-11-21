@@ -3228,6 +3228,10 @@
     <string name="teams_data_conflict">레코드가 변경되었습니다. 최신 리비전을 연 후 저장하세요.</string>
     <string name="teams_data_save">레코드 저장</string>
     <string name="teams_data_latest">최신 리비전 불러오기</string>
+    <string name="teams_report_open">게시 시점의 보고서 열기</string>
+    <string name="teams_report_latest">최신 보고서 열기</string>
+    <string name="teams_report_review">검토 건 열기</string>
+    <string name="teams_report_reviewed">검토 건을 열었습니다</string>
     <string name="teams_share_link">링크 공유</string>
     <string name="teams_share_link_copied">링크를 복사했습니다</string>
     <string name="teams_share_link_failed">링크를 복사할 수 없습니다</string>

@@ -36,6 +36,7 @@ export function DataAutomationSettings({ api, scope, dataset, fields, locale }: 
     void perform(async () => {
       await data({ action: 'setBotDataAccess', scope, dataset, sharedBotId: bot.sharedBotId, expectedVersion: bot.version,
         access: access === 'none' ? null : access,
+        ...(access === 'edit' && form.get('reportReview') ? { reportReview: true as const } : {}),
         ...(access === 'edit' && targets.length ? { handoff: { targets, dailyLimit: Number(form.get('handoffLimit')) } } : {}),
       });
       await refresh();
@@ -75,6 +76,8 @@ export function DataAutomationSettings({ api, scope, dataset, fields, locale }: 
         <label>{zh ? '操作权限' : 'Access'}<select name="access" defaultValue={bot.access ?? 'none'}>
           <option value="none">{zh ? '无权限' : 'None'}</option><option value="read">{zh ? '读取' : 'Read'}</option>
           <option value="edit">{zh ? '读取与写入' : 'Read and write'}</option></select></label>
+        <label><input type="checkbox" name="reportReview" defaultChecked={bot.reportReview} />
+          {zh ? '允许创建报表复核单' : 'May open report reviews'}</label>
         <label>{zh ? '允许交接给' : 'May hand off to'}<select name="handoffTargets" multiple defaultValue={bot.handoff?.targets}>
           {settings.bots.filter(value => value.sharedBotId !== bot.sharedBotId && value.access).map(value =>
             <option key={value.sharedBotId} value={value.sharedBotId}>{value.name}</option>)}</select></label>

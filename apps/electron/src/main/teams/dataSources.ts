@@ -6,41 +6,14 @@ import { isAbsolute, join } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { dialog, type BrowserWindow } from 'electron';
-import type { LocalDataSourceAnswer, LocalDataSourceCommand, ManagedDataSource, SourceDraft } from '../../../../../packages/teams/lingxi-data.js';
+import type { LocalDataSourceAnswer, LocalDataSourceCommand, ManagedDataSource } from '../../../../../packages/teams/lingxi-data.js';
 import type { Account, TeamsService } from './service.js';
+import type { ReportCapture, ReportDraft } from '../../../../../packages/teams/reports.js';
 import { readPrivateDataPage } from './dataPreview.js';
+import { id, readDefinition } from './dataSourceDefinition.js';
 
 const exec = promisify(execFile);
-const id = /^[A-Za-z0-9_-]{1,64}$/u;
 const childEnv = { PATH: '/usr/bin:/bin' };
-
-function object(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function keychain(value: unknown, service: string, account: string): boolean {
-  if (!object(value) || Object.keys(value).length !== 1 || !object(value.keychain)) return false;
-  return value.keychain.service === service && value.keychain.account === account;
-}
-
-function readDefinition(content: string, uid: string): SourceDraft {
-  const value: unknown = JSON.parse(content);
-  if (!object(value) || value.owner !== uid || typeof value.source !== 'string' || !id.test(value.source)
-    || !keychain(value.key, 'com.lingxi.data.host-key', value.source) || value.proxy != null
-    || !object(value.presets) || Object.keys(value.presets).length !== 1 || !object(value.presets.main)) throw new Error('INVALID_INPUT');
-  const preset = value.presets.main, { fields, input } = preset;
-  if (!Array.isArray(fields) || !fields.length || fields.length > 64 || fields.some(field => typeof field !== 'string' || !id.test(field))
-    || !object(input) || !['mysql', 'json', 'csv'].includes(String(input.kind))) throw new Error('INVALID_INPUT');
-  for (const item of Object.values(value.presets)) {
-    if (!object(item) || !object(item.input)) throw new Error('INVALID_INPUT');
-    if (item.input.kind === 'mysql') {
-      if (!keychain(item.input.dsn, 'com.lingxi.data.mysql', value.source) || item.input.isolatedLoopback === true) throw new Error('INVALID_INPUT');
-    } else if (!['csv', 'json'].includes(String(item.input.kind)) || typeof item.input.path !== 'string' || !isAbsolute(item.input.path)) {
-      throw new Error('INVALID_INPUT');
-    }
-  }
-  return { source: value.source, kind: input.kind as SourceDraft['kind'], fields: [...new Set(fields)] as string[] };
-}
 
 function launcher(): { bin: string; endpoint: string; ca: string[] } {
   const { LINGXI_DATA_PREVIEW_BIN: bin, LINGXI_DATA_PREVIEW_ORIGIN: origin, LINGXI_DATA_PREVIEW_CA: ca } = process.env;
@@ -121,11 +94,30 @@ export class DesktopDataSources {
       }
       return { running: this.processes.has(processKey) };
     }
-    if (request.action !== 'start' && request.action !== 'preview') throw new Error('INVALID_INPUT');
+    if (request.action !== 'start' && request.action !== 'preview' && request.action !== 'captureReport') throw new Error('INVALID_INPUT');
     const { sources } = await this.teams.manageSources<{ sources: ManagedDataSource[] }>(context, { action: 'dataSources' });
     const configured = sources.find(row => row.source === source && row.enabled);
     if (!configured) throw new Error('DATA_ACCESS_REQUIRED');
     const { bin, endpoint, ca } = launcher();
+    if (request.action === 'captureReport') {
+      const { plan, scope, dataset } = request;
+      if (plan.origin.kind !== 'source' || plan.origin.source !== source || plan.origin.version !== configured.version) throw new Error('DATA_CONFLICT');
+      const { binding } = await this.teams.data<{ binding: string }>({ scope, command: { action: 'prepareReport', dataset, plan } }, uid);
+      current();
+      const attempt = await mkdtemp(join(tmpdir(), 'lingxi-report-'));
+      try {
+        const path = join(attempt, 'intent.json');
+        await writeFile(path, JSON.stringify({ binding, spec: plan.spec }), { mode: 0o600, flag: 'wx' });
+        const { stdout } = await exec(bin, ['capture-report', '--config', config, '--request', path],
+          { cwd: directory, env: childEnv, maxBuffer: 3 * 1024 * 1024, timeout: 45_000 });
+        const capture: ReportCapture = JSON.parse(stdout);
+        const bytes = Buffer.from(capture.payload, 'base64url');
+        const body: Pick<ReportDraft, 'facts' | 'binding'> = JSON.parse(bytes.toString('utf8'));
+        if (body.binding !== binding || !Array.isArray(body.facts)) throw new Error('INVALID_INPUT');
+        current();
+        return { binding, capture, facts: body.facts, confirmation: createHash('sha256').update(bytes).digest('hex') };
+      } finally { await rm(attempt, { recursive: true, force: true }); }
+    }
     const token = await this.account.getIdToken();
     current();
     if (request.action === 'preview') {

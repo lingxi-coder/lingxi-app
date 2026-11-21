@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 
-REVISION = "d18563624a7745587250fdc1047b3e3ef2a31f55"
+REVISION = "4905f6ac3bbc997932d5024d7df52c0b5883f481"
 
 
 def main():
@@ -19,10 +19,14 @@ def main():
     parser.add_argument("--playwright", type=Path)
     parser.add_argument("--chrome", type=Path)
     parser.add_argument("--private-preview", action="store_true")
+    parser.add_argument("--postgres-bin", type=Path,
+                        help="PostgreSQL bin directory; with --private-preview, also run database sources end to end")
     parser.add_argument("--staging-web-port", type=int, help="Serve isolated staging and keep it running")
     args = parser.parse_args()
     if args.chrome and not args.playwright:
         parser.error("--chrome requires --playwright")
+    if args.postgres_bin and not args.private_preview:
+        parser.error("--postgres-bin requires --private-preview")
     data = args.data_worktree.resolve()
     assert subprocess.check_output(["git", "-C", data, "rev-parse", "HEAD"], text=True).strip() == REVISION
     assert not subprocess.check_output(["git", "-C", data, "status", "--porcelain"], text=True)
@@ -64,6 +68,15 @@ def main():
             public_key = subprocess.check_output([fixture.cli, "host-key", "--config", config], text=True).strip()
             private = {"source": source, "bot": bot, "config": str(config), "ice": str(ice), "ca": str(fixture.ca),
                        "cli": str(fixture.cli), "folder": str(folder), "publicKey": public_key}
+            if args.postgres_bin:
+                # The Data acceptance fixture: a real PostgreSQL view behind a SELECT-only role.
+                postgres = fixture.postgres_fixture(args.postgres_bin.resolve())
+                postgres_config = folder / "postgres-source.json"
+                put(postgres_config, {"source": "postgres-orders", "owner": owner, "key": {"localTestFile": str(key)},
+                                      "ice": {"udpBind": "127.0.0.1:0"}, "presets": {"main": {
+                                          "keyField": "id", "fields": ["id", "title", "exact_id", "exact_value", "private_note"],
+                                          "input": postgres["input"]}}})
+                private["postgres"] = str(postgres_config)
         product_port = port()
         inputs = folder / "product-inputs.json"
         put(inputs, {"endpoint": f"https://127.0.0.1:{product_port}", "actorFile": str(fixture.actors_path),
@@ -107,6 +120,9 @@ def main():
             adapter_env.update({"LINGXI_DATA_PREVIEW_KEY": secrets.token_urlsafe(32), "LINGXI_DATA_FIREBASE_API_KEY": "demo",
                                 "LINGXI_DATA_RULES": "1"})
             subprocess.run(["node", "--test", "test/lingxi-data-private-preview.emulator.test.mjs"], cwd=root, env=adapter_env, check=True)
+            if args.postgres_bin:
+                subprocess.run(["node", "--test", "test/lingxi-data-source-kinds.emulator.test.mjs"], cwd=root, env=adapter_env,
+                               check=True)
 
 
 

@@ -225,7 +225,7 @@ test('product Bot permits gate MySQL WebRTC and durable shared record operations
   assert.equal(created.status, 200, await created.clone().text());
   const { dataset } = await created.json();
   const grant = { action: 'setBotDataAccess', scope, dataset, sharedBotId: bot, access: 'edit', expectedVersion: 0,
-    handoff: { targets: [receiver], dailyLimit: 4 } };
+    reportReview: true, handoff: { targets: [receiver], dailyLimit: 4 } };
   assert.equal((await product(grant, readerToken)).status, 403);
   const granted = await product(grant);
   assert.equal(granted.status, 200, await granted.clone().text());
@@ -240,7 +240,7 @@ test('product Bot permits gate MySQL WebRTC and durable shared record operations
     operation: { action: 'put', dataset, record: 'new-order', expectedRevision: 0, schemaVersion: 1,
       value: { title: 'Written by Bot' } } };
   const offers = { ...grantedTask, permitId: permit.permitId, teamId: team.id, generation: 1, action: 'botDataOffers' };
-  const offer = { dataset, version: 1, write: true, handoffTargets: [receiver] };
+  const offer = { dataset, version: 1, write: true, reportReview: true, handoffTargets: [receiver] };
   assert.deepEqual(await (await product(offers)).json(), { datasets: [offer] });
   assert.equal((await product(write, readerToken)).status, 403);
   assert.equal((await product({ ...write, permitId: 'invalid-permit' })).status, 403);
@@ -255,6 +255,29 @@ test('product Bot permits gate MySQL WebRTC and durable shared record operations
   assert.equal(record.origin, 'agent');
   assert.equal(record.actor.task, grantedTask.taskId);
   assert.deepEqual(record.value, { title: 'Written by Bot' });
+  const report = async command => {
+    const response = await product({ scope, command });
+    assert.equal(response.status, 200, await response.clone().text());
+    return response.json();
+  };
+  const ctx = await report({ action: 'reportContext', dataset });
+  const { epoch } = await report({ action: 'describe', dataset });
+  const plan = { origin: { kind: 'team', dataset, epoch }, parent: null, audienceRevision: ctx.audienceRevision,
+    readers: [owner, reader].map(uid => ({ uid, partitions: '*' })), bots: [bot], spec: {
+      title: 'Order count', partition: 'title', group: 'title', metric: { kind: 'count' } } };
+  const { confirmation } = await report({ action: 'prepareReport', dataset, plan });
+  const { release } = await report({ action: 'publishReport', dataset, plan, confirmation });
+  const readTotals = { ...write, stepId: undefined, operation: { action: 'getReport', dataset, release } };
+  const totals = await product(readTotals);
+  assert.equal(totals.status, 200, await totals.clone().text());
+  assert.deepEqual((await totals.json()).points, [{ group: 'Written by Bot', value: '1' }]);
+  const cell = { action: 'openReportReview', dataset, release, partition: 'Written by Bot', group: 'Written by Bot' };
+  const reviewCase = await product({ ...write, stepId: 'open-case', operation: cell });
+  assert.equal(reviewCase.status, 200, await reviewCase.clone().text());
+  assert.deepEqual(await reviewCase.json(), await report(cell));
+  await report({ action: 'limitReportReader', dataset, uid: reader, generation: 1, partitions: [], expectedVersion: 0 });
+  assert.deepEqual((await (await product(readTotals)).json()).points, []);
+  assert.equal((await product({ ...write, stepId: 'open-case', operation: cell })).status, 403);
   async function runModel(proof, desired) {
     await run(owner, 'heartbeatDeployment', { ...host, ready: true });
     const modelFixture = join(folder, 'product-model-input.json');
@@ -276,12 +299,30 @@ test('product Bot permits gate MySQL WebRTC and durable shared record operations
     assert.equal(modelRecord.status, 200, await modelRecord.clone().text());
     assert.deepEqual((await modelRecord.json()).record.value, { title: 'Order written by real model' });
   }
-  const receiverGrant = { ...grant, sharedBotId: receiver, access: 'read', handoff: undefined };
+  const receiverGrant = { ...grant, sharedBotId: receiver, access: 'read', handoff: undefined, reportReview: undefined };
   assert.deepEqual(await (await product(receiverGrant)).json(), { version: 1, access: 'read' });
   await run(owner, 'heartbeatDeployment', { ...host, ready: true });
   await run(owner, 'completeTask', { ...host, taskId: grantedTask.taskId, permitId: permit.permitId, outcome: 'completed',
     finishedAt: Date.now(), text: 'Order saved.', inputGrantIds: permit.inputs.map(input => input.grantId),
     outputAudience: { mode: 'published_inputs' }, usage: { status: 'missing' } });
+
+  if (process.env.LINGXI_TEST_MODEL_ENDPOINT) {
+    await report({ action: 'limitReportReader', dataset, uid: reader, generation: 1, partitions: '*', expectedVersion: 1 });
+    await run(owner, 'heartbeatDeployment', { ...host, ready: true });
+    const reportTask = await run(owner, 'submit', { conversationId: orders, messageId: 'review-report-message',
+      changeId: 'review-report-change', text: 'Open the published report review.', targets: [bot] });
+    const conversation = await team.collection('conversations').doc(orders).get();
+    const fields = { ...host, taskId: reportTask.tasks[0].taskId, expectedLastChangeSeq: conversation.data().lastChangeSeq };
+    const approval = await run(owner, 'startTask', fields);
+    const proof = { ...fields, teamId: team.id, generation: 1, permitId: approval.permitId };
+    const actual = await runModel(proof, cell);
+    assert.deepEqual(actual.result, await report(cell));
+    const cases = await db.collection('lingxiReportSeries').doc(dataset).collection('reviews').get();
+    assert.deepEqual(cases.docs.map(entry => entry.id), [actual.result.review]);
+    await run(owner, 'completeTask', { ...host, taskId: fields.taskId, permitId: approval.permitId, outcome: 'completed',
+      finishedAt: Date.now(), text: 'Review case open.', inputGrantIds: approval.inputs.map(input => input.grantId),
+      outputAudience: { mode: 'published_inputs' }, usage: { status: 'missing' } });
+  }
 
   const rule = { action: 'setDataRule', scope, dataset, rule: 'review-order', expectedVersion: 0,
     config: { sharedBotId: bot, dailyLimit: 4, definition: { kind: 'transition', field: 'title', equals: 'Pending review' } } };
@@ -343,7 +384,7 @@ test('product Bot permits gate MySQL WebRTC and durable shared record operations
   assert.equal((await product({ action: 'botDataOffers', ...receiverProof })).status, 403);
   assert.deepEqual(await (await product({ ...rule, expectedVersion: 1, config: null })).json(), { version: 2, enabled: false });
   assert.equal((await product({ action: 'botDataOffers', ...handoffProof })).status, 403);
-  assert.deepEqual(await (await product({ ...grant, handoff: undefined, access: null, expectedVersion: 1 })).json(), { version: 2, access: null });
+  assert.deepEqual(await (await product({ ...grant, handoff: undefined, reportReview: undefined, access: null, expectedVersion: 1 })).json(), { version: 2, access: null });
   assert.equal((await teamTasks.get()).docs.filter(doc => doc.data().dataCause?.kind === 'rule').length, 1);
   assert.equal((await product(write)).status, 403);
 });

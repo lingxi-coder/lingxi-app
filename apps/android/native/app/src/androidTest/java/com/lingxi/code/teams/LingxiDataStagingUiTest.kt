@@ -12,6 +12,7 @@ import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.test.core.app.ActivityScenario
@@ -50,7 +51,23 @@ import org.junit.runner.RunWith
 class LingxiDataStagingUiTest {
     @get:Rule val compose = createEmptyComposeRule()
 
-    @Test fun ownerOpensTemplateAndWritesThroughTeams() {
+    @Test fun ownerOpensTemplateAndWritesThroughTeams() = withOwner(::checkRecordAndSave)
+
+    @Test fun ownerOpensPublishedReportAndCreatesReview() = withOwner { activity, _ ->
+        val room = TeamsTags.row("orders-chat")
+        compose.waitUntil(25_000) { compose.onAllNodes(hasTestTag(room)).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag(room).performClick()
+        val open = activity.getString(R.string.teams_report_open)
+        awaitText(open)
+        compose.onAllNodes(hasText(open))[0].performClick()
+        awaitText("Source report")
+        awaitText("a · 1")
+        val review = activity.getString(R.string.teams_report_review) + " · a / a"
+        compose.onNodeWithText(review).performScrollTo().performClick()
+        awaitText(activity.getString(R.string.teams_report_reviewed))
+    }
+
+    private fun withOwner(check: (ComponentActivity, TeamsWorkspace) -> Unit) {
         val args = InstrumentationRegistry.getArguments()
         val ports = listOf("lingxiDataAuth", "lingxiDataFirestore", "lingxiDataApi").map { args.getString(it)?.toIntOrNull() }
         assumeTrue(ports.all { it != null && it in 1024..65535 })
@@ -90,7 +107,7 @@ class LingxiDataStagingUiTest {
                     }
                 }
                 try {
-                    checkRecordAndSave(activity, workspace)
+                    check(activity, workspace)
                 } finally {
                     finishComposeFixture(activity)
                 }

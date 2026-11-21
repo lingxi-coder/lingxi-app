@@ -175,6 +175,7 @@ struct TeamMessageCell: View {
     @Environment(\.locale) private var locale
     @ScaledMetric(relativeTo: .body) private var percent: CGFloat = 100
     @State private var openedData: TeamDataRef?
+    @State private var openedReport: TeamReportLink?
     let message: TeamMessage
     let grouped: Bool
     let context: TeamConversationContext
@@ -220,6 +221,9 @@ struct TeamMessageCell: View {
         .sheet(item: $openedData) { reference in
             TeamDataRecordSheet(reference: reference, conversationId: context.conversation.id, model: context.model)
         }
+        .sheet(item: $openedReport) { reference in
+            TeamReportSheet(link: reference, conversation: context.conversation.id, model: context.model)
+        }
         .frame(maxWidth: 832)
         .frame(maxWidth: .infinity)
         .contextMenu {
@@ -251,6 +255,10 @@ struct TeamMessageCell: View {
                     Button("Open data record") { openedData = reference }
                         .accessibilityIdentifier("teams.message.data.\(message.id)")
                 }
+            }
+            if !recalled, let reference = TeamReportLink(message.text) {
+                GridRow { Button("Open published report") { openedReport = reference }
+                    .accessibilityIdentifier("teams.report.open." + message.id) }
             }
             if !recalled, let read = message.readFiles, !read.isEmpty {
                 GridRow {

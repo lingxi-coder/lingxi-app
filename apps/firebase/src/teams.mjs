@@ -286,14 +286,19 @@ export function createTeamsHandler({ store, friends, inbox, data, verifyToken, c
       if (detail && detail[1] !== 'session' && request.method === 'GET') return reply(await store.detail(user.uid, detail[1]));
       if (request.method !== 'POST' || !['/v1/teams', '/v1/teams/session', '/v1/teams/messages', '/v1/services', ...(data ? ['/v1/teams/data'] : []), ...(friends ? ['/v1/friends'] : [])].includes(path)) fail(404, 'NOT_FOUND');
       const raw = await request.text();
-      if (Buffer.byteLength(raw) > (path === '/v1/teams/messages' ? 1048576 : path === '/v1/teams/data' ? 131072 : 16384)) fail(413, 'REQUEST_TOO_LARGE');
+      const size = Buffer.byteLength(raw);
+      const limit = { '/v1/teams/data': 3 * 1024 * 1024, '/v1/teams/messages': 1048576 }[path] ?? 16384;
+      if (size > limit) fail(413, 'REQUEST_TOO_LARGE');
       let body;
       try { body = JSON.parse(raw); } catch { fail(400, 'INVALID_JSON'); }
       if (path === '/v1/teams/session') {
         z.object({}).strict().parse(body);
         return reply({ uid: user.uid, customToken: await createCustomToken(user.uid) });
       }
-      if (path === '/v1/teams/data') return reply(await data(user.uid, bearer[1], body));
+      if (path === '/v1/teams/data') {
+        if (size > 131072 && body?.command?.action !== 'publishReport') fail(413, 'REQUEST_TOO_LARGE');
+        return reply(await data(user.uid, bearer[1], body));
+      }
       if (path === '/v1/teams/messages') return reply(await new TeamMessagesStore(store.db, store.clock, data && (request => data(user.uid, bearer[1], request))).execute(user, body));
       // Hosted Bot services: the commands about a service itself. Its sessions use /v1/teams/messages with `serviceId`.
       if (path === '/v1/services') return reply(await new HostedBotServices(store.db, store.clock).execute(user, body));

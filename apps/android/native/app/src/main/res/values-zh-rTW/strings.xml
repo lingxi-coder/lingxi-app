@@ -3228,6 +3228,10 @@
     <string name="teams_data_conflict">記錄已有更新。請開啟最新修訂後再儲存。</string>
     <string name="teams_data_save">儲存記錄</string>
     <string name="teams_data_latest">讀取最新修訂</string>
+    <string name="teams_report_open">查看發佈時的報表</string>
+    <string name="teams_report_latest">查看最新報表</string>
+    <string name="teams_report_review">開啟複核單</string>
+    <string name="teams_report_reviewed">複核單已開啟</string>
     <string name="teams_share_link">分享連結</string>
     <string name="teams_share_link_copied">已複製連結</string>
     <string name="teams_share_link_failed">無法複製連結</string>

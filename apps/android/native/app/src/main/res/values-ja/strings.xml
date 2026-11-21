@@ -3228,6 +3228,10 @@
     <string name="teams_data_conflict">レコードが更新されました。最新のリビジョンを開いてから保存してください。</string>
     <string name="teams_data_save">レコードを保存</string>
     <string name="teams_data_latest">最新のリビジョンを読み込む</string>
+    <string name="teams_report_open">公開時のレポートを開く</string>
+    <string name="teams_report_latest">最新のレポートを開く</string>
+    <string name="teams_report_review">確認案件を開く</string>
+    <string name="teams_report_reviewed">確認案件を開きました</string>
     <string name="teams_share_link">リンクを共有</string>
     <string name="teams_share_link_copied">リンクをコピーしました</string>
     <string name="teams_share_link_failed">リンクをコピーできませんでした</string>

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -33,7 +33,7 @@ async function connectStaging(file) {
     if (!response.ok) throw new Error(result.error.code);
     return result;
   }
-  return { binding, request, uid };
+  return { binding, request, uid, fixture };
 }
 
 async function makeRelease(directory, template, record, title) {
@@ -77,19 +77,52 @@ async function makeRelease(directory, template, record, title) {
   </main></body></html>`);
 }
 
-async function run(file) {
+async function makeReport(directory, release, partition) {
+  await mkdir(directory);
+  await writeFile(join(directory, 'index.html'), '<!doctype html><html lang="en"><meta name="viewport" content="width=device-width"><title>Published dataset</title><main><h1>Published dataset</h1><button>Open review case</button><p role="status"></p><table aria-label="Visible groups"></table></main><script src="/report.js" defer></script></html>');
+  await writeFile(join(directory, 'report.js'), `
+    const release = ${JSON.stringify(release)}, partition = ${JSON.stringify(partition)};
+    const button = document.querySelector('button'), status = document.querySelector('[role=status]');
+    button.disabled = true;
+    (async () => {
+      const api = window.localApp.data;
+      const report = await api.request('orders', { action:'getReport', release });
+      document.querySelector('h1').textContent = report.spec.title;
+      for (const {group,value} of report.points) {
+        const row = document.querySelector('table').insertRow();
+        row.insertCell().textContent = group; row.insertCell().textContent = value;
+      }
+      const cell = report.cells.find(item => item.partition === partition);
+      if (!cell) throw Error('missing cell');
+      button.disabled = false;
+      button.onclick = async () => {
+        button.disabled = true;
+        try {
+          await api.request('orders', { action:'openReportReview', release, partition, group:cell.group });
+          status.textContent = 'Review case open';
+        } catch { status.textContent = 'Review failed'; button.disabled = false; }
+      };
+    })().catch(() => { status.textContent = 'Report unavailable'; });
+  `);
+}
+
+async function run(file, report) {
   const product = await connectStaging(file);
+  if (report) product.binding.dataset = report.dataset;
   const { scope, dataset } = product.binding;
-  const { views } = await product.request({ scope, command: { action: 'templateViews', dataset } });
-  const template = views.find(view => view.view === 'order-summary')?.definition;
-  assert.ok(template);
 
   const directory = await mkdtemp(join(tmpdir(), 'lingxi-mobile-data-'));
   let host, launcher;
   try {
     const id = randomUUID(), record = 'mobile-' + id, title = 'Packed on mobile ' + id.slice(0, 8);
     const release = join(directory, 'release');
-    await makeRelease(release, template, record, title);
+    if (report) await makeReport(release, report.release, report.partition);
+    else {
+      const { views } = await product.request({ scope, command: { action: 'templateViews', dataset } });
+      const template = views.find(view => view.view === 'order-summary')?.definition;
+      assert.ok(template);
+      await makeRelease(release, template, record, title);
+    }
     const { LocalAppHost } = await loadSourceHost();
     const appId = 'a' + id.replaceAll('-', '');
     const revision = 1, runId = 'mobile-browser-staging';
@@ -132,6 +165,20 @@ async function run(file) {
           return;
         }
         if (incoming.url !== '/result') return outgoing.writeHead(404).end();
+        if (report) {
+          const { firestore, project } = product.fixture;
+          assert.match(firestore, /^127\.0\.0\.1:\d+$/u);
+          const key = createHash('sha256').update(JSON.stringify([report.release, report.partition, report.partition, 'review'])).digest('hex');
+          const res = await fetch(`http://${firestore}/v1/projects/${project}/databases/(default)/documents/lingxiReportSeries/${dataset}/reviews/${key}`,
+            { headers: { Authorization: 'Bearer owner' } });
+          assert.equal(res.status, 200);
+          const { fields } = await res.json();
+          assert.equal(fields.state.stringValue, 'open');
+          assert.equal(fields.actor.mapValue.fields.uid.stringValue, owner.accountUid);
+          outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+            .end(JSON.stringify({ ...report, review: key, state: 'open' }));
+          return;
+        }
         const { record: stored } = await product.request({ scope, command: {
           action: 'get', reference: { dataset, record, revision: 1, schemaVersion: 1 },
         } });
@@ -156,4 +203,8 @@ async function run(file) {
   }
 }
 
-await run(process.argv[2]);
+const [, , file, dataset, release, partition] = process.argv;
+if (dataset) {
+  assert.match(dataset, /^[a-zA-Z0-9_-]{1,64}$/u); assert.match(release, /^[a-f0-9]{64}$/u); assert.match(partition, /^[a-f]$/u);
+}
+await run(file, dataset ? { dataset, release, partition } : undefined);

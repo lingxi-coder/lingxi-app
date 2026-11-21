@@ -4,12 +4,14 @@ import { z } from 'zod';
 import { authorizeDataBinding, createPinnedDataClient, dataReference, LingxiDataError } from './lingxi-data.mjs';
 import { dataId, generation } from './lingxi-data-sources.mjs';
 import { SharedBotError, SharedBotsStore } from './shared-bots.mjs';
+import { deliverReport, readReport, reviewReport } from './lingxi-data-reports.mjs';
 
 const cursor = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const scope = z.object({ kind: z.literal('team'), teamId: dataId, generation, conversationId: dataId }).strict();
 const accessRequest = z.object({
   action: z.literal('setBotDataAccess'), scope, dataset: dataId, sharedBotId: dataId,
   expectedVersion: cursor, access: z.enum(['read', 'edit']).nullable(),
+  reportReview: z.literal(true).optional(),
   handoff: z.object({ targets: z.array(dataId).min(1).max(8).refine(ids => new Set(ids).size === ids.length),
     dailyLimit: z.number().int().min(1).max(100) }).strict().optional(),
 }).strict();
@@ -22,6 +24,7 @@ const settingsRequest = z.object({ scope, command: z.object({ action: z.literal(
 const operationRequest = z.object({
   action: z.literal('botDataOperation'), ...hostProof, accessVersion: generation,
   operation: z.discriminatedUnion('action', [
+    readReport, reviewReport,
     z.object({ action: z.literal('describe'), dataset: dataId }).strict(),
     z.object({ action: z.literal('list'), dataset: dataId, after: dataId.optional(), limit: z.number().int().min(1).max(10) }).strict(),
     z.object({ action: z.literal('get'), reference: dataReference }).strict(),
@@ -53,7 +56,8 @@ export function createBotDataRecords({ db, endpoint, secret, projectActor, botTo
   async function setAccess(uid, token, raw) {
     const parsed = accessRequest.safeParse(raw);
     if (!parsed.success) deny(400, 'INVALID_DATA_REQUEST');
-    const { scope: target, dataset, sharedBotId, expectedVersion, access, handoff } = parsed.data;
+    const { scope: target, dataset, sharedBotId, expectedVersion, access, handoff, reportReview } = parsed.data;
+    if (reportReview && access !== 'edit') deny(400, 'INVALID_DATA_REQUEST');
     if (handoff && (!access || handoff.targets.includes(sharedBotId))) deny(400, 'INVALID_DATA_REQUEST');
     const team = db.collection('teams').doc(target.teamId);
     const ref = grants(team, sharedBotId).doc(dataset);
@@ -73,7 +77,7 @@ export function createBotDataRecords({ db, endpoint, secret, projectActor, botTo
       const botRevision = bot?.identity?.revision ?? null;
       const principalUid = 'lx_data_bot_' + hash(['dataset', target, dataset, sharedBotId, version, access, botRevision]).slice(0, 40);
       return { entry: { version, access, botRevision, principalUid, requestDigest, conversationId: target.conversationId,
-        issuedBy: { uid, generation: target.generation }, ...(handoff ? { handoff } : {}) } };
+        issuedBy: { uid, generation: target.generation }, ...(handoff ? { handoff } : {}), ...(reportReview ? { reportReview } : {}) } };
     }
     const admitted = await db.runTransaction(authority);
     if (admitted.previous) return { version: admitted.previous.version, access };
@@ -149,6 +153,7 @@ export function createBotDataRecords({ db, endpoint, secret, projectActor, botTo
         const canHandoff = write && parent.data()?.rootTaskId === proof.taskId && grant.handoff
           && (!parent.data()?.dataCause || parent.data().dataCause.reference.dataset === doc.id);
         datasets.push({ dataset: doc.id, version: grant.version, write,
+          ...(write && grant.reportReview ? { reportReview: true } : {}),
           ...(canHandoff ? { handoffTargets: grant.handoff.targets } : {}) });
         if (datasets.length === 32) break;
       }
@@ -160,7 +165,7 @@ export function createBotDataRecords({ db, endpoint, secret, projectActor, botTo
     const parsed = operationRequest.safeParse(raw);
     if (!parsed.success) deny(400, 'INVALID_DATA_REQUEST');
     const { operation, stepId, accessVersion, ...proof } = parsed.data;
-    const write = operation.action === 'put';
+    const write = operation.action === 'put' || operation.action === 'openReportReview';
     if (write !== Boolean(stepId)) deny(400, 'INVALID_DATA_REQUEST');
     const dataset = operation.action === 'get' ? operation.reference.dataset : operation.dataset;
     const team = db.collection('teams').doc(proof.teamId);
@@ -177,7 +182,24 @@ export function createBotDataRecords({ db, endpoint, secret, projectActor, botTo
       const target = await grantScope(tx, team, status, dataset, grant, write);
       const expires = Math.floor(task.deadline / 1000);
       if (expires * 1000 <= clock()) deny();
-      return { grant, target, expires, epoch: task.epoch };
+      return { grant, target, expires, epoch: task.epoch, requester: task.requester, sharedBotId: task.sharedBotId };
+    }
+    if (operation.action === 'getReport' || operation.action === 'openReportReview') {
+      return db.runTransaction(async tx => {
+        const { target, grant, requester, sharedBotId } = await authorize(tx);
+        if (write && !grant.reportReview) deny();
+        const previous = receipt ? (await tx.get(receipt)).data() : null;
+        if (previous && previous.digest !== digest) deny(409, 'DATA_CONFLICT');
+        const usage = receipt && !previous ? (await tx.get(taskRef)).data()?.operationCount : 0;
+        if (!cursor.safeParse(usage).success || usage >= 32) deny(409, 'DATA_CAPACITY');
+        const value = await deliverReport(tx, db, requester.uid, { ...target, generation: requester.generation }, operation,
+          { uid: requester.uid, sharedBotId, task: proof.taskId });
+        if (receipt && !previous) {
+          tx.create(receipt, { digest, sharedBotId, taskId: proof.taskId, review: value.review });
+          tx.update(taskRef, { operationCount: usage + 1 });
+        }
+        return value;
+      });
     }
     const { grant, target, expires, epoch, answer } = await db.runTransaction(async tx => {
       const admitted = await authorize(tx);
@@ -287,6 +309,7 @@ export function createBotDataRecords({ db, endpoint, secret, projectActor, botTo
           grants(team, sharedBotId).doc(dataset))).map(doc => doc.data());
         if (bot?.identity?.state !== 'published') continue;
         bots.push({ sharedBotId, name: bot.name, version: grant?.version ?? 0, access: grant?.access ?? null,
+          ...(grant?.reportReview ? { reportReview: true } : {}),
           ...(grant?.handoff ? { handoff: grant.handoff } : {}) });
       }
       const rows = await tx.get(db.collection('lingxiDataRules').where('dataset', '==', dataset));

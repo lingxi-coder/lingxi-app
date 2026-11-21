@@ -16,6 +16,8 @@ import { ApprovalCard } from './ApprovalCard';
 import { ConversationData } from './ConversationData.js';
 import { PrivatePreviewRequest } from './PrivatePreviewRequest.js';
 import { DataRecordButton } from './DataRecordButton.js';
+import { ReportCard } from './ReportViews.js';
+import { parseReportLink } from './reports.js';
 import { MessageFiles } from './MessageFiles';
 import type { MessageAttachment } from './attachments.js';
 import { executionCommand } from './execution.js';
@@ -316,6 +318,8 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
         {link ? <ShareLinkButton link={link} title={label} locale={locale} note={conversation.kind === 'bot_dm' ? t('teams_share_bot_note') : undefined} /> : null}
         {friend?.actions}
         {!friend && <ConversationData api={workspace.api} scope={{ kind: 'team', ...scope, conversationId: conversation.id }} locale={locale}
+          shareReport={participant && !lock && !snapshot.offline && conversation.kind !== 'bot_dm'
+            ? link => workspace.run(() => model.queue('create', link)) : undefined}
           share={participant && !lock && !snapshot.offline && conversation.kind !== 'bot_dm'
             ? (reference, text) => workspace.run(() => model.queue('create', text, undefined, undefined, [], [], reference))
             : undefined}/>}
@@ -368,6 +372,8 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
               {message.dataRef && !message.recalled ? <DataRecordButton
                 api={workspace.api} scope={{ kind: 'team', teamId: team.id, conversationId: conversation.id, generation: team.generation }}
                 reference={message.dataRef} locale={locale} allowEdit /> : null}
+              {!message.recalled && parseReportLink(message.text) && <ReportCard key={message.text} api={workspace.api}
+                scope={{ kind: 'team', ...scope, conversationId: conversation.id }} reference={parseReportLink(message.text)!} locale={locale} />}
               {message.attachments?.length && !message.recalled ? <MessageFiles api={workspace.api} scope={scope} files={message.attachments} locale={locale} onRevoke={mine && participant ? file => setTakeBack(file) : undefined} /> : null}
               {approval ? <div className="tw-embed"><ApprovalCard api={workspace.api} scope={scope} conversationId={conversation.id} message={message} approval={approval} locale={locale} onChanged={runs.refresh} {...approvalOf(message, waiting)} /></div> : null}
               {answering && !answerPending(message.waitId!)

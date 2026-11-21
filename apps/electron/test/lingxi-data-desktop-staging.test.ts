@@ -4,6 +4,7 @@ import test from 'node:test';
 import { AccountService } from '../src/main/account.js';
 import { TeamsService } from '../src/main/teams/service.js';
 import type { DataRecordResult, DataRef, DataTemplateView, TeamDataScope } from '../../../packages/teams/lingxi-data.js';
+import { parseReportLink, type PublishedReport } from '../../../packages/teams/reports.js';
 
 const endpoints = process.env.LINGXI_DATA_STAGING_ENDPOINTS;
 
@@ -45,6 +46,25 @@ test('Desktop account and Team services authorize a real staging record and isol
     command: { action: 'templateViews', dataset: fixture.reference.dataset } }, reader.uid);
   assert.deepEqual(views.views.map(view => view.view), ['order-summary']);
   await assert.rejects(reader.teams.data({ scope, command: { action: 'get', reference: fixture.reference } }, owner.uid), /INVALID_SESSION/u);
+
+  if (process.env.LINGXI_TEST_REPORT_LINK) {
+    const ref = parseReportLink(process.env.LINGXI_TEST_REPORT_LINK);
+    assert.ok(ref);
+    const request = { scope, command: { action: 'getReport', ...ref } } as const;
+    const limited = await reader.teams.data<PublishedReport>(request, reader.uid);
+    assert.deepEqual(limited.points, [{ group: 'a', value: '1' }]);
+    assert.equal(limited.canReview, false);
+    assert.equal(limited.provenance.inputDigest, undefined);
+    const full = await owner.teams.data<PublishedReport>(request, owner.uid);
+    assert.equal(full.cells.length, 6);
+    assert.equal(full.provenance.kind, 'source');
+    assert.match(full.provenance.inputDigest ?? '', /^[A-Za-z0-9_-]{43}$/u);
+    const command = { action: 'openReportReview', ...ref, partition: 'd', group: 'd' } as const;
+    await assert.rejects(reader.teams.data({ scope, command }, reader.uid), /DATA_ACCESS_REQUIRED/u);
+    const opened = await owner.teams.data<{ state: string; review: string }>({ scope, command }, owner.uid);
+    assert.equal(opened.state, 'open');
+    assert.deepEqual(await owner.teams.data({ scope, command }, owner.uid), opened);
+  }
 
   const personal = { kind: 'personal' } as const;
   const { dataset } = await owner.teams.data<{ dataset: string }>({ scope: personal, operation: crypto.randomUUID(), command: {

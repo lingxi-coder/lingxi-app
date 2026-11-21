@@ -592,6 +592,9 @@ export function createPackagedAppLauncher(appPath, env, {
   const diagnosticArgs = Object.freeze(scope === undefined ? [] : [
     '--lingxi-host-diagnostics',
     `--lingxi-account-session-scope=${scope}`,
+    // Chromium runs in a disposable home. AccountService and source signatures
+    // still use the native Credential Broker and /usr/bin/security.
+    ...(env.LINGXI_DATA_SIGNED_REPORT_QA === '1' ? ['--use-mock-keychain'] : []),
   ]);
   return Object.freeze({
     scope,
@@ -1961,7 +1964,9 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
 
   // Keep nested supervisor Unix sockets below macOS SUN_LEN; the default
   // per-user temp root plus this fixture hierarchy exceeds that OS limit.
-  const tempRoot = mkdtempSync(join('/tmp', 'lingxi-packaged-smoke-'));
+  const tempRoot = process.env.LINGXI_PACKAGED_SMOKE_TMP
+    ? mkdtempSync(join(process.env.LINGXI_PACKAGED_SMOKE_TMP, 'lx-'))
+    : mkdtempSync(join('/tmp', 'lingxi-packaged-smoke-'));
   const tempHome = join(tempRoot, 'home');
   const tempTmp = join(tempRoot, 'tmp');
   mkdirSync(tempHome, { recursive: true, mode: 0o700 });
@@ -2103,6 +2108,10 @@ export async function runPackagedAppSmoke(root = packageRoot, outputRoot = proce
     await assertCustomProviderRequest(page, customProbe, customSession);
     await assertPackagedLocalApps(page, customProbe, customSession, cdpPort, join(tempHome, '.lingxi'));
     await removeCustomProviderAccount(page, customProbe);
+    if (process.env.LINGXI_DATA_SIGNED_REPORT_QA === '1') {
+      const { verifySignedReport } = await import('../test/fixtures/lingxi-data-signed-report.mjs');
+      await verifySignedReport({ appPath: copiedAppPath, userData: runtimePaths.userDataDir, page, evaluate, waitFor });
+    }
     await checkAnonymousAccount(page, 'completed');
     assertNoRendererErrors();
     await waitForTemporaryCredentialBroker(tempHome, brokerManifest.channel, protectedBrokerProcessIds);

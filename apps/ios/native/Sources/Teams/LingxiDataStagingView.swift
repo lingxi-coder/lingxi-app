@@ -1,4 +1,4 @@
-#if DEBUG && targetEnvironment(simulator)
+#if DEBUG && (targetEnvironment(simulator) || LINGXI_DEVICE_DATA_STAGING)
 import FirebaseAuth
 import FirebaseCore
 import FirebaseFirestore
@@ -9,6 +9,7 @@ struct LingxiDataStagingConfiguration {
     let firestore: Int
     let api: Int
     let account: String
+    let browserLauncher: URL?
 
     static var current: Self? {
         guard IsolatedSimulatorTesting.enabled else { return nil }
@@ -17,7 +18,8 @@ struct LingxiDataStagingConfiguration {
               let firestore = port(env["LINGXI_DATA_STAGING_FIRESTORE"]),
               let api = port(env["LINGXI_DATA_STAGING_API"]),
               let account = env["LINGXI_DATA_STAGING_ACCOUNT"], ["reader", "owner"].contains(account) else { return nil }
-        return Self(auth: auth, firestore: firestore, api: api, account: account)
+        let browserLauncher = port(env["LINGXI_REPORT_LAUNCH_PORT"]).flatMap { URL(string: "http://127.0.0.1:\($0)/launch") }
+        return Self(auth: auth, firestore: firestore, api: api, account: account, browserLauncher: browserLauncher)
     }
 
     private static func port(_ raw: String?) -> Int? {
@@ -32,15 +34,20 @@ struct LingxiDataStagingView: View {
     @State private var auth: Auth?
     @State private var error = ""
     @State private var navigation = AppNavigationModel()
-    @State private var tabs = TabCoordinator()
 
     var body: some View {
         Group {
             if let workspace {
-                TeamsTab()
-                    .environment(workspace)
-                    .environment(navigation)
-                    .environment(tabs)
+                VStack(spacing: 0) {
+                    if let url = configuration.browserLauncher {
+                        Link("Open staging Local App", destination: url).accessibilityIdentifier("teams.staging.browser")
+                    }
+                    TeamsTab()
+                        .environment(workspace)
+                        .environment(InboxStore.shared)
+                        .environment(navigation)
+                        .environment(navigation.tabs)
+                }
             } else if !error.isEmpty {
                 Text(verbatim: error).accessibilityIdentifier("teams.staging.error")
             } else {
@@ -52,6 +59,7 @@ struct LingxiDataStagingView: View {
 
     private func connect() {
         guard auth == nil else { return }
+        navigation.tabs.select(.teams)
         let name = "lingxi-data-staging"
         let options = FirebaseOptions(googleAppID: "1:123456789:ios:0000000000000000", gcmSenderID: "123456789")
         options.projectID = "demo-lingxi-data"

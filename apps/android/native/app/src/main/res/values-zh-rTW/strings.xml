@@ -3220,6 +3220,14 @@
     <string name="teams_bot_remaining_today">本人今日剩餘請求</string>
     <string name="teams_bot_resets">重置於</string>
     <string name="teams_bot_examples_hint">範例會加入草稿，請檢查後自行傳送。</string>
+    <string name="teams_data_open">開啟資料記錄</string>
+    <string name="teams_data_json">記錄 JSON</string>
+    <string name="teams_data_loading">正在讀取記錄…</string>
+    <string name="teams_data_unavailable">記錄無法使用或權限已變更。</string>
+    <string name="teams_data_invalid">請輸入有效的 JSON 物件。</string>
+    <string name="teams_data_conflict">記錄已有更新。請開啟最新修訂後再儲存。</string>
+    <string name="teams_data_save">儲存記錄</string>
+    <string name="teams_data_latest">讀取最新修訂</string>
     <string name="teams_share_link">分享連結</string>
     <string name="teams_share_link_copied">已複製連結</string>
     <string name="teams_share_link_failed">無法複製連結</string>

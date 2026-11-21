@@ -3220,6 +3220,14 @@
     <string name="teams_bot_remaining_today">Your remaining requests today</string>
     <string name="teams_bot_resets">Resets</string>
     <string name="teams_bot_examples_hint">Examples add to your draft. Review and send when ready.</string>
+    <string name="teams_data_open">Open data record</string>
+    <string name="teams_data_json">Record JSON</string>
+    <string name="teams_data_loading">Loading record…</string>
+    <string name="teams_data_unavailable">The record is unavailable or its access has changed.</string>
+    <string name="teams_data_invalid">Enter a valid JSON object.</string>
+    <string name="teams_data_conflict">The record has changed. Open the latest revision before saving.</string>
+    <string name="teams_data_save">Save record</string>
+    <string name="teams_data_latest">Load latest revision</string>
     <string name="teams_share_link">Share link</string>
     <string name="teams_share_link_copied">Link copied</string>
     <string name="teams_share_link_failed">Couldn’t copy the link</string>

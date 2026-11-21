@@ -29,6 +29,10 @@ fun LingxiAccountSection(model: AccountViewModel = viewModel()) {
     val state by model.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val activity = context.activity()
+    val googleClientId = remember(context) {
+        val resource = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
+        if (resource == 0) null else context.getString(resource).takeIf(String::isNotBlank)
+    }
     var email by remember { mutableStateOf("") }
     // Passwords intentionally stay out of saved instance state.
     var password by remember { mutableStateOf("") }
@@ -51,8 +55,8 @@ fun LingxiAccountSection(model: AccountViewModel = viewModel()) {
             Button(onClick = { model.emailSignIn(email, password, register) }, enabled = !state.busy && email.isNotBlank() && password.isNotEmpty(), modifier = Modifier.testTag("account.submit")) { Text(stringResource(if (register) R.string.account_create else R.string.account_sign_in)) }
             TextButton(onClick = { register = !register; password = "" }, enabled = !state.busy, modifier = Modifier.testTag("account.mode")) { Text(stringResource(if (register) R.string.account_existing else R.string.account_register)) }
             TextButton(onClick = { model.resetPassword(email) }, enabled = !state.busy && email.isNotBlank()) { Text(stringResource(R.string.account_forgot_password)) }
-            OutlinedButton(
-                onClick = { activity?.let { model.google(it, context.getString(R.string.default_web_client_id)) } },
+            if (googleClientId != null) OutlinedButton(
+                onClick = { activity?.let { model.google(it, googleClientId) } },
                 enabled = !state.busy && activity != null,
                 colors = ButtonDefaults.outlinedButtonColors(containerColor = Color.White, contentColor = Color(0xFF1F1F1F)),
                 border = BorderStroke(1.dp, Color(0xFF747775)),

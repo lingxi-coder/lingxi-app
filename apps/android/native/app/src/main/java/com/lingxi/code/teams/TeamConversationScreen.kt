@@ -403,6 +403,7 @@ private fun ConversationBody(
     // U3: the signed-in person reads "You" in the stream and in "Replying to", whatever their display name.
     val you = stringResource(R.string.teams_you)
     fun authorOf(message: TeamMessage): String = when {
+        message.authorKind == "task" -> message.authorDisplayName.orEmpty()
         message.authorKind == "shared_bot" -> message.authorDisplayName ?: bots.firstOrNull { it.sharedBotId == message.sharedBotId }?.name ?: strings.bot
         message.authorKind == "user" && message.authorUid == uid -> you
         else -> personName(message.authorUid)
@@ -501,6 +502,11 @@ private fun ConversationBody(
                 onExample = { example -> workspace.botEntryContext(uid)?.let { workspace.seedBotExample(it, conversationId, example) } },
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
+        }
+        if (!messaging.offline && editing == null && "user:$uid" in conversation.participants) {
+            TeamDatasetShareButton(conversation, workspace.messagingModel) { id ->
+                members.firstOrNull { it.uid == id }?.displayName?.takeIf(String::isNotBlank) ?: id
+            }
         }
         TeamComposer(
             conversation = conversation, label = label, uid = uid, messaging = messaging, draft = draft,
@@ -673,6 +679,20 @@ private fun MessageCell(
                     }
                     // Attachments and their controls remain reachable independently of the message text.
                     if (message.files.isNotEmpty()) TeamMessageFiles(message, own, workspace, pictures)
+                    if (!message.recalled) (message.resourceRef as? DatasetResourceRef.PageVersion)?.let { reference ->
+                        val context = androidx.compose.ui.platform.LocalContext.current
+                        val uri = android.net.Uri.parse(com.lingxi.code.apps.LocalAppDatasetAccess.origin ?: "https://lingxios.net")
+                            .buildUpon().path("/chat").appendQueryParameter("datasetPage", reference.page)
+                            .appendQueryParameter("datasetVersion", reference.version).build()
+                        TextButton(onClick = { com.lingxi.code.apps.LocalAppBrowser.open(context, uri.toString()) }) {
+                            Text(stringResource(R.string.teams_dataset_open_page))
+                        }
+                    }
+                    if (!message.recalled && message.resourceRef !is DatasetResourceRef.PageVersion) {
+                        val reference = message.resourceRef
+                        val grant = message.resourceGrant
+                        if (reference != null && grant != null) TeamDatasetButton(reference, grant, conversation.id, workspace.messagingModel)
+                    }
                     if (!message.recalled) message.dataRef?.let { reference ->
                         TeamDataRecordButton(reference, conversation.id, workspace.messagingModel)
                     }

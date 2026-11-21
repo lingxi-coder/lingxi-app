@@ -18,6 +18,11 @@ val productConfigText = providers.fileContents(
 val productConfig = JsonSlurper().parseText(productConfigText.get()) as Map<*, *>
 val localAppMarketApiRoot = productConfig["localAppMarketApiRoot"] as String
 val botMarketApiRoot = productConfig["botMarketApiRoot"] as String
+val teamsApiOrigin = providers.gradleProperty("lingxiTeamsApiOrigin").getOrElse("https://lingxios.net").trimEnd('/')
+URI(teamsApiOrigin).also { origin ->
+    require(origin.scheme == "https" && origin.host != null && origin.rawUserInfo == null &&
+        origin.rawQuery == null && origin.rawFragment == null && origin.rawPath.isNullOrEmpty()) { "Invalid Teams API origin" }
+}
 URI(botMarketApiRoot).also { root ->
     require(root.scheme == "https" && root.host != null && root.rawUserInfo == null && root.rawQuery == null && root.rawFragment == null && root.rawPath == "/api/v3/") { "Invalid botMarketApiRoot" }
 }
@@ -32,12 +37,19 @@ plugins {
 
 // Real-device acceptance gets its own app/data directory and Firebase identity.
 val inboxQa = providers.gradleProperty("lingxiInboxQa").map(String::toBooleanStrict).getOrElse(false)
-require(!inboxQa || gradle.startParameter.taskNames.none { it.contains("release", ignoreCase = true) }) {
-    "Inbox QA is available only for debug builds"
+val datasetQa = providers.gradleProperty("lingxiDatasetQa").map(String::toBooleanStrict).getOrElse(false)
+require(!datasetQa || (!inboxQa && teamsApiOrigin != "https://lingxios.net")) {
+    "Dataset QA requires a dedicated Teams origin and app identity"
+}
+require(!(inboxQa || datasetQa) || gradle.startParameter.taskNames.none { it.contains("release", ignoreCase = true) }) {
+    "QA app identities are available only for debug builds"
 }
 androidComponents {
     beforeVariants(selector().withBuildType("release")) {
-        if (inboxQa) it.enable = false
+        if (inboxQa || datasetQa) it.enable = false
+    }
+    beforeVariants(selector().withFlavor("distribution" to "direct")) {
+        if (datasetQa) it.enable = false
     }
 }
 
@@ -84,6 +96,9 @@ android {
         versionName = "0.1.0"
         buildConfigField("String", "MOBILE_LINUX_SDK_VERSION", "\"$mobileLinuxSdkVersion\"")
         buildConfigField("String", "LOCAL_APP_MARKET_API_ROOT", groovy.json.JsonOutput.toJson(localAppMarketApiRoot))
+        buildConfigField("String", "TEAMS_API_ORIGIN", groovy.json.JsonOutput.toJson(teamsApiOrigin))
+        buildConfigField("String", "LINGXI_DATASET_BROWSER_ORIGIN",
+            groovy.json.JsonOutput.toJson(providers.gradleProperty("lingxiDatasetBrowserOrigin").getOrElse("")))
         buildConfigField("String", "BOT_MARKET_API_ROOT", groovy.json.JsonOutput.toJson(botMarketApiRoot))
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -103,6 +118,7 @@ android {
         create("play") {
             dimension = "distribution"
             if (inboxQa) applicationId = "com.lingxi.code.inboxqa"
+            if (datasetQa) applicationId = "com.lingxi.code.datasetqa"
             // "play" is the Store distribution described by the MobileLinux
             // plan. High-risk offloads are absent at compile time.
             buildConfigField("String", "DISTRIBUTION_CHANNEL", "\"store\"")
@@ -147,7 +163,7 @@ android {
     buildTypes {
         debug {
             isMinifyEnabled = false
-            applicationIdSuffix = ".debug"
+            if (!datasetQa) applicationIdSuffix = ".debug"
             manifestPlaceholders["crashlyticsCollectionEnabled"] = false
         }
         release {

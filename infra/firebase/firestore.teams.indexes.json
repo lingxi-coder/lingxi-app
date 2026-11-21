@@ -623,6 +623,20 @@
           "order": "ASCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "datasetV2Events",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "partition",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "committedAt",
+          "order": "ASCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": [
@@ -773,6 +787,24 @@
     },
     {
       "collectionGroup": "inboxReadBatches",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "datasetV2Operations",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "datasetV2Events",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "datasetV2RunDays",
       "fieldPath": "expiresAt",
       "ttl": true,
       "indexes": []

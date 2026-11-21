@@ -131,7 +131,7 @@ final class FriendsWorkspace {
     /// are). A re-friend gets a new pair team and so a fresh composer.
     @ObservationIgnored private var chatDrafts: [String: TeamComposerDraft] = [:]
 
-    init(apiRoot: String = "https://lingxios.net/v1/friends", auth: Auth? = nil, db: Firestore? = nil) {
+    init(apiRoot: String = TeamsApiOrigin.endpoint("v1/friends").absoluteString, auth: Auth? = nil, db: Firestore? = nil) {
         self.apiRoot = apiRoot
         authOverride = auth
         dbOverride = db

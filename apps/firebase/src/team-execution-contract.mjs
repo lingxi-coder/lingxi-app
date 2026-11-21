@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { isResourceRef } from './dataset-resource.mjs';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
+const datasetId = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/u);
 const uid = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/u);
 const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const cursor = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -29,12 +31,15 @@ export const sourceMessage = z.object({
   author: z.discriminatedUnion('kind', [
     z.object({ kind: z.literal('user'), uid, displayName: z.string().min(1).max(80) }).strict(),
     z.object({ kind: z.literal('shared_bot'), sharedBotId: id, displayName: z.string().min(1).max(80) }).strict(),
+    z.object({ kind: z.literal('task'), taskId: datasetId, logicalRun: datasetId, displayName: z.string().min(1).max(80) }).strict(),
   ]),
   createdAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   editedAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   text: z.string(), replyTo: id.optional(), recalled: z.boolean().optional(),
   sourceTaskId: id.optional(), deliveryId: id.optional(), artifactId: id.optional(),
-}).strict().refine(value => !value.recalled || value.text === '', 'Recalled source must not retain its text');
+  resourceRef: z.custom(isResourceRef).optional(),
+}).strict().refine(value => !value.recalled || (value.text === '' && !value.resourceRef),
+  'Recalled source must not retain text or a Dataset reference');
 export const chatInputBatch = z.object({
   schemaVersion: z.literal(1), batchId: id, teamId: id, sharedBotId: id, conversationId: id,
   sessionEpoch: positive, expectedSessionRevision: cursor,

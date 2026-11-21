@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>共享订单</title>
+<main>
+  <button type="button">数量加一</button>
+  <output aria-live="polite">8</output>
+  <canvas width="480" height="640" aria-label="共享订单页面"></canvas>
+</main>
+<script>
+  const button = document.querySelector('button');
+  const state = document.querySelector('output');
+  const canvas = document.querySelector('canvas');
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  const samples = [];
+  const transfer = [];
+  const frames = new Set();
+  const pixels = new Set();
+  window.wire = { samples, transfer, frames, pixels, position: 0, error: '' };
+  performance.setResourceTimingBufferSize(512);
+  async function digest(bytes) {
+    const hash = await crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(hash), n => n.toString(16).padStart(2, '0')).join('');
+  }
+  button.addEventListener('click', async event => {
+    if (!event.isTrusted || button.disabled) return;
+    const begin = performance.now();
+    button.disabled = true;
+    const n = samples.length + 1;
+    try {
+      const response = await fetch('/frame', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ n }), redirect: 'error', cache: 'no-store' });
+      if (!response.ok || response.headers.get('X-Quantity') !== String(8 + n)) throw Error('unexpected response');
+      const bytes = await response.arrayBuffer();
+      const sha = await digest(bytes);
+      if (sha !== response.headers.get('X-Frame-SHA256') || frames.has(sha)) throw Error('duplicate or invalid PNG');
+      const image = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+      if (image.width !== canvas.width || image.height !== canvas.height) throw Error('unexpected dimensions');
+      context.drawImage(image, 0, 0);
+      image.close();
+      state.value = String(8 + n);
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const displayed = performance.now() - begin;
+      const pixelDigest = await digest(context.getImageData(0, 0, canvas.width, canvas.height).data);
+      if (pixels.has(pixelDigest)) throw Error('canvas did not change');
+      const timing = performance.getEntriesByName(response.url).at(-1);
+      if (!timing || timing.encodedBodySize !== bytes.byteLength) throw Error('missing transfer measurement');
+      samples.push(displayed);
+      transfer.push({ payload: bytes.byteLength, browserTransfer: timing.transferSize });
+      frames.add(sha);
+      pixels.add(pixelDigest);
+      window.wire.position = n;
+    } catch (error) {
+      window.wire.error = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
+</script>
+</html>

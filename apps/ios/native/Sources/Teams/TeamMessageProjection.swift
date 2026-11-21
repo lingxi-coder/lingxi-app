@@ -8,7 +8,7 @@ struct TeamLastMessage: Equatable, Sendable {
     let seq: Int
     /// Epoch milliseconds; `nil` while the server has not stamped a write made on this device.
     let atMs: Int64?
-    /// `user` or `shared_bot`.
+    /// Product principal that published the message.
     let authorKind: String
     let authorUid: String
     /// Set for Bot authors.
@@ -16,6 +16,7 @@ struct TeamLastMessage: Equatable, Sendable {
     /// May be empty (a non-text message).
     let preview: String
     let recalled: Bool
+    var authorTaskName: String? = nil
 }
 
 struct TeamConversationAutoReply: Equatable, Sendable { let revision: Int; let targets: [String] }
@@ -94,7 +95,9 @@ struct TeamDataRef: Decodable, Equatable, Identifiable, Sendable {
 struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
     struct Author: Decodable, Equatable, Sendable {
         let kind: String; let uid: String; let sharedBotId: String?; let displayName: String?
-        private enum CodingKeys: String, CodingKey { case kind, uid, sharedBotId, displayName }
+        var taskId: String? = nil
+        var logicalRun: String? = nil
+        private enum CodingKeys: String, CodingKey { case kind, uid, sharedBotId, displayName, taskId, logicalRun }
         init(kind: String, uid: String = "", sharedBotId: String? = nil, displayName: String? = nil) {
             self.kind = kind; self.uid = uid; self.sharedBotId = sharedBotId; self.displayName = displayName
         }
@@ -103,6 +106,11 @@ struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
             displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
             switch kind {
             case "user": uid = try c.decode(String.self, forKey: .uid); sharedBotId = nil
+            case "task":
+                uid = ""; sharedBotId = nil
+                taskId = try c.decode(String.self, forKey: .taskId)
+                logicalRun = try c.decode(String.self, forKey: .logicalRun)
+                guard taskId?.isEmpty == false, logicalRun?.isEmpty == false, displayName?.isEmpty == false else { throw TeamMessageFailure(code: "INVALID_DATA") }
             case "shared_bot": uid = ""; sharedBotId = try c.decode(String.self, forKey: .sharedBotId)
             default: throw TeamMessageFailure(code: "INVALID_DATA")
             }
@@ -134,6 +142,8 @@ struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
     /// On a Bot's reply: the files of this conversation its model was given.
     var readFiles: [TeamReadFile]? = nil
     var dataRef: TeamDataRef? = nil
+    var resourceRef: DatasetResourceRef? = nil
+    var resourceGrant: String? = nil
     /// The files to show: none on a recalled message.
     var files: [TeamMessageAttachment] { recalled == true ? [] : attachments ?? [] }
     /// The request to show under this message, if it is one a Bot made and it can be read.

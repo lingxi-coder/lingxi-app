@@ -44,6 +44,39 @@ const conversationView = (workspace: TeamsWorkspace, more: Record<string, unknow
 const mutations = (fake: FakeTeams): MessageMutation[] => fake.commands.filter((command): command is MessageMutation => command.action === 'mutate');
 const commandsOf = (fake: FakeTeams, action: MessageCommand['action']) => fake.commands.filter(command => command.action === action);
 
+scenario('a task report is opened by its immutable release and paged within its conversation grant', async context => {
+  const calls: Record<string, unknown>[] = [];
+  const { workspace, snapshot } = await open(context, fake => {
+    fake.threads.set('chan-general', [message(1, {
+      author: { kind: 'task', taskId: 'orders-daily', logicalRun: 'today', displayName: 'Daily orders' },
+      resourceRef: { kind: 'reportRelease', dataset: 'orders', release: 'morning' },
+      resourceGrant: 'grant',
+    })]);
+    fake.api.datasets = async <T>(request: Record<string, unknown>): Promise<T> => {
+      calls.push(request);
+      const command = request.command as { after?: string };
+      return {
+        title: 'Morning orders',
+        metric: { kind: 'sum', field: 'amount', scale: 2 },
+        groups: command.after ? [{ group: 'south', units: '-5' }] : [{ group: 'north', units: '900719925474099301' }],
+        cursor: command.after ? null : 'north',
+      } as T;
+    };
+  });
+  workspace.selectConversation('chan-general');
+  await until(() => snapshot().messages.length === 1, 'the report message');
+  const page = await mount(workspace, conversationView(workspace));
+  context.after(() => page.unmount());
+  await page.click(page.button('Open fixed data'));
+  assert.match(page.text(), /Morning orders.*9007199254740993\.01/);
+  await page.click(page.button('Next page'));
+  assert.match(page.text(), /south-0\.05/);
+  assert.deepEqual(calls.map(({ dataset, via, command }) => [dataset, via, command]), [
+    ['orders', 'grant', { action: 'openReport', release: 'morning' }],
+    ['orders', 'grant', { action: 'openReport', release: 'morning', after: 'north' }],
+  ]);
+});
+
 // ── Composer ──
 
 scenario('composer: Enter sends and clears, Shift+Enter and an input method\'s Enter do not, and the unsent text is kept per conversation', async context => {

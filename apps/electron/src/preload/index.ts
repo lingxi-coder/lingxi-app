@@ -263,6 +263,7 @@ export interface ModUiApi {
 export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone' | 'speech_recognition';
 
 export interface VisualizationApi {
+  source(sessionId: string, reference: VisualizationReference, kind: 'visualization' | 'page'): Promise<{ title: string; html: string } | null>;
   mount(sessionId: string, reference: VisualizationReference, theme: VisualizationTheme, locale: string, expanded: boolean): Promise<VisualizationMount | null>;
   writeState(sessionId: string, token: string, generation: number, baseVersion: number, modelContent: string, privateContent: string): Promise<VisualizationStateWrite>;
   unmount(sessionId: string, token: string): Promise<void>;
@@ -546,6 +547,10 @@ const api: LingxiApi = {
     list: uid => teamsRequest({ type: 'list', uid }),
     detail: (uid, teamId) => teamsRequest({ type: 'detail', uid, teamId }),
     historyPage: (uid,scope,conversationId,beforeSeq) => teamsRequest({type:'historyPage',uid,scope,conversationId,beforeSeq}),
+    datasets: (uid, request) => teamsRequest({ type: 'datasets', uid, request }),
+    approveDatasetTask: (uid, draft) => teamsRequest({ type: 'approveDatasetTask', uid, draft }),
+    revokeScheduledDatasetTask: (uid, task) => teamsRequest({ type: 'revokeScheduledDatasetTask', uid, task }),
+    revokeBotDatasetTask: (uid, scope) => teamsRequest({ type: 'revokeBotDatasetTask', uid, scope }),
     data: (uid, request) => teamsRequest({ type: 'data', uid, request }),
     localDataSource: (uid, request) => teamsRequest({ type: 'localDataSource', uid, request }),
     messages: (uid, command) => teamsRequest({ type: 'messages', uid, command }),
@@ -737,6 +742,7 @@ const api: LingxiApi = {
     }),
   },
   visualization: {
+    source: (sessionId, reference, kind) => ipcRenderer.invoke('lingxi:visualization:source', sessionId, reference, kind),
     mount: (sessionId, reference, theme, locale, expanded) => ipcRenderer.invoke('lingxi:visualization:mount', sessionId, reference, theme, locale, expanded) as Promise<VisualizationMount | null>,
     writeState: (sessionId, token, generation, baseVersion, modelContent, privateContent) =>
       ipcRenderer.invoke('lingxi:visualization:writeState', sessionId, token, generation, baseVersion, modelContent, privateContent) as Promise<VisualizationStateWrite>,

@@ -40,6 +40,9 @@ export function createChat({ vault, transport, pingMs = 15_000, limits = CHAT_LI
   async function start(uid, input, signal) {
     await vault.take(uid, 'chat', limits);
     const { provider, apiKey } = await vault.openKey(uid, input.providerId);
+    if (input.providerRevision !== undefined && provider.revision !== input.providerRevision) {
+      throw new VaultError(409, 'MODEL_PROVIDER_CHANGED');
+    }
     const model = input.model ?? provider.defaultModel ?? provider.models[0]?.id;
     if (!model) throw new VaultError(400, 'MODEL_REQUIRED');
     // A failure past this point names the model it was for, so a provider check can say which model it tried.
@@ -52,7 +55,9 @@ export function createChat({ vault, transport, pingMs = 15_000, limits = CHAT_LI
       try { for await (const _ of upstream.body) break; } catch { /* drained */ }
       throw named(new VaultError(upstream.status === 429 ? 429 : 502, statusCode(upstream.status)));
     }
-    return { provider, model, events: normalize(provider.protocol, parseSse(upstream.body)) };
+    const geminiCompatibility = provider.protocol === 'open_ai_chat' &&
+      /^https:\/\/generativelanguage\.googleapis\.com\/v1beta\/openai\/?$/u.test(provider.baseUrl);
+    return { provider, model, events: normalize(provider.protocol, parseSse(upstream.body), { tools: input.tools, geminiCompatibility }) };
   }
 
   async function chat({ user, body, headers, signal }) {
@@ -117,5 +122,5 @@ export function createChat({ vault, transport, pingMs = 15_000, limits = CHAT_LI
     } finally { controller.abort(); }
   }
 
-  return { chat, test };
+  return { chat, test, start };
 }

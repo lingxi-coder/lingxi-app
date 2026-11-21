@@ -802,6 +802,10 @@ export class BridgeClient extends EventEmitter {
     return validateVisualizationServe(await this.visualization({ op: 'serve', path }));
   }
 
+  async visualizationSource(sessionId: string, reference: VisualizationRefDto): Promise<{ title: string; html: string } | null> {
+    return this.publicationSource(await this.visualization({ op: 'read_source', session_id: sessionId, id: reference.id, revision: reference.revision }));
+  }
+
   /** Compare-and-swap a state write from a live mount. */
   async visualizationWriteState(
     token: string,
@@ -838,6 +842,19 @@ export class BridgeClient extends EventEmitter {
   /** Serve one private page on this computer. There is no public URL. */
   async privatePageServe(id: string, revision: number): Promise<PrivatePageServeDto> {
     return validatePrivatePageServe(await this.request('private_page', { op: 'serve', id, revision }));
+  }
+
+  async privatePageSource(id: string, revision: number): Promise<{ title: string; html: string } | null> {
+    return this.publicationSource(await this.request('private_page', { op: 'read_source', id, revision }));
+  }
+
+  private publicationSource(reply: unknown): { title: string; html: string } | null {
+    if (reply === null) return null;
+    const source = reply as { title?: unknown; html?: unknown };
+    if (!source || typeof source.title !== 'string' || typeof source.html !== 'string' || source.html.length > 2 * 1024 * 1024) {
+      throw new Error('Invalid page source');
+    }
+    return { title: source.title, html: source.html };
   }
 
   /** Third-party notices bundled with the visualization runtime. */

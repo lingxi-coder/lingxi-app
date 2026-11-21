@@ -16,6 +16,13 @@ export type TeamsKey =
   | 'common_open'
   | 'common_retry'
   | 'common_save'
+  | 'desktop_dataset_task_approved'
+  | 'desktop_dataset_task_id'
+  | 'desktop_dataset_task_invalid_plan'
+  | 'desktop_dataset_task_plan'
+  | 'desktop_dataset_task_review'
+  | 'desktop_dataset_task_revoke'
+  | 'desktop_dataset_task_revoked'
   | 'friends_add'
   | 'friends_block_body'
   | 'friends_block_title_fmt'
@@ -285,6 +292,7 @@ export type TeamsKey =
   | 'teams_conversation_group'
   | 'teams_conversation_type'
   | 'teams_create'
+  | 'teams_data_unavailable'
   | 'teams_day'
   | 'teams_delete'
   | 'teams_demote'
@@ -595,6 +603,47 @@ export type TeamsKey =
   | 'tw_conv_start_hint'
   | 'tw_copied'
   | 'tw_copy'
+  | 'tw_dataset_access'
+  | 'tw_dataset_add'
+  | 'tw_dataset_audience_fmt'
+  | 'tw_dataset_bot_permission'
+  | 'tw_dataset_bot_permission_scope'
+  | 'tw_dataset_cancel_edit'
+  | 'tw_dataset_continue'
+  | 'tw_dataset_edit'
+  | 'tw_dataset_edit_record'
+  | 'tw_dataset_empty'
+  | 'tw_dataset_fields'
+  | 'tw_dataset_fixed'
+  | 'tw_dataset_live'
+  | 'tw_dataset_location'
+  | 'tw_dataset_mine'
+  | 'tw_dataset_more'
+  | 'tw_dataset_next'
+  | 'tw_dataset_open_fixed'
+  | 'tw_dataset_open_live'
+  | 'tw_dataset_open_page'
+  | 'tw_dataset_page_accessibility'
+  | 'tw_dataset_page_approve'
+  | 'tw_dataset_page_copy'
+  | 'tw_dataset_page_deny'
+  | 'tw_dataset_page_input'
+  | 'tw_dataset_page_package'
+  | 'tw_dataset_page_review'
+  | 'tw_dataset_page_selection'
+  | 'tw_dataset_page_send_input'
+  | 'tw_dataset_page_start_task'
+  | 'tw_dataset_partition_hint'
+  | 'tw_dataset_partitions'
+  | 'tw_dataset_publish_page'
+  | 'tw_dataset_record_fields'
+  | 'tw_dataset_refresh'
+  | 'tw_dataset_report_count'
+  | 'tw_dataset_report_group'
+  | 'tw_dataset_save_record'
+  | 'tw_dataset_share'
+  | 'tw_dataset_shared'
+  | 'tw_dataset_team'
   | 'tw_day_today'
   | 'tw_day_yesterday'
   | 'tw_dismiss'
@@ -847,6 +896,13 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   common_open: { en: 'Open', 'zh-Hans': '打开', 'zh-Hant': '開啟', ja: '開く', ko: '열기' },
   common_retry: { en: 'Retry', 'zh-Hans': '重试', 'zh-Hant': '重試', ja: '再試行', ko: '다시 시도' },
   common_save: { en: 'Save', 'zh-Hans': '保存', 'zh-Hant': '儲存', ja: '保存', ko: '저장' },
+  desktop_dataset_task_approved: { en: 'Dataset task approved.', 'zh-Hans': '数据任务已获批准。', 'zh-Hant': '資料任務已獲核准。', ja: 'データセットタスクを承認しました。', ko: '데이터세트 작업이 승인되었습니다.' },
+  desktop_dataset_task_id: { en: 'Dataset ID', 'zh-Hans': 'Dataset ID', 'zh-Hant': '資料集 ID', ja: 'データセット ID', ko: '데이터세트 ID' },
+  desktop_dataset_task_invalid_plan: { en: 'Enter a JSON object for the task plan.', 'zh-Hans': '请输入 JSON 对象格式的任务方案。', 'zh-Hant': '請輸入 JSON 物件格式的任務方案。', ja: 'タスク計画を JSON オブジェクトで入力してください。', ko: '작업 계획을 JSON 객체로 입력하세요.' },
+  desktop_dataset_task_plan: { en: 'Task plan (JSON)', 'zh-Hans': '任务方案（JSON）', 'zh-Hant': '任務方案（JSON）', ja: 'タスク計画（JSON）', ko: '작업 계획(JSON)' },
+  desktop_dataset_task_review: { en: 'Review plan', 'zh-Hans': '审核方案', 'zh-Hant': '審核方案', ja: '計画を確認', ko: '계획 검토' },
+  desktop_dataset_task_revoke: { en: 'Revoke Dataset approval', 'zh-Hans': '撤销 Dataset 许可', 'zh-Hant': '撤銷 Dataset 許可', ja: 'データセットの承認を取り消す', ko: '데이터세트 승인 취소' },
+  desktop_dataset_task_revoked: { en: 'Dataset task approval revoked.', 'zh-Hans': '数据任务许可已撤销。', 'zh-Hant': '資料任務許可已撤銷。', ja: 'データセットタスクの承認を取り消しました。', ko: '데이터세트 작업 승인이 취소되었습니다.' },
   friends_add: { en: 'Add friend', 'zh-Hans': '添加好友', 'zh-Hant': '新增好友', ja: '友だちを追加', ko: '친구 추가' },
   friends_block_body: { en: 'They are also removed from your friends and the chat is deleted for both of you. Until you unblock them, they can\'t find you or send you requests.', 'zh-Hans': '同时会将对方从好友中移除，并对双方删除聊天记录。在你解除屏蔽之前，对方无法找到你或向你发送请求。', 'zh-Hant': '同時會將對方從好友中移除，並對雙方刪除聊天記錄。在你解除封鎖之前，對方無法找到你或向你傳送請求。', ja: '友だちからも削除され、チャットは双方から削除されます。ブロックを解除するまで、相手はあなたを見つけたりリクエストを送ったりできません。', ko: '친구에서도 삭제되고 대화가 양쪽 모두에서 삭제됩니다. 차단을 해제할 때까지 상대는 나를 찾거나 요청을 보낼 수 없습니다.' },
   friends_block_title_fmt: { en: 'Block “%1$s”?', 'zh-Hans': '屏蔽“%1$s”？', 'zh-Hant': '封鎖「%1$s」？', ja: '「%1$s」さんをブロックしますか？', ko: '“%1$s” 님을 차단할까요?' },
@@ -1116,6 +1172,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_conversation_group: { en: 'Group', 'zh-Hans': '群聊', 'zh-Hant': '群組', ja: 'グループ', ko: '그룹' },
   teams_conversation_type: { en: 'Type', 'zh-Hans': '类型', 'zh-Hant': '類型', ja: '種類', ko: '유형' },
   teams_create: { en: 'Create team', 'zh-Hans': '创建团队', 'zh-Hant': '建立團隊', ja: 'チームを作成', ko: '팀 만들기' },
+  teams_data_unavailable: { en: 'The record is unavailable or its access has changed.', 'zh-Hans': '记录不可用或权限已更改。', 'zh-Hant': '記錄無法使用或權限已變更。', ja: 'レコードが利用できないか、権限が変更されました。', ko: '레코드를 사용할 수 없거나 권한이 변경되었습니다.' },
   teams_day: { en: '1 day', 'zh-Hans': '1 天', 'zh-Hant': '1 天', ja: '1 日', ko: '1일' },
   teams_delete: { en: 'Delete team', 'zh-Hans': '删除团队', 'zh-Hant': '刪除團隊', ja: 'チームを削除', ko: '팀 삭제' },
   teams_demote: { en: 'Make member', 'zh-Hans': '设为成员', 'zh-Hant': '設為成員', ja: 'メンバーにする', ko: '일반 멤버로 변경' },
@@ -1426,6 +1483,47 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_conv_start_hint: { en: 'Create a channel, or start a message with a teammate or a Bot from the sidebar.', 'zh-Hans': '在侧边栏新建频道，或与成员、Bot 开始对话。', 'zh-Hant': '在側邊欄新增頻道，或與成員、Bot 開始對話。', ja: 'サイドバーからチャンネルを作成するか、メンバーや Bot とメッセージを始めてください。', ko: '사이드바에서 채널을 만들거나 팀원 또는 Bot과 대화를 시작하세요.' },
   tw_copied: { en: 'Copied', 'zh-Hans': '已复制', 'zh-Hant': '已複製', ja: 'コピーしました', ko: '복사됨' },
   tw_copy: { en: 'Copy', 'zh-Hans': '复制', 'zh-Hant': '複製', ja: 'コピー', ko: '복사' },
+  tw_dataset_access: { en: 'Access', 'zh-Hans': '访问权限', 'zh-Hant': '存取權限', ja: 'アクセス権', ko: '접근 권한' },
+  tw_dataset_add: { en: 'Add data', 'zh-Hans': '添加数据', 'zh-Hant': '新增資料', ja: 'データを追加', ko: '데이터 추가' },
+  tw_dataset_audience_fmt: { en: 'Share with %1$s', 'zh-Hans': '分享到 %1$s', 'zh-Hant': '分享給 %1$s', ja: '%1$s に共有', ko: '%1$s 님에게 공유' },
+  tw_dataset_bot_permission: { en: 'Bot Dataset permission', 'zh-Hans': 'Bot 数据许可', 'zh-Hant': 'Bot 資料許可', ja: 'Bot のデータセット権限', ko: 'Bot 데이터 세트 권한' },
+  tw_dataset_bot_permission_scope: { en: 'This permission applies to tasks for the current published Bot in this conversation.', 'zh-Hans': '许可适用于此会话当前发布版本的 Bot 任务。', 'zh-Hant': '許可適用於此對話目前發佈版本的 Bot 任務。', ja: 'この会話で現在公開されている Bot のタスクに適用されます。', ko: '이 권한은 이 대화에 현재 게시된 Bot의 작업에 적용됩니다.' },
+  tw_dataset_cancel_edit: { en: 'Cancel edit', 'zh-Hans': '取消编辑', 'zh-Hant': '取消編輯', ja: '編集をキャンセル', ko: '편집 취소' },
+  tw_dataset_continue: { en: 'Continue sharing', 'zh-Hans': '继续分享', 'zh-Hant': '繼續分享', ja: '共有を続ける', ko: '공유 계속' },
+  tw_dataset_edit: { en: 'Edit together', 'zh-Hans': '共同编辑', 'zh-Hant': '共同編輯', ja: '共同編集', ko: '함께 편집' },
+  tw_dataset_edit_record: { en: 'Edit record', 'zh-Hans': '编辑记录', 'zh-Hant': '編輯記錄', ja: 'レコードを編集', ko: '레코드 편집' },
+  tw_dataset_empty: { en: 'No datasets available here.', 'zh-Hans': '这里没有可用的数据集。', 'zh-Hant': '這裡沒有可用的資料集。', ja: '利用できるデータセットがありません。', ko: '사용할 수 있는 데이터세트가 없습니다.' },
+  tw_dataset_fields: { en: 'Visible fields', 'zh-Hans': '可见字段', 'zh-Hant': '可見欄位', ja: '表示するフィールド', ko: '표시할 필드' },
+  tw_dataset_fixed: { en: 'Use fixed version', 'zh-Hans': '使用固定版本', 'zh-Hant': '使用固定版本', ja: '固定バージョンを使う', ko: '고정 버전 사용' },
+  tw_dataset_live: { en: 'See latest', 'zh-Hans': '查看最新', 'zh-Hant': '檢視最新', ja: '最新を表示', ko: '최신 버전 보기' },
+  tw_dataset_location: { en: 'Data location', 'zh-Hans': '数据位置', 'zh-Hant': '資料位置', ja: 'データの場所', ko: '데이터 위치' },
+  tw_dataset_mine: { en: 'My datasets', 'zh-Hans': '我的数据集', 'zh-Hant': '我的資料集', ja: '自分のデータセット', ko: '내 데이터세트' },
+  tw_dataset_more: { en: 'More datasets', 'zh-Hans': '更多数据集', 'zh-Hant': '更多資料集', ja: 'さらに表示', ko: '데이터세트 더 보기' },
+  tw_dataset_next: { en: 'Next page', 'zh-Hans': '下一页', 'zh-Hant': '下一頁', ja: '次のページ', ko: '다음 페이지' },
+  tw_dataset_open_fixed: { en: 'Open fixed data', 'zh-Hans': '打开固定数据', 'zh-Hant': '開啟固定資料', ja: '固定データを開く', ko: '고정 데이터 열기' },
+  tw_dataset_open_live: { en: 'Open latest data', 'zh-Hans': '打开最新数据', 'zh-Hant': '開啟最新資料', ja: '最新データを開く', ko: '최신 데이터 열기' },
+  tw_dataset_open_page: { en: 'Open interactive page', 'zh-Hans': '打开交互页', 'zh-Hant': '開啟互動頁面', ja: '対話型ページを開く', ko: '인터랙티브 페이지 열기' },
+  tw_dataset_page_accessibility: { en: 'Accessible page text', 'zh-Hans': '页面无障碍文本', 'zh-Hant': '頁面無障礙文字', ja: 'ページのアクセシブルなテキスト', ko: '페이지 접근성 텍스트' },
+  tw_dataset_page_approve: { en: 'Approve edit', 'zh-Hans': '批准编辑', 'zh-Hant': '核准編輯', ja: '編集を承認', ko: '편집 승인' },
+  tw_dataset_page_copy: { en: 'Copy selected page text', 'zh-Hans': '复制页面选中文字', 'zh-Hant': '複製頁面所選文字', ja: '選択したページのテキストをコピー', ko: '페이지에서 선택한 텍스트 복사' },
+  tw_dataset_page_deny: { en: 'Deny edit', 'zh-Hans': '拒绝编辑', 'zh-Hant': '拒絕編輯', ja: '編集を拒否', ko: '편집 거부' },
+  tw_dataset_page_input: { en: 'Text input', 'zh-Hans': '文本输入', 'zh-Hant': '文字輸入', ja: 'テキスト入力', ko: '텍스트 입력' },
+  tw_dataset_page_package: { en: 'Page package (JSON)', 'zh-Hans': '页面包（JSON）', 'zh-Hant': '頁面套件（JSON）', ja: 'ページパッケージ（JSON）', ko: '페이지 패키지 (JSON)' },
+  tw_dataset_page_review: { en: 'Review the code, assets and permitted actions before publishing.', 'zh-Hans': '发布前请检查代码、资源和允许的动作。', 'zh-Hant': '發佈前請檢查程式碼、資源和允許的操作。', ja: '公開前にコード、素材、許可する操作を確認してください。', ko: '게시 전에 코드, 에셋 및 허용된 작업을 검토하세요.' },
+  tw_dataset_page_selection: { en: 'Text selected on the page', 'zh-Hans': '页面选中文字', 'zh-Hant': '頁面所選文字', ja: 'ページで選択したテキスト', ko: '페이지에서 선택한 텍스트' },
+  tw_dataset_page_send_input: { en: 'Enter text', 'zh-Hans': '输入文本', 'zh-Hant': '輸入文字', ja: 'テキストを入力', ko: '텍스트 넣기' },
+  tw_dataset_page_start_task: { en: 'Start a Bot task', 'zh-Hans': '启动 Bot 任务', 'zh-Hant': '啟動 Bot 任務', ja: 'Bot タスクを開始', ko: 'Bot 작업 시작' },
+  tw_dataset_partition_hint: { en: 'Comma-separated partitions', 'zh-Hans': '用逗号分隔分组', 'zh-Hant': '用逗號分隔分組', ja: 'カンマ区切りのパーティション', ko: '쉼표로 구분된 파티션' },
+  tw_dataset_partitions: { en: 'Partitions (blank for all)', 'zh-Hans': '分组（留空表示全部）', 'zh-Hant': '分組（留空表示全部）', ja: 'パーティション（空欄で全件）', ko: '파티션 (비워 두면 전체)' },
+  tw_dataset_publish_page: { en: 'Publish interactive page', 'zh-Hans': '发布交互页', 'zh-Hant': '發佈互動頁面', ja: '対話型ページを公開', ko: '인터랙티브 페이지 게시' },
+  tw_dataset_record_fields: { en: 'Editable fields (JSON)', 'zh-Hans': '可编辑字段（JSON）', 'zh-Hant': '可編輯欄位（JSON）', ja: '編集可能なフィールド（JSON）', ko: '편집 가능 필드 (JSON)' },
+  tw_dataset_refresh: { en: 'Refresh', 'zh-Hans': '刷新', 'zh-Hant': '重新整理', ja: '再読み込み', ko: '새로 고침' },
+  tw_dataset_report_count: { en: 'Count', 'zh-Hans': '计数', 'zh-Hant': '計數', ja: '件数', ko: '개수' },
+  tw_dataset_report_group: { en: 'Group', 'zh-Hans': '分组', 'zh-Hant': '分組', ja: 'グループ', ko: '그룹' },
+  tw_dataset_save_record: { en: 'Save record', 'zh-Hans': '保存记录', 'zh-Hant': '儲存記錄', ja: 'レコードを保存', ko: '레코드 저장' },
+  tw_dataset_share: { en: 'Share data', 'zh-Hans': '分享数据', 'zh-Hant': '分享資料', ja: 'データを共有', ko: '데이터 공유' },
+  tw_dataset_shared: { en: 'Shared in this conversation', 'zh-Hans': '此会话共享的数据', 'zh-Hant': '此對話中共用的資料', ja: 'この会話で共有されたデータ', ko: '이 대화에서 공유된 데이터' },
+  tw_dataset_team: { en: 'Team datasets', 'zh-Hans': '团队数据集', 'zh-Hant': '團隊資料集', ja: 'チームのデータセット', ko: '팀 데이터세트' },
   tw_day_today: { en: 'Today', 'zh-Hans': '今天', 'zh-Hant': '今天', ja: '今日', ko: '오늘' },
   tw_day_yesterday: { en: 'Yesterday', 'zh-Hans': '昨天', 'zh-Hant': '昨天', ja: '昨日', ko: '어제' },
   tw_dismiss: { en: 'Dismiss', 'zh-Hans': '知道了', 'zh-Hant': '知道了', ja: '閉じる', ko: '닫기' },

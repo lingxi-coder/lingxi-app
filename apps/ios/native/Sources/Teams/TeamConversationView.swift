@@ -37,6 +37,7 @@ struct TeamConversationView: View {
     @State private var placed = false
     @State private var position = ScrollPosition(edge: .bottom)
     @State private var showDetails = false
+    @State private var showDataset = false
     @State private var showNotice = false
     @State private var recalling: TeamMessage?
     @State private var editing: TeamMessage?
@@ -195,6 +196,11 @@ struct TeamConversationView: View {
             }
             stream(context, messages: messages)
             voicePanel
+            if context.participant && !connectionOffline && editing == nil {
+                Button("teams_dataset_title") { showDataset = true }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal)
+            }
             TeamComposerView(
                 context: context, draft: $draft, editing: editing, answeringWait: answering(context) != nil, replying: replying(context, messages: messages), busy: workspace.messageBusy,
                 files: carrying ? workspace.files(for: conversationID) : [], refusals: carrying ? workspace.refusals(for: conversationID) : [],
@@ -204,6 +210,7 @@ struct TeamConversationView: View {
                 focus: $composerFocused, onSend: { Task { await send(context) } },
                 onCancelEdit: endEdit, onCancelReply: { draft.replyToID = nil })
         }
+        .sheet(isPresented: $showDataset) { TeamDatasetShareSheet(context: context) }
         .toolbar {
             ToolbarItem(placement: .principal) {
                 let identity = HStack(spacing: 8) {

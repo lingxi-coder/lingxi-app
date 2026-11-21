@@ -37,7 +37,7 @@ struct TeamsListStrings: Equatable, Sendable {
 
 /// A person or a Bot, in the shape avatars take.
 struct TeamIdentity: Equatable, Sendable {
-    enum Kind: String, Sendable { case user; case bot = "shared_bot" }
+    enum Kind: String, Sendable { case user, task; case bot = "shared_bot" }
     let kind: Kind
     /// The uid of a person; the `botId` of a Bot whose card is known, else its key.
     let id: String

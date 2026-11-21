@@ -1,3 +1,4 @@
+import type { DatasetTaskHooks } from '../teams/datasetTasks.js';
 import { promises as fs, constants as fsConstants, openSync, closeSync, writeFileSync, fsyncSync, lstatSync, unlinkSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -69,6 +70,7 @@ export interface LocalAppAgentExecution {
   requireCleanupConfirmation(): Promise<void>;
 }
 export interface LocalAppAgentBrokerOptions {
+  datasetTasks?: () => DatasetTaskHooks | undefined;
   /** `<config>/local-apps/v2` */
   root: string;
   /** Brand-owned Agent workspace root, separate from the private ledger. */
@@ -1115,6 +1117,11 @@ export class LocalAppAgentBroker {
         await this.persist(record);
       });
       await assertAuthorized();
+      const data = await this.options.datasetTasks?.()?.open({ executor: 'localAppAgent', task: record.privateTaskId,
+        recipe: { app: caller.appId, release: caller.releaseDigest, model: active.authorization.model,
+          tools: active.authorization.requestedTools, skills: active.authorization.requestedSkills, output: parsed.executionInput.outputSchema } },
+        record.publicRunId, controller.signal);
+      await assertAuthorized();
       const completion = await this.options.execute({
         runId: parsed.runId, taskStorageId: record.privateTaskId, owner: structuredClone(caller), input: structuredClone(parsed.executionInput),
         ...(active.chat ? { chat: structuredClone(active.chat) } : {}), authorization: structuredClone(active.authorization), signal: controller.signal, assertAuthorized,
@@ -1156,6 +1163,8 @@ export class LocalAppAgentBroker {
         await this.verifyChatCheckpoint(record.owner.appId, active.chat.chatId, checkpoint);
         await assertAuthorized();
       } else if (completion.chatCheckpoint !== undefined) throw new LocalAppAgentError('invalid_result', 'An independent run returned Chat authority.');
+      await data?.finish({ text: completion.result.text, output: completion.result.output }, controller.signal);
+      await assertAuthorized();
       await this.finish(recordKey, 'succeeded', undefined, completion.result, usage, completion.chatCheckpoint);
     } catch (error) {
       // Executor errors must distinguish missing cleanup evidence from ordinary

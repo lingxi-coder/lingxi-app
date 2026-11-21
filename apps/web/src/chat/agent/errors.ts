@@ -1,5 +1,9 @@
 /** What an llmApi error code means to the person chatting. */
 const TEXT: Record<string, [en: string, zh: string]> = {
+  MODEL_TOOL_REQUEST_REJECTED: ['The selected model rejected the tool request. Check that it supports function calling.', '所选模型拒绝了工具请求。请确认模型支持函数调用。'],
+  MODEL_PROVIDER_CHANGED: ['The model provider changed. Start a new Dataset turn.', '模型服务已变更，请重新发起数据操作。'],
+  AGENT_TURN_GONE: ['The Dataset action expired.', '数据操作已过期。'],
+  AGENT_ACTION_ALREADY_APPROVED: ['An approved action is being saved.', '已批准的操作正在保存。'],
   UPSTREAM_AUTH: ['The model service rejected this key. Check it and save it again.', '模型服务拒绝了这个 key，请检查后重新保存。'],
   MODEL_NOT_FOUND: ['The model service has no such model. Pick another one.', '模型服务没有这个模型，请换一个。'],
   UPSTREAM_RATE_LIMITED: ['The model service is busy or limiting requests. Try again shortly.', '模型服务繁忙或限流，请稍后再试。'],

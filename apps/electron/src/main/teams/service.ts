@@ -11,6 +11,8 @@ import { readPrivateDataPage, validPreviewLease, type PrivatePreviewLease, type 
 import type { DataRequest } from '../../../../../packages/teams/lingxi-data.js';
 import type { TeamsFirestoreSession, TeamsFirestoreOptions } from './firestore.js';
 import type { TeamDataProof, TeamDatasetOffer } from './process.js';
+import type { DatasetBotScope } from '../../../../../packages/teams/dataset-run.js';
+import type { DatasetTaskProgram } from './datasetTasks.js';
 
 export interface Account {
   snapshot(): { user: { uid: string } | null };
@@ -23,6 +25,7 @@ export interface LocalTeamHost {
   localBots(uid: string): Promise<LocalPublishableBot[]>;
   selectSharedFiles(uid: string, instanceId: string): Promise<SelectedSharedFile[]>;
   publishedKnowledge(uid: string, teamId: string, sharedBotId: string): Promise<PublishedKnowledge>;
+  datasetBotProgram?(uid: string, scope: DatasetBotScope): Promise<DatasetTaskProgram>;
   publishLocalBot(uid: string, input: PublishLocalBotInput): Promise<{ sharedBotId: string; revision: number }>;
   offerSharedBot(uid: string, input: OfferSharedBotInput): Promise<void>;
   acceptSharedBot(uid: string, input: AcceptSharedBotInput): Promise<{ sharedBotId: string; revision: number }>;
@@ -177,6 +180,9 @@ export class TeamsService {
     if (epoch !== this.epoch) throw new Error('INVALID_SESSION');
     return result;
   }
+  async datasets<T>(expectedUid: string, request: Record<string, unknown>): Promise<T> {
+    return this.checked<T>(expectedUid, '/datasets', request);
+  }
   async data<T>(input: DataRequest, expectedUid: string): Promise<T> {
     return this.checked<T>(expectedUid, '/data', input);
   }
@@ -261,6 +267,11 @@ export class TeamsService {
   selectSharedFiles(uid: string, instanceId: string): Promise<SelectedSharedFile[]> { this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE'); return this.host.selectSharedFiles(uid, instanceId); }
   hostStatus(uid: string): Promise<SharedHostStatus> { this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE'); return this.host.status(uid); }
   publishedKnowledge(uid: string, teamId: string, sharedBotId: string): Promise<PublishedKnowledge> { this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE'); return this.host.publishedKnowledge(uid, teamId, sharedBotId); }
+  datasetBotProgram(uid: string, scope: DatasetBotScope): Promise<DatasetTaskProgram> {
+    this.assertHostContext({ uid, epoch: this.epoch });
+    if (!this.host?.datasetBotProgram) throw new Error('TEAM_HOST_UNAVAILABLE');
+    return this.host.datasetBotProgram(uid, scope);
+  }
   publishLocalBot(uid: string, input: PublishLocalBotInput): Promise<{ sharedBotId: string; revision: number }> {
     this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE'); return this.host.publishLocalBot(uid, input);
   }

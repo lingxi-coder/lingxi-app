@@ -503,6 +503,7 @@ struct UnifiedAppManifest: Codable, Equatable, Sendable {
     let capabilities: [String]?
     let targets: [Target]
     let dataSchema: LocalAppJSON?
+    var dataBindings: [String: String]? = nil
     let remix: Remix?
     let package: LocalAppJSON?
     let agent: LocalAppJSON?

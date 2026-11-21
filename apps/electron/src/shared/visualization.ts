@@ -25,6 +25,8 @@ export const VISUALIZATION_GUEST_CHANNEL = 'lingxi-visualization';
 
 /** Renderer → main: authorize a mount for a session's widget. */
 export const CH_VISUALIZATION_MOUNT = 'lingxi:visualization:mount';
+/** Renderer → main: read an immutable author fragment for explicit publishing. */
+export const CH_VISUALIZATION_SOURCE = 'lingxi:visualization:source';
 /** Renderer → main: compare-and-swap a widget state write. */
 export const CH_VISUALIZATION_WRITE_STATE = 'lingxi:visualization:writeState';
 /** Renderer → main: retire a mount. */

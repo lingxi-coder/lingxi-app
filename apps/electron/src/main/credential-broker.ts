@@ -44,7 +44,14 @@ export interface PluginSecretDeletionSummary {
   aborted: boolean;
 }
 
+export interface DatasetTaskVault {
+  read(key: string): Promise<string | undefined>;
+  write(key: string, secret: string): Promise<void>;
+  remove(key: string): Promise<void>;
+}
+
 export interface ProviderCredentialBroker {
+  datasetTaskVault?(): DatasetTaskVault;
   readonly credentialChannel?: 'development' | 'production';
   health(): Promise<CredentialBrokerHealth>;
   listStatus(providerIds: readonly string[]): Promise<CredentialBrokerStatus[]>;
@@ -479,6 +486,23 @@ class CredentialBrokerClient implements ProviderCredentialBroker {
       );
     }
     return result;
+  }
+
+  datasetTaskVault(): DatasetTaskVault {
+    const service = `com.lingxi.secure-storage.v1.${this.channel}.dataset-tasks`;
+    const operate = async (op: 'retrieve' | 'store' | 'delete', key: string, payload?: string) => {
+      if (!/^dsv2\.[0-9a-f]{58}$/u.test(key)) throw new Error('Invalid Dataset task slot');
+      await this.health();
+      return this.requestChecked({ op, service, account: key, ...(payload === undefined ? {} : { payload }) });
+    };
+    return {
+      read: async key => {
+        const result = await operate('retrieve', key);
+        return result.present === true ? result.payload : undefined;
+      },
+      write: async (key, secret) => { await operate('store', key, secret); },
+      remove: async key => { await operate('delete', key); },
+    };
   }
 
   private providerServiceName(): string {

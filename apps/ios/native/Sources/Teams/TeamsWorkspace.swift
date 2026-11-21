@@ -3,6 +3,24 @@ import FirebaseFirestore
 import Foundation
 import Observation
 
+enum TeamsApiOrigin {
+    static let url: URL = {
+        let standard = URL(string: "https://lingxios.net")!
+        guard let configured = Bundle.main.object(forInfoDictionaryKey: "LingxiTeamsApiOrigin") as? String,
+              let parts = URLComponents(string: configured), parts.scheme == "https", parts.host != nil,
+              parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil,
+              parts.path.isEmpty || parts.path == "/", let origin = parts.url else {
+            precondition(Bundle.main.bundleIdentifier != "com.lingxi.code.datasetqa", "Dataset QA requires a valid Teams HTTPS origin")
+            return standard
+        }
+        return origin
+    }()
+
+    static func endpoint(_ path: String) -> URL {
+        url.appendingPathComponent(path)
+    }
+}
+
 private struct TeamsList: Decodable { let teams: [TeamSummary] }
 private struct TeamCommandResult: Decodable { let teamId: String?; let code: String? }
 
@@ -114,7 +132,7 @@ final class TeamsWorkspace {
     /// The team to open first when it is in the list (the persisted selection).
     @ObservationIgnored private var initialTeamID = ""
 
-    init(preferences: TeamsPreferences = TeamsPreferences(), apiRoot: String = "https://lingxios.net/v1/teams", auth: Auth? = nil, db: Firestore? = nil) {
+    init(preferences: TeamsPreferences = TeamsPreferences(), apiRoot: String = TeamsApiOrigin.endpoint("v1/teams").absoluteString, auth: Auth? = nil, db: Firestore? = nil) {
         self.preferences = preferences
         self.apiRoot = apiRoot
         authOverride = auth

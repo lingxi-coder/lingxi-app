@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { User } from 'firebase/auth';
 import { auth } from '../app/firebase';
+import { DatasetPageCard } from '../../../../packages/teams/DatasetPage.js';
+import { isResourceRef } from '../../../../packages/teams/dataset-resource.js';
+import { teamsTransport } from '../../../../packages/teams/index.js';
 import { useAuthUser } from '../app/useAuthUser';
 import type { ChatTarget } from '../app/router';
 import { ChatWorkspace } from '../chat/ChatWorkspace';
@@ -41,7 +44,35 @@ export default function ChatPage(props: Props) {
     {viaLink ? <OpenInAppBanner target={target} prompt={viaLink.prompt} locale={locale} onClose={() => setViaLink(undefined)} /> : null}
     <SignInCard auth={auth} locale={locale} note={zh ? '登录后继续对话' : 'Sign in to continue to your chats'} />
   </main>;
+  const query = new URLSearchParams(window.location.search);
+  const reference = { kind: 'pageVersion', page: query.get('datasetPage'), version: query.get('datasetVersion') };
+  if (isResourceRef(reference) && reference.kind === 'pageVersion') {
+    return <SignedInDatasetPage key={user.uid + ':' + reference.version} user={user} locale={locale} reference={reference} />;
+  }
   return <SignedInChat key={user.uid} user={user} {...props} />;
+}
+
+function useSignedInDatasetApi(user: User) {
+  return useMemo(() => {
+    const request = teamsTransport('', async () => {
+      if (auth.currentUser?.uid !== user.uid) throw new Error('INVALID_SESSION');
+      const token = await user.getIdToken();
+      if (auth.currentUser?.uid !== user.uid) throw new Error('INVALID_SESSION');
+      return token;
+    });
+    return { datasets: <T,>(body: Record<string, unknown>) => request<T>('/datasets', body) };
+  }, [user]);
+}
+
+function SignedInDatasetPage({ user, locale, reference }: {
+  user: User; locale: Locale; reference: { kind: 'pageVersion'; page: string; version: string };
+}) {
+  const api = useSignedInDatasetApi(user);
+  return <main className="teams-web chat-signin">
+    <div className="tw-scope">
+      <DatasetPageCard api={api} reference={reference} locale={locale} />
+    </div>
+  </main>;
 }
 
 /** The workspace for one account: its model client, model services and shared prompt live as long as the page does. */
@@ -73,8 +104,9 @@ interface AreaProps {
 
 function AgentArea({ user, name, locale, client, models, prompt, onPromptTaken, target, onAgentChats, open }: AreaProps) {
   const [history, setHistory] = useState<AgentHistory>();
+  const datasetApi = useSignedInDatasetApi(user);
   useEffect(() => { let live = true; void agentHistory().then(opened => { if (live) setHistory(opened); }); return () => { live = false; }; }, []);
   if (!history) return <div className="chat-notice" role="status"><p>{locale === 'zh' ? '正在加载…' : 'Loading…'}</p></div>;
-  return <AgentHost uid={user.uid} name={name} locale={locale} target={target} client={client} models={models} history={history}
+  return <AgentHost uid={user.uid} name={name} locale={locale} target={target} client={client} datasetApi={datasetApi} models={models} history={history}
     onAgentChats={onAgentChats} open={open} initialPrompt={prompt} onPromptTaken={onPromptTaken} />;
 }

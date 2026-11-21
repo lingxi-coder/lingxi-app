@@ -68,6 +68,9 @@ struct TeamConversationContext {
         if message.author.kind == "user" {
             return TeamIdentity(kind: .user, id: message.author.uid, name: userName(message.author.uid), isSelf: message.author.uid == uid)
         }
+        if message.author.kind == "task", let id = message.author.taskId, let name = message.author.displayName {
+            return TeamIdentity(kind: .task, id: id, name: name, isSelf: false)
+        }
         let card = card(forKey: message.author.sharedBotId)
         let name = message.author.displayName ?? card?.name ?? ""
         return TeamIdentity(kind: .bot, id: card?.sharedBotId ?? message.author.sharedBotId ?? message.author.uid, name: name.isEmpty ? strings.bot : name, isSelf: false)
@@ -176,6 +179,7 @@ struct TeamMessageCell: View {
     @ScaledMetric(relativeTo: .body) private var percent: CGFloat = 100
     @State private var openedData: TeamDataRef?
     @State private var openedReport: TeamReportLink?
+    @State private var openedDataset = false
     let message: TeamMessage
     let grouped: Bool
     let context: TeamConversationContext
@@ -224,6 +228,12 @@ struct TeamMessageCell: View {
         .sheet(item: $openedReport) { reference in
             TeamReportSheet(link: reference, conversation: context.conversation.id, model: context.model)
         }
+        .sheet(isPresented: $openedDataset) {
+            if !recalled, let reference = message.resourceRef, let grant = message.resourceGrant {
+                TeamDatasetSheet(reference: reference, grant: grant, conversation: context.conversation.id, model: context.model)
+            }
+        }
+        .onChange(of: recalled) { _, recalled in if recalled { openedDataset = false } }
         .frame(maxWidth: 832)
         .frame(maxWidth: .infinity)
         .contextMenu {
@@ -256,6 +266,23 @@ struct TeamMessageCell: View {
                         .accessibilityIdentifier("teams.message.data.\(message.id)")
                 }
             }
+            if !recalled, case let .pageVersion(page, version)? = message.resourceRef,
+               let url = datasetPageURL(page, version: version) {
+                GridRow {
+                    Link("teams_dataset_open_page", destination: url)
+                        .accessibilityIdentifier("teams.message.page." + message.id)
+                }
+            }
+            if !recalled, let reference = message.resourceRef, message.resourceGrant != nil {
+                switch reference {
+                case .pageVersion:
+                    EmptyView()
+                case .dataset:
+                    GridRow { datasetButton("teams_dataset_open_live") }
+                default:
+                    GridRow { datasetButton("teams_dataset_open_fixed") }
+                }
+            }
             if !recalled, let reference = TeamReportLink(message.text) {
                 GridRow { Button("Open published report") { openedReport = reference }
                     .accessibilityIdentifier("teams.report.open." + message.id) }
@@ -280,6 +307,19 @@ struct TeamMessageCell: View {
                 }
             }
         }
+    }
+
+    private func datasetButton(_ title: LocalizedStringKey) -> some View {
+        Button(title) { openedDataset = true }
+            .accessibilityIdentifier("teams.message.dataset." + message.id)
+    }
+
+    private func datasetPageURL(_ page: String, version: String) -> URL? {
+        let origin = LocalAppDatasetAccess.origin ?? URL(string: "https://lingxios.net")!
+        guard let target = URL(string: "/chat", relativeTo: origin)?.absoluteURL,
+              var parts = URLComponents(url: target, resolvingAgainstBaseURL: false) else { return nil }
+        parts.queryItems = [URLQueryItem(name: "datasetPage", value: page), URLQueryItem(name: "datasetVersion", value: version)]
+        return parts.url
     }
 
     private func words(_ identity: TeamIdentity, name: String, clock: String) -> some View {

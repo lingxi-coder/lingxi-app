@@ -1,4 +1,5 @@
 import type { ChatEvent, ChatTurn, ProviderTestResult, VaultProvider, VaultUpsert } from '../../../../../packages/llm-vault/contracts';
+import type { ResourceRef } from '../../../../../packages/teams/dataset-resource';
 import { createSseParser } from './sse';
 
 /**
@@ -12,7 +13,27 @@ export class LlmError extends Error {
   constructor(readonly code: string) { super(code); }
 }
 
+export type DatasetAttachment = Extract<ResourceRef, { kind: 'dataset' }>;
+
+export type DatasetTurnRequest =
+  | { action: 'start'; id: string; chat: ChatTurn; attachment?: DatasetAttachment }
+  | { action: 'get' | 'advance' | 'cancel'; id: string }
+  | { action: 'approve' | 'deny'; id: string; approval: string };
+
+export interface DatasetToolProposal {
+  id: string;
+  name: 'dataset_create' | 'dataset_put' | 'dataset_latest';
+  arguments: Record<string, unknown>;
+}
+
+export type DatasetTurn = { id: string; answer: string } & (
+  | { state: 'approval'; approval: string; calls: DatasetToolProposal[] }
+  | { state: 'generating' | 'executing' | 'ready' | 'done' | 'denied' | 'cancelled' }
+  | { state: 'failed'; code: string }
+);
+
 export interface LlmClient {
+  datasetTurn?(request: DatasetTurnRequest, signal?: AbortSignal): Promise<DatasetTurn>;
   listProviders(): Promise<VaultProvider[]>;
   upsertProvider(input: VaultUpsert): Promise<VaultProvider>;
   deleteProvider(id: string, expectedRevision?: number): Promise<void>;
@@ -35,6 +56,11 @@ export function createLlmClient(token: () => Promise<string>, base = LLM_API_URL
   };
   const post = async <T>(path: string, body: unknown): Promise<T> => (await call(path, { method: 'POST', body: JSON.stringify(body) })).json() as Promise<T>;
   return {
+    ...((import.meta as { env?: Record<string, string | undefined> }).env?.VITE_LINGXI_DATASET_WEB_AGENT === '1' ? {
+      async datasetTurn(request: DatasetTurnRequest, signal?: AbortSignal): Promise<DatasetTurn> {
+        return (await call('/dataset-turn', { method: 'POST', body: JSON.stringify(request), signal })).json() as Promise<DatasetTurn>;
+      },
+    } : {}),
     async listProviders() { return ((await (await call('/providers')).json()) as { providers: VaultProvider[] }).providers; },
     async upsertProvider(input) { return (await post<{ provider: VaultProvider }>('/providers', input)).provider; },
     async deleteProvider(id, expectedRevision) { await post('/providers', { action: 'delete', id, ...(expectedRevision === undefined ? {} : { expectedRevision }) }); },

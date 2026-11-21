@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font:20px sans-serif;margin:20px}label,button,output{display:block;margin:12px 0}input{font:inherit}footer{margin-top:1400px}</style>
+<main><h1>订单</h1><output id="qty" aria-label="数量">7</output><button id="add">加一</button>
+<label>备注<input id="note"></label><footer>明细末尾</footer></main>
+<script>
+  window.compositions = [];
+  const field = document.querySelector('#note');
+  for (const name of ['compositionstart', 'compositionupdate', 'compositionend', 'input']) {
+    field.addEventListener(name, event => compositions.push([event.type, event.data]));
+  }
+  document.querySelector('#add').addEventListener('click', () => {
+    const qty = document.querySelector('#qty');
+    qty.value = String(Number(qty.value) + 1);
+  });
+  window.observeNetwork = async function () {
+    const nonce = location.pathname.slice('/app-'.length);
+    const observer = '172.29.76.2';
+    const probes = [location.origin + '/wire-' + nonce, 'https://' + nonce + '.fixture.test:18443/wire-' + nonce];
+    const web = Promise.all(probes.map(async url => {
+      try { return (await fetch(url, { mode: 'cors', signal: AbortSignal.timeout(5000) })).status; }
+      catch { return 0; }
+    }));
+    async function offer(config) {
+      const peer = new RTCPeerConnection(config);
+      peer.createDataChannel('probe');
+      await peer.setLocalDescription(await peer.createOffer());
+      await new Promise(resolve => {
+        const timer = setTimeout(resolve, 3500);
+        peer.addEventListener('icegatheringstatechange', () => {
+          if (peer.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); }
+        });
+      });
+      peer.close();
+    }
+    await Promise.all([
+      offer({ iceServers: [{ urls: 'stun:' + observer + ':3478' }] }),
+      offer({ iceTransportPolicy: 'relay', iceServers: [{ urls: 'turn:' + observer + ':3479?transport=udp', username: 'fixture', credential: 'fixture' }] }),
+    ]);
+    return { httpStatuses: await web, iceOfferCreated: true, turnOfferCreated: true };
+  };
+</script></html>

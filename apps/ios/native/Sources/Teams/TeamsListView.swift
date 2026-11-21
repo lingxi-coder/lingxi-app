@@ -282,6 +282,7 @@ struct TeamsListView: View {
         let unread = context.unread(conversation)
         let strings = context.strings
         let preview = TeamsListLogic.conversationPreview(conversation, uid: uid, strings: strings) { last in
+            if last.authorKind == "task", let name = last.authorTaskName { return name }
             if last.authorKind == "shared_bot" {
                 let name = context.bots.first { $0.sharedBotId == last.authorSharedBotId }?.name ?? ""
                 return name.isEmpty ? strings.bot : name

@@ -1,9 +1,17 @@
+import type { ResourceRef } from './dataset-resource.js';
 import { parseDataRef, type DataRef } from './lingxi-data.js';
 import { isMemberExecutionCommand } from './execution-validation.js';
 import { executionCommand, type MemberExecutionCommand } from './execution.js';
 import { ATTACHMENT_MESSAGE_FILES, type MessageAttachment } from './attachments.js';
-export type MessageAuthor = { kind: 'user'; uid: string; displayName?: string } | { kind: 'shared_bot'; sharedBotId: string; displayName: string };
-export const authorIdentity = (a: MessageAuthor) => a.kind === 'user' ? `user:${a.uid}` : `shared_bot:${a.sharedBotId}`;
+export type MessageAuthor = { kind: 'user'; uid: string; displayName?: string } | { kind: 'shared_bot'; sharedBotId: string; displayName: string }
+  | { kind: 'task'; taskId: string; logicalRun: string; displayName: string };
+export function authorIdentity(author: MessageAuthor): string {
+  switch (author.kind) {
+    case 'user': return 'user:' + author.uid;
+    case 'shared_bot': return 'shared_bot:' + author.sharedBotId;
+    case 'task': return 'task:' + author.taskId;
+  }
+}
 export interface TeamConversation {
   id: string; kind: 'dm' | 'group' | 'channel' | 'bot_dm'; title: string; participants: string[];
   /** Who can read it, as written when it was made: its people and the maintainers its Bots had then. Absent when the source does not say. */
@@ -36,6 +44,8 @@ export interface TeamMessage {
   /** Files the message carries, in the order they were added. */
   attachments?: MessageAttachment[];
   dataRef?: DataRef;
+  resourceRef?: ResourceRef;
+  resourceGrant?: string;
   /** On a Bot's reply: the files of this conversation its model was given, as the service checked them. */
   readFiles?: { attachmentId: string; name: string }[];
 }

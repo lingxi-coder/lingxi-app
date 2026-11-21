@@ -9,7 +9,7 @@ import { teamsText } from './i18n.js';
 // ─── Pure helpers ───────────────────────────────────────────────────────────
 
 /** A person or Bot, in the shape avatars take. */
-export interface Identity { kind: 'user' | 'bot'; id: string; name: string }
+export interface Identity { kind: 'user' | 'bot' | 'task'; id: string; name: string }
 
 /** Prefer the projected incoming count. Older conversation rows fall back to their stored read mark. */
 export const unreadCount = (conversation: Pick<TeamConversation, 'lastSeq' | 'lastReadSeq' | 'unreadCount'>): number => conversation.unreadCount ?? Math.max(0, conversation.lastSeq - conversation.lastReadSeq);

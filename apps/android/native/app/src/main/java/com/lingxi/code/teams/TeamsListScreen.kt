@@ -223,7 +223,8 @@ internal fun TeamsListScreen(
                             val unread = unreadOf(conversation)
                             val last = conversation.lastMessage
                             val preview = TeamsListLogic.conversationPreview(conversation, uid, strings) { message ->
-                                if (message.authorKind == "shared_bot") bots.firstOrNull { it.sharedBotId == message.authorSharedBotId }?.name ?: strings.bot
+                                if (message.authorKind == "task") message.authorTaskName.orEmpty()
+                                else if (message.authorKind == "shared_bot") bots.firstOrNull { it.sharedBotId == message.authorSharedBotId }?.name ?: strings.bot
                                 else members.firstOrNull { it.uid == message.authorUid }?.displayName?.takeIf { it.isNotEmpty() } ?: strings.member
                             }
                             ConversationRow(

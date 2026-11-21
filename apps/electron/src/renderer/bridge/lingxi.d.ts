@@ -170,6 +170,7 @@ export interface ModUiApi {
 export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone' | 'speech_recognition';
 
 export interface VisualizationApi {
+  source(sessionId: string, reference: VisualizationReference, kind: 'visualization' | 'page'): Promise<{ title: string; html: string } | null>;
   mount(sessionId: string, reference: VisualizationReference, theme: VisualizationTheme, locale: string, expanded: boolean): Promise<VisualizationMount | null>;
   writeState(sessionId: string, token: string, generation: number, baseVersion: number, modelContent: string, privateContent: string): Promise<VisualizationStateWrite>;
   unmount(sessionId: string, token: string): Promise<void>;

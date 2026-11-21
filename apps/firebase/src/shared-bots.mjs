@@ -4,6 +4,7 @@ import { admissionId, sharedBotPermits } from './team-execution-contract.mjs';
 import { serviceBotCommand, sharedBotCommand } from './shared-bot-commands.mjs';
 import { serviceScope } from './hosted-bot-service.mjs';
 import { authorizeDataBinding } from './lingxi-data.mjs';
+import { confirmShareDelivery } from './dataset-message-grant.mjs';
 import { allowedPrivateSource } from './lingxi-data-sources.mjs';
 import { messagePreview } from './team-message-preview.mjs';
 import { prepareSharedConversation } from './team-conversations.mjs';
@@ -123,13 +124,14 @@ const unasked = (task, conversation) => task.optional === true && conversation?.
  * interprets old requests or reads old run/trigger collections. */
 export class SharedBotsStore {
   constructor(db, clock = Date.now) { this.db = db; this.clock = clock; }
-  async execute(user, raw) {
+  async execute(user, raw, datasetShare, pageAuthority) {
     // The scope a command works in is a Team or a hosted Bot service. The two never mix: a command names exactly one,
     // and nothing below falls back from one to the other.
     const service = raw?.serviceId !== undefined;
     const command = (service ? serviceBotCommand : sharedBotCommand).parse(raw);
     const { generation, action, payload: p } = command;
-    const requestDigest = hash(command), now = this.clock();
+    if ((datasetShare || pageAuthority) && (service || action !== 'submit')) deny(400, 'INVALID_INPUT');
+    const requestDigest = hash(datasetShare ? { command, datasetShare } : command), now = this.clock();
     return this.db.runTransaction(async tx => {
       const team = service ? serviceScope.root(this.db, command.serviceId) : this.db.doc(`teams/${command.teamId}`);
       const receiptRef = team.collection('executionReceipts').doc(hash([user.uid, generation, command.commandId]));
@@ -139,6 +141,7 @@ export class SharedBotsStore {
       else if (teamDoc.data()?.state !== 'active' || !self) deny(403, 'MEMBERSHIP_REQUIRED');
       if (self.generation !== generation) deny(409, 'STALE_MEMBERSHIP');
       const identity = memberIdentity(user.uid, self);
+      if (pageAuthority) await pageAuthority(tx);
       if (receipt) {
         if (receipt.requestDigest !== requestDigest) deny(409, 'COMMAND_ID_CONFLICT');
         // A start/continue grant is an unrepeatable capability, never a replayable receipt.
@@ -149,7 +152,7 @@ export class SharedBotsStore {
       if (privateTaskBlocked.has(action) && (await tx.get(team.collection('tasks').doc(p.taskId))).data()?.privateDataSource) {
         deny(403, 'DATA_PRIVATE_TASK');
       }
-      const context = { tx, team, self, identity, user, command, now, service };
+      const context = { tx, team, self, identity, user, command, now, service, datasetShare, fromPage: Boolean(pageAuthority) };
       // A service takes only the commands its scope lists and applies its own gates; what it returns runs after the command.
       const leave = service ? await serviceScope.enter({ tx, root: team, service: teamDoc.data(), self, identity, action, payload: p, now,
         liveState: task => taskView(task, now).state }) : undefined;
@@ -498,14 +501,20 @@ export class SharedBotsStore {
     if (!value?.memberUids?.includes(identity.uid) || (mustParticipate && !value.participants.includes(`user:${identity.uid}`))) deny(403, 'CONVERSATION_REQUIRED');
     return { ref, value };
   }
-  async submit({ tx, team, identity, self, command: { payload: p }, now, service, dataCause }) {
+  async submit({ tx, team, identity, self, command: { payload: p }, now, service, dataCause, datasetShare, fromPage }) {
     const { ref, value: c } = await this.conversation(tx, team, p.conversationId, identity, true);
     if (!dataCause && (p.messageId.startsWith('bot_') || p.changeId.startsWith('bot_'))) deny(400, 'INVALID_INPUT');
     if (p.targets.some(id => !c.participants.includes(`shared_bot:${id}`))) deny(403, 'BOT_PARTICIPANT_REQUIRED');
     if (c.kind === 'bot_dm' && (p.targets.length !== 1 || p.targets[0] !== c.sharedBotId)) deny(400, 'INVALID_BOT_TARGET');
     if (c.executionPolicy && p.targets.some(id => !c.executionPolicy.targets.includes(id))) deny(403, 'CONVERSATION_POLICY_REQUIRED');
     const [message, change] = await tx.getAll(ref.collection('messages').doc(p.messageId), ref.collection('changes').doc(p.changeId));
-    const digest = hash({ requester: identity, ...p, targets: [...p.targets].sort(), ...(dataCause ? { dataCause } : {}) });
+    if (datasetShare) {
+      if (c.kind !== 'bot_dm' || p.privateDataSource || dataCause) deny(400, 'INVALID_INPUT');
+      await confirmShareDelivery(tx, team, c, { teamId: team.id, conversationId: p.conversationId,
+        messageId: p.messageId, text: p.text }, identity.uid, datasetShare);
+    }
+    const digest = hash({ requester: identity, ...p, targets: [...p.targets].sort(), ...(dataCause ? { dataCause } : {}),
+      ...(datasetShare ? { datasetShare } : {}) });
     if (message.exists || change.exists) {
       if (change.data()?.submissionDigest !== digest) deny(409, 'MESSAGE_ID_CONFLICT');
       return change.data().submissionReceipt;
@@ -545,8 +554,8 @@ export class SharedBotsStore {
     const locks = await all(p.targets.map(id => team.collection('chatExecutionLocks').doc(hash([id, p.conversationId]))));
     for (const [i, snapshot] of quotas.entries()) if ((snapshot.data()?.used ?? 0) + increments[i] > limits[i]) deny(429, 'REQUEST_QUOTA_EXCEEDED');
     // In a Bot DM every message asks the Bot; with auto-reply on there, the Bot may still decide that one needs no answer.
-    const dmOptional = !p.privateDataSource && !dataCause && c.kind === 'bot_dm' && !!c.autoReply?.targets.includes(c.sharedBotId) && !!bots[0]?.data().autoReply;
-    const unaskedTasks = p.privateDataSource || dataCause ? null : await this.optionalTasks(tx, team, c, p, identity, p.targets, now);
+    const dmOptional = !p.privateDataSource && !dataCause && !datasetShare && c.kind === 'bot_dm' && !!c.autoReply?.targets.includes(c.sharedBotId) && !!bots[0]?.data().autoReply;
+    const unaskedTasks = p.privateDataSource || dataCause || fromPage ? null : await this.optionalTasks(tx, team, c, p, identity, p.targets, now);
     const seq = c.lastSeq + 1, changeSeq = c.lastChangeSeq + 1;
     if (!Number.isSafeInteger(seq) || !Number.isSafeInteger(changeSeq)) deny(409, 'CURSOR_LIMIT');
     const tasks = p.targets.map(sharedBotId => ({ sharedBotId, taskId: admissionId(p.messageId, sharedBotId) }));
@@ -556,6 +565,7 @@ export class SharedBotsStore {
     tx.create(ref.collection('messages').doc(p.messageId), { seq, changeSeq, changeId: p.changeId, text: sharedText, kind: 'text', author,
       createdAt: at, ...(tasks.length ? { taskIds: tasks.map(task => task.taskId), mentions: p.targets.map(id => `shared_bot:${id}`) } : {}),
       ...(dataCause ? { dataRef: dataCause.reference } : {}),
+      ...(datasetShare ? { resourceRef: datasetShare.reference, resourceGrant: datasetShare.grant } : {}),
       ...(p.replyTo ? { replyTo: p.replyTo } : {}), ...(files.attachments.length ? { attachments: files.attachments } : {}) });
     files.attach(p.messageId);
     tx.create(ref.collection('changes').doc(p.changeId), { seq: changeSeq, messageId: p.messageId, operation: 'create',

@@ -14,7 +14,6 @@ import { LOCAL_APP_AGENT_MAX_FILE_BYTES, LOCAL_APP_AGENT_MAX_FILES, LOCAL_APP_AG
 import type { LocalAppAgentBroker, LocalAppAgentOwner, LocalAppAgentAuthorization } from './agentBroker.js';
 import { canonicalJson, LocalAppAgentError, sameAgentGrant, validateAgentSettings } from './agentPolicy.js';
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, LOCAL_APP_SCHEME } from '../../shared/localApps.js';
-import type { DataRequest } from '../../../../../packages/teams/lingxi-data.js';
 import { localAppDataRequest, parseLocalAppDataBinding } from './dataBinding.js';
 import { CH_LOCAL_APP_NATIVE } from '../../shared/localAppNative.js';
 import { appId, atomicJson, containedFile } from './store.js';
@@ -448,7 +447,7 @@ export interface LocalAppHostOptions extends RuntimeOptions {
   core: LocalAppCoreTransport;
   accountToken?: () => Promise<string>;
   accountId?: () => string | undefined;
-  dataRequest?: (input: DataRequest, uid: string) => Promise<unknown>;
+  dataRequest?: (input: Record<string, unknown>, uid: string) => Promise<unknown>;
   /** Trusted, host-owned current mode; captured once when an IPC request arrives. */
   currentConversationMode: () => 'chat' | 'code' | undefined;
   resolveAuthoringBinding?: (appId: string | undefined, session: { projectPath: string; sessionId: string }, source?: AuthoringSessionSource) => Promise<Omit<DesktopAuthoringRef, 'workspaceId' | 'appId'>>;
@@ -2177,7 +2176,7 @@ export class LocalAppHost {
     if (typeof alias !== 'string' || !row.manifest.dataBindings || !Object.hasOwn(row.manifest.dataBindings, alias)
       || !row.releaseDigest) throw new Error('The application release does not declare this data binding');
     const key = createHash('sha256').update(JSON.stringify([uid, row.releaseDigest, alias])).digest('hex');
-    return { path: join(this.store.directory(row.id), 'lingxi-data-bindings', key + '.json'), access: row.manifest.dataBindings[alias]! };
+    return { path: join(this.store.directory(row.id), 'lingxi-dataset-bindings', key + '.json'), access: row.manifest.dataBindings[alias]! };
   }
 
   private async readDataBinding(path: string): Promise<LocalAppDataBinding | null> {
@@ -2191,12 +2190,22 @@ export class LocalAppHost {
     return this.runtime.exclusive(id, async () => {
       const row = await this.store.get(id);
       if (row.revision !== input.revision || this.options.accountId?.() !== uid) throw new Error('Application or account changed');
-      const { path } = this.dataBindingPath(row, input.alias, uid);
+      const { path, access } = this.dataBindingPath(row, input.alias, uid);
       if (write) {
         if (input.binding === null) await fs.rm(path, { force: true });
         else {
           const binding = parseLocalAppDataBinding(input.binding);
-          await request({ scope: binding.scope, command: { action: 'describe', dataset: binding.dataset } }, uid);
+          const description = await request(localAppDataRequest(binding, access, { action: 'describe' }, null), uid) as { access?: string };
+          if (binding.reference.kind === 'dataset' && description.access === 'pinned') {
+            throw new Error('Choose the fixed resource shared by this grant');
+          }
+          if (binding.reference.kind !== 'dataset') {
+            const action = { snapshot: 'list', record: 'get', reportRelease: 'getReport' }[binding.reference.kind];
+            await request(localAppDataRequest(binding, 'read', { action }, null), uid);
+          }
+          if (access === 'edit' && (description.access !== 'edit' || binding.reference.kind !== 'dataset')) {
+            throw new Error('This application requires an editable live Dataset');
+          }
           if (this.options.accountId?.() !== uid) throw new Error('Application account changed');
           await atomicJson(path, binding);
         }

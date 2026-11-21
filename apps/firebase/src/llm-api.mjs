@@ -16,7 +16,7 @@ export const EXPORT_FRESHNESS_SECONDS = 300;
 export const EXPORTS_PER_DAY = 10;
 const uid = z.string().min(1).max(128).regex(/^[^/\u0000-\u001f\u007f]+$/u);
 
-export function createLlmHandler({ vault, verifyToken, origins = [], clock = Date.now, observe = () => undefined, chat, test }) {
+export function createLlmHandler({ vault, verifyToken, origins = [], clock = Date.now, observe = () => undefined, chat, test, datasetTurn }) {
   return async (request, signal = request.signal) => {
     const started = clock();
     const headers = new Headers({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
@@ -36,7 +36,7 @@ export function createLlmHandler({ vault, verifyToken, origins = [], clock = Dat
       }
       const path = new URL(request.url).pathname.replace(/^\/(llmApi|v1\/llm)(?=\/|$)/u, '') || '/';
       route = `${request.method} ${path}`;
-      const known = ['GET /providers', 'POST /providers', 'POST /providers/export', ...(chat ? ['POST /chat'] : [])];
+      const known = ['GET /providers', 'POST /providers', 'POST /providers/export', ...(chat ? ['POST /chat'] : []), ...(datasetTurn ? ['POST /dataset-turn'] : [])];
       if (!known.includes(route)) throw new VaultError(404, 'NOT_FOUND');
 
       const bearer = /^Bearer (\S+)$/u.exec(request.headers.get('Authorization') ?? '');
@@ -50,8 +50,9 @@ export function createLlmHandler({ vault, verifyToken, origins = [], clock = Dat
       const source = origin ? 'web' : CLIENTS.includes(client) ? client : 'unknown';
       if (route === 'GET /providers') return finish(reply({ providers: await vault.list(user.uid) }));
 
-      const body = await readJson(request, route === 'POST /chat' ? 1_200_000 : 65_536);
+      const body = await readJson(request, ['POST /chat', 'POST /dataset-turn'].includes(route) ? 1_200_000 : 65_536);
       if (route === 'POST /chat') return finish(await chat({ user, body, headers, signal }));
+      if (route === 'POST /dataset-turn') return finish(reply(await datasetTurn(user.uid, bearer[1], body, signal)));
       if (route === 'POST /providers/export') {
         if (origin) throw new VaultError(403, 'BROWSER_NOT_ALLOWED');
         if (!CLIENTS.includes(client)) throw new VaultError(400, 'CLIENT_REQUIRED');

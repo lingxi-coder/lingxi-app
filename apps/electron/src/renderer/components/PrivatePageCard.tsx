@@ -13,6 +13,7 @@ import { useI18n } from '../i18n/useI18n';
 import { useT } from '../theme/ThemeContext';
 import { PRIVATE_PAGE_PARTITION, privatePageUrl } from '../../shared/privatePage';
 import { Icon } from './Icon';
+import { PublishVisualization } from './PublishVisualization.js';
 
 export function PrivatePageCard({
   sessionId,
@@ -32,6 +33,7 @@ export function PrivatePageCard({
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px' }}>
         <Icon name="page" size={16} />
         <span style={{ flex: 1, minWidth: 0 }}>{tr('private_page_label')}</span>
+        <PublishVisualization sessionId={sessionId} reference={reference} kind="page" />
         <button type="button" onClick={() => setOpen((value) => !value)}
           style={{ border: `1px solid ${t.border}`, background: t.surface, color: t.text, borderRadius: 8, padding: '4px 10px' }}>
           {open ? tr('private_page_close') : tr('private_page_open')}

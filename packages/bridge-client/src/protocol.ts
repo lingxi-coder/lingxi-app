@@ -1683,6 +1683,7 @@ export type VisualizationRequest =
       expanded: boolean;
     }
   | { op: 'serve'; path: string }
+  | { op: 'read_source'; session_id: string; id: string; revision: number }
   | {
       op: 'write_state';
       token: string;
@@ -1712,7 +1713,7 @@ export interface VisualizationServeDto {
 }
 
 /** Parameters of the bridge `private_page` request. */
-export type PrivatePageRequest = { op: 'serve'; id: string; revision: number };
+export type PrivatePageRequest = { op: 'serve' | 'read_source'; id: string; revision: number };
 
 /** One private-page scheme-handler response; the body is base64. */
 export interface PrivatePageServeDto {

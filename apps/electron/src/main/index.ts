@@ -1,3 +1,4 @@
+import { DatasetTaskHost } from './teams/datasetTasks.js';
 import { BotMarketHost } from './bots/marketHost.js';
 import { systemDecisionCredentials } from './decisionCredentials.js';
 import { DecisionHost } from './decision.js';
@@ -797,16 +798,39 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   host.attachKeepAwake(keepAwake);
   // Opened at login, the app waits in the background: the Bots work without a window.
   const loginItem = new LoginItem({ app, openExternal: (url) => shell.openExternal(url) });
+  let datasetTasks: DatasetTaskHost | undefined;
   scheduled = new ScheduledTaskService(settings, bridge, sessionCatalog, (title, body, ref) => {
     // Propagate the refusal: `scheduledRun` returns false when the kind is off
     // or the notifier is disposed, and the caller keeps its dedupe key.
     return notifier?.scheduledRun(title, body, ref) ?? false;
-  }, (error) => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)), { keepAwake });
-  const account = new AccountService(firebaseConfig, credentialBroker
+  }, (error) => diagnostics.add('warn', 'host', sanitizeDiagnostic(error)), { keepAwake, datasetTasks: () => datasetTasks });
+  let accountConfig: Pick<typeof firebaseConfig, 'projectId' | 'authDomain' | 'apiKey' | 'appId'> = firebaseConfig;
+  let teamsOrigin: string | undefined;
+  const stagedFirebase = process.env.LINGXI_STAGING_FIREBASE;
+  const stagedOrigin = process.env.LINGXI_TEAMS_API_ORIGIN;
+  if (stagedFirebase || stagedOrigin) {
+    if (!diagnosticAccountScope || !stagedFirebase || !stagedOrigin) throw new Error('Staging requires an isolated development account and Teams origin');
+    const candidate = JSON.parse(stagedFirebase);
+    const origin = new URL(stagedOrigin);
+    if (origin.protocol !== 'https:' || origin.href !== origin.origin + '/' || origin.hostname === 'lingxios.net' ||
+        !candidate || typeof candidate.projectId !== 'string' || !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/u.test(candidate.projectId) ||
+        candidate.projectId === firebaseConfig.projectId || candidate.authDomain !== candidate.projectId + '.firebaseapp.com' ||
+        typeof candidate.apiKey !== 'string' || !/^1:\d+:web:[a-f0-9]+$/u.test(candidate.appId)) {
+      throw new Error('Invalid staging account configuration');
+    }
+    accountConfig = { projectId: candidate.projectId, authDomain: candidate.authDomain, apiKey: candidate.apiKey, appId: candidate.appId };
+    teamsOrigin = origin.origin;
+  }
+  const account = new AccountService(accountConfig, credentialBroker
     ? brokerAccountSessionStore(credentialBroker, diagnosticAccountScope)
     : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
   host.attachAccount(account, undefined, new ProviderVaultLinks(app.getPath('userData')));
-  const teamsService = new TeamsService(account, firebaseConfig);
+  const teamsService = new TeamsService(account, accountConfig, teamsOrigin);
+  const datasetOrigin = process.env.LINGXI_DATASET_PRODUCT_ORIGIN ?? teamsOrigin;
+  if (credentialBroker?.datasetTaskVault && datasetOrigin) {
+    datasetTasks = new DatasetTaskHost(join(userData, 'dataset-task-bindings'), datasetOrigin, account,
+      credentialBroker.datasetTaskVault(), (uid, request) => teamsService.datasets(uid, request));
+  }
   notificationAccountUid = account.snapshot().user?.uid ?? null;
   notificationAccountEpoch = account.sessionEpoch();
   const stopInboxAccount = account.onChanged(() => {
@@ -871,7 +895,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   // Friends listens in the Teams service's Firestore session, so it stops first.
   const stopFriendsIpc = installFriendsIpc(new FriendsService(account, teamsService), () => [...mainWindows]);
   const dataSources = new DesktopDataSources(account, teamsService, userData);
-  const stopTeamsIpc = installTeamsIpc(teamsService, () => [...mainWindows], dataSources);
+  const stopTeamsIpc = installTeamsIpc(teamsService, () => [...mainWindows], dataSources, datasetTasks, scheduled);
   stopTeams = () => {
     stopInboxInvalidation();
     stopInboxAccount();
@@ -1088,6 +1112,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     if (teamBotStore && process.platform === 'darwin') {
       try {
         teamConnector = new TeamConnector({
+          datasetTasks: () => datasetTasks,
           service: teamsService, store: teamBotStore, privateStore: new TeamPrivateStore(userData),
           binaries: () => resolveTeamBinaries({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }),
           defaultModel: () => settings.getPublic().model,
@@ -1139,7 +1164,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       onRemoteAccessEnded: quitIfNothingNeedsTheApp,
       accountToken: () => account.getIdToken(),
       accountId: () => account.snapshot().user?.uid ?? undefined,
-      dataRequest: (input, uid) => teamsService.data(input, uid),
+      dataRequest: (input, uid) => teamsService.datasets(uid, input),
       currentConversationMode: () => host?.currentConversationMode(),
       core: new LocalAppCoreClient(resolveServerBin({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath }), productPaths.brandHome, message => diagnostics.add('warn', 'host', message)),
       resolveAuthoringBinding: async (_appId, session, source) => {
@@ -1168,6 +1193,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       },
     });
     const agentBroker = new LocalAppAgentBroker({
+      datasetTasks: () => datasetTasks,
       root: agentRoot,
       workspaceRoot: join(productPaths.workspaceRoot, 'app-agents'),
       authorize: owner => localApps!.authorizeAgent(owner),

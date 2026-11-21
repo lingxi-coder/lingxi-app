@@ -7,7 +7,7 @@ import type { ChatEvent, ChatTurn, VaultProvider, VaultUpsert } from '../../../p
 import { protocolOfDesktopType, desktopTypeOfProtocol, isProviderId, isVaultBaseUrl } from '../../../packages/llm-vault/contracts';
 import baseUrls from '../../../packages/llm-vault/fixtures/base-urls.json' with { type: 'json' };
 import { AgentHost, useModelServices } from '../src/chat/agent/AgentPane';
-import { createLlmClient, LlmError, type LlmClient } from '../src/chat/agent/client';
+import { createLlmClient, LlmError, type DatasetTurnRequest, type LlmClient } from '../src/chat/agent/client';
 import { contextOf, memoryHistory, titleOf, type AgentMessage } from '../src/chat/agent/history';
 import { PRESETS } from '../src/chat/agent/ProviderSettings';
 import { createSseParser } from '../src/chat/agent/sse';
@@ -161,6 +161,52 @@ test('agent pane: a sent prompt becomes a chat, streams its answer and is kept i
   assert.equal(saved?.title, 'Say hello');
   assert.deepEqual(saved?.messages.map(message => [message.role, message.content]), [['user', 'Say hello'], ['assistant', 'Hello **there**']]);
   assert.ok(lists.some(list => Array.isArray(list) && list.some((chat: any) => chat.id === id)), 'the sidebar learns of the chat');
+});
+
+test('agent pane preserves a Dataset proposal across reload and applies it only after approval', async () => {
+  const { client, calls } = fakeClient([deepseek]);
+  const history = memoryHistory();
+  const requests: DatasetTurnRequest[] = [];
+  client.datasetTurn = async request => {
+    requests.push(request);
+    const { id } = request;
+    if (request.action === 'start' || request.action === 'get') {
+      return { id, state: 'approval', answer: '', approval: 'synthetic-approval',
+        calls: [{ id: 'synthetic-call', name: 'dataset_put', arguments: { qty: 9 } }] };
+    }
+    if (request.action === 'approve') {
+      assert.equal(request.approval, 'synthetic-approval');
+      return { id, state: 'ready', answer: '' };
+    }
+    assert.equal(request.action, 'advance');
+    return { id, state: 'done', answer: 'Inventory updated' };
+  };
+  const initial = mount(client, { kind: 'home' }, history);
+  await flush();
+  act(() => button(initial.root, 'Dataset').props.onClick());
+  type(initial.root, 'Set inventory to 9');
+  act(() => button(initial.root, 'Send').props.onClick());
+  await flush();
+  const target = initial.opened[0]![0];
+  assert.equal(target.kind, 'agent');
+  assert.deepEqual(requests.map(request => request.action), ['start']);
+  assert.equal(calls.turns.length, 0);
+  act(() => initial.root.unmount());
+
+  const reloaded = mount(client, target, history);
+  await flush();
+  act(() => button(reloaded.root, 'Resume').props.onClick());
+  await flush();
+  assert.match(textOf(reloaded.root.toJSON()), /Write record/u);
+  assert.match(textOf(reloaded.root.toJSON()), /"qty": 9/u);
+  assert.deepEqual(requests.map(request => request.action), ['start', 'get']);
+
+  act(() => button(reloaded.root, 'Approve').props.onClick());
+  await flush();
+  assert.deepEqual(requests.map(request => request.action), ['start', 'get', 'approve', 'advance']);
+  assert.ok(requests.every(request => request.id === requests[0]!.id));
+  assert.match(textOf(reloaded.root.toJSON()), /Inventory updated/u);
+  assert.equal((await history.get('alice', target.id))?.messages.at(-1)?.datasetTurn?.pending, false);
 });
 
 test('agent pane: Stop ends the answer and keeps what arrived', async () => {

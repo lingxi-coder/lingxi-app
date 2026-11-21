@@ -52,11 +52,16 @@ enum TeamsPointerParser {
         let kind: String
         let authorUid: String
         var sharedBotId: String?
+        var taskName: String?
         switch author["kind"] as? String {
         case "user"?:
             kind = "user"
             guard let uid = nonEmptyString(author["uid"]) else { throw invalid() }
             authorUid = uid
+        case "task"?:
+            guard nonEmptyString(author["taskId"]) != nil, nonEmptyString(author["logicalRun"]) != nil,
+                  let label = nonEmptyString(author["displayName"]) else { throw invalid() }
+            kind = "task"; authorUid = ""; taskName = label
         case "shared_bot"?:
             kind = "shared_bot"
             guard let key = nonEmptyString(author["sharedBotId"]) else { throw invalid() }
@@ -65,7 +70,7 @@ enum TeamsPointerParser {
         default:
             throw invalid()
         }
-        return TeamLastMessage(id: id, seq: seq, atMs: atMs, authorKind: kind, authorUid: authorUid, authorSharedBotId: sharedBotId, preview: preview, recalled: recalled)
+        return TeamLastMessage(id: id, seq: seq, atMs: atMs, authorKind: kind, authorUid: authorUid, authorSharedBotId: sharedBotId, preview: preview, recalled: recalled, authorTaskName: taskName)
     }
 
     /// A document of the `conversations` query (the directory) as the app model. `data` is the document's

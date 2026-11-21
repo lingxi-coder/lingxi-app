@@ -2,6 +2,20 @@ import XCTest
 @testable import LingxiCode
 
 final class TeamsTests: XCTestCase {
+    @MainActor
+    func testFirestoreMessageKeepsTheDatasetAttachment() throws {
+        let message = try TeamMessagingModel.decodeMessage(documentID: "share_orders", data: [
+            "seq": 1, "author": ["kind": "user", "uid": "owner"], "kind": "text",
+            "text": "Shared orders", "changeSeq": 1, "changeId": "share_orders",
+            "resourceRef": ["kind": "dataset", "dataset": "orders"],
+            "resourceGrant": "share-grant",
+            "serverOnly": Date(),
+        ])
+        XCTAssertEqual(message.id, "share_orders")
+        XCTAssertEqual(message.resourceRef, .dataset(dataset: "orders"))
+        XCTAssertEqual(message.resourceGrant, "share-grant")
+    }
+
     func testInvitationPreservesCaseAndRejectsAmbiguousLinks() {
         let code = "AbCdEfGhIjKlMnOpQrStUvWxYz_12345"
         for raw in [TeamInvitation.link(code), "lingxi://team/join?code=\(code)"] {

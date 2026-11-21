@@ -4,6 +4,7 @@
  *   | { type: 'error', code }
  * An upstream's own error text never passes through: errors are one of a few codes.
  */
+import { createToolRound, toolRequest } from './llm-tool-round.mjs';
 import { presetOf } from './llm-vault.mjs';
 
 export const ANTHROPIC_VERSION = '2023-06-01';
@@ -13,26 +14,30 @@ const trimBase = base => base.replace(/\/+$/u, '');
 const join = (base, path) => `${trimBase(base)}${path}`;
 
 /** The HTTP request for one streamed chat turn. `messages` alternate user/assistant and end with the user. */
-export function buildRequest(provider, apiKey, { model, system, messages, maxTokens = DEFAULT_MAX_TOKENS }) {
+export function buildRequest(provider, apiKey, { model, system, messages, maxTokens = DEFAULT_MAX_TOKENS, tools, rounds = [] }) {
   const json = { 'Content-Type': 'application/json', Accept: 'text/event-stream' };
   // Per-preset wire details: an Anthropic-style gateway that wants a Bearer key, and servers that send usage only on request.
   const preset = provider.presetId ? presetOf(provider.presetId) : undefined;
+  const tool = tools?.length ? toolRequest(provider.protocol, tools, rounds) : null;
+  const extensions = tool ? { tools: tool.tools } : {};
+  const continuation = tool?.continuation ?? [];
   switch (provider.protocol) {
     case 'open_ai_chat':
       return { url: join(provider.baseUrl, '/chat/completions'), headers: { ...json, Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({ model, stream: true, ...(preset?.streamUsage ? { stream_options: { include_usage: true } } : {}),
-          messages: [...(system ? [{ role: 'system', content: system }] : []), ...messages] }) };
+          ...extensions, messages: [...(system ? [{ role: 'system', content: system }] : []), ...messages, ...continuation] }) };
     case 'open_ai_responses':
       return { url: join(provider.baseUrl, '/responses'), headers: { ...json, Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({ model, stream: true, store: false, ...(system ? { instructions: system } : {}),
-          input: messages.map(({ role, content }) => ({ role, content })) }) };
+          ...extensions, ...(tool ? { include: ['reasoning.encrypted_content'] } : {}),
+          input: [...messages.map(({ role, content }) => ({ role, content })), ...continuation] }) };
     case 'anthropic_messages':
       return { url: join(provider.baseUrl, '/v1/messages'), headers: { ...json, ...(preset?.auth === 'bearer' ? { Authorization: `Bearer ${apiKey}` } : { 'x-api-key': apiKey }), 'anthropic-version': ANTHROPIC_VERSION },
-        body: JSON.stringify({ model, stream: true, max_tokens: maxTokens, ...(system ? { system } : {}), messages }) };
+        body: JSON.stringify({ model, stream: true, max_tokens: maxTokens, ...(system ? { system } : {}), ...extensions, messages: [...messages, ...continuation] }) };
     case 'gemini_generate_content':
       return { url: join(provider.baseUrl, `/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`), headers: { ...json, 'x-goog-api-key': apiKey },
         body: JSON.stringify({ ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
-          contents: messages.map(({ role, content }) => ({ role: role === 'assistant' ? 'model' : 'user', parts: [{ text: content }] })),
+          ...extensions, contents: [...messages.map(({ role, content }) => ({ role: role === 'assistant' ? 'model' : 'user', parts: [{ text: content }] })), ...continuation],
           generationConfig: { maxOutputTokens: maxTokens } }) };
     default: throw Object.assign(new Error('PROVIDER_NOT_WEB_USABLE'), { code: 'PROVIDER_NOT_WEB_USABLE' });
   }
@@ -110,14 +115,28 @@ const upstreamError = value => {
  * `error`. Anthropic and Responses streams always send their own end event, so a body that ends without one was cut off
  * and is INTERRUPTED; Gemini and OpenAI-compatible streams may end with the body (some servers omit `[DONE]`).
  */
-export async function* normalize(protocol, sse) {
+export async function* normalize(protocol, sse, { tools, geminiCompatibility } = {}) {
   let reason;
-  const done = () => (reason === undefined ? { type: 'done' } : { type: 'done', reason });
+  const round = tools?.length ? createToolRound(protocol, new Set(tools.map(tool => tool.name)), { geminiCompatibility }) : null;
+  const done = () => {
+    try {
+      return round?.result() ?? (reason === undefined ? { type: 'done' } : { type: 'done', reason });
+    } catch {
+      return { type: 'error', code: 'INVALID_TOOL_ROUND' };
+    }
+  };
   for await (const { event, data } of sse) {
+    if (protocol === 'open_ai_chat' && data.trim() === '[DONE]') { yield done(); return; }
+    const value = parsed(data);
+    if (!value) continue;
+    const type = value.type ?? event;
+    try {
+      if (round && !round.accept(value, type)) continue;
+    } catch {
+      yield { type: 'error', code: 'INVALID_TOOL_ROUND' };
+      return;
+    }
     if (protocol === 'open_ai_chat') {
-      if (data.trim() === '[DONE]') { yield done(); return; }
-      const value = parsed(data);
-      if (!value) continue;
       if (value.error) { yield { type: 'error', code: upstreamError(value.error) }; return; }
       const choice = value.choices?.[0], delta = choice?.delta ?? {};
       const thinking = delta.reasoning_content ?? delta.reasoning;
@@ -126,21 +145,16 @@ export async function* normalize(protocol, sse) {
       if (value.usage) yield { type: 'usage', input: value.usage.prompt_tokens, output: value.usage.completion_tokens };
       if (choice?.finish_reason) reason = choice.finish_reason;
     } else if (protocol === 'open_ai_responses') {
-      const value = parsed(data);
-      if (!value) continue;
-      const type = value.type ?? event;
       if (type === 'response.output_text.delta' && value.delta) yield { type: 'delta', text: value.delta };
       else if ((type === 'response.reasoning_summary_text.delta' || type === 'response.reasoning_text.delta') && value.delta) yield { type: 'reasoning', text: value.delta };
       else if (type === 'response.completed' || type === 'response.incomplete') {
         const usage = value.response?.usage;
         if (usage) yield { type: 'usage', input: usage.input_tokens, output: usage.output_tokens };
-        yield { type: 'done', reason: type === 'response.incomplete' ? value.response?.incomplete_details?.reason ?? 'incomplete' : 'stop' };
+        reason = type === 'response.incomplete' ? value.response?.incomplete_details?.reason ?? 'incomplete' : 'stop';
+        yield done();
         return;
       } else if (type === 'response.failed' || type === 'error') { yield { type: 'error', code: upstreamError(value.response?.error ?? value.error ?? value) }; return; }
     } else if (protocol === 'anthropic_messages') {
-      const value = parsed(data);
-      if (!value) continue;
-      const type = value.type ?? event;
       if (type === 'content_block_delta') {
         if (value.delta?.type === 'text_delta' && value.delta.text) yield { type: 'delta', text: value.delta.text };
         else if (value.delta?.type === 'thinking_delta' && value.delta.thinking) yield { type: 'reasoning', text: value.delta.thinking };
@@ -151,8 +165,6 @@ export async function* normalize(protocol, sse) {
       } else if (type === 'message_stop') { yield done(); return; }
       else if (type === 'error') { yield { type: 'error', code: upstreamError(value.error) }; return; }
     } else if (protocol === 'gemini_generate_content') {
-      const value = parsed(data);
-      if (!value) continue;
       if (value.error) { yield { type: 'error', code: upstreamError(value.error) }; return; }
       const candidate = value.candidates?.[0];
       for (const part of candidate?.content?.parts ?? []) {

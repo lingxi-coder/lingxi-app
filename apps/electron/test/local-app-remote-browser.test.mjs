@@ -5,9 +5,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL, fileURLToPath } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { build } from 'esbuild';
 import test from 'node:test';
 import { LocalAppRemoteGateway } from '../src/main/local-apps/remoteGateway.ts';
 import { REMOTE_LOCAL_APP_SDK } from '../src/preload/localAppSdk.ts';
@@ -226,45 +225,17 @@ test('real browser: HTTPS proxy accepts secure host-only cookies and isolates re
 });
 
 
-async function connectProductData(file) {
-  const { createProductDataBrowserFixture } = await import('../../firebase/test/lingxi-data-browser-fixture.mjs');
-  return createProductDataBrowserFixture(JSON.parse(await readFile(file, 'utf8')));
-}
-
-async function verifyConversationDataView(page, product, reference) {
-  const bundle = await build({
-    stdin: { contents: [
-      "import { createRoot } from 'react-dom/client';",
-      "import { ConversationData } from './ConversationData.tsx';",
-      "const scope = JSON.parse(document.querySelector('#test-data').textContent);",
-      "createRoot(document.querySelector('main')).render(<ConversationData api={{ data: window.requestProductData }} scope={scope} locale='en'/>);",
-    ].join('\n'), resolveDir: fileURLToPath(new URL('../../../packages/teams/', import.meta.url)), loader: 'tsx' },
-    nodePaths: [fileURLToPath(new URL('../node_modules/', import.meta.url))],
-    jsx: 'automatic', bundle: true, write: false, platform: 'browser',
-  });
-  page.setDefaultTimeout(8000);
-  await page.exposeFunction('requestProductData', product.request);
-  await page.evaluate(scope => {
-    const config = document.createElement('script');
-    config.type = 'application/json';
-    config.id = 'test-data';
-    config.textContent = JSON.stringify(scope);
-    document.body.append(config);
-  }, product.binding.scope);
-  await page.addScriptTag({ content: bundle.outputFiles[0].text });
-  await page.getByRole('button', { name: 'Conversation data', exact: true }).click();
-  await page.getByRole('button', { name: reference.dataset, exact: true }).click();
-  await page.getByRole('button', { name: 'Open record', exact: true }).click();
-  await page.getByRole('textbox', { name: 'title', exact: true }).fill('Packed and reviewed');
-  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
-  await page.getByRole('dialog', { name: 'Data record', exact: true }).waitFor({ state: 'hidden' });
-  const updated = await product.request({ scope: product.binding.scope, command: {
-    action: 'get', reference: { ...reference, revision: reference.revision + 1 },
-  } });
-  assert.equal(updated.record.value.title, 'Packed and reviewed');
-  await page.getByRole('button', { name: 'Show history', exact: true }).click();
-  await page.getByText(reference.record + ' · Revision ' + reference.revision, { exact: false }).waitFor();
-  await page.close();
+async function connectDatasetFixture(file) {
+  const fixture = JSON.parse(await readFile(file, 'utf8'));
+  const token = (await readFile(fixture.tokenFile, 'utf8')).trim();
+  const endpoint = new URL(fixture.endpoint);
+  assert.equal(endpoint.protocol, 'https:');
+  return { ...fixture, async request(body) {
+    const response = await fetch(endpoint, { method: 'POST', redirect: 'error',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }, body: JSON.stringify(body) });
+    assert.equal(response.status, 200, 'Dataset staging command failed');
+    return response.json();
+  } };
 }
 
 test('real browser: HTTPS Agent Chat recovery and revocation use source Host and durable Broker', { skip: !playwrightModule && 'Set LINGXI_TEST_PLAYWRIGHT_MODULE to an installed Playwright entry point', timeout: 60_000 }, async () => {
@@ -283,18 +254,20 @@ test('real browser: HTTPS Agent Chat recovery and revocation use source Host and
       manifest: { schema: 2, targets: [], name: 'Remote Agent contract', entry: { type: 'static', path: 'index.html' }, capabilities: ['agent'], dataBindings: { orders: 'edit' }, agent: { tools: [], skills: [] } },
       agent: { enabled: true, model, tools: [], skills: [], background: false, maxTurns: 5, timeoutMs: 60_000 },
     };
-    if (process.env.LINGXI_DATA_FIXTURE) {
-      product = await connectProductData(process.env.LINGXI_DATA_FIXTURE);
+    if (process.env.LINGXI_DATASET_FIXTURE) {
+      product = await connectDatasetFixture(process.env.LINGXI_DATASET_FIXTURE);
       browserOwner = { ...owner, accountUid: product.uid };
     }
     let currentUid = browserOwner.accountUid;
-    const binding = product?.binding ?? { dataset: 'orders', scope: { kind: 'personal' } };
+    const binding = product?.binding ?? { reference: { kind: 'dataset', dataset: 'orders' } };
     const dataOperations = [];
     host = new LocalAppHost({ accountId: () => currentUid, dataRequest: async (request, uid) => {
       assert.equal(uid, browserOwner.accountUid);
-      assert.equal(request.command.dataset, binding.dataset);
+      assert.equal(request.dataset, binding.reference.dataset);
       dataOperations.push(request);
-      return product ? product.request(request) : { revision: 2 };
+      if (product) return product.request(request);
+      if (request.command.action === 'describe') return { access: 'edit' };
+      return { reference: { kind: 'record', dataset: request.dataset, record: request.command.record, revision: 2, schemaVersion: 1 } };
     }, core: { onDisconnected() {}, async dispose() {} }, configHome: directory, appProjectsRoot: join(directory, '.apps'), currentConversationMode: () => 'code', preload: '/unused', mainWindow: () => undefined, edit: async () => {}, agentCatalog: async () => ({ models: [model], tools: [], skills: [] }) });
     host.store = {
       root, get: async () => structuredClone(row), getRevision: async () => structuredClone(row), list: async () => [structuredClone(row)],
@@ -374,22 +347,22 @@ test('real browser: HTTPS Agent Chat recovery and revocation use source Host and
     assert.notEqual(new URL(origin).hostname, appId);
     const dataAccess = { action: 'set-data-binding', id: appId, revision: 1, alias: 'orders' };
     await host.request({ ...dataAccess, binding }, undefined, { kind: 'native', mode: 'chat' });
-    const expected = product ? 2 : 1;
+    const expected = product?.expectedRevision ?? 1;
     const record = product?.record ?? 'first';
-    const form = { action: 'put', dataset: 'ignored', record, schemaVersion: 1, expectedRevision: expected,
+    const form = { action: 'put', record, schemaVersion: 1, expectedRevision: expected, partition: product?.partition ?? 'west',
       value: { title: 'Packed in browser' } };
-    const saved = await page.evaluate(input => window.localApp.data.request('orders', input, 'browser-write'), form);
-    assert.equal(saved.revision, expected + 1);
+    const operation = randomUUID();
+    const saved = await page.evaluate(({ input, operation }) => window.localApp.data.request('orders', { ...input, dataset: 'ignored' }, operation),
+      { input: form, operation });
+    assert.equal(saved.reference.revision, expected + 1);
     assert.deepEqual(dataOperations.at(-1), {
-      scope: binding.scope, operation: 'browser-write', command: { ...form, dataset: binding.dataset },
+      protocol: 2, dataset: binding.reference.dataset, ...(binding.via ? { via: binding.via } : {}), operation, command: form,
     });
     if (product) {
-      const visible = await product.request({ scope: binding.scope, command: { action: 'get', reference: saved } });
-      assert.equal(visible.record.value.title, 'Packed in browser');
-      assert.equal(visible.record.actor.id, browserOwner.accountUid);
-      const dataView = await context.newPage();
-      await dataView.goto(origin);
-      await verifyConversationDataView(dataView, product, saved);
+      const visible = await product.request({ protocol: 2, dataset: binding.reference.dataset, ...(binding.via ? { via: binding.via } : {}),
+        command: { action: 'read', reference: saved.reference } });
+      assert.equal(visible.value.title, 'Packed in browser');
+      assert.equal(visible.actor.id, browserOwner.accountUid);
     }
     currentUid = 'other-account';
     assert.equal(await page.evaluate(() => window.localApp.data.request('orders', { action: 'describe' }).then(() => false, () => true)), true);
@@ -493,7 +466,7 @@ test('real browser: HTTPS Agent Chat recovery and revocation use source Host and
     await browser?.close();
     if (host) await host.dispose(); else { await gateway?.dispose(); await broker?.dispose(); }
     if (proxy) { proxy.closeAllConnections(); await new Promise(resolve => proxy.close(resolve)); }
-    await product?.close();
+
     await rm(directory, { recursive: true, force: true });
   }
 });

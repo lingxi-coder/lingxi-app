@@ -9,6 +9,7 @@ import { MemberHome } from './MemberHome';
 import { conversationShareLink } from './share.js';
 import { ShareLinkButton } from './ShareLinkButton';
 import { botAvailabilityText } from './BotMemberDetails';
+import { BotDatasetTaskSettings } from './BotDatasetTaskSettings.js';
 import { snippet } from './compose.js';
 import { Composer, composerLock } from './Composer';
 import { messageErrorText } from './errors.js';
@@ -16,6 +17,8 @@ import { ApprovalCard } from './ApprovalCard';
 import { ConversationData } from './ConversationData.js';
 import { PrivatePreviewRequest } from './PrivatePreviewRequest.js';
 import { DataRecordButton } from './DataRecordButton.js';
+import { DatasetConversationPicker, SharedDatasetCard } from './DatasetConversation.js';
+import { DatasetPageCard, DatasetPagePublisher } from './DatasetPage.js';
 import { ReportCard } from './ReportViews.js';
 import { parseReportLink } from './reports.js';
 import { MessageFiles } from './MessageFiles';
@@ -166,13 +169,18 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
 
   const lock = composerLock({ uid, conversation, bots: snapshot.bots, botsLoaded: snapshot.botsLoaded, botsUnverified: snapshot.botsUnverified }, locale);
   const participant = !conversation.participants.length || conversation.participants.includes(`user:${uid}`);
+  const conversationBot = conversation.kind === 'bot_dm' ?
+    conversation.participants.find(id => id.startsWith('shared_bot:'))?.slice(11) : undefined;
+  const maintainedBot = conversationBot && snapshot.bots.find(bot => bot.sharedBotId === conversationBot &&
+    bot.maintainer.uid === uid && bot.maintainer.generation === team.generation && bot.state === 'published');
   const nameOf = (id: string) => snapshot.directory.find(member => member.uid === id)?.displayName || (id === uid ? t('teams_you') : t('teams_member'));
   const isViewer = (who: { uid: string; generation: number }) => who.uid === uid && who.generation === team.generation;
   const authorOf = (message: TeamMessage): Identity => {
     if (message.author.kind === 'user') return { kind: 'user', id: message.author.uid, name: nameOf(message.author.uid) };
     const author = message.author;
+    if (author.kind === 'task') return { kind: 'task', id: author.taskId, name: author.displayName };
     const card = snapshot.bots.find(bot => bot.sharedBotId === author.sharedBotId);
-    return { kind: 'bot', id: card?.sharedBotId ?? message.author.sharedBotId, name: card?.name || message.author.displayName || t('teams_bot_tag') };
+    return { kind: 'bot', id: card?.sharedBotId ?? author.sharedBotId, name: card?.name || author.displayName || t('teams_bot_tag') };
   };
   const botIdentity = (sharedBotId: string): Identity => ({ kind: 'bot', id: sharedBotId, name: snapshot.bots.find(bot => bot.sharedBotId === sharedBotId)?.name || t('teams_bot_tag') });
   const isMine = (message: TeamMessage) => message.author.kind === 'user' && message.author.uid === uid;
@@ -317,6 +325,14 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
           disabled={snapshot.messageBusy || snapshot.offline} onClick={() => void workspace.markRead()}><Icon name="check" /><span>{t('tw_mark_as_read')}</span></button> : null}
         {link ? <ShareLinkButton link={link} title={label} locale={locale} note={conversation.kind === 'bot_dm' ? t('teams_share_bot_note') : undefined} /> : null}
         {friend?.actions}
+        {participant && !lock && !snapshot.offline && <DatasetConversationPicker
+          api={workspace.api} destination={{ team: team.id, conversation: conversation.id }} generation={team.generation}
+          sharedBot={conversationBot}
+          locale={locale} participantName={uid => snapshot.directory.find(member => member.uid === uid)?.displayName
+            || (uid === snapshot.uid ? t('teams_you') : uid)} />}
+        {participant && !snapshot.offline && maintainedBot && <BotDatasetTaskSettings
+          key={conversation.id + ':' + maintainedBot.revision} api={workspace.api} locale={locale} name={maintainedBot.name}
+          scope={{ team: team.id, conversation: conversation.id, bot: maintainedBot.sharedBotId }} />}
         {!friend && <ConversationData api={workspace.api} scope={{ kind: 'team', ...scope, conversationId: conversation.id }} locale={locale}
           shareReport={participant && !lock && !snapshot.offline && conversation.kind !== 'bot_dm'
             ? link => workspace.run(() => model.queue('create', link)) : undefined}
@@ -369,6 +385,16 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
               {mine && peerRead!==null && peerRead>=message.seq && message===tail?<small>{locale.startsWith('zh')?'已读':'Read'}</small>:null}
               {message.readFiles?.length && !message.recalled ? <p className="tw-msg-sources" title={message.readFiles.map(file => file.name).join('\n')}>
                 <Icon name="clip" size={12} /> {t('tw_conv_read_files_fmt', message.readFiles.map(file => file.name).join(t('tw_list_separator')))}</p> : null}
+              {message.resourceRef && message.resourceRef.kind !== 'pageVersion' && message.resourceGrant && !message.recalled
+                ? <SharedDatasetCard api={workspace.api} reference={message.resourceRef} via={message.resourceGrant} locale={locale} /> : null}
+              {message.resourceRef?.kind === 'pageVersion' && !message.recalled &&
+                <DatasetPageCard api={workspace.api} reference={message.resourceRef} locale={locale} />}
+              {(mine || (message.author.kind === 'task' && message.resourceRef?.kind === 'reportRelease')) &&
+                participant && !lock && !snapshot.offline && conversation.kind !== 'bot_dm' &&
+                message.resourceRef && message.resourceRef.kind !== 'pageVersion' &&
+                message.resourceGrant && !message.recalled &&
+                <DatasetPagePublisher api={workspace.api} destination={{ team: team.id, conversation: conversation.id }}
+                  generation={team.generation} dataset={message.resourceRef.dataset} via={message.resourceGrant} locale={locale} />}
               {message.dataRef && !message.recalled ? <DataRecordButton
                 api={workspace.api} scope={{ kind: 'team', teamId: team.id, conversationId: conversation.id, generation: team.generation }}
                 reference={message.dataRef} locale={locale} allowEdit /> : null}

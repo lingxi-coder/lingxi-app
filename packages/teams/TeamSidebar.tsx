@@ -71,9 +71,11 @@ export function TeamSidebar({ workspace, snapshot, renderAvatar, onOpenSettings,
   const groups = useMemo(() => groupConversations(snapshot.conversations, snapshot.uid), [snapshot.conversations, snapshot.uid]);
   const selectedId = snapshot.selectedConversationId, uid = snapshot.uid;
   const nowMs = now === undefined ? Date.now() : typeof now === 'number' ? now : now.getTime();
-  const authorName = (author: import('./messages').MessageAuthor) => author.kind === 'shared_bot'
-    ? snapshot.bots.find(bot => bot.sharedBotId === author.sharedBotId)?.name || t('teams_bot_tag')
-    : snapshot.directory.find(member => member.uid === author.uid)?.displayName || (author.uid === uid ? t('teams_you') : t('teams_member'));
+  function authorName(author: import('./messages').MessageAuthor): string {
+    if (author.kind === 'task') return author.displayName;
+    if (author.kind === 'shared_bot') return snapshot.bots.find(bot => bot.sharedBotId === author.sharedBotId)?.name || t('teams_bot_tag');
+    return snapshot.directory.find(member => member.uid === author.uid)?.displayName || (author.uid === uid ? t('teams_you') : t('teams_member'));
+  }
   const needle = (query ?? '').trim().toLocaleLowerCase(), searching = needle !== '';
   const matches = (conversation: TeamConversation): boolean => {
     const label = conversationLabel(conversation, snapshot.directory, uid, { bots: snapshot.bots, locale });

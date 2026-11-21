@@ -52,3 +52,10 @@ test('missing, duplicate, reordered, future and mismatched request records are r
   assert.throws(() => buildChatInputBatch({ ...input, currentMessageId: 'message_9999' }));
   assert.throws(() => buildChatInputBatch({ ...input, lastChangeSeq: 12 }));
 });
+test('a scheduled report retains its typed source and attribution until recalled', () => {
+  const input = batch(0, 1, true);
+  const report = { ...input.messages[0], author: { kind: 'task', taskId: 'report', logicalRun: 'r1', displayName: 'Monthly report' },
+    resourceRef: { kind: 'reportRelease', dataset: 'orders', release: 'b'.repeat(64) } };
+  assert.deepEqual(buildChatInputBatch({ ...input, messages: [report] }).messages, [report]);
+  assert.throws(() => buildChatInputBatch({ ...input, messages: [{ ...report, recalled: true, text: '' }] }));
+});

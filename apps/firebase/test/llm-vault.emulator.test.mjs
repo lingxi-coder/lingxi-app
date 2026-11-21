@@ -99,7 +99,7 @@ test('vault store: delete, export and every write are audited', options, async (
   await vault.remove('alice', { action: 'delete', id: 'deepseek' }, 'web');
   await assert.rejects(vault.remove('alice', { action: 'delete', id: 'openai', expectedRevision: 7 }, 'web'), { code: 'REVISION_CONFLICT' });
   assert.deepEqual((await vault.list('alice')).map(entry => entry.id), ['openai']);
-  const audit = (await db.collection('llmVault/alice/audit').get()).docs.map(entry => entry.data());
+  const audit = (await db.collection('llmVault/alice/vaultAudit').get()).docs.map(entry => entry.data());
   const rows = audit.map(({ action, providerId, client }) => `${action}:${providerId}:${client}`).sort();
   assert.deepEqual(rows, ['create:deepseek:web', 'create:openai:web', 'delete:deepseek:web', 'export:deepseek:desktop', 'export:openai:desktop', 'export:openai:ios']);
   assert.doesNotMatch(JSON.stringify(audit), /sk-test/u);

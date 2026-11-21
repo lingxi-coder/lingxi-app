@@ -1,5 +1,5 @@
 import type { LocalAppAgentCatalog, LocalAppAgentSettings } from './localAppAgent.js';
-import type { DataScope } from '../../../../packages/teams/lingxi-data.js';
+import type { ResourceRef } from '../../../../packages/teams/dataset-resource.js';
 import type { AskUserQuestionRequestDto } from '@lingxi/bridge-client';
 /** Shared schema-2 application contract; platform execution remains host-owned. */
 export const CH_LOCAL_APPS = 'lingxi:local-apps';
@@ -25,8 +25,8 @@ export interface LocalAppProcess extends LocalAppStep {
 export type LocalAppMcpServer = ({ type: 'stdio' } & LocalAppStep) | { type: 'http'; process: string; path: string };
 export interface LocalAppMcpStatus { server: string; state: 'connecting' | 'connected' | 'reconnecting'; tools: number }
 export interface LocalAppDataBinding {
-  dataset: string;
-  scope: DataScope;
+  reference: Exclude<ResourceRef, { kind: 'pageVersion' }>;
+  via?: string;
 }
 export interface DesktopAppManifest {
   schema: 2;

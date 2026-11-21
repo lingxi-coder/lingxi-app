@@ -1,3 +1,4 @@
+import { isResourceRef } from './dataset-resource.js';
 import { parseDataRef } from './lingxi-data.js';
 import type { DocumentData, Firestore, FirestoreError } from 'firebase/firestore';
 import { ATTACHMENT_TYPES, type MessageAttachment } from './attachments.js';
@@ -19,6 +20,7 @@ function pointerAuthor(value: unknown): Pointer['author'] {
   const by = record(value);
   if (by.kind === 'user') return { kind: 'user', uid: text(by.uid) };
   if (by.kind === 'shared_bot') return { kind: 'shared_bot', sharedBotId: text(by.sharedBotId), displayName: text(by.displayName) };
+  if (by.kind === 'task') return { kind: 'task', taskId: text(by.taskId), logicalRun: text(by.logicalRun), displayName: text(by.displayName) };
   throw invalidData();
 }
 
@@ -75,6 +77,7 @@ export function firestoreFriendName(value: DocumentData | undefined): { displayN
 
 export function firestoreMessage(id: string, value: DocumentData): TeamMessage {
   const dataRef = value.recalled ? undefined : parseDataRef(value.dataRef);
+  const resourceRef = !value.recalled && isResourceRef(value.resourceRef) ? value.resourceRef : undefined;
   return { id, seq: value.seq, author: pointerAuthor(value.author), kind: value.kind, text: value.text, changeSeq: value.changeSeq, changeId: value.changeId,
     createdAt: timestamp(value.createdAt), editedAt: timestamp(value.editedAt), ...(value.replyTo ? { replyTo: value.replyTo } : {}),
     ...(value.recalled ? { recalled: true } : {}), ...(value.mentions ? { mentions: value.mentions } : {}),
@@ -84,6 +87,7 @@ export function firestoreMessage(id: string, value: DocumentData): TeamMessage {
     ...(value.decision === 'approve' || value.decision === 'deny' ? { decision: value.decision } : {}),
     ...(attachmentsOf(value.attachments).length ? { attachments: attachmentsOf(value.attachments) } : {}),
     ...(dataRef ? { dataRef } : {}),
+    ...(resourceRef ? { resourceRef, resourceGrant: nonEmpty(value.resourceGrant) } : {}),
     ...(readFilesOf(value.readFiles).length ? { readFiles: readFilesOf(value.readFiles) } : {}) };
 }
 function readFilesOf(value: unknown): { attachmentId: string; name: string }[] {

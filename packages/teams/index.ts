@@ -1,3 +1,4 @@
+import type { DatasetBindingDraft, DatasetBotScope } from './dataset-run.js';
 import type { DataRequest, LocalDataSourceAnswer, LocalDataSourceCommand } from './lingxi-data.js';
 import type { MessageApi, MessageCommand, MessageScope, TeamMessage } from './messages';
 import type { LocalPublishableBot, SelectedSharedFile, PublishLocalBotInput, PublishedKnowledge, SharedHostStatus, OfferSharedBotInput, AcceptSharedBotInput } from './execution';
@@ -20,6 +21,10 @@ export type TeamCommand =
   | { action: 'handOver'; teamId: string; uid: string; generation: number };
 export interface TeamResult { teamId?: string; code?: string; generation?: number; alreadyMember?: boolean; ok?: boolean }
 export interface TeamsApi extends MessageApi {
+  datasets?<T>(request: Record<string, unknown>): Promise<T>;
+  approveDatasetTask?(draft: DatasetBindingDraft): Promise<{ permit: string; planDigest: string }>;
+  revokeBotDatasetTask?(scope: DatasetBotScope): Promise<void>;
+
   data?<T>(request: DataRequest): Promise<T>;
   openBotMarket?(): Promise<void>;
   localBots?(): Promise<LocalPublishableBot[]>;
@@ -47,6 +52,11 @@ export interface TeamsApi extends MessageApi {
   onChanged(callback: (event: { invalidated?: boolean }) => void): () => void;
 }
 export interface DesktopTeamsApi {
+  datasets<T>(uid: string, request: Record<string, unknown>): Promise<T>;
+  approveDatasetTask(uid: string, draft: DatasetBindingDraft): Promise<{ permit: string; planDigest: string }>;
+  revokeScheduledDatasetTask(uid: string, task: string): Promise<void>;
+  revokeBotDatasetTask(uid: string, scope: DatasetBotScope): Promise<void>;
+
   localDataSource(uid: string, request: LocalDataSourceCommand): Promise<LocalDataSourceAnswer>;
   data<T>(uid: string, request: DataRequest): Promise<T>;
   openBotMarket(uid: string): Promise<void>;

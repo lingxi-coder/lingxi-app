@@ -1,3 +1,4 @@
+import { datasetExecutorFixture, hasDatasetFixture } from './fixtures/dataset-task-staging.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, promises as fs } from 'node:fs';
@@ -1912,4 +1913,18 @@ test('Chat deletion removes only its drained workspace and rejects a substituted
   await assert.rejects(broker.deleteChat(principal, second.chatId), { code: 'chat_storage_uncertain' });
   assert.equal(await fs.readFile(join(target, 'business.txt'), 'utf8'), 'preserve');
   assert.equal((await fs.lstat(secondWorkspace)).isSymbolicLink(), true);
+});
+
+test('Dataset v2 normal Local App AG-UI task publishes its approved output', { skip: !hasDatasetFixture, timeout: 60_000 }, async t => {
+  const staging = await datasetExecutorFixture(t, 'localAppAgent');
+  const { broker } = await fixture(t, { datasetTasks: () => staging.hooks,
+    execute: async () => ({ result: { text: 'AG-UI result', output: { ok: true }, attachments: [], messageId: 'assistant' }, usage: { turns: 1 } }) });
+  const input = runInput('orders-agent-run');
+  const settled = deferred<void>();
+  t.after(broker.onSettled(() => settled.resolve()));
+  await broker.run(principal, input);
+  await settled.promise;
+  const result = await broker.get(principal, input.runId);
+  assert.equal(result.state, 'succeeded', JSON.stringify(result));
+  await staging.assertOutput('AG-UI result');
 });

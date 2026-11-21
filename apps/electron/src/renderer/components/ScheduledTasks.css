@@ -93,6 +93,50 @@
   border-radius: 10px;
   color: var(--scheduled-muted);
 }
+.scheduled-dataset-dialog {
+  box-sizing: border-box;
+  width: min(38rem, calc(100% - 2rem));
+  padding: 20px;
+  border: 1px solid var(--scheduled-border);
+  border-radius: 14px;
+  background: var(--scheduled-bg);
+  color: var(--scheduled-text);
+}
+.scheduled-dataset-dialog::backdrop {
+  background: rgb(0 0 0 / 40%);
+}
+.scheduled-dataset-dialog fieldset,
+.scheduled-dataset-dialog label {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+}
+.scheduled-dataset-dialog fieldset {
+  gap: 16px;
+  min-width: 0;
+}
+.scheduled-dataset-dialog :is(input, textarea) {
+  min-width: 0;
+  padding: 8px;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--scheduled-border);
+  border-radius: 8px;
+}
+.scheduled-dataset-dialog textarea {
+  resize: vertical;
+}
+.scheduled-dataset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.scheduled-dataset-actions .scheduled-create-button {
+  margin: 0;
+}
 .scheduled-search input {
   width: 100%;
   min-width: 0;

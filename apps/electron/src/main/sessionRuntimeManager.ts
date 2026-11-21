@@ -36,6 +36,7 @@ import { VisualizationRouter } from './visualization.js';
 import { PrivatePageRouter } from './privatePage.js';
 import {
   CH_VISUALIZATION_MOUNT,
+  CH_VISUALIZATION_SOURCE,
   CH_VISUALIZATION_UNMOUNT,
   CH_VISUALIZATION_WRITE_STATE,
   parseVisualizationReference,
@@ -932,6 +933,14 @@ export class SessionRuntimeManager {
         expanded === true,
       );
     });
+    ipcMain.handle(CH_VISUALIZATION_SOURCE, (event: IpcMainInvokeEvent, sessionId: unknown, reference: unknown, kind: unknown) => {
+      this.assertSender(event);
+      const current = this.requireById(sessionId);
+      const parsed = parseVisualizationReference(reference);
+      if (kind === 'page') return current.pageSource(parsed.id, parsed.revision);
+      if (kind === 'visualization') return current.visualizationSource(parsed);
+      throw new Error('Invalid page type');
+    });
     ipcMain.handle(CH_VISUALIZATION_WRITE_STATE, (event: IpcMainInvokeEvent, sessionId: unknown, token: unknown, generation: unknown, baseVersion: unknown, modelContent: unknown, privateContent: unknown) => {
       this.assertSender(event);
       const runtime = this.requireById(sessionId);
@@ -1180,7 +1189,7 @@ export class SessionRuntimeManager {
       CH_SEND_PROMPT, CH_APPROVE, CH_DENY, CH_APPROVE_COMPUTER_ACCESS, CH_DENY_COMPUTER_ACCESS,
       CH_ANSWER_ASK_USER_QUESTION, CH_CANCEL_ASK_USER_QUESTION, CH_CANCEL, CH_COMMAND, CH_CONNECTION_STATE,
       CH_MOD_UI_CONTROL, CH_MOD_UI_OPERATION,
-      CH_VISUALIZATION_MOUNT, CH_VISUALIZATION_WRITE_STATE, CH_VISUALIZATION_UNMOUNT,
+      CH_VISUALIZATION_MOUNT, CH_VISUALIZATION_SOURCE, CH_VISUALIZATION_WRITE_STATE, CH_VISUALIZATION_UNMOUNT,
     ]) ipcMain.removeHandler(channel);
     this.registered = false;
   }

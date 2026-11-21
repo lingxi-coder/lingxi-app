@@ -1,8 +1,20 @@
-import { ipcMain, type BrowserWindow } from 'electron';
-import type { TeamsService } from './service.js';
+import type { DatasetBindingDraft, DatasetBotScope } from '../../../../../packages/teams/dataset-run.js';
+import { app, dialog, ipcMain, type BrowserWindow } from 'electron';
 import type { DesktopDataSources } from './dataSources.js';
+import { scheduledDatasetProgram, taskRecipeDigest, teamBotDatasetKey, type DatasetTaskHost } from './datasetTasks.js';
+import type { TeamsService } from './service.js';
+import type { ScheduledTaskService } from '../scheduled.js';
 
-export function installTeamsIpc(service: TeamsService, windows: () => readonly BrowserWindow[], sources?: DesktopDataSources): () => void {
+function botScope(input: Partial<DatasetBotScope>): DatasetBotScope {
+  if (typeof input.team !== 'string' || typeof input.bot !== 'string' || typeof input.conversation !== 'string' ||
+      ![input.team, input.bot, input.conversation].every(value => /^[A-Za-z0-9_-]{8,64}$/u.test(value))) {
+    throw new Error('INVALID_INPUT');
+  }
+  return { team: input.team, bot: input.bot, conversation: input.conversation };
+}
+
+export function installTeamsIpc(service: TeamsService, windows: () => readonly BrowserWindow[], sources?: DesktopDataSources, taskHost?: DatasetTaskHost,
+  schedules?: ScheduledTaskService): () => void {
   const channel = 'lingxi:teams';
   const senders = new Map<number, () => void>();
   ipcMain.handle(channel, async (event, input: unknown) => {
@@ -73,6 +85,64 @@ export function installTeamsIpc(service: TeamsService, windows: () => readonly B
           value = await service.historyPage(command.uid,command.scope as Parameters<TeamsService['historyPage']>[1],
             command.conversationId as string, command.beforeSeq as number);
           break;
+        case 'datasets': {
+          if (!command.request || typeof command.request !== 'object' || Array.isArray(command.request)) throw new Error('INVALID_INPUT');
+          const request = command.request as Record<string, unknown>;
+          const action = (request.command as { action?: string } | undefined)?.action;
+          if (action === 'approveTask' || action === 'revokeTask') throw new Error('NATIVE_APPROVAL_REQUIRED');
+          value = await service.datasets(command.uid, request);
+          break;
+        }
+        case 'approveDatasetTask': {
+          if (!taskHost || !command.draft || typeof command.draft !== 'object') throw new Error('DATA_UNAVAILABLE');
+          const d = command.draft as DatasetBindingDraft;
+          if (!['nativeSchedule', 'teamBot', 'localAppAgent'].includes(d.executor) ||
+              typeof d.dataset !== 'string' || typeof d.operation !== 'string' || !d.plan ||
+              typeof d.plan !== 'object' || Array.isArray(d.plan) ||
+              JSON.stringify(d).length > 96000) throw new Error('INVALID_INPUT');
+          let program;
+          if (d.executor === 'nativeSchedule') {
+            if (!schedules || typeof d.scope !== 'string' || typeof d.task !== 'string') throw new Error('INVALID_INPUT');
+            const path = schedules.resolveScope(d.scope);
+            const job = (await schedules.manage(d.scope, { action: 'list' })).find(job => job.id === d.task);
+            if (!job || job.permanent || job.durable === false) throw new Error('TASK_UNAVAILABLE');
+            program = scheduledDatasetProgram(job, path);
+          } else if (d.executor === 'teamBot') {
+            const scope = botScope(d);
+            program = await service.datasetBotProgram(command.uid, scope);
+          } else {
+            if (typeof d.task !== 'string' || !d.recipe) throw new Error('INVALID_INPUT');
+            program = { executor: d.executor, task: d.task, recipe: d.recipe };
+          }
+          const zh = app.getLocale().toLowerCase().startsWith('zh');
+          const detail = JSON.stringify({ dataset: d.dataset, task: program.task, executor: d.executor,
+            ...(d.executor === 'teamBot' ? { bot: d.bot, conversation: d.conversation } : {}),
+            recipeSha256: taskRecipeDigest(program), plan: d.plan }, null, 2);
+          const result = await dialog.showMessageBox(window, { type: 'question', title: zh ? '数据任务授权' : 'Dataset task approval',
+            message: zh ? '允许此任务按以下方案读取、写入或发布数据？' : 'Allow this task to use Data under this plan?',
+            detail, buttons: zh ? ['取消', '批准方案'] : ['Cancel', 'Approve plan'], defaultId: 0, cancelId: 0, noLink: true });
+          if (result.response !== 1) throw new Error('APPROVAL_CANCELLED');
+          value = await taskHost.approve(program, d.dataset, d.plan, d.operation, command.uid);
+          break;
+        }
+        case 'revokeScheduledDatasetTask':
+        case 'revokeBotDatasetTask': {
+          if (!taskHost) throw new Error('DATA_UNAVAILABLE');
+          let program: { executor: 'nativeSchedule' | 'teamBot'; task: string };
+          if (command.type === 'revokeBotDatasetTask') {
+            if (!command.scope || typeof command.scope !== 'object') throw new Error('INVALID_INPUT');
+            program = { executor: 'teamBot', task: teamBotDatasetKey(botScope(command.scope as Partial<DatasetBotScope>)) };
+          } else {
+            if (typeof command.task !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/u.test(command.task)) throw new Error('INVALID_INPUT');
+            program = { executor: 'nativeSchedule', task: command.task };
+          }
+          const zh = app.getLocale().toLowerCase().startsWith('zh');
+          const result = await dialog.showMessageBox(window, { type: 'question', message: zh ? '撤销此任务的数据许可？' : 'Revoke this task’s Dataset approval?',
+            buttons: zh ? ['取消', '撤销许可'] : ['Cancel', 'Revoke approval'], defaultId: 0, cancelId: 0, noLink: true });
+          if (result.response !== 1) throw new Error('APPROVAL_CANCELLED');
+          await taskHost.revoke(program, command.uid);
+          break;
+        }
         case 'data':
           if (!command.request || typeof command.request !== 'object') throw new Error('INVALID_INPUT');
           value = await service.data(command.request as Parameters<TeamsService['data']>[0], command.uid);

@@ -1,3 +1,4 @@
+import { datasetExecutorFixture, hasDatasetFixture } from './fixtures/dataset-task-staging.js';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -5,6 +6,7 @@ import { basename, dirname, join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import type { CronAutomationDto, CronJobDto, CronRequestDto } from '@lingxi/bridge-client';
 import { DUE_SOON_MS, ScheduledTaskService, type RoutineBot, type RoutineBots, type RoutineCatalog, type ScheduledTaskServiceOptions } from '../src/main/scheduled';
+import { DatasetTaskHost, scheduledDatasetProgram, taskRecipeDigest } from '../src/main/teams/datasetTasks.js';
 import type { SessionRuntime } from '../src/main/bridge.js';
 import type { SessionRuntimeManager } from '../src/main/sessionRuntimeManager.js';
 import type { SettingsStore } from '../src/main/settings';
@@ -21,6 +23,49 @@ function task(patch: Partial<CronAutomationDto> = {}): CronJobDto {
   return { id: 'task-1', cron: '0 9 * * *', prompt: '# Morning brief\n\nSummarize the project.', recurring: true, durable: true, permanent: false, created_at: 1,
     automation: { version: 2, status: 'active', model: 'openai/test-model', reasoning: { type: 'level', id: 'high' }, runMode: 'new_session', notificationPolicy: 'all', ...patch } };
 }
+
+test('Dataset approval survives a host restart, stays tied to the saved recipe and is withdrawn for only its account', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'lingxi-scheduled-dataset-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const secrets = new Map<string, string>();
+  const receipts: { action: string; dataset: string }[] = [];
+  let uid = 'owner';
+  const account = { snapshot: () => ({ user: { uid } }), getIdToken: async () => 'unused', onChanged: () => () => {} };
+  const vault = { read: async (key: string) => secrets.get(key), write: async (key: string, value: string) => { secrets.set(key, value); },
+    remove: async (key: string) => { secrets.delete(key); } };
+  const program = scheduledDatasetProgram(task(), '/project');
+  function host(): DatasetTaskHost {
+    return new DatasetTaskHost(directory, 'https://data.example', account, vault, async <T>(user: string, body: Record<string, unknown>) => {
+      assert.equal(user, 'owner');
+      const command = body.command as { action: string; plan?: { recipeSha256: string }; permit?: string };
+      receipts.push({ action: command.action, dataset: String(body.dataset) });
+      if (command.action === 'approveTask') {
+        assert.equal(command.plan?.recipeSha256, taskRecipeDigest(program));
+        return { permit: 'permit', credential: 'private-token', planDigest: 'plan-digest' } as T;
+      }
+      assert.equal(command.permit, 'permit');
+      return {} as T;
+    }, async (url, options) => {
+      assert.equal(String(url), 'https://data.example/v2/dataset-runs');
+      assert.equal(new Headers(options?.headers).get('Authorization'), 'DatasetTask private-token');
+      assert.equal(JSON.parse(String(options?.body)).command.recipeSha256, taskRecipeDigest(program));
+      return Response.json({ status: 'ready', inputs: [], automaticSteps: [], outputBindings: [], finished: true });
+    });
+  }
+  assert.deepEqual(await host().approve(program, 'orders', {}, 'approval', uid), { permit: 'permit', planDigest: 'plan-digest' });
+  assert.equal((await host().open(program, 'today'))?.finished, true);
+  await assert.rejects(host().open(scheduledDatasetProgram({ ...task(), cron: '0 10 * * *' }, '/project'), 'today'), /program changed/);
+  uid = 'another-user';
+  assert.equal(await host().open(program, 'today'), undefined);
+  await assert.rejects(host().revoke(program, 'owner'), /STALE_ACCOUNT/);
+  uid = 'owner';
+  await host().revoke(program, 'owner');
+  await host().revoke(program, 'owner');
+  assert.equal(await host().open(program, 'today'), undefined);
+  assert.equal(secrets.size, 0);
+  assert.deepEqual(receipts, [{ action: 'approveTask', dataset: 'orders' }, { action: 'revokeTask', dataset: 'orders' }]);
+});
+
 function taskForClaim(saved: CronJobDto, occurrenceId: string, generation = 1): CronJobDto {
   const automation = saved.automation!;
   return {
@@ -1040,4 +1085,13 @@ test('a new-session run bound before cancellation leaves an openable durable sou
   const source = await (h.service as any).validateTarget(h.project, h.bindings[0].sessionId);
   assert.equal(source.mode, 'code');
   assert.equal(source.path, `/sessions/${h.bindings[0].sessionId}.jsonl`);
+});
+
+test('Dataset v2 normal scheduled occurrence writes its approved summary', { skip: !hasDatasetFixture }, async t => {
+  const staging = await datasetExecutorFixture(t, 'nativeSchedule');
+  const h = await harness(t);
+  const service = h.createService({ datasetTasks: () => staging.hooks });
+  t.after(() => service.dispose());
+  await runClaim(service, h.source, 'orders-occurrence', task({ notificationPolicy: 'none' }));
+  await staging.assertOutput('A completed summary');
 });

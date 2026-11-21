@@ -19,6 +19,7 @@ import type { VisualizationContextChip, VisualizationFollowup } from '../model/r
 import { useT } from '../theme/ThemeContext';
 import type { Tokens } from '../theme/tokens';
 import { Icon } from './Icon';
+import { PublishVisualization } from './PublishVisualization.js';
 import {
   MAX_ACTIVE_VISUALIZATIONS,
   MAX_GUEST_MESSAGE_CHARS,
@@ -353,6 +354,8 @@ export const VisualizationCard = memo(function VisualizationCard({ sessionId, re
         <header className="visualization-toolbar">
           <span className="visualization-glyph" aria-hidden="true"><Icon name="visualization" size={16} /></span>
           <span className="visualization-title" title={label}>{label}</span>
+          {phase === 'ready' && <PublishVisualization key={sessionId + ':' + reference.id + ':' + reference.revision}
+            sessionId={sessionId} reference={reference} />}
           <button ref={expandButton} type="button" className="visualization-action"
             onClick={() => setExpandedState(!expanded)}
             aria-label={expanded ? tr("desktop_ui_close_visualization") : tr("visualization_expand")}

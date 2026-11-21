@@ -17,7 +17,7 @@ final class TeamMessageRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchec
 @MainActor @Observable
 final class TeamMessagingModel {
     static let conversationFields: Set<String> = ["kind", "title", "participants", "lastSeq", "lastChangeSeq", "lastMessage", "sharedBotId", "autoReply"]
-    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "targets", "taskId", "taskIds", "artifactId", "waitId", "approval", "decision", "dataRef"]
+    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "targets", "taskId", "taskIds", "artifactId", "waitId", "approval", "decision", "dataRef", "resourceRef", "resourceGrant"]
     private(set) var cache: TeamMessageProjection?
     private(set) var offline = true
     private(set) var error = ""
@@ -84,7 +84,7 @@ final class TeamMessagingModel {
     /// Small copies of the pictures shown in the stream, by attachment id. In memory only, emptied when the team is closed or lost.
     @ObservationIgnored let pictures: NSCache<NSString, CGImage> = { let cache = NSCache<NSString, CGImage>(); cache.countLimit = 40; return cache }()
 
-    init(apiRoot: URL = URL(string: "https://lingxios.net/v1/teams/messages")!, auth: Auth = Auth.auth(), db: Firestore = Firestore.firestore()) {
+    init(apiRoot: URL = TeamsApiOrigin.endpoint("v1/teams/messages"), auth: Auth = Auth.auth(), db: Firestore = Firestore.firestore()) {
         self.apiRoot = apiRoot; self.auth = auth; self.db = db
     }
 
@@ -207,11 +207,12 @@ final class TeamMessagingModel {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
     }()
-    private func decode<T: Decodable>(_ data: [String: Any]) throws -> T {
-        var value = data
+    static func decodeMessage(documentID: String, data: [String: Any]) throws -> TeamMessage {
+        var value = data.filter { messageFields.contains($0.key) }
+        value["id"] = documentID
         for key in ["createdAt", "editedAt"] { if let time = value[key] as? Timestamp { value[key] = Self.isoFormatter.string(from: time.dateValue()) } }
         guard JSONSerialization.isValidJSONObject(value) else { throw TeamMessageFailure(code: "INVALID_MESSAGE_SNAPSHOT") }
-        return try JSONDecoder().decode(T.self, from: JSONSerialization.data(withJSONObject: value))
+        return try JSONDecoder().decode(TeamMessage.self, from: JSONSerialization.data(withJSONObject: value))
     }
     func stop() {
         active = false; lifecycle += 1; task?.cancel(); retry?.cancel(); deadline?.cancel(); deadline = nil; task = nil; retry = nil
@@ -307,11 +308,10 @@ final class TeamMessagingModel {
     }
 
     private func decodeMessage(_ document: DocumentSnapshot) throws -> TeamMessage {
-        guard var data = document.data()?.filter({ Self.messageFields.contains($0.key) }) else {
+        guard let data = document.data() else {
             throw TeamMessageFailure(code: "INVALID_MESSAGE_SNAPSHOT")
         }
-        data["id"] = document.documentID
-        return try decode(data)
+        return try Self.decodeMessage(documentID: document.documentID, data: data)
     }
 
     private func admitsThread(_ id: String, revision: Int) -> Bool {
@@ -810,19 +810,24 @@ final class TeamMessagingModel {
         return try await response(body, life: lifecycle, dataConversation: conversationId)
     }
 
-    private func response(_ body: [String: Any], life: Int, timeout: TimeInterval = 20, dataConversation: String? = nil) async throws -> Data {
+    func dataset(conversationId: String, body: [String: Any]) async throws -> Data {
+        try await response(body, life: lifecycle, dataConversation: conversationId, dataset: true)
+    }
+
+    private func response(_ body: [String: Any], life: Int, timeout: TimeInterval = 20, dataConversation: String? = nil, dataset: Bool = false) async throws -> Data {
         guard active, life == lifecycle, let user = auth.currentUser, user.uid == uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
         let token = try await user.getIDToken()
         guard active, life == lifecycle, auth.currentUser?.uid == uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
         var body = body
         if let dataConversation {
             guard dataConversation == selected else { throw TeamMessageFailure(code: "CONVERSATION_REQUIRED") }
-            body["scope"] = ["kind": "team", "teamId": teamId, "generation": generation, "conversationId": dataConversation]
+            if !dataset { body["scope"] = ["kind": "team", "teamId": teamId, "generation": generation, "conversationId": dataConversation] }
         } else {
             body["teamId"] = teamId; body["generation"] = generation
         }
         if body["schemaVersion"] != nil { try TeamExecutionContract.validate(body) }
-        var request = URLRequest(url: dataConversation == nil ? apiRoot : apiRoot.deletingLastPathComponent().appendingPathComponent("data"))
+        let endpoint = dataConversation == nil ? apiRoot : apiRoot.deletingLastPathComponent().appendingPathComponent(dataset ? "datasets" : "data")
+        var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"; request.timeoutInterval = timeout; request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)

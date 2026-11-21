@@ -121,6 +121,20 @@ test('shared Chat source: a Bot question and the human answer to it carry the wa
   assert.throws(() => chatSourceMessage(m.id, { ...m.value, waitId: 'short' }), /INVALID_DATA/u);
   assert.throws(() => chatSourceMessage(m.id, { ...m.value, sourceTaskId: 7 }), /INVALID_DATA/u); f.reader.close();
 });
+
+test('a task-authored data message keeps Core task IDs and a fixed record reference', () => {
+  const f = fixture(1);
+  const m = f.messages[0]!;
+  const author = { kind: 'task', taskId: 't', logicalRun: 'r', displayName: 'Report' };
+  const resourceRef = { kind: 'record', dataset: 'd', record: 'x', revision: 1, schemaVersion: 1 };
+  const value = { ...m.value, author, resourceRef };
+  const message = chatSourceMessage(m.id, value);
+  assert.deepEqual(message.author, author);
+  assert.deepEqual(message.resourceRef, resourceRef);
+  assert.throws(() => chatSourceMessage(m.id, { ...value, author: { ...author, logicalRun: 'r/bad' } }), /INVALID_DATA/u);
+  assert.throws(() => chatSourceMessage(m.id, { ...value, resourceRef: { ...resourceRef, revision: 0 } }), /INVALID_DATA/u);
+  f.reader.close();
+});
 test('shared Chat source: independent change watermark returns old edits and blank recalls without consuming future messages', async () => {
   const f = fixture(); f.edit(1, 'Corrected old detail'); f.edit(2, '', true); f.edit(600, 'Future for this task');
   const changed = await f.reader.read({ ...f.scope, mode: 'changes', afterChangeSeq: 650, throughMessageSeq: 300 });

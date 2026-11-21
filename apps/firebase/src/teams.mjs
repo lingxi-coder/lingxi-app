@@ -248,7 +248,7 @@ export class TeamsStore {
 }
 
 /** HTTP authorization is deliberately independent from owner-only Remote Control. */
-export function createTeamsHandler({ store, friends, inbox, data, verifyToken, createCustomToken, origins = [] }) {
+export function createTeamsHandler({ store, friends, inbox, data, datasets, datasetRuns, datasetPages, datasetRender, verifyToken, createCustomToken, origins = [] }) {
   return async request => {
     const headers = new Headers({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
       'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', Vary: 'Origin' });
@@ -263,6 +263,13 @@ export function createTeamsHandler({ store, friends, inbox, data, verifyToken, c
         return new Response(null, { status: 204, headers });
       }
       const path = new URL(request.url).pathname;
+      if (datasetRuns && path === '/v2/dataset-runs' && request.method === 'POST') {
+        const raw = await request.text();
+        if (Buffer.byteLength(raw) > 131072) fail(413, 'REQUEST_TOO_LARGE');
+        let body;
+        try { body = JSON.parse(raw); } catch { fail(400, 'INVALID_JSON'); }
+        return reply(await datasetRuns(store.db, request.headers.get('Authorization') ?? '', body));
+      }
       const bearer = /^Bearer (\S+)$/u.exec(request.headers.get('Authorization') ?? '');
       if (!bearer) fail(401, 'SIGN_IN_REQUIRED');
       let user;
@@ -284,10 +291,10 @@ export function createTeamsHandler({ store, friends, inbox, data, verifyToken, c
       if (friends && path === '/v1/friends/profile' && request.method === 'GET') return reply(await friends.profile(user));
       const detail = /^\/v1\/teams\/([A-Za-z0-9_-]{8,64})$/u.exec(path);
       if (detail && detail[1] !== 'session' && request.method === 'GET') return reply(await store.detail(user.uid, detail[1]));
-      if (request.method !== 'POST' || !['/v1/teams', '/v1/teams/session', '/v1/teams/messages', '/v1/services', ...(data ? ['/v1/teams/data'] : []), ...(friends ? ['/v1/friends'] : [])].includes(path)) fail(404, 'NOT_FOUND');
+      if (request.method !== 'POST' || !['/v1/teams', '/v1/teams/session', '/v1/teams/messages', '/v1/services', ...(data ? ['/v1/teams/data'] : []), ...(datasets ? ['/v1/teams/datasets'] : []), ...(datasetPages ? ['/v1/teams/dataset-pages'] : []), ...(friends ? ['/v1/friends'] : [])].includes(path)) fail(404, 'NOT_FOUND');
       const raw = await request.text();
       const size = Buffer.byteLength(raw);
-      const limit = { '/v1/teams/data': 3 * 1024 * 1024, '/v1/teams/messages': 1048576 }[path] ?? 16384;
+      const limit = { '/v1/teams/dataset-pages': 3 * 1024 * 1024, '/v1/teams/datasets': 3 * 1024 * 1024, '/v1/teams/data': 3 * 1024 * 1024, '/v1/teams/messages': 1048576 }[path] ?? 16384;
       if (size > limit) fail(413, 'REQUEST_TOO_LARGE');
       let body;
       try { body = JSON.parse(raw); } catch { fail(400, 'INVALID_JSON'); }
@@ -295,6 +302,16 @@ export function createTeamsHandler({ store, friends, inbox, data, verifyToken, c
         z.object({}).strict().parse(body);
         return reply({ uid: user.uid, customToken: await createCustomToken(user.uid) });
       }
+      if (path === '/v1/teams/datasets') {
+        if (body?.action === 'page' && datasetPages) return reply(await datasetPages(user, bearer[1], body.request));
+        if (body?.action === 'render' && datasetRender) {
+          if (size > 131072) fail(413, 'REQUEST_TOO_LARGE');
+          return reply(await datasetRender(user, bearer[1], body.request));
+        }
+        if (size > 131072 && body?.command?.action !== 'publishCapture') fail(413, 'REQUEST_TOO_LARGE');
+        return reply(await datasets(store.db, user, bearer[1], body));
+      }
+      if (path === '/v1/teams/dataset-pages') return reply(await datasetPages(user, bearer[1], body));
       if (path === '/v1/teams/data') {
         if (size > 131072 && body?.command?.action !== 'publishReport') fail(413, 'REQUEST_TOO_LARGE');
         return reply(await data(user.uid, bearer[1], body));

@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>LingxiDatasetBrowserOrigin</key>
+	<string>$(LINGXI_DATASET_BROWSER_ORIGIN)</string>
+	<key>LingxiTeamsApiOrigin</key>
+	<string>$(LINGXI_TEAMS_API_ORIGIN)</string>
 	<key>FirebaseCrashlyticsCollectionEnabled</key>
 	<string>$(CRASHLYTICS_COLLECTION_ENABLED)</string>
 	<key>FirebaseMessagingInstallationIdEnabled</key>
@@ -52,7 +56,7 @@
 			<string>com.lingxi.code</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>lingxi</string>
+				<string>$(LINGXI_DEEP_LINK_SCHEME)</string>
 			</array>
 		</dict>
 	</array>

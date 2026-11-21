@@ -29,13 +29,14 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
     var release by remember(appId) { mutableStateOf<AppRelease?>(null) }
     var error by remember(appId) { mutableStateOf<String?>(null) }
     var busy by remember(appId) { mutableStateOf(false) }
+    var datasetConnection by remember(appId) { mutableStateOf<AppRelease?>(null) }
     var needsConsent by remember(appId) { mutableStateOf(false) }
     var needsBrowserConsent by remember(appId) { mutableStateOf(false) }
     var pendingChoose by remember(appId) { mutableStateOf(false) }
     var pendingOpen by remember(appId) { mutableStateOf(false) }
     var opened by rememberSaveable(appId) { mutableStateOf(appReview != null) }
-    fun display(value: AppLaunch, chooseHandler: Boolean = false) {
-        LocalAppBrowser.open(context, value.url, chooseHandler)
+    fun display(url: String, chooseHandler: Boolean = false) {
+        LocalAppBrowser.open(context, url, chooseHandler)
         opened = true
     }
     suspend fun prepare(openBrowser: Boolean, chooseHandler: Boolean = false) {
@@ -51,7 +52,15 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
             }
             val value = apps.openExternalBrowser(appId)
             launch = value; apps.markOpened(appId)
-            if (openBrowser) display(value, chooseHandler)
+            if (openBrowser) {
+                val needsData = LocalAppDatasetAccess.origin != null && LocalAppDatasetAccess.declarations(current).isNotEmpty()
+                if (needsData && LocalAppDatasetAccess.saved(context, current).isEmpty()) {
+                    datasetConnection = current
+                    return
+                }
+                val target = if (needsData) apps.datasetBrowserLaunch(current) ?: value.url else value.url
+                display(target, chooseHandler)
+            }
         } catch (failure: Exception) { error = failure.message }
         finally { busy = false }
     }
@@ -80,12 +89,33 @@ fun UnifiedAppRuntimePage(apps: UnifiedLocalApps, appId: String, onClose: () -> 
         TextButton(enabled = !busy, onClick = { scope.launch { prepare(true, chooseHandler = true) } }) { Text(stringResource(R.string.remote_apps_choose)) }
         if (appReview != null) Text(stringResource(R.string.local_app_agent_browser_return), style = MaterialTheme.typography.bodySmall)
         Text(stringResource(R.string.local_app_host_recommendation), style = MaterialTheme.typography.bodySmall)
+        val current = release
+        if (current != null && LocalAppDatasetAccess.origin != null && LocalAppDatasetAccess.declarations(current).isNotEmpty()) {
+            TextButton(enabled = !busy, onClick = { datasetConnection = current }) { Text("数据集连接") }
+        }
         TextButton(enabled = !busy, onClick = { onShowDetails(appId) }) { Text("应用设置与 Agent 授权") }
-        TextButton(enabled = !busy, onClick = { scope.launch { try { apps.stop(appId); onClose() } catch (failure: Exception) { error = failure.message } } }) { Text("停止应用与 Agent 任务") }
+        TextButton(enabled = !busy, onClick = { scope.launch { try { apps.stop(appId); LocalAppDatasetAccess.revoke(context, appId); onClose() } catch (failure: Exception) { error = failure.message } } }) { Text("停止应用与 Agent 任务") }
         TextButton(onClick = onClose) { Text("关闭管理页面") }
         Text("关闭此管理页面不会停止浏览器中的应用。可通过此处或运行通知停止应用。", style = MaterialTheme.typography.bodySmall)
     }
     if (release?.capabilities?.contains("agent") == true) LocalAppAgentInteractions(apps, appId, appReview?.runId)
+    datasetConnection?.let { current ->
+        LocalAppDatasetConnectionDialog(current, LocalAppDatasetAccess.saved(context, current), saving = busy,
+            onSave = { owner, bindings, sync ->
+                scope.launch {
+                    if (busy) return@launch
+                    busy = true; error = null
+                    try { LocalAppDatasetAccess.save(context, current, owner, bindings, sync) }
+                    catch (failure: kotlinx.coroutines.CancellationException) { throw failure }
+                    catch (failure: Exception) { error = failure.message; datasetConnection = null; return@launch }
+                    finally { busy = false }
+                    datasetConnection = null
+                    prepare(true, pendingChoose)
+                }
+            },
+            onClose = { datasetConnection = null },
+        )
+    }
     val selected = release
     if (needsBrowserConsent && selected != null) AlertDialog(
         onDismissRequest = { needsBrowserConsent = false; onClose() },

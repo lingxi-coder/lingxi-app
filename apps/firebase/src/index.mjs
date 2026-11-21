@@ -1,3 +1,7 @@
+import { createDatasetRender } from './dataset-render.mjs';
+import { getStorage } from 'firebase-admin/storage';
+import { createDatasetPages } from './dataset-pages.mjs';
+import { createDatasetBrowserHttp } from './dataset-browser-bridge.mjs';
 import { readFileSync } from 'node:fs';
 import { initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
@@ -24,6 +28,10 @@ import { PAIR_CONVERSATION_ID, createTeamsHandler, TeamsStore } from './teams.mj
 import { FriendsStore, friendNotifier } from './friends.mjs';
 import { sweepUploads } from './team-attachments.mjs';
 import { OAuth2Client } from 'google-auth-library';
+import { deliverDatasetTaskOutput } from './dataset-task-delivery.mjs';
+import { createPrivateDatasetFetch } from './dataset-cloud-run.mjs';
+import { createDatasetAgentTurn, firestoreDatasetTurns } from './dataset-agent-turn.mjs';
+import { createDatasetGateway } from './dataset-product.mjs';
 import { createProductDataTransport } from './lingxi-data-product.mjs';
 import { createTeamMarketEligibilityHandler, TeamMarketEligibilityStore } from './team-market-eligibility.mjs';
 import { createLlmHandler } from './llm-api.mjs';
@@ -33,6 +41,14 @@ import { createChat } from './llm-chat.mjs';
 import { upstreamTransport } from './llm-egress.mjs';
 
 const app = initializeApp();
+const productionProject = 'lingxi-5e4b2';
+const firebaseProject = app.options.projectId ?? process.env.GCLOUD_PROJECT ?? productionProject;
+const datasetStaging = /^lingxi-dataset-v2-stg-[a-z0-9]+$/u.test(firebaseProject);
+const browserOrigins = [
+  ...(firebaseProject === productionProject ? ['https://lingxios.net'] : []),
+  `https://${firebaseProject}.web.app`, `https://${firebaseProject}.firebaseapp.com`,
+  'http://localhost:5173', 'http://127.0.0.1:5173',
+];
 const seed = JSON.parse(readFileSync(new URL('./seed.json', import.meta.url), 'utf8'));
 const handle = createHandler(new CatalogStore(getFirestore(app, 'model-catalog'), seed),
   (token) => getAuth(app).verifyIdToken(token, true),
@@ -54,8 +70,8 @@ export const marketGateway = onRequest({ region: 'us-central1', minInstances: 0,
 const pushStore = new PushStore(getFirestore(app, 'push-notifications'));
 const pushHandler = createPushHandler({ store: pushStore, messaging: getMessaging(app),
   verifyToken: (token) => getAuth(app).verifyIdToken(token, true),
-  origins: ['https://lingxios.net', 'https://lingxi-5e4b2.web.app'] });
-const pushServiceAccount = 'push-api@lingxi-5e4b2.iam.gserviceaccount.com';
+  origins: [...(firebaseProject === productionProject ? ['https://lingxios.net'] : []), `https://${firebaseProject}.web.app`] });
+const pushServiceAccount = `push-api@${firebaseProject}.iam.gserviceaccount.com`;
 
 export const pushApi = onRequest({ region: 'us-central1', minInstances: 0, maxInstances: 2, memory: '256MiB',
   timeoutSeconds: 60, invoker: 'public', serviceAccount: pushServiceAccount }, async (req, res) => {
@@ -77,20 +93,40 @@ export const prunePushRegistrations = onSchedule({ schedule: 'every 24 hours', t
   region: 'us-central1', memory: '256MiB', timeoutSeconds: 540, maxInstances: 1,
   serviceAccount: pushServiceAccount }, async () => { await pushStore.prune(); await friendsStore.prune(); await sweepUploads(teamsDb); });
 
+const datasetOrigin = process.env.LINGXI_DATASET_ORIGIN;
+const datasetGateway = createDatasetGateway(datasetOrigin,
+  datasetOrigin && process.env.LINGXI_DATASET_PRIVATE_RUN === '1' ? createPrivateDatasetFetch(datasetOrigin) : fetch);
+const datasetBrowserHandler = createDatasetBrowserHttp({
+  origin: process.env.LINGXI_DATASET_BROWSER_ORIGIN,
+  call: datasetGateway?.browser,
+  verifyToken: token => getAuth(app).verifyIdToken(token, true),
+});
+const datasetPages = process.env.LINGXI_DATASET_PAGES_BUCKET ? createDatasetPages({
+  db: teamsDb, bucket: getStorage(app).bucket(process.env.LINGXI_DATASET_PAGES_BUCKET), datasets: datasetGateway?.datasets,
+}) : undefined;
+const renderOrigin = process.env.LINGXI_DATASET_RENDER_ORIGIN;
+const useRenderSecret = datasetStaging || !!renderOrigin;
+const renderKey = defineSecret('LINGXI_DATASET_RENDER_KEY');
+let renderDataset;
 const teamsHandler = createTeamsHandler({ store: new TeamsStore(teamsDb), friends: friendsStore,
+  datasets: datasetGateway?.datasets, datasetRuns: datasetGateway?.run, datasetPages: datasetPages?.execute,
+  datasetRender: renderOrigin && datasetPages ? (...args) => (renderDataset ??= createDatasetRender({
+    origin: renderOrigin, secret: renderKey.value(), pages: datasetPages, db: teamsDb,
+  }))(...args) : undefined,
   data: createProductDataTransport(process.env.LINGXI_DATA_PRODUCT_ORIGIN),
   verifyToken: token => getAuth(app).verifyIdToken(token, true),
   createCustomToken: uid => getAuth(app).createCustomToken(uid),
-  origins: ['https://lingxios.net', 'https://lingxi-5e4b2.web.app', 'https://lingxi-5e4b2.firebaseapp.com',
-    'http://localhost:5173', 'http://127.0.0.1:5173'] });
+  origins: browserOrigins });
 // Reuses an existing service identity. Default-database IAM and token-signing
 // permission require a deployment preflight; no resource is provisioned here.
 export const teamsApi = onRequest({ region: 'us-central1', minInstances: 0, maxInstances: 2, memory: '256MiB',
-  timeoutSeconds: 60, invoker: 'public', serviceAccount: pushServiceAccount }, async (req, res) => {
+  timeoutSeconds: 60, invoker: 'public', serviceAccount: pushServiceAccount,
+  ...(useRenderSecret ? { secrets: [renderKey] } : {}) }, async (req, res) => {
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) if (value) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
-  const output = await teamsHandler(new Request(new URL(req.url, 'https://teams.internal'), { method: req.method, headers,
-    ...(!['GET', 'HEAD'].includes(req.method) ? { body: req.rawBody } : {}) }));
+  const request = new Request(new URL(req.url, 'https://teams.internal'), { method: req.method, headers,
+    ...(!['GET', 'HEAD'].includes(req.method) ? { body: req.rawBody } : {}) });
+  const output = await datasetBrowserHandler?.(request) ?? await teamsHandler(request);
   output.headers.forEach((value, key) => res.set(key, value));
   res.status(output.status).send(Buffer.from(await output.arrayBuffer()));
 });
@@ -174,6 +210,10 @@ const refOf = (kind, { sourceId, teamId, conversationId }) => ({
   sourceId: sourceId ?? teamId,
   conversationId
 });
+export const onDatasetTaskDelivery = onDocumentCreated(
+  { ...triggerOpts, document: 'datasetV2Deliveries/{deliveryId}', retry: true },
+  event => deliverDatasetTaskOutput(teamsDb, event.params.deliveryId));
+
 export const onTeamMessage = onDocumentCreated(
   { ...triggerOpts, maxInstances: 2, document: 'teams/{teamId}/conversations/{conversationId}/messages/{messageId}' },
   async e=>{
@@ -291,13 +331,17 @@ const vaultKey = defineSecret('provider-vault-key');
 let vaultKeyring;
 const vault = new VaultStore(teamsDb, () => (vaultKeyring ??= parseKeyring(vaultKey.value())));
 const llmChat = createChat({ vault, transport: upstreamTransport() });
+const datasetTurn = datasetGateway && process.env.LINGXI_DATASET_WEB_AGENT === '1' ? createDatasetAgentTurn({
+  turns: firestoreDatasetTurns(teamsDb),
+  model: llmChat.start,
+  data: (uid, token, body) => datasetGateway.datasets(teamsDb, { uid }, token, body),
+}) : undefined;
 const llmHandler = createLlmHandler({
-  vault, chat: llmChat.chat, test: llmChat.test,
+  vault, chat: llmChat.chat, test: llmChat.test, datasetTurn,
   verifyToken: token => getAuth(app).verifyIdToken(token, true),
-  origins: ['https://lingxios.net', 'https://lingxi-5e4b2.web.app', 'https://lingxi-5e4b2.firebaseapp.com',
-    'http://localhost:5173', 'http://127.0.0.1:5173'],
+  origins: browserOrigins,
   observe: entry => info('llm.request', entry),
 });
 export const llmApi = onRequest({ region: 'us-central1', minInstances: 0, maxInstances: 4, memory: '256MiB', timeoutSeconds: 300,
-  invoker: 'public', serviceAccount: 'llm-proxy@lingxi-5e4b2.iam.gserviceaccount.com', secrets: [vaultKey] },
+  invoker: 'public', serviceAccount: `llm-proxy@${firebaseProject}.iam.gserviceaccount.com`, secrets: [vaultKey] },
 (req, res) => serveStreaming(llmHandler, req, res, 'https://llm.internal'));

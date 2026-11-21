@@ -1,9 +1,11 @@
+import { isResourceRef, type ResourceRef } from './dataset-resource.js';
 import { parseDataRef, type DataRef } from './lingxi-data.js';
 import type { Firestore, DocumentData, Query, QuerySnapshot } from 'firebase/firestore';
 import { ATTACHMENT_FILE_BYTES, ATTACHMENT_MESSAGE_FILES, ATTACHMENT_TYPES, type MessageAttachment } from './attachments.js';
 
 export type ChatSourceAuthor = { kind: 'user'; uid: string; displayName: string }
-  | { kind: 'shared_bot'; sharedBotId: string; displayName: string };
+  | { kind: 'shared_bot'; sharedBotId: string; displayName: string }
+  | { kind: 'task'; taskId: string; logicalRun: string; displayName: string };
 export interface ChatSourceMessage {
   messageId: string; seq: number; changeSeq: number; changeId: string; author: ChatSourceAuthor;
   createdAt: number; editedAt?: number; text: string; replyTo?: string; recalled?: boolean;
@@ -11,6 +13,7 @@ export interface ChatSourceMessage {
   /** The files the message carries, as it names them. Their bytes are read through the service, one file at a time. */
   attachments?: MessageAttachment[];
   dataRef?: DataRef;
+  resourceRef?: ResourceRef;
 }
 export type ChatReadRequest = { teamId: string; generation: number; conversationId: string } & (
   | { mode: 'recent'; throughSeq: number }
@@ -20,7 +23,12 @@ export type ChatReadRequest = { teamId: string; generation: number; conversation
   | { mode: 'changes'; afterChangeSeq: number; throughMessageSeq: number }
 );
 export interface ChatReadResult { messages: ChatSourceMessage[]; lastSeq: number; lastChangeSeq: number; hasMore: boolean }
-const id = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{8,64}$/u.test(value);
+function dataId(value: unknown): value is string {
+  return typeof value === 'string' && value.length >= 1 && value.length <= 64 && !/[^A-Za-z0-9_-]/u.test(value);
+}
+function id(value: unknown): value is string {
+  return dataId(value) && value.length >= 8;
+}
 const counter = (value: unknown, min = 0): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= min;
 const fail = (code: string): never => { throw new Error(code); };
 function millis(value: unknown): number {
@@ -52,14 +60,19 @@ export function chatSourceMessage(messageId: string, data: DocumentData): ChatSo
   let author: ChatSourceAuthor;
   if (by.kind === 'user' && 'uid' in by && typeof by.uid === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(by.uid)) author = { kind: 'user', uid: by.uid, displayName: label.slice(0, 80) };
   else if (by.kind === 'shared_bot' && 'sharedBotId' in by && id(by.sharedBotId)) author = { kind: 'shared_bot', sharedBotId: by.sharedBotId, displayName: label.slice(0, 80) };
+  else if (by.kind === 'task' && 'taskId' in by && dataId(by.taskId) && 'logicalRun' in by && dataId(by.logicalRun)) {
+    author = { kind: 'task', taskId: by.taskId, logicalRun: by.logicalRun, displayName: label.slice(0, 80) };
+  }
   else return fail('INVALID_DATA');
   const dataRef = data.recalled ? undefined : parseDataRef(data.dataRef);
   if (data.recalled !== true && data.dataRef != null && !dataRef) return fail('INVALID_DATA');
+  const resourceRef = data.recalled ? undefined : data.resourceRef;
+  if (resourceRef != null && (!isResourceRef(resourceRef) || dataRef)) return fail('INVALID_DATA');
   return { messageId, seq: data.seq, changeSeq: data.changeSeq, changeId: data.changeId, text: data.text, author,
     createdAt: millis(data.createdAt), ...(data.editedAt !== undefined ? { editedAt: millis(data.editedAt) } : {}),
     ...(data.replyTo !== undefined ? { replyTo: data.replyTo } : {}), ...(data.recalled !== undefined ? { recalled: data.recalled } : {}),
     // A recalled message gave its files up with its text.
-    ...(dataRef ? { dataRef } : {}),
+    ...(dataRef ? { dataRef } : {}), ...(resourceRef ? { resourceRef } : {}),
     ...(data.attachments !== undefined && data.recalled !== true ? { attachments: attachments(data.attachments) } : {}),
     // A Bot's message names its task as `taskId`; the human answer to a Bot's question stores it as `sourceTaskId`.
     ...(data.taskId !== undefined ? { sourceTaskId: id(data.taskId) ? data.taskId : fail('INVALID_DATA') }

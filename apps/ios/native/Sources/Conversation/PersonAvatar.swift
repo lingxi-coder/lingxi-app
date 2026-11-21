@@ -68,8 +68,8 @@ struct TeamAvatar: View {
     }
 }
 
-/// A person or a Bot from a `TeamIdentity`. A Bot is drawn from its `botId`; when only its key is known the id
-/// is the text after the key's last colon (`AvatarIdentity.teamBotAvatarId`). A person is a circle, a Bot a rounded square (U2).
+/// A person, Bot, or Task from a `TeamIdentity`. When only the Bot key is known, its id is the text
+/// after the last colon (`AvatarIdentity.teamBotAvatarId`).
 struct IdentityAvatar: View {
     let identity: TeamIdentity
     var size: CGFloat = 40
@@ -78,6 +78,7 @@ struct IdentityAvatar: View {
         switch identity.kind {
         case .user: PersonAvatar(id: identity.id, name: identity.name, size: size)
         case .bot: AgentAvatar(agentID: AvatarIdentity.teamBotAvatarId(identity.id), size: size)
+        case .task: TeamAvatar(teamID: identity.id, name: identity.name, size: size)
         }
     }
 }
@@ -118,7 +119,7 @@ struct AvatarStack: View {
         switch identity.kind {
         case .user:
             Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 1.5)
-        case .bot:
+        case .bot, .task:
             RoundedRectangle(cornerRadius: AvatarScale.cornerRadius(side: side), style: .continuous)
                 .stroke(Color(uiColor: .systemBackground), lineWidth: 1.5)
         }

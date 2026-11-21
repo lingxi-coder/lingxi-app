@@ -12,7 +12,7 @@ import java.security.MessageDigest
  * The conversation's newest message as the backend writes it onto the conversation document
  * (`TeamsPointerParser`, SPEC-mobile-team-bot-ui section 8.4). [atMs] is null while the server has not stamped it yet.
  */
-internal data class TeamLastMessage(val id: String, val seq: Long, val atMs: Long?, val authorKind: String, val authorUid: String, val authorSharedBotId: String?, val preview: String, val recalled: Boolean = false)
+internal data class TeamLastMessage(val id: String, val seq: Long, val atMs: Long?, val authorKind: String, val authorUid: String, val authorSharedBotId: String?, val preview: String, val recalled: Boolean = false, val authorTaskName: String? = null)
 
 /** The Bots of a Chat that judge for themselves whether to answer its messages. */
 internal data class TeamConversationAutoReply(val revision: Long, val targets: List<String>)
@@ -86,7 +86,7 @@ internal data class TeamMessage(val id: String, val seq: Long, val authorUid: St
     val attachments: List<TeamMessageAttachment> = emptyList(),
     /** On a Bot's reply: the files of this conversation its model was given. */
     val readFiles: List<TeamReadFile> = emptyList(),
-    val dataRef: TeamDataRef? = null) {
+    val dataRef: TeamDataRef? = null, val resourceRef: DatasetResourceRef? = null, val resourceGrant: String? = null) {
     /** The files to show: none on a recalled message. */
     val files: List<TeamMessageAttachment> get() = if (recalled) emptyList() else attachments
     /** The request to show under this message, if it is one a Bot made. */
@@ -94,14 +94,17 @@ internal data class TeamMessage(val id: String, val seq: Long, val authorUid: St
     val createdAtMs: Long? get() = createdAt?.let { runCatching { java.time.Instant.parse(it).toEpochMilli() }.getOrNull() }
     companion object { fun parse(v: JSONObject): TeamMessage {
         val author = v.getJSONObject("author"); val authorKind = author.getString("kind")
-        if (authorKind !in setOf("user", "shared_bot")) throw TeamMessageFailure("INVALID_DATA")
+        if (authorKind == "task" && listOf("taskId", "logicalRun", "displayName").any { author.optString(it).isBlank() }) throw TeamMessageFailure("INVALID_DATA")
+        if (authorKind !in setOf("user", "shared_bot", "task")) throw TeamMessageFailure("INVALID_DATA")
         return TeamMessage(v.getString("id"), v.getLong("seq"), if (authorKind == "user") author.getString("uid") else "", authorKind,
             v.getString("text"), v.getLong("changeSeq"), v.getString("changeId"), v.optBoolean("recalled"), v.stringOrNull("replyTo"),
             v.stringOrNull("editedAt"), v.getString("kind"), if (authorKind == "shared_bot") author.getString("sharedBotId") else null,
             v.stringOrNull("taskId"), v.stringOrNull("artifactId"), v.optJSONArray("targets")?.strings() ?: emptyList(), v.stringOrNull("createdAt"), v.optJSONArray("taskIds")?.strings() ?: emptyList(), author.stringOrNull("displayName"), v.stringOrNull("waitId"),
             TeamListApproval.parse(v.opt("approval")), when (v.opt("decision")) { "approve" -> true; "deny" -> false; else -> null },
             if (v.has("attachments") && !v.isNull("attachments")) TeamMessageAttachment.list(v.optJSONArray("attachments") ?: throw TeamMessageFailure("INVALID_DATA")) else emptyList(),
-            TeamReadFile.list(v.optJSONArray("readFiles")), TeamDataRef.parse(v.optJSONObject("dataRef")))
+            TeamReadFile.list(v.optJSONArray("readFiles")), TeamDataRef.parse(v.optJSONObject("dataRef")),
+            if (v.isNull("resourceRef")) null else DatasetResourceRef.parse(v.getJSONObject("resourceRef")) ?: throw TeamMessageFailure("INVALID_DATA"),
+            v.stringOrNull("resourceGrant"))
     } }
 }
 internal data class TeamMessageThread(val messages: List<TeamMessage> = emptyList(), val hasEarlier: Boolean = false, val hasLater: Boolean = false)

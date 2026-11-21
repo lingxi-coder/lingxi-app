@@ -4217,6 +4217,10 @@ export class SessionRuntime {
     return this.requireClient().visualizationServe(path);
   }
 
+  visualizationSource(reference: VisualizationReference): Promise<{ title: string; html: string } | null> {
+    return this.requireClient().visualizationSource(this.sessionId, reference);
+  }
+
   visualizationWriteState(
     token: string,
     generation: number,
@@ -4239,6 +4243,10 @@ export class SessionRuntime {
   /** Serve one private page through this session's bridge. */
   pageServe(id: string, revision: number) {
     return this.requireClient().privatePageServe(id, revision);
+  }
+
+  pageSource(id: string, revision: number): Promise<{ title: string; html: string } | null> {
+    return this.requireClient().privatePageSource(id, revision);
   }
 
   private requireClient(allowDisposing = false): BridgeClient {

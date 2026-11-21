@@ -1,6 +1,8 @@
 import { createPortal } from 'react-dom';
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type CSSProperties, type FormEvent } from 'react';
+import { DESKTOP_BRIDGE_GLOBAL } from '../../shared/desktopBridge';
 import type { UseBridge } from '../bridge/bridgeTypes.js';
+import { useAccountState } from '../bridge/useAccountState';
 import {
   scheduledTaskFromJob,
   scheduledTaskInput,
@@ -348,9 +350,93 @@ function ScheduledOverview({ item, bridge, busy, showHistory, onClose, onEdit }:
           <h3>{tr('session_details_model')}</h3>
           <p>{bridge.desktop.modelDetails.find(model => model.reference === job.automation?.model)?.display_name ?? job.automation.model}</p>
         </div>}
+        {!job.permanent && job.durable !== false && <ScheduledDatasetBinding key={taskKey(item)} item={item} />}
       </aside>
     </div>
   </>;
+}
+
+function ScheduledDatasetBinding({ item }: { item: ScopedJob }) {
+  const { state } = useAccountState();
+  const teams = typeof window === 'undefined' ? undefined : window[DESKTOP_BRIDGE_GLOBAL]?.teams;
+  const uid = state?.user?.uid;
+  const dialog = useRef<HTMLDialogElement>(null);
+  const heading = useId();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [status, setStatus] = useState<{ uid: string; text: string; error?: boolean }>();
+  const operation = useRef<{ input: string; id: string }>();
+  if (!uid || !teams) return null;
+
+  async function save(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (busy || !uid || !teams) return;
+    const fields = new FormData(event.currentTarget);
+    const dataset = String(fields.get('dataset') ?? '').trim();
+    const source = String(fields.get('plan') ?? '');
+    let plan: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(source);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new TypeError();
+      plan = parsed as Record<string, unknown>;
+    } catch {
+      setError(tr('desktop_dataset_task_invalid_plan'));
+      return;
+    }
+    setError('');
+    setStatus(undefined);
+    setBusy(true);
+    const input = JSON.stringify([uid, dataset, source]);
+    if (operation.current?.input !== input) operation.current = { input, id: crypto.randomUUID() };
+    try {
+      await teams.approveDatasetTask(uid, { executor: 'nativeSchedule', scope: item.scopeId, task: item.job.id,
+        dataset, operation: operation.current.id, plan });
+      setStatus({ uid, text: tr('desktop_dataset_task_approved') });
+      dialog.current?.close();
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revoke(): Promise<void> {
+    if (busy || !uid || !teams) return;
+    setStatus(undefined);
+    setBusy(true);
+    try {
+      await teams.revokeScheduledDatasetTask(uid, item.job.id);
+      operation.current = undefined;
+      setStatus({ uid, text: tr('desktop_dataset_task_revoked') });
+    } catch (failure) {
+      setStatus({ uid, text: failure instanceof Error ? failure.message : String(failure), error: true });
+    } finally { setBusy(false); }
+  }
+
+  return <div className="scheduled-inspector-section">
+    <button type="button" className="scheduled-create-button" disabled={busy} onClick={() => { setError(''); dialog.current?.showModal(); }}>
+      {tr('desktop_dataset_task_bind')}
+    </button>
+    <button type="button" className="scheduled-create-button" disabled={busy} onClick={() => void revoke()}>
+      {tr('desktop_dataset_task_revoke')}
+    </button>
+    {status?.uid === uid && <p role={status.error ? 'alert' : 'status'}>{status.text}</p>}
+    <dialog className="scheduled-dataset-dialog" ref={dialog} aria-labelledby={heading}
+      onCancel={event => { if (busy) event.preventDefault(); }}>
+      <h2 id={heading}>{tr('desktop_dataset_task_bind')}</h2>
+      <form onSubmit={event => void save(event)}>
+        <fieldset disabled={busy}>
+          <label>{tr('desktop_dataset_task_id')} <input name="dataset" required maxLength={64} /></label>
+          <label>{tr('desktop_dataset_task_plan')} <textarea name="plan" required rows={12} maxLength={88_000} spellCheck={false} /></label>
+          <div className="scheduled-dataset-actions">
+            <button type="button" className="scheduled-create-button" onClick={() => dialog.current?.close()}>{tr('common_close')}</button>
+            <button type="submit" className="scheduled-create-button">{tr('desktop_dataset_task_review')}</button>
+          </div>
+        </fieldset>
+      </form>
+      {error && <p role="alert">{error}</p>}
+    </dialog>
+  </div>;
 }
 
 function taskStatusLabel(status: string): string {

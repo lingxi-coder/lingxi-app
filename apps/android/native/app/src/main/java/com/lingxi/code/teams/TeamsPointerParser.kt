@@ -31,6 +31,10 @@ internal object TeamsPointerParser {
         val uid = if (author["kind"] == "user") (author["uid"] as? String)?.takeIf { it.isNotEmpty() } ?: throw invalid() else ""
         val kind = author["kind"] as? String
         val sharedBotId = when (kind) {
+            "task" -> {
+                if (listOf("taskId", "logicalRun", "displayName").any { (author[it] as? String).isNullOrBlank() }) throw invalid()
+                null
+            }
             "user" -> null
             "shared_bot" -> (author["sharedBotId"] as? String)?.takeIf { it.isNotEmpty() } ?: throw invalid()
             else -> throw invalid()
@@ -40,7 +44,7 @@ internal object TeamsPointerParser {
             pointer["recalled"] == true -> true
             else -> throw invalid()
         }
-        return TeamLastMessage(id, seq, atMs, kind, uid, sharedBotId, preview, recalled)
+        return TeamLastMessage(id, seq, atMs, kind, uid, sharedBotId, preview, recalled, if (kind == "task") author["displayName"] as? String else null)
     }
 
     /** An integer in the JavaScript safe range. A Firestore double with an integral value counts; fractions and strings do not. */

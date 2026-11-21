@@ -68,6 +68,12 @@ actor LocalAppServiceClient {
         let value = try await agentHost(String(decoding: JSONEncoder().encode(fields), as: UTF8.self), authoringMode: authoringMode)
         return try JSONDecoder().decode(T.self, from: JSONEncoder().encode(value))
     }
+    func datasetBrowserLaunch(_ id: String, revision: UInt64, origin: String, proof: String) async throws -> URL {
+        struct Launch: Decodable, Sendable { let url: URL }
+        guard let handle else { throw LocalAppServiceFailure("SERVICE_UNAVAILABLE", "Local apps are unavailable.") }
+        let response = try await handle.datasetBrowserLaunch(appId: id, revision: revision, bridgeOrigin: origin, proof: proof)
+        return try JSONDecoder().decode(LocalAppServiceEnvelope<Launch>.self, from: Data(response.utf8)).result().url
+    }
     private func send<T: Decodable & Sendable>(_ service: MobileLocalAppServiceHandle, _ fields: [String: LocalAppJSON]) async throws -> T {
         let data = try JSONEncoder().encode(fields)
         let response = try await service.requestJson(request: String(decoding: data, as: UTF8.self))

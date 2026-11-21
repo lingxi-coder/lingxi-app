@@ -432,6 +432,7 @@ struct AppRuntimeView: View {
     @State private var opened = false
     @State private var busy = false
     @State private var consent: UnifiedAppRelease?
+    @State private var datasetConnection: UnifiedAppRelease?
     @State private var inAppBrowser: LocalAppBrowserTicket?
     @State private var requestedInApp = false
     var body: some View {
@@ -482,9 +483,20 @@ struct AppRuntimeView: View {
                 if hasAgent, let revision = library.record(appId)?.currentRevision {
                     LocalAppAgentTasks(client: library.client, appID: appId, revision: revision)
                 }
+                if LocalAppDatasetAccess.origin != nil {
+                    Button("数据集连接") {
+                        Task {
+                            if let revision = library.record(appId)?.currentRevision,
+                               let release = try? await library.release(appId, revision: revision),
+                               !(release.manifest.dataBindings ?? [:]).isEmpty {
+                                datasetConnection = release
+                            }
+                        }
+                    }.disabled(busy)
+                }
                 Button("应用设置与 Agent 授权") { onShowDetails(appId) }
                 Button("停止应用与 Agent 任务", role: .destructive) { Task {
-                    do { try await library.stop(appId); onClose() } catch { self.error = error.localizedDescription }
+                    do { try await library.stop(appId); try await LocalAppDatasetAccess.revoke(appID: appId); onClose() } catch { self.error = error.localizedDescription }
                 } }
                 Button("关闭管理页面", action: onClose)
                 Text("关闭此管理页面不会停止浏览器中的应用。")
@@ -496,6 +508,12 @@ struct AppRuntimeView: View {
         }
         .task(id: appId) { await load(openBrowser: !opened && !library.consumeBrowserReview(appId)) }
         .sheet(item: $inAppBrowser) { ticket in LocalAppSystemBrowser(url: ticket.url) }
+        .sheet(item: $datasetConnection) { release in
+            LocalAppDatasetConnectionSheet(release: release) {
+                datasetConnection = nil
+                Task { await load(openBrowser: true) }
+            }
+        }
         .sheet(item: $consent) { release in
             LocalAppConsentSheet(manifest: release.manifest, digest: release.digest, title: "授权此版本运行") {
                 Task { do { try await library.grant(appId, digest: release.digest); consent = nil; await load(openBrowser: true, inApp: requestedInApp) }
@@ -533,9 +551,19 @@ struct AppRuntimeView: View {
                 if inApp {
                     inAppBrowser = LocalAppBrowserTicket(url: value.url)
                 } else {
+                    let target: URL
+                    if !(release.manifest.dataBindings ?? [:]).isEmpty, LocalAppDatasetAccess.origin != nil {
+                        if LocalAppDatasetAccess.saved(release).isEmpty {
+                            datasetConnection = release
+                            return
+                        }
+                        target = try await LocalAppDatasetAccess.launch(release, client: library.client) ?? value.url
+                    } else {
+                        target = value.url
+                    }
                     let scope = LocalAppBrowserDeliveryScope(appID: appId, revision: value.run.revision)
                     let acquisition = library.openBrowserPage(scope: scope) {
-                        openURL(value.url) { accepted in
+                        openURL(target) { accepted in
                             guard !accepted else { return }
                             Task { @MainActor in
                                 library.endBrowserPageDelivery(scope)

@@ -1,3 +1,4 @@
+import { confirmShareDelivery } from './dataset-message-grant.mjs';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { mirrorHttpRead } from './inbox-store.mjs';
@@ -48,7 +49,7 @@ function conversation(snapshot, read, generation) {
  * rules-checked; HTTP also binds queued mutations to the membership generation. */
 export class TeamMessagesStore {
   constructor(db, clock = Date.now, readData) { this.db = db; this.clock = clock; this.readData = readData; }
-  async execute(user, raw) {
+  async execute(user, raw, share) {
     if (raw?.schemaVersion !== undefined) return new SharedBotsStore(this.db, this.clock).execute(user, raw);
     // A hosted Bot service's sessions are read with the same commands, addressed by `serviceId`. They are written only
     // through the execution ledger, so nothing but reading is taken here.
@@ -119,10 +120,14 @@ export class TeamMessagesStore {
       if (input.dataRef) await authorizeDataBinding(tx, this.db, user.uid, dataScope, input.dataRef.dataset, false);
       if (!c.participants.includes(`user:${user.uid}`)) fail(403, 'CONVERSATION_REQUIRED');
       if (c.kind === 'bot_dm' && input.operation === 'create') fail(400, 'SUBMIT_REQUIRED');
+      if (share) await confirmShareDelivery(tx, teamRef, c, input, user.uid, share);
       const msgRef = ref.collection('messages').doc(input.messageId), changeRef = ref.collection('changes').doc(input.changeId);
       const [existing, receipt] = await tx.getAll(msgRef, changeRef);
       const m = existing.data(), old = receipt.data();
-      const textDigest = input.dataRef ? digest(JSON.stringify([input.text, input.dataRef])) : digest(input.text);
+      let content = input.text;
+      if (share) content = JSON.stringify([input.text, share.reference, share.grant]);
+      else if (input.dataRef) content = JSON.stringify([input.text, input.dataRef]);
+      const textDigest = digest(content);
       if (old) {
         if (old.messageId !== input.messageId || old.operation !== input.operation || old.actorUid !== user.uid
           || old.generation !== input.generation || old.textDigest !== textDigest
@@ -150,11 +155,12 @@ export class TeamMessagesStore {
         // The conversation list reads this pointer instead of the message; the author mirrors the message doc.
         Object.assign(update, { lastSeq: seq, lastMessage: { id: input.messageId, seq, at: now, author, preview: messagePreview(input.text) } });
         tx.create(msgRef, { seq, author, kind: 'text', text: input.text,
+          ...(share ? { resourceRef: share.reference, resourceGrant: share.grant } : {}),
           ...(input.replyTo ? { replyTo: input.replyTo } : {}), ...(input.dataRef ? { dataRef: input.dataRef } : {}), createdAt: now, changeSeq, changeId: input.changeId });
         unasked.write(seq);
       } else {
         tx.update(msgRef, { text: input.text, editedAt: now, changeSeq, changeId: input.changeId,
-          ...(input.operation === 'recall' ? { recalled: true, ...(m.dataRef ? { dataRef: null } : {}) } : {}) });
+          ...(input.operation === 'recall' ? { recalled: true, ...(m.dataRef ? { dataRef: null } : {}), ...(m.resourceRef ? { resourceRef: null, resourceGrant: null } : {}) } : {}) });
         // Only the newest message is mirrored. An older edit/recall leaves the pointer alone; a recall never leaves its text behind.
         if (c.lastMessage?.id === input.messageId) {
           update.lastMessage = { ...c.lastMessage, preview: input.operation === 'recall' ? '' : messagePreview(input.text),

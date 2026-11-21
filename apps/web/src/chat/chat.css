@@ -154,6 +154,12 @@
 @media (prefers-reduced-motion: reduce) { .agent-typing i { animation: none; opacity: .6; } }
 .agent-dock { display: flex; flex-direction: column; gap: 10px; padding: 8px 24px 14px; }
 .agent-dock > * { width: 100%; max-width: var(--agent-width); margin-inline: auto; }
+.agent-dataset-controls { padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; }
+.agent-dataset-controls p { margin: 0 0 8px; font-size: 13px; }
+.agent-dataset-controls p:empty { margin: 0; }
+.agent-dataset-actions { max-block-size: 28dvh; overflow: auto; margin: 0 0 8px; padding-inline-start: 20px; }
+.agent-dataset-actions pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 8px; font-size: 12px; }
+.agent-dataset-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
 .agent-status { margin: 6px 0 0; font-size: 13px; line-height: 1.55; }
 .agent-status-error { color: var(--danger); }
 .agent-status-ok { color: var(--success, #2f8a5b); }
@@ -174,7 +180,13 @@
 .agent-provider-text { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
 .agent-provider-text strong { font-size: 14px; font-weight: 600; }
 .agent-provider-text > span:not(.agent-status) { color: var(--ink-3); font-size: 12px; }
-.agent-provider-text .agent-status { margin: 2px 0 0; }
+.agent-provider-text .agent-dataset-controls { padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; }
+.agent-dataset-controls p { margin: 0 0 8px; font-size: 13px; }
+.agent-dataset-controls p:empty { margin: 0; }
+.agent-dataset-actions { max-block-size: 28dvh; overflow: auto; margin: 0 0 8px; padding-inline-start: 20px; }
+.agent-dataset-actions pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 8px; font-size: 12px; }
+.agent-dataset-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.agent-status { margin: 2px 0 0; }
 .agent-provider-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
 .agent-provider-actions .chat-button { min-height: 34px; padding: 0 12px; border-radius: 10px; font-size: 13px; }
 .agent-preset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 10px; margin: 0; padding: 0; list-style: none; }

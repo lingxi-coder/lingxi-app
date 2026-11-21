@@ -1,3 +1,4 @@
+import { datasetExecutorFixture, hasDatasetFixture } from './fixtures/dataset-task-staging.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
@@ -1609,4 +1610,24 @@ test('auto-reply: a Bot is published to answer unasked only from a Desktop with 
  assert.deepEqual(f.sent('publishSharedBot').at(-1).payload.autoReply,{daily:20});
  assert.equal((await f.connector.status('owner')).decisionConfigured,true);
  assert.equal((await none.connector.status('owner')).decisionConfigured,false);
+});
+
+test('Dataset v2 normal Team Bot task commits its approved reply', { skip: !hasDatasetFixture }, async t => {
+  const staging = await datasetExecutorFixture(t, 'teamBot');
+  const f = fixture(t, undefined, { datasetTasks: () => staging.hooks });
+  await f.connector.publishLocalBot('owner', f.input);
+  const task = queued('dataset-bot-task');
+  const scope = { team: f.input.teamId, bot: task.sharedBotId, conversation: task.conversationId };
+  const program = await f.connector.datasetBotProgram('owner', scope);
+  const otherChat = await f.connector.datasetBotProgram('owner', { ...scope, conversation: 'other-chat' });
+  assert.notEqual(program.task, otherChat.task);
+  assert.notEqual(program.task, task.taskId);
+  await staging.authorize(program);
+  f.mock.tasks.push(task); f.mock.wake();
+  const until = Date.now() + 15_000;
+  while (Date.now() < until && !f.mock.commands.some(c => c.action === 'completeTask')) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.ok(f.mock.commands.some(c => c.action === 'completeTask' && c.payload.outcome === 'completed'));
+  await staging.assertOutput('Done');
 });

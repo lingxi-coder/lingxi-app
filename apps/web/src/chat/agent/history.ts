@@ -1,4 +1,5 @@
 import type { ChatTurnMessage } from '../../../../../packages/llm-vault/contracts';
+import type { DatasetAttachment } from './client';
 
 /** One message of an Agent chat as this browser keeps it. */
 export interface AgentMessage {
@@ -6,6 +7,8 @@ export interface AgentMessage {
   role: 'user' | 'assistant';
   content: string;
   reasoning?: string;
+  datasetAttachment?: DatasetAttachment;
+  datasetTurn?: { providerId: string; pending: boolean; attachment?: DatasetAttachment };
   /** An error code that ended this answer; the text before it is kept. */
   error?: string;
   /** The answer was stopped by the user. */

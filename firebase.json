@@ -189,6 +189,20 @@
         }
       },
       {
+        "source": "/v1/dataset-browser/**",
+        "function": {
+          "functionId": "teamsApi",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/v2/dataset-runs",
+        "function": {
+          "functionId": "teamsApi",
+          "region": "us-central1"
+        }
+      },
+      {
         "source": "/v1/teams",
         "function": {
           "functionId": "teamsApi",

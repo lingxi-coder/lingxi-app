@@ -149,6 +149,14 @@ class UnifiedLocalApps private constructor(private val context: Context) {
             }
         }.also { handle = it }
     }
+    internal suspend fun datasetBrowserLaunch(release: AppRelease): String? = withContext(Dispatchers.IO) {
+        val origin = LocalAppDatasetAccess.origin ?: return@withContext null
+        if (LocalAppDatasetAccess.declarations(release).isEmpty()) return@withContext null
+        val proof = LocalAppDatasetAccess.proof(context, release, origin)
+        val response = service().datasetBrowserLaunch(release.appId, release.revision.toULong(), origin, proof)
+        (decodeAppResponse(response) as JSONObject).getString("url")
+    }
+
     /** Trusted app-details UI only; no WebView message can reach this method. */
     suspend fun agentHost(request: JSONObject): Any? = withContext(Dispatchers.IO) {
         val encoded = request.toString()

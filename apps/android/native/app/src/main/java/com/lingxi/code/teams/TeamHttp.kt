@@ -1,5 +1,6 @@
 package com.lingxi.code.teams
 
+import com.lingxi.code.BuildConfig
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -16,7 +17,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /** The one origin of every Teams HTTP command (`POST /v1/teams`, `/v1/teams/messages`). */
-internal const val TEAMS_API_ROOT = "https://lingxios.net"
+internal const val TEAMS_API_ROOT = BuildConfig.TEAMS_API_ORIGIN
 
 /** Cancellation closes the socket, including while a blocking read is in flight.
  * A deadline and bounded executor also bound transports that ignore interruption. */

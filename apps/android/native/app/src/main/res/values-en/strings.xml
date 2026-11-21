@@ -2436,6 +2436,7 @@
     <string name="extension_directory_category_all">All</string>
     <string name="extension_directory_category_browser">Browser</string>
     <string name="extension_directory_category_development">Development</string>
+    <string name="extension_directory_category_database">Database</string>
     <string name="extension_directory_category_productivity">Productivity</string>
     <string name="extension_directory_configure">Configure MCP</string>
     <string name="extension_directory_configured">Configured</string>
@@ -2463,6 +2464,7 @@
     <string name="public_extensions_category_all">All</string>
     <string name="public_extensions_category_browser">Browser</string>
     <string name="public_extensions_category_development">Development</string>
+    <string name="public_extensions_category_database">Database</string>
     <string name="public_extensions_category_productivity">Productivity</string>
     <string name="public_extensions_continue">Continue</string>
     <string name="public_extensions_empty">No matching entries.</string>

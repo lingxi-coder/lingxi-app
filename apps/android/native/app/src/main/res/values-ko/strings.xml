@@ -2436,6 +2436,7 @@
     <string name="extension_directory_category_all">전체</string>
     <string name="extension_directory_category_browser">브라우저</string>
     <string name="extension_directory_category_development">개발</string>
+    <string name="extension_directory_category_database">데이터베이스</string>
     <string name="extension_directory_category_productivity">생산성</string>
     <string name="extension_directory_configure">MCP 구성</string>
     <string name="extension_directory_configured">구성됨</string>
@@ -2463,6 +2464,7 @@
     <string name="public_extensions_category_all">전체</string>
     <string name="public_extensions_category_browser">브라우저</string>
     <string name="public_extensions_category_development">개발</string>
+    <string name="public_extensions_category_database">데이터베이스</string>
     <string name="public_extensions_category_productivity">생산성</string>
     <string name="public_extensions_continue">계속</string>
     <string name="public_extensions_empty">일치하는 항목이 없습니다.</string>

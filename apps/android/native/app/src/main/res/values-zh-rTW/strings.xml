@@ -2436,6 +2436,7 @@
     <string name="extension_directory_category_all">全部</string>
     <string name="extension_directory_category_browser">瀏覽器</string>
     <string name="extension_directory_category_development">開發</string>
+    <string name="extension_directory_category_database">資料庫</string>
     <string name="extension_directory_category_productivity">效率</string>
     <string name="extension_directory_configure">設定 MCP</string>
     <string name="extension_directory_configured">已設定</string>
@@ -2463,6 +2464,7 @@
     <string name="public_extensions_category_all">全部</string>
     <string name="public_extensions_category_browser">瀏覽器</string>
     <string name="public_extensions_category_development">開發</string>
+    <string name="public_extensions_category_database">資料庫</string>
     <string name="public_extensions_category_productivity">效率</string>
     <string name="public_extensions_continue">繼續</string>
     <string name="public_extensions_empty">沒有符合的項目。</string>

@@ -104,7 +104,7 @@ internal fun parsePublicExtensionDirectory(rawJson: String, platform: String = "
             val kind = row.optString("kind")
             val category = row.optString("category")
             require(kind in setOf("mcp", "plugin"))
-            require(category in setOf("browser", "development", "productivity"))
+            require(category in setOf("browser", "development", "database", "productivity"))
             val platforms = row.optJSONArray("platforms").stringValues().toSet()
             val mcp = row.optJSONObject("mcp")
             val mcpName = mcp?.optString("name")?.takeIf(String::isNotBlank)
@@ -368,6 +368,7 @@ internal fun PublicExtensionDirectory(
         "all" to R.string.extension_directory_category_all,
         "browser" to R.string.extension_directory_category_browser,
         "development" to R.string.extension_directory_category_development,
+        "database" to R.string.extension_directory_category_database,
         "productivity" to R.string.extension_directory_category_productivity,
     )
     val visible = remember(entries, query, category, languageTag) {
@@ -566,6 +567,7 @@ private fun PublicExtensionDetailContent(entry: PublicExtensionEntry, languageTa
 private fun categoryLabel(category: String): Int = when (category) {
     "browser" -> R.string.extension_directory_category_browser
     "development" -> R.string.extension_directory_category_development
+    "database" -> R.string.extension_directory_category_database
     else -> R.string.extension_directory_category_productivity
 }
 

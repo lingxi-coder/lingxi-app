@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-11-12",
+  "updatedAt": "2026-11-20",
   "items": [
     {
       "id": "chrome-devtools",
@@ -562,11 +562,231 @@
       ]
     },
     {
+      "id": "dbhub",
+      "kind": "mcp",
+      "name": "DBHub",
+      "publisher": "Bytebase",
+      "category": "database",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "version": "2.0.0",
+      "description": {
+        "en": "Query PostgreSQL, MySQL, MariaDB, SQL Server, Oracle, ClickHouse and SQLite databases.",
+        "zh-Hans": "查询 PostgreSQL、MySQL、MariaDB、SQL Server、Oracle、ClickHouse 和 SQLite 数据库。",
+        "zh-Hant": "查詢 PostgreSQL、MySQL、MariaDB、SQL Server、Oracle、ClickHouse 和 SQLite 資料庫。",
+        "ja": "PostgreSQL、MySQL、MariaDB、SQL Server、Oracle、ClickHouse、SQLite のデータベースを照会します。",
+        "ko": "PostgreSQL, MySQL, MariaDB, SQL Server, Oracle, ClickHouse, SQLite 데이터베이스를 조회합니다."
+      },
+      "requirements": {
+        "en": "Requires Node.js 22.5+. After adding, append --dsn and your connection URL. For read-only access, use --config with a dbhub.toml that sets readonly = true, and connect with a read-only account.",
+        "zh-Hans": "需要 Node.js 22.5 及以上。添加后在参数里补上 --dsn 和连接地址。只读访问请改用 --config 指向设置了 readonly = true 的 dbhub.toml，并使用只读数据库账号。",
+        "zh-Hant": "需要 Node.js 22.5 以上。新增後在參數中補上 --dsn 和連線位址。唯讀存取請改用 --config 指向設定了 readonly = true 的 dbhub.toml，並使用唯讀資料庫帳號。",
+        "ja": "Node.js 22.5 以降が必要です。追加後、引数に --dsn と接続 URL を加えてください。読み取り専用にするには、readonly = true を設定した dbhub.toml を --config で指定し、読み取り専用のアカウントで接続してください。",
+        "ko": "Node.js 22.5 이상이 필요합니다. 추가한 뒤 인수에 --dsn과 연결 URL을 넣으세요. 읽기 전용으로 쓰려면 readonly = true를 설정한 dbhub.toml을 --config로 지정하고 읽기 전용 계정으로 연결하세요."
+      },
+      "sourceUrl": "https://github.com/bytebase/dbhub",
+      "documentationUrl": "https://dbhub.ai/config/read-only-mode",
+      "mcp": {
+        "name": "dbhub",
+        "config": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "@bytebase/dbhub@2.0.0"
+          ]
+        }
+      },
+      "examples": [
+        {
+          "en": "List the tables in this database and explain how they relate.",
+          "zh-Hans": "列出这个数据库里的表，并说明它们之间的关系。",
+          "zh-Hant": "列出這個資料庫裡的資料表，並說明它們之間的關係。",
+          "ja": "このデータベースのテーブルを一覧にして、関係を説明してください。",
+          "ko": "이 데이터베이스의 테이블을 나열하고 서로의 관계를 설명해 주세요."
+        },
+        {
+          "en": "Write a query that totals last month's orders by region, then run it.",
+          "zh-Hans": "写一条按地区汇总上月订单的查询并运行。",
+          "zh-Hant": "寫一條按地區彙總上月訂單的查詢並執行。",
+          "ja": "先月の注文を地域別に集計するクエリを書いて実行してください。",
+          "ko": "지난달 주문을 지역별로 합산하는 쿼리를 작성해 실행해 주세요."
+        }
+      ]
+    },
+    {
+      "id": "mongodb-mcp",
+      "kind": "mcp",
+      "name": "MongoDB",
+      "publisher": "MongoDB",
+      "category": "database",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "version": "3.3.0",
+      "description": {
+        "en": "Explore MongoDB collections, schemas and indexes, and run queries and aggregations.",
+        "zh-Hans": "浏览 MongoDB 的集合、结构和索引，运行查询和聚合。",
+        "zh-Hant": "瀏覽 MongoDB 的集合、結構和索引，執行查詢和彙總。",
+        "ja": "MongoDB のコレクション、スキーマ、インデックスを確認し、クエリや集計を実行します。",
+        "ko": "MongoDB 컬렉션, 스키마, 인덱스를 살펴보고 쿼리와 집계를 실행합니다."
+      },
+      "requirements": {
+        "en": "Requires Node.js 20.19+ or 22.13+. Starts in read-only mode. After adding, set MDB_MCP_CONNECTION_STRING in the server environment, and connect with a user that can only read.",
+        "zh-Hans": "需要 Node.js 20.19 或 22.13 及以上，默认只读。添加后在服务器环境变量中设置 MDB_MCP_CONNECTION_STRING，并使用只有读取权限的用户连接。",
+        "zh-Hant": "需要 Node.js 20.19 或 22.13 以上，預設唯讀。新增後在伺服器環境變數中設定 MDB_MCP_CONNECTION_STRING，並使用只有讀取權限的使用者連線。",
+        "ja": "Node.js 20.19 以降または 22.13 以降が必要です。初期設定は読み取り専用です。追加後、サーバーの環境変数 MDB_MCP_CONNECTION_STRING を設定し、読み取り権限だけを持つユーザーで接続してください。",
+        "ko": "Node.js 20.19 이상 또는 22.13 이상이 필요합니다. 기본값은 읽기 전용입니다. 추가한 뒤 서버 환경 변수 MDB_MCP_CONNECTION_STRING을 설정하고 읽기 권한만 있는 사용자로 연결하세요."
+      },
+      "sourceUrl": "https://github.com/mongodb-js/mongodb-mcp-server",
+      "documentationUrl": "https://www.mongodb.com/docs/mcp-server/get-started/",
+      "mcp": {
+        "name": "mongodb",
+        "config": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "mongodb-mcp-server@3.3.0",
+            "--readOnly"
+          ]
+        }
+      },
+      "examples": [
+        {
+          "en": "Describe the orders collection's schema and indexes.",
+          "zh-Hans": "说明 orders 集合的结构和索引。",
+          "zh-Hant": "說明 orders 集合的結構和索引。",
+          "ja": "orders コレクションのスキーマとインデックスを説明してください。",
+          "ko": "orders 컬렉션의 스키마와 인덱스를 설명해 주세요."
+        },
+        {
+          "en": "Find customers who placed more than five orders this month.",
+          "zh-Hans": "找出本月下单超过五次的客户。",
+          "zh-Hant": "找出本月下單超過五次的客戶。",
+          "ja": "今月 6 件以上注文した顧客を探してください。",
+          "ko": "이번 달 주문이 다섯 건을 넘는 고객을 찾아 주세요."
+        }
+      ]
+    },
+    {
+      "id": "redis-mcp",
+      "kind": "mcp",
+      "name": "Redis",
+      "publisher": "Redis",
+      "category": "database",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "version": "0.5.1",
+      "description": {
+        "en": "Work with Redis data structures, JSON documents, search indexes and server information.",
+        "zh-Hans": "操作 Redis 的数据结构、JSON 文档、搜索索引和服务器信息。",
+        "zh-Hant": "操作 Redis 的資料結構、JSON 文件、搜尋索引和伺服器資訊。",
+        "ja": "Redis のデータ構造、JSON ドキュメント、検索インデックス、サーバー情報を扱います。",
+        "ko": "Redis 데이터 구조, JSON 문서, 검색 인덱스, 서버 정보를 다룹니다."
+      },
+      "requirements": {
+        "en": "Requires uv and Python 3.10+. After adding, append --url and your redis:// or rediss:// URL. The server includes write tools, so connect with an ACL user limited to read commands and the keys you need.",
+        "zh-Hans": "需要 uv 和 Python 3.10 及以上。添加后在参数里补上 --url 和 redis:// 或 rediss:// 地址。该服务器包含写入工具，请使用只开放读取命令和所需键的 ACL 用户连接。",
+        "zh-Hant": "需要 uv 和 Python 3.10 以上。新增後在參數中補上 --url 和 redis:// 或 rediss:// 位址。此伺服器包含寫入工具，請使用只開放讀取命令和所需鍵的 ACL 使用者連線。",
+        "ja": "uv と Python 3.10 以降が必要です。追加後、引数に --url と redis:// または rediss:// の URL を加えてください。書き込みツールも含まれるため、読み取りコマンドと必要なキーだけを許可した ACL ユーザーで接続してください。",
+        "ko": "uv와 Python 3.10 이상이 필요합니다. 추가한 뒤 인수에 --url과 redis:// 또는 rediss:// URL을 넣으세요. 쓰기 도구도 포함되어 있으므로 읽기 명령과 필요한 키만 허용한 ACL 사용자로 연결하세요."
+      },
+      "sourceUrl": "https://github.com/redis/mcp-redis",
+      "documentationUrl": "https://redis.io/docs/latest/integrate/redis-mcp/install/",
+      "mcp": {
+        "name": "redis",
+        "config": {
+          "command": "uvx",
+          "args": [
+            "--from",
+            "redis-mcp-server==0.5.1",
+            "redis-mcp-server"
+          ]
+        }
+      },
+      "examples": [
+        {
+          "en": "Show the memory usage and key count of this Redis server.",
+          "zh-Hans": "显示这个 Redis 服务器的内存用量和键数量。",
+          "zh-Hant": "顯示這個 Redis 伺服器的記憶體用量和鍵數量。",
+          "ja": "この Redis サーバーのメモリ使用量とキー数を表示してください。",
+          "ko": "이 Redis 서버의 메모리 사용량과 키 개수를 보여 주세요."
+        },
+        {
+          "en": "Find the hash keys under session: and summarize their fields.",
+          "zh-Hans": "找出 session: 下的哈希键，并汇总它们的字段。",
+          "zh-Hant": "找出 session: 下的雜湊鍵，並彙整它們的欄位。",
+          "ja": "session: 以下のハッシュキーを探し、フィールドをまとめてください。",
+          "ko": "session: 아래의 해시 키를 찾아 필드를 요약해 주세요."
+        }
+      ]
+    },
+    {
+      "id": "neon",
+      "kind": "mcp",
+      "name": "Neon",
+      "publisher": "Neon",
+      "category": "database",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Manage Neon projects, branches and databases, and run SQL.",
+        "zh-Hans": "管理 Neon 项目、分支和数据库，并运行 SQL。",
+        "zh-Hant": "管理 Neon 專案、分支和資料庫，並執行 SQL。",
+        "ja": "Neon のプロジェクト、ブランチ、データベースを管理し、SQL を実行します。",
+        "ko": "Neon 프로젝트, 브랜치, 데이터베이스를 관리하고 SQL을 실행합니다."
+      },
+      "requirements": {
+        "en": "Requires Neon authorization. Starts in read-only mode.",
+        "zh-Hans": "需要 Neon 授权，默认只读。",
+        "zh-Hant": "需要 Neon 授權，預設唯讀。",
+        "ja": "Neon の認証が必要です。初期設定は読み取り専用です。",
+        "ko": "Neon 인증이 필요합니다. 기본값은 읽기 전용입니다."
+      },
+      "sourceUrl": "https://github.com/neondatabase/mcp-server-neon",
+      "documentationUrl": "https://neon.com/docs/ai/neon-mcp-server",
+      "mcp": {
+        "name": "neon",
+        "config": {
+          "type": "http",
+          "url": "https://mcp.neon.tech/mcp?readonly=true"
+        }
+      },
+      "examples": [
+        {
+          "en": "List my Neon projects and the size of each database.",
+          "zh-Hans": "列出我的 Neon 项目和每个数据库的大小。",
+          "zh-Hant": "列出我的 Neon 專案和每個資料庫的大小。",
+          "ja": "Neon のプロジェクトと各データベースのサイズを一覧にしてください。",
+          "ko": "내 Neon 프로젝트와 각 데이터베이스의 크기를 나열해 주세요."
+        },
+        {
+          "en": "Show the main branch's schema and explain its largest tables.",
+          "zh-Hans": "显示主分支的数据库结构，并说明其中最大的表。",
+          "zh-Hant": "顯示主分支的資料庫結構，並說明其中最大的資料表。",
+          "ja": "メインブランチのスキーマを表示し、最も大きいテーブルを説明してください。",
+          "ko": "기본 브랜치의 스키마를 보여 주고 가장 큰 테이블을 설명해 주세요."
+        }
+      ]
+    },
+    {
       "id": "supabase",
       "kind": "mcp",
       "name": "Supabase",
       "publisher": "Supabase",
-      "category": "development",
+      "category": "database",
       "platforms": [
         "macos",
         "windows",
@@ -918,6 +1138,229 @@
           "zh-Hant": "實作已確定的功能方案並審查結果。",
           "ja": "合意した機能を実装し、結果をレビューしてください。",
           "ko": "합의한 기능을 구현하고 결과를 검토해 주세요."
+        }
+      ]
+    },
+    {
+      "id": "mongodb",
+      "kind": "plugin",
+      "name": "MongoDB",
+      "publisher": "MongoDB",
+      "category": "database",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Design schemas, write and optimize queries, and set up MongoDB connections.",
+        "zh-Hans": "设计数据结构，编写和优化查询，配置 MongoDB 连接。",
+        "zh-Hant": "設計資料結構，撰寫和最佳化查詢，設定 MongoDB 連線。",
+        "ja": "スキーマを設計し、クエリを作成・最適化し、MongoDB への接続を設定します。",
+        "ko": "스키마를 설계하고 쿼리를 작성·최적화하며 MongoDB 연결을 설정합니다."
+      },
+      "sourceUrl": "https://github.com/mongodb/agent-skills",
+      "documentationUrl": "https://github.com/mongodb/agent-skills#readme",
+      "marketplace": {
+        "source": "anthropics/claude-plugins-official",
+        "name": "claude-plugins-official",
+        "plugin": "mongodb"
+      },
+      "skills": [
+        "mongodb-connection",
+        "mongodb-natural-language-querying",
+        "mongodb-query-optimizer",
+        "mongodb-schema-design",
+        "mongodb-search-and-ai",
+        "mongodb-mcp-setup"
+      ],
+      "requirements": {
+        "en": "The bundled MongoDB MCP server runs as a local Node.js process on desktop and needs your connection string. The skills work on every platform.",
+        "zh-Hans": "内置的 MongoDB MCP 服务器在桌面端以本地 Node.js 进程运行，需要你的连接字符串。技能在所有平台都可用。",
+        "zh-Hant": "內建的 MongoDB MCP 伺服器在桌面端以本機 Node.js 程序執行，需要你的連線字串。技能在所有平台都可用。",
+        "ja": "同梱の MongoDB MCP サーバーはデスクトップでローカルの Node.js プロセスとして動作し、接続文字列が必要です。スキルはすべてのプラットフォームで使えます。",
+        "ko": "포함된 MongoDB MCP 서버는 데스크톱에서 로컬 Node.js 프로세스로 실행되며 연결 문자열이 필요합니다. 스킬은 모든 플랫폼에서 사용할 수 있습니다."
+      },
+      "examples": [
+        {
+          "en": "Design a schema for orders and line items, and explain the trade-offs.",
+          "zh-Hans": "为订单和订单明细设计数据结构，并说明取舍。",
+          "zh-Hant": "為訂單和訂單明細設計資料結構，並說明取捨。",
+          "ja": "注文と明細のスキーマを設計し、トレードオフを説明してください。",
+          "ko": "주문과 주문 항목의 스키마를 설계하고 장단점을 설명해 주세요."
+        },
+        {
+          "en": "Review this aggregation pipeline and suggest indexes.",
+          "zh-Hans": "检查这个聚合管道并建议索引。",
+          "zh-Hant": "檢查這個彙總管線並建議索引。",
+          "ja": "この集計パイプラインを確認し、インデックスを提案してください。",
+          "ko": "이 집계 파이프라인을 검토하고 인덱스를 제안해 주세요."
+        }
+      ]
+    },
+    {
+      "id": "redis-development",
+      "kind": "plugin",
+      "name": "Redis Development",
+      "publisher": "Redis",
+      "category": "database",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Apply Redis best practices for data structures, connections, search, security and caching.",
+        "zh-Hans": "在数据结构、连接、搜索、安全和缓存方面应用 Redis 最佳实践。",
+        "zh-Hant": "在資料結構、連線、搜尋、安全性和快取方面套用 Redis 最佳實務。",
+        "ja": "データ構造、接続、検索、セキュリティ、キャッシュに Redis のベストプラクティスを適用します。",
+        "ko": "데이터 구조, 연결, 검색, 보안, 캐싱에 Redis 모범 사례를 적용합니다."
+      },
+      "sourceUrl": "https://github.com/redis/agent-skills",
+      "documentationUrl": "https://github.com/redis/agent-skills#readme",
+      "marketplace": {
+        "source": "anthropics/claude-plugins-official",
+        "name": "claude-plugins-official",
+        "plugin": "redis-development"
+      },
+      "skills": [
+        "redis-core",
+        "redis-connections",
+        "redis-search",
+        "redis-security",
+        "redis-observability",
+        "redis-clustering",
+        "redis-semantic-cache"
+      ],
+      "examples": [
+        {
+          "en": "Choose Redis data structures for a rate limiter and a leaderboard.",
+          "zh-Hans": "为限流器和排行榜选择合适的 Redis 数据结构。",
+          "zh-Hant": "為限流器和排行榜選擇合適的 Redis 資料結構。",
+          "ja": "レート制限とランキングに適した Redis のデータ構造を選んでください。",
+          "ko": "속도 제한기와 리더보드에 맞는 Redis 데이터 구조를 골라 주세요."
+        },
+        {
+          "en": "Review this Redis client setup for connection pooling and timeouts.",
+          "zh-Hans": "检查这段 Redis 客户端配置的连接池和超时设置。",
+          "zh-Hant": "檢查這段 Redis 用戶端設定的連線池和逾時設定。",
+          "ja": "この Redis クライアント設定の接続プールとタイムアウトを確認してください。",
+          "ko": "이 Redis 클라이언트 설정의 연결 풀과 타임아웃을 검토해 주세요."
+        }
+      ]
+    },
+    {
+      "id": "neon-postgres",
+      "kind": "plugin",
+      "name": "Neon Postgres",
+      "publisher": "Neon",
+      "category": "database",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Use Neon Postgres skills for projects, connections and Neon Auth, with the Neon MCP server.",
+        "zh-Hans": "使用 Neon Postgres 技能处理项目、连接和 Neon Auth，并附带 Neon MCP 服务器。",
+        "zh-Hant": "使用 Neon Postgres 技能處理專案、連線和 Neon Auth，並附帶 Neon MCP 伺服器。",
+        "ja": "Neon Postgres のスキルでプロジェクト、接続、Neon Auth を扱います。Neon MCP サーバーも含まれます。",
+        "ko": "Neon Postgres 스킬로 프로젝트, 연결, Neon Auth를 다룹니다. Neon MCP 서버도 포함됩니다."
+      },
+      "sourceUrl": "https://github.com/neondatabase/agent-skills",
+      "documentationUrl": "https://github.com/neondatabase/agent-skills#readme",
+      "marketplace": {
+        "source": "anthropics/claude-plugins-official",
+        "name": "claude-plugins-official",
+        "plugin": "neon"
+      },
+      "skills": [
+        "neon-postgres",
+        "neon",
+        "neon-auth"
+      ],
+      "requirements": {
+        "en": "The bundled Neon MCP server needs Neon authorization.",
+        "zh-Hans": "内置的 Neon MCP 服务器需要 Neon 授权。",
+        "zh-Hant": "內建的 Neon MCP 伺服器需要 Neon 授權。",
+        "ja": "同梱の Neon MCP サーバーには Neon の認証が必要です。",
+        "ko": "포함된 Neon MCP 서버에는 Neon 인증이 필요합니다."
+      },
+      "examples": [
+        {
+          "en": "Set up a Neon database for this app and add the connection settings.",
+          "zh-Hans": "为这个应用创建 Neon 数据库并加上连接配置。",
+          "zh-Hant": "為這個應用程式建立 Neon 資料庫並加上連線設定。",
+          "ja": "このアプリ用に Neon データベースを用意し、接続設定を追加してください。",
+          "ko": "이 앱에 쓸 Neon 데이터베이스를 준비하고 연결 설정을 추가해 주세요."
+        },
+        {
+          "en": "Create a branch to test this migration safely.",
+          "zh-Hans": "创建一个分支来安全地测试这次迁移。",
+          "zh-Hant": "建立一個分支來安全地測試這次遷移。",
+          "ja": "この移行を安全に試すためのブランチを作成してください。",
+          "ko": "이 마이그레이션을 안전하게 시험할 브랜치를 만들어 주세요."
+        }
+      ]
+    },
+    {
+      "id": "supabase-plugin",
+      "kind": "plugin",
+      "name": "Supabase",
+      "publisher": "Supabase",
+      "category": "database",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Use Supabase skills for database, auth and storage work, including Postgres best practices.",
+        "zh-Hans": "使用 Supabase 技能处理数据库、认证和存储，包括 Postgres 最佳实践。",
+        "zh-Hant": "使用 Supabase 技能處理資料庫、驗證和儲存，包括 Postgres 最佳實務。",
+        "ja": "Supabase のスキルでデータベース、認証、ストレージを扱います。Postgres のベストプラクティスも含まれます。",
+        "ko": "Supabase 스킬로 데이터베이스, 인증, 스토리지를 다룹니다. Postgres 모범 사례도 포함됩니다."
+      },
+      "sourceUrl": "https://github.com/supabase-community/supabase-plugin",
+      "documentationUrl": "https://github.com/supabase-community/supabase-plugin#readme",
+      "marketplace": {
+        "source": "anthropics/claude-plugins-official",
+        "name": "claude-plugins-official",
+        "plugin": "supabase"
+      },
+      "skills": [
+        "supabase",
+        "supabase-postgres-best-practices"
+      ],
+      "requirements": {
+        "en": "The bundled Supabase MCP server needs Supabase authorization.",
+        "zh-Hans": "内置的 Supabase MCP 服务器需要 Supabase 授权。",
+        "zh-Hant": "內建的 Supabase MCP 伺服器需要 Supabase 授權。",
+        "ja": "同梱の Supabase MCP サーバーには Supabase の認証が必要です。",
+        "ko": "포함된 Supabase MCP 서버에는 Supabase 인증이 필요합니다."
+      },
+      "examples": [
+        {
+          "en": "Review these Row Level Security policies for gaps.",
+          "zh-Hans": "检查这些行级安全策略有没有漏洞。",
+          "zh-Hant": "檢查這些列層級安全性原則有沒有漏洞。",
+          "ja": "これらの行レベルセキュリティポリシーに抜けがないか確認してください。",
+          "ko": "이 행 수준 보안 정책에 빈틈이 없는지 검토해 주세요."
+        },
+        {
+          "en": "Design tables and indexes for a multi-tenant app on Supabase.",
+          "zh-Hans": "为 Supabase 上的多租户应用设计表和索引。",
+          "zh-Hant": "為 Supabase 上的多租戶應用程式設計資料表和索引。",
+          "ja": "Supabase 上のマルチテナントアプリ向けにテーブルとインデックスを設計してください。",
+          "ko": "Supabase에서 멀티테넌트 앱에 쓸 테이블과 인덱스를 설계해 주세요."
         }
       ]
     }

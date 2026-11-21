@@ -2436,6 +2436,7 @@
     <string name="extension_directory_category_all">すべて</string>
     <string name="extension_directory_category_browser">ブラウザー</string>
     <string name="extension_directory_category_development">開発</string>
+    <string name="extension_directory_category_database">データベース</string>
     <string name="extension_directory_category_productivity">生産性</string>
     <string name="extension_directory_configure">MCP を設定</string>
     <string name="extension_directory_configured">設定済み</string>
@@ -2463,6 +2464,7 @@
     <string name="public_extensions_category_all">すべて</string>
     <string name="public_extensions_category_browser">ブラウザ</string>
     <string name="public_extensions_category_development">開発</string>
+    <string name="public_extensions_category_database">データベース</string>
     <string name="public_extensions_category_productivity">生産性</string>
     <string name="public_extensions_continue">続ける</string>
     <string name="public_extensions_empty">一致する項目はありません。</string>

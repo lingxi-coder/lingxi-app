@@ -136,6 +136,7 @@ struct DiffView: View {
 
     private func caption(_ path: String) -> some View {
         HStack(spacing: 8) {
+            FileTypeIcon(path: path)
             Text(path)
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .foregroundColor(t.text3)

@@ -49,3 +49,5 @@ export { anchorTranscriptAgents, placeTranscriptAgents } from '@lingxi/electron/
 export type { AgentAnchors, AgentTranscriptRow } from '@lingxi/electron/renderer/components/transcriptAgentPlacement';
 export { isTaskProgressTool, isTaskWorkflowTool, transcriptToolKey } from '@lingxi/electron/renderer/components/toolPresentation';
 export { AGENT_AVATARS, agentAvatarIndex, teamBotAvatarId } from '@lingxi/electron/renderer/components/agentAvatarArt';
+
+export { fileTypeIcon } from '@lingxi/electron/renderer/model/fileTypeIcon';

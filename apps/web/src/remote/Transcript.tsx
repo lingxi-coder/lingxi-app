@@ -1,4 +1,4 @@
-import { transcriptRowUuids } from './reuse';
+import { fileTypeIcon, transcriptRowUuids } from './reuse';
 import { useEffect, useMemo, useState } from 'react';
 import type { SessionAgentSummaryDto, StructuredDiffDto } from '@lingxi/bridge-client';
 import type { Locale } from '../utils/locale';
@@ -7,6 +7,10 @@ import { imageRefOf, itemsWithExtras, type ExtraRow, type PromptMeta, type Trans
 import { AGENT_AVATARS, agentAvatarIndex, anchorTranscriptAgents, placeTranscriptAgents, isImageInspectionTool, isTaskProgressTool, isTaskWorkflowTool, toolGroupSummary, transcriptRows, toolDisplayHeader, toolHasBody, toolTruncationNotice, type RunItem, type ToolRunItem, type AgentTranscriptRow } from './reuse';
 import { t, toolSummaryText } from './strings';
 import { displayText } from './text';
+
+function FileTypeIcon({ path }: { path: string }) {
+  return <img src={fileTypeIcon(path)} alt="" aria-hidden="true" width={18} height={18} style={{ flex: 'none' }} />;
+}
 
 interface TranscriptViewProps {
   locale: Locale;
@@ -63,10 +67,15 @@ function Row({ locale, row, transcript, deviceName, fetchImage }: { locale: Loca
       return <p className="rc-thinking" role="status">{t(locale, 'thinking')}</p>;
     case 'meta':
       return row.dur || row.files?.length ? (
-        <p className="rc-meta">
-          {displayText(row.dur, 120)}
-          {row.files?.length ? ` · ${row.files.length} file${row.files.length === 1 ? '' : 's'}` : ''}
-        </p>
+        <div>
+          <p className="rc-meta">
+            {displayText(row.dur, 120)}
+            {row.files?.length ? ` · ${row.files.length} file${row.files.length === 1 ? '' : 's'}` : ''}
+          </p>
+          {row.files?.length ? <ul className="rc-turn-files">{row.files.map(file =>
+            <li key={file.path}><FileTypeIcon path={file.path} /><span title={file.path}>{file.path}</span><small>+{file.additions} −{file.removals}</small></li>
+          )}</ul> : null}
+        </div>
       ) : null;
     case 'compaction':
       return <CompactionNote locale={locale} item={row} />;
@@ -281,7 +290,7 @@ function ToolCard({ locale, tool, trimmed }: { locale: Locale; tool: ToolRunItem
 function Diff({ diff }: { diff: StructuredDiffDto }) {
   return (
     <pre className="rc-code rc-diff">
-      {diff.file_path ? <span className="rc-diff-file">{displayText(diff.file_path, 300)}{'\n'}</span> : null}
+      {diff.file_path ? <span className="rc-diff-file"><FileTypeIcon path={diff.file_path} /> {displayText(diff.file_path, 300)}{'\n'}</span> : null}
       {diff.rows.map((row, index) => (
         <span key={index} className={`rc-diff-${row.kind}`}>
           {row.kind === 'add' ? '+' : row.kind === 'remove' ? '-' : ' '}

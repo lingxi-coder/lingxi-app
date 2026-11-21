@@ -173,8 +173,7 @@ struct ConversationSummarySheet: View {
                 ForEach(Array(changes.enumerated()), id: \.offset) { _, change in
                     VStack(alignment: .leading, spacing: 5) {
                         HStack(spacing: 7) {
-                            Image(systemName: "doc.text.magnifyingglass")
-                                .foregroundStyle(t.accent)
+                            FileTypeIcon(path: change.path)
                             Text(change.path)
                                 .font(.system(size: 13, weight: .medium, design: .monospaced))
                                 .foregroundStyle(t.text)

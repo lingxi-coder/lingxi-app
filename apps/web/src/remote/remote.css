@@ -258,3 +258,9 @@
 .rc-tool-head:disabled { opacity: 1; }
 
 .rc-tool-group-status:empty { position: absolute; }
+
+.rc-turn-files { list-style: none; padding: 0; margin: 4px 0 8px; }
+.rc-turn-files li { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 3px 0; }
+.rc-turn-files li > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-turn-files small { margin-left: auto; white-space: nowrap; }
+.rc-diff-file img { vertical-align: middle; }

@@ -1173,7 +1173,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_conversation_group: { en: 'Group', 'zh-Hans': '群聊', 'zh-Hant': '群組', ja: 'グループ', ko: '그룹' },
   teams_conversation_type: { en: 'Type', 'zh-Hans': '类型', 'zh-Hant': '類型', ja: '種類', ko: '유형' },
   teams_create: { en: 'Create team', 'zh-Hans': '创建团队', 'zh-Hant': '建立團隊', ja: 'チームを作成', ko: '팀 만들기' },
-  teams_data_unavailable: { en: 'The record is unavailable or its access has changed.', 'zh-Hans': '记录不可用或权限已更改。', 'zh-Hant': '記錄無法使用或權限已變更。', ja: 'レコードが利用できないか、権限が変更されました。', ko: '레코드를 사용할 수 없거나 권한이 변경되었습니다.' },
+  teams_data_unavailable: { en: 'The record is unavailable or its access has changed.', 'zh-Hans': '记录不可用或权限已更改。', 'zh-Hant': '記錄無法使用或權限已變更。', ja: 'レコードを利用できないか、アクセス権が変更されました。', ko: '레코드를 사용할 수 없거나 접근 권한이 변경되었습니다.' },
   teams_day: { en: '1 day', 'zh-Hans': '1 天', 'zh-Hant': '1 天', ja: '1 日', ko: '1일' },
   teams_delete: { en: 'Delete team', 'zh-Hans': '删除团队', 'zh-Hant': '刪除團隊', ja: 'チームを削除', ko: '팀 삭제' },
   teams_demote: { en: 'Make member', 'zh-Hans': '设为成员', 'zh-Hant': '設為成員', ja: 'メンバーにする', ko: '일반 멤버로 변경' },

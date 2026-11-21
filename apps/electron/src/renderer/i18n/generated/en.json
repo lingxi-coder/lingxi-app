@@ -804,6 +804,8 @@
   "desktop_extension_no_scope_snapshot": "No configuration snapshot is available for this scope.",
   "desktop_extension_server_name_required": "Enter a server name.",
   "desktop_extension_mcp_save_failed": "Could not save the MCP server.",
+  "desktop_extension_mcp_preparing": "Preparing…",
+  "desktop_extension_mcp_preparing_note": "Installing the package for %1$s before saving. The first install can take a few minutes.",
   "desktop_extension_mcp_remove_failed": "Could not remove the MCP server.",
   "desktop_extension_approval_failed": "Could not update approval.",
   "desktop_extension_mcp_import": "Review this imported MCP configuration. The server is saved only when you confirm below.",

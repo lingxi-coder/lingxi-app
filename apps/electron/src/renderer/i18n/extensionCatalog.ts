@@ -104,6 +104,20 @@ export const extensionCatalog: Record<string, Record<string, string>> = {
     "ja": "MCPサーバーを保存できませんでした。",
     "ko": "MCP 서버를 저장할 수 없습니다."
   },
+  "desktop_extension_mcp_preparing": {
+    "zh-Hans": "正在准备…",
+    "zh-Hant": "正在準備…",
+    "en": "Preparing…",
+    "ja": "準備しています…",
+    "ko": "준비하는 중…"
+  },
+  "desktop_extension_mcp_preparing_note": {
+    "zh-Hans": "正在安装 %1$s 所需的软件包，完成后再保存。首次安装可能需要几分钟。",
+    "zh-Hant": "正在安裝 %1$s 所需的套件，完成後再儲存。首次安裝可能需要幾分鐘。",
+    "en": "Installing the package for %1$s before saving. The first install can take a few minutes.",
+    "ja": "保存する前に、%1$s に必要なパッケージをインストールしています。初回のインストールには数分かかることがあります。",
+    "ko": "저장하기 전에 %1$s에 필요한 패키지를 설치하는 중입니다. 처음 설치할 때는 몇 분 정도 걸릴 수 있습니다."
+  },
   "desktop_extension_mcp_remove_failed": {
     "zh-Hans": "无法移除 MCP 服务器。",
     "zh-Hant": "無法移除 MCP 伺服器。",

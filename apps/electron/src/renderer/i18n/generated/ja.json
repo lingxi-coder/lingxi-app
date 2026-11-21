@@ -767,6 +767,8 @@
   "desktop_extension_no_scope_snapshot": "このスコープの設定スナップショットはありません。",
   "desktop_extension_server_name_required": "サーバー名を入力してください。",
   "desktop_extension_mcp_save_failed": "MCPサーバーを保存できませんでした。",
+  "desktop_extension_mcp_preparing": "準備しています…",
+  "desktop_extension_mcp_preparing_note": "保存する前に、%1$s に必要なパッケージをインストールしています。初回のインストールには数分かかることがあります。",
   "desktop_extension_mcp_remove_failed": "MCPサーバーを削除できませんでした。",
   "desktop_extension_approval_failed": "承認を更新できませんでした。",
   "desktop_extension_mcp_import": "インポートするMCP設定を確認してください。下で確定するまで保存されません。",

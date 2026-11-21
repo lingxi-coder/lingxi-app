@@ -767,6 +767,8 @@
   "desktop_extension_no_scope_snapshot": "이 범위의 구성 스냅샷이 없습니다.",
   "desktop_extension_server_name_required": "서버 이름을 입력하세요.",
   "desktop_extension_mcp_save_failed": "MCP 서버를 저장할 수 없습니다.",
+  "desktop_extension_mcp_preparing": "준비하는 중…",
+  "desktop_extension_mcp_preparing_note": "저장하기 전에 %1$s에 필요한 패키지를 설치하는 중입니다. 처음 설치할 때는 몇 분 정도 걸릴 수 있습니다.",
   "desktop_extension_mcp_remove_failed": "MCP 서버를 제거할 수 없습니다.",
   "desktop_extension_approval_failed": "승인을 업데이트할 수 없습니다.",
   "desktop_extension_mcp_import": "가져온 MCP 구성을 검토하세요. 아래에서 확인해야 서버가 저장됩니다.",

@@ -1,6 +1,8 @@
 package com.lingxi.code.settings
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -8,7 +10,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.selection.toggleable
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
@@ -22,6 +23,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
@@ -137,13 +139,15 @@ internal fun ProviderModelSheet(
                                 if (availability != null && availability.eligibleAccountIds.isEmpty()) Text(stringResource(R.string.provider_account_model_no_eligible))
                             }
                         },
-                        leadingContent = {
-                            if (manageVisibility) Checkbox(checked = selected, onCheckedChange = null)
-                            else RadioButton(selected = selected, onClick = null)
+                        leadingContent = if (manageVisibility) null else { { RadioButton(selected = selected, onClick = null) } },
+                        trailingContent = {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                ModelDetailsInfoButton(onClick = { details = model })
+                                if (manageVisibility) Switch(checked = selected, onCheckedChange = null)
+                            }
                         },
-                        trailingContent = { ModelDetailsInfoButton(onClick = { details = model }) },
                         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                        modifier = (if (manageVisibility) Modifier.toggleable(selected, role = Role.Checkbox) { select() }
+                        modifier = (if (manageVisibility) Modifier.toggleable(selected, role = Role.Switch) { select() }
                             else Modifier.selectable(selected, role = Role.RadioButton, onClick = select))
                             .testTag("provider.models.row.${model.modelId}"),
                     )
@@ -164,9 +168,10 @@ internal fun ProviderModelSheet(
                             Text(accountModelPermissionLabel(model.permissionStatus))
                             if (model.eligibleAccountIds.isEmpty()) Text(stringResource(R.string.provider_account_model_no_eligible))
                         } },
-                        leadingContent = { if (manageVisibility) Checkbox(checked = selected, onCheckedChange = null) else RadioButton(selected = selected, onClick = null) },
+                        leadingContent = if (manageVisibility) null else { { RadioButton(selected = selected, onClick = null) } },
+                        trailingContent = if (manageVisibility) { { Switch(checked = selected, onCheckedChange = null) } } else null,
                         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                        modifier = (if (manageVisibility) Modifier.toggleable(selected, role = Role.Checkbox) { select() }
+                        modifier = (if (manageVisibility) Modifier.toggleable(selected, role = Role.Switch) { select() }
                             else Modifier.selectable(selected, role = Role.RadioButton, onClick = select))
                             .testTag("provider.models.row.${model.modelId}"),
                     )

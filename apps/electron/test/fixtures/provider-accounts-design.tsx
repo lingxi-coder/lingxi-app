@@ -40,7 +40,7 @@ const api: ProviderAccountsApi = {
   },
 };
 let show: (dark: boolean, directory?: boolean) => void;
-const bridge: any = { bootstrap: { settings: {} }, desktop: { providerModelCatalog: [] }, providerAccounts: api,
+const bridge: any = { bootstrap: { settings: {} }, desktop: { currentModel: 'openai-chatgpt/gpt-5', providerModelCatalog: [] }, providerAccounts: api,
   refreshModelPicker: async () => {}, providerSettings: {}, providerSettingsLocked: [], updateProviderSettings: async () => {} };
 function Fixture() {
   const [dark, setDark] = useState(false), [directory, setDirectory] = useState(false);
@@ -106,7 +106,35 @@ const click = (selector: string) => { const element = document.querySelector<HTM
     const providerStatus = (id: string) => document.querySelector(`[data-testid="provider-list-item-${id}"] .provider-directory-status`);
     await until(() => providerStatus('openai')?.getAttribute('data-status') === 'configured');
     assert(providerStatus('openai')?.textContent?.includes('3 / 3'), 'Directory shows actual combined account count');
+    const openaiRow = '[data-testid="provider-list-item-openai"]';
+    assert(document.querySelector(openaiRow)?.matches('[data-current="true"]'), 'ChatGPT model is shown under its OpenAI provider');
+    assert(document.querySelector(openaiRow)?.textContent?.includes('GPT 5'), 'Current model is visible on its provider row');
+    const search = document.querySelector<HTMLInputElement>('.provider-directory-search input')!;
+    const setSearch = (value: string) => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(search, value);
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    setSearch('no such provider');
+    await until(() => Boolean(document.querySelector('.provider-directory-empty[role=status]')));
+    search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    await until(() => search.value === '' && Boolean(document.querySelector(openaiRow)));
+    setSearch('openai');
+    await until(() => document.querySelectorAll('.provider-directory-list li').length === 1);
+    click(openaiRow);
+    await until(() => document.activeElement?.matches('[data-testid="provider-list-back"]') === true);
+    click('[data-testid="provider-list-back"]');
+    await until(() => document.activeElement?.matches(openaiRow) === true);
+    assert(document.querySelector<HTMLInputElement>('.provider-directory-search input')?.value === 'openai', 'Back restores search and provider focus');
+    const restoredSearch = document.querySelector<HTMLInputElement>('.provider-directory-search input')!;
+    restoredSearch.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    await until(() => restoredSearch.value === '' && Boolean(providerStatus('anthropic')));
+    await until(() => document.querySelector('.provider-directory-tools>button')?.getAttribute('aria-disabled') === 'false');
     assert(providerStatus('anthropic')?.getAttribute('data-status') === 'unconfigured', 'Only an empty account list is unconfigured');
+    for (const id of ['openai', 'anthropic']) {
+      const status = providerStatus(id)!;
+      const dot = status.querySelector('[role=img][aria-label][title]');
+      assert(dot && !status.querySelector('.provider-status-label')?.textContent?.trim(), 'Routine status is only shown as a labeled dot');
+    }
     state.health.forEach(health => { health.status = 'needs_auth'; });
     click('.provider-directory-tools>button');
     await until(() => providerStatus('openai')?.getAttribute('data-status') === 'needs_auth');

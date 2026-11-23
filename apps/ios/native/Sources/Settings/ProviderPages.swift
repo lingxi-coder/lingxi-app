@@ -153,15 +153,10 @@ struct ModelsSettingsPage: View {
         return Button { host.push(.providerEdit(.init(.llm), state.id)) } label: {
             HStack(spacing: 12) {
                 ProviderTile(preset: preset, name: state.profile.name)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(state.profile.name).font(.body).foregroundStyle(Color.primary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(state.profile.enabled ? ProviderAccountRepository.shared.configurationDescription(
-                        providerId: repository.logicalProviderID(for: state.profile)) : String(localized: "provider_account_disabled"))
-                        .font(.subheadline).foregroundStyle(Color.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                Text(state.profile.name).font(.body).foregroundStyle(Color.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                providerDirectoryStatus(state)
                 if state.profile.isDefault {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(t.accent)
                         .accessibilityLabel(String(localized: "settings_badge_default"))
@@ -187,6 +182,33 @@ struct ModelsSettingsPage: View {
                 Label(String(localized: "common_removed"), systemImage: "trash")
             }
         }
+    }
+
+    private func providerDirectoryStatus(_ state: ProviderProfileState) -> some View {
+        let summary = ProviderAccountRepository.shared.configurationSummary(
+            providerId: repository.logicalProviderID(for: state.profile)
+        )
+        let status = state.profile.enabled ? summary.status : .disabled
+        let routine = status == .configured || status == .unconfigured
+        let color: Color = switch status {
+        case .configured: t.statusConnected
+        case .needsAuthentication, .storageUnavailable: t.statusError
+        case .temporarilyUnavailable: t.statusTesting
+        default: .secondary
+        }
+        return HStack(spacing: 6) {
+            Circle().fill(color).frame(width: 7, height: 7)
+                .accessibilityLabel(status.label)
+                .accessibilityHidden(!routine)
+            if !routine {
+                Text(status.label)
+            }
+            if let count = summary.count {
+                Text(count).monospacedDigit()
+            }
+        }
+        .font(.footnote)
+        .foregroundStyle(Color.secondary)
     }
 
     // MARK: Routing
@@ -1080,6 +1102,7 @@ private struct ProviderModelsPage: View {
                 Text(catalog.summary)
             }
         }
+        .toggleStyle(.switch)
         .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
     }
 

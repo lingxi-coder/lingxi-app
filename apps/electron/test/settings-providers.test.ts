@@ -211,6 +211,9 @@ test('provider detail shows an honest zero-visible state when every catalog mode
   assert.match(markup, /0 \/ 2 个模型可见/);
   assert.match(markup, /当前没有可显示模型，这个 Provider 会从对话模型列表隐藏。/);
   assert.match(markup, /GPT 5\.7 Preview/);
+  assert.equal((markup.match(/role="switch"/g) ?? []).length, 3);
+  assert.match(markup, /role="switch" aria-label="在模型列表中显示 · GPT 5\.7 Preview"/);
+  assert.doesNotMatch(markup, />在模型列表中显示</);
 });
 
 test('provider detail keeps stored checks and suppresses the zero-visible warning when the provider is hidden', () => {

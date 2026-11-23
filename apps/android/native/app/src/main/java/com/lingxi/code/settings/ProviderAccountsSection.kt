@@ -356,8 +356,8 @@ internal fun accountAvailabilityProblemLabel(problem: ProviderAccountAvailabilit
 })
 
 @Composable
-internal fun providerConfigurationLabel(state: ProviderAccountsState, bindingId: String): String {
-    val status = stringResource(when (state.configurationStatus(bindingId)) {
+internal fun providerConfigurationLabel(status: String): String =
+    stringResource(when (status) {
         "read_failed" -> R.string.provider_accounts_read_failed
         "loading" -> R.string.provider_accounts_loading
         "unconfigured" -> R.string.settings_provider_unconfigured
@@ -368,6 +368,3 @@ internal fun providerConfigurationLabel(state: ProviderAccountsState, bindingId:
         "storage_unavailable" -> R.string.provider_account_storage_unavailable
         else -> R.string.provider_account_status_unknown
     })
-    val accounts = state.providerAccounts(bindingId)
-    return if (accounts.isEmpty()) status else "$status · ${accounts.count { it.enabled }}/${accounts.size}"
-}

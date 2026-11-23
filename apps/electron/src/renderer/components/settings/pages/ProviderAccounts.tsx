@@ -160,7 +160,7 @@ export function ProviderAccounts({ api, provider, running, onConfigured, usageRo
     void perform({ action: 'reorder', providerId: logicalProviderId(provider.id), accountIds: ids });
   };
   const cancelLogin = () => { if (activeOperation.current !== undefined) void api.cancel(activeOperation.current).catch(() => setError(tr('provider_accounts_error'))); };
-  const theme = { '--pa-bg': t.surface, '--pa-text': t.text, '--pa-secondary': t.text3, '--pa-border': t.border, '--pa-accent': t.accent, '--pa-ok': t.ok, '--pa-danger': t.danger } as CSSProperties;
+  const theme = { '--pa-bg': t.surface, '--pa-text': t.text, '--pa-secondary': t.text2, '--pa-border': t.border, '--pa-accent': t.accent, '--pa-ok': t.ok, '--pa-danger': t.danger } as CSSProperties;
   const menuAction = (button: HTMLButtonElement, action: () => void) => { button.closest('details')?.removeAttribute('open'); action(); };
   return <section className="pa-panel" style={theme} aria-label={tr('provider_accounts_accounts')} aria-busy={busy}>
     <header className="pa-section-heading">

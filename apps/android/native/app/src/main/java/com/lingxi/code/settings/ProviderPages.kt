@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
@@ -28,6 +29,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -264,22 +267,54 @@ private fun ProviderRow(
                     if (provider.isDefault) Badge(stringResource(R.string.settings_badge_default), t.accent, strong = true)
                     if (!provider.enabled) Badge(stringResource(R.string.settings_badge_disabled), t.text4)
                 }
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                    Box(Modifier.size(6.dp).clip(CircleShape).background(
-                        if (kind == ProviderKind.Llm) {
-                            if (accountState.configurationStatus(ProviderSettingsRepository.profileNameFor(provider)) == "configured" && provider.enabled) t.ok else t.text4
-                        } else provider.status.dot(t)))
-                    Text(
-                        if (kind == ProviderKind.Llm) providerConfigurationLabel(accountState, ProviderSettingsRepository.profileNameFor(provider))
-                        else "${provider.status.localizedLabel()} · ${provider.model.ifEmpty { "—" }}",
-                        color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.labelSmall, fontFamily = LXFont.mono,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    )
+                if (kind != ProviderKind.Llm) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Box(Modifier.size(6.dp).clip(CircleShape).background(provider.status.dot(t)))
+                        Text(
+                            "${provider.status.localizedLabel()} · ${provider.model.ifEmpty { "—" }}",
+                            color = t.text4, style = androidx.compose.material3.MaterialTheme.typography.labelSmall, fontFamily = LXFont.mono,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
+            }
+            if (kind == ProviderKind.Llm) {
+                ProviderDirectoryStatus(provider, accountState)
             }
             LXIcon(name = LXIconName.ChevronR, size = 13.dp, color = t.text4, stroke = 1.7f)
         }
         if (!isLast) Box(Modifier.fillMaxWidth().size(0.5.dp).background(t.border))
+    }
+}
+
+@Composable
+private fun ProviderDirectoryStatus(provider: GenericProvider, accountState: ProviderAccountsState) {
+    val t = LingXiTheme.palette
+    val binding = ProviderSettingsRepository.profileNameFor(provider)
+    val status = accountState.configurationStatus(binding)
+    val label = providerConfigurationLabel(status)
+    val routine = status == "configured" || status == "unconfigured"
+    val dotColor = when (status) {
+        "configured" -> if (provider.enabled) t.ok else t.text4
+        "needs_auth", "storage_unavailable" -> t.danger
+        "temporarily_unavailable" -> t.statusTesting
+        else -> t.text4
+    }
+    val accounts = accountState.providerAccounts(binding)
+    val count = if (accountState.error == null && accounts.isNotEmpty()) {
+        "${accounts.count { it.enabled }}/${accounts.size}"
+    } else null
+    val detail = listOfNotNull(label.takeUnless { routine }, count).joinToString(" · ")
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        modifier = Modifier.widthIn(max = 144.dp),
+    ) {
+        Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor)
+            .then(if (routine) Modifier.semantics { contentDescription = label } else Modifier))
+        if (detail.isNotEmpty()) {
+            Text(detail, color = t.text3, style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
+        }
     }
 }
 

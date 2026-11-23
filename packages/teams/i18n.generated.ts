@@ -8,6 +8,7 @@ export type TeamsKey =
   | 'account_existing'
   | 'account_google'
   | 'account_password'
+  | 'chat_message_copy'
   | 'chat_status_completed'
   | 'chat_status_failed'
   | 'chat_status_unknown'
@@ -258,15 +259,15 @@ export type TeamsKey =
   | 'teams_cancel_reply'
   | 'teams_choose_conversation'
   | 'teams_choose_team'
-  | 'teams_composer_ask_bot'
   | 'teams_composer_bots_asked'
-  | 'teams_composer_bots_can_ask'
   | 'teams_composer_edit_hint'
   | 'teams_composer_hint_fmt'
   | 'teams_composer_lock_bot_checking'
   | 'teams_composer_lock_bot_unavailable'
   | 'teams_composer_lock_bot_unverified'
   | 'teams_composer_lock_owner_reading'
+  | 'teams_composer_mention'
+  | 'teams_composer_mention_options'
   | 'teams_composer_note_bot_dm'
   | 'teams_composer_note_group'
   | 'teams_composer_note_offline'
@@ -325,6 +326,7 @@ export type TeamsKey =
   | 'teams_error_invalid_data'
   | 'teams_error_list_full'
   | 'teams_error_list_unavailable'
+  | 'teams_error_mention_target'
   | 'teams_error_ops_conflict'
   | 'teams_error_ops_maintainer'
   | 'teams_error_ops_running'
@@ -889,6 +891,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   account_existing: { en: 'Already have an account? Sign in', 'zh-Hans': '已有账户，登录', 'zh-Hant': '已有帳戶，登入', ja: 'アカウントをお持ちの場合はサインイン', ko: '계정이 있으신가요? 로그인' },
   account_google: { en: 'Continue with Google', 'zh-Hans': '通过 Google 登录', 'zh-Hant': '透過 Google 登入', ja: 'Google で続行', ko: 'Google로 계속하기' },
   account_password: { en: 'Password', 'zh-Hans': '密码', 'zh-Hant': '密碼', ja: 'パスワード', ko: '비밀번호' },
+  chat_message_copy: { en: 'Copy', 'zh-Hans': '复制', 'zh-Hant': '複製', ja: 'コピー', ko: '복사' },
   chat_status_completed: { en: 'Completed', 'zh-Hans': '已完成', 'zh-Hant': '已完成', ja: '完了', ko: '완료됨' },
   chat_status_failed: { en: 'Failed', 'zh-Hans': '失败', 'zh-Hant': '失敗', ja: '失敗', ko: '실패' },
   chat_status_unknown: { en: 'Unknown', 'zh-Hans': '未知', 'zh-Hant': '未知', ja: '不明', ko: '알 수 없음' },
@@ -1139,15 +1142,15 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_cancel_reply: { en: 'Cancel reply', 'zh-Hans': '取消回复', 'zh-Hant': '取消回覆', ja: '返信をキャンセル', ko: '답장 취소' },
   teams_choose_conversation: { en: 'Choose a conversation', 'zh-Hans': '选择会话', 'zh-Hant': '選擇會話', ja: '会話を選択', ko: '대화 선택' },
   teams_choose_team: { en: 'Choose a team', 'zh-Hans': '选择团队', 'zh-Hant': '選擇團隊', ja: 'チームを選択', ko: '팀 선택' },
-  teams_composer_ask_bot: { en: 'Ask a Bot (@)', 'zh-Hans': '请求 Bot (@)', 'zh-Hant': '請求 Bot (@)', ja: 'Bot に依頼 (@)', ko: 'Bot에게 요청 (@)' },
   teams_composer_bots_asked: { en: 'Bots that will be asked', 'zh-Hans': '将请求的 Bot', 'zh-Hant': '將請求的 Bot', ja: '依頼する Bot', ko: '요청할 Bot' },
-  teams_composer_bots_can_ask: { en: 'Bots you can ask', 'zh-Hans': '可请求的 Bot', 'zh-Hant': '可請求的 Bot', ja: '依頼できる Bot', ko: '요청할 수 있는 Bot' },
   teams_composer_edit_hint: { en: 'Edit your message', 'zh-Hans': '修改你的消息', 'zh-Hant': '修改你的訊息', ja: 'メッセージを編集', ko: '메시지 수정' },
   teams_composer_hint_fmt: { en: 'Message %1$s', 'zh-Hans': '发送给 %1$s', 'zh-Hant': '傳送給 %1$s', ja: '%1$s にメッセージ', ko: '%1$s에게 메시지' },
   teams_composer_lock_bot_checking: { en: 'Checking whether this Bot is available…', 'zh-Hans': '正在确认此 Bot 是否可用…', 'zh-Hant': '正在確認此 Bot 是否可用…', ja: 'この Bot が利用できるか確認しています…', ko: '이 Bot을 사용할 수 있는지 확인하는 중…' },
   teams_composer_lock_bot_unavailable: { en: 'This Bot is not available to you right now.', 'zh-Hans': '此 Bot 目前对你不可用。', 'zh-Hant': '此 Bot 目前對你不可用。', ja: 'この Bot は現在利用できません。', ko: '이 Bot은 지금 사용할 수 없습니다.' },
   teams_composer_lock_bot_unverified: { en: 'Bot availability could not be verified. Reconnect to check.', 'zh-Hans': '未能确认 Bot 可用状态，请联网后重试。', 'zh-Hant': '未能確認 Bot 可用狀態，請連線後重試。', ja: 'Bot の利用可否を確認できませんでした。再接続して確認してください。', ko: 'Bot 사용 가능 여부를 확인하지 못했습니다. 다시 연결해 확인하세요.' },
   teams_composer_lock_owner_reading: { en: 'You can read this conversation because you maintain its Bot, but only participants can send messages.', 'zh-Hans': '你因维护其中的 Bot 而可阅读此会话，但只有参与者可以发送消息。', 'zh-Hant': '你因維護其中的 Bot 而可閱讀此會話，但只有參與者可以傳送訊息。', ja: 'あなたはこの会話に含まれる Bot のメンテナーなので閲覧できますが、メッセージを送れるのは参加者だけです。', ko: '이 대화에 포함된 Bot의 메인테이너이므로 읽을 수 있지만, 메시지는 참가자만 보낼 수 있습니다.' },
+  teams_composer_mention: { en: 'Mention (@)', 'zh-Hans': '提及 (@)', 'zh-Hant': '提及 (@)', ja: 'メンション (@)', ko: '멘션 (@)' },
+  teams_composer_mention_options: { en: 'Mention suggestions', 'zh-Hans': '提及候选', 'zh-Hant': '提及候選', ja: 'メンション候補', ko: '멘션 후보' },
   teams_composer_note_bot_dm: { en: 'Messages ask this Bot automatically. Its maintainer can read this conversation.', 'zh-Hans': '发送消息会请求此 Bot。其维护者可阅读此会话。', 'zh-Hant': '傳送訊息會請求此 Bot。其維護者可閱讀此會話。', ja: 'メッセージを送ると、この Bot に自動で依頼されます。メンテナーはこの会話を読めます。', ko: '메시지를 보내면 이 Bot에게 자동으로 요청됩니다. 메인테이너가 이 대화를 읽을 수 있습니다.' },
   teams_composer_note_group: { en: 'Type @ to ask a Bot. Only Bots chosen from the list run.', 'zh-Hans': '输入 @ 请求 Bot。仅从列表中选择的 Bot 会执行。', 'zh-Hant': '輸入 @ 請求 Bot。僅從清單中選擇的 Bot 會執行。', ja: 'Bot に依頼するには @ を入力します。一覧から選んだ Bot だけが実行されます。', ko: 'Bot에게 요청하려면 @를 입력하세요. 목록에서 선택한 Bot만 실행됩니다.' },
   teams_composer_note_offline: { en: 'Offline: messages are saved and sent when you reconnect.', 'zh-Hans': '当前离线：消息将保存并在联网后发送。', 'zh-Hant': '目前離線：訊息將儲存並在連線後傳送。', ja: 'オフライン: メッセージは保存され、再接続後に送信されます。', ko: '오프라인: 메시지는 저장되었다가 다시 연결되면 전송됩니다.' },
@@ -1206,6 +1209,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_error_invalid_data: { en: 'Some of this team’s data is in an unsupported format and cannot be shown.', 'zh-Hans': '此团队的部分数据格式不受支持，无法显示。', 'zh-Hant': '此團隊的部分資料格式不受支援，無法顯示。', ja: 'このチームの一部のデータは未対応の形式のため表示できません。', ko: '이 팀의 일부 데이터가 지원되지 않는 형식이라 표시할 수 없습니다.' },
   teams_error_list_full: { en: 'The list is full. Remove some items before adding more.', 'zh-Hans': '清单已满，请先移除一些条目再添加。', 'zh-Hant': '清單已滿，請先移除一些項目再新增。', ja: 'リストがいっぱいです。追加する前にいくつか項目を削除してください。', ko: '목록이 가득 찼습니다. 더 추가하려면 먼저 일부 항목을 제거하세요.' },
   teams_error_list_unavailable: { en: 'This list is no longer available.', 'zh-Hans': '此清单已不可用。', 'zh-Hant': '此清單已無法使用。', ja: 'このリストは利用できなくなりました。', ko: '이 목록은 더 이상 사용할 수 없습니다.' },
+  teams_error_mention_target: { en: 'A mentioned member is no longer available. Copy the message into a new draft and update the mention.', 'zh-Hans': '有被提及的成员已不可用。请将消息复制到新草稿并更新提及。', 'zh-Hant': '有被提及的成員已無法使用。請將訊息複製到新草稿並更新提及。', ja: 'メンションしたメンバーを選択できなくなりました。メッセージを新しい下書きにコピーし、メンションを更新してください。', ko: '멘션한 멤버를 더 이상 선택할 수 없습니다. 메시지를 새 초안에 복사하고 멘션을 업데이트하세요.' },
   teams_error_ops_conflict: { en: 'This was already decided differently. Reload to see the current state.', 'zh-Hans': '此项已有不同的处理结果，请重新加载查看当前状态。', 'zh-Hant': '此項已有不同的處理結果，請重新載入查看目前狀態。', ja: 'すでに別の結果で確定されています。再読み込みして現在の状態を確認してください。', ko: '이미 다른 결과로 확정되었습니다. 다시 불러와 현재 상태를 확인해 주세요.' },
   teams_error_ops_maintainer: { en: 'Only the Bot’s maintainer can confirm what happened.', 'zh-Hans': '只有 Bot 维护者可以确认实际结果。', 'zh-Hant': '只有 Bot 維護者可以確認實際結果。', ja: '実際の結果を確定できるのは Bot の管理者だけです。', ko: 'Bot 관리자만 실제 결과를 확정할 수 있습니다.' },
   teams_error_ops_running: { en: 'The task is still running and may report the result itself. Try again after it stops.', 'zh-Hans': '任务仍在运行，可能会自行报告结果。请在任务停止后重试。', 'zh-Hant': '任務仍在執行，可能會自行回報結果。請在任務停止後重試。', ja: 'タスクはまだ実行中で、自身で結果を報告する可能性があります。停止してからもう一度お試しください。', ko: '작업이 아직 실행 중이며 스스로 결과를 보고할 수 있습니다. 작업이 멈춘 뒤 다시 시도해 주세요.' },

@@ -679,6 +679,16 @@
       "indexes": []
     },
     {
+      "collectionGroup": "messages",
+      "fieldPath": "mentionEntities",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "messages",
+      "fieldPath": "mentionRecipientUids",
+      "indexes": []
+    },
+    {
       "collectionGroup": "artifacts",
       "fieldPath": "document",
       "indexes": []

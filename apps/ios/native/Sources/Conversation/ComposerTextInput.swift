@@ -15,9 +15,15 @@ struct ComposerTextInput: UIViewRepresentable {
     var onDismissCommandSurface: (() -> Void)? = nil
     var historySessionKey: String = ""
     var historyMessages: [String] = []
+    var selection: Binding<NSRange?>? = nil
+    var onEdit: ((String, NSRange?, Int) -> Void)? = nil
+    var submitsOnReturn = true
+    var maxLines = 5
+    var accessibilityIdentifier = "composer.input"
 
     func makeUIView(context: Context) -> ComposerInputView {
         let view = ComposerInputView()
+        if !submitsOnReturn { view.textView.inputAccessoryView = nil }
         view.textView.delegate = context.coordinator
         context.coordinator.view = view
         view.onMoveToWindow = { [weak coordinator = context.coordinator] in
@@ -33,14 +39,24 @@ struct ComposerTextInput: UIViewRepresentable {
         let font = UIFont.preferredFont(forTextStyle: .body)
         view.updateAppearance(font: font, textColor: UIColor(textColor), hintColor: UIColor(hintColor))
         view.placeholderLabel.text = placeholder
+        view.textView.returnKeyType = submitsOnReturn ? .send : .default
+        view.textView.allowsShiftReturn = submitsOnReturn
+        view.textView.accessibilityIdentifier = accessibilityIdentifier
         view.textView.acceptSuggestion = onAcceptSuggestion
         view.textView.dismissCommandSurface = onDismissCommandSurface
         view.textView.configureHistory(sessionKey: historySessionKey, messages: historyMessages)
-        view.textView.accessibilityLabel = String(localized: "composer_placeholder")
+        view.textView.accessibilityLabel = onEdit == nil ? String(localized: "composer_placeholder") : placeholder
 
-        if view.textView.text != text {
+        if !(view.textView.text ?? "").utf16.elementsEqual(text.utf16) {
+            coordinator.pendingEdit = nil
             view.textView.text = text
             view.textView.selectedRange = NSRange(location: text.utf16.count, length: 0)
+            view.scrollSelectionAfterLayout = true
+        }
+        if let range = selection?.wrappedValue, range.location <= text.utf16.count,
+           range.length <= text.utf16.count - range.location,
+           view.textView.selectedRange != range, view.textView.markedTextRange == nil {
+            view.textView.selectedRange = range
             view.scrollSelectionAfterLayout = true
         }
         coordinator.updating = false
@@ -54,7 +70,7 @@ struct ComposerTextInput: UIViewRepresentable {
         guard let width = proposal.width, width > 0 else { return nil }
         let lineHeight = uiView.textView.font?.lineHeight ?? 19
         let height = uiView.textView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
-        return CGSize(width: width, height: ceil(min(max(height, lineHeight), lineHeight * 5)))
+        return CGSize(width: width, height: ceil(min(max(height, lineHeight), lineHeight * CGFloat(maxLines))))
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
@@ -64,6 +80,7 @@ struct ComposerTextInput: UIViewRepresentable {
         weak var view: ComposerInputView?
         var updating = false
         private var focusSynchronizationScheduled = false
+        fileprivate var pendingEdit: (expected: String, range: NSRange)?
 
         init(parent: ComposerTextInput) {
             self.parent = parent
@@ -116,13 +133,23 @@ struct ComposerTextInput: UIViewRepresentable {
             if let editor = textView as? ComposerEditingTextView, !editor.recallingHistory {
                 editor.promptHistory.reset()
             }
-            parent.text = textView.text
+            let text = textView.text ?? ""
+            if let onEdit = parent.onEdit {
+                let range = pendingEdit.flatMap { $0.expected.utf16.elementsEqual(text.utf16) ? $0.range : nil }
+                pendingEdit = nil
+                onEdit(text, range, NSMaxRange(textView.selectedRange))
+            } else {
+                parent.text = text
+            }
             refreshHint()
             view?.invalidateIntrinsicContentSize()
         }
 
         func textViewDidChangeSelection(_ textView: UITextView) {
-            if !updating { refreshHint() }
+            if !updating {
+                parent.selection?.wrappedValue = textView.selectedRange
+                refreshHint()
+            }
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
@@ -130,9 +157,19 @@ struct ComposerTextInput: UIViewRepresentable {
         }
 
         func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
-            if text == "\n", textView.markedTextRange == nil {
+            if parent.submitsOnReturn, text == "\n", textView.markedTextRange == nil {
                 parent.onSubmit()
                 return false
+            }
+            if let onEdit = parent.onEdit {
+                let before = textView.text ?? ""
+                let expected = (before as NSString).replacingCharacters(in: range, with: text)
+                if range.length > 0, expected.utf16.elementsEqual(before.utf16) {
+                    pendingEdit = nil
+                    onEdit(expected, range, range.location + text.utf16.count)
+                } else {
+                    pendingEdit = (expected, range)
+                }
             }
             return true
         }
@@ -224,6 +261,7 @@ final class ComposerInputView: UIView {
 }
 
 final class ComposerEditingTextView: UITextView {
+    var allowsShiftReturn = true
     var acceptSuggestion: (() -> Void)?
     var promptHistory = ComposerPromptHistory()
     private var historySessionKey = ""
@@ -269,7 +307,7 @@ final class ComposerEditingTextView: UITextView {
             command.wantsPriorityOverSystemBehavior = true
             commands.append(command)
         }
-        commands.append(UIKeyCommand(input: "\r", modifierFlags: .shift, action: #selector(insertLineBreak)))
+        if allowsShiftReturn { commands.append(UIKeyCommand(input: "\r", modifierFlags: .shift, action: #selector(insertLineBreak))) }
         if acceptSuggestion != nil {
             for input in ["\t", UIKeyCommand.inputRightArrow] {
                 let command = UIKeyCommand(input: input, modifierFlags: [], action: #selector(useSuggestion))

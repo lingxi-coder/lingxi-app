@@ -1,3 +1,4 @@
+import { messageMentionRecipients } from './team-mentions.mjs';
 import { startReadBatch, readBatchStatus } from './inbox-batch.mjs';
 import { FieldValue } from 'firebase-admin/firestore';
 import { isDeepStrictEqual } from 'node:util';
@@ -216,21 +217,12 @@ async function advanceSharedIndex(db, thread, stats) {
       const result =
         m.author?.kind === 'shared_bot' && typeof m.deliveryId === 'string' && typeof m.taskId === 'string';
       if (!human && !result) continue;
-      const mentions =
-        human && Array.isArray(m.mentions)
-          ? m.mentions
-              .flatMap(v => {
-                if (typeof v !== 'string' || !v || v.length > 133) return [];
-                return v.startsWith('user:') ? [v, v.slice(5)] : [v];
-              })
-              .filter(v => v && v !== m.author.uid)
-          : [];
       writes++;
       tx.set(doc, {
         seq: m.seq,
         at: millis(m.createdAt),
         actor: human ? 'user:' + m.author.uid : 'assistant',
-        mentions: [...new Set(mentions)]
+        mentions: human ? messageMentionRecipients(m) : []
       });
     }
     const revision = page.entries.at(-1).seq;

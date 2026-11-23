@@ -1,6 +1,9 @@
 package com.lingxi.code.teams
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.Arrangement
@@ -22,11 +25,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -39,7 +47,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
@@ -48,26 +55,33 @@ import com.lingxi.code.conversation.AudioSetupBanner
 import com.lingxi.code.conversation.ComposerInputSurface
 import com.lingxi.code.conversation.ComposerSendButton
 import com.lingxi.code.theme.BotAvatar
+import com.lingxi.code.theme.PersonAvatar
 import com.lingxi.code.theme.LingXiTheme
+import kotlinx.coroutines.channels.Channel
+
+private data class TeamEditorReplacement(val original: TextRange, val insertedLength: Int)
+private data class TeamEditorEdit(val text: String, val replacements: List<TeamEditorReplacement>)
 
 /**
  * The composer of a conversation (SPEC-mobile-team-bot-ui section 6.3): a growing field, reply and edit bars, the `@` picker and
  * Bot chips for groups and channels, the lock explanations and the footnotes. The unsent text lives in the workspace's in-memory
  * draft of the conversation; [onSend] hands the text over and the caller clears the draft once the command is journaled.
  */
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
 internal fun TeamComposer(
     conversation: TeamMessageConversation, label: String, uid: String, messaging: TeamMessagingState, draft: ComposerDraft,
     replyTo: TeamMessage?, editing: TeamMessage?, replyAuthor: String,
     onDraft: (ComposerDraft) -> Unit, onCancelReply: () -> Unit, onCancelEdit: () -> Unit,
-    onSend: (text: String, targets: List<String>, done: () -> Unit) -> Unit, modifier: Modifier = Modifier,
+    onSend: (text: String, targets: List<String>, mentions: List<TeamMentionEntity>, done: () -> Unit) -> Unit, modifier: Modifier = Modifier,
+    members: List<TeamMember> = emptyList(),
     /** The files of the unsent message and the chosen ones that were not taken. Empty while a message is edited or a Bot's question is answered: neither carries files, and the files wait in the draft. */
     files: List<TeamDraftFile> = emptyList(), refusals: List<TeamFileRefusal> = emptyList(),
     /** Null where files cannot be added now. */
     onChooseFiles: ((List<TeamChosenFile>) -> Unit)? = null, onRemoveFile: (String) -> Unit = {}, onDismissRefusals: () -> Unit = {},
     /** What the unsent message belongs to (the workspace's draft key). Words spoken into the box are for it alone. Null: no microphone here. */
     voiceTarget: String? = null,
+    readDraft: () -> ComposerDraft = { draft },
 ) {
     val bots = messaging.bots
     val lock = TeamsComposeLogic.composerLock(uid, conversation.kind, conversation.participants, bots, messaging.botsLoaded, messaging.botsFailed, conversation.readers)
@@ -86,35 +100,101 @@ internal fun TeamComposer(
         }
         return
     }
-    var field by remember(conversation.id, editing?.id) {
-        val start = if (editing != null) editing.text else draft.text
-        mutableStateOf(TextFieldValue(start, TextRange(start.length)))
+    val field = remember(conversation.id, editing?.id) {
+        TextFieldState(editing?.text ?: draft.text)
     }
-    androidx.compose.runtime.LaunchedEffect(draft.text, editing?.id) {
-        if (editing == null && field.text != draft.text) field = TextFieldValue(draft.text, TextRange(draft.text.length))
+    val text = field.text.toString()
+    var entities by remember(field) {
+        mutableStateOf(if (editing != null) editing.mentionEntities else draft.mentionEntities)
+    }
+    var trackedText by remember(field) { mutableStateOf(text) }
+    val editEvents = remember(field) { Channel<TeamEditorEdit>(Channel.UNLIMITED) }
+    val persistDraft by rememberUpdatedState<(String, Set<String>, List<TeamMentionEntity>) -> Unit> { value, targets, mentions ->
+        if (editing == null) onDraft(readDraft().copy(text = value, targets = targets, mentionEntities = mentions))
+    }
+    val readLatestDraft by rememberUpdatedState(readDraft)
+
+    fun applyEdit(edit: TeamEditorEdit) {
+        val shifted = edit.replacements.fold(entities) { remaining, (range, inserted) ->
+            TeamMentionEntity.replacing(remaining, range.min, range.max, inserted)
+        }
+        entities = shifted
+        trackedText = edit.text
+        persistDraft(edit.text, readLatestDraft().targets, shifted)
+    }
+
+    fun finishUserEdits() {
+        while (true) applyEdit(editEvents.tryReceive().getOrNull() ?: break)
+        // Some framework actions, such as undo, can update the state outside the input transformation.
+        val latest = field.text.toString()
+        if (trackedText != latest) {
+            entities = TeamMentionEntity.shifted(entities, trackedText, latest, caretAfter = field.selection.end)
+            trackedText = latest
+            persistDraft(latest, readLatestDraft().targets, entities)
+        }
+    }
+
+    LaunchedEffect(field) {
+        for (edit in editEvents) applyEdit(edit)
+    }
+    LaunchedEffect(field) {
+        snapshotFlow { field.text.toString() }.collect { finishUserEdits() }
+    }
+    LaunchedEffect(draft.text, draft.mentionEntities, field) {
+        if (editing == null) {
+            finishUserEdits()
+            val latest = readDraft()
+            if (field.text.toString() != latest.text) field.edit {
+                replace(0, length, latest.text)
+                selection = TextRange(length)
+            }
+            entities = latest.mentionEntities
+            trackedText = latest.text
+        }
     }
     val askable = conversation.kind == "group" || conversation.kind == "channel"
     val viewer = messaging.cache?.let { TeamMemberRef(uid, it.generation) }
     val answeringWait = TeamTaskActions.answerableWait(replyTo, messaging.tasks, viewer, TeamTaskActions.pendingWaitIds(messaging.cache?.outbox.orEmpty())) != null
-    val mention = if (askable && editing == null && !answeringWait) TeamsComposeLogic.mentionAt(field.text, field.selection.end) else null
-    val candidates = if (mention != null && draft.targets.size < TeamsComposeLogic.MAX_TARGETS) TeamsComposeLogic.mentionCandidates(bots, conversation, draft.targets, mention.query) else emptyList()
+    val canMention = askable && !answeringWait
+    val roster = remember(members, conversation.participants, uid, askable) {
+        val participants = conversation.participants.toSet()
+        if (askable) members.mapNotNull { member ->
+            if (member.uid == uid || "user:${member.uid}" !in participants ||
+                member.displayName.any { it == '\n' || it == '\r' }) return@mapNotNull null
+            val key = TeamMentionEntity.searchKey(member.displayName)
+            if (key.isBlank()) null else member to key
+        } else emptyList()
+    }
+    val nameCounts = remember(roster) { roster.groupingBy { it.second }.eachCount() }
+    val mention = if (canMention && !messaging.submitting && field.selection.collapsed) TeamMentionEntity.at(text, field.selection.end, entities) else null
+    val people = if (mention != null && entities.size < TeamMentionEntity.LIMIT) {
+        val needle = TeamMentionEntity.searchKey(mention.query)
+        roster.filter { (_, key) -> key.contains(needle) }
+    } else emptyList()
+    val candidates = if (mention != null && editing == null && draft.targets.size < TeamsComposeLogic.MAX_TARGETS)
+        TeamsComposeLogic.mentionCandidates(bots, conversation, draft.targets, mention.query) else emptyList()
     val staleTargets = if (editing == null && askable && !answeringWait) composerStaleTargets(draft.targets, bots, conversation) else emptySet()
     val staleBotDm = conversation.kind == "bot_dm" && conversation.sharedBotIds.size != 1
-    val tooLong = TeamsComposeLogic.byteLength(field.text) > TeamsComposeLogic.MESSAGE_BYTES
+    val tooLong = TeamsComposeLogic.byteLength(text) > TeamsComposeLogic.MESSAGE_BYTES
     val requestTargets = if (conversation.kind == "bot_dm") conversation.sharedBotIds else draft.targets
     val blockedBots = TeamBotEntry.blockedRequests(requestTargets, bots, editing != null || answeringWait)
-    val canSend = TeamAttachments.canSend(field.text, files) && !messaging.submitting && blockedBots.isEmpty() && (editing != null || (staleTargets.isEmpty() && !staleBotDm))
+    val canSend = TeamAttachments.canSend(text, files) && !messaging.submitting && blockedBots.isEmpty() && (editing != null || (staleTargets.isEmpty() && !staleBotDm))
     val hasAskableBots = askable && bots.any { it.selectable && "shared_bot:${it.sharedBotId}" in conversation.participants }
-    fun update(value: TextFieldValue, targets: Set<String> = draft.targets) {
-        field = value
-        // While editing, the field holds the edited message; the unsent draft keeps what was typed before.
-        if (editing == null) onDraft(draft.copy(text = value.text, targets = targets, replyToId = replyTo?.id))
+    fun update(value: String, caret: TextRange = TextRange(value.length), targets: Set<String> = draft.targets,
+               mentions: List<TeamMentionEntity> = entities) {
+        field.edit {
+            if (asCharSequence().toString() != value) replace(0, length, value)
+            selection = caret
+        }
+        entities = mentions
+        trackedText = value
+        persistDraft(value, targets, mentions)
     }
 
     // Spoken words are added to the box, to be read, changed and sent by hand. A message being changed is another box.
     val voice = if (voiceTarget == null) null else rememberTeamVoice("$voiceTarget:${editing?.id.orEmpty()}") { heard ->
-        val text = TeamsComposeLogic.appendingTranscript(heard, field.text)
-        update(TextFieldValue(text, TextRange(text.length)))
+        finishUserEdits()
+        update(TeamsComposeLogic.appendingTranscript(heard, field.text.toString()))
     }
 
     Column(modifier.fillMaxWidth()) {
@@ -122,20 +202,52 @@ internal fun TeamComposer(
         val openVoiceSettings = LocalOpenVoiceSettings.current
         voice?.guidance?.let { AudioSetupBanner(it, onConfigure = openVoiceSettings, onDismiss = voice.dismiss) }
         if (voice?.listening == true) TeamVoiceListening()
-        if (candidates.isNotEmpty()) {
+        if (people.isNotEmpty() || candidates.isNotEmpty()) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                Text(stringResource(R.string.teams_composer_bots_can_ask), Modifier.semantics { heading() }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                candidates.forEach { bot ->
-                    Row(
-                        Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) {
-                            val at = requireNotNull(mention)
-                            val cleaned = TeamsComposeLogic.withoutMention(field.text, at.start, field.selection.end)
-                            update(TextFieldValue(cleaned, TextRange(at.start.coerceAtMost(cleaned.length))), draft.targets + bot.sharedBotId)
-                        },
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
-                        BotAvatar(bot.avatarId, 24.dp)
-                        Text(bot.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(stringResource(R.string.teams_composer_mention_options), Modifier.semantics { heading() }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                LazyColumn(Modifier.heightIn(max = 192.dp)) {
+                    items(people, key = { "user:${it.first.uid}" }) { (member, key) ->
+                        Row(
+                            Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) {
+                                finishUserEdits()
+                                val currentText = field.text.toString()
+                                val at = TeamMentionEntity.at(currentText, field.selection.end, entities) ?: return@clickable
+                                val label = "@" + member.displayName.trim()
+                                val end = TeamMentionEntity.replacementEnd(currentText, at.start, field.selection.end, member.displayName)
+                                val rest = currentText.substring(end)
+                                val separator = if (TeamMentionEntity.needsSeparator(rest)) " " else ""
+                                val next = currentText.substring(0, at.start) + label + separator + rest
+                                val selected = TeamMentionEntity(member.uid, at.start, label.length)
+                                val shifted = TeamMentionEntity.replacing(entities, at.start, end, label.length + separator.length)
+                                val caret = at.start + label.length + if (separator.isNotEmpty() || rest.startsWith(' ')) 1 else 0
+                                update(next, TextRange(caret), mentions = (shifted + selected).sortedBy { it.offset })
+                            },
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            PersonAvatar(member.uid, member.displayName, 24.dp)
+                            Text(member.displayName, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (nameCounts.getOrDefault(key, 0) > 1) {
+                                Text(member.uid, Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                    items(candidates, key = { "bot:${it.sharedBotId}" }) { bot ->
+                        Row(
+                            Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) {
+                                finishUserEdits()
+                                val currentText = field.text.toString()
+                                val at = TeamMentionEntity.at(currentText, field.selection.end, entities) ?: return@clickable
+                                val end = TeamMentionEntity.replacementEnd(currentText, at.start, field.selection.end, bot.name)
+                                val cleaned = TeamsComposeLogic.withoutMention(currentText, at.start, end)
+                                val removed = currentText.length - cleaned.length
+                                val shifted = TeamMentionEntity.replacing(entities, at.start, at.start + removed, 0)
+                                update(cleaned, TextRange(at.start.coerceAtMost(cleaned.length)), draft.targets + bot.sharedBotId, shifted)
+                            },
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            BotAvatar(bot.avatarId, 24.dp)
+                            Text(bot.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                     }
                 }
             }
@@ -163,7 +275,10 @@ internal fun TeamComposer(
                         val name = bot?.name ?: stringResource(R.string.teams_bot_tag)
                         val remove = stringResource(R.string.teams_composer_remove_bot_fmt, name)
                         InputChip(
-                            selected = false, onClick = { update(field, draft.targets - key) },
+                            selected = false, onClick = {
+                                finishUserEdits()
+                                update(field.text.toString(), field.selection, draft.targets - key)
+                            },
                             label = { Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                             leadingIcon = { BotAvatar(bot?.avatarId ?: key, 20.dp) },
                             trailingIcon = { Icon(Icons.Outlined.Close, null, Modifier.size(16.dp)) },
@@ -182,33 +297,48 @@ internal fun TeamComposer(
             val placeholder = if (editing != null) stringResource(R.string.teams_composer_edit_hint)
                 else stringResource(R.string.teams_composer_hint_fmt, if (conversation.kind == "channel") "#$label" else label)
             BasicTextField(
-                value = field, onValueChange = { update(it) }, minLines = 1, maxLines = 6, enabled = !messaging.submitting,
+                state = field, lineLimits = TextFieldLineLimits.MultiLine(minHeightInLines = 1, maxHeightInLines = 6),
+                enabled = !messaging.submitting,
+                inputTransformation = {
+                    if (changes.changeCount > 0) {
+                        // The edit log distinguishes a same-text replacement from a selection change.
+                        val ranges = (changes.changeCount - 1 downTo 0).map { index ->
+                            TeamEditorReplacement(changes.getOriginalRange(index), changes.getRange(index).length)
+                        }
+                        editEvents.trySend(TeamEditorEdit(asCharSequence().toString(), ranges))
+                    }
+                },
                 textStyle = MaterialTheme.typography.bodyLarge.copy(color = palette.text),
                 cursorBrush = SolidColor(palette.accent),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp)
                     .focusRequester(focus).testTag(TeamsTags.COMPOSER_FIELD),
-                decorationBox = { inner ->
+                decorator = { inner ->
                     Box {
-                        if (field.text.isEmpty()) Text(placeholder, color = palette.text4, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (text.isEmpty()) Text(placeholder, color = palette.text4, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         inner()
                     }
                 },
             )
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 if (onChooseFiles != null) TeamAttachButton(enabled = files.size < TeamAttachments.MESSAGE_FILES && !messaging.submitting, onChosen = onChooseFiles)
-                if (hasAskableBots && editing == null && !answeringWait) {
+                if (canMention) {
                     IconButton(
-                        enabled = !messaging.submitting && draft.targets.size < TeamsComposeLogic.MAX_TARGETS,
+                        enabled = !messaging.submitting && ((roster.isNotEmpty() && entities.size < TeamMentionEntity.LIMIT)
+                            || (hasAskableBots && editing == null && draft.targets.size < TeamsComposeLogic.MAX_TARGETS)),
                         onClick = {
-                            val caret = field.selection.end
-                            val before = field.text.substring(0, caret)
+                            finishUserEdits()
+                            val currentText = field.text.toString()
+                            val start = field.selection.min
+                            val end = field.selection.max
+                            val before = currentText.substring(0, start)
                             val token = if (before.isEmpty() || before.last().isWhitespace()) "@" else " @"
-                            update(TextFieldValue(before + token + field.text.substring(caret), TextRange(caret + token.length)))
+                            val shifted = TeamMentionEntity.replacing(entities, start, end, token.length)
+                            update(before + token + currentText.substring(end), TextRange(start + token.length), mentions = shifted)
                             focus.requestFocus()
                         },
                         modifier = Modifier.testTag(TeamsTags.ASK_BOT),
                     ) {
-                        val description = stringResource(R.string.teams_composer_ask_bot)
+                        val description = stringResource(R.string.teams_composer_mention)
                         Text("@", Modifier.semantics { contentDescription = description }, style = MaterialTheme.typography.titleMedium)
                     }
                 }
@@ -220,9 +350,20 @@ internal fun TeamComposer(
                     icon = if (editing != null) LXIconName.Check else LXIconName.ArrowUp,
                     modifier = Modifier.testTag(TeamsTags.SEND),
                     onClick = {
-                        val submitted = field.text
-                        onSend(submitted, if (editing == null && askable && !answeringWait) draft.targets.sorted() else emptyList()) {
-                            if (field.text == submitted) field = TextFieldValue("")
+                        finishUserEdits()
+                        val submitted = field.text.toString()
+                        val submittedEntities = entities
+                        val mentions = if (canMention) TeamMentionEntity.valid(submittedEntities, submitted)
+                            .filter { "user:${it.userId}" in conversation.participants } else emptyList()
+                        onSend(submitted, if (editing == null && askable && !answeringWait) draft.targets.sorted() else emptyList(), mentions) {
+                            if (field.text.toString() == submitted && entities == submittedEntities) {
+                                field.edit {
+                                    replace(0, length, "")
+                                    selection = TextRange.Zero
+                                }
+                                trackedText = ""
+                                entities = emptyList()
+                            }
                         }
                     },
                 )

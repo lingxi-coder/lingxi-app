@@ -1,3 +1,4 @@
+import { mentionSearchKey } from './mentions.js';
 import { sharedBotUsable, type SharedBotCard } from './execution.js';
 import type { TeamConversation } from './messages.js';
 
@@ -47,8 +48,8 @@ export function withoutMention(text: string, start: number, caret: number): stri
  */
 export function mentionCandidates(bots: readonly SharedBotCard[], conversation: Pick<TeamConversation, 'kind' | 'participants'>, chosen: readonly string[], query: string): SharedBotCard[] {
   if (conversation.kind !== 'group' && conversation.kind !== 'channel') return [];
-  const needle = query.trim().toLowerCase();
-  return bots.filter(bot => sharedBotUsable(bot) && conversation.participants.includes(`shared_bot:${bot.sharedBotId}`) && !chosen.includes(bot.sharedBotId) && (!needle || bot.name.toLowerCase().includes(needle)));
+  const needle = mentionSearchKey(query);
+  return bots.filter(bot => sharedBotUsable(bot) && conversation.participants.includes(`shared_bot:${bot.sharedBotId}`) && !chosen.includes(bot.sharedBotId) && (!needle || mentionSearchKey(bot.name).includes(needle)));
 }
 
 /** One line of a message for a quote or a reply bar: whitespace collapsed, cut at `length` characters. */

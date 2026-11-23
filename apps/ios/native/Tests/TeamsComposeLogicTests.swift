@@ -1,3 +1,5 @@
+import SwiftUI
+import UIKit
 import XCTest
 
 @testable import LingxiCode
@@ -70,6 +72,57 @@ final class TeamsComposeLogicTests: XCTestCase {
                 XCTAssertNil(result, "'\(text)'")
             }
         }
+    }
+
+    func testMemberMentionEditorVectors() throws {
+        struct Shift: Decodable {
+            var before, after: String
+            var offset, length: Int
+            var selectionStart, selectionEnd, caretAfter, expectedOffset: Int?
+        }
+        struct Replacement: Decodable {
+            var text, name: String
+            var start, caret, end: Int
+        }
+        struct Rows: Decodable { var shifts: [Shift]; var replacements: [Replacement] }
+        let json = try JSONSerialization.data(withJSONObject: vectors("memberMentions", as: [String: Any].self))
+        let rows = try JSONDecoder().decode(Rows.self, from: json)
+        for row in rows.shifts {
+            let original = TeamMentionEntity(userId: "member", offset: row.offset, length: row.length)
+            let selection = row.selectionStart.flatMap { start in row.selectionEnd.map { start..<$0 } }
+            let shifted = TeamMentionEntity.shifted([original], from: row.before, to: row.after,
+                                                   selection: selection, caretAfter: row.caretAfter)
+            let expected = row.expectedOffset.map { [TeamMentionEntity(userId: "member", offset: $0, length: row.length)] } ?? []
+            XCTAssertEqual(shifted, expected, row.after)
+        }
+        for row in rows.replacements {
+            XCTAssertEqual(TeamMentionEntity.replacementEnd(row.text, start: row.start, caret: row.caret, name: row.name), row.end, row.text)
+        }
+    }
+
+    @MainActor
+    func testNativeComposerReportsExactBackspaceRange() {
+        var text = "@Annaa "
+        let mention = TeamMentionEntity(userId: "member", offset: 0, length: 5)
+        var entities = [mention]
+        let input = ComposerTextInput(text: .constant(text), isFocused: .constant(false), placeholder: "",
+                                      textColor: .primary, hintColor: .secondary, argumentHint: { _, _ in nil },
+                                      onSubmit: {}, onAcceptSuggestion: nil, onEdit: { updated, edited, caret in
+            entities = TeamMentionEntity.shifted(entities, from: text, to: updated,
+                                                 selection: edited.map { $0.location..<NSMaxRange($0) },
+                                                 caretAfter: edited == nil ? caret : nil)
+            text = updated
+        }, submitsOnReturn: false)
+        let view = UITextView()
+        view.text = text
+        let delegate = input.makeCoordinator()
+        XCTAssertTrue(delegate.textView(view, shouldChangeTextIn: NSRange(location: 5, length: 1), replacementText: ""))
+        view.text = "@Anna "
+        // Simulate a selection callback that still has the pre-edit caret.
+        view.selectedRange = NSRange(location: 6, length: 0)
+        delegate.textViewDidChange(view)
+        XCTAssertEqual(text, "@Anna ")
+        XCTAssertEqual(entities, [mention])
     }
 
     func testMentionAtEdges() {

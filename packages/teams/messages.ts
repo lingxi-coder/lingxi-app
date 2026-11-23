@@ -1,3 +1,4 @@
+import type { MentionEntity } from './mentions.js';
 import type { ResourceRef } from './dataset-resource.js';
 import { parseDataRef, type DataRef } from './lingxi-data.js';
 import { isMemberExecutionCommand } from './execution-validation.js';
@@ -41,6 +42,7 @@ export interface TeamMessage {
   /** On the requester's reply to such a request. */
   decision?: 'approve' | 'deny';
   mentions?: string[];
+  mentionEntities?: MentionEntity[];
   /** Files the message carries, in the order they were added. */
   attachments?: MessageAttachment[];
   dataRef?: DataRef;
@@ -51,7 +53,7 @@ export interface TeamMessage {
 }
 export interface MessageScope { teamId: string; generation: number }
 export type MessageMutation = MessageScope & { action: 'mutate'; conversationId: string; messageId: string; changeId: string;
-  operation: 'create' | 'edit' | 'recall'; text: string; replyTo?: string; dataRef?: DataRef };
+  operation: 'create' | 'edit' | 'recall'; text: string; replyTo?: string; dataRef?: DataRef; mentionEntities?: MentionEntity[] };
 export type MessageCommand = MessageMutation | MemberExecutionCommand
   | MessageScope & { action: 'create'; conversationId: string; kind: TeamConversation['kind']; title: string; participantUids: string[];  }
   | MessageScope & { action:'history';conversationId:string;before?:number }
@@ -150,7 +152,7 @@ function failedCommand<T extends CommandMetadata>(intent: T, error: unknown, per
 /** Server verdicts that end an answer to a Bot's question for good: the wait is over, is not the viewer's, or the task lost its authority. */
 export const ANSWER_REFUSED = ['WAIT_CLOSED', 'WAIT_RECIPIENT_REQUIRED', 'WAIT_REQUIRED', 'TASK_REVOKED'];
 const isRevokedAccessError = (error: unknown) => error instanceof Error && ['MEMBERSHIP_REQUIRED', 'STALE_MEMBERSHIP', 'INVALID_SESSION', 'SIGN_IN_REQUIRED', 'CONVERSATION_REQUIRED'].includes(error.message);
-const isPermanentMessageError = (error: unknown) => error instanceof Error && ['MESSAGE_ID_CONFLICT', 'DATA_REFERENCE_UNAVAILABLE', 'DATA_ACCESS_REQUIRED', 'DATA_NOT_FOUND', 'MESSAGE_RECALLED', 'MESSAGE_AUTHOR_REQUIRED', 'REPLY_REQUIRED', 'INVALID_INPUT', 'BOT_USE_REQUIRED', 'BOT_PARTICIPANT_REQUIRED', 'INVALID_BOT_TARGET', 'HOST_UNAVAILABLE', 'REQUEST_QUOTA_EXCEEDED', 'CONVERSATION_POLICY_REQUIRED', 'INPUT_GRANT_REQUIRED', 'BOT_RETIRED', 'COMMAND_ID_CONFLICT', ...ANSWER_REFUSED].includes(error.message);
+const isPermanentMessageError = (error: unknown) => error instanceof Error && ['MESSAGE_ID_CONFLICT', 'DATA_REFERENCE_UNAVAILABLE', 'DATA_ACCESS_REQUIRED', 'DATA_NOT_FOUND', 'MESSAGE_RECALLED', 'MESSAGE_AUTHOR_REQUIRED', 'REPLY_REQUIRED', 'MENTION_TARGET_REQUIRED', 'INVALID_INPUT', 'BOT_USE_REQUIRED', 'BOT_PARTICIPANT_REQUIRED', 'INVALID_BOT_TARGET', 'HOST_UNAVAILABLE', 'REQUEST_QUOTA_EXCEEDED', 'CONVERSATION_POLICY_REQUIRED', 'INPUT_GRANT_REQUIRED', 'BOT_RETIRED', 'COMMAND_ID_CONFLICT', ...ANSWER_REFUSED].includes(error.message);
 /** Persist command identities before transport; Firestore owns message history. */
 export class TeamMessaging {
   state: MessageProjection;
@@ -198,7 +200,7 @@ export class TeamMessaging {
       && (kind === 'creation' ? command.action === 'createConversation' : command.action === 'submit' || command.action === 'answerWait');
     // Human-message commands retain the existing transport; no execution targets are accepted here.
     const fields = kind === 'creation' ? ['action', 'teamId', 'generation', 'conversationId', 'kind', 'title', 'participantUids']
-      : ['action', 'teamId', 'generation', 'conversationId', 'messageId', 'changeId', 'operation', 'text', 'replyTo'];
+      : ['action', 'teamId', 'generation', 'conversationId', 'messageId', 'changeId', 'operation', 'text', 'replyTo', 'mentionEntities'];
     return command.action === (kind === 'creation' ? 'create' : 'mutate') && Object.keys(command).every(key => fields.includes(key));
   }
   private async reload(): Promise<void> {
@@ -314,7 +316,7 @@ export class TeamMessaging {
     return conversationId;
   }
   /** `attachments`: checked uploads of this sender for the open conversation. A new message may be files alone. */
-  async queue(operation: MessageMutation['operation'], text: string, messageId: string = crypto.randomUUID(), replyTo?: string, targets: string[] = [], attachments: string[] = [], dataRef?: DataRef, privateDataSource?: string) {
+  async queue(operation: MessageMutation['operation'], text: string, messageId: string = crypto.randomUUID(), replyTo?: string, targets: string[] = [], attachments: string[] = [], dataRef?: DataRef, privateDataSource?: string, mentionEntities?: MentionEntity[]) {
     if (this.closed || !this.selected || (operation !== 'recall' && ((!text.trim() && !attachments.length) || new TextEncoder().encode(text).length > 8192))) throw new Error('INVALID_INPUT');
     if (operation !== 'create' && (targets.length || attachments.length)) throw new Error('INVALID_BOT_TARGET');
     if (attachments.length > ATTACHMENT_MESSAGE_FILES || new Set(attachments).size !== attachments.length) throw new Error('ATTACHMENT_LIMIT');
@@ -330,8 +332,8 @@ export class TeamMessaging {
     const command: OutboxCommand = operation === 'create' && (selectedTargets.length || attachments.length)
       ? executionCommand(this.scope, 'submit', { conversationId: this.selected, messageId, changeId, text: text.trim() ? text : '', targets: [...selectedTargets],
         ...(replyTo ? { replyTo } : {}), ...(attachments.length ? { attachments: [...attachments] } : {}),
-        ...(privateDataSource ? { privateDataSource } : {}) })
-      : { action: 'mutate', ...this.scope, conversationId: this.selected, messageId, changeId, operation, text, ...(replyTo ? { replyTo } : {}), ...(dataRef ? { dataRef } : {}) };
+        ...(privateDataSource ? { privateDataSource } : {}), ...(mentionEntities?.length ? { mentionEntities } : {}) })
+      : { action: 'mutate', ...this.scope, conversationId: this.selected, messageId, changeId, operation, text, ...(replyTo ? { replyTo } : {}), ...(dataRef ? { dataRef } : {}), ...(mentionEntities !== undefined ? { mentionEntities } : {}) };
     await this.commit(old => ({ ...old, outbox: [...old.outbox, { command }] }));
     void this.refresh();
   }

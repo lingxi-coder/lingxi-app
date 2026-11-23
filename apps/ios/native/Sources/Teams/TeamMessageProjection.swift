@@ -128,6 +128,7 @@ struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
     let changeSeq: Int
     let changeId: String
     var mentions: [String]? = nil
+    var mentionEntities: [TeamMentionEntity]? = nil
     var taskIds: [String]? = nil
     var taskId: String? = nil
     var artifactId: String? = nil
@@ -171,6 +172,7 @@ struct TeamMessageIntent: Codable, Equatable, Identifiable, Sendable {
     var attachments: [String]? = nil
     /// Their names, for the pending bubble only.
     var attachmentNames: [String]? = nil
+    var mentionEntities: [TeamMentionEntity]? = nil
     var error: String?
     var leaseUntil: Double?
     var attempted: Bool?
@@ -183,6 +185,7 @@ struct TeamMessageIntent: Codable, Equatable, Identifiable, Sendable {
             return ["schemaVersion": 1, "commandId": changeId, "teamId": teamId, "generation": generation, "action": "answerWait", "payload": payload]
         }
         if let replyTo { payload["replyTo"] = replyTo }
+        if let mentionEntities { payload["mentionEntities"] = mentionEntities.map(\.json) }
         if operation == "create", !targets.isEmpty || !attachments.isEmpty {
             payload["targets"] = targets
             if !attachments.isEmpty { payload["attachments"] = attachments }

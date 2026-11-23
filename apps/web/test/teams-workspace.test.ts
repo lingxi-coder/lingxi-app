@@ -597,6 +597,32 @@ test('drafts are kept per team and conversation until they are emptied', async c
   workspace.setDraft('chan-a', ''); assert.equal(workspace.draft('chan-a'), '');
 });
 
+test('draft storage restores legacy mentions and writes text and ranges together', async context => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const values = new Map<string, string>();
+  const writes: string[] = [];
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { writes.push(key); values.set(key, value); },
+    removeItem: (key: string) => values.delete(key),
+  } });
+  context.after(() => { if (previous) Object.defineProperty(globalThis, 'localStorage', previous); else Reflect.deleteProperty(globalThis, 'localStorage'); });
+  const key = `${uid}:team-aaaa:1:draft-migration`, id = 'draft-migration';
+  const mentions = [{ userId: 'bob', offset: 0, length: 10 }];
+  values.set('lingxi.teamDraft.' + key, '@Mary Jane');
+  values.set('lingxi.teamDraftMentions.' + key, JSON.stringify({ text: '@Mary Jane', entities: mentions }));
+  const { workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
+  await until(() => !!snapshot().messaging, 'load');
+  assert.deepEqual(workspace.draftMentions(id), mentions);
+  writes.length = 0;
+  workspace.setDraft(id, '@Mary Jane, hi');
+  assert.deepEqual(writes, ['lingxi.teamStructuredDraft.v1.' + key]);
+  assert.deepEqual(JSON.parse(values.get(writes[0]!)!), { text: '@Mary Jane, hi', entities: mentions });
+  workspace.setDraft(id, '');
+  assert.equal(workspace.draft(id), '');
+  assert.equal([...values.keys()].some(key => key.endsWith(':draft-migration')), false);
+});
+
 test('selecting the open team or an unknown team changes nothing', async context => {
   const { fake, workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
   await until(() => !!snapshot().messaging && snapshot().detail !== null, 'load');

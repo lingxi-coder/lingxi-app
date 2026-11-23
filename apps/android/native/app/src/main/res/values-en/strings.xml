@@ -2758,6 +2758,9 @@
     <string name="teams_editing_message">Editing message</string>
     <string name="teams_composer_hint_fmt">Message %1$s</string>
     <string name="teams_composer_edit_hint">Edit your message</string>
+    <string name="teams_error_mention_target">A mentioned member is no longer available. Copy the message into a new draft and update the mention.</string>
+    <string name="teams_composer_mention">Mention (@)</string>
+    <string name="teams_composer_mention_options">Mention suggestions</string>
     <string name="teams_composer_ask_bot">Ask a Bot (@)</string>
     <string name="teams_composer_bots_asked">Bots that will be asked</string>
     <string name="teams_composer_bots_can_ask">Bots you can ask</string>

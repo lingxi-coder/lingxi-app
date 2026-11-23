@@ -42,12 +42,13 @@ struct TeamConversationView: View {
     @State private var recalling: TeamMessage?
     @State private var editing: TeamMessage?
     @State private var savedText: String?
+    @State private var savedMentions: [TeamMentionEntity]?
     @State private var draft = TeamComposerDraft()
     @State private var draftLoaded = false
     @State private var ownedDraftKey = ""
     /// The app's voice input, made the first time the microphone is used here. What it hears goes into the box.
     @State private var voice: VoiceInteractionController?
-    @FocusState private var composerFocused: Bool
+    @State private var composerFocused = false
 
     var body: some View {
         Group {
@@ -100,7 +101,7 @@ struct TeamConversationView: View {
         // Another account, another team, or the viewer's membership changed: what was being said is dropped, not moved.
         .onChange(of: workspace.draftKey(conversationID)) { _, _ in
             voice?.close()
-            editing = nil; savedText = nil
+            editing = nil; savedText = nil; savedMentions = nil
             loadDraft()
         }
         .onChange(of: workspace.draft(for: conversationID)) { _, value in
@@ -207,7 +208,7 @@ struct TeamConversationView: View {
                 onChooseFiles: carrying ? { workspace.addFiles($0, to: conversationID) } : nil,
                 onRemoveFile: { workspace.removeFile($0, from: conversationID) }, onDismissRefusals: { workspace.dismissRefusals(for: conversationID) },
                 listening: voice?.capturePhase == .listening, onVoice: toggleVoice,
-                focus: $composerFocused, onSend: { Task { await send(context) } },
+                focused: $composerFocused, onSend: { Task { await send(context) } },
                 onCancelEdit: endEdit, onCancelReply: { draft.replyToID = nil })
         }
         .sheet(isPresented: $showDataset) { TeamDatasetShareSheet(context: context) }
@@ -575,7 +576,9 @@ struct TeamConversationView: View {
             composerFocused = false
             controller.startDictation { heard in
                 guard workspace.draftKey(conversationID) == key else { return }
-                draft.text = TeamsComposeLogic.appendingTranscript(heard, to: draft.text)
+                let next = TeamsComposeLogic.appendingTranscript(heard, to: draft.text)
+                // Dictation appends to this draft, so any existing ranges stay at their offsets.
+                draft.text = next
             }
         case .listening:
             controller.finishListening()
@@ -594,11 +597,12 @@ struct TeamConversationView: View {
     private func beginEdit(_ message: TeamMessage) {
         // Words still being spoken were for the message set aside, not for the one being changed.
         voice?.cancelDictation()
-        if editing == nil { savedText = draft.text }
+        if editing == nil { savedText = draft.text; savedMentions = draft.mentionEntities }
         editing = message
         draft.replyToID = nil
         draft.targets = []
         draft.text = message.text
+        draft.mentionEntities = message.mentionEntities
         composerFocused = true
     }
 
@@ -606,15 +610,19 @@ struct TeamConversationView: View {
         voice?.cancelDictation()
         editing = nil
         draft.text = savedText ?? ""
-        savedText = nil
+        draft.mentionEntities = savedMentions
+        savedText = nil; savedMentions = nil
     }
 
     private func send(_ context: TeamConversationContext) async {
         let ownerKey = workspace.draftKey(conversationID)
         guard ownedDraftKey == ownerKey else { return }
-        let body = draft.text, reply = draft.replyToID, targets = draft.targets, changing = editing
+        let submittedDraft = draft
+        let body = submittedDraft.text, reply = submittedDraft.replyToID, targets = submittedDraft.targets, changing = editing
         // A reply to a Bot's question that still waits for the viewer is its answer: it continues that task and asks no Bot.
         let waitId = answering(context)
+        let entities = TeamMentionEntity.valid(submittedDraft.mentionEntities ?? [], in: body)
+            .filter { context.conversation.participants.contains("user:\($0.userId)") }
         // The files are this conversation's draft's, read at the moment of sending: no other conversation's are ever sent here.
         let files = changing == nil && waitId == nil ? workspace.files(for: conversationID) : []
         guard TeamAttachments.canSend(text: body, files: files) else { return }
@@ -626,7 +634,7 @@ struct TeamConversationView: View {
                 throw TeamMessageFailure(code: "BOT_USE_REQUIRED")
             }
             guard model.selected == conversationID else { throw TeamMessageFailure(code: "INVALID_INPUT") }
-            try await model.queue(operation: changing == nil ? "create" : "edit", text: body, messageId: changing?.id, replyTo: reply, targets: changing == nil ? targets : [], files: files)
+            try await model.queue(operation: changing == nil ? "create" : "edit", text: body, messageId: changing?.id, replyTo: reply, targets: changing == nil ? targets : [], files: files, mentionEntities: !entities.isEmpty || changing?.mentionEntities?.isEmpty == false ? entities : nil)
         }
         guard sent, ownedDraftKey == ownerKey, workspace.draftKey(conversationID) == ownerKey, workspace.messaging === context.model else { return }
         workspace.filesSent(files.map(\.uploadId), in: conversationID)
@@ -634,9 +642,12 @@ struct TeamConversationView: View {
             // The set-aside draft comes back (Desktop: `onClearEditing` restores the text kept while editing).
             endEdit()
         } else {
-            draft.targets = []
-            // Text typed while the message was being saved stays.
-            if draft.text == body { draft.text = "" }
+            if draft.targets == targets { draft.targets = [] }
+            // Both text and mentions can change while the message is being saved.
+            if draft.text == body && draft.mentionEntities == submittedDraft.mentionEntities {
+                draft.text = ""
+                draft.mentionEntities = nil
+            }
         }
         if reply != nil, draft.replyToID == reply { draft.replyToID = nil }
     }

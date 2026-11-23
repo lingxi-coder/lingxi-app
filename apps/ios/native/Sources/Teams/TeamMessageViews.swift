@@ -336,13 +336,34 @@ struct TeamMessageCell: View {
                 AIText(markdown: context.text(of: message))
                     .teamBotLinkPolicy()
             } else {
-                Text(context.text(of: message))
+                let body = context.text(of: message)
+                if let entities = message.mentionEntities, !entities.isEmpty {
+                    Text(mentionedText(body, entities: entities))
+                } else {
+                    Text(body)
+                }
             }
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(Text(verbatim: spokenLabel(identity, name: name, clock: clock)))
         .accessibilityIdentifier("teams.message.body.\(message.id)")
         .modifier(MessageActionsAccessibility(message: message, recalled: recalled, onReply: onReply, onEdit: onEdit, onRecall: onRecall))
+    }
+
+    private func mentionedText(_ text: String, entities: [TeamMentionEntity]) -> AttributedString {
+        let units = Array(text.utf16)
+        let valid = TeamMentionEntity.valid(entities, in: units)
+        guard !valid.isEmpty else { return AttributedString(text) }
+        var styled = AttributedString(), end = 0
+        for entity in valid {
+            styled += AttributedString(String(decoding: units[end..<entity.offset], as: UTF16.self))
+            end = entity.offset + entity.length
+            var mention = AttributedString(String(decoding: units[entity.offset..<end], as: UTF16.self))
+            mention.font = .body.weight(.semibold)
+            styled += mention
+        }
+        styled += AttributedString(String(decoding: units[end...], as: UTF16.self))
+        return styled
     }
 
     /// "Ann, Bot, 10:32, Sam, Hello there, Sure, Edited": author, Bot tag, time, the quote, the text, the edit mark.
@@ -505,6 +526,10 @@ struct TeamOutboxCell: View {
                     }
                 }
                 .accessibilityElement(children: .combine)
+                if intent.error == "MENTION_TARGET_REQUIRED", !intent.text.isEmpty {
+                    Button("chat_message_copy") { UIPasteboard.general.string = intent.text }
+                        .font(.footnote).minimumHitTarget(minWidth: 0, alignment: .leading)
+                }
                 Button(role: .destructive, action: onDiscard) {
                     Text("teams_message_discard").font(.footnote).minimumHitTarget(minWidth: 0, alignment: .leading)
                 }

@@ -1,3 +1,4 @@
+import { parseMentionEntities, shiftMentionEntities, type MentionEntity } from './mentions.js';
 import { executionCommand, sharedBotUsable, type SharedBotCard } from './execution.js';
 import { botDmHandedOver } from './compose.js';
 import { indexedDbCommandStorage } from './command-storage.js';
@@ -375,7 +376,7 @@ export class TeamsWorkspace {
   private botsUnverified = false;
   private botsError = '';
   private readonly conversationByTeam = new Map<string, string>();
-  private readonly drafts = new Map<string, string>();
+  private readonly drafts = new Map<string, { text: string; entities: MentionEntity[] }>();
   private draftFillRevision = 0;
   // Files of unsent messages, kept like the text drafts. Each upload is for one conversation of one membership and ends there.
   private readonly draftFileLists = new Map<string, DraftFile[]>();
@@ -416,18 +417,58 @@ export class TeamsWorkspace {
   // ── Reading ──
 
   /** Drafts are scoped by account and source membership, outside disposable transcript caches. */
-  draft = (conversationId:string):string => {
-    const key=this.draftKey(conversationId);
-    if(this.drafts.has(key)) return this.drafts.get(key)!;
-    try {return globalThis.localStorage?.getItem('lingxi.teamDraft.'+key)??'';} catch {return '';}
-  };
-  setDraft = (conversationId: string, text: string): void => {
+  draft = (conversationId: string): string => this.readDraft(conversationId).text;
+  draftMentions = (conversationId: string): MentionEntity[] => this.readDraft(conversationId).entities;
+
+  private readDraft(conversationId: string): { text: string; entities: MentionEntity[] } {
     const key = this.draftKey(conversationId);
-    if (text) this.drafts.set(key, text); else this.drafts.delete(key);
+    const cached = this.drafts.get(key);
+    if (cached) return cached;
     try {
-      if(text) globalThis.localStorage?.setItem('lingxi.teamDraft.'+key,text);
-      else globalThis.localStorage?.removeItem('lingxi.teamDraft.'+key);
-    } catch {this.actionError='STORAGE_FAILED';this.publish();}
+      const storage = globalThis.localStorage;
+      const current = storage?.getItem('lingxi.teamStructuredDraft.v1.' + key);
+      if (current !== null && current !== undefined) {
+        const value = JSON.parse(current);
+        if (typeof value?.text === 'string' && value.text) {
+          const draft = { text: value.text, entities: parseMentionEntities(value.text, value.entities) };
+          this.drafts.set(key, draft);
+          return draft;
+        }
+      } else {
+        const text = storage?.getItem('lingxi.teamDraft.' + key);
+        if (text) {
+          let entities: MentionEntity[] = [];
+          try {
+            const legacy = JSON.parse(storage?.getItem('lingxi.teamDraftMentions.' + key) ?? 'null');
+            if (legacy?.text === text) entities = parseMentionEntities(text, legacy.entities);
+          } catch { /* Legacy mention data is optional. */ }
+          const draft = { text, entities };
+          this.drafts.set(key, draft);
+          return draft;
+        }
+      }
+    } catch { /* Storage may be unavailable. */ }
+    return { text: '', entities: [] };
+  }
+
+  setDraft = (conversationId: string, text: string, entities?: MentionEntity[]): void => {
+    const key = this.draftKey(conversationId);
+    if (entities === undefined) {
+      const current = this.readDraft(conversationId);
+      entities = shiftMentionEntities(current.text, text, current.entities);
+    }
+    const value = { text, entities };
+    if (text) this.drafts.set(key, value); else this.drafts.delete(key);
+    try {
+      const storage = globalThis.localStorage, recordKey = 'lingxi.teamStructuredDraft.v1.' + key;
+      if (text) storage?.setItem(recordKey, JSON.stringify(value));
+      else {
+        // Clear legacy keys before removing the record that takes precedence over them.
+        storage?.removeItem('lingxi.teamDraft.' + key);
+        storage?.removeItem('lingxi.teamDraftMentions.' + key);
+        storage?.removeItem(recordKey);
+      }
+    } catch { this.actionError = 'STORAGE_FAILED'; this.publish(); }
   };
   private draftKey(conversationId: string): string { return `${this.uid}:${this.selection}:${this.messagingTeam?.generation ?? 0}:${conversationId}`; }
 

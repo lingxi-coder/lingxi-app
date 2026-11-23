@@ -40,6 +40,26 @@ class TeamsComposeLogicTest {
         }
     }
 
+    @Test fun memberMentionEditorVectors() {
+        val rows = compose.getJSONObject("memberMentions")
+        for (row in rows.getJSONArray("shifts").objects()) {
+            val entity = TeamMentionEntity("member", row.getInt("offset"), row.getInt("length"))
+            val shifted = TeamMentionEntity.shifted(
+                listOf(entity), row.getString("before"), row.getString("after"),
+                row.optInt("selectionStart", -1).takeIf { it >= 0 },
+                row.optInt("selectionEnd", -1).takeIf { it >= 0 },
+                row.optInt("caretAfter", -1).takeIf { it >= 0 },
+            )
+            val expected = if (row.isNull("expectedOffset")) emptyList() else listOf(entity.copy(offset = row.getInt("expectedOffset")))
+            assertEquals(row.getString("after"), expected, shifted)
+        }
+        for (row in rows.getJSONArray("replacements").objects()) {
+            assertEquals(row.getString("text"), row.getInt("end"), TeamMentionEntity.replacementEnd(
+                row.getString("text"), row.getInt("start"), row.getInt("caret"), row.getString("name"),
+            ))
+        }
+    }
+
     @Test fun mentionAtUsesJavaScriptWhitespaceAndTheFortyCharacterQueryLimit() {
         for (space in listOf(" ", "　", "﻿", " ", "\t", "\n")) assertEquals(MentionAt(3, "a"), TeamsComposeLogic.mentionAt("hi$space@a", 5))
         assertEquals(MentionAt(3, "a".repeat(40)), TeamsComposeLogic.mentionAt("hi @" + "a".repeat(40), 3 + 1 + 40))

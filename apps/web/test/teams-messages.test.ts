@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { TeamMessaging, applyMessageSnapshot, emptyProjection, pendingCommands, type MessageApi, type MessageSnapshot, type PendingCommands, type CommandStorage, type TeamConversation, type TeamMessage } from '../../../packages/teams/messages.js';
+import { TeamMessaging, applyMessageSnapshot, emptyProjection, pendingCommands, projectionKey, type MessageApi, type MessageSnapshot, type PendingCommands, type CommandStorage, type TeamConversation, type TeamMessage } from '../../../packages/teams/messages.js';
 const scope = { teamId: 'test-team', generation: 1 }, uid = 'owner';
 const conversation: TeamConversation = { id: 'test-chat', kind: 'dm', title: 'Fixture', participants: ['user:owner'], lastSeq: 1, lastChangeSeq: 1, lastReadSeq: 0 };
 const message: TeamMessage = { id: 'message01', seq: 1, author: { kind: 'user', uid }, kind: 'text', text: 'Synthetic', createdAt: null, changeSeq: 1, changeId: 'change001' };
@@ -129,4 +129,29 @@ test('command notifications coordinate durable backoff across tabs without a ret
   first.close(); online = true; const future = Date.now() + 2000; context.mock.method(Date, 'now', () => future);
   await second.refresh(); await until(() => !second.state.outbox.length);
   assert.equal(calls.length, 2); assert.deepEqual(calls[1], calls[0]);
+});
+
+test('a departed mention recipient fails only its offline message and the outbox continues', async context => {
+  const storage = memoryStorage();
+  const create = (messageId: string, text: string) => ({
+    ...scope, action: 'mutate' as const, operation: 'create' as const, conversationId: conversation.id,
+    messageId, changeId: messageId + '-change', text,
+  });
+  const first = { ...create('queued01', '@Mary Jane'), mentionEntities: [{ userId: 'former-member', offset: 0, length: 10 }] };
+  const next = create('queued02', 'Still send this');
+  storage.records.set(projectionKey(uid, scope), { version: 2, uid, ...scope, outbox: [{ command: first }, { command: next }] });
+  const attempted: string[] = [];
+  const source = fixture(async command => {
+    if (command.action !== 'mutate') throw new Error('Unexpected command');
+    attempted.push(command.messageId);
+    if (command.messageId === first.messageId) throw new Error('MENTION_TARGET_REQUIRED');
+    return {} as never;
+  });
+  const model = new TeamMessaging(source.api, storage, uid, scope); context.after(() => model.close());
+  await model.start(); model.select(conversation.id);
+  await until(() => model.state.outbox.length === 1 && model.state.outbox[0]?.error === 'MENTION_TARGET_REQUIRED');
+  assert.deepEqual(attempted, ['queued01', 'queued02']);
+  assert.equal(model.offline, false);
+  assert.equal(model.state.conversations[0]?.id, conversation.id);
+  assert.deepEqual(storage.records.get(projectionKey(uid, scope))?.outbox[0]?.command, first);
 });

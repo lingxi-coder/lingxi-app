@@ -2758,6 +2758,9 @@
     <string name="teams_editing_message">メッセージを編集中</string>
     <string name="teams_composer_hint_fmt">%1$s にメッセージ</string>
     <string name="teams_composer_edit_hint">メッセージを編集</string>
+    <string name="teams_error_mention_target">メンションしたメンバーを選択できなくなりました。メッセージを新しい下書きにコピーし、メンションを更新してください。</string>
+    <string name="teams_composer_mention">メンション (@)</string>
+    <string name="teams_composer_mention_options">メンション候補</string>
     <string name="teams_composer_ask_bot">Bot に依頼 (@)</string>
     <string name="teams_composer_bots_asked">依頼する Bot</string>
     <string name="teams_composer_bots_can_ask">依頼できる Bot</string>

@@ -1,7 +1,7 @@
 package com.lingxi.code.teams
 
 /** Unsent state stays in the existing workspace draft, never a second message store. */
-internal data class ComposerDraft(val text: String = "", val replyToId: String? = null, val editingId: String? = null, val targets: Set<String> = emptySet())
+internal data class ComposerDraft(val text: String = "", val replyToId: String? = null, val editingId: String? = null, val targets: Set<String> = emptySet(), val mentionEntities: List<TeamMentionEntity> = emptyList())
 
 /** Why the composer cannot be used (SPEC-mobile-team-bot-ui section 8.3; mirrors `Composer.tsx`). */
 internal enum class ComposerLock { None, OwnerReading, BotHandedOver, BotUnverified, BotChecking, BotUnavailable }
@@ -41,8 +41,8 @@ internal object TeamsComposeLogic {
     /** Bots that can be asked now: only groups and channels, usable, taking part, not chosen yet, matching what was typed. */
     fun mentionCandidates(bots: List<TeamBotCard>, conversation: TeamMessageConversation, chosenKeys: Collection<String>, query: String): List<TeamBotCard> {
         if (conversation.kind != "group" && conversation.kind != "channel") return emptyList()
-        val needle = query.trim().lowercase()
-        return bots.filter { it.selectable && "shared_bot:${it.sharedBotId}" in conversation.participants && it.sharedBotId !in chosenKeys && (needle.isEmpty() || it.name.lowercase().contains(needle)) }
+        val needle = TeamMentionEntity.searchKey(query)
+        return bots.filter { it.selectable && "shared_bot:${it.sharedBotId}" in conversation.participants && it.sharedBotId !in chosenKeys && (needle.isEmpty() || TeamMentionEntity.searchKey(it.name).contains(needle)) }
     }
 
     /**

@@ -7,6 +7,7 @@ import { SharedBotsStore } from './shared-bots.mjs';
 import { authorizeDataBinding, dataReference } from './lingxi-data.mjs';
 import { messagePreview } from './team-message-preview.mjs';
 import { recallAttachments } from './team-attachments.mjs';
+import { mentionEntitiesSchema, mentionFields, mentionMemberRefs, preserveMentionEntities, validMentionEntities } from './team-mentions.mjs';
 import { serviceMessageActions, serviceScope } from './hosted-bot-service.mjs';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
@@ -22,8 +23,9 @@ export const messageCommand = z.discriminatedUnion('action', [
   z.object({ action: z.literal('sync'), ...thread, after: cursor, limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ action: z.literal('history'), ...thread, before: cursor.optional() }).strict(),
   z.object({ action: z.literal('mutate'), ...thread, messageId: id, changeId: id,
-    operation: z.enum(['create', 'edit', 'recall']), text: z.string(), replyTo: id.optional(), dataRef: dataReference.optional() }).strict()
+    operation: z.enum(['create', 'edit', 'recall']), text: z.string(), replyTo: id.optional(), dataRef: dataReference.optional(), mentionEntities: mentionEntitiesSchema.optional() }).strict()
     .refine(value => value.operation === 'recall' ? value.text === '' : text.safeParse(value.text).success)
+    .refine(value => validMentionEntities(value.text, value.mentionEntities))
     .refine(value => value.operation === 'create' || (value.replyTo === undefined && value.dataRef === undefined)),
   z.object({ action: z.literal('read'), ...thread, lastReadSeq: cursor }).strict(),
 ]);
@@ -128,9 +130,10 @@ export class TeamMessagesStore {
       if (share) content = JSON.stringify([input.text, share.reference, share.grant]);
       else if (input.dataRef) content = JSON.stringify([input.text, input.dataRef]);
       const textDigest = digest(content);
+      const mentionDigest = input.mentionEntities === undefined ? undefined : digest(JSON.stringify(input.mentionEntities));
       if (old) {
         if (old.messageId !== input.messageId || old.operation !== input.operation || old.actorUid !== user.uid
-          || old.generation !== input.generation || old.textDigest !== textDigest
+          || old.generation !== input.generation || old.textDigest !== textDigest || old.mentionDigest !== mentionDigest
           || (input.operation === 'create' && (m?.author.kind !== 'user' || m.author.uid !== user.uid || m.kind !== 'text'
             || (m.replyTo ?? null) !== (input.replyTo ?? null)))) fail(409, 'MESSAGE_ID_CONFLICT');
         return { messageId: input.messageId, changeId: input.changeId, changeSeq: old.seq };
@@ -138,7 +141,16 @@ export class TeamMessagesStore {
       if (input.operation === 'create' && existing.exists) fail(409, 'MESSAGE_ID_CONFLICT');
       if (input.operation !== 'create' && (!m || m.author.kind !== 'user' || m.author.uid !== user.uid)) fail(403, 'MESSAGE_AUTHOR_REQUIRED');
       if (m?.recalled) fail(409, 'MESSAGE_RECALLED');
-      if (input.replyTo && !(await tx.get(ref.collection('messages').doc(input.replyTo))).exists) fail(400, 'REPLY_REQUIRED');
+      const priorTargets = new Set(input.operation === 'edit' ? m.mentionEntities?.map(({ userId }) => userId) : []);
+      const newMentions = input.mentionEntities?.filter(({ userId }) => !priorTargets.has(userId));
+      const memberRefs = mentionMemberRefs(teamRef, c, newMentions, user.uid);
+      if (!memberRefs) fail(409, 'MENTION_TARGET_REQUIRED');
+      const replyRefs = input.replyTo ? [ref.collection('messages').doc(input.replyTo)] : [];
+      if (replyRefs.length || memberRefs.length) {
+        const reads = await tx.getAll(...replyRefs, ...memberRefs);
+        if (replyRefs.length && !reads[0].exists) fail(400, 'REPLY_REQUIRED');
+        if (reads.slice(replyRefs.length).some(member => !member.exists)) fail(409, 'MENTION_TARGET_REQUIRED');
+      }
       const clock = this.clock();
       const releaseFiles = input.operation === 'recall' ? await recallAttachments(tx, teamRef, m, clock) : () => {};
       // A new message also goes to the Chat's Bots that answer unasked; each one's host decides whether it does.
@@ -148,18 +160,23 @@ export class TeamMessagesStore {
       if (!Number.isSafeInteger(changeSeq) || !Number.isSafeInteger(seq)) fail(409, 'CURSOR_LIMIT');
       const now = new Date(clock);
       const change = { seq: changeSeq, messageId: input.messageId, operation: input.operation,
-        actorUid: user.uid, generation: input.generation, textDigest, at: now };
+        actorUid: user.uid, generation: input.generation, textDigest, ...(mentionDigest ? { mentionDigest } : {}), at: now };
       const update = { lastChangeSeq: changeSeq, lastChange: { id: input.changeId, seq: changeSeq } };
       if (input.operation === 'create') {
         const author = { kind: 'user', uid: user.uid };
         // The conversation list reads this pointer instead of the message; the author mirrors the message doc.
         Object.assign(update, { lastSeq: seq, lastMessage: { id: input.messageId, seq, at: now, author, preview: messagePreview(input.text) } });
         tx.create(msgRef, { seq, author, kind: 'text', text: input.text,
+          ...(input.mentionEntities?.length ? mentionFields(input.mentionEntities) : {}),
           ...(share ? { resourceRef: share.reference, resourceGrant: share.grant } : {}),
           ...(input.replyTo ? { replyTo: input.replyTo } : {}), ...(input.dataRef ? { dataRef: input.dataRef } : {}), createdAt: now, changeSeq, changeId: input.changeId });
         unasked.write(seq);
       } else {
-        tx.update(msgRef, { text: input.text, editedAt: now, changeSeq, changeId: input.changeId,
+        const entities = input.operation === 'recall' ? []
+          : input.mentionEntities ?? preserveMentionEntities(m.text, input.text, m.mentionEntities);
+        // Delivery recipients belong to the original send. Editing only changes the inline ranges.
+        tx.update(msgRef, { ...(m.mentionEntities?.length || entities?.length ? { mentionEntities: entities ?? [] } : {}),
+          text: input.text, editedAt: now, changeSeq, changeId: input.changeId,
           ...(input.operation === 'recall' ? { recalled: true, ...(m.dataRef ? { dataRef: null } : {}), ...(m.resourceRef ? { resourceRef: null, resourceGrant: null } : {}) } : {}) });
         // Only the newest message is mirrored. An older edit/recall leaves the pointer alone; a recall never leaves its text behind.
         if (c.lastMessage?.id === input.messageId) {

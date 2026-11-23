@@ -107432,6 +107432,74 @@
         }
       }
     },
+    "teams_composer_mention": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "提及 (@)"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "提及 (@)"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mention (@)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メンション (@)"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "멘션 (@)"
+          }
+        }
+      }
+    },
+    "teams_composer_mention_options": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "提及候选"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "提及候選"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mention suggestions"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メンション候補"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "멘션 후보"
+          }
+        }
+      }
+    },
     "teams_composer_note_bot_dm": {
       "localizations": {
         "zh-Hans": {
@@ -111134,6 +111202,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "이 목록은 더 이상 사용할 수 없습니다."
+          }
+        }
+      }
+    },
+    "teams_error_mention_target": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有被提及的成员已不可用。请将消息复制到新草稿并更新提及。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有被提及的成員已無法使用。請將訊息複製到新草稿並更新提及。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A mentioned member is no longer available. Copy the message into a new draft and update the mention."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メンションしたメンバーを選択できなくなりました。メッセージを新しい下書きにコピーし、メンションを更新してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "멘션한 멤버를 더 이상 선택할 수 없습니다. 메시지를 새 초안에 복사하고 멘션을 업데이트하세요."
           }
         }
       }

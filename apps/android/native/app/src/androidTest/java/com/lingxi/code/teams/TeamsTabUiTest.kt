@@ -26,7 +26,9 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextInputSelection
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -227,10 +229,12 @@ class TeamsTabUiTest {
         assertEquals(listOf("switch"), events)
     }
 
-    @Test fun offlineShowsASavedMessagesBannerWithReconnect() {
+    @Test fun offlineShowsSavedMessagesAndOffersReconnectInTheConnectionMenu() {
         showList(messaging(offline = true))
-        rule.onNodeWithTag(TeamsTags.OFFLINE).assertIsDisplayed()
+        val connection = rule.onNodeWithTag(TeamsTags.OFFLINE)
+        connection.assertIsDisplayed()
         rule.onNodeWithTag(TeamsTags.row("b")).assertIsDisplayed()
+        connection.performClick()
         rule.onNodeWithText(text(R.string.teams_reconnect)).performClick()
         assertEquals(listOf("reconnect"), events)
     }
@@ -272,7 +276,10 @@ class TeamsTabUiTest {
 
     private var draft by mutableStateOf(ComposerDraft())
 
-    private fun showComposer(conversation: TeamMessageConversation, state: TeamMessagingState = messaging(), initial: ComposerDraft = ComposerDraft()) {
+    private fun showComposer(
+        conversation: TeamMessageConversation, state: TeamMessagingState = messaging(), initial: ComposerDraft = ComposerDraft(),
+        roster: List<TeamMember> = members,
+    ) {
         draft = initial
         rule.setContent {
             LingXiTheme(darkTheme = false) {
@@ -280,8 +287,9 @@ class TeamsTabUiTest {
                     Box(Modifier.requiredSize(400.dp, 1000.dp)) {
                         TeamComposer(
                             conversation = conversation, label = "Ann", uid = uid, messaging = state, draft = draft, replyTo = null, editing = null, replyAuthor = "",
+                            members = roster,
                             onDraft = { draft = it }, onCancelReply = { events += "cancelReply" }, onCancelEdit = { events += "cancelEdit" },
-                            onSend = { sent, targets, done -> events += "send:$sent:$targets"; done() },
+                            onSend = { sent, targets, _, done -> events += "send:$sent:$targets"; done() },
                         )
                     }
                 }
@@ -310,6 +318,39 @@ class TeamsTabUiTest {
         rule.waitForIdle()
         assertEquals(listOf("send:hello there:[]"), events)
         rule.onNodeWithTag(TeamsTags.SEND).assertIsNotEnabled()
+    }
+
+    @Test fun pickingASpacedMemberNameReplacesThePartialSurnameAndBindsTheRecipient() {
+        showComposer(
+            conversation("g", "group", "Crew chat", listOf("user:u1", "user:u2"), 1, 1, base),
+            initial = ComposerDraft(text = "@Jane, thanks"),
+            roster = listOf(TeamMember("u2", "Mary Jane", "member", 1)),
+        )
+        val field = rule.onNodeWithTag(TeamsTags.COMPOSER_FIELD)
+        field.performClick()
+        field.performTextInputSelection(TextRange(3))
+        rule.onNodeWithText("Mary Jane").performClick()
+        rule.runOnIdle {
+            assertEquals("@Mary Jane, thanks", draft.text)
+            assertEquals(listOf(TeamMentionEntity("u2", 0, 10)), draft.mentionEntities)
+        }
+    }
+
+    @Test fun replacingAMentionWithIdenticalLiteralTextClearsItsRecipient() {
+        val mention = TeamMentionEntity("u2", 0, 10)
+        showComposer(
+            conversation("g", "group", "Crew chat", listOf("user:u1", "user:u2"), 1, 1, base),
+            initial = ComposerDraft(text = "@Mary Jane", mentionEntities = listOf(mention)),
+        )
+        val field = rule.onNodeWithTag(TeamsTags.COMPOSER_FIELD)
+        field.performClick()
+        field.performTextInputSelection(TextRange(0, 10))
+        rule.runOnIdle { assertEquals(listOf(mention), draft.mentionEntities) }
+        field.performTextInput("@Mary Jane")
+        rule.runOnIdle {
+            assertEquals("@Mary Jane", draft.text)
+            assertTrue(draft.mentionEntities.isEmpty())
+        }
     }
 
     @Test fun anOversizedMessageShowsTheHintAndCannotBeSent() {

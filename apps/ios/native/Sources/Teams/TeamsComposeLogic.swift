@@ -67,10 +67,10 @@ enum TeamsComposeLogic {
     /// conversation, not be chosen yet, and match what was typed (trimmed, case-insensitive).
     static func mentionCandidates(bots: [TeamBotCard], conversation: TeamMessageConversation, chosenKeys: some Collection<String>, query: String) -> [TeamBotCard] {
         guard conversation.kind == "group" || conversation.kind == "channel" else { return [] }
-        let needle = JSText.trim(query).lowercased()
+        let needle = TeamMentionEntity.searchKey(query)
         return bots.filter {
             $0.selectable && conversation.participants.contains("shared_bot:\($0.sharedBotId)") && !chosenKeys.contains($0.sharedBotId)
-                && (needle.isEmpty || $0.name.lowercased().contains(needle))
+                && (needle.isEmpty || TeamMentionEntity.searchKey($0.name).contains(needle))
         }
     }
 

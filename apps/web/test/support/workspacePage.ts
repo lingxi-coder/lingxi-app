@@ -42,10 +42,11 @@ export function Host<Snapshot>({ workspace, render }: { workspace: Store<Snapsho
 export const classes = (node: any) => String(node.props.className ?? '').split(' ');
 export const textOf = (node: any): string => typeof node === 'string' ? node : (node.children ?? []).map(textOf).join('');
 
-export async function mount<Snapshot>(workspace: Store<Snapshot>, render: (snapshot: Snapshot) => ReactElement) {
+export async function mount<Snapshot>(workspace: Store<Snapshot>, render: (snapshot: Snapshot) => ReactElement,
+  createNodeMock: (element: ReactElement) => unknown = hostNode) {
   const { create, act } = renderer!;
   let tree: any;
-  await act(async () => { tree = create(createElement(Host, { workspace, render }), { createNodeMock: hostNode }); await settle(); });
+  await act(async () => { tree = create(createElement(Host, { workspace, render }), { createNodeMock }); await settle(); });
   const find = (match: (node: any) => boolean): any[] => tree.root.findAll((node: any) => typeof node.type === 'string' && match(node));
   const one = (match: (node: any) => boolean, label: string): any => {
     const found = find(match);

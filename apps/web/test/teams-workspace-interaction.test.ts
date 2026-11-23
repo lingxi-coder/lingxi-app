@@ -3,9 +3,9 @@ import { type TestContext } from 'node:test';
 import { createElement } from 'react';
 import type { MessageCommand, MessageMutation } from '../../../packages/teams/messages';
 import { TeamsWorkspace, type TeamsSnapshot } from '../../../packages/teams/workspace';
-import { FakeTeams, botCard, conversation, memoryStorage, message, team, uid, until } from './support/fakeTeams';
+import { FakeTeams, botCard, conversation, memoryStorage, members, message, team, uid, until } from './support/fakeTeams';
 import { loadTeamsModule } from './support/loadTeamsModule';
-import { classes, mount, scenario, textOf, withDom } from './support/workspacePage';
+import { classes, hostNode, mount, scenario, textOf, withDom } from './support/workspacePage';
 
 // These tests drive the components' event handlers and effects through react-test-renderer (see support/workspacePage).
 const { TeamConversationView } = loadTeamsModule<typeof import('../../../packages/teams/TeamConversationView')>('TeamConversationView');
@@ -121,6 +121,144 @@ scenario('composer: @ offers the Bots of the conversation, only a chosen Bot is 
   assert.equal('targets' in mutations(fake)[0]!, false, 'typing a name never asks a Bot');
 });
 
+scenario('composer: a full display name selects one member ID and survives draft and cursor changes', async context => {
+  const { fake, workspace, snapshot, bot } = await open(context, fake => {
+    const chat = fake.conversations.get('team-aaaa')![0]!;
+    chat.participants.push('user:carol');
+    fake.details.set('team-aaaa', { team: fake.teams[0]!, invites: [], members: members('alice', 'bob', 'carol', 'owner').map(member => ({
+      ...member, displayName: member.uid === 'alice' ? 'Alice' : 'Mary Jane',
+    })) });
+  });
+  workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 3 && snapshot().directory.length === 4);
+  const page = await mount(workspace, conversationView(workspace)); context.after(() => page.unmount());
+  const box = () => page.find(node => node.type === 'textarea')[0];
+  await page.type(box(), '👋 @mary ja');
+  assert.deepEqual(page.byClass('tw-mention').map(textOf), ['MJMary Janebob', 'MJMary Janecarol']);
+  await page.key(box(), 'ArrowDown'); await page.key(box(), 'Enter');
+  assert.equal(box().props.value, '👋 @Mary Jane ');
+  const selected = { userId: 'carol', offset: 3, length: 10 };
+  assert.deepEqual(workspace.draftMentions('chan-general'), [selected]);
+
+  workspace.selectConversation('dm-bob');
+  await until(() => box()?.props.value === '');
+  workspace.selectConversation('chan-general');
+  await until(() => box()?.props.value === '👋 @Mary Jane ');
+  await page.type(box(), 'Hi 👋 @Mary Jane please');
+  const shifted = { ...selected, offset: 6 };
+  assert.deepEqual(workspace.draftMentions('chan-general'), [], 'an ambiguous multi-range edit drops the association');
+  await page.type(box(), 'Hi 👋 @mary ja');
+  await page.key(box(), 'ArrowDown'); await page.key(box(), 'Enter');
+  await page.type(box(), 'Hi 👋 @Mary Jane please @Fixture B');
+  await page.key(box(), 'Enter'); await page.key(box(), 'Enter');
+  await until(() => commandsOf(fake, 'submit').length === 1);
+  const [sent] = commandsOf(fake, 'submit');
+  if (sent?.action !== 'submit') throw new Error('Submit expected');
+  assert.deepEqual(sent.payload.mentionEntities, [shifted]);
+  assert.deepEqual(sent.payload.targets, [bot.sharedBotId]);
+
+  await page.type(box(), '@Mary Jane');
+  await page.key(box(), 'Escape'); await page.key(box(), 'Enter');
+  await until(() => mutations(fake).length === 1);
+  assert.equal(mutations(fake)[0]?.mentionEntities, undefined);
+});
+
+scenario('composer replaces the rest of a spaced name and preserves the mention after a repeated paste', async context => {
+  const { fake, workspace, snapshot } = await open(context, fake => {
+    fake.details.set('team-aaaa', { team: fake.teams[0]!, invites: [], members: members('alice', 'bob').map(member =>
+      member.uid === 'bob' ? { ...member, displayName: 'Mary Jane' } : member) });
+    fake.bots = [{ ...fake.bots[0]!, name: 'Build  Tools' }];
+  });
+  workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 3 && snapshot().directory.length === 2);
+  const page = await mount(workspace, conversationView(workspace)); context.after(() => page.unmount());
+  const box = () => page.find(node => node.type === 'textarea')[0];
+  await page.type(box(), '👋 @Mary Jane, please review', 8);
+  await page.key(box(), 'Enter');
+  assert.equal(box().props.value, '👋 @Mary Jane, please review');
+  assert.deepEqual(workspace.draftMentions('chan-general'), [{ userId: 'bob', offset: 3, length: 10 }]);
+  await page.type(box(), ''); await page.type(box(), '@Mary');
+  await page.key(box(), 'Enter');
+  await page.type(box(), '@Mary Jane @Mary Jane ');
+  await page.key(box(), 'Escape');
+  await page.key(box(), 'Enter');
+  await until(() => mutations(fake).length === 1);
+  assert.deepEqual(mutations(fake)[0]?.mentionEntities, [{ userId: 'bob', offset: 0, length: 10 }]);
+  await page.type(box(), '@Build  Tools');
+  assert.match(page.byClass('tw-mention').map(textOf).join(), /Build  Tools/);
+});
+
+scenario('composer replaces a partial surname and removes the recipient on identical literal replacement', async context => {
+  const { fake, workspace, snapshot } = await open(context, fake => {
+    fake.details.set('team-aaaa', { team: fake.teams[0]!, invites: [], members: members('alice', 'bob').map(member =>
+      ({ ...member, displayName: member.uid === 'bob' ? 'Mary Jane' : 'Alice' })) });
+  });
+  workspace.selectConversation('chan-general');
+  await until(() => snapshot().directory.length === 2 && snapshot().messages.length === 3);
+  const input = Object.assign(new EventTarget(), hostNode());
+  input.addEventListener = EventTarget.prototype.addEventListener;
+  input.removeEventListener = EventTarget.prototype.removeEventListener;
+  const page = await mount(workspace, conversationView(workspace), element => element.type === 'textarea' ? input : hostNode());
+  context.after(() => page.unmount());
+  const box = () => page.find(node => node.type === 'textarea')[0];
+  await page.type(box(), '@Jane, thanks', 3);
+  await page.click(page.oneByClass('tw-mention'));
+  assert.equal(box().props.value, '@Mary Jane, thanks');
+  assert.equal(workspace.draftMentions('chan-general')[0]?.userId, 'bob');
+
+  await page.during(() => {
+    Object.assign(input, { value: box().props.value, selectionStart: 0, selectionEnd: 10 });
+    input.dispatchEvent(new Event('beforeinput'));
+    Object.assign(input, { selectionStart: 10 });
+    input.dispatchEvent(Object.assign(new Event('input'), { inputType: 'insertFromPaste' }));
+  });
+  assert.equal(box().props.value, '@Mary Jane, thanks');
+  assert.deepEqual(workspace.draftMentions('chan-general'), []);
+  await page.key(box(), 'Enter');
+  await until(() => mutations(fake).length === 1);
+  assert.equal(mutations(fake)[0]?.mentionEntities, undefined);
+});
+
+scenario('composer windows a large roster and keeps the wrapped active row available', async context => {
+  const { workspace, snapshot } = await open(context, fake => {
+    const people = Array.from({ length: 50 }, (_, index) => 'member-' + index);
+    const chat = fake.conversations.get('team-aaaa')![0]!;
+    chat.participants.push(...people.map(id => 'user:' + id));
+    fake.details.set('team-aaaa', { team: fake.teams[0]!, invites: [], members: members('alice', 'bob', ...people) });
+  });
+  workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 3 && snapshot().directory.length === 52);
+  const page = await mount(workspace, conversationView(workspace)); context.after(() => page.unmount());
+  const box = () => page.find(node => node.type === 'textarea')[0];
+  await page.type(box(), '@member');
+  assert.ok(page.byClass('tw-mention').length <= 10);
+  await page.key(box(), 'ArrowUp');
+  const active = page.byClass('tw-mention').find(node => node.props.id === box().props['aria-activedescendant']);
+  assert.equal(active?.props['aria-posinset'], 50);
+  assert.equal(active?.props['aria-setsize'], 50);
+  await page.key(box(), 'Enter');
+  assert.equal(workspace.draftMentions('chan-general')[0]?.userId, 'member-49');
+});
+
+scenario('composer preserves a new mention selected while an identical text draft is sending', async context => {
+  const { fake, workspace, snapshot } = await open(context);
+  workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 3 && snapshot().directory.length > 0);
+  const page = await mount(workspace, conversationView(workspace)); context.after(() => page.unmount());
+  const box = () => page.find(node => node.type === 'textarea')[0];
+  const run = workspace.run;
+  let finish!: () => void;
+  const sending = new Promise<void>(resolve => { finish = resolve; });
+  context.after(() => finish());
+  workspace.run = async action => run(async () => { await action(); await sending; });
+  await page.type(box(), '@Bob ', 4);
+  await page.submit();
+  await until(() => mutations(fake).length === 1);
+  await page.key(box(), 'Enter');
+  assert.equal(box().props.value, '@Bob ');
+  assert.equal(workspace.draftMentions('chan-general')[0]?.userId, 'bob');
+  finish();
+  await until(() => !snapshot().messageBusy);
+  assert.equal(box().props.value, '@Bob ');
+  assert.equal(workspace.draftMentions('chan-general')[0]?.userId, 'bob');
+});
+
 scenario('a failed Bot request can be retried from its message after the host returns', async context => {
   const { fake, workspace, snapshot, bot } = await open(context);
   workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 3);
@@ -154,7 +292,7 @@ scenario('replying, editing and recalling go through the same queue as sending',
   await page.type(box(), 'second draft');
   await page.click(page.oneByLabel('Edit'));
   assert.equal(box().props.value, 'Mine'); assert.match(page.byClass('tw-context').map(textOf).join(), /Editing message/);
-  assert.equal(page.byClass('tw-mentions').length, 0); assert.equal(page.byLabel('Ask a Bot (@)').length, 0, 'an edit asks no Bots');
+  assert.equal(page.byClass('tw-mentions').length, 0); assert.equal(page.byLabel('Mention (@)').length, 1, 'an edit can still mention members');
   await page.type(box(), 'Mine, corrected');
   await page.key(box(), 'Enter'); await until(() => mutations(fake).length === 2, 'the edit');
   assert.deepEqual([mutations(fake)[1]!.operation, mutations(fake)[1]!.messageId, mutations(fake)[1]!.text], ['edit', 'message-2', 'Mine, corrected']);

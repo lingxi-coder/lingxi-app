@@ -28,6 +28,8 @@ export function messageErrorText(code: string, locale: string): string {
     return t('teams_messages_storage_error');
   }
   switch (code) {
+    case 'MENTION_TARGET_REQUIRED':
+      return t('teams_error_mention_target');
     case 'BOT_USE_REQUIRED':
     case 'BOT_PARTICIPANT_REQUIRED':
     case 'INVALID_BOT_TARGET':

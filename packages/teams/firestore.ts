@@ -1,3 +1,4 @@
+import { parseMentionEntities } from './mentions.js';
 import { isResourceRef } from './dataset-resource.js';
 import { parseDataRef } from './lingxi-data.js';
 import type { DocumentData, Firestore, FirestoreError } from 'firebase/firestore';
@@ -76,11 +77,12 @@ export function firestoreFriendName(value: DocumentData | undefined): { displayN
 }
 
 export function firestoreMessage(id: string, value: DocumentData): TeamMessage {
+  const mentionEntities = value.recalled ? [] : parseMentionEntities(value.text, value.mentionEntities);
   const dataRef = value.recalled ? undefined : parseDataRef(value.dataRef);
   const resourceRef = !value.recalled && isResourceRef(value.resourceRef) ? value.resourceRef : undefined;
   return { id, seq: value.seq, author: pointerAuthor(value.author), kind: value.kind, text: value.text, changeSeq: value.changeSeq, changeId: value.changeId,
     createdAt: timestamp(value.createdAt), editedAt: timestamp(value.editedAt), ...(value.replyTo ? { replyTo: value.replyTo } : {}),
-    ...(value.recalled ? { recalled: true } : {}), ...(value.mentions ? { mentions: value.mentions } : {}),
+    ...(value.recalled ? { recalled: true } : {}), ...(value.mentions ? { mentions: value.mentions } : {}), ...(mentionEntities.length ? { mentionEntities } : {}),
     ...(value.taskId ? { taskId: value.taskId } : {}), ...(value.taskIds ? { taskIds: value.taskIds } : {}), ...(value.artifactId ? { artifactId: value.artifactId } : {}),
     ...(value.waitId ? { waitId: value.waitId } : {}),
     ...(approvalOf(value.approval) ? { approval: approvalOf(value.approval)! } : {}),

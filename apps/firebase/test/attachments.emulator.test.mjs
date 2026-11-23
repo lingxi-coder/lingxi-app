@@ -100,6 +100,29 @@ test('attachments: a picture and a document are uploaded in parts, sent, and rea
   assert.deepEqual([(await messageData(alone.messageId)).text, (await chatData()).lastMessage.preview, (await chatData()).lastSeq], ['', 'tickets.pdf', 2]);
 });
 
+test('one reply can mention a participant, ask a Bot and carry an attachment', options, async () => {
+  await execute('publishSharedBot', publish(), owner);
+  await execute('heartbeatDeployment', { ...host, ready: true }, owner);
+  const conversationId = 'chat_mentions_bot';
+  await execute('createConversation', { conversationId, kind: 'group', title: 'Trip', participantUids: [owner.uid, member.uid], sharedBotIds: [botId] });
+  const replyTo = 'original_01';
+  await messages.execute(owner, { action: 'mutate', teamId, generation: 1, conversationId,
+    operation: 'create', messageId: replyTo, changeId: 'change_initial', text: 'Travel itinerary' });
+  const file = await upload(png(4096), { conversationId });
+  const text = '@Trip Owner itinerary';
+  const mention = { userId: owner.uid, offset: 0, length: '@Trip Owner'.length };
+  const payload = { text, conversationId, replyTo, targets: [botId] };
+  await assert.rejects(send([file.uploadId], { ...payload, mentionEntities: [{ ...mention, userId: other.uid }] }), { code: 'MENTION_TARGET_REQUIRED' });
+  const sent = await send([file.uploadId], { ...payload, mentionEntities: [mention] });
+  const message = await messageData(sent.messageId, conversationId);
+  assert.deepEqual(message.mentionEntities, [mention]);
+  assert.deepEqual(message.mentionRecipientUids, [owner.uid]);
+  assert.deepEqual(message.mentions, [`shared_bot:${botId}`, `user:${owner.uid}`]);
+  assert.equal(message.replyTo, replyTo);
+  assert.equal(message.attachments[0].attachmentId, file.uploadId);
+  assert.equal(sent.tasks[0].sharedBotId, botId);
+});
+
 test('attachments: a file that is not what it says, is cut short or was changed on the way is refused, and its bytes are not kept (L3)', options, async () => {
   const picture = png(5000);
   // Called a JPEG, a text file that is not text, a text file with a NUL.

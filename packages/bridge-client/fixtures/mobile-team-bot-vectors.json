@@ -1091,6 +1091,173 @@
     }
   ],
   "compose": {
+    "memberMentions": {
+      "shifts": [
+        {
+          "before": "@Annaa ",
+          "after": "@Anna ",
+          "offset": 0,
+          "length": 5,
+          "selectionStart": 5,
+          "selectionEnd": 6,
+          "caretAfter": 5,
+          "expectedOffset": 0
+        },
+        {
+          "before": "@Annaa ",
+          "after": "@Anna ",
+          "offset": 0,
+          "length": 5,
+          "selectionStart": 4,
+          "selectionEnd": 5,
+          "caretAfter": 4,
+          "expectedOffset": null
+        },
+        {
+          "before": "@Mary Jane ",
+          "after": "@Mary Jane ",
+          "offset": 0,
+          "length": 10,
+          "selectionStart": 0,
+          "selectionEnd": 10,
+          "caretAfter": 10,
+          "expectedOffset": null
+        },
+        {
+          "before": "@Mary Jane ",
+          "after": "@Mary Jane @Mary Jane ",
+          "offset": 0,
+          "length": 10,
+          "selectionStart": 11,
+          "selectionEnd": 11,
+          "caretAfter": 22,
+          "expectedOffset": 0
+        },
+        {
+          "before": "@Mary Jane ",
+          "after": "@Mary Jane @Mary Jane ",
+          "offset": 0,
+          "length": 10,
+          "selectionStart": 0,
+          "selectionEnd": 0,
+          "caretAfter": 11,
+          "expectedOffset": 11
+        },
+        {
+          "before": "@Mary Jane @Mary Jane ",
+          "after": "@Mary Jane ",
+          "offset": 0,
+          "length": 10,
+          "selectionStart": 11,
+          "selectionEnd": 22,
+          "caretAfter": 11,
+          "expectedOffset": 0
+        },
+        {
+          "before": "@Mary Jane @Mary Jane ",
+          "after": "@Mary Jane ",
+          "offset": 11,
+          "length": 10,
+          "selectionStart": 0,
+          "selectionEnd": 0,
+          "caretAfter": 0,
+          "expectedOffset": 0
+        },
+        {
+          "before": "@Mary Jane ",
+          "after": "@Mary June ",
+          "offset": 0,
+          "length": 10,
+          "selectionStart": 6,
+          "selectionEnd": 10,
+          "caretAfter": 10,
+          "expectedOffset": null
+        },
+        {
+          "before": "👋 @Mary Jane ",
+          "after": "Hi 👋 @Mary Jane ",
+          "offset": 3,
+          "length": 10,
+          "selectionStart": 0,
+          "selectionEnd": 0,
+          "caretAfter": 3,
+          "expectedOffset": 6
+        },
+        {
+          "before": "@Mary Jane ",
+          "after": "@Mary Jane @Mary Jane ",
+          "offset": 0,
+          "length": 10,
+          "caretAfter": 22,
+          "expectedOffset": 0
+        },
+        {
+          "before": "@Mary Jane ",
+          "after": "@Mary Jane @Mary Jane ",
+          "offset": 0,
+          "length": 10,
+          "expectedOffset": null
+        }
+      ],
+      "replacements": [
+        {
+          "text": "@Jane, please review",
+          "start": 0,
+          "caret": 3,
+          "name": "Mary Jane",
+          "end": 5
+        },
+        {
+          "text": "@Janet, please review",
+          "start": 0,
+          "caret": 3,
+          "name": "Mary Jane",
+          "end": 3
+        },
+        {
+          "text": "👋 @Mary Jane, please review",
+          "start": 3,
+          "caret": 8,
+          "name": "Mary Jane",
+          "end": 13
+        },
+        {
+          "text": "@Mary  Jane tomorrow",
+          "start": 0,
+          "caret": 5,
+          "name": "Mary Jane",
+          "end": 11
+        },
+        {
+          "text": "@Marvin ok",
+          "start": 0,
+          "caret": 4,
+          "name": "Mary Jane",
+          "end": 4
+        },
+        {
+          "text": "@Mary please review",
+          "start": 0,
+          "caret": 5,
+          "name": "Mary Jane",
+          "end": 5
+        },
+        {
+          "text": "@Mary, please review",
+          "start": 0,
+          "caret": 5,
+          "name": "Mary Jane",
+          "end": 5
+        },
+        {
+          "text": "@Mary Jane, hello",
+          "start": 0,
+          "caret": 10,
+          "name": "Mary Jane",
+          "end": 10
+        }
+      ]
+    },
     "canSendText": [
       {
         "text": "   ",

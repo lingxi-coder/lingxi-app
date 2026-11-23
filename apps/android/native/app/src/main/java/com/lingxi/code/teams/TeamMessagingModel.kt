@@ -335,7 +335,7 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
                     catch (error: CancellationException) { throw error }
                     catch (error: Exception) {
                         val code = (error as? TeamMessageFailure)?.code ?: "SERVICE_UNAVAILABLE"
-                        val permanent = code in setOf("MESSAGE_ID_CONFLICT", "MESSAGE_RECALLED", "MESSAGE_AUTHOR_REQUIRED", "REPLY_REQUIRED", "REQUEST_QUOTA_EXCEEDED", "CONVERSATION_POLICY_REQUIRED", "INPUT_GRANT_REQUIRED", "COMMAND_ID_CONFLICT", "BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "INVALID_INPUT", "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "TASK_REVOKED", "ATTACHMENT_REQUIRED", "ATTACHMENT_LIMIT", "UPLOAD_EXPIRED")
+                        val permanent = code in setOf("MESSAGE_ID_CONFLICT", "MESSAGE_RECALLED", "MESSAGE_AUTHOR_REQUIRED", "REPLY_REQUIRED", "MENTION_TARGET_REQUIRED", "REQUEST_QUOTA_EXCEEDED", "CONVERSATION_POLICY_REQUIRED", "INPUT_GRANT_REQUIRED", "COMMAND_ID_CONFLICT", "BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "INVALID_INPUT", "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "TASK_REVOKED", "ATTACHMENT_REQUIRED", "ATTACHMENT_LIMIT", "UPLOAD_EXPIRED")
                         commit(life) { it.copy(outbox = it.outbox.map { value -> if ((value.optJSONObject("payload")?.getString("changeId") ?: value.getString("changeId")) == id) JSONObject(value.toString()).also { it.remove("leaseUntil"); if (permanent) it.put("error", code) } else value }) }
                         if (!permanent) throw error
                     }
@@ -469,7 +469,8 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
      * files is only ever queued for the conversation they were uploaded for.
      */
     fun queue(operation: String, text: String, messageId: String? = null, replyTo: String? = null, targets: List<String> = emptyList(), waitId: String? = null,
-              files: List<TeamDraftFile> = emptyList(), conversationId: String? = null, onSuccess: () -> Unit = {}) {
+              files: List<TeamDraftFile> = emptyList(), conversationId: String? = null,
+              mentionEntities: List<TeamMentionEntity>? = null, onSuccess: () -> Unit = {}) {
         if (mutable.value.submitting) return
         mutable.update { it.copy(submitting = true) }; val life = lifecycle
         launchOperation {
@@ -495,9 +496,12 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
                 val said = if (carries && text.isBlank()) "" else text
                 val intent = JSONObject().put("action", "mutate").put("teamId", teamId).put("generation", generation).put("conversationId", mutable.value.selected).put("messageId", messageId ?: UUID.randomUUID().toString()).put("changeId", UUID.randomUUID().toString()).put("operation", operation).put("text", said)
                 replyTo?.let { intent.put("replyTo", it) }
+                val entities = mentionEntities?.let { JSONArray(it.map { entity -> entity.json() }) }
+                if (entities != null) intent.put("mentionEntities", entities)
                 val command = if (targetsForSubmit.isNotEmpty() || carries) {
                     val payload = JSONObject().put("conversationId", intent.getString("conversationId")).put("messageId", intent.getString("messageId")).put("changeId", intent.getString("changeId")).put("text", said).put("targets", JSONArray(targetsForSubmit.distinct().sorted()))
                     replyTo?.let { payload.put("replyTo", it) }
+                    if (entities != null) payload.put("mentionEntities", entities)
                     if (carries) payload.put("attachments", JSONArray(files.map { it.uploadId }))
                     executionCommand("submit", payload, intent.getString("changeId")).also { if (carries) it.put("attachmentNames", JSONArray(files.map { file -> file.name })) }
                 } else intent

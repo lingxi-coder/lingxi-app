@@ -1,3 +1,4 @@
+import { mentionReplacementEnd, shiftMentionEntities } from '../../../packages/teams/mentions.js';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -28,6 +29,20 @@ const luminance = (hex: string) => {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 };
 const contrast = (a: string, b: string) => { const [x, y] = [luminance(a), luminance(b)].sort((m, n) => n - m) as [number, number]; return (x + 0.05) / (y + 0.05); };
+
+test('member mention editor operations agree with the native vectors', () => {
+  const { compose: { memberMentions } } = JSON.parse(readFileSync(
+    new URL('../../../packages/bridge-client/fixtures/mobile-team-bot-vectors.json', import.meta.url), 'utf8'));
+  for (const row of memberMentions.shifts) {
+    const entity = { userId: 'member', offset: row.offset, length: row.length };
+    const selection = row.selectionStart === undefined ? undefined : { start: row.selectionStart, end: row.selectionEnd };
+    const shifted = shiftMentionEntities(row.before, row.after, [entity], selection, row.caretAfter);
+    assert.deepEqual(shifted, row.expectedOffset === null ? [] : [{ ...entity, offset: row.expectedOffset }], row.after);
+  }
+  for (const row of memberMentions.replacements) {
+    assert.equal(mentionReplacementEnd(row.text, row.start, row.caret, row.name), row.end, row.text);
+  }
+});
 
 test('avatars: the color follows the id, the initials follow the name, and every color carries white text at 4.5:1', () => {
   assert.equal(avatarColor('user-1'), avatarColor('user-1'));
@@ -471,7 +486,7 @@ test('conversation view: header, stream with day and unread dividers, grouped ru
   assert.match(markup, /aria-label="Mark as read" title="Mark as read"><svg/);
   assert.match(markup, /aria-pressed="false" aria-label="Team details"/);
   assert.match(markup, /<textarea[^>]*aria-label="Message"[^>]*placeholder="Message #general"/); assert.match(markup, /Type @ to ask a Bot/);
-  assert.match(markup, /aria-label="Ask a Bot \(@\)"/); assert.match(markup, /class="tw-primary tw-send" disabled="" aria-label="Send"/, 'nothing to send yet');
+  assert.match(markup, /aria-label="Mention \(@\)"/); assert.match(markup, /class="tw-primary tw-send" disabled="" aria-label="Send"/, 'nothing to send yet');
   assert.doesNotMatch(markup, /tw-jump/, 'pinned to the newest message: no jump button');
 });
 
@@ -512,7 +527,7 @@ test('conversation view: someone else\'s Bot dm is read-only; a Bot dm needs its
   assert.match(observer, /Ready · Maintainer: Owner/); assert.match(observer, /<h2>Fixture Bot · Bob<\/h2>/, 'the Bot\'s maintainer sees whose chat it is');
   workspace.selectConversation('bot-chat'); await until(() => snapshot().selectedConversationId === 'bot-chat', 'bot chat');
   const own = html(view(workspace, snapshot()));
-  assert.match(own, /<textarea[^>]*placeholder="Message Fixture Bot"/); assert.match(own, /Messages ask this Bot automatically/); assert.doesNotMatch(own, /Ask a Bot \(@\)/, 'a Bot dm asks its Bot by itself');
+  assert.match(own, /<textarea[^>]*placeholder="Message Fixture Bot"/); assert.match(own, /Messages ask this Bot automatically/); assert.doesNotMatch(own, /Mention \(@\)/, 'a Bot dm asks its Bot by itself');
   assert.match(own, /Ready · Maintainer: Owner/); assert.match(own, /<h2>Fixture Bot<\/h2>/); assert.doesNotMatch(own, /tw-chan/, 'a Bot dm has its Bot\'s picture, not the channel #');
   fake.bots = [botCard({ permitted: false })]; await workspace.refreshBots(); await until(() => snapshot().bots[0]?.permitted === false, 'revoked access');
   const revoked = html(view(workspace, snapshot()));
@@ -521,7 +536,7 @@ test('conversation view: someone else\'s Bot dm is read-only; a Bot dm needs its
   assert.match(html(view(workspace, snapshot())), /Bot availability could not be verified/);
   workspace.selectConversation('dm-bob'); await until(() => snapshot().selectedConversationId === 'dm-bob', 'dm');
   const dm = html(view(workspace, snapshot()));
-  assert.match(dm, /<h2>Bob<\/h2>/); assert.match(dm, /placeholder="Message Bob"/); assert.doesNotMatch(dm, /Ask a Bot/); assert.match(dm, /Enter to send, Shift\+Enter for a new line/); assert.match(dm, /No messages yet|Loading messages/);
+  assert.match(dm, /<h2>Bob<\/h2>/); assert.match(dm, /placeholder="Message Bob"/); assert.doesNotMatch(dm, /Mention \(@\)/); assert.match(dm, /Enter to send, Shift\+Enter for a new line/); assert.match(dm, /No messages yet|Loading messages/);
 });
 
 test('conversation view: a conversation with no messages says so and invites a first one; one whose messages are on their way only says it is loading', async context => {

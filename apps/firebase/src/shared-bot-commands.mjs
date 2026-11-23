@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { mentionEntitiesSchema, validMentionEntities } from './team-mentions.mjs';
 import { deploymentRecord, memberRef, usePolicy } from './team-execution-contract.mjs';
 import { attachmentLimits, attachmentTypes } from './team-attachments.mjs';
 
@@ -99,10 +100,12 @@ const payloads = {
   // A message that asks Bots, carries files, or both. A message with neither is an ordinary message and is not sent here.
   submit: z.object({ ...thread, messageId: executionId, changeId: executionId, text: z.string().refine(value => Buffer.byteLength(value, 'utf8') <= 8192),
     targets: z.array(executionId).max(8).refine(unique), replyTo: executionId.optional(),
+    mentionEntities: mentionEntitiesSchema.optional(),
     privateDataSource: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/u).optional(),
     attachments: z.array(executionId).min(1).max(attachmentLimits.messageFiles).refine(unique).optional() }).strict()
     .refine(value => value.targets.length > 0 || value.attachments !== undefined).refine(value => value.text.length > 0 || value.attachments !== undefined)
-    .refine(value => !value.privateDataSource || (value.targets.length === 1 && !value.replyTo && !value.attachments)),
+    .refine(value => validMentionEntities(value.text, value.mentionEntities))
+    .refine(value => !value.privateDataSource || (value.targets.length === 1 && !value.replyTo && !value.attachments && !value.mentionEntities?.length)),
   // Files in a message (detailed design 19): uploaded for one Chat in parts of at most 700 KiB, checked as a whole, then carried by a message.
   createUpload: z.object({ ...thread, uploadId: executionId, name: fileName, mime: z.enum(attachmentTypes),
     byteLength: z.number().int().min(1).max(attachmentLimits.fileBytes), sha256: digest }).strict(),

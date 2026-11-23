@@ -88,6 +88,54 @@ test('IndexedDB upgrade deletes only the retired command store and preserves unr
   assert.equal(await indexedDbCommandStorage().load('account-team-generation'), undefined);
   assert.deepEqual(opened, [['lingxi-team-messages', 3]]); assert.deepEqual(deleted, ['projections']); assert.deepEqual([...stores], ['protected-sentinel', 'commands-v2']);
 });
+test('mention commands persist separately and keep the shared v2 journal readable by older tabs', async context => {
+  const { indexedDbCommandStorage } = await import('../../../packages/teams/command-storage');
+  const { emptyProjection, pendingCommands } = await import('../../../packages/teams/messages');
+  const records = new Map<string, unknown>();
+  const factory = { open() {
+    const request: Record<string, any> = { result: {
+      transaction() {
+        const tx: Record<string, any> = {};
+        setImmediate(() => tx.oncomplete());
+        tx.objectStore = () => ({
+          get(key: string) {
+            const record: Record<string, any> = {};
+            queueMicrotask(() => { record.result = structuredClone(records.get(key)); record.onsuccess?.(); });
+            return record;
+          },
+          put(value: unknown, key: string) { records.set(key, structuredClone(value)); },
+          delete(key: string) { records.delete(key); },
+        });
+        return tx;
+      },
+    } };
+    queueMicrotask(() => request.onsuccess());
+    return request;
+  } };
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'indexedDB');
+  Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: factory });
+  context.after(() => { if (descriptor) Object.defineProperty(globalThis, 'indexedDB', descriptor); else Reflect.deleteProperty(globalThis, 'indexedDB'); });
+  const storage = indexedDbCommandStorage(), key = projectionKey('alice', scope);
+  const plain = (changeId: string) => ({ command: { action: 'mutate' as const, operation: 'create' as const, ...scope,
+    conversationId: 'chat_0001', messageId: changeId, changeId, text: 'Hello' } });
+  const mention = { command: { ...plain('mention_1').command, text: '@Mary Jane',
+    mentionEntities: [{ userId: 'mary', offset: 0, length: 10 }] } };
+  const first = plain('plain_1'), second = plain('plain_2'), fromOldTab = plain('plain_3');
+  await storage.update(key, () => ({ ...emptyProjection('alice', scope), outbox: [first, mention, second] }));
+  const legacy = records.get(key) as ReturnType<typeof pendingCommands>;
+  assert.deepEqual(legacy.outbox, [first, second]);
+  records.set(key, { ...legacy, outbox: [second, fromOldTab] });
+  assert.deepEqual((await storage.load(key))?.outbox, [mention, second, fromOldTab]);
+
+  await storage.update(key, old => ({ ...old!, outbox: old!.outbox.map(row =>
+    pendingPayload(row).changeId === 'mention_1' ? { ...row, attempted: true, error: 'MENTION_TARGET_REQUIRED' } : row) }));
+  const restored = await indexedDbCommandStorage().load(key);
+  assert.deepEqual(restored?.outbox, [{ ...mention, attempted: true, error: 'MENTION_TARGET_REQUIRED' }, second, fromOldTab]);
+  await storage.update(key, old => ({ ...old!, outbox: old!.outbox.filter(row => pendingPayload(row).changeId !== 'mention_1') }));
+  assert.deepEqual((await storage.load(key))?.outbox, [second, fromOldTab]);
+  assert.deepEqual([...records.keys()], [key]);
+});
+
 test('durable wait member commands are strict and host-only commands are not member commands', () => {
   const answer = { conversationId: 'chat_0001', waitId: 'wait_0001', messageId: 'message_0002', changeId: 'change_0002', text: 'Lisbon' };
   assert.deepEqual(executionCommand(scope, 'answerWait', answer, 'command001'), { schemaVersion: 1, commandId: 'command001', ...scope, action: 'answerWait', payload: answer });

@@ -17,7 +17,7 @@ final class TeamMessageRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchec
 @MainActor @Observable
 final class TeamMessagingModel {
     static let conversationFields: Set<String> = ["kind", "title", "participants", "lastSeq", "lastChangeSeq", "lastMessage", "sharedBotId", "autoReply"]
-    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "targets", "taskId", "taskIds", "artifactId", "waitId", "approval", "decision", "dataRef", "resourceRef", "resourceGrant"]
+    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "mentionEntities", "targets", "taskId", "taskIds", "artifactId", "waitId", "approval", "decision", "dataRef", "resourceRef", "resourceGrant"]
     private(set) var cache: TeamMessageProjection?
     private(set) var offline = true
     private(set) var error = ""
@@ -428,7 +428,7 @@ final class TeamMessagingModel {
                         try await commit { $0.outbox.removeAll { $0.id == intent.id } }
                     } catch {
                         let code = (error as? TeamMessageFailure)?.code ?? "SERVICE_UNAVAILABLE"
-                        let permanent = ["MESSAGE_ID_CONFLICT", "MESSAGE_RECALLED", "MESSAGE_AUTHOR_REQUIRED", "REPLY_REQUIRED", "REQUEST_QUOTA_EXCEEDED", "CONVERSATION_POLICY_REQUIRED", "INPUT_GRANT_REQUIRED", "COMMAND_ID_CONFLICT", "BOT_USE_REQUIRED", "BOT_PARTICIPANT_REQUIRED", "INVALID_BOT_TARGET", "INVALID_INPUT", "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "TASK_REVOKED", "ATTACHMENT_REQUIRED", "ATTACHMENT_LIMIT", "UPLOAD_EXPIRED"].contains(code)
+                        let permanent = ["MESSAGE_ID_CONFLICT", "MESSAGE_RECALLED", "MESSAGE_AUTHOR_REQUIRED", "REPLY_REQUIRED", "MENTION_TARGET_REQUIRED", "REQUEST_QUOTA_EXCEEDED", "CONVERSATION_POLICY_REQUIRED", "INPUT_GRANT_REQUIRED", "COMMAND_ID_CONFLICT", "BOT_USE_REQUIRED", "BOT_PARTICIPANT_REQUIRED", "INVALID_BOT_TARGET", "INVALID_INPUT", "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "TASK_REVOKED", "ATTACHMENT_REQUIRED", "ATTACHMENT_LIMIT", "UPLOAD_EXPIRED"].contains(code)
                         try await commit { value in if let index = value.outbox.firstIndex(where: { $0.id == intent.id }) { value.outbox[index].leaseUntil = nil; if permanent { value.outbox[index].error = code } } }
                         if !permanent { throw error }
                     }
@@ -565,7 +565,7 @@ final class TeamMessagingModel {
     }
     /// `waitId` makes a new message the answer to a Bot's question: it asks no Bot and starts no task.
     /// `files`: checked uploads of this conversation that a new message carries; it may then have no text.
-    func queue(operation: String, text: String, messageId: String? = nil, replyTo: String? = nil, targets: [String] = [], waitId: String? = nil, files: [TeamDraftFile] = []) async throws {
+    func queue(operation: String, text: String, messageId: String? = nil, replyTo: String? = nil, targets: [String] = [], waitId: String? = nil, files: [TeamDraftFile] = [], mentionEntities: [TeamMentionEntity]? = nil) async throws {
         let carries = operation == "create" && waitId == nil && !files.isEmpty
         guard active, !revoked, !selected.isEmpty, files.isEmpty || carries, files.count <= TeamAttachments.messageFiles, files.allSatisfy({ $0.state == .ready }),
               operation == "recall" || ((carries || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) && text.utf8.count <= 8192) else { throw TeamMessageFailure(code: "INVALID_INPUT") }
@@ -583,7 +583,7 @@ final class TeamMessagingModel {
             throw TeamMessageFailure(code: blocked == .quota_exhausted ? "REQUEST_QUOTA_EXCEEDED" : "HOST_UNAVAILABLE")
         }
         let intent = TeamMessageIntent(teamId: teamId, generation: generation, conversationId: selected, messageId: messageId ?? UUID().uuidString, changeId: UUID().uuidString, operation: operation, text: carries && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : text, replyTo: replyTo, targets: resolvedTargets ?? nil,
-                                       attachments: carries ? files.map(\.uploadId) : nil, attachmentNames: carries ? files.map(\.name) : nil)
+                                       attachments: carries ? files.map(\.uploadId) : nil, attachmentNames: carries ? files.map(\.name) : nil, mentionEntities: mentionEntities)
         try await commit { $0.outbox.append(intent) }; refresh()
     }
     func pause(_ bot: TeamBotCard) async throws {

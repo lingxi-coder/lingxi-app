@@ -65,6 +65,8 @@ import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -473,7 +475,7 @@ private fun ConversationBody(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        is StreamItem.Local -> LocalCommandRow(item, tick, onDiscard = {
+                        is StreamItem.Local -> LocalCommandRow(item, tick, onCopy = copyText, onDiscard = {
                             workspace.messagingModel.discard((item.intent.optJSONObject("payload") ?: item.intent).getString("changeId"))
                         })
                     }
@@ -509,21 +511,27 @@ private fun ConversationBody(
             }
         }
         TeamComposer(
-            conversation = conversation, label = label, uid = uid, messaging = messaging, draft = draft,
+            conversation = conversation, label = label, uid = uid, messaging = messaging, draft = draft, members = members,
             replyTo = replyTo, editing = editing, replyAuthor = replyTo?.let(::authorOf).orEmpty(),
             onDraft = ::setDraft, onCancelReply = { setDraft(draft.copy(replyToId = null)) }, onCancelEdit = { editingId = null },
             voiceTarget = workspace.draftKey(conversationId),
-            onSend = { text, targets, done ->
+            readDraft = { workspace.draft(conversationId) },
+            onSend = { text, targets, mentions, done ->
                 val editingMessage = editing
+                val submittedDraft = workspace.draft(conversationId)
                 // A reply to a Bot's question that still waits for the viewer is its answer: it continues that task and asks no Bot.
                 val waitId = if (editingMessage == null) TeamTaskActions.answerableWait(draft.replyToId?.let { byId[it] }, messaging.tasks, viewer, pendingWaits) else null
                 // The files are this conversation's draft's, read at the moment of sending: no other conversation's are ever sent here.
                 val sending = if (editingMessage == null && waitId == null) workspace.draftFiles.value[workspace.draftKey(conversationId)].orEmpty() else emptyList()
                 workspace.messagingModel.queue(if (editingMessage == null) "create" else "edit", text, editingMessage?.id, if (editingMessage == null) draft.replyToId else null, if (waitId == null) targets else emptyList(), waitId,
-                    files = sending, conversationId = conversationId) {
-                    done()
+                    files = sending, conversationId = conversationId, mentionEntities = mentions.takeIf { it.isNotEmpty() || editingMessage?.mentionEntities?.isNotEmpty() == true }) {
                     workspace.filesSent(conversationId, sending.map { it.uploadId })
-                    if (editingMessage != null) editingId = null else setDraft(ComposerDraft())
+                    if (editingMessage != null) {
+                        editingId = null
+                    } else if (workspace.draft(conversationId) == submittedDraft) {
+                        done()
+                        setDraft(ComposerDraft())
+                    }
                 }
             },
             files = files, refusals = if (carriesFiles) fileRefusals[fileKey].orEmpty() else emptyList(),
@@ -664,7 +672,13 @@ private fun MessageCell(
                         if (message.recalled) Text(stringResource(R.string.teams_message_recalled), style = MaterialTheme.typography.bodyMedium, fontStyle = FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         else if (message.text.isEmpty() && message.files.isNotEmpty()) Unit // A message of files alone has no text line.
                         else if (TeamsBotText.rendersMarkdown(message.authorKind, message.recalled)) AIText(markdown = body, modifier = Modifier.fillMaxWidth().testTag("teams.message.body.${message.id}"), onOpenLink = rememberTeamBotLinkOpener())
-                        else Text(body, style = MaterialTheme.typography.bodyLarge)
+                        else if (message.mentionEntities.isEmpty()) Text(body, style = MaterialTheme.typography.bodyLarge)
+                        else Text(buildAnnotatedString {
+                            append(body)
+                            for (entity in TeamMentionEntity.valid(message.mentionEntities, body)) {
+                                addStyle(SpanStyle(fontWeight = FontWeight.SemiBold), entity.offset, entity.offset + entity.length)
+                            }
+                        }, style = MaterialTheme.typography.bodyLarge)
                         val edited = message.editedAt != null && !message.recalled
                         val time = TeamsStreamLogic.formatClock(message.createdAtMs)
                         if (edited || time.isNotEmpty()) Row(
@@ -760,7 +774,7 @@ private fun BotTag() {
 
 /** A command saved on this device and not yet confirmed (or rejected): the existing outbox semantics, ids and journals unchanged. */
 @Composable
-private fun LocalCommandRow(item: StreamItem.Local, tick: androidx.compose.runtime.State<Long>, onDiscard: () -> Unit) {
+private fun LocalCommandRow(item: StreamItem.Local, tick: androidx.compose.runtime.State<Long>, onCopy: (String) -> Unit, onDiscard: () -> Unit) {
     val intent = item.intent
     val failed = intent.has("error")
     val attempted = intent.optBoolean("attempted")
@@ -780,6 +794,9 @@ private fun LocalCommandRow(item: StreamItem.Local, tick: androidx.compose.runti
             ) {
                 if (body.isNotEmpty()) Text(body, style = MaterialTheme.typography.bodyMedium)
                 Text(status, style = MaterialTheme.typography.labelSmall, color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                if (intent.optString("error") == "MENTION_TARGET_REQUIRED" && payload.optString("text").isNotEmpty()) {
+                    TextButton(onClick = { onCopy(payload.getString("text")) }) { Text(stringResource(R.string.chat_message_copy)) }
+                }
                 if (canDiscard) TextButton(onClick = onDiscard) { Text(stringResource(R.string.teams_message_discard)) }
             }
         }

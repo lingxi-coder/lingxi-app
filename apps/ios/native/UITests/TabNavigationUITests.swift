@@ -8,6 +8,15 @@ enum ShellTab: String, CaseIterable {
 
     var identifier: String { "tab.\(rawValue)" }
     var index: Int { Self.allCases.firstIndex(of: self) ?? 0 }
+    var tabSymbol: String {
+        switch self {
+        case .chats: "bubble.left.and.bubble.right"
+        case .bots: "cpu"
+        case .teams: "person.2"
+        case .friends: "person.crop.circle"
+        case .settings: "gearshape"
+        }
+    }
 }
 
 extension XCUIApplication {
@@ -16,7 +25,16 @@ extension XCUIApplication {
         let rail = descendants(matching: .any)["tabs.rail"].firstMatch
         if rail.exists { return rail.buttons[tab.identifier].firstMatch }
         let byIdentifier = tabBars.buttons[tab.identifier]
-        return byIdentifier.exists ? byIdentifier : tabBars.buttons.element(boundBy: tab.index)
+        if byIdentifier.exists { return byIdentifier }
+        let byPosition = tabBars.buttons.element(boundBy: tab.index)
+        return byPosition.exists ? byPosition : floatingTabButton(tab)
+    }
+
+    /// Compact, floating system tabs can expose their icon buttons outside an XCUI tab bar.
+    private func floatingTabButton(_ tab: ShellTab) -> XCUIElement {
+        let symbol = tab.tabSymbol
+        let filled = buttons.containing(.image, identifier: symbol + ".fill").firstMatch
+        return filled.exists ? filled : buttons.containing(.image, identifier: symbol).firstMatch
     }
 
     /// Whether the system tab bar is on screen and usable (it is hidden on pushed screens, with the
@@ -25,7 +43,8 @@ extension XCUIApplication {
         let rail = descendants(matching: .any)["tabs.rail"].firstMatch
         if rail.exists && rail.buttons[ShellTab.chats.identifier].firstMatch.isHittable { return true }
         let bar = tabBars.firstMatch
-        return bar.exists && bar.isHittable
+        if bar.exists && bar.isHittable { return true }
+        return floatingTabButton(.chats).isHittable && floatingTabButton(.teams).isHittable
     }
 
     /// Taps `tab` in the bar once it is on screen, and returns its button.

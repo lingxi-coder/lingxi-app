@@ -1,3 +1,4 @@
+import { mentionTextParts } from './mentions.js';
 import {SourceNoticePreview} from '../inbox/SourceNoticePreview';
 import type {InboxNoticeTarget} from '../inbox/contracts';
 import { durableReadFrontier,observeTranscript,type VisibleReadFrontier } from '../inbox/visibility.js';
@@ -419,6 +420,8 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
                 <p className="tw-msg-body">{operation === 'recall' ? t('tw_conv_recall_message') : `${operation === 'edit' ? `${t('teams_message_edit')}: ` : ''}${payload.text}`}</p>
                 {'attachments' in payload && payload.attachments?.length ? <p className="tw-msg-body tw-pending-files"><Icon name="clip" size={12} /> {payload.attachments.length === 1 ? t('tw_files_one') : t('tw_files_other_fmt', payload.attachments.length)}</p> : null}
                 <div className="tw-pending-actions">
+                  {intent.error === 'MENTION_TARGET_REQUIRED' && payload.text
+                    ? <button type="button" onClick={() => void workspace.attempt(() => navigator.clipboard.writeText(payload.text))}>{t('chat_message_copy')}</button> : null}
                   {intent.error === 'HOST_UNAVAILABLE' ? <button type="button" onClick={() => void workspace.attempt(() => model.retryHostUnavailable(payload.changeId))}>{t('common_retry')}</button> : null}
                   <button type="button" disabled={Boolean(intent.attempted && !intent.error) || (intent.leaseUntil ?? 0) > Date.now()} onClick={() => void workspace.attempt(() => model.discard(payload.changeId))}>{t('teams_message_discard')}</button>
                 </div>
@@ -487,7 +490,8 @@ function MessageItem({ message, grouped, author, mine, owner, quote, question, a
   const body = markdown ? <div className="tw-msg-body tw-md" data-markdown="true">
     {renderMarkdown(message.text)}
   </div> : filesOnly ? null : <p className="tw-msg-body">
-    {message.recalled ? <em>{t('teams_message_recalled')}</em> : message.text}
+    {message.recalled ? <em>{t('teams_message_recalled')}</em> : message.mentionEntities?.length ? mentionTextParts(message.text, message.mentionEntities).map((part, index) =>
+      part.mention ? <strong className="tw-member-mention" key={index}>{part.text}</strong> : part.text) : message.text}
   </p>;
   const edited = message.editedAt && !message.recalled;
   const meta = clock || edited ? <div className="tw-msg-meta">

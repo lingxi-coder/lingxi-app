@@ -7,6 +7,7 @@ import { initializeTestEnvironment, assertFails } from '@firebase/rules-unit-tes
 import { doc, setDoc } from 'firebase/firestore';
 import { TeamsStore, createTeamsHandler } from '../src/teams.mjs';
 import { TeamMessagesStore } from '../src/team-messages.mjs';
+import { InboxStore } from '../src/inbox-store.mjs';
 import { onTeamMessageCreated } from '../src/team-message-push.mjs';
 
 const options = { skip: !process.env.FIRESTORE_EMULATOR_HOST, timeout: 60000 };
@@ -56,6 +57,66 @@ test('T2: retry evidence survives later editing and recall without retaining rec
   await assert.rejects(execute(command({ operation: 'edit', changeId: 'change004', text: 'Revival' })), { code: 'MESSAGE_RECALLED' });
   await assert.rejects(execute(command({ operation: 'recall', changeId: 'change003', text: 'Not blank' }))); // Strict recall schema.
 });
+test('group mentions preserve a spaced name, route attention by ID and keep send receipts stable', options, async () => {
+  const groupId = 'mentions-chat', key = `team:${teamId}:${groupId}`;
+  const group = { ...scope, conversationId: groupId };
+  const prefixed = { uid: 'user:alice', name: 'Other Alice' };
+  const { code } = await teams.execute(owner, { action: 'invite', teamId, requestId: 'mention-invite', role: 'member', maxUses: 1, ttlSeconds: 3600 });
+  await teams.execute(prefixed, { action: 'join', code, requestId: 'mention-join' });
+  await execute({ action: 'create', ...group, kind: 'group', title: 'Mentions', participantUids: ['owner', 'alice', prefixed.uid] });
+  const mention = { userId: 'alice', offset: 3, length: '@Mary Jane'.length };
+  const send = command({ ...group, text: '👋 @Mary Jane, could you review?', mentionEntities: [mention] });
+  await assert.rejects(execute({ ...send, mentionEntities: [{ ...mention, offset: 2 }] }));
+  await assert.rejects(execute({ ...send, mentionEntities: [{ ...mention, userId: 'hidden' }] }), { code: 'MENTION_TARGET_REQUIRED' });
+  const first = await execute(send);
+  assert.deepEqual(await execute(send), first);
+  await assert.rejects(execute({ ...send, mentionEntities: [] }), { code: 'MESSAGE_ID_CONFLICT' });
+  const read = async () => (await sync(0, alice, { conversationId: groupId })).messages[0];
+  assert.deepEqual((await read()).mentionEntities, [mention]);
+  assert.deepEqual((await read()).mentions, ['user:alice']);
+  assert.deepEqual((await read()).mentionRecipientUids, ['alice']);
+  const inbox = new InboxStore(db, () => now);
+  await inbox.fold(alice.uid, { kind: 'team', sourceId: teamId, conversationId: groupId });
+  await inbox.fold(prefixed.uid, { kind: 'team', sourceId: teamId, conversationId: groupId });
+  assert.equal((await inbox.execute(alice.uid, { action: 'get', key })).item.mentionCount, 1);
+  assert.equal((await inbox.execute(prefixed.uid, { action: 'get', key })).item.mentionCount, 0);
+  assert.deepEqual((await db.collection('users/alice/inboxNotices').get()).docs.map(doc => doc.data().kind), ['mention']);
+  assert.equal((await db.collection(`users/${prefixed.uid}/inboxNotices`).get()).size, 0);
+  const countEvent = db.doc(`teams/${teamId}/conversations/${groupId}/inboxCountEvents/${send.messageId}`);
+  assert.deepEqual((await countEvent.get()).data().mentions, ['alice']);
+
+  await execute({ ...send, operation: 'edit', changeId: 'edit-mention', mentionEntities: [] });
+  assert.deepEqual((await read()).mentionEntities, []);
+  assert.deepEqual((await read()).mentionRecipientUids, ['alice']);
+
+  await teams.execute(owner, { action: 'remove', teamId, uid: alice.uid, generation: 1 });
+  await assert.rejects(execute({ ...send, messageId: 'message02', changeId: 'change002' }), { code: 'MENTION_TARGET_REQUIRED' });
+  assert.deepEqual(await execute(send), first, 'receipt stays idempotent after removal');
+  await execute(command({ ...group, messageId: 'message03', changeId: 'change003' }));
+});
+
+test('legacy and current edits preserve historical mentions, but cannot add departed targets', options, async () => {
+  const group = { ...scope, conversationId: 'history-mentions' };
+  await execute({ action: 'create', ...group, kind: 'group', title: 'Mention history', participantUids: [owner.uid, alice.uid, hidden.uid] });
+  const mention = { userId: alice.uid, offset: 0, length: 10 };
+  const send = command({ ...group, text: '@Mary Jane, old wording', mentionEntities: [mention] });
+  await execute(send);
+  const get = async () => (await sync(0, owner, group)).messages[0];
+  const legacyEdit = { ...command(group), operation: 'edit', text: '👋 ' + send.text, changeId: 'edit-legacy' };
+  await execute(legacyEdit);
+  const shifted = { ...mention, offset: 3 };
+  assert.deepEqual((await get()).mentionEntities, [shifted]);
+  await teams.execute(owner, { action: 'remove', teamId, uid: alice.uid, generation: 1 });
+  await teams.execute(owner, { action: 'remove', teamId, uid: hidden.uid, generation: 1 });
+  await execute({ ...legacyEdit, text: '👋 @Mary Jane, revised wording', changeId: 'edit-current', mentionEntities: [shifted] });
+  assert.deepEqual((await get()).mentionEntities, [shifted]);
+  await assert.rejects(execute({ ...legacyEdit, changeId: 'edit-new-target', mentionEntities: [{ ...shifted, userId: hidden.uid }] }), { code: 'MENTION_TARGET_REQUIRED' });
+  await execute({ ...legacyEdit, changeId: 'edit-clear', mentionEntities: [] });
+  assert.deepEqual((await get()).mentionEntities, []);
+  assert.deepEqual((await get()).mentionRecipientUids, [alice.uid]);
+  await assert.rejects(execute({ ...legacyEdit, changeId: 'edit-reintroduce', mentionEntities: [shifted] }), { code: 'MENTION_TARGET_REQUIRED' });
+});
+
 test('T2: mutation catch-up pages edits/recalls older than the reconnect cursor in order', options, async () => {
   for (let i = 1; i <= 105; i++) await execute(command({ messageId: `message-${String(i).padStart(3, '0')}`, changeId: `create-${String(i).padStart(3, '0')}`, text: `Synthetic ${i}` }));
   const before = await sync(); assert.equal(before.changes.length, 100); assert.equal(before.hasMore, true);

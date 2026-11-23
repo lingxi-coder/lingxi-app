@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { messageMentionRecipients } from './team-mentions.mjs';
 export const DAY = 86400000;
 export const id = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/u);
 const cursor = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -207,7 +208,7 @@ export function messageEvent(m, uid, conversation, reply) {
     !['text', 'status', 'question', 'task_ref', 'app_ref'].includes(m.kind)
   )
     return null;
-  const mention = m.mentions?.includes(uid) || m.mentions?.includes('user:' + uid);
+  const mention = messageMentionRecipients(m).includes(uid);
   return {
     cursor: m.seq,
     kind: mention

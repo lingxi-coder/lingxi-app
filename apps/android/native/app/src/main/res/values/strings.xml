@@ -2758,6 +2758,9 @@
     <string name="teams_editing_message">正在编辑消息</string>
     <string name="teams_composer_hint_fmt">发送给 %1$s</string>
     <string name="teams_composer_edit_hint">修改你的消息</string>
+    <string name="teams_error_mention_target">有被提及的成员已不可用。请将消息复制到新草稿并更新提及。</string>
+    <string name="teams_composer_mention">提及 (@)</string>
+    <string name="teams_composer_mention_options">提及候选</string>
     <string name="teams_composer_ask_bot">请求 Bot (@)</string>
     <string name="teams_composer_bots_asked">将请求的 Bot</string>
     <string name="teams_composer_bots_can_ask">可请求的 Bot</string>

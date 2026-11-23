@@ -1,3 +1,4 @@
+import { mentionFields, mentionMemberRefs } from './team-mentions.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { FieldValue } from 'firebase-admin/firestore';
 import { admissionId, sharedBotPermits } from './team-execution-contract.mjs';
@@ -525,10 +526,19 @@ export class SharedBotsStore {
       const { binding } = await allowedPrivateSource(tx, this.db, team, p.privateDataSource, p.conversationId, p.targets[0], identity);
       privateData = { privateDataSource: p.privateDataSource, privateDataVersion: binding.version };
     }
-    if (p.replyTo && !(await tx.get(ref.collection('messages').doc(p.replyTo))).exists) deny(400, 'REPLY_REQUIRED');
-    const files = await attachable(tx, team, identity, p.conversationId, p.attachments, now);
+    const memberRefs = mentionMemberRefs(team, c, p.mentionEntities, identity.uid);
+    if (!memberRefs) deny(409, 'MENTION_TARGET_REQUIRED');
+    const replyRefs = p.replyTo ? [ref.collection('messages').doc(p.replyTo)] : [];
+    const botRefs = p.targets.map(id => team.collection('sharedBots').doc(id));
     const all = refs => refs.length ? tx.getAll(...refs) : [];
-    const bots = await all(p.targets.map(id => team.collection('sharedBots').doc(id)));
+    const [reads, files] = await Promise.all([
+      all([...replyRefs, ...memberRefs, ...botRefs]),
+      attachable(tx, team, identity, p.conversationId, p.attachments, now)
+    ]);
+    if (replyRefs.length && !reads[0].exists) deny(400, 'REPLY_REQUIRED');
+    const botStart = replyRefs.length + memberRefs.length;
+    if (reads.slice(replyRefs.length, botStart).some(member => !member.exists)) deny(409, 'MENTION_TARGET_REQUIRED');
+    const bots = reads.slice(botStart);
     const owners = await all(bots.map(doc => team.collection('members').doc(doc.data()?.identity.maintainer.uid ?? '_missing')));
     const deployments = await all(bots.map(doc => team.collection('deployments').doc(doc.data()?.identity.activeDeploymentId ?? '_missing')));
     for (const [index, snapshot] of bots.entries()) {
@@ -563,7 +573,9 @@ export class SharedBotsStore {
     const author = dataCause?.author ?? { kind: 'user', uid: identity.uid, displayName: self.displayName || 'Member' }, at = new Date(now);
     const sharedText = p.privateDataSource ? 'Private data preview requested.' : p.text;
     tx.create(ref.collection('messages').doc(p.messageId), { seq, changeSeq, changeId: p.changeId, text: sharedText, kind: 'text', author,
-      createdAt: at, ...(tasks.length ? { taskIds: tasks.map(task => task.taskId), mentions: p.targets.map(id => `shared_bot:${id}`) } : {}),
+      createdAt: at, ...(tasks.length ? { taskIds: tasks.map(task => task.taskId) } : {}),
+      ...(p.mentionEntities?.length ? mentionFields(p.mentionEntities, p.targets.map(id => `shared_bot:${id}`))
+        : tasks.length ? { mentions: p.targets.map(id => `shared_bot:${id}`) } : {}),
       ...(dataCause ? { dataRef: dataCause.reference } : {}),
       ...(datasetShare ? { resourceRef: datasetShare.reference, resourceGrant: datasetShare.grant } : {}),
       ...(p.replyTo ? { replyTo: p.replyTo } : {}), ...(files.attachments.length ? { attachments: files.attachments } : {}) });

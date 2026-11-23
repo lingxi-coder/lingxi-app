@@ -42,6 +42,7 @@ export async function browserSignIn(
   openExternal: (url: string) => Promise<void>,
   signal: AbortSignal,
   reauth?: { uid: string; email: string | null },
+  complete?: (credential: BrowserCredential) => Promise<void>,
 ): Promise<BrowserCredential> {
   const secret = randomBytes(32).toString('hex');
   const path = `/${secret}`;
@@ -53,6 +54,7 @@ export async function browserSignIn(
   return new Promise((resolve, reject) => {
     let origin = '';
     let settled = false;
+    let completing = false;
     const finish = (error?: Error, credential?: BrowserCredential) => {
       if (settled) return;
       settled = true;
@@ -62,7 +64,7 @@ export async function browserSignIn(
       server.closeAllConnections();
       if (error) reject(error); else resolve(credential!);
     };
-    const abort = () => finish(new Error('登录已取消。'));
+    const abort = () => { if (!completing) finish(new Error('登录已取消。')); };
     const timer = setTimeout(() => finish(new Error('登录超时，请重试。')), 180_000);
     const server = createServer(async (req, res) => {
       res.setHeader('Cache-Control', 'no-store');
@@ -80,7 +82,38 @@ export async function browserSignIn(
         const label = provider === 'google.com' ? 'Google' : 'Apple';
         // Dynamic imports keep electron-vite's ESM shim scanner from treating
         // browser imports inside this HTML string as imports of the Node bundle.
-        res.end(`<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LingXi 登录</title><style nonce="${secret}">body{font:16px system-ui;max-width:440px;margin:15vh auto;padding:24px;color:#202124}button{font:inherit;padding:12px 24px;border-radius:10px;border:1px solid #ccc;background:#fff;cursor:pointer}p{line-height:1.6}</style><h1>登录 LingXi</h1><p>使用 ${label} 账号继续。</p><button id="login">通过 ${label} 登录</button><p id="status" role="status"></p><script type="module" nonce="${secret}">
+        res.end(`<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LingXi 登录</title>
+<style nonce="${secret}">
+  :root { color-scheme: light dark; }
+  body { margin: 0; background: light-dark(#fdfdfb, #191a1b); color: light-dark(#202421, #f0f2ef); font: 1rem/1.5 system-ui, sans-serif; }
+  main { box-sizing: border-box; min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 1.5rem; text-align: center; }
+  h1 { margin: 0 0 .5rem; font-size: 1.375rem; font-weight: 625; letter-spacing: -.025em; }
+  p { margin: 0; color: light-dark(#5e675f, #adb5af); }
+  button { margin: 1rem 0 .5rem; font: inherit; padding: .625rem 1.125rem; border-radius: .625rem; border: 1px solid light-dark(#cbd1cc, #5b655d); cursor: pointer; }
+  button:disabled { cursor: default; }
+  #status { font-size: .875rem; }
+  .success p { font-size: .9375rem; }
+  .success h1:focus { outline: none; }
+  .success-mark { display: grid; place-items: center; width: 2.25rem; height: 2.25rem; margin: 0 auto .875rem; border-radius: 50%; background: light-dark(#e1eee5, #25372c); color: light-dark(#286342, #acd9bb); font-weight: 650; }
+</style>
+<main>
+  <section id="sign-in">
+    <h1>登录 LingXi</h1>
+    <p>使用 ${label} 账号继续。</p>
+    <button id="login">通过 ${label} 登录</button>
+    <p id="status" role="status"></p>
+  </section>
+  <section id="success" class="success" hidden>
+    <span class="success-mark" aria-hidden="true">✓</span>
+    <h1 tabindex="-1">已登录 LingXi</h1>
+    <p>可以关闭此网页，返回 LingXi 继续。</p>
+  </section>
+</main>
+<script type="module" nonce="${secret}">
 const { initializeApp } = await import('/firebase-app.js');
 const { initializeAuth, inMemoryPersistence, browserPopupRedirectResolver, GoogleAuthProvider, OAuthProvider, signInWithPopup, signOut, getAdditionalUserInfo, deleteUser } = await import('/firebase-auth.js');
 const reauth = ${JSON.stringify(reauth ?? null).replaceAll('<', '\\u003c')};
@@ -103,8 +136,17 @@ button.onclick = async () => {
   const credential = ${provider === 'google.com' ? 'GoogleAuthProvider' : 'OAuthProvider'}.credentialFromResult(result);
   if (!credential) throw new Error('没有收到登录凭据。');
   const response = await fetch('${path}/complete', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(credential.toJSON())});
-  if (!response.ok) throw new Error('无法连接 LingXi，请返回应用重试。');
-  status.textContent = '已返回 LingXi 完成验证，请切回应用。';
+  if (!response.ok) {
+   status.textContent = 'LingXi 未能完成登录，请切回应用查看原因。';
+   return;
+  }
+  document.title = reauth ? '已验证 LingXi 账号' : '已登录 LingXi';
+  document.getElementById('sign-in').hidden = true;
+  const success = document.getElementById('success');
+  const heading = success.querySelector('h1');
+  if (reauth) heading.textContent = document.title;
+  success.hidden = false;
+  heading.focus();
  } catch(error) {
   if (error.code === 'auth/popup-closed-by-user') {
    try {
@@ -122,6 +164,8 @@ button.onclick = async () => {
       if (req.method !== 'POST' || ![`${path}/complete`, `${path}/cancel`, `${path}/mismatch`].includes(req.url ?? '') || req.headers.origin !== origin || req.headers['content-type'] !== 'application/json') {
         res.writeHead(403).end(); return;
       }
+      if (completing) { res.writeHead(409).end(); return; }
+      let credential: BrowserCredential;
       try {
         let body = '';
         for await (const chunk of req) {
@@ -129,6 +173,7 @@ button.onclick = async () => {
           if (Buffer.byteLength(body) > 96 * 1024) { res.writeHead(413).end(); return; }
         }
         const value: unknown = JSON.parse(body);
+        if (settled || completing) { res.writeHead(409).end(); return; }
         if (req.url === `${path}/cancel`) {
           res.writeHead(200).end('{}', () => finish(new Error('登录已取消。')));
           return;
@@ -137,9 +182,22 @@ button.onclick = async () => {
           res.writeHead(200).end('{}', () => finish(new Error('ACCOUNT_MISMATCH')));
           return;
         }
-        const credential = parseBrowserCredential(value, provider);
-        res.writeHead(200).end('{}', () => finish(undefined, credential));
-      } catch { res.writeHead(400).end(); }
+        credential = parseBrowserCredential(value, provider);
+      } catch { res.writeHead(400).end(); return; }
+
+      completing = true;
+      clearTimeout(timer);
+      let failure: Error | undefined;
+      try { await complete?.(credential); }
+      catch (error) { failure = error instanceof Error ? error : new Error('INVALID_IDP_RESPONSE'); }
+
+      // If the browser tab closes mid-exchange, still settle the app's request.
+      const sent = () => finish(failure, credential);
+      if (res.destroyed) sent();
+      else {
+        res.once('close', sent);
+        res.writeHead(failure ? 502 : 200).end('{}', sent);
+      }
     });
     server.requestTimeout = 15_000;
     server.on('error', () => finish(new Error('无法启动本机登录回调。')));

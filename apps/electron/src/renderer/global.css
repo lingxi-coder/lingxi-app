@@ -614,25 +614,6 @@ body {
   scroll-behavior: auto;
 }
 
-.settings-provider-row,
-.settings-provider-back {
-  transition-property: background-color, opacity;
-  transition-duration: 140ms;
-  transition-timing-function: ease-out;
-}
-
-.settings-provider-row:not(:disabled):hover,
-.settings-provider-row:not(:disabled):focus-visible,
-.settings-provider-back:not(:disabled):hover,
-.settings-provider-back:not(:disabled):focus-visible {
-  background: var(--settings-provider-row-hover) !important;
-  outline: none;
-}
-
-.settings-provider-row:disabled,
-.settings-provider-back:disabled {
-  opacity: 0.58;
-}
 .desktop-stage-feed {
   position: relative;
   z-index: 1;

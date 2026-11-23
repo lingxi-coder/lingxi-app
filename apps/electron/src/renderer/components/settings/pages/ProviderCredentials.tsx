@@ -1,5 +1,7 @@
 import { logicalProviderId, providerAccountSummary, type ProviderAccountSnapshot } from '../../../../shared/providerAccounts';
 import { ProviderAccounts } from './ProviderAccounts';
+import { ProviderBrandIcon } from './ProviderBrandIcon';
+import { ProviderFeedback, ProviderInfo } from './ProviderPopups';
 import { CloudProviders } from './CloudProviders';
 import { VAULT_PRESET_IDS } from '../../../../shared/providerVault';
 import { ProviderProtocol } from './ProviderProtocol';
@@ -11,7 +13,7 @@ import { useT } from '../../../theme/ThemeContext';
 import { Icon } from '../../Icon';
 import type { PageContentProps } from '../SettingsScreen';
 import { PROVIDERS, providerById, providersFromCatalog } from '../../../../shared/providers';
-import { modelCapabilitySummary, selectedModelIdsForPickerSettings, waitForModelSelection } from '../../../bridge/modelCatalog';
+import { modelCapabilitySummary, modelReference, selectedModelIdsForPickerSettings, waitForModelSelection } from '../../../bridge/modelCatalog';
 
 export function initialProviderSelection(initialProviderId?: string): string {
   return providerById(logicalProviderId(initialProviderId ?? ''))?.id ?? 'anthropic';
@@ -24,8 +26,26 @@ export function ProviderCredentials({ bridge, onLayerLockChange, initialProvider
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(() => initialProviderId ? initialProviderSelection(initialProviderId) : null);
   const [pendingModelReference, setPendingModelReference] = useState(requestedModelReference);
   const [applyError, setApplyError] = useState<string>();
+  const [settingsRetryError, setSettingsRetryError] = useState<string>();
   const [applying, setApplying] = useState(false);
   const [search, setSearch] = useState('');
+  const searchInput = useRef<HTMLInputElement>(null);
+  const directoryList = useRef<HTMLUListElement>(null);
+  const backButton = useRef<HTMLButtonElement>(null);
+  const previousProviderId = useRef(selectedProviderId);
+  useEffect(() => {
+    const previousId = previousProviderId.current;
+    if (selectedProviderId === previousId) return;
+    previousProviderId.current = selectedProviderId;
+    if (selectedProviderId !== null) {
+      backButton.current?.focus();
+    } else {
+      const row = previousId && directoryList.current?.querySelector<HTMLButtonElement>(
+        `[data-testid="provider-list-item-${CSS.escape(previousId)}"]`,
+      );
+      (row || searchInput.current)?.focus();
+    }
+  }, [selectedProviderId]);
   const [accountSnapshot, setAccountSnapshot] = useState<ProviderAccountSnapshot | undefined>(snapshot?.providerAccountSnapshot);
   const [accountStatusError, setAccountStatusError] = useState(false);
   const [refreshingAccounts, setRefreshingAccounts] = useState(false);
@@ -62,11 +82,19 @@ export function ProviderCredentials({ bridge, onLayerLockChange, initialProvider
   // not assert that any account or model is available for inference.
   const usingPresets = catalogProviders.length === 0;
   const officialProviders = (usingPresets ? PROVIDERS : catalogProviders).filter(provider => provider.id !== 'openai-chatgpt');
+  const query = search.trim().toLocaleLowerCase();
+  const visibleProviders = officialProviders.filter(provider => `${provider.label} ${provider.id}`.toLocaleLowerCase().includes(query));
+  const activeModel = modelReference(bridge.desktop.currentModel ?? '');
+  const activeProviderId = logicalProviderId(activeModel.providerId ?? '');
+  const activeModelLabel = bridge.desktop.providerModelCatalog
+    ?.find(entry => entry.provider_id === activeModel.providerId)
+    ?.models.find(model => model.reference === activeModel.reference)?.display_name || activeModel.label;
   const selectedProvider = officialProviders.find(provider => provider.id === selectedProviderId) ?? providerById(selectedProviderId ?? '') ?? PROVIDERS[0];
   const providerCatalogEntry = bridge.desktop.providerModelCatalog?.find(entry => entry.provider_id === selectedProvider.id);
   const visibility = snapshot?.settings.modelPickerVisibility?.[selectedProvider.id];
   const selectedModelIds = selectedModelIdsForPickerSettings(providerCatalogEntry?.models.map(model => model.model_id) ?? [], visibility);
-  const theme = { '--pa-bg': t.surface, '--pa-text': t.text, '--pa-secondary': t.text3, '--pa-border': t.border, '--pa-accent': t.accent, '--pa-ok': t.ok, '--pa-danger': t.danger, '--pa-warn': t.warn } as CSSProperties;
+  const hiddenFromPicker = selectedProvider.available && visibility?.showInModelPicker !== false && providerCatalogEntry && selectedModelIds.length === 0;
+  const theme = { '--pa-bg': t.surface, '--pa-text': t.text, '--pa-secondary': t.text2, '--pa-border': t.border, '--pa-accent': t.accent, '--pa-ok': t.ok, '--pa-danger': t.danger, '--pa-warn': t.warn } as CSSProperties;
   const writeVisibility = (next: { showInModelPicker?: boolean; visibleModelIds?: string[] }) => {
     void bridge.setModelPickerVisibility({ ...snapshot?.settings.modelPickerVisibility, [selectedProvider.id]: next });
   };
@@ -83,57 +111,134 @@ export function ProviderCredentials({ bridge, onLayerLockChange, initialProvider
     finally { if (!controller.signal.aborted) setApplying(false); }
   };
   if (selectedProviderId === null) return <div className="provider-settings-content provider-directory" style={theme}>
-    <header className="provider-directory-intro"><h2>{tr('model_detail_provider')}</h2><p>{tr('provider_accounts_directory_desc')}</p><span>{tr('provider_accounts_global')}</span></header>
-    <div className="provider-directory-tools"><label className="provider-directory-search"><Icon name="search" size={15} /><input type="search" aria-label={tr('provider_accounts_search')} placeholder={tr('provider_accounts_search')} value={search} onChange={event => setSearch(event.target.value)} /></label><button className="pa-icon-button" aria-label={tr('provider_accounts_refresh')} disabled={refreshingAccounts} onClick={() => { void refreshAccounts(); void bridge.refreshModelPicker('manual').catch(() => undefined); }}>{refreshingAccounts ? <span className="pa-spinner" /> : <Icon name="refresh" />}</button></div>
-    {usingPresets && <p className="pa-caption">{tr('provider_accounts_presets_only')}</p>}
-    <div className="provider-directory-list">{officialProviders.filter(provider => `${provider.label} ${provider.id}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())).map(provider => {
-      const summary = accountSnapshot ? providerAccountSummary(accountSnapshot, provider.id) : undefined;
-      const status = accountStatusError ? 'unknown' : summary?.status ?? 'loading';
-      return <button type="button" key={provider.id} className="settings-provider-row provider-directory-item" data-testid={`provider-list-item-${provider.id}`} onClick={() => { setPendingModelReference(undefined); setSelectedProviderId(provider.id); }}>
-        <span className="provider-monogram" aria-hidden="true">{provider.label.slice(0, 1)}</span>
-        <span className="provider-directory-copy"><strong>{provider.label}</strong><span>{provider.description}</span></span>
-        <span className="provider-directory-status" data-status={status}>
-          <span className="provider-status-label"><i aria-hidden="true" />{tr(`provider_accounts_configuration_${status}`)}</span>
-          {summary && summary.total > 0 && <small>{tr('provider_accounts_configuration_count', summary.enabled, summary.total)}</small>}
-        </span>
-        <Icon name="chevronR" size={16} />
-      </button>;
-    })}</div>
-    {officialProviders.every(provider => !`${provider.label} ${provider.id}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())) && <p className="pa-empty">{tr('provider_accounts_no_matches')}</p>}
+    <header className="provider-directory-intro">
+      <div className="pa-heading-with-info">
+        <h2>{tr('provider_accounts_all_providers')}</h2>
+        <ProviderInfo label={tr('provider_accounts_all_providers')}>
+          <p>{tr('provider_accounts_directory_desc')}</p>
+          {usingPresets && <p>{tr('provider_accounts_presets_only')}</p>}
+        </ProviderInfo>
+      </div>
+    </header>
+    <div className="provider-directory-tools">
+      <label className="provider-directory-search">
+        <Icon name="search" size={16} />
+        <input
+          ref={searchInput}
+          type="search"
+          aria-label={tr('provider_accounts_search')}
+          placeholder={tr('provider_accounts_search')}
+          value={search}
+          onChange={event => setSearch(event.target.value)}
+          onKeyDown={event => {
+            if (event.key !== 'Escape' || !search) return;
+            event.preventDefault();
+            event.stopPropagation();
+            setSearch('');
+          }}
+        />
+      </label>
+      <button type="button" className="pa-icon-button" aria-label={tr('provider_accounts_refresh')} title={tr('provider_accounts_refresh')} aria-disabled={refreshingAccounts} onClick={() => {
+        if (refreshingAccounts) return;
+        void refreshAccounts();
+        void bridge.refreshModelPicker('manual').catch(() => undefined);
+      }}>
+        {refreshingAccounts ? <span className="pa-spinner" /> : <Icon name="refresh" />}
+      </button>
+    </div>
+    {visibleProviders.length > 0 ? <ul ref={directoryList} className="provider-directory-list" role="list">
+      {visibleProviders.map(provider => {
+        const summary = accountSnapshot ? providerAccountSummary(accountSnapshot, provider.id) : undefined;
+        const status = accountStatusError ? 'unknown' : summary?.status ?? 'loading';
+        const isActive = provider.id === activeProviderId;
+        const statusLabel = tr(`provider_accounts_configuration_${status}`);
+        const showStatusLabel = status !== 'configured' && status !== 'unconfigured';
+        return <li key={provider.id}>
+          <button type="button" className="settings-provider-row" data-current={isActive} data-testid={`provider-list-item-${provider.id}`} onClick={() => { setPendingModelReference(undefined); setApplyError(undefined); setSettingsRetryError(undefined); setSelectedProviderId(provider.id); }}>
+            <ProviderBrandIcon provider={provider} className="provider-monogram" />
+            <span className="provider-directory-copy">
+              <strong>{provider.label}</strong>
+              {isActive
+                ? <span className="provider-current-model">{tr('composer_current_model')} · {activeModelLabel}</span>
+                : provider.description && <span>{provider.description}</span>}
+            </span>
+            <span className="provider-directory-status" data-status={status}>
+              <span className="provider-status-label">
+                {showStatusLabel
+                  ? <><span className="provider-status-dot" aria-hidden="true" />{statusLabel}</>
+                  : <span className="provider-status-dot" role="img" aria-label={statusLabel} title={statusLabel} />}
+              </span>
+              {!accountStatusError && summary && summary.total > 0 && <small>{tr('provider_accounts_configuration_count', summary.enabled, summary.total)}</small>}
+            </span>
+            <Icon name="chevronR" size={16} />
+          </button>
+        </li>;
+      })}
+    </ul> : <div className="provider-directory-empty" role="status">
+      <Icon name="search" size={20} />
+      <p>{tr('provider_accounts_no_matches')}</p>
+    </div>}
     <CloudProviders onPulled={async () => { await bridge.reloadProviderSettings?.().catch(() => undefined); await refreshAccounts(); await bridge.refreshModelPicker('manual').catch(() => undefined); }} />
   </div>;
   return <div className="provider-settings-content" style={theme}>
-    <button type="button" className="settings-provider-back provider-back-link" data-testid="provider-list-back" disabled={applying} onClick={() => setSelectedProviderId(null)}><Icon name="chevronL" size={14} />{tr('provider_accounts_all_providers')}</button>
-    <header className="provider-detail-heading"><span className="provider-monogram" aria-hidden="true">{selectedProvider.label.slice(0, 1)}</span><div><h2>{selectedProvider.label}</h2><p>{tr('provider_accounts_global')}</p></div></header>
-    {bridge.providerSettingsApplyPending && <div className="pa-feedback pa-error" role="alert"><span>{bridge.providerSettingsError}</span><button className="pa-button" disabled={applying} onClick={() => { setApplying(true); void bridge.updateProviderSettings({}).catch(cause => setApplyError(cause instanceof Error ? cause.message : tr('provider_accounts_error'))).finally(() => setApplying(false)); }}>{tr('common_retry')}</button></div>}
-    {bridge.providerAccounts ? <ProviderAccounts key={selectedProvider.id} api={bridge.providerAccounts} provider={selectedProvider} running={bridge.running || applying} onConfigured={configured} usageRows={bridge.cost?.by_account} cloudSyncable={VAULT_PRESET_IDS.has(logicalProviderId(selectedProvider.id))} /> : <p role="alert">{tr('provider_accounts_status_error')}</p>}
-    {applyError && <p role="alert" style={{ color: t.danger }}>{applyError}<button type="button" disabled={applying} onClick={() => void configured()} className="pa-button">{tr('desktop_settings_00a58a5b98')}</button></p>}
-    <details className="provider-models-disclosure"><summary><span><strong>{tr('desktop_settings_e06568d15f')}</strong></span><Icon name="chevron" size={15} /></summary>
-      <ProviderProtocol providerId={selectedProvider.id} bridge={bridge} onLayerLockChange={onLayerLockChange} />
-    </details>
-    <details className="provider-models-disclosure"><summary><span><strong>{tr('provider_accounts_models_title')}</strong><small>{providerCatalogEntry ? tr('desktop_settings_28e11f6cd1', selectedModelIds.length, providerCatalogEntry.models.length) : tr('provider_accounts_presets_only')}</small></span><Icon name="chevron" size={15} /></summary><Card>
-        {!providerCatalogEntry && <Row title={tr('provider_accounts_presets_only')}><span /></Row>}
-        {selectedProvider.available && providerCatalogEntry && (
+    <button ref={backButton} type="button" className="settings-provider-back" data-testid="provider-list-back" disabled={applying} onClick={() => setSelectedProviderId(null)}>
+      <Icon name="chevronL" size={15} />{tr('provider_accounts_all_providers')}
+    </button>
+    <header className="provider-detail-heading">
+      <ProviderBrandIcon provider={selectedProvider} className="provider-monogram" />
+      <div>
+        <div className="pa-heading-with-info">
+          <h2>{selectedProvider.label}</h2>
+          <ProviderInfo label={selectedProvider.label}>
+            <p>{tr('provider_accounts_global')}</p>
+            {!providerCatalogEntry && <p>{tr('desktop_settings_71a4b21d4a')}</p>}
+            {hiddenFromPicker && <p>{tr('settings_provider_picker_hidden_empty')}</p>}
+          </ProviderInfo>
+        </div>
+        {selectedProvider.description && <p>{selectedProvider.description}</p>}
+      </div>
+    </header>
+    <ProviderFeedback error={[applyError, bridge.providerSettingsApplyPending ? settingsRetryError || bridge.providerSettingsError || tr('provider_accounts_error') : undefined].filter(Boolean).join('\n')}>
+      {applyError && <button type="button" disabled={applying} onClick={() => void configured()} className="pa-button">{tr('desktop_settings_00a58a5b98')}</button>}
+      {bridge.providerSettingsApplyPending && <button type="button" className="pa-button" disabled={applying} onClick={() => {
+          setApplying(true); setSettingsRetryError(undefined);
+          void bridge.updateProviderSettings({}).catch(cause => setSettingsRetryError(cause instanceof Error ? cause.message : tr('provider_accounts_error'))).finally(() => setApplying(false));
+        }}>{tr('common_retry')}</button>}
+    </ProviderFeedback>
+    {bridge.providerAccounts
+      ? <ProviderAccounts key={selectedProvider.id} api={bridge.providerAccounts} provider={selectedProvider} running={bridge.running || applying} onConfigured={configured} usageRows={bridge.cost?.by_account} cloudSyncable={VAULT_PRESET_IDS.has(logicalProviderId(selectedProvider.id))} />
+      : <ProviderFeedback error={tr('provider_accounts_status_error')} />}
+    {providerCatalogEntry && <details className="provider-settings-disclosure">
+      <summary>
+        <span className="provider-disclosure-icon" aria-hidden="true"><Icon name="spark" size={16} /></span>
+        <span className="provider-disclosure-copy">
+          <strong>{tr('provider_accounts_models_title')}</strong>
+          <small>{tr('desktop_settings_28e11f6cd1', selectedModelIds.length, providerCatalogEntry.models.length)}</small>
+        </span>
+        <Icon name="chevron" size={15} />
+      </summary>
+      <Card>
+        {selectedProvider.available && (
           <Row
-            title={tr('desktop_settings_a148f7060d')}
-            desc={providerCatalogEntry
-              ? tr('desktop_settings_28e11f6cd1', selectedModelIds.length, providerCatalogEntry.models.length)
-              : tr('desktop_settings_71a4b21d4a')}
+            title={tr('desktop_settings_6a04127f16')}
             align="center"
           >
-            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, color: t.text2, fontSize: 12.5 }}>
+            <label className="pa-switch provider-visibility-switch">
               <input
                 type="checkbox"
+                role="switch"
+                aria-label={tr('desktop_settings_6a04127f16')}
                 checked={visibility?.showInModelPicker !== false}
                 onChange={(event) => writeVisibility({
                   showInModelPicker: event.currentTarget.checked,
                   visibleModelIds: visibility?.visibleModelIds,
                 })}
               />
-              {tr('desktop_settings_6a04127f16')}</label>
+              <span aria-hidden="true" />
+            </label>
           </Row>
         )}
-        {selectedProvider.available && providerCatalogEntry?.models.map((entry) => {
+        {selectedProvider.available && providerCatalogEntry.models.map((entry) => {
           const selected = selectedModelIds.includes(entry.model_id);
           return (
             <Row
@@ -142,10 +247,12 @@ export function ProviderCredentials({ bridge, onLayerLockChange, initialProvider
               desc={[entry.model_id, modelCapabilitySummary(entry)].filter(Boolean).join(' · ')}
               align="center"
             >
-              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, color: t.text2, fontSize: 12.5 }}>
+              <label className="pa-switch provider-visibility-switch">
                 <input
                   type="checkbox"
+                  role="switch"
                   checked={selected}
+                  aria-label={`${tr('desktop_settings_1d237711e4')} · ${entry.display_name || entry.model_id}`}
                   onChange={() => {
                     const base = visibility?.visibleModelIds ?? providerCatalogEntry.models.map((model) => model.model_id);
                     const next = selected
@@ -157,15 +264,13 @@ export function ProviderCredentials({ bridge, onLayerLockChange, initialProvider
                     });
                   }}
                 />
-                {tr('desktop_settings_1d237711e4')}</label>
+                <span aria-hidden="true" />
+              </label>
             </Row>
           );
         })}
-        {selectedProvider.available && visibility?.showInModelPicker !== false && providerCatalogEntry && selectedModelIds.length === 0 && (
-          <Row title={tr('desktop_settings_f56c6c8220')} desc={tr('settings_provider_picker_hidden_empty')} align="center">
-            <Icon name="warning" size={15} color={t.warn} />
-          </Row>
-        )}
-    </Card></details>
+      </Card>
+    </details>}
+    <ProviderProtocol providerId={selectedProvider.id} bridge={bridge} onLayerLockChange={onLayerLockChange} />
   </div>;
 }

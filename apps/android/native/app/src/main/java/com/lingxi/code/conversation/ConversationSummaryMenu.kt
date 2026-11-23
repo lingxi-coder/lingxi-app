@@ -87,8 +87,11 @@ internal fun ConversationSummaryMenu(
                         val changes = calls.mapNotNull { it.display?.diff }
                         if (changes.isEmpty()) item { SummaryEmpty(category) }
                         items(changes) { diff ->
-                            Text("${diff.filePath.orEmpty()}  +${diff.additions}  −${diff.removals}",
-                                style = MaterialTheme.typography.labelLarge)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                FileTypeIcon(diff.filePath.orEmpty())
+                                Text("${diff.filePath.orEmpty()}  +${diff.additions}  −${diff.removals}",
+                                    style = MaterialTheme.typography.labelLarge)
+                            }
                             DiffView(diff)
                         }
                     }

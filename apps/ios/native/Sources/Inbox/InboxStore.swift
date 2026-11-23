@@ -29,7 +29,6 @@ final class InboxStore {
     private(set) var unreadByTeam: [String: Int] = [:]
     private(set) var activeRow: InboxRow?
     var filter: InboxFilter = .all { didSet { if filter != oldValue { resetQuery() } } }
-    var category: InboxCategory? { didSet { if category != oldValue { resetQuery() } } }
     var search = "" {
         didSet {
             if InboxTitleSearch.prefix(search) != InboxTitleSearch.prefix(oldValue) { resetQuery() }
@@ -108,8 +107,22 @@ final class InboxStore {
         let work = Task.detached(priority: .userInitiated) {
             (Result { try storage.load() }, storage.cached(now: InboxPush.now))
         }
-        let (loaded, cache) = await work.value
+        let (loaded, storedCache) = await work.value
         guard life == epoch else { return }
+        var cache = storedCache
+        #if DEBUG && targetEnvironment(simulator)
+        if IsolatedSimulatorTesting.enabled,
+           ProcessInfo.processInfo.environment["LINGXI_UI_TEST_INBOX_SEARCH"] == "1" {
+            let now = InboxPush.now
+            cache = [("alpha", "Alpha review"), ("beta", "Beta planning")].map { id, title in
+                let ref = InboxRef(kind: .team, sourceId: "qa", conversationId: id, generation: 1)
+                return InboxCachedRow(
+                    row: InboxRow(key: ref.key, ref: ref, category: .team, title: title, lastActivityAt: now),
+                    verifiedAt: now
+                )
+            }
+        }
+        #endif
         switch loaded {
         case let .success(value):
             state = value
@@ -367,7 +380,7 @@ final class InboxStore {
         var failures: Error?
         var successfulPages = 0
         for _ in 0..<pages {
-            let body = InboxListRequest(filter: filter, category: category, archived: showArchived,
+            let body = InboxListRequest(filter: filter, category: nil, archived: showArchived,
                                         searchPrefix: prefix, after: more).requestValues
             do {
                 let page: InboxPage = try await session.request(body)
@@ -410,7 +423,7 @@ final class InboxStore {
             if !revalidating { verifyCloud(Array(rows.dropFirst(previous))) }
             else { scheduleCloudExpiration() }
 
-            if filter == .all && category == nil && prefix == nil && !showArchived {
+            if filter == .all && prefix == nil && !showArchived {
                 cached = rows
                 persistCloudCache()
             }
@@ -420,7 +433,7 @@ final class InboxStore {
     }
 
     private func matches(_ row: InboxRow) -> Bool {
-        filter.accepts(row, archivedOnly: showArchived) && (category.map { row.category == $0 } ?? (row.category != .assistant))
+        filter.accepts(row, archivedOnly: showArchived) && row.category != .assistant
     }
 
     private func rebuild() {

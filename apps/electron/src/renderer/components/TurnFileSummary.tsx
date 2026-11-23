@@ -5,6 +5,7 @@ import type { TurnFileChange } from '../model/runItem';
 import { useT } from '../theme/ThemeContext';
 import { DiffView } from './DiffView';
 import { Icon } from './Icon';
+import { FileTypeIcon } from './FileTypeIcon';
 
 export const TurnFileSummary = memo(function TurnFileSummary({ files, onReview }: {
   files: readonly TurnFileChange[];
@@ -27,6 +28,7 @@ export const TurnFileSummary = memo(function TurnFileSummary({ files, onReview }
       {files.map(file => {
         const split = Math.max(file.path.lastIndexOf('/'), file.path.lastIndexOf('\\')) + 1;
         return <li key={file.path}>
+          <FileTypeIcon path={file.path} />
           <button type="button" className="turn-file-path" title={file.path} onClick={() => onReview?.(file.path)} disabled={!onReview} aria-controls="runtime-inspector-panel">
             <bdi><span>{file.path.slice(0, split)}</span>{file.path.slice(split)}</bdi>
           </button>

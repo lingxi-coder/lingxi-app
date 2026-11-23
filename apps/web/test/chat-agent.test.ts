@@ -354,7 +354,7 @@ test('model settings: a preset key is sent once, cleared from the form and check
   await flush();
   assert.deepEqual(calls.upserts, [{ action: 'upsert', id: 'deepseek', presetId: 'deepseek', apiKey: 'sk-test-0001' }]);
   assert.deepEqual(calls.tests, ['deepseek']);
-  assert.match(textOf(root.toJSON()), /DeepSeek is connected/u);
+  assert.match(textOf(root.root.findByType('dialog')), /DeepSeek is connected/u);
   assert.equal(root.root.findAll((node: any) => node.type === 'input' && node.props.type === 'password').length, 0, 'the form closed with the key gone');
 });
 
@@ -368,14 +368,18 @@ test('model settings: after a failed check, saving again changes the record just
   await flush();
   const field = (placeholder: string) => root.root.find((node: any) => node.type === 'input' && node.props.placeholder === placeholder);
   const key = () => root.root.find((node: any) => node.type === 'input' && node.props.type === 'password');
+  const closeFeedback = () => act(() => root.root.findByType('dialog').props.onClose());
   const submit = async (value: string) => {
     act(() => key().props.onChange({ target: { value } }));
-    await act(async () => { root.root.findByType('form').props.onSubmit({ preventDefault() {} }); });
+    await act(async () => { root.root.findByProps({ className: 'agent-form' }).props.onSubmit({ preventDefault() {} }); });
     await flush();
   };
   act(() => button(root, 'Replace key').props.onClick());
   await submit('sk-wrong-0001');
+  assert.match(textOf(root.root.findByType('dialog')), /Saved, but the check failed/u);
+  closeFeedback();
   await submit('sk-right-0002');
+  closeFeedback();
   assert.deepEqual(upserts.map(input => input.expectedRevision), [1, 2], 'the second save is at the revision the first one wrote');
 
   act(() => button(root, 'Cancel').props.onClick());
@@ -384,9 +388,11 @@ test('model settings: after a failed check, saving again changes the record just
   act(() => field('https://api.example.com/v1').props.onChange({ target: { value: 'https://gw.example.com/v1' } }));
   act(() => field('model-a, model-b').props.onChange({ target: { value: 'm1' } }));
   await submit('sk-gw-0001');
-  assert.match(textOf(root.toJSON()), /belongs to a listed service/u, 'a custom service cannot take a listed service\'s id');
+  assert.match(textOf(root.root.findByType('dialog')), /belongs to a listed service/u, 'a custom service cannot take a listed service\'s id');
+  closeFeedback();
   act(() => field('my-gateway').props.onChange({ target: { value: 'gw' } }));
   await submit('sk-gw-0001');
+  closeFeedback();
   await submit('sk-gw-0002');
   assert.deepEqual(upserts.slice(2).map(input => [input.id, input.apiKey, input.expectedRevision]), [['gw', 'sk-gw-0001', undefined], ['gw', 'sk-gw-0002', 4]]);
   assert.doesNotMatch(textOf(root.toJSON()), /already exists/u);

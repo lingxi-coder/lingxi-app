@@ -43,7 +43,7 @@ fun SettingsRow(
     icon: LXIconName? = null, iconColor: Color? = null,
     sub: String? = null, value: String? = null, valueColor: Color? = null,
     chevron: Boolean = true, danger: Boolean = false, isLast: Boolean = false,
-    onTap: (() -> Unit)? = null, trailing: (@Composable () -> Unit)? = null,
+    onTap: (() -> Unit)? = null, leading: (@Composable () -> Unit)? = null, trailing: (@Composable () -> Unit)? = null,
 ) {
     val t = LingXiTheme.palette
     Column(modifier.fillMaxWidth()) {
@@ -58,7 +58,7 @@ fun SettingsRow(
                         value?.let { Text(it, color = valueColor ?: t.text2) }
                     }
                 }} else null,
-                leadingContent = icon?.let {{ LXIcon(it, color = iconColor ?: t.text2) }},
+                leadingContent = leading ?: icon?.let {{ LXIcon(it, color = iconColor ?: t.text2) }},
                 trailingContent = if (trailing != null || (chevron && onTap != null)) {{
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         CompositionLocalProvider(LocalControlLabel provides label) { trailing?.invoke() }
@@ -70,7 +70,7 @@ fun SettingsRow(
             )
         }
         if (!isLast) HorizontalDivider(color = t.border,
-            modifier = Modifier.padding(start = if (icon != null) 56.dp else 16.dp, end = 16.dp))
+            modifier = Modifier.padding(start = if (icon != null || leading != null) 56.dp else 16.dp, end = 16.dp))
     }
 }
 

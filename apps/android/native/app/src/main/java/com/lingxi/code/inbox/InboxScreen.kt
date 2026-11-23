@@ -1,7 +1,7 @@
 package com.lingxi.code.inbox
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,11 +19,13 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Badge
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -43,6 +45,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -64,13 +69,38 @@ internal fun InboxScreen(
     modifier: Modifier = Modifier,
 ) {
     val state by controller.state.collectAsStateWithLifecycle()
+    InboxScreenContent(state, controller, onOpen, onOpenProjects, modifier)
+}
+
+@Composable
+internal fun InboxScreenContent(
+    state: InboxState,
+    controller: InboxController,
+    onOpen: (InboxItem) -> Unit,
+    onOpenProjects: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     var filter by rememberSaveable(state.uid) { mutableStateOf(InboxFilter.All) }
-    var category by rememberSaveable(state.uid) { mutableStateOf<String?>(null) }
     var search by rememberSaveable(state.uid) { mutableStateOf("") }
+    var searchOpen by rememberSaveable(state.uid) { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
-    val query = InboxQuery(filter, category ?: "messages", search)
+    val searchFocus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    val closeSearch = {
+        keyboard?.hide()
+        search = ""
+        searchOpen = false
+    }
+    BackHandler(enabled = searchOpen, onBack = closeSearch)
+    LaunchedEffect(searchOpen) {
+        if (searchOpen) {
+            searchFocus.requestFocus()
+            keyboard?.show()
+        }
+    }
+    val query = InboxQuery(filter, category = "messages", search = search)
     val listState = rememberLazyListState()
-    LaunchedEffect(controller, filter, category, query.searchPrefix) {
+    LaunchedEffect(controller, filter, query.searchPrefix) {
         if (query.searchPrefix.isNotEmpty()) kotlinx.coroutines.delay(250)
         controller.show(query)
         listState.scrollToItem(0)
@@ -83,11 +113,25 @@ internal fun InboxScreen(
     Surface(modifier.fillMaxSize().testTag("inbox.root")) {
         Column(Modifier.windowInsetsPadding(WindowInsets.statusBars)) {
             Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(stringResource(R.string.inbox_title), Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
-                TextButton(onClick = onOpenProjects) { Text(stringResource(R.string.drawer_entry_projects)) }
+                Text(stringResource(R.string.session_details_messages), Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
                 Box {
                     IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, stringResource(R.string.inbox_options)) }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        for ((candidate, label) in listOf(
+                            InboxFilter.All to R.string.inbox_all, InboxFilter.Unread to R.string.inbox_unread,
+                            InboxFilter.Attention to R.string.inbox_attention,
+                        )) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(label)) },
+                                trailingIcon = if (filter == candidate) ({ Icon(Icons.Default.Check, null) }) else null,
+                                onClick = { filter = candidate; menu = false },
+                            )
+                        }
+                        HorizontalDivider()
+                        DropdownMenuItem(text = { Text(stringResource(R.string.drawer_entry_projects)) }, onClick = {
+                            menu = false
+                            onOpenProjects()
+                        })
                         DropdownMenuItem(
                             text = { Text(stringResource(R.string.inbox_mark_all_read)) },
                             enabled = state.uid != null && state.online && state.readBatchReady && !state.readBatchBusy,
@@ -116,25 +160,20 @@ internal fun InboxScreen(
                         }
                     }
                 }
-            }
-            OutlinedTextField(
-                value = search, onValueChange = { search = it }, singleLine = true,
-                label = { Text(stringResource(R.string.inbox_search)) },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).testTag("inbox.search"),
-            )
-            Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                for ((candidate, label) in listOf(
-                    InboxFilter.All to R.string.inbox_all, InboxFilter.Unread to R.string.inbox_unread,
-                    InboxFilter.Attention to R.string.inbox_attention,
-                )) {
-                    FilterChip(selected = filter == candidate, onClick = { filter = candidate }, label = { Text(stringResource(label)) })
+                IconButton(onClick = { if (searchOpen) closeSearch() else searchOpen = true }) {
+                    Icon(
+                        if (searchOpen) Icons.Default.Close else Icons.Default.Search,
+                        stringResource(if (searchOpen) R.string.common_close else R.string.inbox_search),
+                    )
                 }
             }
-            Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                for (candidate in listOf("friend", "team", "service")) {
-                    FilterChip(selected = category == candidate, onClick = { category = if (category == candidate) null else candidate },
-                        label = { Text(stringResource(inboxCategoryRes(candidate))) })
-                }
+            if (searchOpen) {
+                OutlinedTextField(
+                    value = search, onValueChange = { search = it }, singleLine = true,
+                    label = { Text(stringResource(R.string.inbox_search)) },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+                        .focusRequester(searchFocus).testTag("inbox.search"),
+                )
             }
             if (filter == InboxFilter.Archived) Text(stringResource(R.string.inbox_archived), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.labelLarge)
             if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())

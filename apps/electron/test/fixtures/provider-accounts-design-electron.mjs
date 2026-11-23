@@ -21,6 +21,8 @@ async function main() {
       await js('window.accountDesign.show(false)'); await js('window.accountDesign.open()'); await capture('add-account');
       await js("document.querySelector('.pa-account-dialog[open] form footer button[type=button]').click()");
       await js('window.accountDesign.show(false, true)'); await capture('providers');
+      await js('window.accountDesign.show(true, true)');
+      window.setSize(545, 900); await capture('providers-narrow-dark'); window.setSize(1024, 900);
       await js('window.accountDesign.show(false)');
     }
     const result = await js('window.accountDesign.run()');
@@ -28,7 +30,7 @@ async function main() {
       const { writeFile } = await import('node:fs/promises');
       await writeFile(join(process.env.LINGXI_DESIGN_SCREENSHOTS, 'first-account.png'), (await window.webContents.capturePage()).toPNG());
     }
-    process.stdout.write(`${JSON.stringify(result)}\n`);
+    await new Promise(resolve => process.stdout.write(`${JSON.stringify(result)}\n`, resolve));
   } finally { window.destroy(); }
 }
-main().then(() => app.quit(), error => { process.stderr.write(`${error.stack}\n`); app.exit(1); });
+main().then(() => app.exit(0), error => { process.stderr.write(`${error.stack}\n`); app.exit(1); });

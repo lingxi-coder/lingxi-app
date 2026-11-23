@@ -1,11 +1,7 @@
 .desktop-inbox-panel { display:flex; flex-direction:column; flex:1; min-height:0; min-width:0; color:var(--text); }
-.desktop-inbox-heading { display:flex; align-items:center; justify-content:space-between; padding:8px 12px; gap:8px; }
-.desktop-inbox-heading h2 { font-size:16px; margin:0; font-weight:650; }
-.desktop-inbox-heading button { border:0; background:transparent; color:inherit; border-radius:8px; min-width:32px; min-height:32px; font-size:22px; cursor:pointer; }
-.desktop-inbox-heading button:hover { background:var(--sidebar-button-surface); }
-.desktop-inbox-preferences { border-top:1px solid var(--nav-panel-border); padding:10px 12px; font-size:12px; }
-.desktop-inbox-preferences summary { cursor:pointer; padding-block:4px; }
-.desktop-inbox-preferences label { display:flex; gap:6px; align-items:flex-start; margin-block-start:12px; }
+.desktop-inbox-panel .lx-inbox-heading { padding: 4px 2px; }
+.desktop-inbox-panel .lx-inbox-heading h2 { font-size: .9375rem; }
+.desktop-inbox-preferences { font-size:12px; }
 .desktop-inbox-preferences p,.desktop-inbox-sign-in { color:var(--text3); line-height:1.5; font-size:12px; margin:7px 0; }
 .desktop-inbox-sign-in { padding:8px 12px; }
 .desktop-inbox-toast-announcement {

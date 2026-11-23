@@ -125,6 +125,7 @@ private fun DiffCaption(diff: StructuredDiffUi) {
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         diff.filePath?.let {
+            FileTypeIcon(it)
             Text(
                 text = it,
                 color = t.text3,

@@ -3,6 +3,8 @@ import { tr } from '../../../i18n/locale';
 import { useEffect, useRef, useState } from 'react';
 import type { PageContentProps } from '../SettingsScreen';
 import { Card, Row } from '../rows';
+import { Icon } from '../../Icon';
+import { ProviderFeedback, ProviderInfo } from './ProviderPopups';
 import { useT } from '../../../theme/ThemeContext';
 import { PROVIDER_PROTOCOLS } from '../../../../shared/providerProtocols';
 import { asRecord } from './configurationAdmin';
@@ -51,17 +53,25 @@ export function ProviderProtocol({ providerId, bridge, onLayerLockChange }: Pick
     catch (cause) { if (token === generation.current) setError(cause instanceof Error ? cause.message : tr('desktop_settings_6cdef1b894')); }
     finally { if (token === generation.current) setSaving(false); onLayerLockChange?.(false); }
   };
-  return <Card title={tr('desktop_settings_e06568d15f')}>
-    {bridge.providerSettingsLocked?.includes('routing') && <Row title="Managed policy"><span>Locked</span></Row>}
-    <Row title={tr('desktop_settings_2746420a13')} desc={tr('desktop_settings_5334aa2c77')} align="center">
-      <select aria-label={tr('desktop_settings_bc58b64d0d')} value={typeof own === 'string' ? own : own === null ? '' : '__inherit__'} disabled={disabled || account.formats.length < 2}
-        onChange={event => { void write(event.target.value); }}
-        style={{ background: t.surface, color: t.text, border: `1px solid ${t.border}`, borderRadius: 7, padding: '6px 10px', maxWidth: '100%' }}>
-        <option value="__inherit__">{tr('desktop_settings_inherit_current', protocolLabel(String(desired)))}</option>
-        <option value="">{tr('desktop_settings_auto_format', protocolLabel(account.native))}</option>
-        {account.formats.map(format => <option key={format} value={format}>{protocolLabel(format)}</option>)}
-      </select>
-    </Row>
-    {error && <Row title={tr('desktop_settings_f48af7b362')}><span role="alert">{error}</span></Row>}
-  </Card>;
+  return <><details className="provider-settings-disclosure">
+    <summary>
+      <span className="provider-disclosure-icon" aria-hidden="true"><Icon name="sliders" size={16} /></span>
+      <span className="provider-disclosure-copy"><strong>{tr('desktop_settings_e06568d15f')}</strong></span>
+      <Icon name="chevron" size={15} />
+    </summary>
+    <Card>
+      {bridge.providerSettingsLocked?.includes('routing') && <Row title="Managed policy"><span>Locked</span></Row>}
+      <Row title={tr('desktop_settings_2746420a13')} align="center" badge={
+        <ProviderInfo label={tr('desktop_settings_2746420a13')}><p>{tr('desktop_settings_5334aa2c77')}</p></ProviderInfo>
+      }>
+        <select aria-label={tr('desktop_settings_bc58b64d0d')} value={typeof own === 'string' ? own : own === null ? '' : '__inherit__'} disabled={disabled || account.formats.length < 2}
+          onChange={event => { void write(event.target.value); }}
+          style={{ background: t.surface, color: t.text, border: `1px solid ${t.border}`, borderRadius: 7, padding: '6px 10px', maxWidth: '100%' }}>
+          <option value="__inherit__">{tr('desktop_settings_inherit_current', protocolLabel(String(desired)))}</option>
+          <option value="">{tr('desktop_settings_auto_format', protocolLabel(account.native))}</option>
+          {account.formats.map(format => <option key={format} value={format}>{protocolLabel(format)}</option>)}
+        </select>
+      </Row>
+    </Card>
+  </details><ProviderFeedback error={error ?? undefined} /></>;
 }

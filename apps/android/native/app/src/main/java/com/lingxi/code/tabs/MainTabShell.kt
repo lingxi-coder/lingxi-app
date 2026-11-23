@@ -384,7 +384,7 @@ private fun TabIcon(tab: AppTab, badge: Int) {
 }
 
 private fun AppTab.labelRes(): Int = when (this) {
-    AppTab.Chats -> R.string.tabs_chats
+    AppTab.Chats -> R.string.session_details_messages
     AppTab.Bots -> R.string.remote_bots
     AppTab.Teams -> R.string.teams_title
     AppTab.Friends -> R.string.friends_title

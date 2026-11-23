@@ -26,6 +26,7 @@ type AuthResponse = { localId: string; idToken: string; refreshToken: string; ex
 export function accountError(error: unknown): string {
   const code = error instanceof Error ? error.message.split(' : ')[0] : '';
   const messages: Record<string, string> = {
+    ACCOUNT_STORAGE_WRITE_FAILED: '无法保存登录状态，请检查系统安全存储后重试。',
     INVALID_LOGIN_CREDENTIALS: '邮箱或密码不正确。', EMAIL_NOT_FOUND: '邮箱或密码不正确。', INVALID_PASSWORD: '邮箱或密码不正确。',
     EMAIL_EXISTS: '此邮箱已注册，请登录或重置密码。', WEAK_PASSWORD: '密码强度不足，请使用更长的密码。',
     TOO_MANY_ATTEMPTS_TRY_LATER: '尝试次数过多，请稍后重试。', USER_DISABLED: '此账号已停用。',
@@ -142,14 +143,15 @@ export class AccountService {
     if (value.needConfirmation) throw new Error('NEED_CONFIRMATION');
     if (!value.localId || !value.refreshToken || !value.idToken) throw new Error('INVALID_IDP_RESPONSE');
     if (expectUid !== undefined && (this.session?.user.uid !== expectUid || value.localId !== expectUid)) throw new Error('ACCOUNT_MISMATCH');
-    const previous = this.session;
     // A re-authentication keeps what is known of the account; a new sign-in learns it with `reload`.
-    const signInMethods = expectUid !== undefined ? previous?.user.signInMethods : undefined;
-    const previousToken = this.idToken, previousExpiry = this.expiresAt, previousExpired = this.sessionExpired, previousAuthenticatedAt = this.authenticatedAt;
-    this.session = { projectId: this.config.projectId, refreshToken: value.refreshToken, user: {
+    const signInMethods = expectUid !== undefined ? this.session?.user.signInMethods : undefined;
+    const session = { projectId: this.config.projectId, refreshToken: value.refreshToken, user: {
       uid: value.localId, email: value.email ?? null, displayName: value.displayName ?? null, emailVerified: value.emailVerified === true,
       ...(signInMethods ? { signInMethods } : {}),
     } };
+    try { await this.store.write(JSON.stringify(session)); }
+    catch { throw new Error('ACCOUNT_STORAGE_WRITE_FAILED'); }
+    this.session = session;
     if (expectUid === undefined) this.authenticationEpoch++;
     this.tokenRequest = undefined;
     this.sessionExpired = false;
@@ -157,12 +159,6 @@ export class AccountService {
     this.idToken = value.idToken;
     this.expiresAt = Date.now() + Number(value.expiresIn) * 1000;
     this.publish();
-    try { await this.save(); } catch (error) {
-      this.session = previous; this.idToken = previousToken; this.expiresAt = previousExpiry; this.sessionExpired = previousExpired;
-      this.authenticatedAt = previousAuthenticatedAt;
-      if (expectUid === undefined) this.authenticationEpoch++;
-      this.tokenRequest = undefined; this.publish(); throw error;
-    }
   }
 
   /**
@@ -225,20 +221,21 @@ export class AccountService {
           break;
         case 'oauth': {
           if (command.expectUid !== undefined && this.session?.user.uid !== command.expectUid) throw new Error('ACCOUNT_MISMATCH');
-          this.abort = new AbortController();
-          // A re-authentication names the account, so the page preselects it and never leaves another account behind.
-          const credential = await browserSignIn(this.config, command.provider, this.openExternal, this.abort.signal,
-            command.expectUid !== undefined ? { uid: command.expectUid, email: this.session?.user.email ?? null } : undefined);
-          const postBody = new URLSearchParams({ providerId: credential.providerId });
-          if (credential.idToken) postBody.set('id_token', credential.idToken);
-          if (credential.accessToken) postBody.set('access_token', credential.accessToken);
-          if (credential.nonce) postBody.set('nonce', credential.nonce);
-          const response = await this.request<AuthResponse>('signInWithIdp', {
-            requestUri: 'http://127.0.0.1', returnSecureToken: true,
-            ...(credential.pendingToken ? { pendingToken: credential.pendingToken } : { postBody: postBody.toString() }),
+          const reauth = command.expectUid !== undefined ? { uid: command.expectUid, email: this.session?.user.email ?? null } : undefined;
+          const controller = new AbortController();
+          this.abort = controller;
+          await browserSignIn(this.config, command.provider, this.openExternal, controller.signal, reauth, async credential => {
+            const postBody = new URLSearchParams({ providerId: credential.providerId });
+            if (credential.idToken) postBody.set('id_token', credential.idToken);
+            if (credential.accessToken) postBody.set('access_token', credential.accessToken);
+            if (credential.nonce) postBody.set('nonce', credential.nonce);
+            const response = await this.request<AuthResponse>('signInWithIdp', {
+              requestUri: 'http://127.0.0.1', returnSecureToken: true,
+              ...(credential.pendingToken ? { pendingToken: credential.pendingToken } : { postBody: postBody.toString() }),
+            });
+            if (controller.signal.aborted) throw new Error('登录已取消。');
+            await this.accept(response, command.expectUid);
           });
-          if (this.abort.signal.aborted) throw new Error('登录已取消。');
-          await this.accept(response, command.expectUid);
           if (command.expectUid === undefined) await this.reload().catch(() => undefined);
           break;
         }

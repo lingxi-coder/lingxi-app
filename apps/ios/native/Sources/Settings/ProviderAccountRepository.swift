@@ -1,6 +1,24 @@
 import Foundation
 import Observation
 
+enum ProviderConfigurationStatus: Equatable {
+    case readFailed, loading, unconfigured, configured, disabled, storageUnavailable, temporarilyUnavailable, needsAuthentication, unverified
+
+    var label: String {
+        switch self {
+        case .readFailed: String(localized: "provider_accounts_status_read_failed")
+        case .loading: String(localized: "provider_accounts_loading_status")
+        case .unconfigured: String(localized: "settings_provider_unconfigured")
+        case .configured: String(localized: "settings_provider_status_configured")
+        case .disabled: String(localized: "provider_account_disabled")
+        case .storageUnavailable: String(localized: "provider_account_storage_unavailable")
+        case .temporarilyUnavailable: String(localized: "provider_account_temporarily_unavailable")
+        case .needsAuthentication: String(localized: "provider_account_needs_auth")
+        case .unverified: String(localized: "provider_account_status_unverified")
+        }
+    }
+}
+
 /// A Host-owned identity. Connections describe endpoints; accounts describe
 /// independent credentials and retain their identity when priority changes.
 struct ProviderAccount: Codable, Equatable, Identifiable {
@@ -308,21 +326,26 @@ final class ProviderAccountRepository {
     }
 
     func configurationDescription(providerId: String) -> String {
-        if snapshotReadFailed { return String(localized: "provider_accounts_status_read_failed") }
-        if snapshot.storeScope.isEmpty { return String(localized: "provider_accounts_loading_status") }
+        let summary = configurationSummary(providerId: providerId)
+        return [summary.status.label, summary.count].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    func configurationSummary(providerId: String) -> (status: ProviderConfigurationStatus, count: String?) {
+        if snapshotReadFailed { return (.readFailed, nil) }
+        if snapshot.storeScope.isEmpty { return (.loading, nil) }
         let logicalID = providerId == "openai-chatgpt" ? "openai" : providerId
         let rows = accounts(providerId: logicalID)
-        if rows.isEmpty { return String(localized: "settings_provider_unconfigured") }
+        if rows.isEmpty { return (.unconfigured, nil) }
         let enabled = rows.filter(\.enabled)
         let statuses = enabled.compactMap { health(for: $0)?.status }
-        let label: String
-        if enabled.isEmpty { label = String(localized: "provider_account_disabled") }
-        else if statuses.contains("ready") { label = String(localized: "settings_provider_status_configured") }
-        else if statuses.contains("storage_unavailable") { label = String(localized: "provider_account_storage_unavailable") }
-        else if statuses.contains("cooling_down") || statuses.contains("quota_exhausted") { label = String(localized: "provider_account_temporarily_unavailable") }
-        else if statuses.contains("needs_auth") { label = String(localized: "provider_account_needs_auth") }
-        else { label = String(localized: "provider_account_status_unverified") }
-        return "\(label) · \(enabled.count)/\(rows.count)"
+        let status: ProviderConfigurationStatus
+        if enabled.isEmpty { status = .disabled }
+        else if statuses.contains("ready") { status = .configured }
+        else if statuses.contains("storage_unavailable") { status = .storageUnavailable }
+        else if statuses.contains("cooling_down") || statuses.contains("quota_exhausted") { status = .temporarilyUnavailable }
+        else if statuses.contains("needs_auth") { status = .needsAuthentication }
+        else { status = .unverified }
+        return (status, "\(enabled.count)/\(rows.count)")
     }
 
     func health(for account: ProviderAccount) -> ProviderAccountHealth? {

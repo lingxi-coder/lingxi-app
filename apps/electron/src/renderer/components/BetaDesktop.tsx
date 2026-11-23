@@ -562,7 +562,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   // What the rail marks as the page the window is on: data-active draws it (global.css), aria-current tells assistive technology.
   const railMarked = !scheduled && !changes;
   const modeMarked = (mode: SidebarMode) => railMarked && sidebarMode === mode;
-  const messagesLabel = tr(splitHome ? 'tw_messages' : 'tabs_chats');
+  const messagesLabel = tr('tw_messages');
   const chatsMarked = modeMarked('home') && homeView === 'chats';
   const projectsMarked = modeMarked('home') && homeView === 'projects';
   const selectHomeView = (view: 'chats' | 'projects') => {

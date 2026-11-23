@@ -189,6 +189,11 @@ Object.assign(window, {
       detail: async (_uid: string, id: string) => teams.api.detail(id),
       execute: async (_uid: string, command: Parameters<typeof teams.api.execute>[0]) => teams.api.execute(command),
       messages: async (_uid: string, command: Parameters<typeof teams.api.messages>[0]) => teams.api.messages(command),
+      data: async (_uid: string, { command }: { command: { action: string } }) => {
+        if (command.action === 'datasets') return { datasets: [] };
+        if (command.action === 'privateSourceOffers') return { sources: [] };
+        throw new Error(`Unexpected fixture data action: ${command.action}`);
+      },
       onChanged: teams.api.onChanged, onMessagesChanged: teams.api.onMessagesChanged,
       watchMessages: (_uid: string, ...args: Parameters<typeof teams.api.watchMessages>) => teams.api.watchMessages(...args),
     },

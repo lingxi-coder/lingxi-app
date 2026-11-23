@@ -1,7 +1,7 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { Icon } from '../teams/ui.js';
 import {
   isUnread,
-  type InboxCategory,
   type InboxFilter,
   type InboxItem,
   type InboxNoticeTarget,
@@ -16,10 +16,10 @@ export interface InboxListProps {
   onOpen: (item: InboxItem, noticeTarget?: InboxNoticeTarget) => void | Promise<void>;
   locale?: string;
   activeKey?: string;
+  heading: ReactNode;
+  settings?: ReactNode;
 }
 const filters: InboxFilter[] = ['all', 'unread', 'attention'];
-const messageCategories: InboxCategory[] = ['friend', 'team', 'service'];
-const categories: InboxCategory[] = ['assistant', ...messageCategories];
 const en = {
   all: 'All',
   unread: 'Unread',
@@ -51,7 +51,7 @@ function statusText(row: InboxItem, cn: boolean) {
   return '';
 }
 
-export function InboxList({ controller, onOpen, activeKey, locale = 'en' }: InboxListProps) {
+export function InboxList({ controller, onOpen, activeKey, locale = 'en', heading: title, settings }: InboxListProps) {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
   const cn = locale.startsWith('zh'),
     labels = cn ? zh : en;
@@ -63,6 +63,8 @@ export function InboxList({ controller, onOpen, activeKey, locale = 'en' }: Inbo
   const [search, setSearch] = useState(''),
     [scroll, setScroll] = useState(0),
     [viewport, setViewport] = useState(560);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchToggle = useRef<HTMLButtonElement>(null);
   const [history, setHistory] = useState(false);
   const [actionKey, setActionKey] = useState(''),
     [error, setError] = useState('');
@@ -72,8 +74,15 @@ export function InboxList({ controller, onOpen, activeKey, locale = 'en' }: Inbo
     groupProbe = useRef<HTMLDivElement>(null),
     menu = useRef<HTMLDetailsElement>(null);
   const box = useRef<HTMLDivElement>(null),
-    searchId = useId(),
-    catId = useId();
+    searchId = useId();
+  const searchLabel = cn ? '搜索会话' : 'Search conversations';
+  const toggleSearch = () => {
+    if (searchOpen) {
+      setSearch('');
+      searchToggle.current?.focus();
+    }
+    setSearchOpen(!searchOpen);
+  };
   const prefix = search.trim().normalize('NFKC').toLowerCase();
   const rows = useMemo(
     () =>
@@ -84,11 +93,11 @@ export function InboxList({ controller, onOpen, activeKey, locale = 'en' }: Inbo
   );
   useEffect(() => {
     const timer = setTimeout(
-      () => void controller.setFilter(state.filter, state.category, state.archived, prefix),
+      () => void controller.setFilter(state.filter, undefined, state.archived, prefix),
       250,
     );
     return () => clearTimeout(timer);
-  }, [controller, state.filter, state.category, state.archived, prefix]);
+  }, [controller, state.filter, state.archived, prefix]);
   const firstRecent = useMemo(() => rows.findIndex((row) => row.pinOrder === null), [rows]);
   const grouped = !prefix && !!rows.length && firstRecent !== 0;
   const sections = grouped ? (firstRecent > 0 ? 2 : 1) : 0;
@@ -123,7 +132,7 @@ export function InboxList({ controller, onOpen, activeKey, locale = 'en' }: Inbo
     if (box.current) box.current.scrollTop = 0;
     setScroll(0);
     setActionKey('');
-  }, [state.filter, state.category, state.archived, search]);
+  }, [state.filter, state.archived, search]);
   useEffect(() => {
     const outside = (event: PointerEvent) => {
       if (menu.current?.open && event.target instanceof Node && !menu.current.contains(event.target))
@@ -171,18 +180,8 @@ export function InboxList({ controller, onOpen, activeKey, locale = 'en' }: Inbo
       <div className="lx-inbox-probe" ref={probe} aria-hidden="true" />
       <div className="lx-inbox-group-probe" ref={groupProbe} aria-hidden="true" />
       <div className="lx-inbox-tools">
-        <div className="lx-inbox-search">
-          <label className="lx-inbox-sr" htmlFor={searchId}>
-            {cn ? '搜索会话' : 'Search conversations'}
-          </label>
-          <input
-            id={searchId}
-            type="search"
-            maxLength={120}
-            value={search}
-            placeholder={cn ? '搜索会话' : 'Search conversations'}
-            onChange={(e) => setSearch(e.target.value)}
-          />
+        <header className="lx-inbox-heading">
+          {title}
           <details
             ref={menu}
             className="lx-inbox-more"
@@ -193,7 +192,9 @@ export function InboxList({ controller, onOpen, activeKey, locale = 'en' }: Inbo
               }
             }}
           >
-            <summary aria-label={cn ? '更多收件箱操作' : 'More inbox actions'}>⋯</summary>
+            <summary aria-label={cn ? '筛选和会话操作' : 'Filters and conversation actions'} data-filtered={state.filter !== 'all' || state.archived || undefined}>
+              <Icon name="more" size={20} />
+            </summary>
             <div
               className="lx-inbox-menu"
               onClick={(e) => {
@@ -203,13 +204,25 @@ export function InboxList({ controller, onOpen, activeKey, locale = 'en' }: Inbo
                 }
               }}
             >
+              <div className="lx-inbox-views" role="group" aria-label={cn ? '收件箱视图' : 'Inbox views'}>
+                {filters.map((filter) => (
+                  <button
+                    key={filter}
+                    type="button"
+                    aria-pressed={filter === state.filter}
+                    onClick={() => run(() => controller.setFilter(filter, undefined, state.archived))}
+                  >
+                    {filter === 'attention' ? (cn ? '待处理' : 'Attention') : labels[filter]}
+                  </button>
+                ))}
+              </div>
               <button type="button" aria-pressed={history} onClick={() => setHistory(!history)}>
                 {cn ? '通知历史' : 'Notification history'}
               </button>
               <button
                 type="button"
                 aria-pressed={state.archived}
-                onClick={() => run(() => controller.setFilter(state.filter, state.category, !state.archived))}
+                onClick={() => run(() => controller.setFilter(state.filter, undefined, !state.archived))}
               >
                 {cn ? '已归档' : 'Archived'}
               </button>
@@ -227,44 +240,41 @@ export function InboxList({ controller, onOpen, activeKey, locale = 'en' }: Inbo
               >
                 {cn ? '全部标为已读' : 'Mark all read'}
               </button>
+              {settings}
             </div>
           </details>
-        </div>
-        <div className="lx-inbox-filterbar">
-          <div className="lx-inbox-switch" role="group" aria-label={cn ? '收件箱视图' : 'Inbox views'}>
-            {filters.map((filter) => (
-              <button
-                key={filter}
-                type="button"
-                aria-pressed={filter === state.filter}
-                onClick={() => run(() => controller.setFilter(filter, state.category, state.archived))}
-              >
-                {filter === 'attention' ? (cn ? '待处理' : 'Attention') : labels[filter]}
-              </button>
-            ))}
-          </div>
-          {controller.scope !== 'assistant' && (
-            <>
-              <label className="lx-inbox-sr" htmlFor={catId}>
-                {cn ? '类别' : 'Category'}
-              </label>
-              <select
-                id={catId}
-                value={state.category ?? ''}
-                onChange={(e) => {
-                  const cat = e.target.value as InboxCategory;
-                  run(() => controller.setFilter(state.filter, cat || undefined, state.archived));
-                }}
-              >
-                <option value="">{cn ? '类别' : 'Category'}</option>
-                {(controller.scope === 'messages' ? messageCategories : categories).map((category) => (
-                  <option key={category} value={category}>
-                    {labels[category]}
-                  </option>
-                ))}
-              </select>
-            </>
-          )}
+          <button
+            ref={searchToggle}
+            className="lx-inbox-search-toggle"
+            type="button"
+            aria-label={searchOpen ? (cn ? '关闭搜索' : 'Close search') : searchLabel}
+            aria-expanded={searchOpen}
+            aria-controls={searchId}
+            onClick={toggleSearch}
+          >
+            <Icon name={searchOpen ? 'x' : 'search'} size={20} />
+          </button>
+        </header>
+        <div className="lx-inbox-search" id={searchId} hidden={!searchOpen}>
+          {searchOpen && <>
+            <label className="lx-inbox-sr" htmlFor={searchId + '-input'}>{searchLabel}</label>
+            <input
+              autoFocus
+              id={searchId + '-input'}
+              type="search"
+              maxLength={120}
+              value={search}
+              placeholder={searchLabel}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape' && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  toggleSearch();
+                }
+              }}
+            />
+          </>}
         </div>
       </div>
       {state.batchBusy ? <p role="status">{cn ? '正在标为已读…' : 'Marking conversations read…'}</p> : null}

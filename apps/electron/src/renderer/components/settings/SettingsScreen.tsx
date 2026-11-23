@@ -662,6 +662,7 @@ export function SettingsScreen({
       // A native modal owns focus and Escape until its task is dismissed.
       if (panelRef.current?.querySelector('dialog[open]')) return;
       if (event.key === 'Escape') {
+        if (panelRef.current?.querySelector('[popover=auto]:popover-open')) return;
         event.preventDefault();
         if (closeRequestRef.current) closeRequestRef.current();
         else onCloseRef.current();

@@ -92,6 +92,12 @@ struct ModelsSettingsPage: View {
 
     private var defaultModelSection: some View {
         let summary = repository.settingsSummary
+        let runtimeInfo = [
+            summary.runtime.lastError,
+            summary.runtime.activeModelID.flatMap { active in
+                summary.runtimeMatchesDefault || active.isEmpty ? nil : String(localized: "settings_provider_runtime_active \(active)")
+            },
+        ].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n")
         return Section {
             LabeledContent {
                 Text(summary.defaultModelID.flatMap { $0.isEmpty ? nil : $0 }
@@ -99,15 +105,9 @@ struct ModelsSettingsPage: View {
                     .foregroundStyle(Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } label: {
-                Text("settings_provider_default_model")
-            }
-        } footer: {
-            VStack(alignment: .leading, spacing: 4) {
-                if let active = summary.runtime.activeModelID, !summary.runtimeMatchesDefault, !active.isEmpty {
-                    Text(String(localized: "settings_provider_runtime_active \(active)"))
-                }
-                if let error = summary.runtime.lastError, !error.isEmpty {
-                    Text(error).foregroundStyle(t.danger)
+                HStack {
+                    Text("settings_provider_default_model")
+                    if !runtimeInfo.isEmpty { ProviderInfoButton(message: runtimeInfo) }
                 }
             }
         }
@@ -153,15 +153,10 @@ struct ModelsSettingsPage: View {
         return Button { host.push(.providerEdit(.init(.llm), state.id)) } label: {
             HStack(spacing: 12) {
                 ProviderTile(preset: preset, name: state.profile.name)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(state.profile.name).font(.body).foregroundStyle(Color.primary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(state.profile.enabled ? ProviderAccountRepository.shared.configurationDescription(
-                        providerId: repository.logicalProviderID(for: state.profile)) : String(localized: "provider_account_disabled"))
-                        .font(.subheadline).foregroundStyle(Color.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                Text(state.profile.name).font(.body).foregroundStyle(Color.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                providerDirectoryStatus(state)
                 if state.profile.isDefault {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(t.accent)
                         .accessibilityLabel(String(localized: "settings_badge_default"))
@@ -187,6 +182,33 @@ struct ModelsSettingsPage: View {
                 Label(String(localized: "common_removed"), systemImage: "trash")
             }
         }
+    }
+
+    private func providerDirectoryStatus(_ state: ProviderProfileState) -> some View {
+        let summary = ProviderAccountRepository.shared.configurationSummary(
+            providerId: repository.logicalProviderID(for: state.profile)
+        )
+        let status = state.profile.enabled ? summary.status : .disabled
+        let routine = status == .configured || status == .unconfigured
+        let color: Color = switch status {
+        case .configured: t.statusConnected
+        case .needsAuthentication, .storageUnavailable: t.statusError
+        case .temporarilyUnavailable: t.statusTesting
+        default: .secondary
+        }
+        return HStack(spacing: 6) {
+            Circle().fill(color).frame(width: 7, height: 7)
+                .accessibilityLabel(status.label)
+                .accessibilityHidden(!routine)
+            if !routine {
+                Text(status.label)
+            }
+            if let count = summary.count {
+                Text(count).monospacedDigit()
+            }
+        }
+        .font(.footnote)
+        .foregroundStyle(Color.secondary)
     }
 
     // MARK: Routing
@@ -312,17 +334,14 @@ struct ModelsSettingsPage: View {
     }
 }
 
-/// The colored initial used for a provider throughout the model settings.
+/// The brand tile used in the model provider directory and picker.
 private struct ProviderTile: View {
     @Environment(\.theme) private var t
     let preset: ProviderPreset
     let name: String
 
     var body: some View {
-        Text(String(name.prefix(1)))
-            .font(.footnote.weight(.bold))
-            .foregroundStyle(preset.color)
-            .frame(width: 36, height: 36)
+        ProviderBrandMark(providerID: preset.id, name: name, size: 36, tint: preset.color)
             .background(preset.color.opacity(0.12))
             .clipShape(.rect(cornerRadius: 7))
             .overlay {
@@ -523,6 +542,7 @@ struct ProviderEditorForm: View {
             }
             removeSection
         }
+        .providerMessage($actionError)
         .formStyle(.grouped)
         .scrollDismissesKeyboard(.interactively)
         .background(Color(uiColor: .systemGroupedBackground))
@@ -556,12 +576,12 @@ struct ProviderEditorForm: View {
     private var statusSection: some View {
         Section {
             LabeledContent("session_details_status") {
-                Text(statusLabel).font(.subheadline).foregroundStyle(statusColor)
-            }
-        } footer: {
-            if let detail = draft.validationMessage ?? draft.detailMessage ?? actionError {
-                Text(detail)
-                    .foregroundStyle(draft.connectionState == .failed || draft.validationMessage != nil || actionError != nil ? t.danger : t.text3)
+                HStack {
+                    Text(statusLabel).font(.subheadline).foregroundStyle(statusColor)
+                    if let detail = draft.validationMessage ?? draft.detailMessage {
+                        ProviderInfoButton(message: detail)
+                    }
+                }
             }
         }
         .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
@@ -617,8 +637,7 @@ struct ProviderEditorForm: View {
         Section {
             if needsInitialProfileSave {
                 Button("provider_account_save_first", action: save)
-                Text("provider_account_save_first_hint")
-                    .font(.footnote).foregroundStyle(.secondary)
+                ProviderInfoButton(message: String(localized: "provider_account_save_first_hint"))
             } else {
                 NavigationLink {
                     ProviderAccountsPage(providerId: repository.logicalProviderID(for: draft.profile),
@@ -970,9 +989,6 @@ private struct ProviderModelsPage: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(details?.preferredDisplayName ?? ModelDisplay.modelName(for: model))
                                     .foregroundStyle(Color.primary)
-                                Text(ProviderAccountRepository.shared.modelAccessDescription(
-                                    bindingId: repository.engineProfileID(for: draft.profile), modelId: model))
-                                    .font(.caption).foregroundStyle(.secondary)
                                 if (details?.preferredDisplayName ?? ModelDisplay.modelName(for: model)) != model {
                                     Text(model)
                                         .font(.subheadline)
@@ -1072,14 +1088,11 @@ private struct ProviderModelsPage: View {
                     .tint(t.accent)
                 }
             }
-        } footer: {
             if catalog.isReady, draft.profile.showInModelPicker, visible.isEmpty {
-                Text(String(localized: "settings_provider_picker_hidden_empty"))
-                    .foregroundStyle(t.statusTesting)
-            } else {
-                Text(catalog.summary)
+                ProviderInfoButton(message: String(localized: "settings_provider_picker_hidden_empty"))
             }
         }
+        .toggleStyle(.switch)
         .listRowBackground(Color(uiColor: .secondarySystemGroupedBackground))
     }
 

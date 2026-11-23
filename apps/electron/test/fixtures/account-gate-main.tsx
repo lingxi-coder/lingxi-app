@@ -18,7 +18,7 @@ const fixture = {
   backgroundTabs: 0,
   expire: () => publish({ ...state, user: null, sessionExpired: true, error: 'Fixture session expired' }),
   timeout: () => publish({ ...state, busy: false, error: 'Fixture browser sign-in timed out' }),
-  succeed: () => { publish({ user, busy: false, error: null, persistence: 'secure' }); pending[1](state); },
+  succeed: () => { state = { user, busy: false, error: null, persistence: 'secure' }; pending[1](state); },
   finishOldReply: () => pending[0]({ user: null, sessionExpired: true, busy: false, error: 'Stale timeout', persistence: 'secure' }),
   signOut: () => publish({ user: null, busy: false, error: null, persistence: 'secure' }),
 };

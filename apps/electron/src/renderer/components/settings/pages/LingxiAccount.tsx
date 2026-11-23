@@ -1,6 +1,6 @@
 import { tr } from '../../../i18n/locale';
 import { useContext, useEffect, useRef, useState, type CSSProperties } from 'react';
-import type { AccountCommand } from '../../../../shared/account';
+import type { AccountCommand, AccountState } from '../../../../shared/account';
 import { AccountSignInContext, useAccountState } from '../../../bridge/useAccountState';
 import { useT } from '../../../theme/ThemeContext';
 import { ghostButtonStyle } from './ghostButton';
@@ -9,7 +9,7 @@ import './LingxiAccount.css';
 
 const googleIcon = new URL('../../../assets/google-g.png', import.meta.url).href;
 
-export function LingxiAccount({ standalone = false }: { standalone?: boolean }) {
+export function LingxiAccount({ standalone = false, onSignedIn }: { standalone?: boolean; onSignedIn?: (state: AccountState) => void }) {
   const t = useT();
   const { state, setState, readError } = useAccountState();
   const requestSignIn = useContext(AccountSignInContext);
@@ -37,6 +37,7 @@ export function LingxiAccount({ standalone = false }: { standalone?: boolean }) 
       const next = await api.request(command);
       if (sequence !== requestSequence.current) return;
       setState(next);
+      if (next.user && ['signIn', 'register', 'oauth'].includes(command.type)) onSignedIn?.(next);
       if (next.user || command.type === 'signOut') setPassword('');
       if (!next.error) {
         if (['signIn', 'register', 'oauth', 'signOut'].includes(command.type)) setPassword('');

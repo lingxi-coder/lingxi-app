@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
 import { build } from 'electron-vite';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -34,6 +35,39 @@ test('packaged browser sign-in keeps Node shims outside the served login script'
     assert.ok(script);
     assert.doesNotMatch(script, /node:|__cjs_mod__|createRequire|import\.meta/);
     assert.match(script, /button\.onclick\s*=/);
+    assert.match(html, /<section id="success" class="success" hidden>/);
+    for (const ok of [false, true]) {
+      const heading = { focused: false, focus() { this.focused = true; } };
+      const elements = {
+        login: {}, status: {}, 'sign-in': { hidden: false },
+        success: { hidden: true, querySelector: () => heading },
+      };
+      const document = { title: 'LingXi 登录', getElementById: id => elements[id] };
+      const firebaseApp = { initializeApp() {} };
+      const firebaseAuth = {
+        initializeAuth() {}, signOut: async () => {}, signInWithPopup: async () => ({}),
+        GoogleAuthProvider: class {
+          addScope() {}
+          static credentialFromResult() { return { toJSON: () => ({ providerId: 'google.com' }) }; }
+        },
+      };
+      const scriptWithStubs = script
+        .replace("await import('/firebase-app.js')", 'firebaseApp')
+        .replace("await import('/firebase-auth.js')", 'firebaseAuth');
+      let acknowledge;
+      const response = new Promise(resolve => { acknowledge = resolve; });
+      await runInNewContext(`(async () => {${scriptWithStubs}})()`, {
+        document, firebaseApp, firebaseAuth, fetch: () => response,
+      });
+      const click = elements.login.onclick();
+      assert.equal(elements.success.hidden, true, 'waits for the desktop response');
+      acknowledge({ ok });
+      await click;
+      assert.equal(elements.success.hidden, !ok);
+      assert.equal(elements['sign-in'].hidden, ok);
+      assert.equal(heading.focused, ok);
+      assert.equal(document.title, ok ? '已登录 LingXi' : 'LingXi 登录');
+    }
     assert.match(response.headers.get('content-security-policy'), /script-src 'self' 'nonce-/);
     for (const name of ['firebase-app.js', 'firebase-auth.js']) {
       const sdk = await fetch(new URL(`/${name}`, url));

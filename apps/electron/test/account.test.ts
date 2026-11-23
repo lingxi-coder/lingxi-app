@@ -161,6 +161,34 @@ test('Google SDK credentials with null optional fields complete desktop sign-in'
   assert.equal(state.error, null);
   assert.equal(JSON.parse(saved.value!).refreshToken, 'refresh-secret');
 });
+test('Google handoff waits for secure storage and reports a desktop completion failure', async t => {
+  const saved = store();
+  let signalWrite!: () => void;
+  let rejectWrite!: (error: Error) => void;
+  const writing = new Promise<void>(resolve => { signalWrite = resolve; });
+  saved.write = () => new Promise((_resolve, reject) => { rejectWrite = reject; signalWrite(); });
+  let opened!: (url: string) => void;
+  const started = new Promise<string>(resolve => { opened = resolve; });
+  const service = new AccountService(config, saved, async url => { opened(url); }, mockFetch(() => Response.json(authResponse)));
+  t.after(() => service.dispose());
+  const pending = service.execute({ type: 'oauth', provider: 'google.com' });
+  const url = await started;
+  let acknowledged = false;
+  const response = fetch(`${url}/complete`, {
+    method: 'POST', headers: { Origin: new URL(url).origin, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ providerId: 'google.com', idToken: 'fixture-id' }),
+  }).then(value => { acknowledged = true; return value; });
+  await writing;
+  assert.equal(acknowledged, false);
+  assert.equal(service.snapshot().user, null);
+  rejectWrite(new Error('fixture storage error'));
+  assert.equal((await response).status, 502);
+  const state = await pending;
+  assert.equal(state.user, null);
+  assert.equal(state.busy, false);
+  assert.match(state.error ?? '', /无法保存登录状态/);
+});
+
 test('browser callback rejects cross-origin requests and consumes only the expected credential', async () => {
   let opened!: (url: string) => void;
   const started = new Promise<string>(resolve => { opened = resolve; });

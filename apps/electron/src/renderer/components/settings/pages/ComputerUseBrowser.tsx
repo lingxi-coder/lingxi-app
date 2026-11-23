@@ -1,5 +1,5 @@
 import { useI18n } from '../../../i18n/useI18n';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Icon } from '../../Icon';
 import { Toggle } from '../primitives';
 import type { ComputerPermission, BrowserSitePermission } from '../../../../shared/computerSettings';
@@ -20,7 +20,7 @@ function PermissionSelect({ label, value, disabled, onChange, history = false }:
   </select>;
 }
 
-export function BrowserSettings({ onBack, settings }: { onBack(): void; settings: ComputerSettingsController }) {
+export function BrowserSettings({ onBack, settings, feedback }: { onBack(): void; settings: ComputerSettingsController; feedback: ReactNode }) {
   const { tr } = useI18n();
   const { state, pending } = settings;
   const browser = state?.browser;
@@ -65,6 +65,7 @@ export function BrowserSettings({ onBack, settings }: { onBack(): void; settings
           <button type="button" className="computer-use-manage computer-browser-remove" disabled={unavailable || !status?.installed} onClick={() => void settings.execute({ action: 'removeBrowser' })}>{tr('desktop_computer_disconnect_extension')}</button>
         </div>
       </header>
+      {feedback}
       <div className="computer-browser-choice">
         <label htmlFor="computer-browser-choice">{tr('desktop_computer_browser_select')}</label>
         <select id="computer-browser-choice" className="computer-browser-select" aria-label={tr('desktop_computer_browser_select')} value={status?.browserId ?? ''} disabled={unavailable} onChange={(event) => {

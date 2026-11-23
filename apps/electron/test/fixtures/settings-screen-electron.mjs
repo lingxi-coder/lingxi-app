@@ -243,6 +243,7 @@ async function runWindowChromeScenario(window, webContents) {
     const scrollRect = rect(contentScroll);
     const innerRect = rect(inner);
     const headerRect = rect(inner.firstElementChild);
+    const backRect = rect(dialog.querySelector('.settings-back-button'));
     const lastChild = inner.lastElementChild;
     const sidebarRect = rect(sidebar);
     const sidebarScrollRect = rect(sidebarScroll);
@@ -259,10 +260,12 @@ async function runWindowChromeScenario(window, webContents) {
         bottom: pixels(dialogRect.bottom - scrollRect.bottom),
       },
       contentInsets: {
+        top: pixels(headerRect.top - innerRect.top),
         left: pixels(headerRect.left - innerRect.left),
         right: pixels(innerRect.right - headerRect.right),
         bottom: parseFloat(getComputedStyle(inner).paddingBottom),
       },
+      backTop: pixels(backRect.top - dialogRect.top),
       contentBottomClearance: pixels(innerRect.bottom - rect(lastChild).bottom),
       sidebarInsets: {
         left: pixels(sidebarScrollRect.left - sidebarRect.left - parseFloat(sidebarStyle.borderLeftWidth)),
@@ -302,13 +305,22 @@ async function runWindowChromeScenario(window, webContents) {
   const chrome = await run(`(() => {
     const dragRegion = document.querySelector('.settings-window-drag-region');
     const dragStyle = dragRegion && getComputedStyle(dragRegion);
+    const bounds = dragRegion.getBoundingClientRect();
     return {
       hasDragRegion: Boolean(dragRegion),
       dragRegionMode: dragStyle?.webkitAppRegion ?? null,
       dragRegionHeight: dragStyle?.height ?? null,
+      dragRegionEdges: [bounds.top, bounds.left, window.innerWidth - bounds.right],
     };
   })()`);
-  return { ...chrome, layout: { top, bottom, switched, returned, narrow } };
+  const measureTop = (selector) => run(`document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect().top`);
+  await run('window.__settingsScreenTest.selectPage("computer-use")');
+  await waitFor(webContents, 'Boolean(document.querySelector(".computer-use-page-heading"))');
+  const computerTop = await measureTop('.computer-use-page-heading');
+  await run('document.querySelector(".computer-use-manage").click()');
+  await waitFor(webContents, 'Boolean(document.querySelector(".computer-browser-breadcrumb"))');
+  const browserTop = await measureTop('.computer-browser-breadcrumb');
+  return { ...chrome, computerTop, browserTop, layout: { top, bottom, switched, returned, narrow } };
 }
 
 async function runLayerReseedScenario(webContents) {

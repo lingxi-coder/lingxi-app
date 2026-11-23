@@ -1,5 +1,21 @@
 .settings-screen {
+  --settings-titlebar-height: 40px;
+  --settings-top-padding: 12px;
   accent-color: var(--settings-accent);
+}
+
+.settings-window-drag-region {
+  position: absolute;
+  z-index: 1;
+  /* Leave room for the native macOS window buttons. */
+  inset: 0 0 auto 88px;
+  height: var(--settings-titlebar-height);
+  user-select: none;
+}
+
+.settings-sidebar-controls {
+  flex-shrink: 0;
+  padding: calc(var(--settings-titlebar-height) + var(--settings-top-padding)) 14px 8px;
 }
 
 :is(.settings-screen, .settings-model-popup) :is(button, input, select, textarea, summary, a[href], [tabindex]):focus-visible {
@@ -70,6 +86,7 @@
   min-width: 0;
   min-height: 0;
   margin: 0 6px 8px 0;
+  padding-top: var(--settings-titlebar-height);
   overflow: hidden;
 }
 
@@ -81,7 +98,7 @@
 }
 
 .settings-content-inner {
-  padding: 0 26px 32px 32px;
+  padding: var(--settings-top-padding) 26px 32px 32px;
 }
 
 .settings-nav-scroll {

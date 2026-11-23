@@ -3,7 +3,8 @@
   width: 100%;
   max-width: 1100px;
   margin-inline: auto;
-  padding: clamp(40px, 7vw, 104px) clamp(24px, 5vw, 72px) 56px;
+  padding-inline: clamp(24px, 5vw, 72px);
+  padding-bottom: 56px;
 }
 .computer-use-settings { color: var(--computer-settings-text); font-optical-sizing: auto; }
 .computer-use-page-heading { margin-bottom: 58px; }
@@ -54,7 +55,7 @@
 .computer-use-help p { max-width: 68ch; margin: 12px 0 0; }
 .computer-use-help:target { outline: 2px solid var(--computer-settings-accent); outline-offset: 8px; border-radius: 4px; }
 @media (max-width: 820px) {
-  .settings-content-inner.settings-computer-use-content { padding: 36px 20px; }
+  .settings-content-inner.settings-computer-use-content { padding-inline: 20px; padding-bottom: 36px; }
   .computer-use-page-heading { margin-bottom: 36px; }
   .computer-use-control-row { gap: 12px; }
   .computer-use-settings-card { padding-inline: 14px; }
@@ -66,7 +67,6 @@
 }
 
 /* Browser management is a child of Computer use, with its own breadcrumb. */
-.settings-content-inner.settings-computer-use-content:has(.computer-browser-settings) { padding-top: 32px; }
 .computer-browser-breadcrumb { display: flex; align-items: center; gap: 16px; margin-bottom: 48px; font-size: 14px; }
 .computer-browser-breadcrumb > svg { color: var(--computer-settings-muted); }
 .computer-browser-breadcrumb button { padding: 4px 0; border: 0; border-radius: 4px; background: transparent; color: var(--computer-settings-muted); font: inherit; cursor: pointer; }
@@ -106,7 +106,8 @@
   .computer-browser-table-scroll, .computer-browser-select, .computer-browser-table tbody tr { border-color: var(--computer-settings-text); }
 }
 
-.computer-settings-feedback { min-height: 24px; margin-bottom: 12px; color: var(--computer-settings-muted); font-size: 13px; line-height: 1.5; }
+.computer-settings-feedback { color: var(--computer-settings-muted); font-size: 13px; line-height: 1.5; }
+.computer-settings-feedback:not(:empty) { margin-bottom: 12px; }
 .computer-settings-feedback p { margin: 0; }
 .computer-settings-error { color: var(--computer-settings-danger); overflow-wrap: anywhere; }
 .computer-settings-error button { color: inherit; background: transparent; border: 0; padding: 0 4px; font: inherit; text-decoration: underline; cursor: pointer; }

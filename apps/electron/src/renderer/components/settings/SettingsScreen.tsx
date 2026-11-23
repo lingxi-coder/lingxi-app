@@ -281,9 +281,6 @@ export interface PageContentProps {
   onJumpToLayer(layer: EditableLayer): void;
 }
 
-/** Clears the macOS hidden-inset titlebar controls before the first settings control. */
-export const SETTINGS_SIDEBAR_TOP_INSET = 44;
-
 function PagePlaceholder({ page, kind }: { page: NavPage; kind: 'not-implemented' | 'not-wired' }) {
   const t = useT();
   const heading = tr(kind === 'not-implemented' ? 'desktop_shell_page_unimplemented' : 'desktop_shell_page_coming', navPageLabel(page));
@@ -776,7 +773,7 @@ export function SettingsScreen({
           width: 240, flexShrink: 0, display: 'flex', flexDirection: 'column',
           borderRight: `0.5px solid ${t.border}`, background: t.sidebarBg, overflow: 'hidden',
         }}>
-          <div style={{ flexShrink: 0, padding: `${SETTINGS_SIDEBAR_TOP_INSET}px 14px 8px` }}>
+          <div className="settings-sidebar-controls">
             <button ref={backRef} type="button" aria-label={tr('desktop_back')} onClick={requestClose}
               className="settings-back-button"
               style={{ width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9,
@@ -843,7 +840,7 @@ export function SettingsScreen({
           </div>
         </nav>
 
-        <div className="settings-content-viewport" style={{ paddingTop: SETTINGS_SIDEBAR_TOP_INSET }}>
+        <div className="settings-content-viewport">
           <div ref={contentScrollRef} className="settings-content-scroll settings-scroll-area">
             <div className={page === 'computer-use' ? 'settings-content-inner settings-computer-use-content' : 'settings-content-inner'}>
               {page !== 'computer-use' && page !== 'provider-credentials' && <div className="settings-page-header" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>

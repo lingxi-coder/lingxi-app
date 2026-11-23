@@ -165,11 +165,15 @@ test('settings preserves content and scroll track insets while scrolling and swi
     const result = await runScenario('window-chrome', theme);
     assert.equal(result.hasDragRegion, true);
     assert.equal(result.dragRegionMode, 'drag');
-    assert.equal(result.dragRegionHeight, '18px');
+    assert.equal(result.dragRegionHeight, '40px');
+    assert.deepEqual(result.dragRegionEdges, [0, 88, 0]);
+    assert.equal(result.computerTop, 52, 'Computer Use starts at the shared top inset');
+    assert.equal(result.browserTop, 52, 'Browser breadcrumb starts at the shared top inset');
     for (const [position, state] of Object.entries(result.layout)) {
       const context = `${theme} ${position}`;
-      assert.deepEqual(state.viewportInsets, { top: 44, right: 6, bottom: 8 }, `${context}: viewport clears the titlebar and window edges`);
-      assert.deepEqual(state.contentInsets, { left: 32, right: 26, bottom: 32 }, `${context}: inner content keeps its padding`);
+      assert.deepEqual(state.viewportInsets, { top: 40, right: 6, bottom: 8 }, `${context}: viewport clears the titlebar and window edges`);
+      assert.deepEqual(state.contentInsets, { top: 12, left: 32, right: 26, bottom: 32 }, `${context}: inner content keeps its padding`);
+      assert.equal(state.backTop, 52, `${context}: Back aligns with the start of the content`);
       assert.ok(state.contentBottomClearance >= 32, `${context}: final content clears the bottom padding`);
       assert.deepEqual(state.sidebarInsets, { left: 6, right: 6, bottom: 8 }, `${context}: sidebar scroll track remains inset`);
       assert.equal(state.scrollPaddingTop, '0px', context);

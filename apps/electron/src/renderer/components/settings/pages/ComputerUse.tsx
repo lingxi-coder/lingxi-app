@@ -55,6 +55,12 @@ export function ComputerUse() {
       returningFromBrowser.current = false;
     }
   }, [browserOpen]);
+  const feedback = (
+    <div className="computer-settings-feedback" aria-live="polite" aria-atomic="true">
+      {error ? <p role="alert" className="computer-settings-error">{error} <button type="button" onClick={() => void settings.refresh()} disabled={pending}>{tr('desktop_computer_reload')}</button></p>
+        : pending ? <p role="status">{tr('desktop_computer_saving')}</p> : !state ? <p role="status">{tr('desktop_computer_loading')}</p> : null}
+    </div>
+  );
   return (
     <article className="computer-use-settings" style={{
       '--computer-settings-text': t.text,
@@ -66,11 +72,7 @@ export function ComputerUse() {
       '--computer-settings-risk': t.dark ? '#ff9f66' : '#c74300',
       '--computer-settings-danger': t.danger,
     } as CSSProperties}>
-      <div className="computer-settings-feedback" aria-live="polite" aria-atomic="true">
-        {error ? <p role="alert" className="computer-settings-error">{error} <button type="button" onClick={() => void settings.refresh()} disabled={pending}>{tr('desktop_computer_reload')}</button></p>
-          : pending ? <p role="status">{tr('desktop_computer_saving')}</p> : !state ? <p role="status">{tr('desktop_computer_loading')}</p> : null}
-      </div>
-      {browserOpen ? <BrowserSettings settings={settings} onBack={() => {
+      {browserOpen ? <BrowserSettings settings={settings} feedback={feedback} onBack={() => {
         returningFromBrowser.current = true;
         setBrowserOpen(false);
       }} /> : <>
@@ -78,6 +80,7 @@ export function ComputerUse() {
         <h1>{tr('desktop_computer_title')}</h1>
         <p>{tr('desktop_computer_description')}</p>
       </header>
+      {feedback}
 
       <section aria-labelledby="computer-use-control-heading">
         <h2 id="computer-use-control-heading">{tr('desktop_computer_control')}</h2>

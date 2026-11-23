@@ -15,7 +15,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -117,14 +119,17 @@ fun ProviderListPage(
         }
     }
     var advancedExpanded by remember(kind) { mutableStateOf(false) }
+    var dismissCatalogNotice by remember(catalogRefreshNotice) { mutableStateOf(false) }
 
     Column(Modifier.fillMaxWidth()) {
         if (kind != ProviderKind.Llm) Blurb(kind.blurb())
         else {
-            androidx.compose.material3.TextButton(enabled = catalogRefreshEnabled, onClick = onRefreshCatalog) {
+            TextButton(enabled = catalogRefreshEnabled, onClick = {
+                dismissCatalogNotice = false
+                onRefreshCatalog()
+            }) {
                 Text(stringResource(R.string.settings_parity_refresh_catalog))
             }
-            catalogRefreshNotice?.let { Text(it, color = t.text4) }
         }
 
         SettingsSection(label = stringResource(R.string.settings_provider_added_count_fmt, arr.size)) {
@@ -231,6 +236,9 @@ fun ProviderListPage(
             }
 
         }
+    }
+    if (kind == ProviderKind.Llm && !dismissCatalogNotice) catalogRefreshNotice?.let { notice ->
+        ProviderMessageDialog(notice) { dismissCatalogNotice = true }
     }
 }
 
@@ -470,6 +478,8 @@ fun ProviderEditPage(
     var keyDraft by remember(providerId) { mutableStateOf("") }
     var removalMessage by remember(providerId) { mutableStateOf<String?>(null) }
     var removing by remember(providerId) { mutableStateOf(false) }
+    var confirmRemoval by remember(providerId) { mutableStateOf(false) }
+    var applyHelp by remember(providerId) { mutableStateOf(false) }
     var applying by remember(providerId) { mutableStateOf(false) }
     val catalogEntry = if (kind == ProviderKind.Llm) {
         state.llmCatalogEntries.firstOrNull { it.profileId == ProviderSettingsRepository.profileNameFor(editing) }
@@ -478,6 +488,21 @@ fun ProviderEditPage(
     val pickerModelIds = (catalogModels.map { it.modelId } + accountSnapshot.modelAvailability
         .filter { it.executionBindingId == ProviderSettingsRepository.profileNameFor(editing) }.map { it.modelId }).distinct()
     val applyState = providerApplyUiState(providerId in state.pendingLlmProviderChanges, applying)
+
+    fun removeProvider() {
+        removing = true
+        removalMessage = null
+        store.removeProvider(kind, providerId) { error ->
+            removing = false
+            removalMessage = error
+            if (error == null) {
+                if (kind == ProviderKind.Llm) {
+                    onReconnectEngine()
+                }
+                onPop()
+            }
+        }
+    }
 
     val usesPresetDefaults = kind == ProviderKind.Llm && preset.id != "custom"
     val connectionFields: @Composable () -> Unit = {
@@ -521,12 +546,10 @@ fun ProviderEditPage(
         if (kind == ProviderKind.Llm && providerId in state.pendingLlmProviderChanges) {
             SettingsSection(
                 label = stringResource(R.string.settings_provider_apply),
-                footer = stringResource(if (providerId in state.pendingLlmProviderChanges)
-                    R.string.settings_provider_apply_footer_pending else R.string.settings_provider_apply_footer_applied),
             ) {
                 SettingsRow(
                     label = stringResource(R.string.settings_provider_apply_config_reconnect),
-                    sub = stringResource(R.string.settings_provider_apply_config_sub), chevron = false, isLast = true,
+                    chevron = false, isLast = true, onTap = { applyHelp = true },
                     trailing = { ProviderTextAction(stringResource(applyState.labelRes), applyState.enabled) {
                         applying = true
                         onReconnectEngine()
@@ -580,8 +603,6 @@ fun ProviderEditPage(
             )
         }
 
-        if (kind == ProviderKind.Llm) FieldHint(stringResource(R.string.provider_account_configuration_remove_hint))
-
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center,
@@ -591,18 +612,8 @@ fun ProviderEditPage(
                 .clip(RoundedCornerShape(11.dp))
                 .border(0.5.dp, t.border, RoundedCornerShape(11.dp))
                 .clickable(enabled = !removing) {
-                    removing = true
-                    removalMessage = null
-                    store.removeProvider(kind, providerId) { error ->
-                        removing = false
-                        removalMessage = error
-                        if (error == null) {
-                            if (kind == ProviderKind.Llm) {
-                                onReconnectEngine()
-                            }
-                            onPop()
-                        }
-                    }
+                    if (kind == ProviderKind.Llm) confirmRemoval = true
+                    else removeProvider()
                 }
                 .padding(12.dp),
         ) {
@@ -613,15 +624,20 @@ fun ProviderEditPage(
                 fontWeight = FontWeight.Medium,
             )
         }
-        if (removalMessage != null) {
-            Text(
-                removalMessage.orEmpty(),
-                color = t.danger,
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(top = 8.dp, start = 4.dp, end = 4.dp),
-            )
-        }
     }
+    removalMessage?.let { ProviderMessageDialog(it) { removalMessage = null } }
+    if (applyHelp) ProviderMessageDialog(
+        stringResource(R.string.settings_provider_apply_footer_pending) + "\n\n" + stringResource(R.string.settings_provider_apply_config_sub),
+    ) { applyHelp = false }
+    if (confirmRemoval) AlertDialog(
+        onDismissRequest = { confirmRemoval = false },
+        title = { Text(stringResource(R.string.settings_provider_remove)) },
+        text = { Text(stringResource(R.string.provider_account_configuration_remove_hint)) },
+        confirmButton = { TextButton(onClick = { confirmRemoval = false; removeProvider() }) {
+            Text(stringResource(R.string.settings_provider_remove), color = t.danger)
+        } },
+        dismissButton = { TextButton(onClick = { confirmRemoval = false }) { Text(stringResource(android.R.string.cancel)) } },
+    )
     if (modelSheet != null) {
         ProviderModelSheet(
             provider = editing,
@@ -704,12 +720,10 @@ private fun PresetTile(preset: ProviderPreset, kind: ProviderKind, size: android
             .background(preset.color.mix(t.surface, 0.18f))
             .border(0.5.dp, preset.color.tint(0.28f), RoundedCornerShape(if (size > 28.dp) 8.dp else 7.dp)),
     ) {
-        Text(
-            preset.localizedName(kind).take(1),
-            color = preset.color,
-            fontSize = fontSize,
-            fontWeight = FontWeight.Bold,
-        )
+        val initial: @Composable () -> Unit = {
+            Text(preset.localizedName(kind).take(1), color = preset.color, fontSize = fontSize, fontWeight = FontWeight.Bold)
+        }
+        if (kind == ProviderKind.Llm) ProviderBrandMark(preset.id, size, initial) else initial()
     }
 }
 

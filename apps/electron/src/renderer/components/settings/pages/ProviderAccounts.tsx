@@ -3,11 +3,13 @@ import { useI18n } from '../../../i18n/useI18n';
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type { AccountUsageRowDto } from '@lingxi/bridge-client';
 import { accountUsageByAccount, formatSessionTokens, formatSessionUsd, sessionUsageFromIndex, type AccountSessionUsage } from '../../../../shared/accountUsage';
-import type { ProviderAccountCommand, ProviderAccountHealth, ProviderAccountModelEntitlement, ProviderAccountRouting, ProviderAccountsApi, ProviderAccountSnapshot } from '../../../../shared/providerAccounts';
+import type { ProviderAccountCommand, ProviderAccountHealth, ProviderAccountRouting, ProviderAccountsApi, ProviderAccountSnapshot } from '../../../../shared/providerAccounts';
 import { logicalProviderId, orderedProviderAccounts } from '../../../../shared/providerAccounts';
 import type { ProviderDefinition } from '../../../../shared/providers';
 import { useT } from '../../../theme/ThemeContext';
 import { Icon } from '../../Icon';
+import { ProviderBrandIcon } from './ProviderBrandIcon';
+import { ProviderFeedback, ProviderInfo } from './ProviderPopups';
 import { useAccountState } from '../../../bridge/useAccountState';
 import type { AccountApi } from '../../../../shared/account';
 import { readVaultSyncPreference, vaultCodeText, writeVaultSyncPreference } from './CloudProviders';
@@ -85,16 +87,6 @@ export function ProviderAccounts({ api, provider, running, onConfigured, usageRo
     }
     return map;
   }, [snapshot]);
-  const entitlementsByAccount = useMemo(() => {
-    const map = new Map<string, ProviderAccountModelEntitlement[]>();
-    for (const entry of snapshot?.modelEntitlements ?? []) {
-      const key = `${entry.accountId}:${entry.identityGeneration}`;
-      const list = map.get(key);
-      if (list) list.push(entry);
-      else map.set(key, [entry]);
-    }
-    return map;
-  }, [snapshot]);
   const locked = busy || running || !snapshot;
   const supportsKey = provider.authMethods.includes('api_key') || provider.authMethods.includes('token');
   const supportsOAuth = provider.authMethods.includes('oauth');
@@ -164,22 +156,28 @@ export function ProviderAccounts({ api, provider, running, onConfigured, usageRo
   const menuAction = (button: HTMLButtonElement, action: () => void) => { button.closest('details')?.removeAttribute('open'); action(); };
   return <section className="pa-panel" style={theme} aria-label={tr('provider_accounts_accounts')} aria-busy={busy}>
     <header className="pa-section-heading">
-      <div><h3>{tr('provider_accounts_accounts')} {snapshot && <span className="pa-count">{accounts.length}</span>}</h3>{accounts.length > 1 && <p>{tr('provider_accounts_priority_desc')}</p>}{accounts.length > 0 && <p>{tr('provider_accounts_session_usage_note')}</p>}</div>
+      <div className="pa-heading-with-info">
+        <h3>{tr('provider_accounts_accounts')} {snapshot && <span className="pa-count">{accounts.length}</span>}</h3>
+        <ProviderInfo label={tr('provider_accounts_accounts')}>
+          {accounts.length > 1 && <p>{tr('provider_accounts_priority_desc')}</p>}
+          {accounts.length > 0 ? <p>{tr('provider_accounts_session_usage_note')}</p> : <p>{tr('provider_accounts_empty_desc')}</p>}
+          {running && <p>{tr('provider_accounts_running')}</p>}
+        </ProviderInfo>
+      </div>
       <div className="pa-toolbar">
-        <button className="pa-icon-button" aria-label={tr('provider_accounts_refresh')} disabled={busy} onClick={() => void api.snapshot().then(setSnapshot).catch(() => setError(tr('provider_accounts_status_error')))}><Icon name="refresh" size={16} /></button>
+        <button className="pa-icon-button" aria-label={tr('provider_accounts_refresh')} disabled={busy} onClick={() => { setError(undefined); void api.snapshot().then(setSnapshot).catch(() => setError(tr('provider_accounts_status_error'))); }}><Icon name="refresh" size={16} /></button>
         {provider.available && <button ref={addButton} className="pa-button pa-primary" disabled={locked} onClick={() => openForm()}><Icon name="plus" size={15} />{tr('provider_accounts_add')}</button>}
       </div>
     </header>
     <div className="pa-list">
       {!snapshot ? <div className="pa-empty" role="status"><span className="pa-spinner" />{tr('provider_accounts_loading')}</div>
-        : accounts.length === 0 ? <div className="pa-empty"><span className="pa-empty-icon"><Icon name="user" size={24} /></span><h4>{tr('provider_accounts_empty')}</h4><p>{tr('provider_accounts_empty_desc')}</p></div>
+        : accounts.length === 0 ? <div className="pa-empty"><span className="pa-empty-icon"><Icon name="user" size={24} /></span><h4>{tr('provider_accounts_empty')}</h4></div>
         : accounts.map((account, index) => {
           const health = healthByAccount.get(`${account.accountId}:${account.identityGeneration}`);
-          const entitlements = entitlementsByAccount.get(`${account.accountId}:${account.identityGeneration}`) ?? [];
           const testing = pending?.action === 'test' && pending.accountId === account.accountId;
           return <article className="pa-account" key={account.accountId} data-enabled={account.enabled}>
             <span className="pa-rank" aria-label={`${tr('provider_accounts_priority')} ${index + 1}`}>{index + 1}</span>
-            <span className="pa-account-icon"><Icon name={account.authKind === 'oauth' ? 'user' : 'key'} size={19} /></span>
+            <ProviderBrandIcon provider={provider} className="pa-account-icon" />
             <div className="pa-account-copy">
               <input className="pa-name" aria-label={tr('provider_accounts_row_name', index + 1)} key={`${account.accountId}:${account.configRevision}`} defaultValue={account.displayName} disabled={locked} maxLength={128}
                 onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { event.currentTarget.value = account.displayName; event.currentTarget.blur(); event.stopPropagation(); } }}
@@ -187,7 +185,6 @@ export function ProviderAccounts({ api, provider, running, onConfigured, usageRo
               <div className="pa-meta"><span>{account.authKind === 'oauth' ? tr('provider_accounts_subscription') : tr('provider_accounts_key')}</span><span className="pa-health" data-status={health?.status} role="status"><i />{providerAccountHealthLabel(health)}</span></div>
               <AccountSessionUsageLines usage={sessionUsageFromIndex(usageByAccount, account)} />
               {routing?.selectedAccountId === account.accountId && routing.identityGeneration === account.identityGeneration && <p className="pa-caption">{tr('provider_accounts_last_used', routing.model, routing.attempt)}</p>}
-              {entitlements.length ? <details className="pa-permissions"><summary>{tr('provider_accounts_model_access')}</summary><ul>{entitlements.map(entry => <li key={entry.modelId}><span>{entry.modelId}</span><span>{tr(`provider_accounts_model_${entry.status}`)}</span></li>)}</ul></details> : <p className="pa-caption">{tr('provider_accounts_models_unverified')}</p>}
             </div>
             <div className="pa-account-actions">
               <div className="pa-reorder"><button className="pa-icon-button" aria-label={tr('provider_accounts_move_up', account.displayName)} disabled={locked || index === 0} onClick={() => move(index, -1)}>↑</button><button className="pa-icon-button" aria-label={tr('provider_accounts_move_down', account.displayName)} disabled={locked || index === accounts.length - 1} onClick={() => move(index, 1)}>↓</button></div>
@@ -201,11 +198,8 @@ export function ProviderAccounts({ api, provider, running, onConfigured, usageRo
           </article>;
         })}
     </div>
-    {running && <p className="pa-caption">{tr('provider_accounts_running')}</p>}
-    {logicalProviderId(provider.id) === 'openai' && snapshot && accounts.length > 0 && <div className="pa-billing"><div><h4>{tr('provider_accounts_billing')}</h4><p>{tr('provider_accounts_billing_desc')}</p></div><label className="pa-switch"><input type="checkbox" role="switch" aria-label={tr('provider_accounts_billing_allow')} checked={snapshot.providerPolicies?.openai?.allowSubscriptionToMetered === true} disabled={locked} onChange={event => void perform({ action: 'set_policy', providerId: 'openai', allowSubscriptionToMetered: event.currentTarget.checked })} /><span /></label></div>}
-    {error && !showForm && !removalId && <p className="pa-feedback pa-error" role="alert">{error}</p>}
-    {notice && <p className="pa-feedback pa-success" role="status"><Icon name="check" size={15} />{notice}</p>}
-    {syncWarning && <p className="pa-feedback pa-error" role="alert">{syncWarning}</p>}
+    {logicalProviderId(provider.id) === 'openai' && snapshot && accounts.length > 0 && <div className="pa-billing"><div className="pa-heading-with-info"><h4>{tr('provider_accounts_billing')}</h4><ProviderInfo label={tr('provider_accounts_billing')}><p>{tr('provider_accounts_billing_desc')}</p></ProviderInfo></div><label className="pa-switch"><input type="checkbox" role="switch" aria-label={tr('provider_accounts_billing_allow')} checked={snapshot.providerPolicies?.openai?.allowSubscriptionToMetered === true} disabled={locked} onChange={event => void perform({ action: 'set_policy', providerId: 'openai', allowSubscriptionToMetered: event.currentTarget.checked })} /><span /></label></div>}
+    <ProviderFeedback error={showForm || removalId ? undefined : [error, syncWarning].filter(Boolean).join('\n')} notice={showForm || removalId ? undefined : notice} />
     <dialog ref={accountDialog} className="pa-dialog pa-account-dialog" aria-labelledby="pa-form-title" onCancel={event => { event.preventDefault(); if (busy && oauthBusy) cancelLogin(); else closeForm(); }}>
     {showForm && <form ref={form} aria-labelledby="pa-form-title" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (busy && oauthBusy) cancelLogin(); else closeForm(); } }} onSubmit={event => { event.preventDefault(); if (!locked && (authKind === 'oauth' || key.trim())) { setFormOpen(true); void perform({ action: replacementId ? 'reconnect' : 'add', accountId: replacementId, providerId: logicalProviderId(provider.id), displayName: name.trim() || provider.label, authKind, executionBindingId: authKind === 'oauth' ? 'openai-chatgpt' : logicalProviderId(provider.id), ...(offerCloudSync && cloudSync ? { cloudSync: true } : {}) }, authKind === 'api_key' ? key : undefined); } }}>
         <header><h3 id="pa-form-title">{tr(replacementId ? authKind === 'oauth' ? 'provider_accounts_reconnect' : 'provider_accounts_replace' : 'provider_accounts_add')}</h3></header>
@@ -223,6 +217,6 @@ export function ProviderAccounts({ api, provider, running, onConfigured, usageRo
         <footer>{(accounts.length > 0 || formOpen || (busy && oauthBusy)) && <button type="button" className="pa-button" disabled={busy && !oauthBusy} onClick={() => busy && oauthBusy ? cancelLogin() : closeForm()}>{tr(busy && oauthBusy ? 'provider_accounts_cancel_login' : 'provider_accounts_cancel')}</button>}<button type="submit" className="pa-button pa-primary" disabled={locked || (authKind === 'api_key' && !key.trim())}>{tr(replacementId ? authKind === 'oauth' ? 'provider_accounts_reconnect' : 'provider_accounts_save' : authKind === 'oauth' ? 'provider_accounts_add_oauth' : 'provider_accounts_add_key')}</button></footer>
     </form>}
     </dialog>
-    <dialog ref={confirmation} className="pa-dialog" aria-labelledby="pa-remove-title" onCancel={event => { event.preventDefault(); if (!busy) setRemovalId(undefined); }} onKeyDown={event => { if (event.key === 'Escape') event.stopPropagation(); }}><h3 id="pa-remove-title">{tr('provider_accounts_remove')} {accounts.find(account => account.accountId === removalId)?.displayName}?</h3><p className="pa-dialog-note">{tr('provider_accounts_remove_hint')}</p>{error && <p className="pa-feedback pa-error" role="alert">{error}</p>}<footer><button className="pa-button" disabled={busy} onClick={() => setRemovalId(undefined)}>{tr('provider_accounts_cancel')}</button><button className="pa-button pa-danger-button" disabled={locked} onClick={() => removalId && void perform({ action: 'remove', accountId: removalId })}>{tr('provider_accounts_remove')}</button></footer></dialog>
+    <dialog ref={confirmation} className="pa-dialog" aria-labelledby="pa-remove-title" onCancel={event => { event.preventDefault(); if (!busy) { setError(undefined); setRemovalId(undefined); } }} onKeyDown={event => { if (event.key === 'Escape') event.stopPropagation(); }}><h3 id="pa-remove-title">{tr('provider_accounts_remove')} {accounts.find(account => account.accountId === removalId)?.displayName}?</h3><p className="pa-dialog-note">{tr('provider_accounts_remove_hint')}</p>{error && <p className="pa-feedback pa-error" role="alert">{error}</p>}<footer><button className="pa-button" disabled={busy} onClick={() => { setError(undefined); setRemovalId(undefined); }}>{tr('provider_accounts_cancel')}</button><button className="pa-button pa-danger-button" disabled={locked} onClick={() => removalId && void perform({ action: 'remove', accountId: removalId })}>{tr('provider_accounts_remove')}</button></footer></dialog>
   </section>;
 }

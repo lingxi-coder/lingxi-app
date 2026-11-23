@@ -19,7 +19,8 @@ final class ProviderAccountsNativeUITests: XCTestCase {
         let submit = app.buttons["provider.account.submit"]
         waitEnabled(submit)
         submit.tap()
-        XCTAssertTrue(app.staticTexts["provider.account.add.error"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.alerts.firstMatch.waitForExistence(timeout: 5))
+        app.alerts.firstMatch.buttons.firstMatch.tap()
         let nameField = app.textFields["provider.account.name"]
         XCTAssertTrue(nameField.waitForExistence(timeout: 8), app.debugDescription)
         nameField.tap()
@@ -84,13 +85,16 @@ final class ProviderAccountsNativeUITests: XCTestCase {
         submit.tap()
         XCTAssertTrue(app.staticTexts["Adding account"].waitForExistence(timeout: 5))
         app.buttons["provider.account.fixture.release"].tap()
-        let error = app.staticTexts["provider.account.add.error"]
+        let alert = app.alerts.firstMatch
+        let error = alert.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Synthetic lost add reply")).firstMatch
         XCTAssertTrue(error.waitForExistence(timeout: 10))
         XCTAssertTrue(error.label.contains("Synthetic lost add reply"))
+        alert.buttons.firstMatch.tap()
         waitEnabled(submit)
         submit.tap()
-        let failure = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", "Synthetic authorization failure"), object: error)
-        XCTAssertEqual(XCTWaiter.wait(for: [failure], timeout: 10), .completed)
+        let failure = alert.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Synthetic authorization failure")).firstMatch
+        XCTAssertTrue(failure.waitForExistence(timeout: 10))
+        alert.buttons.firstMatch.tap()
         XCTAssertTrue(name.exists)
         XCTAssertFalse(name.isEnabled)
         waitEnabled(submit)
@@ -120,16 +124,20 @@ final class ProviderAccountsNativeUITests: XCTestCase {
         submit.tap()
         XCTAssertTrue(app.staticTexts["Adding account"].waitForExistence(timeout: 5))
         app.buttons["provider.account.fixture.release"].tap()
-        let error = app.staticTexts["provider.account.add.error"]
+        let alert = app.alerts.firstMatch
+        let error = alert.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Synthetic lost add reply")).firstMatch
         XCTAssertTrue(error.waitForExistence(timeout: 10))
+        alert.buttons.firstMatch.tap()
         waitEnabled(submit)
         submit.tap()
-        let failure = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", "Synthetic authorization failure"), object: error)
-        XCTAssertEqual(XCTWaiter.wait(for: [failure], timeout: 10), .completed)
+        let failure = alert.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Synthetic authorization failure")).firstMatch
+        XCTAssertTrue(failure.waitForExistence(timeout: 10))
+        alert.buttons.firstMatch.tap()
         waitEnabled(submit)
         submit.tap()
-        let changed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", "no longer matches"), object: error)
-        XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 10), .completed)
+        let changed = alert.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "no longer matches")).firstMatch
+        XCTAssertTrue(changed.waitForExistence(timeout: 10))
+        alert.buttons.firstMatch.tap()
         XCTAssertFalse(app.staticTexts["provider.account.device-code"].exists)
         app.terminate()
     }

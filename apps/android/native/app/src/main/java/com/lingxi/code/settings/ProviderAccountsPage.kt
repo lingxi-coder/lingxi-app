@@ -39,12 +39,18 @@ internal fun ProviderAccountsPage(
         val choices = bindingIds.filter { it != "openai-chatgpt" || "openai" !in bindingIds }
         choices.forEach { binding ->
             TextButton(onClick = { selected = binding }) {
-                Text(providers.firstOrNull { it.profileId == binding }?.displayName ?: binding)
+                val label = providers.firstOrNull { it.profileId == binding }?.displayName ?: binding
+                ProviderBrandMark(binding, 28.dp) { }
+                Text(label)
             }
         }
         val binding = selected?.takeIf { it in choices } ?: choices.firstOrNull()
         if (binding != null) ProviderAccountsSection(binding, repository, onChanged,
             providerName = providers.firstOrNull { it.profileId == binding }?.displayName ?: binding)
-        else Text(accounts.error ?: stringResource(R.string.provider_accounts_loading))
+        else {
+            var dismissed by remember(accounts.error) { mutableStateOf(false) }
+            if (accounts.error == null) Text(stringResource(R.string.provider_accounts_loading))
+            else if (!dismissed) accounts.error?.let { ProviderMessageDialog(it) { dismissed = true } }
+        }
     }
 }

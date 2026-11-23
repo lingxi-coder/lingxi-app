@@ -70,14 +70,14 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
     val logicalProviderId = if (bindingId == "openai-chatgpt") "openai" else bindingId
     val accounts = state.accounts.filter { it.providerId == logicalProviderId }
     var busy by remember(bindingId) { mutableStateOf(false) }
-    var message by remember(bindingId) { mutableStateOf<String?>(null) }
-    var messageIsError by remember(bindingId) { mutableStateOf(true) }
+    var message by remember(bindingId, state.bindingGeneration) { mutableStateOf<String?>(null) }
     var edit by remember(bindingId) { mutableStateOf<ProviderAccountRow?>(null) }
     var showAccountOptions by remember(bindingId) { mutableStateOf(false) }
     var adding by remember(bindingId) { mutableStateOf(false) }
     var oauth by remember(bindingId) { mutableStateOf(false) }
     var confirmRemove by remember(bindingId) { mutableStateOf<ProviderAccountRow?>(null) }
-    var modelsExpanded by remember(bindingId) { mutableStateOf(false) }
+    var detailMessage by remember(bindingId) { mutableStateOf<String?>(null) }
+    var dismissedError by remember(bindingId, state.error) { mutableStateOf(false) }
     var confirmMetered by remember(bindingId) { mutableStateOf(false) }
     var name by remember(bindingId) { mutableStateOf("") }
     var key by remember(bindingId) { mutableStateOf("") }
@@ -98,7 +98,7 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
     fun execute(action: String, fields: JSONObject, credential: String? = null, after: (() -> Unit)? = null) {
         busy = true
         message = null
-        messageIsError = true
+        dismissedError = true
         scope.launch {
             try {
                 message = repository.command(action, fields, credential)
@@ -106,10 +106,19 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
             } finally { busy = false }
         }
     }
-    SettingsSection(label = stringResource(R.string.provider_accounts_title), footer = if (accounts.size > 1) stringResource(R.string.provider_accounts_order_hint) else null) {
-        if (!state.loaded) Text(state.error ?: stringResource(R.string.provider_accounts_loading), color = palette.text3)
+    val guidance = listOfNotNull(
+        if (accounts.size > 1) stringResource(R.string.provider_accounts_order_hint) else null,
+        if (!canAddAccounts) stringResource(R.string.provider_account_apply_configuration_first) else null,
+        if (!state.oauthSupported && logicalProviderId == "openai") stringResource(R.string.provider_account_remote_oauth_hint) else null,
+        if (state.allAccountsUnavailable) stringResource(R.string.provider_account_all_unavailable) else null,
+        if (logicalProviderId == "openai") stringResource(R.string.provider_account_metered_fee_hint) else null,
+    )
+    SettingsSection(label = stringResource(R.string.provider_accounts_title)) {
+        if (!state.loaded && state.error == null) Text(stringResource(R.string.provider_accounts_loading), color = palette.text3)
         if (state.loaded && accounts.isEmpty()) Text(stringResource(R.string.provider_accounts_empty), color = palette.text3)
-        if (state.allAccountsUnavailable) Text(stringResource(R.string.provider_account_all_unavailable), color = palette.danger)
+        if (guidance.isNotEmpty()) TextButton(onClick = { detailMessage = guidance.joinToString("\n\n") }) {
+            Text(stringResource(R.string.session_details_button))
+        }
         accounts.forEachIndexed { index, account ->
             Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
                 SettingsRow(
@@ -120,6 +129,7 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                         else -> R.string.provider_account_auth_oauth
                     }),
                     chevron = false,
+                    leading = { ProviderBrandMark(logicalProviderId, 32.dp) { Text(providerName.take(1), color = palette.text2) } },
                     trailing = { com.lingxi.code.components.LXToggle(checked = account.enabled, enabled = !busy,
                         onCheckedChange = { execute("set_enabled", JSONObject().put("accountId", account.accountId).put("enabled", it)) }) },
                 )
@@ -138,7 +148,7 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                 }
                 Text(statusLabel + (account.cooldownUntilMs?.let { " · ${DateFormat.getDateTimeInstance().format(Date(it))}" } ?: ""),
                     color = palette.text3, modifier = Modifier.padding(horizontal = 12.dp))
-                state.scopedHealth.filter { it.accountId == account.accountId && it.identityGeneration == account.identityGeneration }.forEach { health ->
+                val healthDetails = state.scopedHealth.filter { it.accountId == account.accountId && it.identityGeneration == account.identityGeneration }.map { health ->
                     val scopeLabel = stringResource(if (health.scopeKind == "model") R.string.provider_account_scope_model else R.string.provider_account_scope_endpoint)
                     val reasonLabel = stringResource(when (health.reason) {
                         "rate_limited" -> R.string.provider_account_rate_limited
@@ -147,19 +157,11 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                         "authentication_rejected", "credential_missing", "authentication_required" -> R.string.provider_account_needs_auth
                         else -> R.string.provider_account_temporarily_unavailable
                     })
-                    Text(stringResource(R.string.provider_account_scoped_health, scopeLabel, health.scopeId, reasonLabel) +
-                        health.unavailableUntilMs?.let { " · ${DateFormat.getDateTimeInstance().format(Date(it))}" }.orEmpty(),
-                        color = palette.text3, modifier = Modifier.padding(horizontal = 12.dp))
+                    stringResource(R.string.provider_account_scoped_health, scopeLabel, health.scopeId, reasonLabel) +
+                        health.unavailableUntilMs?.let { " · ${DateFormat.getDateTimeInstance().format(Date(it))}" }.orEmpty()
                 }
-                var permissionsExpanded by remember(account.accountId) { mutableStateOf(false) }
-                val entitlements = state.modelEntitlements.filter { it.accountId == account.accountId && it.identityGeneration == account.identityGeneration }.sortedBy { it.modelId }
-                if (entitlements.isNotEmpty()) TextButton(onClick = { permissionsExpanded = !permissionsExpanded }) {
-                    Text(stringResource(R.string.provider_account_permissions_count, entitlements.size))
-                }
-                if (permissionsExpanded) entitlements.forEach { entitlement ->
-                    Text(stringResource(R.string.provider_account_model_observed, entitlement.modelId, accountModelPermissionLabel(entitlement.status)) +
-                        entitlement.retryAtMs?.let { " · ${DateFormat.getDateTimeInstance().format(Date(it))}" }.orEmpty(),
-                        color = palette.text3, modifier = Modifier.padding(horizontal = 12.dp))
+                if (healthDetails.isNotEmpty()) TextButton(onClick = { detailMessage = healthDetails.joinToString("\n\n") }) {
+                    Text(stringResource(R.string.session_details_button))
                 }
                 Row {
                     TextButton(enabled = !busy, onClick = { edit = account; name = account.displayName; key = ""; adding = false; oauth = account.authKind == "oauth" }) {
@@ -177,12 +179,11 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                     }) { Text(stringResource(R.string.provider_account_down)) }
                 }
                 Row {
-                    TextButton(enabled = !busy, onClick = { execute("test", JSONObject().put("accountId", account.accountId)) { message = context.getString(R.string.provider_account_test_success); messageIsError = false } }) {
+                    TextButton(enabled = !busy, onClick = { execute("test", JSONObject().put("accountId", account.accountId)) { message = context.getString(R.string.provider_account_test_success) } }) {
                         Text(stringResource(R.string.settings_provider_test_connection))
                     }
                     if (account.authKind == "oauth" && state.oauthSupported) TextButton(enabled = !busy, onClick = {
                         busy = true
-                        messageIsError = true
                         message = null
                         loginJob = scope.launch {
                             try {
@@ -194,21 +195,6 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                 }
             }
         }
-        val modelRows = state.modelAvailability.filter { it.providerId == logicalProviderId }
-            .sortedWith(compareBy<ProviderAccountModelAvailability> { it.modelId }.thenBy { it.executionBindingId })
-        if (modelRows.isNotEmpty()) {
-            TextButton(onClick = { modelsExpanded = !modelsExpanded }) {
-                Text(stringResource(R.string.provider_account_models_union))
-            }
-            if (modelsExpanded) Text(stringResource(R.string.provider_account_models_verification_hint), color = palette.text3)
-            if (modelsExpanded) modelRows.forEach { model ->
-                val authLabel = stringResource(if (model.executionBindingId == "openai-chatgpt") R.string.provider_account_auth_chatgpt else R.string.provider_account_auth_api_key)
-                val names = accounts.filter { it.accountId in model.eligibleAccountIds }.joinToString { it.displayName }
-                Text("${model.modelId} · $authLabel · ${accountModelPermissionLabel(model.permissionStatus)}", color = palette.text)
-                Text(names.ifEmpty { stringResource(R.string.provider_account_model_no_eligible) }, color = palette.text3)
-            }
-        }
-        if (!canAddAccounts) Text(stringResource(R.string.provider_account_apply_configuration_first), color = palette.text3)
         Row {
             if (bindingId != "openai-chatgpt") TextButton(enabled = !busy && state.loaded && canAddAccounts, onClick = {
                 adding = true; oauth = false; edit = null; name = ""; key = ""; showAccountOptions = false
@@ -217,11 +203,9 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                 adding = true; oauth = true; edit = null; name = ""; key = ""; showAccountOptions = false
             }) { Text(stringResource(R.string.provider_account_add_oauth)) }
         }
-        if (!state.oauthSupported && logicalProviderId == "openai") Text(stringResource(R.string.provider_account_remote_oauth_hint), color = palette.text3)
         if (logicalProviderId == "openai") {
             SettingsRow(
                 label = stringResource(R.string.provider_account_allow_metered),
-                sub = stringResource(R.string.provider_account_metered_fee_hint),
                 chevron = false,
                 trailing = {
                     com.lingxi.code.components.LXToggle(
@@ -235,20 +219,32 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                 },
             )
         }
-        deviceAuthorization?.let { authorization ->
-            val displayName = accounts.firstOrNull { it.accountId == authorization.accountId }?.displayName.orEmpty()
-            Text(stringResource(R.string.provider_account_device_instructions, displayName), color = palette.text)
-            SelectionContainer { Text(authorization.userCode, color = palette.accent) }
-            Text(authorization.verificationUrl, color = palette.text3)
-            Text(stringResource(R.string.provider_account_device_enable_hint), color = palette.text3)
-            TextButton(onClick = {
-                runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(authorization.verificationUrl)).addCategory(Intent.CATEGORY_BROWSABLE)) }
-                    .onFailure { message = context.getString(R.string.provider_account_device_browser_failed); messageIsError = true }
-            }) { Text(stringResource(R.string.provider_account_device_open_browser)) }
+        if (loginJob != null && deviceAuthorization == null) TextButton(onClick = { loginJob?.cancel() }) {
+            Text(stringResource(R.string.provider_account_cancel_signin))
         }
-        if (loginJob != null) TextButton(onClick = { loginJob?.cancel() }) { Text(stringResource(R.string.provider_account_cancel_signin)) }
-        if (message != null || state.error != null) Text(message ?: state.error.orEmpty(), color = if (message == null || messageIsError) palette.danger else palette.text3, modifier = Modifier.padding(12.dp))
-        TextButton(enabled = !busy, onClick = { scope.launch { repository.refresh() } }) { Text(stringResource(R.string.provider_accounts_refresh)) }
+        TextButton(enabled = !busy, onClick = {
+            dismissedError = false
+            scope.launch { repository.refresh() }
+        }) { Text(stringResource(R.string.provider_accounts_refresh)) }
+    }
+    deviceAuthorization?.let { authorization ->
+        val displayName = accounts.firstOrNull { it.accountId == authorization.accountId }?.displayName.orEmpty()
+        AlertDialog(
+            onDismissRequest = { loginJob?.cancel() },
+            title = { Text(stringResource(R.string.provider_account_device_instructions, displayName)) },
+            text = {
+                Column {
+                    SelectionContainer { Text(authorization.userCode, color = palette.accent) }
+                    Text(authorization.verificationUrl, color = palette.text3)
+                    Text(stringResource(R.string.provider_account_device_enable_hint), color = palette.text3)
+                }
+            },
+            confirmButton = { TextButton(onClick = {
+                runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(authorization.verificationUrl)).addCategory(Intent.CATEGORY_BROWSABLE)) }
+                    .onFailure { message = context.getString(R.string.provider_account_device_browser_failed) }
+            }) { Text(stringResource(R.string.provider_account_device_open_browser)) } },
+            dismissButton = { TextButton(onClick = { loginJob?.cancel() }) { Text(stringResource(R.string.provider_account_cancel_signin)) } },
+        )
     }
     confirmRemove?.let { account ->
         AlertDialog(
@@ -283,7 +279,6 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                     Text(stringResource(if (adding) R.string.provider_account_add_title else R.string.provider_account_edit), style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
                     if (adding) Text(providerName, color = palette.text3)
                     if (busy) androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
-                    if (message != null) Text(message.orEmpty(), color = palette.danger)
                     if (!adding) OutlinedTextField(modifier = Modifier.fillMaxWidth(), value = name, onValueChange = { name = it }, enabled = !busy, singleLine = true,
                         label = { Text(stringResource(R.string.settings_display_name)) })
                     if (!oauth) OutlinedTextField(modifier = Modifier.fillMaxWidth(), value = key, onValueChange = { key = it }, enabled = !busy, singleLine = true,
@@ -292,7 +287,7 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                     if (!oauth) providerCredentialManagementUrl(bindingId)?.let { url ->
                         TextButton(onClick = {
                             runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE)) }
-                                .onFailure { message = context.getString(R.string.provider_account_device_browser_failed); messageIsError = true }
+                                .onFailure { message = context.getString(R.string.provider_account_device_browser_failed) }
                         }) { Text(stringResource(R.string.provider_account_manage_api_key)) }
                     }
                     if (adding) TextButton(enabled = !busy, onClick = { showAccountOptions = !showAccountOptions }) {
@@ -322,7 +317,6 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                     execute("add", fields, key.takeIf { it.isNotBlank() }) { adding = false; edit = null; key = "" }
                 } else {
                     busy = true
-                    messageIsError = true
                     scope.launch {
                         try {
                             message = repository.saveAccount(account, name.trim(), key.takeIf { it.isNotBlank() })
@@ -333,6 +327,14 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
             }) { Text(stringResource(if (adding) { if (oauth) R.string.provider_account_add_oauth else R.string.provider_account_add_key } else R.string.voice_save_button)) }
                     }
                 }
+        }
+    }
+    val feedback = message ?: detailMessage ?: state.error.takeUnless { dismissedError }
+    if (feedback != null && confirmRemove == null && !confirmMetered) ProviderMessageDialog(feedback) {
+        when {
+            message != null -> message = null
+            detailMessage != null -> detailMessage = null
+            else -> dismissedError = true
         }
     }
 }

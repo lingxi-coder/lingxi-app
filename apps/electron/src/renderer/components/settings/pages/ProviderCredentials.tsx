@@ -1,5 +1,7 @@
 import { logicalProviderId, providerAccountSummary, type ProviderAccountSnapshot } from '../../../../shared/providerAccounts';
 import { ProviderAccounts } from './ProviderAccounts';
+import { ProviderBrandIcon } from './ProviderBrandIcon';
+import { ProviderFeedback, ProviderInfo } from './ProviderPopups';
 import { CloudProviders } from './CloudProviders';
 import { VAULT_PRESET_IDS } from '../../../../shared/providerVault';
 import { ProviderProtocol } from './ProviderProtocol';
@@ -24,6 +26,7 @@ export function ProviderCredentials({ bridge, onLayerLockChange, initialProvider
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(() => initialProviderId ? initialProviderSelection(initialProviderId) : null);
   const [pendingModelReference, setPendingModelReference] = useState(requestedModelReference);
   const [applyError, setApplyError] = useState<string>();
+  const [settingsRetryError, setSettingsRetryError] = useState<string>();
   const [applying, setApplying] = useState(false);
   const [search, setSearch] = useState('');
   const searchInput = useRef<HTMLInputElement>(null);
@@ -90,6 +93,7 @@ export function ProviderCredentials({ bridge, onLayerLockChange, initialProvider
   const providerCatalogEntry = bridge.desktop.providerModelCatalog?.find(entry => entry.provider_id === selectedProvider.id);
   const visibility = snapshot?.settings.modelPickerVisibility?.[selectedProvider.id];
   const selectedModelIds = selectedModelIdsForPickerSettings(providerCatalogEntry?.models.map(model => model.model_id) ?? [], visibility);
+  const hiddenFromPicker = selectedProvider.available && visibility?.showInModelPicker !== false && providerCatalogEntry && selectedModelIds.length === 0;
   const theme = { '--pa-bg': t.surface, '--pa-text': t.text, '--pa-secondary': t.text2, '--pa-border': t.border, '--pa-accent': t.accent, '--pa-ok': t.ok, '--pa-danger': t.danger, '--pa-warn': t.warn } as CSSProperties;
   const writeVisibility = (next: { showInModelPicker?: boolean; visibleModelIds?: string[] }) => {
     void bridge.setModelPickerVisibility({ ...snapshot?.settings.modelPickerVisibility, [selectedProvider.id]: next });
@@ -108,8 +112,13 @@ export function ProviderCredentials({ bridge, onLayerLockChange, initialProvider
   };
   if (selectedProviderId === null) return <div className="provider-settings-content provider-directory" style={theme}>
     <header className="provider-directory-intro">
-      <h2>{tr('provider_accounts_all_providers')}</h2>
-      <p>{tr('provider_accounts_directory_desc')}</p>
+      <div className="pa-heading-with-info">
+        <h2>{tr('provider_accounts_all_providers')}</h2>
+        <ProviderInfo label={tr('provider_accounts_all_providers')}>
+          <p>{tr('provider_accounts_directory_desc')}</p>
+          {usingPresets && <p>{tr('provider_accounts_presets_only')}</p>}
+        </ProviderInfo>
+      </div>
     </header>
     <div className="provider-directory-tools">
       <label className="provider-directory-search">
@@ -145,8 +154,8 @@ export function ProviderCredentials({ bridge, onLayerLockChange, initialProvider
         const statusLabel = tr(`provider_accounts_configuration_${status}`);
         const showStatusLabel = status !== 'configured' && status !== 'unconfigured';
         return <li key={provider.id}>
-          <button type="button" className="settings-provider-row" data-current={isActive} data-testid={`provider-list-item-${provider.id}`} onClick={() => { setPendingModelReference(undefined); setApplyError(undefined); setSelectedProviderId(provider.id); }}>
-            <span className="provider-monogram" aria-hidden="true">{provider.label.slice(0, 1)}</span>
+          <button type="button" className="settings-provider-row" data-current={isActive} data-testid={`provider-list-item-${provider.id}`} onClick={() => { setPendingModelReference(undefined); setApplyError(undefined); setSettingsRetryError(undefined); setSelectedProviderId(provider.id); }}>
+            <ProviderBrandIcon provider={provider} className="provider-monogram" />
             <span className="provider-directory-copy">
               <strong>{provider.label}</strong>
               {isActive
@@ -169,7 +178,6 @@ export function ProviderCredentials({ bridge, onLayerLockChange, initialProvider
       <Icon name="search" size={20} />
       <p>{tr('provider_accounts_no_matches')}</p>
     </div>}
-    {usingPresets && <p className="provider-directory-note">{tr('provider_accounts_presets_only')}</p>}
     <CloudProviders onPulled={async () => { await bridge.reloadProviderSettings?.().catch(() => undefined); await refreshAccounts(); await bridge.refreshModelPicker('manual').catch(() => undefined); }} />
   </div>;
   return <div className="provider-settings-content" style={theme}>
@@ -177,24 +185,40 @@ export function ProviderCredentials({ bridge, onLayerLockChange, initialProvider
       <Icon name="chevronL" size={15} />{tr('provider_accounts_all_providers')}
     </button>
     <header className="provider-detail-heading">
-      <span className="provider-monogram" aria-hidden="true">{selectedProvider.label.slice(0, 1)}</span>
-      <div><h2>{selectedProvider.label}</h2>{selectedProvider.description && <p>{selectedProvider.description}</p>}</div>
+      <ProviderBrandIcon provider={selectedProvider} className="provider-monogram" />
+      <div>
+        <div className="pa-heading-with-info">
+          <h2>{selectedProvider.label}</h2>
+          <ProviderInfo label={selectedProvider.label}>
+            <p>{tr('provider_accounts_global')}</p>
+            {!providerCatalogEntry && <p>{tr('desktop_settings_71a4b21d4a')}</p>}
+            {hiddenFromPicker && <p>{tr('settings_provider_picker_hidden_empty')}</p>}
+          </ProviderInfo>
+        </div>
+        {selectedProvider.description && <p>{selectedProvider.description}</p>}
+      </div>
     </header>
-    {bridge.providerSettingsApplyPending && <div className="pa-feedback pa-error" role="alert"><span>{bridge.providerSettingsError}</span><button className="pa-button" disabled={applying} onClick={() => { setApplying(true); void bridge.updateProviderSettings({}).catch(cause => setApplyError(cause instanceof Error ? cause.message : tr('provider_accounts_error'))).finally(() => setApplying(false)); }}>{tr('common_retry')}</button></div>}
-    {bridge.providerAccounts ? <ProviderAccounts key={selectedProvider.id} api={bridge.providerAccounts} provider={selectedProvider} running={bridge.running || applying} onConfigured={configured} usageRows={bridge.cost?.by_account} cloudSyncable={VAULT_PRESET_IDS.has(logicalProviderId(selectedProvider.id))} /> : <p role="alert">{tr('provider_accounts_status_error')}</p>}
-    {applyError && <p role="alert" style={{ color: t.danger }}>{applyError}<button type="button" disabled={applying} onClick={() => void configured()} className="pa-button">{tr('desktop_settings_00a58a5b98')}</button></p>}
-    <details className="provider-settings-disclosure">
+    <ProviderFeedback error={[applyError, bridge.providerSettingsApplyPending ? settingsRetryError || bridge.providerSettingsError || tr('provider_accounts_error') : undefined].filter(Boolean).join('\n')}>
+      {applyError && <button type="button" disabled={applying} onClick={() => void configured()} className="pa-button">{tr('desktop_settings_00a58a5b98')}</button>}
+      {bridge.providerSettingsApplyPending && <button type="button" className="pa-button" disabled={applying} onClick={() => {
+          setApplying(true); setSettingsRetryError(undefined);
+          void bridge.updateProviderSettings({}).catch(cause => setSettingsRetryError(cause instanceof Error ? cause.message : tr('provider_accounts_error'))).finally(() => setApplying(false));
+        }}>{tr('common_retry')}</button>}
+    </ProviderFeedback>
+    {bridge.providerAccounts
+      ? <ProviderAccounts key={selectedProvider.id} api={bridge.providerAccounts} provider={selectedProvider} running={bridge.running || applying} onConfigured={configured} usageRows={bridge.cost?.by_account} cloudSyncable={VAULT_PRESET_IDS.has(logicalProviderId(selectedProvider.id))} />
+      : <ProviderFeedback error={tr('provider_accounts_status_error')} />}
+    {providerCatalogEntry && <details className="provider-settings-disclosure">
       <summary>
         <span className="provider-disclosure-icon" aria-hidden="true"><Icon name="spark" size={16} /></span>
         <span className="provider-disclosure-copy">
           <strong>{tr('provider_accounts_models_title')}</strong>
-          {providerCatalogEntry && <small>{tr('desktop_settings_28e11f6cd1', selectedModelIds.length, providerCatalogEntry.models.length)}</small>}
+          <small>{tr('desktop_settings_28e11f6cd1', selectedModelIds.length, providerCatalogEntry.models.length)}</small>
         </span>
         <Icon name="chevron" size={15} />
       </summary>
       <Card>
-        {!providerCatalogEntry && <Row title={tr('desktop_settings_71a4b21d4a')}><span /></Row>}
-        {selectedProvider.available && providerCatalogEntry && (
+        {selectedProvider.available && (
           <Row
             title={tr('desktop_settings_6a04127f16')}
             align="center"
@@ -214,7 +238,7 @@ export function ProviderCredentials({ bridge, onLayerLockChange, initialProvider
             </label>
           </Row>
         )}
-        {selectedProvider.available && providerCatalogEntry?.models.map((entry) => {
+        {selectedProvider.available && providerCatalogEntry.models.map((entry) => {
           const selected = selectedModelIds.includes(entry.model_id);
           return (
             <Row
@@ -245,14 +269,8 @@ export function ProviderCredentials({ bridge, onLayerLockChange, initialProvider
             </Row>
           );
         })}
-        {selectedProvider.available && visibility?.showInModelPicker !== false && providerCatalogEntry && selectedModelIds.length === 0 && (
-          <Row title={tr('desktop_settings_f56c6c8220')} desc={tr('settings_provider_picker_hidden_empty')} align="center">
-            <Icon name="warning" size={15} color={t.warn} />
-          </Row>
-        )}
       </Card>
-    </details>
+    </details>}
     <ProviderProtocol providerId={selectedProvider.id} bridge={bridge} onLayerLockChange={onLayerLockChange} />
-    <p className="provider-directory-note">{tr('provider_accounts_global')}</p>
   </div>;
 }

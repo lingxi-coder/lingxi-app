@@ -1,6 +1,7 @@
 import { resolve } from 'path';
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
 import react from '@vitejs/plugin-react';
+import { searchForWorkspaceRoot } from 'vite';
 import { signedDataBuild } from './test/fixtures/signed-data-build.js';
 
 export default defineConfig({
@@ -40,6 +41,10 @@ export default defineConfig({
   },
   renderer: {
     root: resolve(__dirname, 'src/renderer'),
+    server: { fs: { allow: [
+      searchForWorkspaceRoot(resolve(__dirname, 'src/renderer')),
+      resolve(__dirname, '../../assets/brand/provider-icons'),
+    ] } },
     build: {
       rollupOptions: {
         input: {

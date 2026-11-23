@@ -59,6 +59,15 @@ const click = (selector: string) => { const element = document.querySelector<HTM
   open: async () => { click('.pa-toolbar .pa-primary'); await until(() => Boolean(document.querySelector('.pa-account-dialog[open] form'))); },
   run: async () => {
     const assert = (value: unknown, message: string) => { if (!value) throw new Error(message); };
+    assert(!document.querySelector('.pa-permissions'), 'Account cards omit model access');
+    const usageInfo = '.pa-section-heading .pa-info';
+    assert(getComputedStyle(document.querySelector(usageInfo)!).display === 'none', 'Usage guidance is hidden by default');
+    click('.pa-section-heading .pa-info-button');
+    assert(document.querySelector(`${usageInfo}:popover-open`), 'Usage guidance opens as a popover');
+    click('.pa-section-heading .pa-info-button');
+    assert(!document.querySelector(`${usageInfo}:popover-open`), 'Usage guidance can be closed');
+    const openaiMark = getComputedStyle(document.querySelector('.pa-account-icon .provider-brand-mask')!).maskImage;
+    assert(openaiMark.startsWith('url('), 'OpenAI account uses a bundled brand mask');
     click('.pa-toolbar .pa-primary');
     await until(() => Boolean(document.querySelector('.pa-account-dialog[open] form')));
     assert(document.activeElement === document.querySelector('.pa-account-dialog[open] form button[type=submit]'), 'The primary authentication action receives focus');
@@ -95,6 +104,16 @@ const click = (selector: string) => { const element = document.querySelector<HTM
     click('.pa-account-dialog[open] form footer button[type=button]'); await until(() => !document.querySelector('.pa-account-dialog[open] form'));
     click('.pa-account:first-child .pa-test'); await until(() => Boolean(document.querySelector('.pa-test .pa-spinner')));
     pending!.resolve(); pending = undefined; await until(() => !document.querySelector('.pa-test .pa-spinner'));
+    const toast = '.pa-toast:popover-open';
+    assert(document.querySelector(`${toast} .pa-toast-success`), 'Test success opens a popover');
+    assert(!document.querySelector('.pa-panel > .pa-feedback'), 'Test feedback does not add inline content');
+    click(`${toast} .pa-icon-button`);
+    assert(!document.querySelector(toast), 'Test feedback can be dismissed');
+    click('.pa-account:first-child .pa-test');
+    await until(() => Boolean(pending));
+    pending!.reject(new Error('Synthetic connection failure')); pending = undefined;
+    await until(() => document.querySelector(`${toast} .pa-toast-error`)?.textContent?.includes('Synthetic connection failure') === true);
+    click(`${toast} .pa-icon-button`);
     click('.pa-account:first-child .pa-reorder button:last-child');
     await until(() => document.querySelector<HTMLInputElement>('.pa-name')?.value === '备用 API');
     assert(calls.at(-1)?.action === 'reorder', 'Priority update issued');
@@ -109,6 +128,9 @@ const click = (selector: string) => { const element = document.querySelector<HTM
     const openaiRow = '[data-testid="provider-list-item-openai"]';
     assert(document.querySelector(openaiRow)?.matches('[data-current="true"]'), 'ChatGPT model is shown under its OpenAI provider');
     assert(document.querySelector(openaiRow)?.textContent?.includes('GPT 5'), 'Current model is visible on its provider row');
+    const geminiMark = document.querySelector<HTMLImageElement>('[data-testid="provider-list-item-gemini"] .provider-brand-mark');
+    assert(geminiMark, 'Gemini uses a bundled brand image');
+    await until(() => Boolean(geminiMark?.naturalWidth));
     const search = document.querySelector<HTMLInputElement>('.provider-directory-search input')!;
     const setSearch = (value: string) => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(search, value);

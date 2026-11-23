@@ -108,7 +108,11 @@ function SettingsDialog({ title, onClose, children }: { title: string; onClose()
     return () => { if (node.open && typeof node.close === 'function') node.close(); opener?.focus(); };
   }, []);
   return <dialog ref={ref} className="agent-dialog" aria-labelledby={id}
-    onCancel={event => { event.preventDefault(); close.current(); }}
+    onCancel={event => {
+      if (event.target !== event.currentTarget) return;
+      event.preventDefault();
+      close.current();
+    }}
     onClick={event => { if (event.target === event.currentTarget) close.current(); }}>
     <h2 id={id} className="sr-only">{title}</h2>
     {children}

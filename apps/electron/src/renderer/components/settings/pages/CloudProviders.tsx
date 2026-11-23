@@ -7,6 +7,8 @@ import { tr } from '../../../i18n/locale';
 import { useI18n } from '../../../i18n/useI18n';
 import { useT } from '../../../theme/ThemeContext';
 import { Icon } from '../../Icon';
+import { ProviderBrandIcon } from './ProviderBrandIcon';
+import { ProviderFeedback, ProviderInfo } from './ProviderPopups';
 
 const SYNC_PREFERENCE = 'lingxi.providerVault.sync';
 /** Whether the last add asked for cloud sync; the choice is remembered on this Mac only. */
@@ -57,6 +59,7 @@ export function CloudProviders({ api = bridgeGlobal()?.providerVault, account = 
   const [reauthError, setReauthError] = useState<string>();
   const generation = useRef(0);
   const dialog = useRef<HTMLDialogElement>(null);
+  const removalDialog = useRef<HTMLDialogElement>(null);
 
   const apply = useCallback((reply: ProviderVaultReply, current: number) => {
     if (generation.current !== current) return false;
@@ -76,6 +79,17 @@ export function CloudProviders({ api = bridgeGlobal()?.providerVault, account = 
     if (reauth) { if (!dialog.current?.open) dialog.current?.showModal(); }
     else dialog.current?.close();
   }, [reauth]);
+
+  useEffect(() => {
+    if (removal && !removalDialog.current?.open) removalDialog.current?.showModal();
+    if (!removal) removalDialog.current?.close();
+  }, [removal]);
+
+  const cancelRemoval = () => {
+    if (busy) return;
+    setError(undefined);
+    setRemoval(undefined);
+  };
 
   const pull = async (ids: string[]) => {
     if (!api || busy) return;
@@ -128,27 +142,39 @@ export function CloudProviders({ api = bridgeGlobal()?.providerVault, account = 
   const passwordOffered = Boolean(user?.email) && offers('password');
   const theme = { '--pa-bg': t.surface, '--pa-text': t.text, '--pa-secondary': t.text3, '--pa-border': t.border, '--pa-accent': t.accent, '--pa-ok': t.ok, '--pa-danger': t.danger } as CSSProperties;
   return <section className="pa-panel cloud-providers" style={theme} aria-label={tr('provider_vault_title')} aria-busy={Boolean(busy)} data-testid="cloud-providers">
-    <header className="pa-section-heading"><div><h3>{tr('provider_vault_title')} {providers && <span className="pa-count">{providers.length}</span>}</h3><p>{user ? tr('provider_vault_desc') : tr('provider_vault_sign_in')}</p></div></header>
+    <header className="pa-section-heading">
+      <div className="pa-heading-with-info">
+        <h3>{tr('provider_vault_title')} {providers && <span className="pa-count">{providers.length}</span>}</h3>
+        <ProviderInfo label={tr('provider_vault_title')}><p>{tr(user ? 'provider_vault_desc' : 'provider_vault_sign_in')}</p></ProviderInfo>
+      </div>
+    </header>
     {user && <div className="pa-list">
       {!providers ? !error && <div className="pa-empty" role="status"><span className="pa-spinner" />{tr('provider_accounts_loading')}</div>
         : providers.length === 0 ? <p className="pa-caption">{tr('provider_vault_empty')}</p>
         : providers.map(provider => <article className="pa-account" key={provider.id} data-testid={`cloud-provider-${provider.id}`}>
-          <span className="pa-account-icon"><Icon name="key" size={19} /></span>
+          <ProviderBrandIcon provider={{ id: provider.presetId ?? "", label: provider.label }} className="pa-account-icon" />
           <div className="pa-account-copy">
             <strong className="pa-name">{provider.label}</strong>
             <div className="pa-meta"><span>{tr(`provider_vault_source_${provider.source}`)}</span><span>•••• {provider.keyHint}</span>{!provider.webUsable && <span>{tr('provider_vault_desktop_only')}</span>}</div>
           </div>
           <div className="pa-account-actions">
             <button className="pa-button" disabled={Boolean(busy)} onClick={() => void pull([provider.id])}>{busy === provider.id && <span className="pa-spinner" />}{tr(busy === provider.id ? 'provider_vault_pulling' : 'provider_vault_pull')}</button>
-            {removal?.id === provider.id
-              ? <><button className="pa-button" disabled={Boolean(busy)} onClick={() => setRemoval(undefined)}>{tr('provider_accounts_cancel')}</button><button className="pa-button pa-danger-button" disabled={Boolean(busy)} onClick={() => void remove(provider)}>{tr('provider_vault_remove')}</button></>
-              : <button className="pa-icon-button" aria-label={`${tr('provider_vault_remove')} ${provider.label}`} disabled={Boolean(busy)} onClick={() => { setError(undefined); setRemoval(provider); }}><Icon name="trash" size={15} /></button>}
+            <button className="pa-icon-button" aria-label={`${tr('provider_vault_remove')} ${provider.label}`} disabled={Boolean(busy)} onClick={() => { setError(undefined); setRemoval(provider); }}><Icon name="trash" size={15} /></button>
           </div>
-          {removal?.id === provider.id && <p className="pa-caption" role="alert">{tr('provider_vault_remove_confirm', provider.label)}</p>}
         </article>)}
     </div>}
-    {error && <p className="pa-feedback pa-error" role="alert" style={{ whiteSpace: 'pre-line' }}>{error}</p>}
-    {notice && <p className="pa-feedback pa-success" role="status"><Icon name="check" size={15} />{notice}</p>}
+    <ProviderFeedback error={reauth || removal ? undefined : error} notice={reauth || removal ? undefined : notice} />
+    <dialog ref={removalDialog} className="pa-dialog" aria-labelledby="cloud-remove-title" onCancel={event => { event.preventDefault(); cancelRemoval(); }}>
+      {removal && <>
+        <h3 id="cloud-remove-title">{tr('provider_vault_remove')}</h3>
+        <p className="pa-dialog-note">{tr('provider_vault_remove_confirm', removal.label)}</p>
+        {error && <p className="pa-feedback pa-error" role="alert">{error}</p>}
+        <footer>
+          <button type="button" className="pa-button" disabled={Boolean(busy)} onClick={cancelRemoval}>{tr('provider_accounts_cancel')}</button>
+          <button type="button" className="pa-button pa-danger-button" disabled={Boolean(busy)} onClick={() => void remove(removal)}>{tr('provider_vault_remove')}</button>
+        </footer>
+      </>}
+    </dialog>
     <dialog ref={dialog} className="pa-dialog" aria-labelledby="cloud-reauth-title" onCancel={event => { event.preventDefault(); closeReauth(); }}>
       {reauth && <form onSubmit={event => { event.preventDefault(); if (passwordOffered && password && busy !== 'reauth') void confirmIdentity({ type: 'signIn', password }); }}>
         <header><h3 id="cloud-reauth-title">{tr('provider_vault_reauth_title')}</h3></header>

@@ -238,7 +238,7 @@ async function input(event) {
   }
 }
 
-async function frame() {
+async function frame(captureOnly) {
   const [{ data }, { nodes }] = await Promise.all([
     send('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false }),
     send('Accessibility.getFullAXTree'),
@@ -252,7 +252,7 @@ async function frame() {
     if (target) focusableNodes.add(target);
     return { id: node.nodeId, parent: node.parentId, role: node.role?.value, name: String(node.name?.value ?? '').slice(0, 256), target };
   });
-  return { png: data, accessibility, actions: actions.splice(0) };
+  return { png: data, accessibility, actions: captureOnly ? [] : actions.splice(0) };
 }
 
 const requests = createInterface({ input: process.stdin });
@@ -263,6 +263,9 @@ try {
       if (request.action === 'close') break;
       if (request.action === 'mount') await mount(request);
       if (!bundle) throw new Error('Renderer not mounted');
+      if (request.action === 'frame' && Array.isArray(request.deferredActions)) {
+        actions.unshift(...request.deferredActions);
+      }
       const selectedText = request.action === 'input' ? await input(request.event) : undefined;
       if (request.action === 'result') {
         const contextId = responses.get(request.id);
@@ -271,7 +274,10 @@ try {
           await send('Runtime.evaluate', { contextId, expression: `globalThis.__lingxiResult(${scriptLiteral(request.id)},${scriptLiteral(request.result ?? null)},${scriptLiteral(request.error ?? null)})` });
         }
       }
-      console.log(JSON.stringify({ ...await frame(), selectedText }));
+      const scene = request.actionsOnly || request.deferFrame && actions.length
+        ? { actions: actions.splice(0) }
+        : await frame(request.captureOnly === true);
+      console.log(JSON.stringify({ ...scene, selectedText }));
     } catch { console.log(JSON.stringify({ error: 'RENDER_UNAVAILABLE' })); }
   }
 } finally {

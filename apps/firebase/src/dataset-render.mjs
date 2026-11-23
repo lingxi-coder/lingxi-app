@@ -50,9 +50,18 @@ export function createDatasetRender({ origin, secret, pages, db, fetchRequest = 
 
   async function fold(frame, target, view, request, user, token) {
     const selectedText = request.action === 'input' && request.event.kind === 'selection' ? frame.selectedText : undefined;
-    const pending = db.collection(`datasetRenderApprovals/${hash([target.owner, target.scope, target.session])}/pending`);
+    const pending = db.collection(`datasetRenderApprovals/${hash([target.owner, target.scope, target.session])}/datasetRenderPending`);
     const queue = [...(frame.actions ?? [])];
-    for (let step = 0; queue.length && step < 32; step++) {
+    async function settle(id, outcome) {
+      frame = await render('/frame', { ...target, command: { action: 'result', id, ...outcome, actionsOnly: true } });
+      queue.push(...(frame.actions ?? []));
+    }
+    for (let step = 0; step < 32; step++) {
+      if (!queue.length && !frame.png) {
+        frame = await render('/frame', { ...target, command: { action: 'frame', deferFrame: true } });
+        queue.push(...(frame.actions ?? []));
+      }
+      if (!queue.length) break;
       const action = queue.shift();
       if (!action || !id.safeParse(action.id).success || Buffer.byteLength(JSON.stringify(action)) > 32_768) continue;
       if (action.kind === 'state') {
@@ -60,8 +69,7 @@ export function createDatasetRender({ origin, secret, pages, db, fetchRequest = 
           expected: action.expected, state: action.state }).then(result => ({ result }), error => ({
           error: error.status === 409 ? 'PAGE_STATE_CHANGED' : 'PAGE_STATE_REJECTED',
         }));
-        frame = await render('/frame', { ...target, command: { action: 'result', id: action.id, ...outcome } });
-        queue.push(...(frame.actions ?? []));
+        await settle(action.id, outcome);
         continue;
       }
       const policy = view.actions[action.alias];
@@ -73,15 +81,18 @@ export function createDatasetRender({ origin, secret, pages, db, fetchRequest = 
         const ref = pending.doc(action.id);
         await db.runTransaction(async tx => {
           const old = (await tx.get(ref)).data();
-          if (!old) tx.create(ref, { intent: JSON.stringify(intent), expiresAt: new Date(Date.now() + 5 * 60_000) });
+          if (!old) tx.create(ref, { status: 'pending', intent: JSON.stringify(intent), expiresAt: new Date(Date.now() + 5 * 60_000) });
         });
         continue;
       }
       const outcome = await pages.execute(user, token, intent).then(result => ({ result }), () => ({ error: 'DATA_ACCESS_REQUIRED' }));
-      frame = await render('/frame', { ...target, command: { action: 'result', id: action.id, ...outcome } });
-      queue.push(...(frame.actions ?? []));
+      await settle(action.id, outcome);
     }
-    const approvals = (await pending.limit(32).get()).docs.flatMap(doc => {
+    if (!frame.png || queue.length) frame = await render('/frame', { ...target,
+      command: { action: 'frame', captureOnly: true, ...(queue.length ? { deferredActions: queue } : {}) } });
+
+    const approvals = (await pending.where('status', '==', 'pending')
+      .where('expiresAt', '>', new Date()).limit(32).get()).docs.flatMap(doc => {
       const row = doc.data();
       if (row.decision || (row.expiresAt?.toMillis?.() ?? 0) < Date.now()) return [];
       const intent = JSON.parse(row.intent), policy = view.actions[intent.alias];
@@ -93,6 +104,7 @@ export function createDatasetRender({ origin, secret, pages, db, fetchRequest = 
       fail(503, 'RENDER_UNAVAILABLE');
     }
     return { session: target.session, png: frame.png, accessibility: frame.accessibility, approvals,
+      ...(queue.length ? { moreActions: true } : {}),
       ...(typeof selectedText === 'string' && selectedText.length <= 8192 ? { selectedText } : {}) };
   }
 
@@ -101,9 +113,9 @@ export function createDatasetRender({ origin, secret, pages, db, fetchRequest = 
     const target = { owner: hash(user.uid), scope: hash([request.page, request.version]), session: request.session };
     if (request.action === 'close') return render('/close', target);
     const mount = request.action === 'mount';
-    async function verify() {
+    async function verify(final = false) {
       try {
-        return await pages.verifyRenderer(user, token, request.page, request.version);
+        return await pages.verifyRenderer(user, token, request.page, request.version, final);
       } catch (failure) {
         await render('/close', target).catch(() => undefined);
         throw failure;
@@ -111,35 +123,40 @@ export function createDatasetRender({ origin, secret, pages, db, fetchRequest = 
     }
     const view = mount ? await pages.openForRenderer(user, token, request.page, request.version) : await verify();
     target.tenant = hash(view.tenant);
-    let frame;
-    if (mount) {
-      const result = await render('/open', { ...target, bundle: view.bundle, state: view.state === null ? null : JSON.parse(view.state),
-        stateVersion: view.stateVersion, dimensions: request.dimensions });
-      target.session = session.parse(result.session);
-      frame = result;
-    } else if (request.action === 'approve' || request.action === 'deny') {
-      const pending = db.doc(`datasetRenderApprovals/${hash([target.owner, target.scope, target.session])}/pending/${request.id}`);
-      const decision = request.action;
-      const approval = await db.runTransaction(async tx => {
-        const row = (await tx.get(pending)).data();
-        if (!row || (row.expiresAt?.toMillis?.() ?? 0) < Date.now() || (row.decision && row.decision !== decision)) {
-          fail(409, 'RENDER_APPROVAL_CHANGED');
-        }
-        if (!row.decision) tx.update(pending, { decision });
-        return row;
-      });
-      const outcome = decision === 'deny' ? { error: 'DATA_ACTION_DENIED' } :
-        await pages.executeApprovedAction(user, token, JSON.parse(approval.intent)).then(result => ({ result }), failure => {
-          if (![400, 403, 404, 409].includes(failure.status)) throw failure;
-          return { error: 'DATA_ACTION_REJECTED' };
+    try {
+      let frame;
+      if (mount) {
+        const result = await render('/open', { ...target, bundle: view.bundle, state: view.state === null ? null : JSON.parse(view.state),
+          stateVersion: view.stateVersion, dimensions: request.dimensions, deferFrame: true });
+        target.session = session.parse(result.session);
+        frame = result;
+      } else if (request.action === 'approve' || request.action === 'deny') {
+        const pending = db.doc(`datasetRenderApprovals/${hash([target.owner, target.scope, target.session])}/datasetRenderPending/${request.id}`);
+        const decision = request.action;
+        const approval = await db.runTransaction(async tx => {
+          const row = (await tx.get(pending)).data();
+          if (!row || (row.expiresAt?.toMillis?.() ?? 0) < Date.now() || (row.decision && row.decision !== decision)) {
+            fail(409, 'RENDER_APPROVAL_CHANGED');
+          }
+          if (!row.decision) tx.update(pending, { status: 'decided', decision });
+          return row;
         });
-      frame = await render('/frame', { ...target, command: { action: 'result', id: request.id, ...outcome } });
-    } else {
-      frame = await render('/frame', { ...target, command: request.action === 'input' ?
-        { action: 'input', event: request.event } : { action: 'frame' } });
+        const outcome = decision === 'deny' ? { error: 'DATA_ACTION_DENIED' } :
+          await pages.executeApprovedAction(user, token, JSON.parse(approval.intent)).then(result => ({ result }), failure => {
+            if (![400, 403, 404, 409].includes(failure.status)) throw failure;
+            return { error: 'DATA_ACTION_REJECTED' };
+          });
+        frame = await render('/frame', { ...target, command: { action: 'result', id: request.id, ...outcome, deferFrame: true } });
+      } else {
+        frame = await render('/frame', { ...target, command: request.action === 'input' ?
+          { action: 'input', event: request.event, deferFrame: true } : { action: 'frame', deferFrame: true } });
+      }
+      const result = await fold(frame, target, view, request, user, token);
+      await verify(true);
+      return result;
+    } catch (failure) {
+      if (mount && target.session) await render('/close', target).catch(() => undefined);
+      throw failure;
     }
-    const result = await fold(frame, target, view, request, user, token);
-    await verify();
-    return result;
   };
 }

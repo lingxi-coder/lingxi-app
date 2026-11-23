@@ -625,6 +625,34 @@
       ]
     },
     {
+      "collectionGroup": "heads",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "archived",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "partition",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "datasetRenderPending",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "expiresAt",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
       "collectionGroup": "datasetV2Events",
       "queryScope": "COLLECTION",
       "fields": [
@@ -787,6 +815,23 @@
     },
     {
       "collectionGroup": "inboxReadBatches",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "datasetAgentTurns",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "datasetAgentTurns",
+      "fieldPath": "state",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "datasetRenderPending",
       "fieldPath": "expiresAt",
       "ttl": true,
       "indexes": []

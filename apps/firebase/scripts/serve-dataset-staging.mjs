@@ -17,7 +17,7 @@ import { createChat } from '../src/llm-chat.mjs';
 import { createLlmHandler } from '../src/llm-api.mjs';
 import { upstreamTransport } from '../src/llm-egress.mjs';
 import { parseKeyring, VaultStore } from '../src/llm-vault.mjs';
-import { createTeamsHandler, TeamsStore } from '../src/teams.mjs';
+import { datasetBodyLimit, createTeamsHandler, TeamsStore } from '../src/teams.mjs';
 
 const projectId = 'lingxi-dataset-v2-stg-261119';
 if (process.env.LINGXI_DATA_PROJECT !== projectId || !process.env.K_SERVICE ||
@@ -42,7 +42,7 @@ async function verifySession(token) {
 }
 const services = [process.env.DATASET_ORIGIN_A, process.env.DATASET_ORIGIN_B];
 if (new Set(services).size !== 2) throw new Error('Expected two Dataset service origins');
-const gateways = services.map(origin => createDatasetGateway(origin, createPrivateDatasetFetch(origin)));
+const gateways = services.map(origin => createDatasetGateway(origin, createPrivateDatasetFetch(origin), verifySession));
 let nextReplica = 0;
 function next() {
   const gateway = gateways[nextReplica];
@@ -60,11 +60,12 @@ const renderDataset = createDatasetRender({
 });
 const origins = [`https://${projectId}.web.app`, `https://${projectId}.firebaseapp.com`];
 const handle = createTeamsHandler({ store: new TeamsStore(db), friends: new FriendsStore(db, Date.now, { auth }),
-  verifyToken: verifySession, datasets: (...args) => next().datasets(...args), datasetRuns: (...args) => next().run(...args),
+  verifyToken: verifySession, datasets: (...args) => next().datasets(...args),
+  datasetCommand: (...args) => next().command(...args), datasetRuns: (...args) => next().run(...args),
   datasetPages: pages?.execute, datasetRender: renderDataset,
   createCustomToken: uid => auth.createCustomToken(uid), origins });
 const browser = createDatasetBrowserHttp({
-  origin: process.env.LINGXI_DATASET_BROWSER_ORIGIN, verifyToken: verifySession,
+  origin: process.env.LINGXI_DATASET_BROWSER_ORIGIN,
   call: (...args) => next().browser(...args),
 });
 const vaultFile = process.env.LINGXI_DATASET_VAULT_FILE;
@@ -75,7 +76,7 @@ if (vaultFile) {
   const chat = createChat({ vault, transport: upstreamTransport() });
   const datasetTurn = createDatasetAgentTurn({
     turns: firestoreDatasetTurns(db), model: chat.start,
-    data: (uid, token, body) => next().datasets(db, { uid }, token, body),
+    data: (uid, token, body, signal) => next().datasets(db, { uid }, token, body, signal),
   });
   llm = createLlmHandler({ vault, chat: chat.chat, test: chat.test, datasetTurn, verifyToken: verifySession, origins });
 }
@@ -91,11 +92,12 @@ createServer(async (incoming, outgoing) => {
       outgoing.writeHead(404).end(); return;
     }
     if (!['GET', 'POST', 'OPTIONS'].includes(incoming.method)) { outgoing.writeHead(405).end(); return; }
+    const limit = datasetBodyLimit(url.pathname) ?? 3 * 1024 * 1024;
     const chunks = [];
     let bytes = 0;
     for await (const chunk of incoming) {
       bytes += chunk.length;
-      if (bytes > 3 * 1024 * 1024) { outgoing.writeHead(413).end(); return; }
+      if (bytes > limit) { outgoing.writeHead(413).end(); return; }
       chunks.push(chunk);
     }
     const request = new Request(url, { method: incoming.method, headers: incoming.headers, signal: abort.signal,

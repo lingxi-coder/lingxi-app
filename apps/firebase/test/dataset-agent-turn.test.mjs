@@ -13,7 +13,7 @@ const putCall = dataset => ({ id: 'same-provider-id', name: 'dataset_put', argum
   expectedRevision: 0, schemaVersion: 1, partition: 'west', value: { qty: 9 } } });
 const latestCall = dataset => ({ id: 'same-provider-id', name: 'dataset_latest', arguments: { dataset, record: 'a' } });
 const toolRound = call => ({ type: 'toolRound', assistant: { role: 'assistant' }, calls: [call] });
-function driver({ failFirstPut = false, rejectRead = false, attachmentAllowed = true } = {}) {
+function driver({ failFirstPut = false, rejectRead = false, attachmentAllowed = true, repeatLatest = false, beforeRead } = {}) {
   const states = new Map(), effects = new Map(), attempts = [];
   const turns = { async update(uid, id, change) {
     const key = JSON.stringify([uid, id]);
@@ -31,23 +31,28 @@ function driver({ failFirstPut = false, rejectRead = false, attachmentAllowed = 
       const get = index => rounds[index]?.results['same-provider-id'];
       if (!rounds.length) yield toolRound(createCall);
       else if (rounds.length === 1) yield toolRound(putCall(get(0).reference.dataset));
-      else if (rounds.length === 2) yield toolRound(latestCall(get(0).reference.dataset));
+      else if (rounds.length === 2) {
+        const latest = latestCall(get(0).reference.dataset);
+        yield { ...toolRound(latest), calls: repeatLatest ? [latest, { ...latest, id: 'duplicate-revision' }] : [latest] };
+      }
       else {
         assert.deepEqual(get(2), rejectRead ? { error: 'DATA_ACTION_REJECTED' } : {
           reference: get(1).reference, value: { qty: 9 },
         });
+        if (repeatLatest) assert.deepEqual(rounds[2].results['duplicate-revision'], get(2));
         yield { type: 'delta', text: rejectRead ? 'Access removed' : 'Recorded 9' };
         yield { type: 'done' };
       }
     }
     return { provider: { revision: 7 }, events: events() };
   }
-  async function data(uid, token, body) {
+  async function data(uid, token, body, signal) {
     assert.equal(token, 'test-token');
     attempts.push(body);
     const { action, record } = body.command;
     if (action === 'describe') return { reference: { kind: 'dataset', dataset: body.dataset }, canManage: attachmentAllowed };
     if (action === 'read') {
+      await beforeRead?.(signal);
       if (rejectRead) throw new VaultError(403, 'DATA_ACCESS_REQUIRED');
       return { reference: body.command.reference, value: { qty: 9 } };
     }
@@ -65,7 +70,7 @@ function driver({ failFirstPut = false, rejectRead = false, attachmentAllowed = 
   }
   const handle = createDatasetAgentTurn({ turns, model, data });
   const id = randomUUID();
-  const send = (action, rest = {}, uid = 'test-user') => handle(uid, 'test-token', { action, id, ...rest });
+  const send = (action, rest = {}, uid = 'test-user', signal) => handle(uid, 'test-token', { action, id, ...rest }, signal);
   return { send, effects, attempts, states, versions, prompts };
 }
 
@@ -133,6 +138,45 @@ test('previous read receipts do not disclose revoked data to the provider on res
   }
   assert.equal(turn.state, 'done');
   assert.equal(turn.answer, 'Access removed');
+});
+
+test('a model continuation authorizes each distinct immutable revision once', async () => {
+  const { send, attempts } = driver({ repeatLatest: true });
+  let turn = await send('start', { chat });
+  for (let round = 0; round < 3; round++) {
+    await send('approve', { approval: turn.approval });
+    turn = await send('advance');
+  }
+  assert.equal(turn.state, 'done');
+  assert.equal(attempts.filter(({ command }) => command.action === 'latest').length, 2);
+  assert.equal(attempts.filter(({ command }) => command.action === 'read').length, 1);
+});
+
+test('cancelling before model dispatch aborts in-flight Dataset reads and releases the lease', async () => {
+  let enter;
+  const entered = new Promise(resolve => { enter = resolve; });
+  let first = true;
+  const { send, versions } = driver({ beforeRead: async signal => {
+    if (!first) return;
+    first = false;
+    enter();
+    signal.throwIfAborted();
+    await new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  } });
+  let turn = await send('start', { chat });
+  for (let round = 0; round < 2; round++) {
+    await send('approve', { approval: turn.approval });
+    turn = await send('advance');
+  }
+  await send('approve', { approval: turn.approval });
+  const controller = new AbortController();
+  const blocked = send('advance', {}, 'test-user', controller.signal);
+  await entered;
+  controller.abort();
+  await blocked;
+  assert.equal(versions.length, 3);
+  assert.equal((await send('advance')).state, 'done');
+  assert.equal(versions.length, 4);
 });
 
 test('the agent route is opt-in and operates with the verified user token', async () => {

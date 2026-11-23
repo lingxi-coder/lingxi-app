@@ -181,7 +181,7 @@ export class TeamsService {
     return result;
   }
   async datasets<T>(expectedUid: string, request: Record<string, unknown>): Promise<T> {
-    return this.checked<T>(expectedUid, '/datasets', request);
+    return request.action === 'page' ? this.checked<T>(expectedUid, '/dataset-pages', request.request) : this.checked<T>(expectedUid, '/datasets', request);
   }
   async data<T>(input: DataRequest, expectedUid: string): Promise<T> {
     return this.checked<T>(expectedUid, '/data', input);

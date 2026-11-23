@@ -60,7 +60,7 @@ function useSignedInDatasetApi(user: User) {
       if (auth.currentUser?.uid !== user.uid) throw new Error('INVALID_SESSION');
       return token;
     });
-    return { datasets: <T,>(body: Record<string, unknown>) => request<T>('/datasets', body) };
+    return { datasets: <T,>(body: Record<string, unknown>) => body.action === 'page' ? request<T>('/dataset-pages', body.request as Record<string, unknown>) : request<T>('/datasets', body) };
   }, [user]);
 }
 

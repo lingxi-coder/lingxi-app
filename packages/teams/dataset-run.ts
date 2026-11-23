@@ -109,11 +109,21 @@ export class DatasetRunSession {
       }
       return request(command, signal);
     }
-    const deadline = Date.now() + 30_000;
-    let ready = await request(start);
+    // Each start advances one durable page. Keep progressing while Core is making
+    // headway, with backoff only when a server reports no progress.
+    const deadline = Date.now() + 5 * 60_000;
+    const preparation = AbortSignal.timeout(5 * 60_000);
+    const signal = options.signal ? AbortSignal.any([options.signal, preparation]) : preparation;
+    let previousBlocks = -1;
+    let ready = await request(start, signal);
     while (ready.status === 'preparing') {
-      await waitForDatasetRun(deadline, 'Snapshot preparation is still in progress', options.signal);
-      ready = await request(start);
+      signal.throwIfAborted();
+      const blocks = ready.blocks;
+      if (typeof blocks !== 'number' || blocks <= previousBlocks) {
+        await waitForDatasetRun(deadline, 'Snapshot preparation is still in progress', signal);
+      }
+      if (typeof blocks === 'number') previousBlocks = blocks;
+      ready = await request(start, signal);
     }
     if (!Array.isArray(ready.inputs) || !ready.inputs.every(isResourceRef)
       || !Array.isArray(ready.automaticSteps) || !ready.automaticSteps.every(s => typeof s === 'string')
@@ -124,8 +134,14 @@ export class DatasetRunSession {
     return new DatasetRunSession(send, ready.inputs, ready.automaticSteps, ready.outputBindings, ready.finished === true);
   }
 
-  readInput(index: number, block?: number, signal?: AbortSignal): Promise<Record<string, unknown>> {
-    return this.send({ action: 'readInput', index, block }, signal);
+  async readInput(index: number, block?: number, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const command = { action: 'readInput' as const, index, block };
+    const page = await this.send(command, signal);
+    // Core commits a newly requested immutable block before it can be read back.
+    if (page.status !== 'preparing') return page;
+    const committed = await this.send(command, signal);
+    if (committed.status === 'preparing') throw new DatasetRunError(503, 'Snapshot page preparation did not complete');
+    return committed;
   }
   readReport(index: number, after?: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
     return this.send({ action: 'readInput', index, after }, signal);

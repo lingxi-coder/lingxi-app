@@ -1104,12 +1104,14 @@ export class TeamConnector implements LocalTeamHost {
     if (datasetTasks) await frameAuthorize();
     const dataProgram = teamBotDatasetProgram({ team: b.teamId, bot: b.sharedBotId, conversation: sourceScope.conversationId },
       b.revision, b.snapshot, b.deploymentId);
-    const dataRun = isServiceId(b.teamId) ? undefined : await datasetTasks?.open(dataProgram, record.taskId, signal, Boolean(record.privateData));
     // One validation at a time: a slow or failing server is not sent another every tick while the last waits out its timeout.
     // A cancelled task answers TASK_CANCELLED here, which stops the worker like any other definitive refusal.
     let validating = false;
     interval = setInterval(() => { if (validating) return; validating = true;
       void authorize().catch(error => { if (definitive(error)) execution.abort(errorCode(error)); }).finally(() => { validating = false; }); },2000); interval.unref();
+    const remaining = Math.max(0, Math.min(300_000, record.deadlineAt - this.now()));
+    const preparation = AbortSignal.any([signal, AbortSignal.timeout(remaining)]);
+    const dataRun = isServiceId(b.teamId) ? undefined : await datasetTasks?.open(dataProgram, record.taskId, preparation, Boolean(record.privateData));
       const {credential_id:_credential,provider_account_profiles:_profiles,instructions,documents,...model} = snapshot;
       let result: TeamRunResult | undefined, failure: unknown;
       try {

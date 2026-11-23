@@ -267,5 +267,12 @@ export function createDatasetPages({ db, bucket, datasets }) {
     return describe(storedPage(db, id.parse(page), digest.parse(version)), user, token, mount);
   }
   return { execute, executeApprovedAction, openForRenderer: (user, token, page, version) => rendererView(user, token, page, version, true),
-    verifyRenderer: (user, token, page, version) => rendererView(user, token, page, version, false) };
+    async verifyRenderer(user, token, page, version, final = true) {
+      const ref = storedPage(db, id.parse(page), digest.parse(version));
+      const { row } = await db.runTransaction(tx => authority(tx, ref, user));
+      await datasets(db, user, token, coreRequest(row, { action: 'describe' }));
+      if (final) await db.runTransaction(tx => authority(tx, ref, user));
+      return { tenant: row.destination.team, actions: row.actions };
+    },
+  };
 }

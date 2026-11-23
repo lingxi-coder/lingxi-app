@@ -12,6 +12,7 @@ type Frame = {
   png: string;
   accessibility: { id: string; role?: string; name: string; target?: number }[];
   selectedText?: string;
+  moreActions?: boolean;
   approvals: ({ id: string; alias: string } & (
     | { mode: 'putRecord'; record: string; parameters: Record<string, unknown> }
     | { mode: 'startTask'; bot: string; prompt: string }
@@ -91,6 +92,7 @@ export function DatasetPageCard({ api, reference, locale }: { api: Pick<TeamsApi
   const dimensions = useRef({ width: 620, height: 480 });
   const active = useRef(false);
   const inFlight = useRef(false);
+  const scroll = useRef<(Point & { dy: number })>();
   const session = useRef<string>();
   const pointer = useRef<{ id: number; start: Point; clientX: number; clientY: number }>();
   const requestData = api.datasets;
@@ -99,6 +101,7 @@ export function DatasetPageCard({ api, reference, locale }: { api: Pick<TeamsApi
 
   useEffect(() => () => {
     active.current = false;
+    scroll.current = undefined;
     const key = session.current;
     session.current = undefined;
     if (key && requestData) void requestData({ action: 'render', request: { action: 'close', page, version, session: key } })
@@ -118,6 +121,7 @@ export function DatasetPageCard({ api, reference, locale }: { api: Pick<TeamsApi
       } catch (failure) {
         if (cancelled || session.current !== openSession) return;
         active.current = false;
+        scroll.current = undefined;
         session.current = undefined;
         setFrame(undefined);
         setSelection(undefined);
@@ -139,6 +143,14 @@ export function DatasetPageCard({ api, reference, locale }: { api: Pick<TeamsApi
     };
   }, [openSession, page, requestData, version]);
 
+  useEffect(() => {
+    if (!frame?.moreActions) return;
+    const timer = window.setTimeout(() => {
+      if (session.current === frame.session && !document.hidden) void send({ action: 'refresh' });
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [frame]);
+
   if (!requestData) return null;
 
   async function send(request: Record<string, unknown>): Promise<Frame | undefined> {
@@ -155,8 +167,26 @@ export function DatasetPageCard({ api, reference, locale }: { api: Pick<TeamsApi
       }
       void closeSession();
     } catch (failure) {
+      scroll.current = undefined;
       if (active.current) { setError(diagnosis(failure)); setFrame(undefined); setSelection(undefined); }
-    } finally { inFlight.current = false; setBusy(false); }
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+      flushScroll();
+    }
+  }
+
+  function flushScroll(): void {
+    const pending = scroll.current;
+    if (!pending || !active.current || !session.current || inFlight.current) return;
+    scroll.current = undefined;
+    if (pending.dy) void send({ action: 'input', event: { kind: 'scroll', ...pending } });
+  }
+
+  function queueScroll(position: Point, dy: number): void {
+    if (!Number.isFinite(dy)) return;
+    scroll.current = { ...position, dy: Math.max(-2000, Math.min(2000, (scroll.current?.dy ?? 0) + dy)) };
+    flushScroll();
   }
 
   async function closeSession(): Promise<void> {
@@ -178,6 +208,7 @@ export function DatasetPageCard({ api, reference, locale }: { api: Pick<TeamsApi
 
   function close(): void {
     active.current = false;
+    scroll.current = undefined;
     setFrame(undefined);
     setSelection(undefined);
     void closeSession();
@@ -205,7 +236,7 @@ export function DatasetPageCard({ api, reference, locale }: { api: Pick<TeamsApi
     const dy = press.clientY - event.clientY;
     if (event.pointerType === 'touch') {
       if (Math.abs(dy) >= 10) {
-        void send({ action: 'input', event: { kind: 'scroll', ...end, dy: Math.max(-2000, Math.min(2000, dy)) } });
+        queueScroll(end, dy);
         return;
       }
     } else if (Math.hypot(press.clientX - event.clientX, dy) > 5) {
@@ -235,7 +266,7 @@ export function DatasetPageCard({ api, reference, locale }: { api: Pick<TeamsApi
             <img src={'data:image/png;base64,' + frame.png} draggable={false} style={{ display: 'block', width: '100%', touchAction: 'pan-x pinch-zoom' }}
               alt={title || t('tw_dataset_open_page')} onPointerDown={pointerDown}
               onPointerCancel={() => { pointer.current = undefined; }} onPointerUp={pointerUp}
-              onWheel={event => void send({ action: 'input', event: { kind: 'scroll', ...point(event), dy: Math.max(-2000, Math.min(2000, event.deltaY)) } })} />
+              onWheel={event => queueScroll(point(event), event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? dimensions.current.height : 1))} />
           </div>
           <form onSubmit={event => {
             event.preventDefault();

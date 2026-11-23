@@ -1612,6 +1612,33 @@ test('auto-reply: a Bot is published to answer unasked only from a Desktop with 
  assert.equal((await none.connector.status('owner')).decisionConfigured,false);
 });
 
+test('Dataset v2 normal Team Bot preparation stops when its Team task is cancelled', async t => {
+  let entered = false;
+  let cancelled = false;
+  const f = fixture(t, undefined, { datasetTasks: () => ({
+    open: async (_program, _logicalRun, signal) => {
+      entered = true;
+      signal?.throwIfAborted();
+      return new Promise<never>((_resolve, reject) => signal?.addEventListener('abort', () => {
+        cancelled = true;
+        reject(signal.reason);
+      }, { once: true }));
+    },
+  }) });
+  await f.connector.publishLocalBot('owner', f.input);
+  f.mock.tasks.push(queued('dataset-cancelled')); f.mock.wake();
+  const until = Date.now() + 7000;
+  while (!entered && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(entered, true);
+  const original = f.mock.service.hostMessages;
+  f.mock.service.hostMessages = async (context, command) => {
+    if (command.action === 'validateTask') throw new TeamsApiError('TASK_CANCELLED', 409);
+    return original(context, command);
+  };
+  while (!cancelled && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(cancelled, true);
+});
+
 test('Dataset v2 normal Team Bot task commits its approved reply', { skip: !hasDatasetFixture }, async t => {
   const staging = await datasetExecutorFixture(t, 'teamBot');
   const f = fixture(t, undefined, { datasetTasks: () => staging.hooks });

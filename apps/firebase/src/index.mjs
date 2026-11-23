@@ -24,7 +24,7 @@ import { createMarketGateway } from './market-gateway.mjs';
 import { createHandler } from './catalog.mjs';
 import { CatalogStore } from './store.mjs';
 import { createPushHandler, PushStore } from './push.mjs';
-import { PAIR_CONVERSATION_ID, createTeamsHandler, TeamsStore } from './teams.mjs';
+import { PAIR_CONVERSATION_ID, createTeamsHandler, datasetBodyLimit, TeamsStore } from './teams.mjs';
 import { FriendsStore, friendNotifier } from './friends.mjs';
 import { sweepUploads } from './team-attachments.mjs';
 import { OAuth2Client } from 'google-auth-library';
@@ -95,11 +95,11 @@ export const prunePushRegistrations = onSchedule({ schedule: 'every 24 hours', t
 
 const datasetOrigin = process.env.LINGXI_DATASET_ORIGIN;
 const datasetGateway = createDatasetGateway(datasetOrigin,
-  datasetOrigin && process.env.LINGXI_DATASET_PRIVATE_RUN === '1' ? createPrivateDatasetFetch(datasetOrigin) : fetch);
+  datasetOrigin && process.env.LINGXI_DATASET_PRIVATE_RUN === '1' ? createPrivateDatasetFetch(datasetOrigin) : fetch,
+  token => getAuth(app).verifyIdToken(token, true));
 const datasetBrowserHandler = createDatasetBrowserHttp({
   origin: process.env.LINGXI_DATASET_BROWSER_ORIGIN,
   call: datasetGateway?.browser,
-  verifyToken: token => getAuth(app).verifyIdToken(token, true),
 });
 const datasetPages = process.env.LINGXI_DATASET_PAGES_BUCKET ? createDatasetPages({
   db: teamsDb, bucket: getStorage(app).bucket(process.env.LINGXI_DATASET_PAGES_BUCKET), datasets: datasetGateway?.datasets,
@@ -109,7 +109,7 @@ const useRenderSecret = datasetStaging || !!renderOrigin;
 const renderKey = defineSecret('LINGXI_DATASET_RENDER_KEY');
 let renderDataset;
 const teamsHandler = createTeamsHandler({ store: new TeamsStore(teamsDb), friends: friendsStore,
-  datasets: datasetGateway?.datasets, datasetRuns: datasetGateway?.run, datasetPages: datasetPages?.execute,
+  datasets: datasetGateway?.datasets, datasetCommand: datasetGateway?.command, datasetRuns: datasetGateway?.run, datasetPages: datasetPages?.execute,
   datasetRender: renderOrigin && datasetPages ? (...args) => (renderDataset ??= createDatasetRender({
     origin: renderOrigin, secret: renderKey.value(), pages: datasetPages, db: teamsDb,
   }))(...args) : undefined,
@@ -124,7 +124,13 @@ export const teamsApi = onRequest({ region: 'us-central1', minInstances: 0, maxI
   ...(useRenderSecret ? { secrets: [renderKey] } : {}) }, async (req, res) => {
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) if (value) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
-  const request = new Request(new URL(req.url, 'https://teams.internal'), { method: req.method, headers,
+  const url = new URL(req.url, 'https://teams.internal');
+  const limit = datasetBodyLimit(url.pathname);
+  if (limit && req.rawBody?.byteLength > limit) {
+    res.status(413).json({ error: { code: 'REQUEST_TOO_LARGE' } });
+    return;
+  }
+  const request = new Request(url, { method: req.method, headers,
     ...(!['GET', 'HEAD'].includes(req.method) ? { body: req.rawBody } : {}) });
   const output = await datasetBrowserHandler?.(request) ?? await teamsHandler(request);
   output.headers.forEach((value, key) => res.set(key, value));
@@ -334,7 +340,7 @@ const llmChat = createChat({ vault, transport: upstreamTransport() });
 const datasetTurn = datasetGateway && process.env.LINGXI_DATASET_WEB_AGENT === '1' ? createDatasetAgentTurn({
   turns: firestoreDatasetTurns(teamsDb),
   model: llmChat.start,
-  data: (uid, token, body) => datasetGateway.datasets(teamsDb, { uid }, token, body),
+  data: (uid, token, body, signal) => datasetGateway.datasets(teamsDb, { uid }, token, body, signal),
 }) : undefined;
 const llmHandler = createLlmHandler({
   vault, chat: llmChat.chat, test: llmChat.test, datasetTurn,

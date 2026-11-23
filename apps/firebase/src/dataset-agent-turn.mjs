@@ -124,34 +124,53 @@ export function createDatasetAgentTurn({ turns, model, data, clock = Date.now })
       }));
     }
 
+    const generationBudget = AbortSignal.timeout(Math.max(0, acquired.lease.until - clock() - 1000));
+    const work = new AbortController();
+    const generation = AbortSignal.any([generationBudget, work.signal, ...(signal ? [signal] : [])]);
     try {
       let system = modelRules;
       if (acquired.attachment) {
         const { dataset } = acquired.attachment;
-        const info = await data(uid, token, { protocol: DATA_PROTOCOL_VERSION, dataset, command: { action: 'describe' } });
+        const info = await data(uid, token, { protocol: DATA_PROTOCOL_VERSION, dataset, command: { action: 'describe' } }, generation);
         if (info?.canManage !== true || info.reference?.kind !== 'dataset' || info.reference.dataset !== dataset) {
           throw new VaultError(403, 'DATA_ACCESS_REQUIRED');
         }
         system += '\nThe caller attached the personal Dataset identified by ' + JSON.stringify(dataset) + '. Use approved tools for data operations.';
       }
-      const rounds = [];
-      for (const round of acquired.rounds) {
+      const reads = new Map();
+      const rounds = acquired.rounds.map(round => {
         const results = { ...round.results };
-        for (const call of round.calls.filter(call => call.name === 'dataset_latest')) {
+        for (const call of round.calls) {
+          if (call.name !== 'dataset_latest') continue;
           const reference = results[call.id].reference;
           if (!reference) continue;
-          try {
-            const read = await data(uid, token, { protocol: DATA_PROTOCOL_VERSION, dataset: reference.dataset, command: { action: 'read', reference } });
-            results[call.id] = { reference, value: read.value };
-          } catch (error) {
-            if ([401, 403, 404, 410].includes(error.status)) results[call.id] = { error: 'DATA_ACTION_REJECTED' };
-            else throw error;
-          }
+          const key = JSON.stringify([reference.dataset, reference.record, reference.revision, reference.schemaVersion]);
+          if (!reads.has(key)) reads.set(key, { reference, sinks: [] });
+          reads.get(key).sinks.push(result => { results[call.id] = result; });
         }
-        rounds.push({ ...round, results });
+        return { ...round, results };
+      });
+      const pending = [...reads.values()];
+      let cursor = 0;
+      async function readReferences() {
+        while (cursor < pending.length) {
+          generation.throwIfAborted();
+          const { reference, sinks } = pending[cursor++];
+          let result;
+          try {
+            const read = await data(uid, token, { protocol: DATA_PROTOCOL_VERSION, dataset: reference.dataset, command: { action: 'read', reference } }, generation);
+            result = { reference, value: read.value };
+          } catch (error) {
+            if (![401, 403, 404, 410].includes(error.status)) throw error;
+            result = { error: 'DATA_ACTION_REJECTED' };
+          }
+          for (const accept of sinks) accept(result);
+        }
       }
+      await Promise.all(Array.from({ length: Math.min(8, pending.length) }, readReferences));
+      generation.throwIfAborted();
       const started = await model(uid, { ...acquired.chat, system, tools: datasetAgentTools, rounds,
-        providerRevision: acquired.providerRevision, maxTokens: 4096 }, AbortSignal.any([AbortSignal.timeout(55_000), ...(signal ? [signal] : [])]));
+        providerRevision: acquired.providerRevision, maxTokens: 4096 }, AbortSignal.any([AbortSignal.timeout(55_000), generation]));
       let text = '', terminal;
       const approval = randomUUID();
       for await (const event of started.events) {
@@ -173,7 +192,9 @@ export function createDatasetAgentTurn({ turns, model, data, clock = Date.now })
       }
       return view(await revise(turn => ({ ...turn, lease: null })));
     } catch (error) {
-      if (signal?.aborted || error?.name === 'TimeoutError' || error?.code === 'TIMEOUT') {
+      const interrupted = generation.aborted || error?.name === 'TimeoutError' || error?.code === 'TIMEOUT';
+      work.abort();
+      if (interrupted) {
         return view(await revise(turn => ({ ...turn, lease: null })));
       }
       const code = error?.code === 'UPSTREAM_REJECTED' ? 'MODEL_TOOL_REQUEST_REJECTED' :

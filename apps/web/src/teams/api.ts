@@ -48,7 +48,7 @@ export function webTeamsApi(user: User, db: Firestore, currentUid: () => string 
       watch(teamId, ['teams', teamId, 'members'], current.team.generation); return current;
     },
     execute: (command: TeamCommand) => checked<TeamResult>('', command),
-    datasets: <T>(request: Record<string, unknown>) => checked<T>('/datasets', request),
+    datasets: <T>(request: Record<string, unknown>) => request.action === 'page' ? checked<T>('/dataset-pages', request.request) : checked<T>('/datasets', request),
     data: <T>(input: DataRequest) => checked<T>('/data', input),
     messages: <T>(command: MessageCommand) => checked<T>('/messages', command),
     async historyPage(scope,conversationId,beforeSeq) {

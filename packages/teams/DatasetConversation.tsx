@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type FormEvent } from 'react';
+import { memo, useCallback, useId, useMemo, useRef, useState, type FormEvent } from 'react';
 import { DATA_PROTOCOL_VERSION, type ResourceRef } from './dataset-resource.js';
 import { messageErrorText } from './errors.js';
 import type { TeamsApi } from './index.js';
@@ -216,6 +216,10 @@ export function SharedDatasetCard({ api, reference, via, locale }: {
   const [page, setPage] = useState<Page>();
   const [report, setReport] = useState<ReportPage>();
   const [editing, setEditing] = useState<{ row: Row; text: string; operation: string }>();
+  const tableFields = useMemo(() => Object.keys(desc?.schema.properties ?? {}), [desc]);
+  const editRow = useCallback((row: Row) => {
+    setEditing({ row, text: JSON.stringify(row.value, null, 2), operation: crypto.randomUUID() });
+  }, []);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const t = useTeamsText(locale);
@@ -278,9 +282,9 @@ export function SharedDatasetCard({ api, reference, via, locale }: {
       <div className="tw-dialog-panel">
         <h3 id={heading}>{report?.title ?? (desc?.schema.title || reference.dataset)}</h3>
         {error && <p role="alert">{messageErrorText(error, locale)}</p>}
-        {page && <DatasetRows page={page} fields={Object.keys(desc?.schema.properties ?? {})} title={desc?.schema.title || reference.dataset}
+        {page && <DatasetRows page={page} fields={tableFields} title={desc?.schema.title || reference.dataset}
           editLabel={t('tw_dataset_edit_record')} onEdit={reference.kind === 'dataset' && desc?.access === 'edit' && !busy
-            ? row => setEditing({ row, text: JSON.stringify(row.value, null, 2), operation: crypto.randomUUID() }) : undefined} />}
+            ? editRow : undefined} />}
         {report && <div className="tw-data-table-scroll" tabIndex={0} role="region" aria-label={report.title}>
           <table className="tw-data-table">
             <caption>{report.title}</caption>
@@ -316,7 +320,7 @@ function formatReportUnits(units: string, scale: number): string {
   return (negative ? '-' : '') + digits.slice(0, -scale) + '.' + digits.slice(-scale);
 }
 
-function DatasetRows({ page, fields, title, onEdit, editLabel }: {
+const DatasetRows = memo(function DatasetRows({ page, fields, title, onEdit, editLabel }: {
   page: Page; fields: string[]; title: string; onEdit?(row: Row): void; editLabel: string;
 }) {
   return <div className="tw-data-table-scroll" tabIndex={0} role="region" aria-label={title}>
@@ -330,4 +334,4 @@ function DatasetRows({ page, fields, title, onEdit, editLabel }: {
       </tr>)}</tbody>
     </table>
   </div>;
-}
+});

@@ -20,7 +20,7 @@ const publish = z.object({
   text: z.string().min(1).refine(value => Buffer.byteLength(value) <= 8192),
 }).strict();
 
-export function createDatasetGateway(origin, fetchRequest = fetch) {
+export function createDatasetGateway(origin, fetchRequest = fetch, verifyIdentity) {
   if (!origin) return null;
   const url = new URL(origin);
   if (url.protocol !== 'https:' || url.pathname !== '/' || url.username || url.password || url.search || url.hash) {
@@ -39,15 +39,38 @@ export function createDatasetGateway(origin, fetchRequest = fetch) {
     }
     verifiedUntil = Date.now() + 60_000;
   }
-  async function forward(path, authorization, body) {
+  async function forward(path, authorization, body, signal, delegated = false) {
     checking ??= checkContract().finally(() => { checking = undefined; });
     await checking;
+    const timeout = AbortSignal.timeout(30_000);
+    const budget = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    const init = { method: 'POST', redirect: 'error', cache: 'no-store',
+      headers: { ...(authorization ? { Authorization: authorization } : {}), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body), signal: budget };
     let response;
     try {
-      response = await fetchRequest(new URL(path, url), { method: 'POST', redirect: 'error', cache: 'no-store',
-        headers: { ...(authorization ? { Authorization: authorization } : {}), 'Content-Type': 'application/json' },
-        body: JSON.stringify(body), signal: AbortSignal.timeout(30000) });
-    } catch { throw new LingxiDataError(503, 'DATA_UNAVAILABLE'); }
+      budget.throwIfAborted();
+      if (delegated && verifyIdentity) {
+        response = await fetchRequest(new URL(path.replace('/v2/', '/v2/auth-v1/'), url), init);
+        if (response.status === 404 && response.headers.get('x-lingxi-auth-version') !== '1') {
+          await response.body?.cancel();
+          try {
+            const user = await verifyIdentity(authorization.slice('Bearer '.length));
+            if (typeof user?.uid !== 'string' || !/^[^/\u0000-\u001f\u007f]{1,128}$/u.test(user.uid) || user.uid.length > 128) {
+              throw new Error('Invalid Firebase user identity');
+            }
+          }
+          catch { throw new LingxiDataError(401, 'INVALID_SESSION'); }
+          budget.throwIfAborted();
+          response = undefined;
+        }
+      }
+      response ??= await fetchRequest(new URL(path, url), init);
+    } catch (error) {
+      if (error instanceof LingxiDataError) throw error;
+      budget.throwIfAborted();
+      throw new LingxiDataError(503, 'DATA_UNAVAILABLE');
+    }
     if (!response.ok) {
       const codes = { 400: 'INVALID_DATA_REQUEST', 401: 'DATA_ACCESS_REQUIRED', 403: 'DATA_ACCESS_REQUIRED',
         404: 'DATA_NOT_FOUND', 409: 'DATA_CONFLICT', 410: 'DATA_BACKFILL_REQUIRED', 429: 'DATA_QUOTA', 503: 'DATA_UNAVAILABLE' };
@@ -55,12 +78,12 @@ export function createDatasetGateway(origin, fetchRequest = fetch) {
     }
     return response.json();
   }
-  function command(token, body) {
+  function command(token, body, signal, delegated = false) {
     const path = body?.command?.action === 'publishCapture' ? '/v2/report-captures' : '/v2/datasets';
-    return forward(path, 'Bearer ' + token, body);
+    return forward(path, 'Bearer ' + token, body, signal, delegated);
   }
-  async function datasets(db, user, token, body) {
-    if (body?.action !== 'share') return command(token, body);
+  async function datasets(db, user, token, body, signal) {
+    if (body?.action !== 'share') return command(token, body, signal);
     const input = publish.parse(body);
     const { dataset, via, operation, destination, mode, projection, readers, reshare, audienceDigest } = input;
     const call = (action, fields = {}) => command(token, { protocol: DATA_PROTOCOL_VERSION, dataset, via, operation, command: { action, ...fields } });
@@ -105,7 +128,7 @@ export function createDatasetGateway(origin, fetchRequest = fetch) {
   const browserPaths = { host: '/v2/dataset-browser-host', open: '/v2/dataset-browser-open', invoke: '/v2/dataset-browser-invoke' };
   function browser(action, authorization, body) {
     if (!Object.hasOwn(browserPaths, action)) throw new LingxiDataError(400, 'INVALID_DATA_REQUEST');
-    return forward(browserPaths[action], authorization, body);
+    return forward(browserPaths[action], authorization, body, undefined, action === 'host');
   }
-  return { datasets, run, browser };
+  return { command: (token, body) => command(token, body, undefined, true), datasets, run, browser };
 }

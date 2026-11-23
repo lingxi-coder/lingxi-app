@@ -248,7 +248,38 @@ export class TeamsStore {
 }
 
 /** HTTP authorization is deliberately independent from owner-only Remote Control. */
-export function createTeamsHandler({ store, friends, inbox, data, datasets, datasetRuns, datasetPages, datasetRender, verifyToken, createCustomToken, origins = [] }) {
+const datasetPath = '/v1/teams/datasets';
+const capturePath = '/v1/teams/dataset-captures';
+const pagesPath = '/v1/teams/dataset-pages';
+
+export function datasetBodyLimit(path) {
+  if (path === capturePath || path === pagesPath) return 3 * 1024 * 1024;
+  if (path === datasetPath || path === '/v2/dataset-runs' || path.startsWith('/v1/dataset-browser/')) return 131072;
+  return undefined;
+}
+
+async function boundedDatasetBody(request, limit) {
+  if (Number(request.headers.get('Content-Length')) > limit) fail(413, 'REQUEST_TOO_LARGE');
+  const reader = request.body?.getReader();
+  let raw = '';
+  if (!reader) return raw;
+  const decoder = new TextDecoder();
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return raw + decoder.decode();
+      size += value.byteLength;
+      if (size > limit) {
+        void reader.cancel().catch(() => undefined);
+        fail(413, 'REQUEST_TOO_LARGE');
+      }
+      raw += decoder.decode(value, { stream: true });
+    }
+  } finally { reader.releaseLock(); }
+}
+
+export function createTeamsHandler({ store, friends, inbox, data, datasets, datasetCommand, datasetRuns, datasetPages, datasetRender, verifyToken, createCustomToken, origins = [] }) {
   return async request => {
     const headers = new Headers({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
       'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', Vary: 'Origin' });
@@ -272,9 +303,27 @@ export function createTeamsHandler({ store, friends, inbox, data, datasets, data
       }
       const bearer = /^Bearer (\S+)$/u.exec(request.headers.get('Authorization') ?? '');
       if (!bearer) fail(401, 'SIGN_IN_REQUIRED');
-      let user;
-      try { user = await verifyToken(bearer[1]); } catch { fail(401, 'INVALID_SESSION'); }
-      if (!uid.safeParse(user?.uid).success) fail(401, 'INVALID_SESSION');
+      async function identity() {
+        let user;
+        try { user = await verifyToken(bearer[1]); } catch { fail(401, 'INVALID_SESSION'); }
+        if (!uid.safeParse(user?.uid).success) fail(401, 'INVALID_SESSION');
+        return user;
+      }
+      // Core authenticates forwarded commands. Product-side operations still
+      // require the full verified identity before touching product resources.
+      if (datasets && !inbox && (path === datasetPath || path === capturePath) && request.method === 'POST') {
+        const raw = await boundedDatasetBody(request, datasetBodyLimit(path));
+        let body;
+        try { body = JSON.parse(raw); } catch { fail(400, 'INVALID_JSON'); }
+        if (path === capturePath && body?.command?.action !== 'publishCapture') fail(400, 'INVALID_DATA_REQUEST');
+        if (body?.action === 'page' && datasetPages) return reply(await datasetPages(await identity(), bearer[1], body.request));
+        if (body?.action === 'render' && datasetRender) {
+          return reply(await datasetRender(await identity(), bearer[1], body.request));
+        }
+        if (datasetCommand && body?.action !== 'share') return reply(await datasetCommand(bearer[1], body));
+        return reply(await datasets(store.db, await identity(), bearer[1], body));
+      }
+      const user = await identity();
       if (inbox) {
         if (!['/','/v1/inbox','/inboxApi'].includes(path) || request.method !== 'POST') fail(404, 'NOT_FOUND');
         const raw = await request.text();
@@ -291,25 +340,16 @@ export function createTeamsHandler({ store, friends, inbox, data, datasets, data
       if (friends && path === '/v1/friends/profile' && request.method === 'GET') return reply(await friends.profile(user));
       const detail = /^\/v1\/teams\/([A-Za-z0-9_-]{8,64})$/u.exec(path);
       if (detail && detail[1] !== 'session' && request.method === 'GET') return reply(await store.detail(user.uid, detail[1]));
-      if (request.method !== 'POST' || !['/v1/teams', '/v1/teams/session', '/v1/teams/messages', '/v1/services', ...(data ? ['/v1/teams/data'] : []), ...(datasets ? ['/v1/teams/datasets'] : []), ...(datasetPages ? ['/v1/teams/dataset-pages'] : []), ...(friends ? ['/v1/friends'] : [])].includes(path)) fail(404, 'NOT_FOUND');
-      const raw = await request.text();
+      if (request.method !== 'POST' || !['/v1/teams', '/v1/teams/session', '/v1/teams/messages', '/v1/services', ...(data ? ['/v1/teams/data'] : []), ...(datasetPages ? ['/v1/teams/dataset-pages'] : []), ...(friends ? ['/v1/friends'] : [])].includes(path)) fail(404, 'NOT_FOUND');
+      const raw = path === pagesPath ? await boundedDatasetBody(request, datasetBodyLimit(path)) : await request.text();
       const size = Buffer.byteLength(raw);
-      const limit = { '/v1/teams/dataset-pages': 3 * 1024 * 1024, '/v1/teams/datasets': 3 * 1024 * 1024, '/v1/teams/data': 3 * 1024 * 1024, '/v1/teams/messages': 1048576 }[path] ?? 16384;
+      const limit = { '/v1/teams/dataset-pages': 3 * 1024 * 1024, '/v1/teams/data': 3 * 1024 * 1024, '/v1/teams/messages': 1048576 }[path] ?? 16384;
       if (size > limit) fail(413, 'REQUEST_TOO_LARGE');
       let body;
       try { body = JSON.parse(raw); } catch { fail(400, 'INVALID_JSON'); }
       if (path === '/v1/teams/session') {
         z.object({}).strict().parse(body);
         return reply({ uid: user.uid, customToken: await createCustomToken(user.uid) });
-      }
-      if (path === '/v1/teams/datasets') {
-        if (body?.action === 'page' && datasetPages) return reply(await datasetPages(user, bearer[1], body.request));
-        if (body?.action === 'render' && datasetRender) {
-          if (size > 131072) fail(413, 'REQUEST_TOO_LARGE');
-          return reply(await datasetRender(user, bearer[1], body.request));
-        }
-        if (size > 131072 && body?.command?.action !== 'publishCapture') fail(413, 'REQUEST_TOO_LARGE');
-        return reply(await datasets(store.db, user, bearer[1], body));
       }
       if (path === '/v1/teams/dataset-pages') return reply(await datasetPages(user, bearer[1], body));
       if (path === '/v1/teams/data') {

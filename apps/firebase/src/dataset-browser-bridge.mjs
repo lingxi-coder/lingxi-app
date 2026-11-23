@@ -105,7 +105,7 @@ export function createDatasetBrowserHttp({ origin, call, verifyToken }) {
       if (action === 'host') {
         const token = /^Bearer (\S+)$/u.exec(authorization)?.[1];
         if (!token || callerOrigin) throw new LingxiDataError(401, 'SIGN_IN_REQUIRED');
-        try { await verifyToken(token); } catch { throw new LingxiDataError(401, 'INVALID_SESSION'); }
+        try { await verifyToken?.(token); } catch { throw new LingxiDataError(401, 'INVALID_SESSION'); }
       } else if (action === 'open' || action === 'invoke') {
         if (callerOrigin !== url.origin) throw new LingxiDataError(403, 'ORIGIN_NOT_ALLOWED');
         if (action === 'invoke' && !/^DatasetApp [A-Za-z0-9_-]{43}$/u.test(authorization)) {

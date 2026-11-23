@@ -38,6 +38,7 @@ async function main() {
       return activatedAt;
     })()`);
     const openMore = () => run("document.querySelector('.lx-inbox-more summary').click()");
+    const selectFilter = async name => { await openMore(); await clickButton(name); };
     const current = name => `${row(name)}?.getAttribute('aria-current') === 'page'`;
     const hasMainText = text => `document.querySelector('.desktop-main')?.innerText.includes(${JSON.stringify(text)})`;
     const rowCount = count => `document.querySelectorAll('.lx-inbox-row').length === ${count}`;
@@ -104,6 +105,17 @@ async function main() {
       return;
     }
     console.error('Checking filters and row actions');
+    assert.equal(await run("document.querySelector('.lx-inbox-heading h2')?.textContent"), 'Messages');
+    assert.equal(await run("document.querySelector('.lx-inbox-tools select') === null"), true);
+    const searchToggle = "document.querySelector('.lx-inbox-search-toggle')";
+    const search = "document.querySelector('.lx-inbox-search input')";
+    assert.equal(await run(`!${search} && ${searchToggle}.getAttribute('aria-expanded') === 'false'`), true);
+    await run(`${searchToggle}.click()`);
+    await wait(`${search} && document.activeElement === ${search}`);
+    await contents.insertText('Bob');
+    await wait(`${rowCount(1)} && ${row('friend')}`);
+    await run(`${search}.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true, cancelable: true}))`);
+    await wait(`!${search} && document.activeElement === ${searchToggle} && ${rowCount(2)}`);
     assert.deepEqual(await run("[...document.querySelectorAll('.lx-inbox-row strong')].map(node => node.textContent)"),
       ['Bob', 'general']);
     assert.equal(await run("document.querySelector('.desktop-rail-chats .desktop-rail-count')?.textContent"), '2');
@@ -113,24 +125,14 @@ async function main() {
       const badge = home.querySelector('.desktop-rail-count').getBoundingClientRect();
       return badge.left >= button.left && badge.right <= button.right + 3
         && badge.top >= button.top - 1 && badge.bottom <= button.bottom;
-    })()`), true, 'position the unread count on the Chats button');
+    })()`), true, 'position the unread count on the Messages button');
 
-    await clickButton('Attention');
+    await selectFilter('Attention');
     await wait(`${rowCount(0)} && !${row('assistant')}`);
-    await clickButton('Unread');
+    await selectFilter('Unread');
     await wait(`${rowCount(1)} && ${row('friend')}`);
-    await clickButton('All');
-    await wait(rowCount(2));
-    await run(`(() => {
-      const select = document.querySelector('.lx-inbox-tools select');
-      select.value = 'team'; select.dispatchEvent(new Event('change', { bubbles: true }));
-    })()`);
-    await wait(`${rowCount(1)} && ${row('channel')}`);
-    await run(`(() => {
-      const select = document.querySelector('.lx-inbox-tools select');
-      select.value = ''; select.dispatchEvent(new Event('change', { bubbles: true }));
-    })()`);
-    await wait(rowCount(2));
+    await selectFilter('All');
+    await wait(`${rowCount(2)} && ${row('friend')} && ${row('channel')}`);
 
     await run("document.querySelector('button[aria-label=\"Actions for Bob\"]').click()");
     await clickButton('Pin');
@@ -148,10 +150,10 @@ async function main() {
     await clickButton('Archived');
     await wait(rowCount(2));
 
-    console.error('Checking independent Chats and Projects subviews');
-    await clickButton('Unread');
+    console.error('Checking independent Messages and Projects subviews');
+    await selectFilter('Unread');
     await wait(rowCount(1));
-    assert.equal(await run("Boolean(document.querySelector('.desktop-nav-rail [title=Home], .desktop-home-tabs'))"), false, 'Chats and Projects replace Home in the main rail');
+    assert.equal(await run("Boolean(document.querySelector('.desktop-nav-rail [title=Home], .desktop-home-tabs'))"), false, 'Messages and Projects replace Home in the main rail');
     assert.deepEqual(await run("[...document.querySelectorAll('.desktop-nav-rail button')].slice(0, 2).map(button => button.title)"), ['Messages', 'Projects']);
     await clickRail('projects');
     await wait(`${selectedView('projects')} && document.querySelector('.projects-sidebar-section')?.getBoundingClientRect().height > 0`);
@@ -173,7 +175,7 @@ async function main() {
     contents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
     await wait(`${selectedView('chats')} && document.activeElement === ${rail('chats')}`);
     await wait(rowCount(1));
-    assert.equal(await run("document.querySelector('.lx-inbox-switch button[aria-pressed=true]').textContent.trim()"), 'Unread');
+    assert.equal(await run("document.querySelector('.lx-inbox-views button[aria-pressed=true]').textContent.trim()"), 'Unread');
     assert.equal(await run("window.inboxFixture.opens.length"), 0, 'changing subviews does not open a conversation');
     assert.equal(await run("window.inboxFixture.requests.filter(({command}) => command.action === 'markRead').length"), 0);
     await run("(() => { const list = document.querySelector('.lx-inbox-scroll'); list.style.maxHeight = '30px'; list.style.minHeight = '0'; list.scrollTop = 30; list.dispatchEvent(new Event('scroll')); })()");
@@ -186,7 +188,7 @@ async function main() {
     await wait("!document.querySelector('.projects-sidebar-menu-layer')");
     await wait(`${selectedView('chats')} && document.querySelector('.lx-inbox-scroll').scrollTop === 30`);
     await run("(() => { const list = document.querySelector('.lx-inbox-scroll'); list.style.maxHeight = ''; list.style.minHeight = ''; })()");
-    await clickButton('All');
+    await selectFilter('All');
     await wait(rowCount(2));
 
     console.error('Checking Friends and Teams routes');
@@ -226,7 +228,7 @@ async function main() {
     await wait("window.inboxFixture.selected() === 'draft' && document.querySelector('.desktop-stage')");
     await wait(selectedView('projects'));
 
-    console.error('Checking Apps to Chats content restoration');
+    console.error('Checking Apps to Messages content restoration');
     await run("document.querySelector('.desktop-nav-rail button[title=Apps]').click()");
     await wait("document.querySelector('.local-apps-sidebar-disclosure')");
     await run("document.querySelector('.local-apps-sidebar-disclosure').click()");

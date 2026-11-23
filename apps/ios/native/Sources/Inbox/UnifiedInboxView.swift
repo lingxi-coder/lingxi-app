@@ -10,11 +10,20 @@ struct UnifiedInboxView: View {
     @State private var selecting = false
     @State private var options = false
     @State private var confirmingReadAll = false
+    @State private var searchOpen = false
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         @Bindable var inbox = inbox
         List {
-            filters
+            if searchOpen {
+                TextField("inbox_search", text: $inbox.search)
+                    .textFieldStyle(.roundedBorder)
+                    .submitLabel(.search)
+                    .focused($searchFocused)
+                    .accessibilityIdentifier("inbox.search")
+                    .onAppear { searchFocused = true }
+            }
             if let issue = inbox.issue {
                 Button(issueTitle(issue), systemImage: "exclamationmark.circle") { inbox.clearIssue(); inbox.refreshNow() }
             }
@@ -61,15 +70,21 @@ struct UnifiedInboxView: View {
         .listStyle(.plain)
         .accessibilityIdentifier("inbox.list")
         .navigationTitle("session_details_messages")
-        .searchable(text: $inbox.search, prompt: "inbox_search")
         .refreshable { inbox.refreshNow() }
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("drawer_entry_projects", systemImage: "folder", action: openProjects)
-                    .accessibilityIdentifier("inbox.open-projects")
-            }
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
                 Menu("inbox_options", systemImage: "ellipsis.circle") {
+                    Picker("inbox_filter", selection: $inbox.filter) {
+                        Text("inbox_all").tag(InboxFilter.all)
+                        Text("inbox_unread").tag(InboxFilter.unread)
+                        Text("inbox_attention").tag(InboxFilter.attention)
+                    }
+                    .accessibilityIdentifier("inbox.filter")
+                    Button("drawer_entry_projects", systemImage: "folder") {
+                        closeSearch()
+                        openProjects()
+                    }
+                    .accessibilityIdentifier("inbox.open-projects")
                     Button(selecting ? "inbox_select_done" : "inbox_select") {
                         selecting.toggle()
                         selection = []
@@ -83,6 +98,15 @@ struct UnifiedInboxView: View {
                     }
                     if inbox.uid != nil { Button("inbox_settings", systemImage: "gearshape") { options = true } }
                 }
+                .accessibilityIdentifier("inbox.options")
+                Button {
+                    if searchOpen { closeSearch() }
+                    else { searchOpen = true }
+                } label: {
+                    Label(searchOpen ? LocalizedStringKey("common_close") : "inbox_search",
+                          systemImage: searchOpen ? "xmark" : "magnifyingglass")
+                }
+                .accessibilityIdentifier("inbox.toggle-search")
             }
         }
         .sheet(isPresented: $options) { UnifiedInboxSettings() }
@@ -93,28 +117,17 @@ struct UnifiedInboxView: View {
         } message: {
             Text("inbox_mark_all_read_message")
         }
-        .onChange(of: inbox.uid) { _, _ in options = false; confirmingReadAll = false; selecting = false; selection = [] }
+        .onChange(of: inbox.uid) { _, _ in
+            options = false; confirmingReadAll = false; selecting = false; selection = []
+            closeSearch()
+        }
+        .onDisappear { closeSearch() }
     }
 
-    private var filters: some View {
-        @Bindable var inbox = inbox
-        return VStack(alignment: .leading, spacing: 8) {
-            Picker("inbox_filter", selection: $inbox.filter) {
-                Text("inbox_all").tag(InboxFilter.all)
-                Text("inbox_unread").tag(InboxFilter.unread)
-                Text("inbox_attention").tag(InboxFilter.attention)
-            }
-            .pickerStyle(.menu)
-            .accessibilityIdentifier("inbox.filter")
-            Picker("public_extensions_category", selection: $inbox.category) {
-                Text("inbox_all_categories").tag(InboxCategory?.none)
-                Text("friends_title").tag(InboxCategory?.some(.friend))
-                Text("teams_title").tag(InboxCategory?.some(.team))
-                Text("inbox_service").tag(InboxCategory?.some(.service))
-            }
-            .pickerStyle(.menu)
-        }
-        .accessibilityElement(children: .contain)
+    private func closeSearch() {
+        searchFocused = false
+        searchOpen = false
+        inbox.search = ""
     }
 
     private var batchMenu: some View {

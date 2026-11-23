@@ -110,6 +110,7 @@ export function ConversationLead({ conversation, label, snapshot, locale, size =
 // ─── Icons ──────────────────────────────────────────────────────────────────
 
 const paths = {
+  search: 'M17 10.5a6.5 6.5 0 1 1-13 0 6.5 6.5 0 0 1 13 0zm-1.9 4.6 4.9 4.9',
   chevronDown: 'M6 9l6 6 6-6',
   chevronLeft: 'M15 6l-6 6 6 6',
   chevronRight: 'M9 6l6 6-6 6',

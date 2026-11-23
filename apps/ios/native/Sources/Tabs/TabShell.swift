@@ -106,7 +106,7 @@ struct TabShell<ChatsContent: View, SettingsContent: View>: View {
     }
     private func label(for tab: AppTab) -> LocalizedStringKey {
         switch tab {
-        case .chats: "tabs_chats"
+        case .chats: "session_details_messages"
         case .bots: "remote_bots"
         case .teams: "teams_title"
         case .friends: "friends_title"
@@ -154,7 +154,7 @@ struct TabShell<ChatsContent: View, SettingsContent: View>: View {
         let teamsValue: LocalizedStringKey = teamsBadgeText == nil ? "" : "tabs_badge_unread \(teamsUnread)"
         let friendsValue: LocalizedStringKey = friendsBadgeText == nil ? "" : "tabs_badge_unread \(friendsUnread)"
         return TabView(selection: selection) {
-            Tab("tabs_chats", systemImage: "bubble.left.and.bubble.right", value: AppTab.chats) {
+            Tab("session_details_messages", systemImage: "bubble.left.and.bubble.right", value: AppTab.chats) {
                 chats()
                     .toolbar(barVisibility(for: .chats), for: .tabBar)
             }

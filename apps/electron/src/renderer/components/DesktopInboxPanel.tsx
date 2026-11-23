@@ -57,10 +57,8 @@ export function DesktopInboxPanel({ inbox, locale, activeKey, onOpen }: {
     finally { setBusy(false); }
   };
   if (!inbox.controller) return null;
-  return <div className="desktop-inbox-panel">
-    <header className="desktop-inbox-heading"><h2>{tr('tw_messages')}</h2></header>
-    <InboxList controller={inbox.controller} locale={locale} activeKey={activeKey} onOpen={onOpen} />
-    {inbox.uid ? <details className="desktop-inbox-preferences">
+  const settings = inbox.uid ? (
+    <details className="lx-inbox-settings desktop-inbox-preferences">
       <summary>{cn ? '会话与隐私设置' : 'Conversation settings'}</summary>
       <label><input type="checkbox" disabled={busy || preferences?.uid !== inbox.uid} checked={preferences?.uid === inbox.uid && preferences.sync}
         onChange={event => { void save('sync', event.target.checked); }} />{cn ? '跨设备同步会话摘要与已读' : 'Sync summaries and reading position'}</label>
@@ -74,6 +72,11 @@ export function DesktopInboxPanel({ inbox, locale, activeKey, onOpen }: {
         onChange={event => { void save('receipts', event.target.checked); }} />{cn ? '分享私聊已读回执' : 'Share direct-message read receipts'}</label>
       <p>{cn ? '双方开启后才显示对方已读。此设置不影响自己的多端阅读同步。' : 'Receipts appear only when both people enable them. Your own reading position always syncs.'}</p>
       {failed ? <p role="alert">{cn ? '暂时无法保存或读取设置，请稍后重试。' : 'Settings are temporarily unavailable. Please try again.'}</p> : null}
-    </details> : <p className="desktop-inbox-sign-in">{cn ? '登录后查看好友、团队和 Bot 消息。' : 'Sign in to view messages from friends, teams, and bots.'}</p>}
+    </details>
+  ) : null;
+  return <div className="desktop-inbox-panel">
+    <InboxList controller={inbox.controller} locale={locale} activeKey={activeKey} onOpen={onOpen}
+      heading={<h2>{tr('tw_messages')}</h2>} settings={settings} />
+    {!inbox.uid && <p className="desktop-inbox-sign-in">{cn ? '登录后查看好友、团队和 Bot 消息。' : 'Sign in to view messages from friends, teams, and bots.'}</p>}
   </div>;
 }

@@ -1,7 +1,7 @@
 import { useContext, useEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import { ChatTopbarHeader, ChatTopbarTarget } from '../../../../../packages/teams/ChatTopbar';
 import { Icon as ChatIcon } from '../../../../../packages/teams/ui';
-import type { BotUi, BotsApi } from '../../shared/bots';
+import type { BotSandboxAvailability, BotUi, BotsApi } from '../../shared/bots';
 import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
 import { useT } from '../theme/ThemeContext';
@@ -10,12 +10,12 @@ import { botDraftProblems, createBot, emptyBotDraft, hasBotDraftProblems, sortBo
 import { LoginItemController } from '../bridge/botLoginItem';
 import { botActivity, botRuntimes, relativeActivity, type BotActivity } from '../bridge/botSession';
 import { BotWorkspaceRequestsController, requestsOfBot } from '../bridge/botWorkspaceRequests';
-import type { BotsState } from '../bridge/botsStore';
+import { sandboxOf, type BotsState } from '../bridge/botsStore';
 import type { UseBots } from '../bridge/useBots';
 import type { UseBridge } from '../bridge/bridgeTypes';
 import { AgentAvatar } from './AgentAvatar';
 import { BotDetail, BotStateChip } from './BotDetail';
-import { BotConfirm, BotFoldersField, BotGeneralFields, BotPermissionField, BotPersonaField, useObservable, type ModelChoices } from './BotFields';
+import { BotConfirm, BotFoldersField, BotGeneralFields, BotPermissionField, BotPersonaField, BotSandboxAcknowledge, useObservable, type ModelChoices } from './BotFields';
 import { BotCreateIntro } from './BotCreateIntro';
 import { BotLeaveGuard } from '../bridge/botLeaveGuard';
 import { draftFromProposal, type BotCreationProposal } from '../bridge/botCreation';
@@ -72,13 +72,13 @@ export function Bots({ visible, bots, api, bridge, onOpenChat, onNewRoutine, onO
 
   return <ChatTopbarTarget.Provider value={visible ? topbar : undefined}><section className="bots-page" aria-label={tr('bots_title')} style={style}>
     {view.kind === 'create'
-      ? <BotCreate key={view.requestId ?? 'new'} api={api} models={models} pickFolder={bridge.pickBotFolder} onCancel={() => setView({ kind: 'list' })}
+      ? <BotCreate key={view.requestId ?? 'new'} api={api} models={models} pickFolder={bridge.pickBotFolder} sandbox={sandboxOf(state.availability) ?? { available: true }} onCancel={() => setView({ kind: 'list' })}
         initialProposal={view.proposal} guard={bots.guard} onAssist={onAssist}
         onCreated={(bot) => { controller.put(bot); setView({ kind: 'detail', botId: bot.botId }); }} />
       : view.kind === 'detail'
         ? <BotDetail key={view.botId} botId={view.botId} listed={state.bots.find((bot) => bot.botId === view.botId)} api={api} bots={controller} guard={bots.guard}
           activity={activityOf(view.botId)} models={models} pickFolder={bridge.pickBotFolder} visible={visible} sessionLoading={bridge.sessionLoading}
-          routines={bridge} requests={requests} onNewRoutine={onNewRoutine} onOpenRoutine={onOpenRoutine} deleteRequest={view.deleteRequest}
+          routines={bridge} requests={requests} onNewRoutine={onNewRoutine} onOpenRoutine={onOpenRoutine} deleteRequest={view.deleteRequest} sandboxRequest={view.sandboxRequest}
           onBack={() => setView({ kind: 'list' })}
           onOpenChat={async (workspaceId) => { await bridge.openBotSession(view.botId, undefined, undefined, workspaceId); onOpenChat(); }}
           onOpenTaskChat={async (botId, sessionId) => { await bridge.openBotSession(botId, sessionId); onOpenChat(); }}
@@ -147,10 +147,12 @@ export function shownProblems(problems: BotDraftProblems, attempted: boolean): B
   return shown;
 }
 
-export function BotCreate({ api, models, pickFolder, onCancel, onCreated, initialProposal, guard: providedGuard, onAssist }: {
+export function BotCreate({ api, models, pickFolder, sandbox, onCancel, onCreated, initialProposal, guard: providedGuard, onAssist }: {
   api: Pick<BotsApi, 'create'>;
   models: ModelChoices;
   pickFolder(): Promise<{ path: string } | null>;
+  /** Whether this device can give the new Bot a sandbox. Where it cannot, the Bot is made without one, and the owner says they know. */
+  sandbox: BotSandboxAvailability;
   onCancel(): void;
   onCreated(bot: BotUi): void;
   initialProposal?: BotCreationProposal;
@@ -168,6 +170,7 @@ export function BotCreate({ api, models, pickFolder, onCancel, onCreated, initia
   useEffect(() => { guard.hold(dirty); }, [guard, dirty]);
   useEffect(() => () => guard.hold(false), [guard]);
   const saving = useRef(false);
+  const [acknowledged, setAcknowledged] = useState(false);
   const [attempted, setAttempted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -177,11 +180,11 @@ export function BotCreate({ api, models, pickFolder, onCancel, onCreated, initia
     event.preventDefault();
     if (saving.current) return;
     setAttempted(true);
-    if (hasBotDraftProblems(problems)) return;
+    if (hasBotDraftProblems(problems) || (!sandbox.available && !acknowledged)) return;
     saving.current = true;
     setBusy(true);
     setError('');
-    const created = await createBot(api, draft);
+    const created = await createBot(api, sandbox.available ? draft : { ...draft, sandbox: { enabled: false, allowedDomains: [] } });
     saving.current = false;
     setBusy(false);
     if (created.ok) { guard.hold(false); onCreated(created.bot); }
@@ -207,6 +210,7 @@ export function BotCreate({ api, models, pickFolder, onCancel, onCreated, initia
     <BotPersonaField draft={draft} problems={shown} disabled={busy} onChange={change} />
     <BotPermissionField draft={draft} disabled={busy} onChange={change} />
     <BotFoldersField draft={draft} problems={shown} disabled={busy} pickFolder={pickFolder} onChange={change} />
+    {sandbox.available ? null : <BotSandboxAcknowledge reason={sandbox.reason} acknowledged={acknowledged} missing={attempted} disabled={busy} onChange={setAcknowledged} />}
     <footer className="bots-savebar">
       <div className="bots-save-status">{error ? <p role="alert" className="bots-problem">{tr('bots_create_failed', error)}</p> : null}</div>
       <button type="submit" data-variant="primary" disabled={busy}>{busy ? tr('bots_creating') : tr('bots_create')}</button>

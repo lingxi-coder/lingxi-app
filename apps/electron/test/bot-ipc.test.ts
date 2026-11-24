@@ -15,11 +15,12 @@ import { HostController } from '../src/main/host.js';
 import { DiagnosticBuffer } from '../src/main/host-utils.js';
 import { SettingsStore } from '../src/main/settings.js';
 import {
-  BOT_CONFLICT_MESSAGE, CH_BOTS_AVAILABILITY, CH_BOTS_CREATE, CH_BOTS_DELETE, CH_BOTS_GET, CH_BOTS_LIST, CH_BOTS_LOGIN_ITEM_GET, CH_BOTS_LOGIN_ITEM_SET,
+  BOT_CONFLICT_MESSAGE, BOT_SANDBOX_UNAVAILABLE_MESSAGE, CH_BOTS_AVAILABILITY, CH_BOTS_CREATE, CH_BOTS_DELETE, CH_BOTS_GET, CH_BOTS_LIST, CH_BOTS_LOGIN_ITEM_GET, CH_BOTS_LOGIN_ITEM_SET,
   CH_BOTS_LOGIN_ITEMS_OPEN, CH_BOTS_MEMORY_DELETE, CH_BOTS_MEMORY_LIST, CH_BOTS_MEMORY_READ,
   CH_BOTS_MEMORY_WRITE, CH_BOTS_PERSONA_GET, CH_BOTS_PERSONA_SET, CH_BOTS_SESSION_OPEN, CH_BOTS_SESSIONS_LIST, CH_BOTS_SKILL_DELETE, CH_BOTS_SKILL_IMPORT,
   CH_BOTS_SKILLS_IMPORTABLE, CH_BOTS_SKILLS_LIST, CH_BOTS_TASK_CANCEL, CH_BOTS_TASKS_LIST, CH_BOTS_UPDATE,
   CH_BOTS_WORKSPACE_REQUEST_DECIDE, CH_BOTS_WORKSPACE_REQUESTS_LIST,
+  type BotUi,
 } from '../src/shared/bots.js';
 import { botFixture, noLoginItem, noTasks, SESSION } from './bot-helpers.js';
 
@@ -55,7 +56,7 @@ function setup(t: { after(fn: () => void): void }, tasks: BotsUiTasks = noTasks,
   const calls: unknown[][] = [];
   const service = new BotService({
     store: f.store,
-    platform: 'darwin',
+    sandbox: () => ({ available: true }),
     runtimes: fakeRuntimes(calls),
     catalogFor: () => ({
       list: async () => ({ sessions: [] }),
@@ -310,29 +311,32 @@ test('Bots attached after the handlers were registered are registered at once', 
 
 // Availability
 
-test('where Bots cannot run only the question whether they can is answered', async (t) => {
+test('the answer to whether Bots can be used says whether this computer can give them a sandbox', async (t) => {
+  const s = setup(t);
+  assert.deepEqual(await s.call(CH_BOTS_AVAILABILITY), { available: true, sandbox: { available: true } });
   const f = botFixture(t);
   const service = new BotService({
-    store: f.store, platform: 'linux',
+    store: f.store, sandbox: () => ({ available: false, reason: 'bots_sandbox_why_platform' }),
     runtimes: { ...fakeRuntimes([]), newSession: async () => { throw new Error('unused'); } },
     catalogFor: () => ({ list: async () => ({ sessions: [] }), find: async () => undefined, select: async () => undefined, workspaceSettings: async () => ({ environment: {}, configHome: '/x' }), invalidate: () => undefined }),
   });
   const handlers = new BotsUi({ service, content: new BotContent(f.store), tasks: noTasks, loginItem: noLoginItem }).handlers();
-  assert.deepEqual(Object.keys(handlers).sort(), [...ALL_CHANNELS].sort(), 'the same channels are there');
-  assert.deepEqual(await handlers[CH_BOTS_AVAILABILITY]!(), { available: false, reason: 'Bots are available on macOS only.' });
-  const args: Record<string, unknown[]> = {
-    [CH_BOTS_UPDATE]: ['Bot0000000000000000001', 1, {}], [CH_BOTS_CREATE]: [{ name: 'x' }],
-    [CH_BOTS_PERSONA_SET]: ['Bot0000000000000000001', 'x'], [CH_BOTS_MEMORY_WRITE]: ['Bot0000000000000000001', 'x.md', 'x'],
-  };
-  for (const channel of ALL_CHANNELS.filter((name) => name !== CH_BOTS_AVAILABILITY)) {
-    await assert.rejects(Promise.resolve().then(() => handlers[channel]!(...(args[channel] ?? ['Bot0000000000000000001', 'x']))), /Bots are available on macOS only\./, channel);
-  }
-  assert.deepEqual(readdirSync(f.store.root), [], 'and nothing was made');
+  assert.deepEqual(await handlers[CH_BOTS_AVAILABILITY]!(), { available: true, sandbox: { available: false, reason: 'bots_sandbox_why_platform' } });
 });
 
-test('on macOS the answer is that Bots are available', async (t) => {
-  const s = setup(t);
-  assert.deepEqual(await s.call(CH_BOTS_AVAILABILITY), { available: true });
+test('a Bot cannot be made with its sandbox on where the computer has none, and the window is told in the words it knows', async (t) => {
+  const f = botFixture(t);
+  const service = new BotService({
+    store: f.store, sandbox: () => ({ available: false, reason: 'bots_sandbox_why_no_bwrap' }),
+    runtimes: { ...fakeRuntimes([]), newSession: async () => { throw new Error('unused'); } },
+    catalogFor: () => ({ list: async () => ({ sessions: [] }), find: async () => undefined, select: async () => undefined, workspaceSettings: async () => ({ environment: {}, configHome: '/x' }), invalidate: () => undefined }),
+  });
+  const handlers = new BotsUi({ service, content: new BotContent(f.store), tasks: noTasks, loginItem: noLoginItem }).handlers();
+  await assert.rejects(Promise.resolve().then(() => handlers[CH_BOTS_CREATE]!({ name: 'Confined' })), new RegExp(BOT_SANDBOX_UNAVAILABLE_MESSAGE.replace('.', '\\.')));
+  await assert.rejects(Promise.resolve().then(() => handlers[CH_BOTS_CREATE]!({ name: 'Confined', sandbox: { enabled: true, allowedDomains: [] } })), /isolate this Bot/);
+  assert.deepEqual(readdirSync(f.store.root), [], 'and nothing was made');
+  const free = await handlers[CH_BOTS_CREATE]!({ name: 'Free', sandbox: { enabled: false, allowedDomains: [] } }) as BotUi;
+  assert.deepEqual(free.sandbox, { enabled: false, allowedDomains: [] }, 'the owner chose to go without, and has it');
 });
 
 // The mode, the activity and the skills to import

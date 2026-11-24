@@ -20,7 +20,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSy
 import { basename, dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import type { PermissionModeId } from '@lingxi/bridge-client';
 
-import { BOT_CONFLICT_MESSAGE } from '../../shared/bots.js';
+import { BOT_ALLOWED_DOMAINS_MAX, BOT_CONFLICT_MESSAGE, allowedDomain } from '../../shared/bots.js';
 import { isPermissionModeId } from '../host-utils.js';
 import { isSessionId } from '../sessionIdentity.js';
 import { isInside, writeFileAtomic } from './files.js';
@@ -33,7 +33,6 @@ export const DEFAULT_WORKSPACE_ID = 'default';
 export const MAX_BOT_WORKSPACES = 16;
 export const MAX_ACCEPT_FROM = 64;
 export const MAX_PERSONA_BYTES = 64 * 1024;
-export const MAX_ALLOWED_DOMAINS = 64;
 export const MAX_SCOPE_ENTRIES = 64;
 export const MAX_REPLY_KEYWORDS = 32;
 export const MAX_REPLY_POLICY_CHARS = 4000;
@@ -44,11 +43,9 @@ const MAX_LABEL_CHARS = 80;
 const MAX_DESCRIPTION_CHARS = 500;
 const MAX_MODEL_CHARS = 256;
 const MAX_PATH_CHARS = 4096;
-const MAX_DOMAIN_CHARS = 253;
 const MAX_REFERENCE_CHARS = 128;
 const BOT_ID = /^[A-Za-z0-9_-]{22}$/;
 const WORKSPACE_ID = /^[A-Za-z0-9_-]{1,32}$/;
-const DOMAIN = /^(\*\.)?[a-z0-9][a-z0-9.-]*$/;
 const LOCAL_APP_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const CLOCK_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 const ROUTINE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -358,10 +355,10 @@ export function parseSandbox(value: unknown): BotSandbox {
   exactKeys(input, ['enabled', 'allowedDomains'], [], 'sandbox');
   if (typeof input['enabled'] !== 'boolean') throw new Error('invalid sandbox');
   const domains = input['allowedDomains'];
-  if (!Array.isArray(domains) || domains.length > MAX_ALLOWED_DOMAINS) throw new Error('invalid sandbox domains');
+  if (!Array.isArray(domains) || domains.length > BOT_ALLOWED_DOMAINS_MAX) throw new Error('invalid sandbox domains');
   const allowedDomains = domains.map((domain: unknown) => {
-    const name = typeof domain === 'string' ? domain.trim().toLowerCase() : '';
-    if (name.length === 0 || name.length > MAX_DOMAIN_CHARS || !DOMAIN.test(name)) throw new Error('invalid sandbox domain');
+    const name = typeof domain === 'string' ? allowedDomain(domain) : undefined;
+    if (name === undefined) throw new Error('invalid sandbox domain');
     return name;
   });
   if (new Set(allowedDomains).size !== allowedDomains.length) throw new Error('invalid sandbox domains');

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import { PassThrough } from 'node:stream';
-import { mkdirSync, writeFileSync, readFileSync, symlinkSync, linkSync, chmodSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, symlinkSync, linkSync, chmodSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { TeamsApiError } from '../../../packages/teams';
@@ -42,7 +42,7 @@ function fakeService(){
 }
 function fixture(t:any,run?:TeamHostProcessOptions extends never?never:(o:TeamHostProcessOptions)=>Promise<TeamHostResult>,more:Partial<ConstructorParameters<typeof TeamConnector>[0]>={}){
  const f=botFixture(t),privateStore=new TeamPrivateStore(f.userData),mock=fakeService(),bot=f.store.create({name:'Personal',persona:'PRIVATE_ROLE_NOT_SHARED',model:'anthropic/synthetic'});let selected:string[]=[];
- const connector=new TeamConnector({service:mock.service,store:f.store,privateStore,binaries:()=>({host:'/mock/host',worker:'/mock/worker'}),defaultModel:()=>undefined,modelRoute:async()=>({route:route(),profiles:[route().model_profile],assertCurrent:async()=>{}}),modelAccounts:async()=>accounts(),chooseFiles:async()=>selected,validateModel:async()=>{},platform:'darwin',retryMs:60000,run:run??(async o=>o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor}:{status:'completed',cursor,text:'Done',finishedAt:Date.now()}),...more});
+ const connector=new TeamConnector({service:mock.service,store:f.store,privateStore,binaries:()=>({host:'/mock/host',worker:'/mock/worker'}),defaultModel:()=>undefined,modelRoute:async()=>({route:route(),profiles:[route().model_profile],assertCurrent:async()=>{}}),modelAccounts:async()=>accounts(),chooseFiles:async()=>selected,validateModel:async()=>{},isolation:()=>({available:true}),retryMs:60000,run:run??(async o=>o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor}:{status:'completed',cursor,text:'Done',finishedAt:Date.now()}),...more});
  t.after(()=>connector.close());const input:PublishLocalBotInput={teamId,generation:1,publicationId:'publication001',sharedBotId,instanceId:bot.bot_id,expectedRevision:0,usePolicy:{mode:'all'},fileTokens:[],quotas:{team:100,bot:100,member:10},role:'Explicit published role'};
  return {...f,privateStore,mock,bot,connector,input,select:(paths:string[])=>{selected=paths;}};
 }
@@ -1271,6 +1271,30 @@ test('sleep and quit say at once that the Bots are offline, nothing is served wh
  f.connector.awake();await settle(()=>beats(f).at(-1)===true&&m.state.holds===1);assert.equal((await f.connector.status('owner')).bots[0]!.state,'ready');
  // A service that does not answer cannot hold up the exit.
  const answer=f.mock.service.hostMessages;f.mock.service.hostMessages=()=>new Promise(()=>{});const started=Date.now();await f.connector.rest(30);assert.ok(Date.now()-started<1000);assert.equal(m.state.holds,0);f.mock.service.hostMessages=answer;
+});
+test('a computer that cannot isolate Bots hosts none: every host call is refused, nothing is served, and the status says why',async t=>{
+ for(const reason of ['bots_sandbox_why_platform','bots_sandbox_why_no_bwrap','bots_sandbox_why_wsl1']){
+  const f=fixture(t,undefined,{isolation:()=>({available:false,reason})});
+  for(const call of [()=>f.connector.localBots('owner'),()=>f.connector.selectSharedFiles('owner',f.bot.bot_id),()=>f.connector.publishLocalBot('owner',f.input),()=>f.connector.publishedKnowledge('owner',teamId,sharedBotId)])await assert.rejects(call(),/^Error: TEAM_HOST_ISOLATION_UNAVAILABLE$/,reason);
+  f.mock.wake();await f.connector.idle();await new Promise(done=>setTimeout(done,20));
+  assert.deepEqual(f.mock.commands,[],'no pass and no heartbeat: the constructor, a change and a message each woke it for nothing');
+  const status=await f.connector.status('owner');assert.equal(status.isolationAvailable,false);assert.deepEqual(status.bots,[]);
+ }
+});
+test('macOS and Linux with bubblewrap host alike, and a computer that gains bubblewrap is asked again at once rather than remembered as unable',async t=>{
+ let isolation:{available:true}|{available:false;reason:string}={available:false,reason:'bots_sandbox_why_no_bwrap'};
+ const f=fixture(t,undefined,{isolation:()=>isolation});
+ assert.equal((await f.connector.status('owner')).isolationAvailable,false);
+ await assert.rejects(f.connector.localBots('owner'),/TEAM_HOST_ISOLATION_UNAVAILABLE/);
+ isolation={available:true};
+ assert.equal((await f.connector.status('owner')).isolationAvailable,true);
+ assert.equal((await f.connector.localBots('owner')).length,1);
+ await f.connector.publishLocalBot('owner',f.input);f.mock.wake();await settle(()=>beats(f).at(-1)===true);
+ assert.deepEqual((await f.connector.status('owner')).bots.map(b=>b.state),['ready']);
+});
+test('a Bot\'s own sandbox setting governs its chats only: nothing the Team host runs reads it',()=>{
+ const folder=new URL('../src/main/teams/',import.meta.url);
+ for(const name of readdirSync(folder))if(name.endsWith('.ts'))assert.doesNotMatch(readFileSync(new URL(name,folder),'utf8'),/\.sandbox\b/,name);
 });
 test('the host status names what stands between a published Bot and an answer (M3-2)',async t=>{
  let model=true;const f=fixture(t,undefined,{modelAccounts:async()=>model?accounts():undefined});

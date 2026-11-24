@@ -4,9 +4,14 @@
  * window whose host cannot say has no Bots to show.
  */
 
-import type { BotUi, BotsApi, BotsAvailability } from '../../shared/bots';
+import type { BotSandboxAvailability, BotUi, BotsApi, BotsAvailability } from '../../shared/bots';
 import { ipcErrorMessage } from './botForm';
 import { ObservableState } from './observableState';
+
+/** What this computer can do for a Bot's sandbox, once the host has said Bots can be used here. */
+export function sandboxOf(availability: BotsAvailability | undefined): BotSandboxAvailability | undefined {
+  return availability?.available === true ? availability.sandbox : undefined;
+}
 
 export interface BotsState {
   /** Unknown until the host has answered. */

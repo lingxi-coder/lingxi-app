@@ -12,6 +12,8 @@ import type { ChatReadRequest, ChatReadResult, ChatSourceMessage } from '../../.
 import { isServiceId } from '../../../../../packages/teams/hosted-service.js';
 import { ATTACHMENT_MESSAGE_BYTES, ATTACHMENT_MESSAGE_FILES, downloadAttachment, type MessageAttachment } from '../../../../../packages/teams/attachments.js';
 import type { BotStore } from '../bots/store.js';
+import { sandboxAvailability } from '../bots/sandboxAvailability.js';
+import type { BotSandboxAvailability } from '../../shared/bots.js';
 import { validateBotManifest } from '../bots/package.js';
 import { TeamPrivateStore, digest, validateTeamModelRoute, type TeamModelSelection, type TeamPersonaSnapshot, type SharedBotBinding, type PublishedDocument, type SavedExecution, type SavedDelivery, type TeamDataRef, type SavedGrantIntent } from './privateStore.js';
 import { runTeamHost, runResult, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult, type TeamRunResult, type TeamTaskCheckpoint, type TeamTaskWait, type TeamContinuation, type BotChatScope, type TeamOperation, type TeamOperationOutcome } from './process.js';
@@ -45,7 +47,8 @@ export interface TeamConnectorOptions {
   /** Only the native chooser supplies paths; renderer requests carry opaque one-use tokens. */
   chooseFiles(): Promise<string[]>;
   validateModel?(context: TeamAccountContext, snapshot: TeamPersonaSnapshot, selection: TeamModelSelection): Promise<void>;
-  platform?: NodeJS.Platform; run?: (options: TeamHostProcessOptions) => Promise<TeamHostResult>;
+  /** Whether this computer can isolate the Bots it serves (macOS, or Linux with bubblewrap). Read each time, since a program can be installed while the app runs. */
+  isolation?: () => BotSandboxAvailability; run?: (options: TeamHostProcessOptions) => Promise<TeamHostResult>;
   retryMs?: number; now?: () => number; maxConcurrent?: number;
   /** Event name plus ids and codes only; never user text, credentials or model output. */
   diagnostics?: (event: string, details: Record<string, unknown>) => void;
@@ -186,7 +189,8 @@ export class TeamConnector implements LocalTeamHost {
   private now() { return (this.options.now ?? Date.now)(); }
   private log(event: string, details: Record<string, unknown>) { try { this.options.diagnostics?.(event, details); } catch { /* Diagnostics never interrupt a task. */ } }
   private abort(a: { taskId: string; controller: AbortController }, reason: string) { if (a.controller.signal.aborted) return; this.log('team_task_aborted', { taskId: a.taskId, reason }); a.controller.abort(reason); }
-  private available() { if ((this.options.platform ?? process.platform) !== 'darwin') throw new Error('TEAM_HOST_MACOS_REQUIRED'); }
+  private isolated() { return (this.options.isolation ?? (() => sandboxAvailability()))().available; }
+  private available() { if (!this.isolated()) throw new Error('TEAM_HOST_ISOLATION_UNAVAILABLE'); }
   private context(uid: string) { const c = this.options.service.hostContext(); if (!c || c.uid !== uid || this.closed) throw new Error('INVALID_SESSION'); return c; }
   private assert(c: TeamAccountContext) { if (this.closed) throw new Error('INVALID_SESSION'); this.options.service.assertHostContext(c); }
   private async command<T>(c: TeamAccountContext, binding: Pick<SharedBotBinding, 'teamId' | 'generation'>, action: string, payload: Record<string, unknown>, commandId = newId()): Promise<T> {
@@ -506,7 +510,7 @@ export class TeamConnector implements LocalTeamHost {
   /** Account reset or sign-out: every running task loses its authority. A cache or listener flicker never comes here. */
   revoke() { this.revision++; this.ended.clear(); for (const a of this.active.values()) this.abort(a,'REVOKED'); this.selections.clear(); this.deferred.clear(); this.deferredCodes.clear(); this.verdicts.clear(); this.activated.clear(); this.heartbeats.clear(); this.resultProbes.clear(); this.served.clear(); this.keepServing(); this.wake(); }
   private wake() {
-    if (this.closed || this.resting || (this.options.platform ?? process.platform) !== 'darwin') return; this.pending = true; if (this.refresh) return;
+    if (this.closed || this.resting || !this.isolated()) return; this.pending = true; if (this.refresh) return;
     this.refresh = (async () => { while (this.pending && !this.closed && !this.resting) { this.pending = false; try { await this.discover(); } catch { /* Retry discovery; a failed authorization never starts work. */ } this.keepServing(); } })()
       .finally(() => { this.refresh = undefined; clearTimeout(this.timer); if (!this.closed && !this.resting) { this.timer = setTimeout(() => this.wake(), this.options.retryMs ?? 5000); this.timer.unref(); } });
   }
@@ -542,7 +546,7 @@ export class TeamConnector implements LocalTeamHost {
     const running = (b: SharedBotBinding) => [...this.active.keys()].filter(key => { const scope = JSON.parse(key) as string[]; return scope[0] === b.teamId && scope[1] === b.sharedBotId; }).length;
     return { bots: bindings.map(b => ({ teamId: b.teamId, sharedBotId: b.sharedBotId, state: 'checking' as const, ...this.served.get(scopeKey(b)), running: running(b) })),
       ...(this.options.background?.() ?? { openAtLogin: { available: false, enabled: false, needsApproval: false }, keepAwake: false, onBattery: false }),
-      decisionConfigured: await this.options.decision?.isConfigured().catch(() => false) ?? false };
+      decisionConfigured: await this.options.decision?.isConfigured().catch(() => false) ?? false, isolationAvailable: this.isolated() };
   }
   async idle() { await this.refresh; }
   private async discover() {

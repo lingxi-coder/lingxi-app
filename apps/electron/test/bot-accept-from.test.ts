@@ -114,7 +114,7 @@ function setupUi(t: { after(fn: () => void): void }) {
   const f = botFixture(t);
   const service = new BotService({
     store: f.store,
-    platform: 'darwin',
+    sandbox: () => ({ available: true }),
     runtimes: { newSession: async (projectPath) => ({ projectPath, sessionId: '11111111-2222-4333-8444-555555555555' }), openSession: async () => ({}), closeProject: async () => undefined },
     catalogFor: () => ({ list: async () => ({ sessions: [] }), find: async () => undefined, workspaceSettings: async () => ({ environment: {}, configHome: '/unused' }), invalidate: () => undefined }),
   });

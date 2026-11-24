@@ -61,7 +61,7 @@ function fake(host = false) {
     ...(host ? {
       localBots: async () => [{ instanceId: 'instance001', name: 'Trip planner', description: 'Plans trips', model: 'anthropic/synthetic' }, { instanceId: 'instance002', name: 'Needs files', description: '', requiredResources: ['handbook'] }],
       publishLocalBot: async (input: any) => { state.published_inputs.push(input); if (state.publishFails) throw new ApiError(state.publishFails); return { sharedBotId: input.sharedBotId, revision: 1 }; },
-      hostStatus: async () => ({ bots: state.published.map(service => ({ teamId: service.serviceId, sharedBotId: service.sharedBotId, state: 'ready' as const, running: 0 })), openAtLogin: { available: false, enabled: false, needsApproval: false }, keepAwake: false, onBattery: false, decisionConfigured: false }),
+      hostStatus: async () => ({ bots: state.published.map(service => ({ teamId: service.serviceId, sharedBotId: service.sharedBotId, state: 'ready' as const, running: 0 })), openAtLogin: { available: false, enabled: false, needsApproval: false }, keepAwake: false, onBattery: false, decisionConfigured: false, isolationAvailable: true }),
     } : {}),
   };
   /** The publisher's Bot answers the oldest request that is under way. */

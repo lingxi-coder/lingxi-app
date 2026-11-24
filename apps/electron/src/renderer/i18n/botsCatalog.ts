@@ -163,6 +163,181 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "ja": "権限",
     "ko": "권한"
   },
+  "bots_tab_sandbox": {
+    "zh-Hans": "沙箱",
+    "zh-Hant": "沙箱",
+    "en": "Sandbox",
+    "ja": "サンドボックス",
+    "ko": "샌드박스"
+  },
+  "bots_sandbox_switch_title": {
+    "zh-Hans": "Shell 命令沙箱",
+    "zh-Hant": "Shell 指令沙箱",
+    "en": "Sandbox for shell commands",
+    "ja": "シェルコマンドのサンドボックス",
+    "ko": "셸 명령 샌드박스"
+  },
+  "bots_sandbox_switch_hint": {
+    "zh-Hans": "这个 Bot 在 shell 里运行的命令只能访问它自己的文件夹和你授予的文件夹，并且只能连接下面列出的主机。无论是否开启，Bot 的文件工具都只限于这些文件夹。",
+    "zh-Hant": "這個 Bot 在 shell 中執行的指令只能存取它自己的資料夾和你授權的資料夾，而且只能連線到下方列出的主機。不論是否開啟，Bot 的檔案工具都只限於這些資料夾。",
+    "en": "The commands this Bot runs in a shell can only reach its own folders and the ones you gave it, and only the hosts below. The Bot's file tools stay limited to those folders either way.",
+    "ja": "この Bot がシェルで実行するコマンドは、Bot 自身のフォルダと許可したフォルダにしかアクセスできず、下に挙げたホストにしか接続できません。オンでもオフでも、Bot のファイルツールはそれらのフォルダに限られます。",
+    "ko": "이 Bot이 셸에서 실행하는 명령은 Bot 자신의 폴더와 허용한 폴더에만 접근할 수 있고, 아래 호스트에만 연결할 수 있습니다. 켜든 끄든 Bot의 파일 도구는 해당 폴더로 제한됩니다."
+  },
+  "bots_sandbox_why_no_sandbox_exec": {
+    "zh-Hans": "这台 Mac 上没有 sandbox-exec，沙箱需要它。",
+    "zh-Hant": "這台 Mac 上沒有 sandbox-exec，沙箱需要它。",
+    "en": "This Mac has no sandbox-exec, which the sandbox needs.",
+    "ja": "この Mac には、サンドボックスに必要な sandbox-exec がありません。",
+    "ko": "이 Mac에는 샌드박스에 필요한 sandbox-exec이 없습니다."
+  },
+  "bots_sandbox_why_no_bwrap": {
+    "zh-Hans": "这台电脑上没有安装 bubblewrap（bwrap）。请用系统的包管理器安装后再开启沙箱。",
+    "zh-Hant": "這台電腦上沒有安裝 bubblewrap（bwrap）。請用系統的套件管理工具安裝後再開啟沙箱。",
+    "en": "bubblewrap (bwrap) is not installed on this computer. Install it with your package manager to turn the sandbox on.",
+    "ja": "このコンピュータには bubblewrap（bwrap）がインストールされていません。パッケージマネージャでインストールすると、サンドボックスをオンにできます。",
+    "ko": "이 컴퓨터에 bubblewrap(bwrap)이 설치되어 있지 않습니다. 패키지 관리자로 설치하면 샌드박스를 켤 수 있습니다."
+  },
+  "bots_sandbox_why_wsl1": {
+    "zh-Hans": "这台电脑运行的是 WSL 1，无法使用沙箱。WSL 2 可以。",
+    "zh-Hant": "這台電腦執行的是 WSL 1，無法使用沙箱。WSL 2 可以。",
+    "en": "This computer runs WSL 1, which cannot run the sandbox. WSL 2 can.",
+    "ja": "このコンピュータは WSL 1 で動作しており、サンドボックスを実行できません。WSL 2 なら実行できます。",
+    "ko": "이 컴퓨터는 WSL 1에서 실행 중이라 샌드박스를 사용할 수 없습니다. WSL 2에서는 가능합니다."
+  },
+  "bots_sandbox_why_platform": {
+    "zh-Hans": "这个操作系统不支持沙箱。",
+    "zh-Hant": "這個作業系統不支援沙箱。",
+    "en": "This operating system does not support the sandbox.",
+    "ja": "このオペレーティングシステムはサンドボックスに対応していません。",
+    "ko": "이 운영 체제는 샌드박스를 지원하지 않습니다."
+  },
+  "bots_sandbox_unavailable": {
+    "zh-Hans": "这台设备无法隔离这个 Bot。",
+    "zh-Hant": "這台裝置無法隔離這個 Bot。",
+    "en": "This device can't isolate this Bot.",
+    "ja": "このデバイスではこの Bot を隔離できません。",
+    "ko": "이 기기에서는 이 Bot을 격리할 수 없습니다."
+  },
+  "bots_sandbox_unavailable_hint": {
+    "zh-Hans": "这个 Bot 开着沙箱，但这台设备无法提供沙箱，所以它的对话无法启动。关闭沙箱后才能在这里使用它。",
+    "zh-Hant": "這個 Bot 開著沙箱，但這台裝置無法提供沙箱，所以它的對話無法啟動。關閉沙箱後才能在這裡使用它。",
+    "en": "The sandbox is on for this Bot, and this device cannot provide one, so its chats cannot start. Turn the sandbox off to use the Bot here.",
+    "ja": "この Bot はサンドボックスがオンですが、このデバイスにはサンドボックスがないため、チャットを開始できません。ここで使うにはサンドボックスをオフにしてください。",
+    "ko": "이 Bot은 샌드박스가 켜져 있지만 이 기기에는 샌드박스를 제공할 수 없어 채팅을 시작할 수 없습니다. 여기서 사용하려면 샌드박스를 끄세요."
+  },
+  "bots_sandbox_open_settings": {
+    "zh-Hans": "沙箱设置",
+    "zh-Hant": "沙箱設定",
+    "en": "Sandbox settings",
+    "ja": "サンドボックスの設定",
+    "ko": "샌드박스 설정"
+  },
+  "bots_sandbox_off_title": {
+    "zh-Hans": "关闭沙箱？",
+    "zh-Hant": "關閉沙箱？",
+    "en": "Turn off the sandbox?",
+    "ja": "サンドボックスをオフにしますか？",
+    "ko": "샌드박스를 끌까요?"
+  },
+  "bots_sandbox_off_body": {
+    "zh-Hans": "关闭后，这个 Bot 在 shell 里运行的命令不再被限制在它的文件夹内：它们可以读取和修改你在这台电脑上能访问的一切。只有 Bot 的文件工具仍限于它的文件夹。只对你信任的 Bot 这样做。",
+    "zh-Hant": "關閉後，這個 Bot 在 shell 中執行的指令將不再被限制在它的資料夾內：它們可以讀取並修改你在這台電腦上能存取的一切。只有 Bot 的檔案工具仍限於它的資料夾。請只對你信任的 Bot 這麼做。",
+    "en": "Without the sandbox, the shell commands this Bot runs are no longer confined to its folders: they can read and change anything you can on this computer. Only the Bot's file tools stay limited to its folders. Do this only for a Bot you trust.",
+    "ja": "サンドボックスをオフにすると、この Bot がシェルで実行するコマンドは Bot のフォルダに閉じ込められなくなり、このコンピュータであなたが読み書きできるものすべてを読み書きできます。Bot のファイルツールだけが引き続きフォルダに限られます。信頼できる Bot にのみ行ってください。",
+    "ko": "샌드박스를 끄면 이 Bot이 셸에서 실행하는 명령이 더 이상 Bot의 폴더로 제한되지 않아, 이 컴퓨터에서 내가 읽고 바꿀 수 있는 모든 것을 읽고 바꿀 수 있습니다. Bot의 파일 도구만 계속 폴더로 제한됩니다. 신뢰하는 Bot에만 이렇게 하세요."
+  },
+  "bots_sandbox_off_confirm": {
+    "zh-Hans": "关闭沙箱",
+    "zh-Hant": "關閉沙箱",
+    "en": "Turn off sandbox",
+    "ja": "サンドボックスをオフにする",
+    "ko": "샌드박스 끄기"
+  },
+  "bots_sandbox_hosts_title": {
+    "zh-Hans": "命令可以连接的主机",
+    "zh-Hant": "指令可以連線的主機",
+    "en": "Hosts the commands may reach",
+    "ja": "コマンドが接続できるホスト",
+    "ko": "명령이 연결할 수 있는 호스트"
+  },
+  "bots_sandbox_hosts_hint": {
+    "zh-Hans": "沙箱里的命令可以直接连接这些主机；连接其他主机前会先请你批准。用 *.example.com 表示 example.com 下的所有名称。",
+    "zh-Hant": "沙箱中的指令可以直接連線到這些主機；連線到其他主機前會先請你核准。用 *.example.com 代表 example.com 底下的所有名稱。",
+    "en": "Commands in the sandbox reach these hosts without asking. Any other host needs your approval first. Use *.example.com for every name below example.com.",
+    "ja": "サンドボックス内のコマンドは、これらのホストには確認なしで接続できます。ほかのホストに接続する前には、あなたの承認が必要です。*.example.com は example.com 以下のすべての名前を表します。",
+    "ko": "샌드박스 안의 명령은 이 호스트에 바로 연결할 수 있습니다. 다른 호스트에 연결하려면 먼저 내 승인이 필요합니다. *.example.com은 example.com 아래의 모든 이름을 뜻합니다."
+  },
+  "bots_sandbox_hosts_empty": {
+    "zh-Hans": "没有主机：沙箱里的命令每次联网前都会先请你批准。",
+    "zh-Hant": "沒有主機：沙箱中的指令每次連線前都會先請你核准。",
+    "en": "No hosts: every connection a command in the sandbox makes needs your approval first.",
+    "ja": "ホストがありません。サンドボックス内のコマンドが接続するたびに、先にあなたの承認が必要です。",
+    "ko": "호스트가 없습니다. 샌드박스 안의 명령이 연결할 때마다 먼저 내 승인이 필요합니다."
+  },
+  "bots_sandbox_host_label": {
+    "zh-Hans": "要允许的主机",
+    "zh-Hant": "要允許的主機",
+    "en": "Host to allow",
+    "ja": "許可するホスト",
+    "ko": "허용할 호스트"
+  },
+  "bots_sandbox_host_placeholder": {
+    "zh-Hans": "example.com 或 *.example.com",
+    "zh-Hant": "example.com 或 *.example.com",
+    "en": "example.com or *.example.com",
+    "ja": "example.com または *.example.com",
+    "ko": "example.com 또는 *.example.com"
+  },
+  "bots_sandbox_host_add": {
+    "zh-Hans": "添加",
+    "zh-Hant": "新增",
+    "en": "Add",
+    "ja": "追加",
+    "ko": "추가"
+  },
+  "bots_sandbox_host_remove": {
+    "zh-Hans": "移除 %1$s",
+    "zh-Hant": "移除 %1$s",
+    "en": "Remove %1$s",
+    "ja": "%1$s を削除",
+    "ko": "%1$s 제거"
+  },
+  "bots_sandbox_host_invalid": {
+    "zh-Hans": "这不是主机名。请使用 example.com 或 *.example.com 这样的名称，不要带 https:// 或路径。",
+    "zh-Hant": "這不是主機名稱。請使用 example.com 或 *.example.com 這樣的名稱，不要加 https:// 或路徑。",
+    "en": "That is not a host name. Use a name such as example.com or *.example.com, without https:// or a path.",
+    "ja": "ホスト名ではありません。https:// やパスを付けず、example.com や *.example.com のような名前を入力してください。",
+    "ko": "호스트 이름이 아닙니다. https://나 경로 없이 example.com 또는 *.example.com 같은 이름을 사용하세요."
+  },
+  "bots_sandbox_host_duplicate": {
+    "zh-Hans": "这个主机已在列表中。",
+    "zh-Hant": "這個主機已在清單中。",
+    "en": "That host is already in the list.",
+    "ja": "このホストはすでにリストにあります。",
+    "ko": "이미 목록에 있는 호스트입니다."
+  },
+  "bots_sandbox_host_too_many": {
+    "zh-Hans": "最多只能允许 64 个主机。",
+    "zh-Hant": "最多只能允許 64 個主機。",
+    "en": "At most 64 hosts can be allowed.",
+    "ja": "許可できるホストは最大 64 個です。",
+    "ko": "허용할 수 있는 호스트는 최대 64개입니다."
+  },
+  "bots_sandbox_ack": {
+    "zh-Hans": "我明白，在这台电脑上，这个 Bot 的 shell 命令不会被限制在它的文件夹内。",
+    "zh-Hant": "我了解，在這台電腦上，這個 Bot 的 shell 指令不會被限制在它的資料夾內。",
+    "en": "I understand that on this computer this Bot's shell commands will not be confined to its folders.",
+    "ja": "このコンピュータでは、この Bot のシェルコマンドが Bot のフォルダに閉じ込められなくなることを理解しました。",
+    "ko": "이 컴퓨터에서는 이 Bot의 셸 명령이 Bot의 폴더로 제한되지 않는다는 점을 이해합니다."
+  },
+  "bots_sandbox_ack_required": {
+    "zh-Hans": "请勾选确认，才能创建没有沙箱的 Bot。",
+    "zh-Hant": "請勾選確認，才能建立沒有沙箱的 Bot。",
+    "en": "Tick the box to create a Bot without the sandbox.",
+    "ja": "サンドボックスなしの Bot を作成するには、チェックボックスをオンにしてください。",
+    "ko": "샌드박스 없는 Bot을 만들려면 확인란을 선택하세요."
+  },
   "bots_sections_label": {
     "zh-Hans": "Bot 设置",
     "zh-Hant": "Bot 設定",

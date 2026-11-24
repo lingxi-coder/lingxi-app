@@ -3720,7 +3720,7 @@
   "tw_error_model_config": "目前的模型設定無法用於團隊 Bot，請檢查 Desktop 的提供商設定或選擇其他模型。",
   "tw_error_model_key": "此 Bot 的模型或 API 金鑰無法使用，請檢查 Desktop 的模型與提供商設定。",
   "tw_error_runtime": "此 Desktop 缺少團隊隔離執行環境，請安裝包含該環境的 Desktop 版本。",
-  "tw_error_macos": "目前共享團隊 Bot 需要 macOS 版 Desktop。",
+  "tw_error_isolation": "共享團隊 Bot 需要 macOS，或已安裝 bubblewrap（bwrap）的 Linux。",
   "tw_error_host": "Bot 宿主無法使用，請聯絡維護者重新連線 Desktop。",
   "tw_error_quota": "每日請求額度已用盡，請聯絡維護者檢查額度，或在 UTC 日期切換後再試。",
   "tw_error_doc_access": "你已無權存取此文件，請聯絡維護者檢查受眾。",

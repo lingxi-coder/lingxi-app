@@ -55,7 +55,7 @@ async function fixture(t: Parameters<typeof botFixture>[0]) {
   const stopped: string[] = [];
   const service = new BotService({
     store: f.store,
-    platform: 'darwin',
+    sandbox: () => ({ available: true }),
     teamRevoking: (botId) => stopped.push(botId),
     runtimes: {
       newSession: async () => {

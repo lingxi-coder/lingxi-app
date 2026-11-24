@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { BOT_CONFLICT_MESSAGE, type BotCreateRequest, type BotUi, type BotUpdateRequest } from '../src/shared/bots';
+import { BOT_ALLOWED_DOMAINS_MAX, BOT_CONFLICT_MESSAGE, BOT_SANDBOX_UNAVAILABLE_MESSAGE, allowedDomain, type BotCreateRequest, type BotUi, type BotUpdateRequest } from '../src/shared/bots';
 import {
   botChanges,
   botCreateRequest,
@@ -13,14 +13,16 @@ import {
   hasBotDraftProblems,
   ipcErrorMessage,
   isBotConflict,
+  isBotSandboxUnavailable,
   saveBot,
   sortBots,
+  withAllowedHost,
   withFolder,
   type BotDraft,
 } from '../src/renderer/bridge/botForm';
 
 function bot(overrides: Partial<BotUi> = {}): BotUi {
-  return { botId: 'b1', name: 'Scribe', description: 'Writes things down', createdAt: 1_000, updatedAt: 1_000, revision: 3, workspaces: [], ...overrides };
+  return { botId: 'b1', name: 'Scribe', description: 'Writes things down', createdAt: 1_000, updatedAt: 1_000, revision: 3, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, ...overrides };
 }
 
 /** The wrapper Electron puts around an error thrown by an IPC handler. */
@@ -78,7 +80,7 @@ test('a new Bot sends the displayed approval mode and the trimmed fields the own
   assert.deepEqual(botCreateRequest({ ...emptyBotDraft(), name: '  Scribe  ' }), { name: 'Scribe', permissionMode: 'default' });
   assert.deepEqual(botCreateRequest({
     name: 'Scribe', description: ' notes ', persona: '# Scribe\n', model: 'builtin/small', permissionMode: 'plan',
-    workspaces: [{ path: '/work/a', mode: 'write' }],
+    workspaces: [{ path: '/work/a', mode: 'write' }], acceptFrom: [], remote: false, sandbox: { enabled: true, allowedDomains: [] },
   }), { name: 'Scribe', description: 'notes', persona: '# Scribe\n', model: 'builtin/small', permissionMode: 'plan', workspaces: [{ path: '/work/a', mode: 'write' }] });
 });
 
@@ -150,6 +152,67 @@ test('the Remote Control switch is shown as the Bot has it, and only a change of
   const saved = await saveBot(api, off, '', { ...draftFromBot(off, ''), remote: true });
   assert.equal(saved.ok, true);
   assert.deepEqual(calls.update, [['b1', 3, { remote: true }]], 'with the revision it was read at, like every change');
+});
+
+test('the sandbox is shown as the Bot has it, and only a change of it is sent', async () => {
+  const on = bot({ sandbox: { enabled: true, allowedDomains: ['example.com'] } });
+  const off = bot({ sandbox: { enabled: false, allowedDomains: [] } });
+  assert.deepEqual(draftFromBot(on, '').sandbox, { enabled: true, allowedDomains: ['example.com'] });
+  assert.deepEqual(draftFromBot(off, '').sandbox, { enabled: false, allowedDomains: [] });
+  assert.notEqual(draftFromBot(on, '').sandbox.allowedDomains, on.sandbox.allowedDomains, 'the draft holds its own list');
+  assert.deepEqual(botChanges(on, '', draftFromBot(on, '')), { patch: {}, personaChanged: false });
+  assert.deepEqual(botChanges(off, '', draftFromBot(off, '')), { patch: {}, personaChanged: false });
+  assert.deepEqual(botChanges(on, '', { ...draftFromBot(on, ''), sandbox: { enabled: false, allowedDomains: ['example.com'] } }).patch, { sandbox: { enabled: false, allowedDomains: ['example.com'] } }, 'off is sent with the hosts it keeps');
+  assert.deepEqual(botChanges(off, '', { ...draftFromBot(off, ''), sandbox: { enabled: true, allowedDomains: [] } }).patch, { sandbox: { enabled: true, allowedDomains: [] } });
+  assert.deepEqual(botChanges(on, '', { ...draftFromBot(on, ''), sandbox: { enabled: true, allowedDomains: ['example.com', '*.example.org'] } }).patch, { sandbox: { enabled: true, allowedDomains: ['example.com', '*.example.org'] } });
+  assert.deepEqual(botChanges(on, '', { ...draftFromBot(on, ''), sandbox: { enabled: true, allowedDomains: [] } }).patch, { sandbox: { enabled: true, allowedDomains: [] } }, 'an emptied list is sent as empty');
+  assert.deepEqual(botChanges(on, '', { ...draftFromBot(on, ''), name: 'Renamed' }).patch, { name: 'Renamed' }, 'a sandbox that stays as it is is not sent again');
+  const { api, calls } = fakeApi();
+  const saved = await saveBot(api, on, '', { ...draftFromBot(on, ''), sandbox: { enabled: false, allowedDomains: [] } });
+  assert.equal(saved.ok, true);
+  assert.deepEqual(calls.update, [['b1', 3, { sandbox: { enabled: false, allowedDomains: [] } }]], 'with the revision it was read at, like every change');
+});
+
+test('a new Bot is made with the sandbox on and no host, and the request carries the sandbox only when the owner changed it', () => {
+  assert.deepEqual(emptyBotDraft().sandbox, { enabled: true, allowedDomains: [] });
+  assert.ok(!('sandbox' in botCreateRequest({ ...emptyBotDraft(), name: 'Scribe' })), 'the default is the main process\'s to give');
+  assert.deepEqual(botCreateRequest({ ...emptyBotDraft(), name: 'Scribe', sandbox: { enabled: false, allowedDomains: [] } }).sandbox, { enabled: false, allowedDomains: [] });
+  assert.deepEqual(botCreateRequest({ ...emptyBotDraft(), name: 'Scribe', sandbox: { enabled: true, allowedDomains: ['example.com'] } }).sandbox, { enabled: true, allowedDomains: ['example.com'] });
+  const draft = { ...emptyBotDraft(), name: 'Scribe', sandbox: { enabled: true, allowedDomains: ['example.com'] } };
+  assert.notEqual(botCreateRequest(draft).sandbox!.allowedDomains, draft.sandbox.allowedDomains, 'the request holds its own list');
+});
+
+test('a host is added the way the main process keeps it, once, and no more than it may hold', () => {
+  assert.deepEqual(withAllowedHost([], 'example.com'), { ok: true, domains: ['example.com'] });
+  assert.deepEqual(withAllowedHost(['example.com'], '  *.Example.ORG '), { ok: true, domains: ['example.com', '*.example.org'] }, 'trimmed and in lower case, after the ones there are');
+  const before = ['example.com'];
+  withAllowedHost(before, 'example.org');
+  assert.deepEqual(before, ['example.com'], 'the list it was given is left as it was');
+  assert.deepEqual(withAllowedHost(['example.com'], 'EXAMPLE.com'), { ok: false, problem: 'duplicate' });
+  for (const text of ['', '   ', 'https://example.com', 'example.com/path', 'example.com:8080', 'exa mple.com', '*', '*.', '*example.com', 'a..b', '-a.com', 'a-.com', '*.*.com', 'user@example.com', 'x'.repeat(64) + '.com', `${'a.'.repeat(130)}com`]) {
+    assert.deepEqual(withAllowedHost([], text), { ok: false, problem: 'invalid' }, JSON.stringify(text));
+  }
+  const full = Array.from({ length: BOT_ALLOWED_DOMAINS_MAX }, (_, index) => `host${index}.example.com`);
+  assert.deepEqual(withAllowedHost(full.slice(1), 'last.example.com').ok, true, 'room for one more');
+  assert.deepEqual(withAllowedHost(full, 'last.example.com'), { ok: false, problem: 'too_many' });
+  assert.deepEqual(withAllowedHost(full, 'host3.example.com'), { ok: false, problem: 'duplicate' }, 'a host that is there is reported as that, not as the list being full');
+  // What the main process would keep is what this keeps.
+  assert.equal(allowedDomain('  Example.COM '), 'example.com');
+  assert.equal(allowedDomain('*.example.com'), '*.example.com');
+  assert.equal(allowedDomain('localhost'), 'localhost');
+});
+
+test('more hosts than the main process allows is a problem of the form before anything is sent', () => {
+  const draft = (count: number): BotDraft => ({ ...emptyBotDraft(), name: 'Scribe', sandbox: { enabled: true, allowedDomains: Array.from({ length: count }, (_, index) => `host${index}.example.com`) } });
+  assert.deepEqual(botDraftProblems(draft(BOT_ALLOWED_DOMAINS_MAX)), {});
+  assert.deepEqual(botDraftProblems(draft(BOT_ALLOWED_DOMAINS_MAX + 1)), { sandbox: 'sandbox_too_many' });
+});
+
+test('a Bot refused for want of a sandbox is known by the words of the refusal, however they arrive', () => {
+  assert.equal(isBotSandboxUnavailable(new Error(BOT_SANDBOX_UNAVAILABLE_MESSAGE)), true);
+  assert.equal(isBotSandboxUnavailable(overIpc('lingxi:bots:sessions:open', BOT_SANDBOX_UNAVAILABLE_MESSAGE)), true);
+  assert.equal(isBotSandboxUnavailable(overIpc('lingxi:bots:sessions:open', 'The Bot\'s folder is missing.')), false);
+  assert.equal(isBotSandboxUnavailable(undefined), false);
 });
 
 test('saving writes the record, then the persona, and does nothing when nothing changed', async () => {

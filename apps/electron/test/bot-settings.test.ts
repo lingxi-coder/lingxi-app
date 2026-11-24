@@ -24,6 +24,9 @@ function settingsOf(f: Fixture, bot: BotRecord): any {
   return JSON.parse(readFileSync(settingsPath(f, bot), 'utf8'));
 }
 
+/** What the settings of a Bot with nothing to say hold: the sandbox on, and every list empty. */
+const NO_LISTS = { sandbox: true, additionalDirectories: [] as string[], allow: [] as string[], deny: [] as string[], denyRead: [] as string[], allowedDomains: [] as string[] };
+
 const read = (path: string) => pathRule('Read', path);
 const edit = (path: string, directory = true) => pathRule('Edit', path, directory);
 
@@ -125,11 +128,11 @@ test('the memory folder is the same whichever folder a session works in, and is 
   writeBotSettings(f.store, bot);
   assert.equal(settingsOf(f, bot).autoMemoryDirectory, memory);
   assert.equal(JSON.parse(readFileSync(join(f.store.homeDir(bot.bot_id), MANAGED_FILE), 'utf8')).autoMemoryDirectory, memory);
-  const merged = applyManagedSettings({ autoMemoryDirectory: memory, theme: 'x' }, { autoMemoryDirectory: memory, additionalDirectories: [], allow: [], deny: [], denyRead: [] },
-    { additionalDirectories: [], allow: [], deny: [], denyRead: [] });
+  const merged = applyManagedSettings({ autoMemoryDirectory: memory, theme: 'x' }, { autoMemoryDirectory: memory, ...NO_LISTS },
+    { ...NO_LISTS });
   assert.ok(!('autoMemoryDirectory' in merged), 'a value LingXi wrote and no longer writes goes');
-  const kept = applyManagedSettings({ autoMemoryDirectory: '/mine' }, { autoMemoryDirectory: memory, additionalDirectories: [], allow: [], deny: [], denyRead: [] },
-    { additionalDirectories: [], allow: [], deny: [], denyRead: [] });
+  const kept = applyManagedSettings({ autoMemoryDirectory: '/mine' }, { autoMemoryDirectory: memory, ...NO_LISTS },
+    { ...NO_LISTS });
   assert.equal(kept.autoMemoryDirectory, '/mine', 'and one somebody else wrote stays');
 });
 
@@ -277,6 +280,99 @@ test('the sandbox is switched on and required, whatever the file said', (t) => {
   assert.deepEqual(sandbox.excludedCommands, ['git']);
 });
 
+test('the sandbox lists the hosts the commands of the Bot may reach, and a host someone else allowed stays', (t) => {
+  const f = botFixture(t);
+  const bot = f.store.create({ name: 'Reaching', sandbox: { enabled: true, allowedDomains: ['example.com', '*.docs.example.com'] } });
+  writeFileSync(settingsPath(f, bot), JSON.stringify({ sandbox: { network: { allowLocalBinding: true, allowedDomains: ['mine.example.org'] } } }));
+  for (let round = 0; round < 3; round += 1) writeBotSettings(f.store, bot);
+  let network = settingsOf(f, bot).sandbox.network;
+  assert.deepEqual(network.allowedDomains, ['mine.example.org', 'example.com', '*.docs.example.com'], 'the foreign host first, ours once each');
+  assert.equal(network.allowLocalBinding, true);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.store.homeDir(bot.bot_id), MANAGED_FILE), 'utf8')).allowedDomains, ['example.com', '*.docs.example.com'], 'what was written is remembered');
+  // A host the owner takes out of the list goes; the one that was somebody else's does not.
+  const changed = f.store.update(bot.bot_id, 1, { sandbox: { enabled: true, allowedDomains: ['api.example.com'] } });
+  writeBotSettings(f.store, changed);
+  network = settingsOf(f, bot).sandbox.network;
+  assert.deepEqual(network.allowedDomains, ['mine.example.org', 'api.example.com']);
+  const none = f.store.update(bot.bot_id, 2, { sandbox: { enabled: true, allowedDomains: [] } });
+  writeBotSettings(f.store, none);
+  assert.deepEqual(settingsOf(f, bot).sandbox.network.allowedDomains, ['mine.example.org']);
+  // A Bot that allows no host does not make a list for it.
+  const bare = f.store.create({ name: 'Closed' });
+  writeBotSettings(f.store, bare);
+  assert.ok(!('network' in settingsOf(f, bare).sandbox));
+});
+
+test('a Bot whose sandbox is off has it off and not required, and every permission rule it had', (t) => {
+  const f = botFixture(t);
+  const on = makeBot(f, { name: 'Confined' });
+  const off = makeBot(f, { name: 'Free', sandbox: { enabled: false, allowedDomains: ['example.com'] } });
+  const sandbox = settingsOf(f, off).sandbox;
+  assert.deepEqual(sandbox, { enabled: false }, 'nothing else of the sandbox is written for a Bot that does not run in one');
+  assert.equal(JSON.parse(readFileSync(join(f.store.homeDir(off.bot_id), MANAGED_FILE), 'utf8')).sandbox, false);
+  // The rules that keep the Read and Edit tools out of the private places are the same with or without the sandbox.
+  const rules = (bot: BotRecord) => settingsOf(f, bot).permissions.deny.filter((rule: string) => rule.startsWith('Read(') || rule.startsWith('Edit('));
+  assert.ok(rules(off).includes(read(f.store.botDir(on.bot_id))), 'the sibling is walled off');
+  assert.ok(rules(off).includes(read(join(f.userData, 'bridge-runtime'))), 'and so is the rest of the app data');
+  assert.ok(rules(off).includes(edit(join(f.store.botDir(off.bot_id), 'bot.json'), false)), 'and its own record is out of its reach');
+  assert.ok(rules(off).includes(edit(join(f.userData, 'logs'))), 'the logs cannot be changed either');
+  writeBotSettings(f.store, on);
+  assert.ok(rules(on).includes(read(f.store.botDir(off.bot_id))), 'and the Bot with the sandbox on is kept out of this one in the same way');
+});
+
+test('the sandbox is off and not required whatever the file said, and what someone else put in it stays', (t) => {
+  const f = botFixture(t);
+  const bot = f.store.create({ name: 'Free', sandbox: { enabled: false, allowedDomains: [] } });
+  writeFileSync(settingsPath(f, bot), JSON.stringify({ sandbox: { enabled: true, failIfUnavailable: true, excludedCommands: ['git'], filesystem: { denyRead: ['/extra-secret'] } } }));
+  writeBotSettings(f.store, bot);
+  const sandbox = settingsOf(f, bot).sandbox;
+  assert.equal(sandbox.enabled, false);
+  assert.ok(!('failIfUnavailable' in sandbox));
+  assert.deepEqual(sandbox.excludedCommands, ['git']);
+  assert.deepEqual(sandbox.filesystem.denyRead, ['/extra-secret']);
+});
+
+test('switching the sandbox off takes out what it had put in and on puts it back, and nothing of anyone else\'s moves', (t) => {
+  const f = botFixture(t);
+  const bot = makeBot(f, { name: 'Switched', sandbox: { enabled: true, allowedDomains: ['example.com'] } });
+  const sibling = makeBot(f, { name: 'Sibling' });
+  writeFileSync(settingsPath(f, bot), JSON.stringify({ ...settingsOf(f, bot), sandbox: { ...settingsOf(f, bot).sandbox, filesystem: { denyRead: ['/extra-secret', ...settingsOf(f, bot).sandbox.filesystem.denyRead] } } }));
+  writeBotSettings(f.store, bot);
+  const confined = settingsOf(f, bot).sandbox;
+  assert.equal(confined.enabled, true);
+  assert.equal(confined.failIfUnavailable, true);
+  assert.ok(confined.filesystem.denyRead.includes(f.store.botDir(sibling.bot_id)));
+  const off = f.store.update(bot.bot_id, 1, { sandbox: { enabled: false, allowedDomains: ['example.com'] } });
+  writeBotSettings(f.store, off);
+  const loose = settingsOf(f, bot).sandbox;
+  assert.equal(loose.enabled, false);
+  assert.ok(!('failIfUnavailable' in loose));
+  assert.deepEqual(loose.filesystem.denyRead, ['/extra-secret'], 'only what the Bot had added is gone');
+  assert.deepEqual(loose.network.allowedDomains, [], 'and so are its hosts, which it keeps in its record for when the sandbox is on again');
+  const again = f.store.update(bot.bot_id, 2, { sandbox: { enabled: true, allowedDomains: ['example.com'] } });
+  writeBotSettings(f.store, again);
+  const back = settingsOf(f, bot).sandbox;
+  assert.deepEqual(back, confined, 'switching it back on gives the settings it had');
+});
+
+test('a list of what was written before the sandbox could be switched off is still read, as one written with it on', (t) => {
+  const f = botFixture(t);
+  const bot = makeBot(f, { name: 'Older' });
+  const managed = join(f.store.homeDir(bot.bot_id), MANAGED_FILE);
+  const current = JSON.parse(readFileSync(managed, 'utf8'));
+  const { sandbox: _sandbox, allowedDomains: _domains, ...older } = current;
+  writeFileSync(managed, JSON.stringify(older));
+  const off = f.store.update(bot.bot_id, 1, { sandbox: { enabled: false, allowedDomains: [] } });
+  writeBotSettings(f.store, off);
+  assert.equal(settingsOf(f, bot).sandbox.enabled, false);
+  assert.ok(!('failIfUnavailable' in settingsOf(f, bot).sandbox));
+  assert.ok(!('denyRead' in (settingsOf(f, bot).sandbox.filesystem ?? {})) || settingsOf(f, bot).sandbox.filesystem.denyRead.length === 0, 'what it had put in is taken out');
+  for (const bad of [{ ...current, sandbox: 'yes' }, { ...current, allowedDomains: [1] }, { ...current, allowedDomains: 'example.com' }]) {
+    writeFileSync(managed, JSON.stringify(bad));
+    assert.throws(() => writeBotSettings(f.store, off), new RegExp(`${MANAGED_FILE.replace('.', '\\.')} is unreadable`));
+  }
+});
+
 test('a file that is not what the engine needs is reported and left as it was', (t) => {
   const f = botFixture(t);
   const bot = makeBot(f, { name: 'Unreadable' });
@@ -342,7 +438,7 @@ test('a folder that has moved somewhere a Bot may not work is no longer granted 
 
 test('merging only ever touches the copy it was given', () => {
   const existing = Object.freeze({ permissions: Object.freeze({ deny: Object.freeze(['x']) }) }) as Record<string, unknown>;
-  const merged = applyManagedSettings(existing, undefined, { additionalDirectories: [], allow: [], deny: ['y'], denyRead: [] });
+  const merged = applyManagedSettings(existing, undefined, { ...NO_LISTS, deny: ['y'] });
   assert.deepEqual((merged['permissions'] as any).deny, ['x', 'y']);
   assert.deepEqual((existing['permissions'] as any).deny, ['x']);
 });
@@ -420,7 +516,7 @@ test('regenerating with a mode twice changes nothing, and the list of what was w
 
 test('a mode that is merged is only ever put into the copy it was given', () => {
   const existing = { permissions: { defaultMode: 'default', allow: [] } };
-  const managed = { defaultMode: 'plan' as const, additionalDirectories: [], allow: [], deny: [], denyRead: [] };
+  const managed = { defaultMode: 'plan' as const, ...NO_LISTS };
   const merged = applyManagedSettings(existing, undefined, managed) as any;
   assert.equal(merged.permissions.defaultMode, 'plan');
   assert.equal(existing.permissions.defaultMode, 'default');

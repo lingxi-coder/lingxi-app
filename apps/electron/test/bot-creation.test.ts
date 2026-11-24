@@ -114,7 +114,7 @@ test('only opted-in complete valid assistant fences render the Bot preview actio
 test('new Bot setup offers AI assistance and a manual path; a proposal opens an editable native form', () => {
   const props = {
     api: { create: async () => { throw new Error('rendering must not create'); } }, models: { references: [], details: [] },
-    pickFolder: async () => null, onCancel: () => {}, onCreated: () => {}, onAssist: async () => {},
+    pickFolder: async () => null, sandbox: { available: true }, onCancel: () => {}, onCreated: () => {}, onAssist: async () => {},
   };
   const intro = render(React.createElement(BotCreate, props));
   assert.match(intro, /Continue in chat/);

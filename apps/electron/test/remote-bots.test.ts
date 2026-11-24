@@ -144,7 +144,7 @@ function world(t: { after(fn: () => void): void }, options: { ordinary?: boolean
   };
   service = new BotService({
     store: f.store,
-    platform: 'darwin',
+    sandbox: () => ({ available: true }),
     runtimes,
     openProject: (sessionId) => fx.runtimes.get(sessionId)?.projectPath,
     changed: () => fx.policy.notifySessionsChanged(),

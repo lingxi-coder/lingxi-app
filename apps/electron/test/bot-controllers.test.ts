@@ -5,10 +5,10 @@ import { BOT_CONFLICT_MESSAGE, type BotMemoryEntryUi, type BotSkillUi, type BotU
 import { BotEditorController, botEditorDirty } from '../src/renderer/bridge/botEditor';
 import { BOT_MEMORY_MAX_BYTES, BotMemoryController, botMemoryProblem } from '../src/renderer/bridge/botMemory';
 import { BotSkillsController, importCandidates } from '../src/renderer/bridge/botSkills';
-import { BotsController } from '../src/renderer/bridge/botsStore';
+import { BotsController, sandboxOf } from '../src/renderer/bridge/botsStore';
 
 function bot(overrides: Partial<BotUi> = {}): BotUi {
-  return { botId: 'b1', name: 'Scribe', description: 'Writes things down', createdAt: 1_000, updatedAt: 1_000, revision: 1, workspaces: [], ...overrides };
+  return { botId: 'b1', name: 'Scribe', description: 'Writes things down', createdAt: 1_000, updatedAt: 1_000, revision: 1, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, ...overrides };
 }
 
 function ipc(message: string): Error {
@@ -19,6 +19,9 @@ function ipc(message: string): Error {
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 // ---- The list and whether Bots exist here at all ----
+
+/** What a host that can give Bots a sandbox answers. */
+const READY: BotsAvailability = { available: true, sandbox: { available: true } };
 
 function listApi(availability: BotsAvailability | Error, list: () => Promise<BotUi[]>) {
   const calls = { availability: 0, list: 0 };
@@ -36,11 +39,11 @@ test('a window whose host has no Bots API has no Bots to show', async () => {
 });
 
 test('where Bots cannot be used the list is never asked for, whether the host says so or cannot say', async () => {
-  const refused = listApi({ available: false, reason: 'Bots are available on macOS only.' }, async () => [bot()]);
+  const refused = listApi({ available: false, reason: 'Bots are not available on this computer.' }, async () => [bot()]);
   const controller = new BotsController(refused.api);
   await controller.start();
   assert.equal(controller.getSnapshot().availability?.available, false);
-  assert.equal(controller.getSnapshot().availability?.reason, 'Bots are available on macOS only.');
+  assert.deepEqual(controller.getSnapshot().availability, { available: false, reason: 'Bots are not available on this computer.' });
   assert.equal(refused.calls.list, 0);
   await controller.reload();
   assert.equal(refused.calls.list, 0);
@@ -49,12 +52,21 @@ test('where Bots cannot be used the list is never asked for, whether the host sa
   const unsure = new BotsController(silent.api);
   await unsure.start();
   assert.equal(unsure.getSnapshot().availability?.available, false);
-  assert.equal(unsure.getSnapshot().availability?.reason, 'no handler registered');
+  assert.deepEqual(unsure.getSnapshot().availability, { available: false, reason: 'no handler registered' });
   assert.equal(silent.calls.list, 0);
 });
 
+test('what a computer can do for the sandbox is known only where Bots can be used', () => {
+  assert.deepEqual(sandboxOf(READY), { available: true });
+  const without: BotsAvailability = { available: true, sandbox: { available: false, reason: 'bots_sandbox_why_no_bwrap' } };
+  assert.deepEqual(sandboxOf(without), { available: false, reason: 'bots_sandbox_why_no_bwrap' });
+  assert.equal(sandboxOf({ available: false }), undefined);
+  assert.equal(sandboxOf({ available: false, reason: 'Bots are not available on this computer.' }), undefined);
+  assert.equal(sandboxOf(undefined), undefined, 'not known until the host has answered');
+});
+
 test('where Bots can be used the list is read, and Bots can be added, replaced and removed', async () => {
-  const { api, calls } = listApi({ available: true }, async () => [bot({ botId: 'a', name: 'Alpha' })]);
+  const { api, calls } = listApi(READY, async () => [bot({ botId: 'a', name: 'Alpha' })]);
   const controller = new BotsController(api);
   const seen: boolean[] = [];
   controller.subscribe(() => seen.push(controller.getSnapshot().loading));
@@ -73,7 +85,7 @@ test('where Bots can be used the list is read, and Bots can be added, replaced a
 
 test('a list that cannot be read is an error to show, and a later answer replaces it', async () => {
   let fail = true;
-  const { api } = listApi({ available: true }, async () => { if (fail) throw ipc('The Bots folder cannot be read.'); return [bot()]; });
+  const { api } = listApi(READY, async () => { if (fail) throw ipc('The Bots folder cannot be read.'); return [bot()]; });
   const controller = new BotsController(api);
   await controller.start();
   assert.equal(controller.getSnapshot().error, 'The Bots folder cannot be read.');
@@ -86,7 +98,7 @@ test('a list that cannot be read is an error to show, and a later answer replace
 
 test('an older answer never replaces a newer one', async () => {
   const resolvers: Array<(bots: BotUi[]) => void> = [];
-  const { api } = listApi({ available: true }, () => new Promise<BotUi[]>((resolve) => { resolvers.push(resolve); }));
+  const { api } = listApi(READY, () => new Promise<BotUi[]>((resolve) => { resolvers.push(resolve); }));
   const controller = new BotsController(api);
   void controller.start();
   await settle();

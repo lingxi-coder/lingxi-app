@@ -27,9 +27,13 @@
  *    is trusted; a trusted bound folder whose own project settings name another
  *    memory folder would take precedence over it, which is the owner's choice
  *    to make in their own folder.
- *  - `sandbox`: on, refusing to start without it, and the same private places
- *    unreadable to the commands of the Bash tool, which no permission rule
- *    reaches. The sandbox is off in the engine unless the settings turn it on.
+ *  - `sandbox`: on by default, refusing to start without it, with the same
+ *    private places unreadable to the commands of the Bash tool, which no
+ *    permission rule reaches, and the hosts those commands may reach (`allowedDomains`
+ *    of the Bot). The sandbox is off in the engine unless the settings turn it on.
+ *    A Bot whose owner switched the sandbox off gets `enabled: false` and none of
+ *    the rest: its commands are then confined by nothing but the permission rules,
+ *    which are all there in either case.
  *  - `model` and `permissions.defaultMode`, when the Bot has them. The Bot's
  *    mode is the one its sessions start in; the owner's own last choice never
  *    reaches a Bot.
@@ -58,10 +62,14 @@ export interface ManagedSettings {
   defaultMode?: PermissionModeId;
   /** Where the Bot's memory is, for a session in whichever folder. */
   autoMemoryDirectory?: string;
+  /** Whether the sandbox is on. When it is not, `denyRead` and `allowedDomains` are empty. */
+  sandbox: boolean;
   additionalDirectories: string[];
   allow: string[];
   deny: string[];
   denyRead: string[];
+  /** The hosts the commands of the sandbox may reach. */
+  allowedDomains: string[];
 }
 
 /** Escape what a gitignore-style pattern treats specially: `\ * ? [ ] { }`, and a space that ends the pattern. */
@@ -106,6 +114,7 @@ export function buildManagedSettings(store: BotStore, record: BotRecord, workspa
   const workspace = store.workspaceDir(botId);
   const isolated = isolatedPaths(store, botId);
   const memory = store.memoryDir(botId);
+  const sandboxed = record.sandbox.enabled;
   const deny = [
     ...isolated.flatMap((path) => [pathRule('Read', path), pathRule('Edit', path)]),
     ...workspaces.filter((bound) => bound.mode === 'read').map((bound) => pathRule('Edit', bound.path)),
@@ -122,10 +131,12 @@ export function buildManagedSettings(store: BotStore, record: BotRecord, workspa
     ...(record.model !== undefined ? { model: record.model } : {}),
     ...(record.permission_mode !== undefined ? { defaultMode: record.permission_mode } : {}),
     autoMemoryDirectory: memory,
+    sandbox: sandboxed,
     additionalDirectories: [workspace, ...workspaces.map((bound) => bound.path)],
     allow: [pathRule('Read', memory), pathRule('Edit', memory), ...routerToolRules()],
     deny,
-    denyRead: isolated,
+    denyRead: sandboxed ? isolated : [],
+    allowedDomains: sandboxed ? [...record.sandbox.allowedDomains] : [],
   };
 }
 
@@ -155,18 +166,22 @@ function writeIfChanged(path: string, text: string): void {
 function parseManaged(text: string, path: string): ManagedSettings {
   try {
     const input = plainObject(JSON.parse(text), 'managed settings');
-    if (input['v'] !== 1 || Object.keys(input).some((key) => !['v', 'model', 'defaultMode', 'autoMemoryDirectory', 'additionalDirectories', 'allow', 'deny', 'denyRead'].includes(key))) {
+    if (input['v'] !== 1 || Object.keys(input).some((key) => !['v', 'model', 'defaultMode', 'autoMemoryDirectory', 'sandbox', 'additionalDirectories', 'allow', 'deny', 'denyRead', 'allowedDomains'].includes(key))) {
       throw new Error('unsupported');
     }
     const lists = (['additionalDirectories', 'allow', 'deny', 'denyRead'] as const).map((key) => stringList(input[key], key));
+    const allowedDomains = stringList(input['allowedDomains'], 'allowedDomains');
     if (lists.some((list) => list === undefined) || (input['model'] !== undefined && typeof input['model'] !== 'string')
       || (input['autoMemoryDirectory'] !== undefined && typeof input['autoMemoryDirectory'] !== 'string')
+      || (input['sandbox'] !== undefined && typeof input['sandbox'] !== 'boolean')
       || (input['defaultMode'] !== undefined && !isPermissionModeId(input['defaultMode']))) throw new Error('invalid');
     return {
       ...(typeof input['model'] === 'string' ? { model: input['model'] } : {}),
       ...(isPermissionModeId(input['defaultMode']) ? { defaultMode: input['defaultMode'] } : {}),
       ...(typeof input['autoMemoryDirectory'] === 'string' ? { autoMemoryDirectory: input['autoMemoryDirectory'] } : {}),
-      additionalDirectories: lists[0]!, allow: lists[1]!, deny: lists[2]!, denyRead: lists[3]!,
+      // A file from before the sandbox could be switched off has neither: it was written with the sandbox on and no hosts.
+      sandbox: input['sandbox'] !== false,
+      additionalDirectories: lists[0]!, allow: lists[1]!, deny: lists[2]!, denyRead: lists[3]!, allowedDomains: allowedDomains ?? [],
     };
   } catch {
     // Guessing which entries are ours could leave a removed grant in place.
@@ -187,10 +202,12 @@ function union(left: ManagedSettings, right: ManagedSettings): ManagedSettings {
     ...(model !== undefined ? { model } : {}),
     ...(defaultMode !== undefined ? { defaultMode } : {}),
     ...(autoMemoryDirectory !== undefined ? { autoMemoryDirectory } : {}),
+    sandbox: right.sandbox,
     additionalDirectories: merge(left.additionalDirectories, right.additionalDirectories),
     allow: merge(left.allow, right.allow),
     deny: merge(left.deny, right.deny),
     denyRead: merge(left.denyRead, right.denyRead),
+    allowedDomains: merge(left.allowedDomains, right.allowedDomains),
   };
 }
 
@@ -212,6 +229,12 @@ function mergeList(parent: Record<string, unknown>, key: string, what: string, p
   if (merged.length > 0 || current !== undefined) parent[key] = merged;
 }
 
+/** The list at `sandbox[group][key]`, in a group that is not made only to be left without it. */
+function mergeSandboxList(sandbox: Record<string, unknown>, group: 'filesystem' | 'network', key: string, previous: readonly string[] | undefined, next: readonly string[]): void {
+  if (next.length === 0 && sandbox[group] === undefined) return;
+  mergeList(objectField(sandbox, group, `sandbox.${group}`), key, `sandbox.${group}.${key}`, previous, next);
+}
+
 export function applyManagedSettings(
   existing: Record<string, unknown>,
   previous: ManagedSettings | undefined,
@@ -228,10 +251,13 @@ export function applyManagedSettings(
   mergeList(permissions, 'additionalDirectories', 'permissions.additionalDirectories', previous?.additionalDirectories, next.additionalDirectories);
   mergeList(permissions, 'allow', 'permissions.allow', previous?.allow, next.allow);
   mergeList(permissions, 'deny', 'permissions.deny', previous?.deny, next.deny);
+  // Whether the sandbox is on is the Bot's to say, whatever the file said; refusing to start without it goes with it.
   const sandbox = objectField(settings, 'sandbox', 'sandbox');
-  sandbox['enabled'] = true;
-  sandbox['failIfUnavailable'] = true;
-  mergeList(objectField(sandbox, 'filesystem', 'sandbox.filesystem'), 'denyRead', 'sandbox.filesystem.denyRead', previous?.denyRead, next.denyRead);
+  sandbox['enabled'] = next.sandbox;
+  if (next.sandbox) sandbox['failIfUnavailable'] = true;
+  else delete sandbox['failIfUnavailable'];
+  mergeSandboxList(sandbox, 'filesystem', 'denyRead', previous?.denyRead, next.denyRead);
+  mergeSandboxList(sandbox, 'network', 'allowedDomains', previous?.allowedDomains, next.allowedDomains);
   return settings;
 }
 

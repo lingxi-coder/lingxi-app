@@ -95,8 +95,8 @@ test('a task is refused, with the reason, when the target is not one the sender 
   await refused(s.tasks.delegate(caller, delegation(s.bots['Bob']!)), 'unavailable', /Your Bot is no longer there/);
   s.deleting.clear();
   s.state.available = false;
-  await refused(s.tasks.delegate(caller, delegation(s.bots['Bob']!)), 'unavailable', /macOS only/);
-  assert.throws(() => s.tasks.listBots(caller), /macOS only/);
+  await refused(s.tasks.delegate(caller, delegation(s.bots['Bob']!)), 'unavailable', /not available on this computer/);
+  assert.throws(() => s.tasks.listBots(caller), /not available on this computer/);
   s.state.available = true;
   await refused(s.tasks.delegate({ botId: 'Bot0000000000000000999', sessionId: sessionId(1) }, delegation(s.bots['Bob']!)), 'unavailable', /no longer there/);
 

@@ -36,7 +36,7 @@ function render(element: React.ReactElement): string {
 }
 
 function bot(botId: string, overrides: Partial<BotUi> = {}): BotUi {
-  return { botId, name: botId, description: '', createdAt: NOW - 600 * MINUTES, updatedAt: NOW, revision: 1, workspaces: [], ...overrides };
+  return { botId, name: botId, description: '', createdAt: NOW - 600 * MINUTES, updatedAt: NOW, revision: 1, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, ...overrides };
 }
 
 function chat(uuid: string, minutesAgo: number, title = uuid): SessionRowDto {
@@ -44,7 +44,7 @@ function chat(uuid: string, minutesAgo: number, title = uuid): SessionRowDto {
 }
 
 function botsState(change: Partial<BotsState> = {}): BotsState {
-  return { availability: { available: true }, bots: [], loading: false, error: undefined, ...change };
+  return { availability: { available: true, sandbox: { available: true } }, bots: [], loading: false, error: undefined, ...change };
 }
 
 /** The chats of Bots, read the way the sidebar reads them. */

@@ -43,11 +43,11 @@ test('the View menu picks what the sidebar lists and shows or hides it, each ite
   assert.ok(view.findIndex(item => item.label === 'Teams') < view.findIndex(item => item.label === 'Show/Hide Sidebar'), 'the modes come before the sidebar toggle');
 });
 
-test('Bots are greyed out in the menu where they cannot run, not left out of it', () => {
-  for (const [platform, enabled] of [['darwin', true], ['win32', false], ['linux', false]] as const) {
+test('Bots are in the menu everywhere, and greyed out on Windows', () => {
+  for (const platform of ['darwin', 'win32', 'linux'] as const) {
     const bots = viewItems(applicationMenuTemplate(platform, () => {}, false)).find(item => item.label === 'Bots');
-    assert.ok(bots, `${platform} still lists Bots`);
-    assert.equal(bots.enabled, enabled, platform);
+    assert.ok(bots, `${platform} lists Bots`);
+    assert.equal(bots.enabled !== false, platform !== 'win32', platform);
   }
 });
 

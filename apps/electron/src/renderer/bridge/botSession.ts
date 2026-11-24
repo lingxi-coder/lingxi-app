@@ -5,7 +5,7 @@
  */
 
 import { tr } from '../i18n/locale';
-import { ipcErrorMessage } from './botForm';
+import { ipcErrorMessage, isBotSandboxUnavailable } from './botForm';
 import type { SessionRuntimeSummary } from './lingxi';
 import { formatRelativeSessionTime } from './sessionPresentation';
 
@@ -81,13 +81,19 @@ export function relativeActivity(epochMs: number, now = Date.now()): string {
   return Number.isFinite(at.getTime()) ? formatRelativeSessionTime(at.toISOString(), now) : '';
 }
 
-/** How something the owner asked of a Bot went: done, or why not, in words for the owner. */
-export type BotOutcome = { ok: true } | { ok: false; message: string };
+/**
+ * How something the owner asked of a Bot went: done, or why not, in words for the owner. `sandbox` is set when the Bot's
+ * sandbox is on and this device cannot give it one: the Bot's sandbox settings are the way out of that.
+ */
+export type BotOutcome = { ok: true } | { ok: false; message: string; sandbox?: true };
 
 /** Open a chat of a Bot. A chat that cannot start is reported where the owner is, not thrown at them. */
 export async function startBotChat(open: () => Promise<unknown>): Promise<BotOutcome> {
   try { await open(); return { ok: true }; }
-  catch (cause) { return { ok: false, message: tr('bots_chat_start_failed', ipcErrorMessage(cause)) }; }
+  catch (cause) {
+    if (isBotSandboxUnavailable(cause)) return { ok: false, message: tr('bots_sandbox_unavailable'), sandbox: true };
+    return { ok: false, message: tr('bots_chat_start_failed', ipcErrorMessage(cause)) };
+  }
 }
 
 export async function removeBot(remove: () => Promise<unknown>): Promise<BotOutcome> {

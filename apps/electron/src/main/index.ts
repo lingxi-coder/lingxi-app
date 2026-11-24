@@ -1054,7 +1054,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       const tasks = new BotTasks({
         store: botStore,
         runtimes: { withSession: (ref, empty, model, operation) => manager.withBackgroundSession(ref, empty, model, operation) },
-        available: () => bots?.availability().available === true,
+        available: () => bots !== null,
         isDeleting: (botId) => bots?.isDeleting(botId) === true,
         warn: botWarn,
         keepAwake,
@@ -1068,7 +1068,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       const workspaceRequests = new WorkspaceRequests({
         store: botStore,
         grant: (botId, input) => { if (bots === null) throw new Error('Bots are unavailable.'); return bots.grantWorkspace(botId, input); },
-        usable: (botId) => bots?.availability().available === true && bots.isDeleting(botId) === false,
+        usable: (botId) => bots !== null && bots.isDeleting(botId) === false,
         changed: (botIds) => {
           host?.sendToWindows(CH_BOTS_WORKSPACE_REQUESTS_CHANGED, { botIds: [...botIds] } satisfies BotWorkspaceRequestsChangedUi);
           // A phone that lists the Bots hears that one asked for a folder, or that the request was answered.
@@ -1139,7 +1139,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       permission: (input, signal) => localApps!.promptAgentPermission(input, signal),
       question: (input, signal) => localApps!.promptAgentQuestion(input, signal),
     });
-    if (teamBotStore && process.platform === 'darwin') {
+    // Where this computer cannot isolate a Bot (Windows, or Linux without bubblewrap) the connector serves nobody and says why when asked.
+    if (teamBotStore) {
       try {
         teamConnector = new TeamConnector({
           datasetTasks: () => datasetTasks,

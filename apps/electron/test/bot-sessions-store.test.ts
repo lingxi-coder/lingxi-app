@@ -12,7 +12,7 @@ function row(uuid: string, modifiedAt: number | string, title = uuid): SessionRo
 }
 
 function bot(botId: string, overrides: Partial<BotUi> = {}): BotUi {
-  return { botId, name: botId, description: '', createdAt: 1, updatedAt: 1, revision: 1, workspaces: [], ...overrides };
+  return { botId, name: botId, description: '', createdAt: 1, updatedAt: 1, revision: 1, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, ...overrides };
 }
 
 /** A host whose answers the test hands out: the next `listSessions` of a Bot it holds waits for `release`. */

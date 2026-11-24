@@ -669,9 +669,9 @@ export type TeamsKey =
   | 'tw_error_handover_closed'
   | 'tw_error_handover_mismatch'
   | 'tw_error_host'
+  | 'tw_error_isolation'
   | 'tw_error_list_changed'
   | 'tw_error_list_model'
-  | 'tw_error_macos'
   | 'tw_error_membership_ended'
   | 'tw_error_model_config'
   | 'tw_error_model_key'
@@ -1552,9 +1552,9 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_error_handover_closed: { en: 'This handover is no longer open. Refresh to see who maintains the Bot.', 'zh-Hans': '此次移交已结束。请刷新以查看 Bot 当前的维护者。', 'zh-Hant': '此次移交已結束。請重新整理以查看 Bot 目前的維護者。', ja: 'この引き継ぎはすでに終了しています。更新して、Bot の現在のメンテナーを確認してください。', ko: '이 인계는 이미 종료되었습니다. 새로 고쳐 Bot의 현재 메인테이너를 확인하세요.' },
   tw_error_handover_mismatch: { en: 'The Bot’s role and files did not arrive as they were offered, so nothing was taken over. Ask its maintainer to offer it again.', 'zh-Hans': '收到的角色和资料与邀请时不一致，因此未接手。请让维护者重新发出邀请。', 'zh-Hant': '收到的角色和資料與邀請時不一致，因此未接手。請讓維護者重新發出邀請。', ja: '受け取ったロールとファイルが申し出の内容と一致しなかったため、引き継ぎは行われませんでした。メンテナーにもう一度申し出てもらってください。', ko: '받은 역할과 파일이 제안한 내용과 달라 인계되지 않았습니다. 메인테이너에게 다시 제안해 달라고 요청하세요.' },
   tw_error_host: { en: 'The Bot’s host is unavailable. Ask its maintainer to reconnect Desktop.', 'zh-Hans': 'Bot 宿主不可用，请联系维护者重新连接 Desktop。', 'zh-Hant': 'Bot 宿主無法使用，請聯絡維護者重新連線 Desktop。', ja: 'この Bot のホストを利用できません。メンテナーに Desktop を再接続してもらってください。', ko: 'Bot 호스트를 사용할 수 없습니다. 메인테이너에게 Desktop을 다시 연결해 달라고 요청하세요.' },
+  tw_error_isolation: { en: 'Sharing a Team Bot needs macOS, or Linux with bubblewrap (bwrap) installed.', 'zh-Hans': '共享团队 Bot 需要 macOS，或已安装 bubblewrap（bwrap）的 Linux。', 'zh-Hant': '共享團隊 Bot 需要 macOS，或已安裝 bubblewrap（bwrap）的 Linux。', ja: 'チーム Bot の共有には、macOS、または bubblewrap（bwrap）をインストールした Linux が必要です。', ko: '팀 Bot을 공유하려면 macOS 또는 bubblewrap(bwrap)이 설치된 Linux가 필요합니다.' },
   tw_error_list_changed: { en: 'The list was changed in the meantime. Refresh it and try again.', 'zh-Hans': '清单在此期间已被修改，请刷新后重试。', 'zh-Hant': '清單在此期間已被修改，請重新整理後再試。', ja: 'その間にリストが変更されました。更新してもう一度お試しください。', ko: '그 사이에 목록이 변경되었습니다. 새로 고친 뒤 다시 시도하세요.' },
   tw_error_list_model: { en: 'This Bot’s model cannot keep a shared list. Choose another model for the Bot, or publish it without the list.', 'zh-Hans': '此 Bot 使用的模型不支持共享清单。请为 Bot 更换模型，或不带清单发布。', 'zh-Hant': '此 Bot 使用的模型不支援共享清單。請為 Bot 更換模型，或不帶清單發布。', ja: 'この Bot のモデルは共有リストを扱えません。Bot のモデルを変更するか、リストなしで公開してください。', ko: '이 Bot의 모델은 공유 목록을 지원하지 않습니다. Bot의 모델을 바꾸거나 목록 없이 게시하세요.' },
-  tw_error_macos: { en: 'Sharing a Team Bot currently requires macOS Desktop.', 'zh-Hans': '共享团队 Bot 当前需要 macOS Desktop。', 'zh-Hant': '目前共享團隊 Bot 需要 macOS 版 Desktop。', ja: 'チーム Bot の共有には、現在 macOS 版の Desktop が必要です。', ko: '팀 Bot을 공유하려면 현재 macOS용 Desktop이 필요합니다.' },
   tw_error_membership_ended: { en: 'Your membership has ended. Refresh or join with a new invite.', 'zh-Hans': '你已不在此团队，请刷新或通过新邀请加入。', 'zh-Hant': '你已不在此團隊，請重新整理或透過新的邀請加入。', ja: 'メンバーシップが終了しました。更新するか、新しい招待で参加してください。', ko: '멤버십이 종료되었습니다. 새로 고치거나 새 초대로 참가하세요.' },
   tw_error_model_config: { en: 'This model configuration cannot be used for Team Bots. Check the provider settings on Desktop or choose another model.', 'zh-Hans': '当前模型配置不能用于团队 Bot，请检查 Desktop 的供应商配置或选择其他模型。', 'zh-Hant': '目前的模型設定無法用於團隊 Bot，請檢查 Desktop 的提供商設定或選擇其他模型。', ja: 'このモデル構成はチーム Bot では使えません。Desktop のプロバイダー設定を確認するか、別のモデルを選んでください。', ko: '이 모델 구성은 팀 Bot에 사용할 수 없습니다. Desktop의 제공업체 설정을 확인하거나 다른 모델을 선택하세요.' },
   tw_error_model_key: { en: 'This Bot’s model or API key is unavailable. Check its model and provider settings on Desktop.', 'zh-Hans': '此 Bot 的模型或 API 密钥不可用，请检查 Desktop 的模型与供应商设置。', 'zh-Hant': '此 Bot 的模型或 API 金鑰無法使用，請檢查 Desktop 的模型與提供商設定。', ja: 'この Bot のモデルまたは API キーを利用できません。Desktop でモデルとプロバイダーの設定を確認してください。', ko: '이 Bot의 모델 또는 API 키를 사용할 수 없습니다. Desktop에서 모델과 제공업체 설정을 확인하세요.' },

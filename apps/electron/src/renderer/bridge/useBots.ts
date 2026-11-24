@@ -8,8 +8,11 @@ import type { BotCreationProposal } from './botCreation';
 export type BotsView =
   | { kind: 'list' }
   | { kind: 'create'; proposal?: BotCreationProposal; requestId?: number }
-  /** `deleteRequest` counts the times the sidebar has asked for the Bot to be deleted: the page asks whether to, each time. */
-  | { kind: 'detail'; botId: string; deleteRequest?: number };
+  /**
+   * `deleteRequest` counts the times the sidebar has asked for the Bot to be deleted: the page asks whether to, each time.
+   * `sandboxRequest` counts the times a chat that could not start for want of a sandbox has asked for the Bot's sandbox settings.
+   */
+  | { kind: 'detail'; botId: string; deleteRequest?: number; sandboxRequest?: number };
 
 export interface UseBots {
   controller: BotsController;

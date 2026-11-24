@@ -2,7 +2,7 @@
  * One Bot open for editing: the record and persona as last read, the draft the
  * owner is changing, and where saving stands. The draft covers the parts of a
  * Bot that are saved together (name, description, model, persona, permission
- * mode, folders); memory and skills act at once and have their own controllers.
+ * mode, folders, sandbox); memory and skills act at once and have their own controllers.
  */
 
 import type { BotUi, BotsApi } from '../../shared/bots';

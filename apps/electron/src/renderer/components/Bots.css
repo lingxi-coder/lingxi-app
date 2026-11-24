@@ -106,6 +106,12 @@
 .bots-accept-description { overflow-wrap: anywhere; }
 .bots-hint-list { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0 0 0 18px; }
 
+.bots-sandbox-why { color: var(--bots-warn); }
+.bots-sandbox-add { display: flex; gap: 8px; align-items: center; }
+.bots-sandbox-add input { flex: 1 1 auto; }
+.bots-sandbox-ack { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; line-height: 1.5; cursor: pointer; }
+.bots-page .bots-sandbox-ack input[type='checkbox'] { width: auto; margin-top: 3px; }
+
 .bots-panel { display: flex; flex-direction: column; gap: 14px; }
 .bots-rows { display: flex; flex-direction: column; gap: 8px; padding: 0; margin: 0; list-style: none; }
 .bots-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 14px; border: 1px solid var(--bots-line); border-radius: 10px; background: var(--bots-surface); }

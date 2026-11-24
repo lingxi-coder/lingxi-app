@@ -1,7 +1,6 @@
 import type { MenuItemConstructorOptions } from 'electron';
 import type { ApplicationMenuAction } from '../shared/applicationMenu.js';
 import { nativeTr } from '../shared/nativeLocale.js';
-import { botsAvailability } from './bots/service.js';
 
 export function applicationMenuTemplate(
   platform: NodeJS.Platform,
@@ -23,9 +22,9 @@ export function applicationMenuTemplate(
       { label: nativeTr('native_open_link'), click: () => dispatch('open-link') },
     ] },
     { label: nativeTr('native_view'), submenu: [
-      // What the sidebar lists: the same choice as the rail's workspace buttons. Bots stay in the menu where they cannot run, greyed out.
+      // What the sidebar lists: the same choice as the rail's workspace buttons. Bots stay in the menu on Windows, greyed out.
       { label: nativeTr('native_home'), accelerator: 'CommandOrControl+1', click: () => dispatch('home') },
-      { label: nativeTr('native_bots'), accelerator: 'CommandOrControl+2', enabled: botsAvailability(platform).available, click: () => dispatch('bots') },
+      { label: nativeTr('native_bots'), accelerator: 'CommandOrControl+2', enabled: platform !== 'win32', click: () => dispatch('bots') },
       { label: nativeTr('native_teams'), accelerator: 'CommandOrControl+3', click: () => dispatch('teams') },
       { label: nativeTr('native_apps'), accelerator: 'CommandOrControl+4', click: () => dispatch('apps') },
       // Friends came after Apps had ⌘4, so it takes the next number and the next place.

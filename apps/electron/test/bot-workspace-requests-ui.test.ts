@@ -5,7 +5,7 @@ import type { BotUi, BotWorkspaceRequestUi, BotWorkspaceRequestsChangedUi, BotsA
 import { BotWorkspaceRequestsController, requestsOfBot } from '../src/renderer/bridge/botWorkspaceRequests';
 
 function bot(overrides: Partial<BotUi> = {}): BotUi {
-  return { botId: 'b1', name: 'Scribe', description: '', createdAt: 1, updatedAt: 1, revision: 1, workspaces: [], ...overrides };
+  return { botId: 'b1', name: 'Scribe', description: '', createdAt: 1, updatedAt: 1, revision: 1, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, ...overrides };
 }
 
 function request(requestId: string, botId: string, path = '/work/a'): BotWorkspaceRequestUi {

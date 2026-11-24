@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { BOT_SANDBOX_UNAVAILABLE_MESSAGE } from '../src/shared/bots';
 import {
   botActivity,
   botIdOfSession,
@@ -78,6 +79,14 @@ test('a chat that cannot start is reported in words, with the reason the host ga
   assert.deepEqual(await startBotChat(async () => undefined), { ok: true });
   const refused = await startBotChat(async () => { throw new Error("Error invoking remote method 'lingxi:bots:sessions:open': Error: The Bot's folder is missing."); });
   assert.deepEqual(refused, { ok: false, message: "The Bot could not start the chat: The Bot's folder is missing." });
+});
+
+test('a chat that cannot start for want of a sandbox says so, and points to the Bot\'s sandbox settings', async () => {
+  for (const error of [new Error(BOT_SANDBOX_UNAVAILABLE_MESSAGE), new Error(`Error invoking remote method 'lingxi:bots:sessions:open': Error: ${BOT_SANDBOX_UNAVAILABLE_MESSAGE}`)]) {
+    assert.deepEqual(await startBotChat(async () => { throw error; }), { ok: false, message: "This device can't isolate this Bot.", sandbox: true });
+  }
+  const other = await startBotChat(async () => { throw new Error('The Bot\'s folder is missing.'); });
+  assert.ok(!('sandbox' in other), 'any other failure has no such way out');
 });
 
 test('a Bot that cannot be deleted is reported in words, with the reason the host gave', async () => {

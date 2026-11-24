@@ -57,7 +57,7 @@ async function hostFixture(t: TestContext) {
   // As the app wires them: the scheduler is made first and learns of the Bots afterwards.
   let scheduled: ScheduledTaskService | undefined;
   const service = new BotService({
-    store: f.store, platform: 'darwin',
+    store: f.store, sandbox: () => ({ available: true }),
     runtimes: {
       // The first chat of a Bot is `SESSION`; the one that replaces it, when it is cleared, is `REPLACEMENT`.
       newSession: async (projectPath, _model, owner) => {

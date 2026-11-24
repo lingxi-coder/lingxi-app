@@ -77,7 +77,7 @@ const desktopTeams = {
   localBots: async () => [],
   hostStatus: async () => ({
     bots: [], openAtLogin: { available: false, enabled: false, needsApproval: false },
-    keepAwake: false, onBattery: false, decisionConfigured: false,
+    keepAwake: false, onBattery: false, decisionConfigured: false, isolationAvailable: true,
   }),
   list: async () => fake.api.list(),
   detail: async (_uid: string, teamId: string) => fake.api.detail(teamId),

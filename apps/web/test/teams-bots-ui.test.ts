@@ -11,6 +11,7 @@ const { BotDirectory } = loadTeamsModule<typeof import('../../../packages/teams/
 const { TeamConversationView } = loadTeamsModule<typeof import('../../../packages/teams/TeamConversationView')>('TeamConversationView');
 const { BotRun, usageText, tokenSplit, runLook, RUN_STATES } = loadTeamsModule<typeof import('../../../packages/teams/BotRunCards')>('BotRunCards');
 const { teamsText } = loadTeamsModule<typeof import('../../../packages/teams/i18n')>('i18n');
+const { messageErrorText } = loadTeamsModule<typeof import('../../../packages/teams/errors')>('errors');
 async function open(context: Parameters<Parameters<typeof scenario>[1]>[0], overrides: Partial<TeamsApi> = {}) {
   withDom(context); const fake = new FakeTeams('alice'); fake.teams = [team('team-test', { role: 'owner' })]; fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 } })]; Object.assign(fake.api, overrides);
   const workspace = new TeamsWorkspace(fake.api, 'alice', { storage: memoryStorage, environment: new EventTarget() }); context.after(() => workspace.close()); await until(() => workspace.getSnapshot().botsLoaded && !!workspace.getSnapshot().detail); return { fake, workspace };
@@ -81,7 +82,7 @@ scenario('Publishing a Bot again shows what it is shared with now: each file is 
 });
 scenario('On Desktop a maintainer sees how this Mac serves their Bots, what stops it, and turns on what keeps it serving; nobody else is shown it (M3-2)', async context => {
   const changes: unknown[] = []; let opened = 0, reads = 0;
-  let host: import('../../../packages/teams/execution').SharedHostStatus = { bots: [{ teamId: 'team-test', sharedBotId: 'assistant-fixture', state: 'ready', running: 1 }], openAtLogin: { available: true, enabled: false, needsApproval: false }, keepAwake: false, onBattery: false, decisionConfigured: false };
+  let host: import('../../../packages/teams/execution').SharedHostStatus = { bots: [{ teamId: 'team-test', sharedBotId: 'assistant-fixture', state: 'ready', running: 1 }], openAtLogin: { available: true, enabled: false, needsApproval: false }, keepAwake: false, onBattery: false, decisionConfigured: false, isolationAvailable: true };
   const { fake, workspace } = await open(context, { hostStatus: async () => { reads += 1; return host; }, openLoginItems: async () => { opened += 1; },
     // The system answers a request to open at login by asking the owner to allow it.
     setHostBackground: async change => { changes.push(change); host = { ...host, ...(change.openAtLogin ? { openAtLogin: { available: true, enabled: false, needsApproval: true } } : {}), ...(change.keepAwake === undefined ? {} : { keepAwake: change.keepAwake }) }; } });
@@ -809,7 +810,7 @@ scenario('A chat with an assistant from before it changed maintainer stays reada
 });
 scenario('Auto-reply: the wizard offers it only with Decision set up on this Desktop, and the review and publication carry the daily limit', async context => {
   const published: Record<string, unknown>[] = []; let decisionConfigured = false;
-  const status = (): import('../../../packages/teams/execution').SharedHostStatus => ({ bots: [], openAtLogin: { available: false, enabled: false, needsApproval: false }, keepAwake: false, onBattery: false, decisionConfigured });
+  const status = (): import('../../../packages/teams/execution').SharedHostStatus => ({ bots: [], openAtLogin: { available: false, enabled: false, needsApproval: false }, keepAwake: false, onBattery: false, decisionConfigured, isolationAvailable: true });
   const { workspace } = await open(context, { localBots: async () => [{ instanceId: 'local-new', name: 'Travel', description: '', model: 'Configured model' }], selectSharedFiles: async () => [], hostStatus: async () => status(),
     publishLocalBot: async input => { published.push(input as unknown as Record<string, unknown>); return { sharedBotId: input.sharedBotId, revision: 1 }; } });
   const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
@@ -824,6 +825,32 @@ scenario('Auto-reply: the wizard offers it only with Decision set up on this Des
   await page.submit(); assert.match(page.text(), /Answers on its own in chats that turn it on, at most 5 a day/);
   await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox').at(-1)); await page.click(page.button('Publish Bot'));
   assert.equal(published.length, 1); assert.deepEqual(published[0]!.autoReply, { daily: 5 });
+});
+scenario('Where this computer cannot isolate Bots the publish button is greyed out and says why; where it can, or the host has not said, it is left to try (B2)', async context => {
+  const status = (isolationAvailable: boolean): import('../../../packages/teams/execution').SharedHostStatus => ({ bots: [], openAtLogin: { available: false, enabled: false, needsApproval: false }, keepAwake: false, onBattery: false, decisionConfigured: false, isolationAvailable });
+  const native = { localBots: async () => [], selectSharedFiles: async () => [], publishLocalBot: async (input: { sharedBotId: string }) => ({ sharedBotId: input.sharedBotId, revision: 1 }) };
+  const explanation = /Sharing a Team Bot needs macOS, or Linux with bubblewrap \(bwrap\) installed\./;
+  for (const [name, overrides, greyed] of [
+    ['cannot', { hostStatus: async () => status(false) }, true],
+    ['can', { hostStatus: async () => status(true) }, false],
+    ['has not said', { hostStatus: () => new Promise<never>(() => undefined) }, false],
+    ['cannot be asked', { hostStatus: async () => { throw new Error('TEAM_HOST_UNAVAILABLE'); } }, false],
+    ['is a browser', {}, false],
+  ] as const) {
+    const { workspace } = await open(context, name === 'is a browser' ? {} : { ...native, ...overrides });
+    const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
+    if (greyed) await until(() => explanation.test(page.text()), 'the explanation'); else await page.during(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+    assert.equal(explanation.test(page.text()), greyed, name);
+    if (name === 'is a browser') { assert.equal(page.find(n => n.type === 'button' && textOf(n) === 'Load local Bots').length, 0, 'a browser has no local Bots to publish'); continue; }
+    const load = page.button('Load local Bots');
+    assert.equal(load.props.disabled === true, greyed, name);
+    const note = page.find(n => n.type === 'p' && explanation.test(textOf(n)))[0];
+    assert.equal(load.props['aria-describedby'], greyed ? note?.props.id : undefined, `${name}: the button is described by the explanation`);
+  }
+  // The same explanation is what an attempt that reached the host is answered with, in every language.
+  const refused = (locale: string) => messageErrorText('TEAM_HOST_ISOLATION_UNAVAILABLE', locale);
+  assert.equal(refused('en'), 'Sharing a Team Bot needs macOS, or Linux with bubblewrap (bwrap) installed.');
+  for (const locale of ['zh-Hans', 'zh-Hant', 'ja', 'ko']) { assert.ok(refused(locale).includes('bwrap'), locale); assert.notEqual(refused(locale), refused('en'), locale); }
 });
 scenario('Auto-reply: a person in a Chat turns a Bot on after being told where the messages go; a declined run is one quiet line', async context => {
   const { fake, workspace } = await open(context); const calls: MessageCommand[] = [];

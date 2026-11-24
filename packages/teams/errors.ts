@@ -48,8 +48,8 @@ export function messageErrorText(code: string, locale: string): string {
       return t('tw_error_model_key');
     case 'TEAM_RUNTIME_UNAVAILABLE':
       return t('tw_error_runtime');
-    case 'TEAM_HOST_MACOS_REQUIRED':
-      return t('tw_error_macos');
+    case 'TEAM_HOST_ISOLATION_UNAVAILABLE':
+      return t('tw_error_isolation');
     case 'HOST_UNAVAILABLE':
     case 'TEAM_HOST_UNAVAILABLE':
       return t('tw_error_host');

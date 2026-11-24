@@ -1075,6 +1075,35 @@ test('lockfile polling ignores invalid candidates until a valid private lockfile
   }
 });
 
+test('an engine that will not run without the sandbox it was asked for says so, and that is why it published no lockfile', async () => {
+  const workspace = temporaryDirectory();
+  const launchDir = temporaryDirectory();
+  const runtime = new SessionRuntime({ lockfileTimeoutMs: 500, launchConfig: () => ({ workspace, trusted: true }) });
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  (runtime as any).generation = 1;
+  (runtime as any).captureLogs({ stdout, stderr });
+  try {
+    // Said by the engine as it exits, so the host holds on to it until the lockfile it waits for turns out never to come.
+    stderr.write('Error: failed to assemble bridge runtime: sandbox required but unavailable: bwrap not found\n');
+    await assert.rejects(
+      (runtime as any).waitForLockfile(launchDir, { workspace, trusted: true }, 1),
+      /sandbox required but unavailable: bwrap not found/,
+    );
+    // An engine that leaves without saying why is as before.
+    (runtime as any).sandboxRefusal = undefined;
+    await assert.rejects((runtime as any).waitForLockfile(launchDir, { workspace, trusted: true }, 1), /bridge-server exited before publishing a lockfile/);
+    // What an engine of an earlier launch says is not the reason for this one.
+    (runtime as any).generation = 2;
+    stderr.write('Error: failed to assemble bridge runtime: sandbox required but unavailable: bwrap not found\n');
+    assert.equal((runtime as any).sandboxRefusal, undefined);
+  } finally {
+    stdout.destroy(); stderr.destroy();
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(launchDir, { recursive: true, force: true });
+  }
+});
+
 test('privileged bridge access re-checks current workspace trust before use', () => {
   let trusted = true;
   const client = { sendCommand: () => undefined };

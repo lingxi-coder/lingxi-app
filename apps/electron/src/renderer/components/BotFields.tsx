@@ -3,9 +3,9 @@ import type { PermissionModeId } from '@lingxi/bridge-client';
 import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
 import { groupModelReferences, modelBillingGroups, modelDisplayLabel, type ModelCatalogDetail } from '../bridge/modelCatalog';
-import type { BotUi, BotWorkspaceUi } from '../../shared/bots';
+import type { BotSandboxAvailability, BotUi, BotWorkspaceUi } from '../../shared/bots';
 import { BOT_FOLDER_LABEL_MAX, folderBaseName, ownFolderTitle } from '../bridge/botFolders';
-import { BOT_DESCRIPTION_MAX, BOT_FOLDERS_MAX, ipcErrorMessage, permissionModeNeedsConfirmation, withFolder, type BotDraft, type BotDraftProblem, type BotDraftProblems } from '../bridge/botForm';
+import { BOT_DESCRIPTION_MAX, BOT_FOLDERS_MAX, ipcErrorMessage, permissionModeNeedsConfirmation, withAllowedHost, withFolder, type BotDraft, type BotDraftProblem, type BotDraftProblems, type BotHostAdd } from '../bridge/botForm';
 import type { BotMemoryProblem } from '../bridge/botMemory';
 import type { ObservableState } from '../bridge/observableState';
 import { permissionModeOptions } from '../model/permissionModes';
@@ -36,6 +36,7 @@ export function problemText(problem: BotDraftProblem | BotMemoryProblem): string
     case 'folders_duplicate': return tr('bots_problem_folders_duplicate');
     case 'folders_label_too_long': return tr('bots_problem_folders_label_too_long', BOT_FOLDER_LABEL_MAX);
     case 'accept_too_many': return tr('bots_problem_accept_too_many');
+    case 'sandbox_too_many': return tr('bots_sandbox_host_too_many');
     case 'too_large': return tr('bots_problem_memory_too_large');
     case 'invalid': return tr('bots_problem_memory_invalid');
   }
@@ -205,6 +206,111 @@ export function BotRemoteField({ draft, availability, disabled = false, onChange
         onChange={(remote) => onChange({ remote })} />
     </li>
   </ul>;
+}
+
+function hostProblemText(problem: Exclude<BotHostAdd, { ok: true }>['problem']): string {
+  switch (problem) {
+    case 'invalid': return tr('bots_sandbox_host_invalid');
+    case 'duplicate': return tr('bots_sandbox_host_duplicate');
+    case 'too_many': return tr('bots_sandbox_host_too_many');
+  }
+}
+
+/** The hosts the commands of the sandbox may reach: the ones allowed so far, and one more to add. */
+function BotSandboxHosts({ draft, problems, disabled, onChange }: Pick<FieldsProps, 'draft' | 'problems' | 'disabled' | 'onChange'>) {
+  const [text, setText] = useState('');
+  const [problem, setProblem] = useState<Exclude<BotHostAdd, { ok: true }>['problem']>();
+  const hosts = draft.sandbox.allowedDomains;
+  const set = (allowedDomains: string[]) => onChange({ sandbox: { ...draft.sandbox, allowedDomains } });
+  const add = () => {
+    if (text.trim() === '') return;
+    const added = withAllowedHost(hosts, text);
+    if (!added.ok) { setProblem(added.problem); return; }
+    setProblem(undefined);
+    setText('');
+    set(added.domains);
+  };
+  return <fieldset className="bots-fields bots-sandbox-hosts" disabled={disabled}>
+    <legend className="bots-label">{tr('bots_sandbox_hosts_title')}</legend>
+    <p className="bots-hint">{tr('bots_sandbox_hosts_hint')}</p>
+    {hosts.length > 0 ? <ul className="bots-rows">
+      {hosts.map((host) => <li key={host} className="bots-row">
+        <div className="bots-row-main"><span className="bots-row-title mono">{host}</span></div>
+        <div className="bots-row-actions">
+          <button type="button" data-variant="quiet" aria-label={tr('bots_sandbox_host_remove', host)} onClick={() => set(hosts.filter((entry) => entry !== host))}><Icon name="x" size={15} /></button>
+        </div>
+      </li>)}
+    </ul> : <p className="bots-empty-line">{tr('bots_sandbox_hosts_empty')}</p>}
+    <div className="bots-sandbox-add">
+      <input value={text} placeholder={tr('bots_sandbox_host_placeholder')} aria-label={tr('bots_sandbox_host_label')} autoComplete="off" spellCheck={false}
+        aria-invalid={problem ? true : undefined}
+        onChange={(event) => { setText(event.target.value); setProblem(undefined); }}
+        onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); add(); } }} />
+      <button type="button" disabled={text.trim() === ''} onClick={add}>{tr('bots_sandbox_host_add')}</button>
+    </div>
+    {problem ? <p className="bots-problem" role="alert">{hostProblemText(problem)}</p> : null}
+    {problems.sandbox ? <p className="bots-problem" role="alert">{problemText(problems.sandbox)}</p> : null}
+  </fieldset>;
+}
+
+/**
+ * The sandbox the shell commands of a Bot run in, and the hosts they may reach in it. It cannot be switched on where this
+ * device cannot give one, and says why. Switching it off asks first: the commands are then confined by nothing but the
+ * owner's trust in the Bot, since the rules that keep its file tools in its folders do not reach them.
+ */
+export function BotSandboxField({ draft, problems, availability, disabled = false, onChange }: FieldsProps & { availability: BotSandboxAvailability }) {
+  const [confirming, setConfirming] = useState(false);
+  const { enabled } = draft.sandbox;
+  return <div className="bots-fields bots-sandbox">
+    <ul className="bots-rows">
+      <li className="bots-row">
+        <div className="bots-row-main">
+          <span className="bots-row-title">{tr('bots_sandbox_switch_title')}</span>
+          <span className="bots-row-text">{tr('bots_sandbox_switch_hint')}</span>
+          {!availability.available ? <span role="status" className="bots-row-text bots-sandbox-why">{tr(availability.reason)}</span> : null}
+        </div>
+        <Toggle value={enabled} disabled={disabled || (!availability.available && !enabled)} label={tr('bots_sandbox_switch_title')}
+          onChange={(on) => { if (on) onChange({ sandbox: { ...draft.sandbox, enabled: true } }); else setConfirming(true); }} />
+      </li>
+    </ul>
+    {enabled ? <BotSandboxHosts draft={draft} problems={problems} disabled={disabled} onChange={onChange} /> : null}
+    {confirming ? <BotConfirm title={tr('bots_sandbox_off_title')} icon="shieldAlert" confirmLabel={tr('bots_sandbox_off_confirm')}
+      onCancel={() => setConfirming(false)} onConfirm={() => { setConfirming(false); onChange({ sandbox: { ...draft.sandbox, enabled: false } }); }}>
+      <p>{tr('bots_sandbox_off_body')}</p>
+    </BotConfirm> : null}
+  </div>;
+}
+
+/**
+ * Where this device cannot give a Bot a sandbox the form makes the Bot without one: the switch is off and cannot be turned
+ * on, and the owner says they understand what that means before the Bot can be made.
+ */
+export function BotSandboxAcknowledge({ reason, acknowledged, missing, disabled = false, onChange }: {
+  /** The key of the text that says why this device has no sandbox. */
+  reason: string;
+  acknowledged: boolean;
+  /** The owner tried to make the Bot without ticking the box. */
+  missing: boolean;
+  disabled?: boolean;
+  onChange(acknowledged: boolean): void;
+}) {
+  return <fieldset className="bots-fields bots-sandbox" disabled={disabled}>
+    <ul className="bots-rows">
+      <li className="bots-row">
+        <div className="bots-row-main">
+          <span className="bots-row-title">{tr('bots_sandbox_switch_title')}</span>
+          <span className="bots-row-text">{tr('bots_sandbox_unavailable')}</span>
+          <span role="status" className="bots-row-text bots-sandbox-why">{tr(reason)}</span>
+        </div>
+        <Toggle value={false} disabled label={tr('bots_sandbox_switch_title')} onChange={() => undefined} />
+      </li>
+    </ul>
+    <label className="bots-sandbox-ack">
+      <input type="checkbox" checked={acknowledged} aria-invalid={missing && !acknowledged ? true : undefined} onChange={(event) => onChange(event.target.checked)} />
+      <span>{tr('bots_sandbox_ack')}</span>
+    </label>
+    {missing && !acknowledged ? <p className="bots-problem" role="alert">{tr('bots_sandbox_ack_required')}</p> : null}
+  </fieldset>;
 }
 
 export function BotFoldersField({ draft, problems, disabled = false, pickFolder, saved, chatDisabled = false, onNewChat, onChange }: FieldsProps & {

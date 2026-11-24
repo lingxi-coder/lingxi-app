@@ -51,8 +51,8 @@ export interface BotsSidebarProps {
   onOpenChat(): void;
   /** Run `go`, which opens a chat and so leaves the Bots page. A Bot's page with edits that are not saved asks about them first, and `go` waits for the answer. */
   onLeave(go: () => void): void;
-  /** Show a Bot's page; with `delete`, asking whether to delete it. */
-  onOpenBot(botId: string, intent?: 'delete'): void;
+  /** Show a Bot's page; with `delete`, asking whether to delete it, and with `sandbox`, at its sandbox settings. */
+  onOpenBot(botId: string, intent?: 'delete' | 'sandbox'): void;
   onCreateBot(): void;
 }
 
@@ -127,7 +127,8 @@ export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpen
   );
   const [showAll, setShowAll] = useState<ReadonlySet<string>>(() => new Set());
   const [opening, setOpening] = useState<string>();
-  const [problem, setProblem] = useState<string>();
+  /** Why a chat could not be opened; `sandboxOf` names the Bot whose sandbox settings are the way on, when that is why. */
+  const [problem, setProblem] = useState<{ message: string; sandboxOf?: string }>();
   const [menu, setMenu] = useState<OpenMenu | null>(null);
   /** The row that last had the focus: the one Tab comes back to. */
   const [focusedRow, setFocusedRow] = useState<string>();
@@ -171,13 +172,14 @@ export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpen
       const outcome = await startBotChat(() => bridge.openBotSession(botId, sessionId, transcriptPath, workspaceId));
       setOpening((current) => current === key ? undefined : current);
       if (outcome.ok) onOpenChat();
-      else setProblem(outcome.message);
+      else setProblem({ message: outcome.message, ...(outcome.sandbox ? { sandboxOf: botId } : {}) });
     });
   };
   const closeMenu = useCallback(() => setMenu(null), []);
   const openMenu = (target: MenuTarget, at: Point, opener: HTMLElement, trigger?: HTMLElement) => setMenu({ target, at, opener, trigger });
 
   const busy = bridge.sessionLoading || opening !== undefined;
+  const sandboxBot = problem?.sandboxOf;
 
   const loading = state.availability === undefined || (state.loading && state.bots.length === 0);
   const empty = !loading && state.error === undefined && state.bots.length === 0;
@@ -227,7 +229,10 @@ export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpen
           </div>
         </div>
 
-        {problem !== undefined ? <p role="alert" className="bots-sidebar-note" data-tone="danger">{problem}</p> : null}
+        {problem !== undefined ? <p role="alert" className="bots-sidebar-note" data-tone="danger">
+          {problem.message}
+          {sandboxBot !== undefined ? <> <button type="button" className="bots-sidebar-link" onClick={() => onOpenBot(sandboxBot, 'sandbox')}>{tr('bots_sandbox_open_settings')}</button></> : null}
+        </p> : null}
         {loading ? <p role="status" className="bots-sidebar-note">{tr('bots_loading')}</p> : null}
         {state.error !== undefined ? <p role="alert" className="bots-sidebar-note" data-tone="danger">
           {tr('bots_load_failed')} {state.error} <button type="button" className="bots-sidebar-link" onClick={() => void controller.reload()}>{tr('common_retry')}</button>

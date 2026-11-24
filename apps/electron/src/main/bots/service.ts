@@ -17,8 +17,10 @@
  * keeps in its home, or because it works in the Bot's own folder, which nothing
  * but a Bot uses and which is therefore never given the owner's configuration.
  *
- * Bots are macOS-only in this version: their isolation relies on the engine's
- * sandbox and on POSIX path rules. Anywhere else every operation is refused.
+ * Bots run on every computer. What confines the shell commands of a Bot to its
+ * folders is the engine's sandbox, which a Bot has unless its owner switched it off
+ * and which a computer may not be able to give (see `sandboxAvailability`): such a
+ * computer makes no Bot with the sandbox on and starts none that has it.
  */
 
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
@@ -26,7 +28,7 @@ import { readdir, stat } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 
 import type { SessionRowDto } from '@lingxi/bridge-client';
-import type { BotsAvailability } from '../../shared/bots.js';
+import type { BotSandboxAvailability, BotsAvailability } from '../../shared/bots.js';
 import type { BotMarketOrigin } from '../../shared/botMarket.js';
 import type { SessionRef, WorkspaceLaunchSettings } from '../bridgeTypes.js';
 import type { SessionRuntime } from '../bridge.js';
@@ -34,8 +36,10 @@ import type { RemoteBot, RemoteBotLookup, BotChat } from '../remoteControl/remot
 import type { RoutineBot, RoutineCatalog, RoutineFolder } from '../scheduled.js';
 import type { ProjectSessionCatalogRow } from '../session-catalog.js';
 import { isSessionId } from '../sessionIdentity.js';
+import { ENGINE_SANDBOX_REFUSAL } from '../host-utils.js';
 import { writeAllBotSettings, writeBotSettings } from './botSettings.js';
 import { ensureRouterEntry } from './mcpConfig.js';
+import { BotSandboxUnavailableError, sandboxAvailability } from './sandboxAvailability.js';
 import { ROUTER_TOKEN_ENV, ROUTER_URL_ENV } from './routerTools.js';
 import {
   BotConflictError,
@@ -131,6 +135,8 @@ export interface BotServiceOptions {
   deleted?: (botId: string) => void;
   /** Revoke private Team runs before a local policy change or deletion awaits, and again once a deleted Bot is trashed (a run may start while the deletion waits). */
   teamRevoking?: (botId: string) => void;
+  /** Whether this computer can confine a Bot's commands to its folders, asked each time (`bwrap` can be installed while the app runs); this computer's by default. */
+  sandbox?: () => BotSandboxAvailability;
   /** The platform the app runs on; this process's by default. */
   platform?: NodeJS.Platform;
   /** How long a session that was working when its Bot's folders changed is left alone before it is looked at again. */
@@ -144,11 +150,6 @@ const DEFAULT_RETRY_MS = 3000;
 /** About half an hour at the default delay. */
 const MAX_RETRIES = 600;
 const MAX_REMEMBERED_MISSES = 2000;
-
-/** Whether Bots can run on a platform. They need the engine's sandbox, which Desktop uses on macOS only. */
-export function botsAvailability(platform: NodeJS.Platform = process.platform): BotsAvailability {
-  return platform === 'darwin' ? { available: true } : { available: false, reason: 'Bots are available on macOS only.' };
-}
 
 export interface BotSessionRef {
   botId: string;
@@ -166,9 +167,9 @@ export type BotSessionRow = SessionRowDto & {
   removedPath?: string;
 };
 
-/** What decides what the engine of a session was given: when it differs from the Bot's, the session is launched again. */
-function foldersOf(record: BotRecord): string {
-  return JSON.stringify(record.workspaces.map((workspace) => [workspace.path, workspace.mode]));
+/** What decides what the engine of a session was given (the Bot's folders, and whether and how its commands are confined): when it differs from the Bot's, the session is launched again. */
+function launchKeyOf(record: BotRecord): string {
+  return JSON.stringify([record.workspaces.map((workspace) => [workspace.path, workspace.mode]), record.sandbox]);
 }
 
 function realOrSame(path: string): string {
@@ -183,7 +184,7 @@ export class BotService {
   private readonly claims = new Map<string, string>();
   /** Session and working directory pairs looked for in the Bots' records and not found. */
   private readonly misses = new Set<string>();
-  /** Session id → the folders its engine was launched with. */
+  /** Session id → what its engine was launched with: {@link launchKeyOf}. */
   private readonly launched = new Map<string, string>();
   private readonly retries = new Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>();
   private readonly syncing = new Set<Promise<void>>();
@@ -192,14 +193,35 @@ export class BotService {
     this.store = options.store;
   }
 
+  /** Bots can be used on every computer; whether it can give them a sandbox is the part of the answer that differs. */
+  /**
+   * Bots run wherever the app does except on Windows: the rules that keep a Bot to its folders are written for
+   * POSIX paths, which the engine does not take there.
+   */
   availability(): BotsAvailability {
-    return botsAvailability(this.options.platform);
+    if ((this.options.platform ?? process.platform) === 'win32') return { available: false, reason: 'Bots are not available on Windows yet.' };
+    return { available: true, sandbox: this.sandbox() };
   }
 
-  /** Refuse, in words the owner can read, wherever Bots cannot run. */
+  /** Whether this computer can confine a Bot's commands to its folders. */
+  sandbox(): BotSandboxAvailability {
+    return (this.options.sandbox ?? (() => sandboxAvailability()))();
+  }
+
+  /** Nothing about a computer as a whole refuses Bots now; where one does again, this is the place that says so. */
   assertAvailable(): void {
-    const { available, reason } = this.availability();
-    if (!available) throw new Error(reason ?? 'Bots are not available on this computer.');
+    const availability = this.availability();
+    if (!availability.available) throw new Error(availability.reason ?? 'Bots are not available on this computer.');
+  }
+
+  /** A Bot whose sandbox is on cannot be made, switched on or started where the computer has none to give it. */
+  private assertSandboxPossible(record: BotRecord): void {
+    if (record.sandbox.enabled && !this.sandbox().available) throw new BotSandboxUnavailableError();
+  }
+
+  /** What went wrong starting an engine, with the engine's own refusal to run without its sandbox said the way the window knows it. */
+  private refusal(error: unknown): unknown {
+    return error instanceof Error && ENGINE_SANDBOX_REFUSAL.test(error.message) ? new BotSandboxUnavailableError() : error;
   }
 
   private warn(message: string): void {
@@ -234,7 +256,7 @@ export class BotService {
 
   create(input: BotCreateInput): BotRecord {
     this.assertAvailable();
-    const record = this.store.create(input, (draft) => { this.writeSettings(draft); });
+    const record = this.store.create(input, (draft) => { this.assertSandboxPossible(draft); this.writeSettings(draft); });
     // Every other Bot must now keep out of this one.
     writeAllBotSettings(this.store, (message) => this.warn(message), record.bot_id);
     this.changed();
@@ -244,7 +266,7 @@ export class BotService {
   /** A market copy uses the same settings isolation and change notifications as any personal Bot. */
   createFromMarket(input: BotCreateInput, origin: BotMarketOrigin, prepare: (record: BotRecord) => void): BotRecord {
     this.assertAvailable();
-    const record = this.store.createFromMarket(input, origin, draft => { prepare(draft); this.writeSettings(draft); });
+    const record = this.store.createFromMarket(input, origin, draft => { this.assertSandboxPossible(draft); prepare(draft); this.writeSettings(draft); });
     writeAllBotSettings(this.store, message => this.warn(message), record.bot_id);
     this.changed();
     return record;
@@ -262,7 +284,11 @@ export class BotService {
     if (Number.isSafeInteger(expectedRevision) && expectedRevision >= 1 && before.revision !== expectedRevision) throw new BotConflictError();
     const removed = patch.workspaces === undefined ? [] : this.leftOut(before, patch.workspaces);
     this.assertNothingWorking(botId, removed);
-    const record = this.store.update(botId, expectedRevision, patch, (draft) => { this.writeSettings(draft); });
+    const record = this.store.update(botId, expectedRevision, patch, (draft) => {
+      // Only turning the sandbox on asks the computer for one: a Bot that has it on and cannot run can still be given up, or made free.
+      if (!before.sandbox.enabled) this.assertSandboxPossible(draft);
+      this.writeSettings(draft);
+    });
     if (record.revision !== expectedRevision) {
       await this.endChatsIn(botId, removed);
       this.syncSoon(botId);
@@ -386,7 +412,7 @@ export class BotService {
    * asked for it. The owner's sessions in a folder they bound to a Bot stay the owner's.
    */
   botIdForSession(ref: { projectPath: string; sessionId: string }): string | undefined {
-    if (!this.availability().available || typeof ref.sessionId !== 'string') return undefined;
+    if (typeof ref.sessionId !== 'string') return undefined;
     const sessionId = ref.sessionId.toLowerCase();
     const claimed = this.claims.get(sessionId);
     if (claimed !== undefined) return claimed;
@@ -494,7 +520,7 @@ export class BotService {
 
   private async syncChats(botId: string): Promise<void> {
     const record = this.store.get(botId);
-    const current = foldersOf(record);
+    const current = launchKeyOf(record);
     const earlier = this.retries.get(botId);
     if (earlier !== undefined) { clearTimeout(earlier.timer); this.retries.delete(botId); }
     let behind = false;
@@ -563,6 +589,7 @@ export class BotService {
       if (!activate) throw new Error('A prepared Bot open requires an existing session.');
       if (transcriptPath !== undefined) throw new Error('invalid Bot session selection');
       const folder = this.openableFolder(record, workspaceId ?? DEFAULT_WORKSPACE_ID);
+      this.assertSandboxPossible(record);
       let claimed: string | undefined;
       try {
         const ref = await this.options.runtimes.newSession(folder.path, record.model, {
@@ -574,7 +601,7 @@ export class BotService {
         return { botId, projectPath: ref.projectPath, sessionId: ref.sessionId, workspaceId: folder.id };
       } catch (error) {
         if (claimed !== undefined && this.options.runtimes.get?.(claimed) === undefined) this.forgetSession(claimed);
-        throw error;
+        throw this.refusal(error);
       }
     }
     if (workspaceId !== undefined) throw new Error('A chat that exists keeps the folder it works in.');
@@ -624,7 +651,7 @@ export class BotService {
       await this.options.runtimes.openSession({ projectPath, sessionId: row.uuid, mode: row.mode }, row.empty_session, row.resume_model ?? record.model, activate, row.path);
     } catch (error) {
       if (!claimedBefore && this.options.runtimes.get?.(sessionId) === undefined) this.forgetSession(sessionId);
-      throw error;
+      throw this.refusal(error);
     }
     this.store.rememberSessionSource(botId, row.uuid, { path: row.path, mode: row.mode });
     return { botId, projectPath, sessionId: row.uuid, workspaceId: folder.id };
@@ -760,9 +787,9 @@ export class BotService {
     try { return this.store.allWorkspaces(this.store.get(botId)).map((workspace) => workspace.path); } catch { return [this.store.workspaceDir(botId)]; }
   }
 
-  /** The Bot whose own folder a working directory is, if it is one and Bots can run here. What a session is, is {@link botIdForSession}'s to say. */
+  /** The Bot whose own folder a working directory is, if it is one. What a session is, is {@link botIdForSession}'s to say. */
   botIdFor(projectPath: string): string | undefined {
-    return this.availability().available ? this.store.botIdForWorkspace(projectPath) : undefined;
+    return this.store.botIdForWorkspace(projectPath);
   }
 
   /** The model of the Bot a session belongs to, if it has one. */
@@ -781,9 +808,8 @@ export class BotService {
 
   // What the routine scheduler asks
 
-  /** The Bots whose routines run now: none where Bots cannot run, and not one that is being deleted or cannot be read. */
+  /** The Bots whose routines run now: not one that is being deleted or cannot be read. */
   routineBots(): RoutineBot[] {
-    if (!this.availability().available) return [];
     let entries: ReturnType<BotStore['entries']>;
     try { entries = this.store.entries(); } catch { return []; }
     return entries.flatMap(({ botId, record }) => record !== undefined && !this.deleting.has(botId) ? [this.routineBot(record)] : []);
@@ -805,16 +831,14 @@ export class BotService {
 
   /** Where a Bot stands for remote devices. Never throws: a Bot that cannot be read is not there. */
   remoteBot(botId: string): RemoteBotLookup {
-    if (!this.availability().available) return { state: 'unknown' };
     if (this.deleting.has(botId)) return { state: 'deleting' };
     let record: BotRecord;
     try { record = this.store.get(botId); } catch { return { state: 'unknown' }; }
     return record.remote === true ? { state: 'on', bot: this.remoteBotOf(record) } : { state: 'off' };
   }
 
-  /** The Bots whose Remote Control switch is on, oldest first: none where Bots cannot run, and not one being deleted or that cannot be read. */
+  /** The Bots whose Remote Control switch is on, oldest first: not one being deleted or that cannot be read. */
   remoteBots(): RemoteBot[] {
-    if (!this.availability().available) return [];
     let entries: ReturnType<BotStore['entries']>;
     try { entries = this.store.entries(); } catch { return []; }
     return entries
@@ -831,7 +855,7 @@ export class BotService {
    */
   chat(sessionId: string): BotChat | undefined {
     // Only the spelling the engine writes: the id reaches a file name below.
-    if (!this.availability().available || !isSessionId(sessionId) || sessionId !== sessionId.toLowerCase()) return undefined;
+    if (!isSessionId(sessionId) || sessionId !== sessionId.toLowerCase()) return undefined;
     const project = this.options.openProject?.(sessionId);
     let botId: string | undefined;
     let folder: string | undefined;
@@ -929,6 +953,8 @@ export class BotService {
     const record = this.store.get(botId);
     const folder = this.folderAt(record, projectPath);
     if (folder === undefined) throw new Error('This chat\'s folder is not one of the Bot\'s any more.');
+    // Every start of an engine for a Bot comes through here: one that would refuse to run is not started at all.
+    this.assertSandboxPossible(record);
     const bound = this.writeSettings(record);
     if (folder.id !== DEFAULT_WORKSPACE_ID && !bound.some((workspace) => workspace.id === folder.id)) {
       throw new Error(`${folder.path} is no longer a folder a Bot may work in.`);
@@ -938,7 +964,7 @@ export class BotService {
     const globalConfigPath = join(home, '.lingxi.json');
     const grants = this.grantsFor(record, bound, folder.path);
     if (sessionId !== undefined) {
-      this.launched.set(sessionId.toLowerCase(), foldersOf(record));
+      this.launched.set(sessionId.toLowerCase(), launchKeyOf(record));
       // The runtime manager prefers a session's own grants over these; what an earlier sync left there must not outlive the folders it named.
       this.options.runtimes.setSessionDirectoryGrants(sessionId, grants);
     }

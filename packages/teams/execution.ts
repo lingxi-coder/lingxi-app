@@ -133,7 +133,9 @@ export interface SharedHostBot { teamId: string; sharedBotId: string; state: 'ch
 /** A Desktop as the host of the Bots it publishes, and what keeps it serving while its owner is away. The system owns `openAtLogin`. */
 export interface SharedHostStatus { bots: SharedHostBot[]; openAtLogin: { available: boolean; enabled: boolean; needsApproval: boolean }; keepAwake: boolean; onBattery: boolean;
   /** A Decision service is set up on this Desktop: its Bots can be published with auto-reply. */
-  decisionConfigured: boolean }
+  decisionConfigured: boolean;
+  /** This computer can isolate the Bots it publishes (macOS, or Linux with bubblewrap installed); where it cannot, none is published or served from it. */
+  isolationAvailable: boolean }
 /** One read-only file or Skill a Bot is published with. Its text stays on the maintainer's Desktop. */
 export interface PublishedKnowledgeDocument { resourceId: string; revision: number; kind: 'file' | 'skill'; name: string; sha256: string; bytes: number }
 /** What a Bot is published with, as its maintainer's Desktop holds it: the role and the shared files of publication `revision`. */

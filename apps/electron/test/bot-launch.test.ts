@@ -40,7 +40,7 @@ test('the engine of a Bot is started in the Bot workspace with the Bot home, its
   const docs = f.folder('docs');
   const service = new BotService({
     store: f.store,
-    platform: 'darwin',
+    sandbox: () => ({ available: true }),
     runtimes: NO_RUNTIMES,
     catalogFor: () => ({
       list: async () => ({ sessions: [] }), find: async () => undefined, select: async () => undefined, invalidate: () => undefined,
@@ -82,7 +82,7 @@ test('a session of a Bot in a folder of the owner\'s is started there, trusted, 
   const docs = f.folder('docs');
   const service = new BotService({
     store: f.store,
-    platform: 'darwin',
+    sandbox: () => ({ available: true }),
     runtimes: NO_RUNTIMES,
     catalogFor: () => ({
       list: async () => ({ sessions: [] }), find: async () => undefined, select: async () => undefined, invalidate: () => undefined,
@@ -117,7 +117,7 @@ test('the process that is started reads the Bot home, whatever the owner\'s envi
   const f = botFixture(t);
   const service = new BotService({
     store: f.store,
-    platform: 'darwin',
+    sandbox: () => ({ available: true }),
     runtimes: NO_RUNTIMES,
     catalogFor: () => ({
       list: async () => ({ sessions: [] }), find: async () => undefined, select: async () => undefined, invalidate: () => undefined,

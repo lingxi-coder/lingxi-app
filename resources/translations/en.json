@@ -3735,7 +3735,7 @@
   "tw_error_model_config": "This model configuration cannot be used for Team Bots. Check the provider settings on Desktop or choose another model.",
   "tw_error_model_key": "This Bot’s model or API key is unavailable. Check its model and provider settings on Desktop.",
   "tw_error_runtime": "The isolated Teams runtime is unavailable on this Desktop. Install a Desktop build that includes it.",
-  "tw_error_macos": "Sharing a Team Bot currently requires macOS Desktop.",
+  "tw_error_isolation": "Sharing a Team Bot needs macOS, or Linux with bubblewrap (bwrap) installed.",
   "tw_error_host": "The Bot’s host is unavailable. Ask its maintainer to reconnect Desktop.",
   "tw_error_quota": "The daily request quota is exhausted. Ask the maintainer to review quotas or try after the UTC day resets.",
   "tw_error_doc_access": "You no longer have access to this document. Ask the maintainer to review its audience.",

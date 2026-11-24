@@ -3720,7 +3720,7 @@
   "tw_error_model_config": "このモデル構成はチーム Bot では使えません。Desktop のプロバイダー設定を確認するか、別のモデルを選んでください。",
   "tw_error_model_key": "この Bot のモデルまたは API キーを利用できません。Desktop でモデルとプロバイダーの設定を確認してください。",
   "tw_error_runtime": "この Desktop では、分離されたチーム用ランタイムを利用できません。ランタイムを含む Desktop のビルドをインストールしてください。",
-  "tw_error_macos": "チーム Bot の共有には、現在 macOS 版の Desktop が必要です。",
+  "tw_error_isolation": "チーム Bot の共有には、macOS、または bubblewrap（bwrap）をインストールした Linux が必要です。",
   "tw_error_host": "この Bot のホストを利用できません。メンテナーに Desktop を再接続してもらってください。",
   "tw_error_quota": "1日のリクエスト上限に達しました。メンテナーに上限の見直しを依頼するか、UTC の日付が変わってからもう一度お試しください。",
   "tw_error_doc_access": "このドキュメントにはアクセスできなくなりました。メンテナーに公開範囲の見直しを依頼してください。",

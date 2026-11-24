@@ -37,6 +37,12 @@ export type { NotificationPreferences } from '../shared/notificationPreferences.
 export { parseNotificationPreferences } from '../shared/notificationPreferences.js';
 export { isPermissionModeId } from '../shared/permission.js';
 
+/**
+ * What the engine says, last on its standard error, when it was told to require a sandbox and the computer has none
+ * (its `BuildError::SandboxUnavailable`). It then exits, so this is all anyone gets to know of why.
+ */
+export const ENGINE_SANDBOX_REFUSAL = /sandbox required but unavailable/i;
+
 export const MAX_PROJECTS = 50;
 export const MAX_PINNED_SESSIONS = 100;
 /** How many Bots the sidebar remembers as open; far above any list a person keeps. */

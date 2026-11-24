@@ -483,15 +483,16 @@ export function App() {
     } catch (cause) { setLocalAppNavigationError(localAppErrorMessage(cause)); }
   }, [appWorkspace.groups, sessionNavigationBlocked, setLocalAppNavigationError]);
   const botDeleteRequests = useRef(0);
+  const botSandboxRequests = useRef(0);
   const { available: botsAvailable, view: botsView, setView: setBotsView, guard: botsGuard } = bots;
   /**
-   * Show a Bot's page, from the sidebar or from the title of its chat; with `delete`, the page asks whether to delete the Bot.
+   * Show a Bot's page, from the sidebar or from the title of its chat; with `delete`, the page asks whether to delete the Bot, and with `sandbox` it shows the Bot's sandbox settings.
    * The page of the Bot being edited keeps its edits. Another Bot's page replaces it, and them, so that asks about them first.
    */
-  const openBot = useCallback((botId: string, intent?: 'delete') => {
+  const openBot = useCallback((botId: string, intent?: 'delete' | 'sandbox') => {
     if (sessionNavigationBlocked() || !botsAvailable) return;
     const go = () => {
-      setBotsView({ kind: 'detail', botId, ...(intent === 'delete' ? { deleteRequest: ++botDeleteRequests.current } : {}) });
+      setBotsView({ kind: 'detail', botId, ...(intent === 'delete' ? { deleteRequest: ++botDeleteRequests.current } : {}), ...(intent === 'sandbox' ? { sandboxRequest: ++botSandboxRequests.current } : {}) });
       setSidebarMode('bots');
       openPage('bots');
     };

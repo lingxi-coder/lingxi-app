@@ -68,7 +68,7 @@ async function fixture(t: Parameters<typeof botFixture>[0]) {
   );
   const service = new BotService({
     store: f.store,
-    platform: 'darwin',
+    sandbox: () => ({ available: true }),
     runtimes: {
       newSession: async () => {
         throw new Error('unused');

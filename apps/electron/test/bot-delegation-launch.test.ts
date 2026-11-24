@@ -45,7 +45,7 @@ function setup(t: { after(fn: () => void): void }, options: { router?: boolean; 
   let service!: BotService;
   service = new BotService({
     store: f.store,
-    platform: 'darwin',
+    sandbox: () => ({ available: true }),
     runtimes: {
       ...NO_RUNTIMES,
       closeProject: async () => { calls.push('closeProject'); if (failures.close) throw new Error('cancel active turns and pending interactions before removing a project'); },
@@ -251,7 +251,7 @@ test('the engine that is started is given the router\'s address and a token that
   const router = new BotRouter({ backend: tasks, warn: (message) => warnings.push(message) });
   service = new BotService({
     store: f.store,
-    platform: 'darwin',
+    sandbox: () => ({ available: true }),
     router,
     delegation: tasks,
     runtimes: NO_RUNTIMES,

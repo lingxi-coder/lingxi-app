@@ -14,7 +14,7 @@ import { BotTasksController, type BotTasksState } from '../bridge/botTasks';
 import { requestsOfBot, type BotWorkspaceRequestsController } from '../bridge/botWorkspaceRequests';
 import { relativeActivity, removeBot, startBotChat, type BotActivity } from '../bridge/botSession';
 import { botRemoteAvailability, useRemoteControl } from '../bridge/remoteControl';
-import type { BotsController } from '../bridge/botsStore';
+import { sandboxOf, type BotsController } from '../bridge/botsStore';
 import type { UseBridge } from '../bridge/bridgeTypes';
 import { AgentAvatar } from './AgentAvatar';
 import { rovingIndex } from './rovingIndex';
@@ -27,15 +27,16 @@ import {
   BotPermissionField,
   BotPersonaField,
   BotRemoteField,
+  BotSandboxField,
   useObservable,
   type ModelChoices,
 } from './BotFields';
 
-export type BotTab = 'routines' | 'tasks' | 'general' | 'persona' | 'memory' | 'skills' | 'folders' | 'permissions' | 'market';
+export type BotTab = 'routines' | 'tasks' | 'general' | 'persona' | 'memory' | 'skills' | 'folders' | 'permissions' | 'sandbox' | 'market';
 
-const TABS: readonly BotTab[] = ['routines', 'tasks', 'general', 'persona', 'memory', 'skills', 'folders', 'permissions', 'market'];
+const TABS: readonly BotTab[] = ['routines', 'tasks', 'general', 'persona', 'memory', 'skills', 'folders', 'permissions', 'sandbox', 'market'];
 /** The tabs whose fields are one draft, saved together. */
-const DRAFT_TABS: ReadonlySet<BotTab> = new Set<BotTab>(['general', 'persona', 'folders', 'permissions']);
+const DRAFT_TABS: ReadonlySet<BotTab> = new Set<BotTab>(['general', 'persona', 'folders', 'permissions', 'sandbox']);
 
 function tabLabel(tab: BotTab): string {
   switch (tab) {
@@ -47,6 +48,7 @@ function tabLabel(tab: BotTab): string {
     case 'skills': return tr('bots_tab_skills');
     case 'folders': return tr('bots_tab_folders');
     case 'permissions': return tr('bots_tab_permissions');
+    case 'sandbox': return tr('bots_tab_sandbox');
     case 'market': return 'Package & Market';
   }
 }
@@ -94,7 +96,7 @@ export function BotDeleteTasksNote({ state }: { state: Pick<BotTasksState, 'view
 /** What of the Scheduled page's data a Bot's routines panel reads. */
 export type BotRoutinesBridge = Pick<UseBridge, 'scheduledScopes' | 'manageScheduled'>;
 
-export function BotDetail({ botId, listed, api, bots, guard, activity, models, pickFolder, visible, sessionLoading, routines: routinesBridge, requests, onBack, onOpenChat, onOpenTaskChat, onNewRoutine, onOpenRoutine, onDelete, deleteRequest }: {
+export function BotDetail({ botId, listed, api, bots, guard, activity, models, pickFolder, visible, sessionLoading, routines: routinesBridge, requests, onBack, onOpenChat, onOpenTaskChat, onNewRoutine, onOpenRoutine, onDelete, deleteRequest, sandboxRequest }: {
   botId: string;
   /** The Bot as the list has it: its name is there to show before the Bot itself has been read. */
   listed: BotUi | undefined;
@@ -123,6 +125,8 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
   onDelete(): Promise<void>;
   /** Each new number asks whether to delete the Bot, as the Delete button does: the sidebar's "Delete Bot…" leads here. */
   deleteRequest?: number;
+  /** Each new number shows the Bot's sandbox settings: a chat that could not start for want of a sandbox leads here. */
+  sandboxRequest?: number;
 }) {
   const [editor] = useState(() => new BotEditorController(api, botId, (bot) => bots.put(bot), () => botPeers(bots.getSnapshot().bots, botId)));
   const [memory] = useState(() => new BotMemoryController(api.memory, botId));
@@ -136,10 +140,10 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
   const waiting = requestsOfBot(useObservable(requests), botId).length;
   const known = useObservable(bots);
   const remoteAvailability = botRemoteAvailability(useRemoteControl().status);
-  const [tab, setTab] = useState<BotTab>('general');
+  const [tab, setTab] = useState<BotTab>(() => sandboxRequest === undefined ? 'general' : 'sandbox');
   const tabsId = useId();
   const [opening, setOpening] = useState<string | undefined>();
-  const [openError, setOpenError] = useState('');
+  const [openError, setOpenError] = useState<{ message: string; sandbox: boolean }>();
   const [deleting, setDeleting] = useState<{ busy: boolean; error: string } | undefined>(() => deleteRequest === undefined ? undefined : { busy: false, error: '' });
 
   useEffect(() => { void editor.load(); }, [editor]);
@@ -148,6 +152,7 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
   useEffect(() => {
     if (deleteRequest !== undefined) setDeleting((current) => current ?? { busy: false, error: '' });
   }, [deleteRequest]);
+  useEffect(() => { if (sandboxRequest !== undefined) setTab('sandbox'); }, [sandboxRequest]);
   useEffect(() => { if (tab === 'memory') void memory.load(); }, [tab, memory]);
   useEffect(() => { if (tab === 'skills') void skills.load(); }, [tab, skills]);
   // The tasks are read when their tab is shown, or the question whether to delete the Bot is asked, and then follow the host's word that they changed.
@@ -172,13 +177,16 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
   const problems = botDraftProblems(state.draft, peers);
   // The list is read again whenever the page comes back, so it knows more recent activity than the copy opened here.
   const lastActive = listed?.lastActivityAt ?? state.bot?.lastActivityAt;
+  // The Bot's sandbox is on and this device has none to give it: its chats cannot start until the owner turns the sandbox off.
+  const sandbox = sandboxOf(known.availability);
+  const unisolated = sandbox?.available === false && (state.bot ?? listed)?.sandbox.enabled === true;
 
   const openWith = async (key: string, start: () => Promise<void>) => {
     if (opening !== undefined || sessionLoading) return;
     setOpening(key);
-    setOpenError('');
+    setOpenError(undefined);
     const outcome = await startBotChat(start);
-    if (!outcome.ok) setOpenError(outcome.message);
+    if (!outcome.ok) setOpenError({ message: outcome.message, sandbox: outcome.sandbox === true });
     setOpening(undefined);
   };
   const open = () => openWith('new', () => onOpenChat());
@@ -218,7 +226,10 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
       </div>
     </header></ChatTopbarHeader>
     {description ? <p className="bots-muted">{description}</p> : null}
-    {openError ? <p role="alert" className="bots-problem">{openError}</p> : null}
+    {unisolated ? <p role="alert" className="bots-problem">{tr('bots_sandbox_unavailable')} {tr('bots_sandbox_unavailable_hint')}
+      {tab !== 'sandbox' ? <button type="button" onClick={() => setTab('sandbox')}>{tr('bots_sandbox_open_settings')}</button> : null}</p> : null}
+    {openError && !(openError.sandbox && unisolated) ? <p role="alert" className="bots-problem">{openError.message}
+      {openError.sandbox && tab !== 'sandbox' ? <button type="button" onClick={() => setTab('sandbox')}>{tr('bots_sandbox_open_settings')}</button> : null}</p> : null}
     {state.phase === 'failed' ? <p role="alert" className="bots-problem">{tr('bots_detail_failed', state.loadError ?? '')} <button type="button" onClick={() => void editor.load()}>{tr('common_retry')}</button></p> : null}
     {state.phase === 'loading' ? <p role="status" className="bots-muted">{tr('bots_detail_loading')}</p> : null}
     <div className="bots-tabs" role="tablist" aria-label={tr('bots_sections_label')} onKeyDown={tabKey}>
@@ -245,6 +256,7 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
         <BotRemoteField draft={state.draft} availability={remoteAvailability} disabled={state.save.kind === 'saving'} onChange={(change) => editor.setDraft(change)} />
         <BotAcceptField draft={state.draft} problems={problems} peers={peers === undefined ? undefined : known.bots.filter((bot) => bot.botId !== botId)} disabled={state.save.kind === 'saving'} onChange={(change) => editor.setDraft(change)} />
       </> : null}
+      {tab === 'sandbox' && sandbox ? <BotSandboxField draft={state.draft} problems={problems} availability={sandbox} disabled={state.save.kind === 'saving'} onChange={(change) => editor.setDraft(change)} /> : null}
       <BotSaveBar state={state} dirty={dirty} problems={hasBotDraftProblems(problems)} onSave={() => void editor.save()} onReload={() => void editor.load()} />
     </> : null}
     </div>

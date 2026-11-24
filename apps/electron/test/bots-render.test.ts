@@ -5,13 +5,13 @@ import { join } from 'node:path';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import type { BotMemoryEntryUi, BotSkillUi, BotUi, BotWorkspaceRequestUi, BotsApi } from '../src/shared/bots';
+import type { BotMemoryEntryUi, BotSkillUi, BotUi, BotWorkspaceRequestUi, BotsApi, BotsAvailability } from '../src/shared/bots';
 import { BotMemoryController } from '../src/renderer/bridge/botMemory';
 import { BotSkillsController } from '../src/renderer/bridge/botSkills';
 import { BotWorkspaceRequestsController } from '../src/renderer/bridge/botWorkspaceRequests';
 import { BotLeaveGuard } from '../src/renderer/bridge/botLeaveGuard';
 import { BotsController, type BotsState } from '../src/renderer/bridge/botsStore';
-import { botDraftProblems, emptyBotDraft, permissionModeNeedsConfirmation } from '../src/renderer/bridge/botForm';
+import { botDraftProblems, emptyBotDraft, permissionModeNeedsConfirmation, type BotDraft } from '../src/renderer/bridge/botForm';
 import { emptyDesktopState } from '../src/renderer/bridge/desktopState';
 import { emptyRuntimeCenterState } from '../src/renderer/bridge/runtimeCenterState';
 import type { UseBridge } from '../src/renderer/bridge/bridgeTypes.js';
@@ -19,10 +19,11 @@ import type { UseBots } from '../src/renderer/bridge/useBots';
 import { tr } from '../src/renderer/i18n/locale';
 import { agentAvatarIndex } from '../src/renderer/components/AgentAvatar';
 import { BotSaveBar } from '../src/renderer/components/BotDetail';
-import { BotFoldersField, BotGeneralFields, BotPermissionField, BotPersonaField } from '../src/renderer/components/BotFields';
+import { BotFoldersField, BotGeneralFields, BotPermissionField, BotPersonaField, BotSandboxAcknowledge, BotSandboxField } from '../src/renderer/components/BotFields';
 import { BotMemoryPanel, BotSkillsPanel, BotWorkspaceRequestsPanel } from '../src/renderer/components/BotPanels';
 import { BotCreate, BotList, Bots, shownProblems } from '../src/renderer/components/Bots';
 import { BetaSidebar, BetaTopBar } from '../src/renderer/components/BetaDesktop';
+import { Toggle } from '../src/renderer/components/settings/primitives';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { controlBorder } from '../src/renderer/theme/teamsTheme';
 import { tokens } from '../src/renderer/theme/tokens';
@@ -50,11 +51,15 @@ function render(element: React.ReactElement): string {
 const avatarsOf = (html: string) => [...html.matchAll(/data-agent-avatar="(\d+)"/g)].map((match) => Number(match[1]));
 
 function bot(overrides: Partial<BotUi> = {}): BotUi {
-  return { botId: 'b1', name: 'Scribe', description: 'Writes things down', createdAt: Date.now() - 60 * MINUTES, updatedAt: Date.now(), revision: 1, workspaces: [], ...overrides };
+  return { botId: 'b1', name: 'Scribe', description: 'Writes things down', createdAt: Date.now() - 60 * MINUTES, updatedAt: Date.now(), revision: 1, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, ...overrides };
 }
 
+/** What a computer that can give a Bot a sandbox says, and one that cannot. */
+const READY: BotsAvailability = { available: true, sandbox: { available: true } };
+const NO_SANDBOX: BotsAvailability = { available: true, sandbox: { available: false, reason: 'bots_sandbox_why_no_bwrap' } };
+
 function state(change: Partial<BotsState> = {}): BotsState {
-  return { availability: { available: true }, bots: [], loading: false, error: undefined, ...change };
+  return { availability: READY, bots: [], loading: false, error: undefined, ...change };
 }
 
 const models = { references: [], details: [] };
@@ -106,7 +111,7 @@ test('each Bot shows its name, description, whether it is working, and when it w
 // ---- Making a Bot ----
 
 test('the form that makes a Bot asks for each part, and does not scold an empty name before it is tried', () => {
-  const html = render(React.createElement(BotCreate, { api: {} as BotsApi, models, pickFolder: async () => null, onCancel: noop, onCreated: noop }));
+  const html = render(React.createElement(BotCreate, { api: {} as BotsApi, models, pickFolder: async () => null, sandbox: { available: true }, onCancel: noop, onCreated: noop }));
   for (const label of ['Name', 'Description', 'Model', 'Persona', 'Default permission mode', 'Folders']) assert.match(html, new RegExp(`>${label}<`), label);
   assert.match(html, />Create Bot</);
   assert.match(html, /← All Bots/);
@@ -169,6 +174,132 @@ test('new Bots explicitly ask for approval, while an unset mode is shown as the 
 
   assert.equal(permissionModeNeedsConfirmation('bypassPermissions'), true);
   for (const mode of ['', 'default', 'acceptEdits', 'plan', 'auto', 'dontAsk'] as const) assert.equal(permissionModeNeedsConfirmation(mode), false, mode);
+});
+
+test('the sandbox is a switch that is on for a Bot that has it, with the hosts it may reach listed under it and a way to take each away', () => {
+  const draft = { ...emptyBotDraft(), sandbox: { enabled: true, allowedDomains: ['example.com', '*.example.org'] } };
+  const html = render(React.createElement(BotSandboxField, { draft, problems: {}, availability: { available: true }, onChange: noop }));
+  assert.match(html, /<button type="button" role="switch" class="settings-toggle"[^>]*aria-checked="true"[^>]*aria-label="Sandbox for shell commands"/);
+  assert.ok(!/role="switch"[^>]*disabled/.test(html), 'it can be turned off');
+  assert.ok(!html.includes('role="status"'), 'a computer that can give one has nothing to explain');
+  assert.match(html, /<legend class="bots-label">Hosts the commands may reach<\/legend>/);
+  assert.match(html, /class="bots-row-title mono">example\.com</);
+  assert.match(html, /class="bots-row-title mono">\*\.example\.org</);
+  assert.match(html, /aria-label="Remove example\.com"/);
+  assert.match(html, /aria-label="Remove \*\.example\.org"/);
+  assert.match(html, /<input[^>]*placeholder="example\.com or \*\.example\.com"[^>]*aria-label="Host to allow"/);
+  assert.match(html, /<button type="button" disabled="">Add<\/button>/, 'nothing typed, nothing to add');
+  assert.ok(!html.includes('No hosts'));
+  assert.ok(!html.includes('role="dialog"'), 'nothing is asked until the sandbox is switched off');
+
+  const none = render(React.createElement(BotSandboxField, { draft: emptyBotDraft(), problems: {}, availability: { available: true }, onChange: noop }));
+  assert.match(none, /No hosts: every connection a command in the sandbox makes needs your approval first\./);
+  assert.ok(!none.includes('aria-label="Remove '));
+});
+
+/** The switch of a sandbox field, found in what the field draws while it is being drawn, since there is no DOM to click in. */
+function sandboxSwitch(draft: BotDraft, changes: Array<Partial<BotDraft>>): { value: boolean; onChange(value: boolean): void } {
+  const found: Array<{ value: boolean; onChange(value: boolean): void }> = [];
+  const walk = (node: React.ReactNode): void => {
+    if (!React.isValidElement(node)) return;
+    const props = node.props as { value?: boolean; children?: React.ReactNode };
+    if (node.type === Toggle) found.push(props as never);
+    React.Children.forEach(props.children, walk);
+  };
+  const Probe = () => {
+    walk(BotSandboxField({ draft, problems: {}, availability: { available: true }, onChange: (change: Partial<BotDraft>) => changes.push(change) }));
+    return null;
+  };
+  render(React.createElement(Probe));
+  assert.equal(found.length, 1);
+  return found[0]!;
+}
+
+test('the sandbox is turned on at once, and turned off only once the owner has been asked, which the draft does not wait for', () => {
+  const changes: Array<Partial<BotDraft>> = [];
+  const on = sandboxSwitch({ ...emptyBotDraft(), sandbox: { enabled: true, allowedDomains: ['example.com'] } }, changes);
+  assert.equal(on.value, true);
+  on.onChange(false);
+  assert.deepEqual(changes, [], 'turning it off changes nothing until the question is answered');
+  const off = sandboxSwitch({ ...emptyBotDraft(), sandbox: { enabled: false, allowedDomains: ['example.com'] } }, changes);
+  assert.equal(off.value, false);
+  off.onChange(true);
+  assert.deepEqual(changes, [{ sandbox: { enabled: true, allowedDomains: ['example.com'] } }], 'turning it on is not asked about, and keeps the hosts the Bot had');
+});
+
+test('a Bot without the sandbox shows the switch off and no hosts to edit, which would reach nothing', () => {
+  const draft = { ...emptyBotDraft(), sandbox: { enabled: false, allowedDomains: ['kept.example.com'] } };
+  const html = render(React.createElement(BotSandboxField, { draft, problems: {}, availability: { available: true }, onChange: noop }));
+  assert.match(html, /role="switch"[^>]*aria-checked="false"/);
+  assert.ok(!html.includes('Hosts the commands may reach'));
+  assert.ok(!html.includes('kept.example.com'));
+  assert.ok(!html.includes('role="dialog"'));
+});
+
+test('where this computer has no sandbox the switch cannot be turned on, and says why; a Bot that has it on can still be turned off', () => {
+  const off = render(React.createElement(BotSandboxField, { draft: { ...emptyBotDraft(), sandbox: { enabled: false, allowedDomains: [] } }, problems: {}, availability: { available: false, reason: 'bots_sandbox_why_no_bwrap' }, onChange: noop }));
+  assert.match(off, /role="switch"[^>]*disabled=""[^>]*aria-checked="false"/);
+  assert.match(off, /role="status" class="bots-row-text bots-sandbox-why">bubblewrap \(bwrap\) is not installed on this computer\./);
+  const on = render(React.createElement(BotSandboxField, { draft: emptyBotDraft(), problems: {}, availability: { available: false, reason: 'bots_sandbox_why_wsl1' }, onChange: noop }));
+  assert.ok(!/role="switch"[^>]*disabled/.test(on), 'turning it off is always allowed');
+  assert.match(on, /aria-checked="true"/);
+  assert.match(on, /This computer runs WSL 1, which cannot run the sandbox\. WSL 2 can\./);
+  const saving = render(React.createElement(BotSandboxField, { draft: emptyBotDraft(), problems: {}, availability: { available: true }, disabled: true, onChange: noop }));
+  assert.match(saving, /role="switch"[^>]*disabled=""/, 'nothing changes while a save is under way');
+  assert.match(saving, /<fieldset class="bots-fields bots-sandbox-hosts" disabled="">/);
+});
+
+test('more hosts than may be allowed is said next to the hosts', () => {
+  const html = render(React.createElement(BotSandboxField, { draft: emptyBotDraft(), problems: { sandbox: 'sandbox_too_many' }, availability: { available: true }, onChange: noop }));
+  assert.match(html, /role="alert"[^>]*>At most 64 hosts can be allowed\./);
+});
+
+test('the form that makes a Bot on a computer with no sandbox asks the owner to say they know, and one with a sandbox asks nothing of the kind', () => {
+  const props = { api: {} as BotsApi, models, pickFolder: async () => null, onCancel: noop, onCreated: noop };
+  const without = render(React.createElement(BotCreate, { ...props, sandbox: { available: false, reason: 'bots_sandbox_why_platform' } }));
+  assert.match(without, /<span class="bots-row-title">Sandbox for shell commands<\/span>/);
+  assert.match(without, /This device can&#x27;t isolate this Bot\./);
+  assert.match(without, /This operating system does not support the sandbox\./);
+  assert.match(without, /role="switch"[^>]*disabled=""[^>]*aria-checked="false"[^>]*aria-label="Sandbox for shell commands"/, 'the switch is shown off and cannot be turned on');
+  assert.match(without, /<input type="checkbox"[^>]*\/><span>I understand that on this computer this Bot&#x27;s shell commands will not be confined to its folders\.<\/span>/);
+  assert.ok(!/<input type="checkbox"[^>]*checked/.test(without), 'unticked until the owner ticks it');
+  assert.ok(!without.includes('Tick the box'), 'not scolded before it is tried');
+  assert.ok(without.indexOf('Folders') < without.indexOf('Sandbox for shell commands') && without.indexOf('Sandbox for shell commands') < without.indexOf('Create Bot'), 'between the folders and the button');
+
+  const withSandbox = render(React.createElement(BotCreate, { ...props, sandbox: { available: true } }));
+  assert.ok(!withSandbox.includes('Sandbox for shell commands'));
+  assert.ok(!withSandbox.includes('type="checkbox"'));
+});
+
+test('the acknowledgement is asked for again, with the box marked, once creating was tried without it', () => {
+  const tried = render(React.createElement(BotSandboxAcknowledge, { reason: 'bots_sandbox_why_no_sandbox_exec', acknowledged: false, missing: true, onChange: noop }));
+  assert.match(tried, /<input type="checkbox" aria-invalid="true"/);
+  assert.match(tried, /role="alert"[^>]*>Tick the box to create a Bot without the sandbox\./);
+  assert.match(tried, /This Mac has no sandbox-exec, which the sandbox needs\./);
+  const ticked = render(React.createElement(BotSandboxAcknowledge, { reason: 'bots_sandbox_why_no_sandbox_exec', acknowledged: true, missing: true, onChange: noop }));
+  assert.match(ticked, /<input type="checkbox" checked=""/);
+  assert.ok(!ticked.includes('Tick the box') && !ticked.includes('aria-invalid'));
+  const busy = render(React.createElement(BotSandboxAcknowledge, { reason: 'bots_sandbox_why_platform', acknowledged: false, missing: false, disabled: true, onChange: noop }));
+  assert.match(busy, /<fieldset class="bots-fields bots-sandbox" disabled="">/);
+});
+
+test('a Bot whose sandbox is on, on a computer that has none, says its chats cannot start and leads to the setting', async () => {
+  const bots = await pageBots({ kind: 'detail', botId: 'a' }, [bot({ botId: 'a', name: 'Alpha' })], NO_SANDBOX);
+  const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
+  assert.match(html, /role="alert" class="bots-problem">This device can&#x27;t isolate this Bot\. The sandbox is on for this Bot, and this device cannot provide one, so its chats cannot start\. Turn the sandbox off to use the Bot here\.<button type="button">Sandbox settings<\/button>/);
+
+  const off = await pageBots({ kind: 'detail', botId: 'a' }, [bot({ botId: 'a', name: 'Alpha', sandbox: { enabled: false, allowedDomains: [] } })], NO_SANDBOX);
+  assert.ok(!render(React.createElement(Bots, { visible: true, bots: off, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop })).includes('isolate this Bot'), 'a Bot that has none to give up has nothing to say');
+
+  const ready = await pageBots({ kind: 'detail', botId: 'a' }, [bot({ botId: 'a', name: 'Alpha' })]);
+  assert.ok(!render(React.createElement(Bots, { visible: true, bots: ready, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop })).includes('isolate this Bot'), 'nor has a computer that has one');
+});
+
+test('a request for the Bot\'s sandbox settings opens at the Sandbox tab, which is then selected and drops the way to itself', async () => {
+  const bots = await pageBots({ kind: 'detail', botId: 'a', sandboxRequest: 1 }, [bot({ botId: 'a', name: 'Alpha' })], NO_SANDBOX);
+  const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
+  assert.match(html, /role="tab" id="[^"]+" aria-selected="true" aria-controls="[^"]+" tabindex="0">Sandbox<\/button>/);
+  assert.ok(!html.includes('>Sandbox settings<'), 'the setting is already in view');
 });
 
 test('folders show their access and can be removed; a Bot with none works only in its own workspace', () => {
@@ -388,8 +519,8 @@ function bridgeStub(runtimes: unknown[] = [], extra: Record<string, unknown> = {
   } as unknown as Pick<UseBridge, 'bootstrap' | 'desktop' | 'sessionLoading' | 'sessionRuntimeStatus' | 'openBotSession' | 'deleteBot' | 'pickBotFolder' | 'scheduledScopes' | 'manageScheduled' | 'setBotsKeepAwake'>;
 }
 
-async function pageBots(view: UseBots['view'], bots: BotUi[]): Promise<UseBots> {
-  const api: Pick<BotsApi, 'availability' | 'list'> = { availability: async () => ({ available: true }), list: async () => bots };
+async function pageBots(view: UseBots['view'], bots: BotUi[], availability: BotsAvailability = READY): Promise<UseBots> {
+  const api: Pick<BotsApi, 'availability' | 'list'> = { availability: async () => availability, list: async () => bots };
   const controller = new BotsController(api);
   await controller.start();
   return { controller, state: controller.getSnapshot(), available: true, view, setView: noop, guard: new BotLeaveGuard(noop) };
@@ -418,7 +549,7 @@ test('a Bot opens to its general settings, with the routines and tasks listed fi
   assert.match(html, /<div class="bots-detail-identity"><span class="bots-avatar" aria-hidden="true"><img [^>]*data-agent-avatar="\d+"[^>]*\/><\/span><div class="bots-detail-title"><h1>Alpha<\/h1>/, 'its avatar stands beside the name');
   assert.deepEqual(avatarsOf(html), [agentAvatarIndex('a')], 'the one the list shows for it');
   assert.match(html, /First helper/);
-  for (const tab of ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions']) assert.match(html, new RegExp(`<button type="button"[^>]*>${tab}</button>`), tab);
+  for (const tab of ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions', 'Sandbox']) assert.match(html, new RegExp(`<button type="button"[^>]*>${tab}</button>`), tab);
   assert.ok(html.indexOf('>Routines</button>') < html.indexOf('>Tasks</button>') && html.indexOf('>Tasks</button>') < html.indexOf('>General</button>'), 'the routines and the tasks come before the settings');
   assert.ok(!html.includes('aria-current'), 'the sections are tabs, not links to pages');
   assert.ok(!html.includes('>Chats</button>'), 'the chats of a Bot are listed under it in the sidebar, not here');
@@ -434,7 +565,7 @@ test('the sections of a Bot are a tab list: one tab selected and in the tab orde
   assert.match(html, /<div class="bots-tabs" role="tablist" aria-label="Bot settings">/);
   const tabs = [...html.matchAll(/<button type="button" role="tab" id="([^"]+)" aria-selected="(true|false)" aria-controls="([^"]+)" tabindex="(-?\d+)">([^<]+)<\/button>/g)]
     .map((match) => ({ id: match[1]!, selected: match[2], controls: match[3]!, tabindex: match[4], label: match[5] }));
-  assert.deepEqual(tabs.map((tab) => tab.label), ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions', 'Package &amp; Market']);
+  assert.deepEqual(tabs.map((tab) => tab.label), ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions', 'Sandbox', 'Package &amp; Market']);
   assert.deepEqual(tabs.filter((tab) => tab.selected === 'true').map((tab) => tab.label), ['General'], 'one is selected');
   assert.deepEqual(tabs.filter((tab) => tab.tabindex === '0').map((tab) => tab.label), ['General'], 'and it is the one Tab reaches: the arrow keys go to the others');
   assert.ok(tabs.every((tab) => tab.selected === 'true' || tab.tabindex === '-1'));

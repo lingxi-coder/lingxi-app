@@ -4,9 +4,11 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, w
 import { join } from 'node:path';
 
 import { pathRule } from '../src/main/bots/botSettings.js';
-import { BotService, botsAvailability, type BotCatalog, type BotRuntimes, type BotServiceOptions } from '../src/main/bots/service.js';
+import { BotSandboxUnavailableError, sandboxAvailability } from '../src/main/bots/sandboxAvailability.js';
+import { BotService, type BotCatalog, type BotRuntimes, type BotServiceOptions } from '../src/main/bots/service.js';
 import { BotConflictError, BotNotFoundError, BotStore, DEFAULT_WORKSPACE_ID, workspaceIdOf } from '../src/main/bots/store.js';
 import type { ProjectSessionCatalogRow } from '../src/main/session-catalog.js';
+import { BOT_SANDBOX_UNAVAILABLE_MESSAGE, type BotSandboxAvailability } from '../src/shared/bots.js';
 import { botFixture, SESSION } from './bot-helpers.js';
 
 const OTHER_SESSION = '99999999-2222-4333-8444-555555555555';
@@ -40,6 +42,7 @@ function setup(t: { after(fn: () => void): void }, options: Pick<BotServiceOptio
   let hold: Promise<void> | undefined;
   let nextSession = SESSION;
   let newSessionFailure: Error | undefined;
+  let sandbox: BotSandboxAvailability = { available: true };
   const controllers = new Set<string>();
   const liveRuntimes = new Map<string, any>();
   const runtimes: BotRuntimes = {
@@ -65,7 +68,7 @@ function setup(t: { after(fn: () => void): void }, options: Pick<BotServiceOptio
   const catalogs = new Map<string, { configHome: string; sessions: ProjectSessionCatalogRow[]; environment: Record<string, string> }>();
   const service = new BotService({
     store: f.store,
-    platform: 'darwin',
+    sandbox: () => sandbox,
     runtimes,
     catalogFor: (configHome): BotCatalog => {
       const state = { configHome, sessions: [] as ProjectSessionCatalogRow[], environment: { FROM_SETTINGS: 'yes' } as Record<string, string> };
@@ -96,6 +99,8 @@ function setup(t: { after(fn: () => void): void }, options: Pick<BotServiceOptio
     /** The id the next new session is given, and whether starting one fails after it has its id. */
     nextSession(id: string) { nextSession = id; },
     failNewSession(error: Error | undefined) { newSessionFailure = error; },
+    /** Whether the computer can give a Bot a sandbox, from now on. */
+    setSandbox(next: BotSandboxAvailability) { sandbox = next; },
     /** A session that is open, in the folder it works in. */
     open(sessionId: string, projectPath: string, extra: Record<string, unknown> = {}) {
       const runtime = { projectPath, sessionId, sessionMode: 'code', hasActiveWork: false, connectionState: { status: 'connected' }, ...extra };
@@ -392,48 +397,110 @@ test('nothing starts, changes or launches in a Bot while it is being deleted', a
 
 // Where Bots can run
 
-const REFUSAL = /Bots are available on macOS only\./;
+const NO_BWRAP: BotSandboxAvailability = { available: false, reason: 'bots_sandbox_why_no_bwrap' };
+/** What a refused Bot says, in the words the window knows it by. */
+const UNISOLATED = new RegExp(BOT_SANDBOX_UNAVAILABLE_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+const SANDBOX_OFF = { enabled: false, allowedDomains: [] as string[] };
 
-test('Bots are available on macOS and nowhere else', () => {
-  assert.deepEqual(botsAvailability('darwin'), { available: true });
-  for (const platform of ['linux', 'win32', 'freebsd', 'android'] as const) {
-    assert.deepEqual(botsAvailability(platform), { available: false, reason: 'Bots are available on macOS only.' }, platform);
-  }
-  assert.deepEqual(botsAvailability(), botsAvailability(process.platform), 'this computer by default');
+test('Bots are available wherever the app runs but Windows, and the answer says whether it can give them a sandbox', (t) => {
+  const s = setup(t);
+  assert.deepEqual(s.service.availability(), { available: true, sandbox: { available: true } });
+  s.setSandbox(NO_BWRAP);
+  assert.deepEqual(s.service.availability(), { available: true, sandbox: NO_BWRAP }, 'asked afresh: bwrap can be installed while the app runs');
+  assert.doesNotThrow(() => s.service.assertAvailable());
+  const bare = new BotService({ store: s.store, runtimes: NO_RUNTIMES, catalogFor: NO_CATALOGS });
+  assert.deepEqual(bare.availability(), { available: true, sandbox: sandboxAvailability() }, 'this computer by default');
 });
 
-test('where Bots cannot run every operation is refused in words the owner can read', async (t) => {
+test('on Windows no Bot is made or listed, whatever its sandbox', (t) => {
   const s = setup(t);
-  const bot = s.service.create({ name: 'Mac Bot' });
-  for (const platform of ['linux', 'win32'] as const) {
-    const elsewhere = new BotService({
-      store: s.store, platform,
-      runtimes: NO_RUNTIMES,
-      catalogFor: () => ({ list: async () => ({ sessions: [] }), find: async () => undefined, select: async () => undefined, workspaceSettings: async () => ({ environment: {}, configHome: '/x' }), invalidate: () => undefined }),
-    });
-    assert.deepEqual(elsewhere.availability(), { available: false, reason: 'Bots are available on macOS only.' });
-    assert.throws(() => elsewhere.assertAvailable(), REFUSAL);
-    assert.throws(() => elsewhere.list(), REFUSAL);
-    assert.throws(() => elsewhere.get(bot.bot_id), REFUSAL);
-    assert.throws(() => elsewhere.create({ name: 'Nowhere' }), REFUSAL);
-    await assert.rejects(elsewhere.update(bot.bot_id, 1, { name: 'Renamed' }), REFUSAL);
-    await assert.rejects(elsewhere.addWorkspace(bot.bot_id, { path: s.folder('x'), mode: 'read' }), REFUSAL);
-    await assert.rejects(elsewhere.grantWorkspace(bot.bot_id, { path: s.folder('x'), mode: 'read' }), REFUSAL);
-    await assert.rejects(elsewhere.changeWorkspace(bot.bot_id, 'wNoSuchFold', { mode: 'read' }), REFUSAL);
-    await assert.rejects(elsewhere.removeWorkspace(bot.bot_id, 'wNoSuchFold'), REFUSAL);
-    await assert.rejects(elsewhere.delete(bot.bot_id), REFUSAL);
-    await assert.rejects(elsewhere.openSession(bot.bot_id), REFUSAL);
-    await assert.rejects(elsewhere.listSessions(bot.bot_id), REFUSAL);
-    await assert.rejects(elsewhere.launchSettings(s.store.workspaceDir(bot.bot_id)), REFUSAL);
-    await assert.rejects(elsewhere.lastActivityAt(bot.bot_id), REFUSAL);
-    // And the app does not treat the folder of a Bot as one.
-    assert.equal(elsewhere.ownsSession({ projectPath: s.store.workspaceDir(bot.bot_id), sessionId: SESSION }), false);
-    assert.equal(elsewhere.botIdFor(s.store.workspaceDir(bot.bot_id)), undefined);
-    assert.equal(elsewhere.modelFor(s.store.workspaceDir(bot.bot_id)), undefined);
-  }
-  assert.deepEqual(s.service.list().map((record) => record.bot_id), [bot.bot_id], 'nothing above touched the Bot');
-  assert.equal(s.store.get(bot.bot_id).revision, 1);
-  assert.deepEqual(s.calls, []);
+  const windows = new BotService({ store: s.store, runtimes: NO_RUNTIMES, catalogFor: NO_CATALOGS, platform: 'win32', sandbox: () => ({ available: false, reason: 'bots_sandbox_why_platform' }) });
+  assert.deepEqual(windows.availability(), { available: false, reason: 'Bots are not available on Windows yet.' });
+  assert.throws(() => windows.assertAvailable(), /not available on Windows/);
+  assert.throws(() => windows.create({ name: 'Unconfined', sandbox: SANDBOX_OFF }), /not available on Windows/);
+  assert.throws(() => windows.list(), /not available on Windows/);
+});
+
+test('where the computer cannot give a sandbox no Bot is made with one, and a Bot can be made without', (t) => {
+  const s = setup(t);
+  s.setSandbox(NO_BWRAP);
+  assert.throws(() => s.service.create({ name: 'Confined' }), UNISOLATED, 'the sandbox is on unless the owner says otherwise');
+  assert.throws(() => s.service.create({ name: 'Confined too', sandbox: { enabled: true, allowedDomains: ['example.com'] } }), BotSandboxUnavailableError);
+  assert.deepEqual(s.service.list(), [], 'nothing of a refused Bot is left behind');
+  assert.deepEqual(s.warnings, []);
+  const free = s.service.create({ name: 'Free', sandbox: SANDBOX_OFF });
+  assert.equal(free.sandbox.enabled, false);
+  assert.equal(s.settingsOf(free.bot_id).sandbox.enabled, false);
+  assert.ok(!('failIfUnavailable' in s.settingsOf(free.bot_id).sandbox));
+  // A computer that can has no objection to either.
+  s.setSandbox({ available: true });
+  assert.equal(s.service.create({ name: 'Confined' }).sandbox.enabled, true);
+});
+
+test('a Bot from the market is made with the sandbox on, so it is refused where the computer has none', (t) => {
+  const s = setup(t);
+  s.setSandbox(NO_BWRAP);
+  const origin = { market: 'https://market.example.com', accountId: 'acct', listingId: 'listing-1', releaseId: 'release-1', digest: 'a'.repeat(64), installIntent: 'b'.repeat(64) };
+  let prepared = false;
+  assert.throws(() => s.service.createFromMarket({ name: 'Market Bot' }, origin, () => { prepared = true; }), UNISOLATED);
+  assert.equal(prepared, false, 'its files are not even put in place');
+  assert.deepEqual(s.service.list(), []);
+});
+
+test('the sandbox is switched off whenever the owner likes, and on only where the computer can give one', async (t) => {
+  const s = setup(t);
+  const bot = s.service.create({ name: 'Switched' });
+  s.setSandbox(NO_BWRAP);
+  // Changing what has nothing to do with the sandbox, or the hosts it allows, is not a reason to refuse.
+  const renamed = await s.service.update(bot.bot_id, 1, { name: 'Renamed' });
+  assert.equal(renamed.revision, 2);
+  const hosts = await s.service.update(bot.bot_id, 2, { sandbox: { enabled: true, allowedDomains: ['example.com'] } });
+  assert.deepEqual(hosts.sandbox, { enabled: true, allowedDomains: ['example.com'] });
+  const off = await s.service.update(bot.bot_id, 3, { sandbox: SANDBOX_OFF });
+  assert.equal(off.sandbox.enabled, false);
+  assert.equal(s.settingsOf(bot.bot_id).sandbox.enabled, false);
+  const before = readFileSync(s.store.recordPath(bot.bot_id), 'utf8');
+  await assert.rejects(s.service.update(bot.bot_id, 4, { sandbox: { enabled: true, allowedDomains: [] } }), UNISOLATED, 'switching it on needs a computer that has one');
+  assert.equal(readFileSync(s.store.recordPath(bot.bot_id), 'utf8'), before, 'the Bot is as it was');
+  assert.equal(s.settingsOf(bot.bot_id).sandbox.enabled, false);
+  s.setSandbox({ available: true });
+  const on = await s.service.update(bot.bot_id, 4, { sandbox: { enabled: true, allowedDomains: [] } });
+  assert.equal(on.sandbox.enabled, true);
+  assert.equal(s.settingsOf(bot.bot_id).sandbox.failIfUnavailable, true);
+});
+
+test('a Bot with the sandbox on does not start where the computer has none, and one without it does', async (t) => {
+  const s = setup(t);
+  const confined = s.service.create({ name: 'Confined' });
+  const free = s.service.create({ name: 'Free', sandbox: SANDBOX_OFF });
+  s.setSandbox(NO_BWRAP);
+  await assert.rejects(s.service.openSession(confined.bot_id), UNISOLATED);
+  assert.deepEqual(s.asked('newSession'), [], 'no session is made for it');
+  await assert.rejects(s.service.startSession(confined.bot_id), BotSandboxUnavailableError);
+  // Whatever else would start its engine is refused in the same way, and does not write its settings.
+  const settings = readFileSync(join(s.store.homeDir(confined.bot_id), 'settings.json'), 'utf8');
+  s.service.claimSession(confined.bot_id, SESSION);
+  await assert.rejects(s.service.launchSettings(s.store.workspaceDir(confined.bot_id), SESSION), UNISOLATED);
+  await assert.rejects(s.service.launchSettings(s.store.workspaceDir(confined.bot_id)), BotSandboxUnavailableError);
+  assert.equal(readFileSync(join(s.store.homeDir(confined.bot_id), 'settings.json'), 'utf8'), settings);
+  // The one without it starts as it would anywhere.
+  s.nextSession(OTHER_SESSION);
+  const ref = await s.service.openSession(free.bot_id);
+  assert.equal(ref.botId, free.bot_id);
+  assert.equal(s.asked('newSession').length, 1);
+  const launch = await s.service.launchSettings(s.store.workspaceDir(free.bot_id), OTHER_SESSION);
+  assert.equal(launch.configHome, s.store.homeDir(free.bot_id));
+  assert.equal(s.settingsOf(free.bot_id).sandbox.enabled, false);
+});
+
+test('an engine that will not run without the sandbox it was asked for is the same refusal, and any other failure is left as it was', async (t) => {
+  const s = setup(t);
+  const bot = s.service.create({ name: 'Refused' });
+  s.failNewSession(new Error('Error: failed to assemble bridge runtime: sandbox required but unavailable: bwrap not found'));
+  await assert.rejects(s.service.openSession(bot.bot_id), (error) => error instanceof BotSandboxUnavailableError && error.message === BOT_SANDBOX_UNAVAILABLE_MESSAGE);
+  const other = new Error('bridge-server exited before publishing a lockfile');
+  s.failNewSession(other);
+  await assert.rejects(s.service.openSession(bot.bot_id), (error) => error === other);
 });
 
 test('the Bot whose folder a working directory is can be told from the directory', (t) => {
@@ -555,17 +622,6 @@ test('a Bot that cannot be read is left out, and the others are still offered', 
   assert.equal(s.service.isBotWorkspace(s.store.workspaceDir(damaged.bot_id)), true);
 });
 
-test('where Bots cannot run the scheduler is told of none, yet still knows a Bot\'s folder when it sees one', (t) => {
-  const s = setup(t);
-  const bot = s.service.create({ name: 'Mac Bot' });
-  const workspace = s.store.workspaceDir(bot.bot_id);
-  const elsewhere = new BotService({ store: s.store, platform: 'linux', runtimes: NO_RUNTIMES, catalogFor: NO_CATALOGS });
-  assert.deepEqual(elsewhere.routineBots(), []);
-  assert.equal(elsewhere.routineBotFor(workspace), undefined);
-  assert.equal(elsewhere.isBotWorkspace(workspace), true);
-  assert.equal(elsewhere.nameFor(workspace), undefined);
-});
-
 test('a Bot is named by its folder wherever the app has only the folder', async (t) => {
   const s = setup(t);
   const bot = s.service.create({ name: 'Named' });
@@ -623,25 +679,13 @@ test('the Bots offered to remote devices are ordered by when they were made, not
   const ids = ['Bot0000000000000000003', 'Bot0000000000000000002', 'Bot0000000000000000001'];
   let now = 1000;
   const store = new BotStore({ userData: f.userData, home: f.home, defaultConfigHome: f.defaultConfigHome, defaultWorkspaceRoot: f.defaultWorkspaceRoot, now: () => now, newId: () => ids.shift()! });
-  const service = new BotService({ store, platform: 'darwin', runtimes: NO_RUNTIMES, catalogFor: NO_CATALOGS });
+  const service = new BotService({ store, sandbox: () => ({ available: true }), runtimes: NO_RUNTIMES, catalogFor: NO_CATALOGS });
   for (const name of ['Oldest', 'Middle', 'Newest']) {
     const bot = service.create({ name });
     await service.update(bot.bot_id, 1, { remote: true });
     now += 1000;
   }
   assert.deepEqual(service.remoteBots().map((bot) => bot.name), ['Oldest', 'Middle', 'Newest']);
-});
-
-test('where Bots cannot run, none is offered to remote devices and none is a chat\'s Bot', async (t) => {
-  const s = setup(t);
-  const bot = s.service.create({ name: 'Mac Bot' });
-  await s.service.update(bot.bot_id, 1, { remote: true });
-  const workspace = s.store.workspaceDir(bot.bot_id);
-  const elsewhere = new BotService({ store: s.store, platform: 'linux', runtimes: NO_RUNTIMES, catalogFor: NO_CATALOGS, openProject: () => workspace });
-  assert.deepEqual(elsewhere.remoteBots(), []);
-  assert.deepEqual(elsewhere.remoteBot(bot.bot_id), { state: 'unknown' });
-  assert.equal(elsewhere.chat(SESSION), undefined);
-  assert.equal(elsewhere.remoteEnabled(workspace), false);
 });
 
 test('a chat is a Bot\'s when it is open in the Bot\'s workspace or its transcript is in the Bot\'s home', async (t) => {
@@ -859,7 +903,7 @@ test('what a Bot recorded of a session tells a new run of the app whose it is, b
   const inRepo = chatOf(s, bot.bot_id, SESSION, repo);
   s.catalogs.get(s.store.homeDir(bot.bot_id))!.sessions.push(inRepo);
   await s.service.openSession(bot.bot_id, SESSION, inRepo.path);
-  const restarted = () => new BotService({ store: s.store, platform: 'darwin', runtimes: NO_RUNTIMES, catalogFor: NO_CATALOGS });
+  const restarted = () => new BotService({ store: s.store, sandbox: () => ({ available: true }), runtimes: NO_RUNTIMES, catalogFor: NO_CATALOGS });
   assert.equal(restarted().botIdForSession({ projectPath: repo, sessionId: SESSION }), bot.bot_id, 'nothing was claimed in this run: the record is what says so');
   assert.equal(restarted().botIdForSession({ projectPath: s.folder('elsewhere'), sessionId: SESSION }), undefined, 'the same id in a folder its transcript is not kept for');
   assert.equal(restarted().botIdForSession({ projectPath: repo, sessionId: OTHER_SESSION }), undefined, 'and the owner\'s other session in that folder is still the owner\'s');
@@ -941,6 +985,43 @@ test('a folder is changed to read or write for the open chats, and a label is no
   await s.service.settled();
   assert.deepEqual(s.asked('restart'), [['restart', { projectPath: own, sessionId: SESSION, mode: 'code' }]]);
   assert.ok(s.settingsOf(bot.bot_id).permissions.deny.includes(pathRule('Edit', folder.path)));
+});
+
+test('a change to the sandbox starts the open chats again, and the hosts it allows are one', async (t) => {
+  const s = setup(t);
+  const { bot, own } = await launchedChat(s);
+  const restart = [['restart', { projectPath: own, sessionId: SESSION, mode: 'code' }]];
+  await s.service.update(bot.bot_id, 1, { sandbox: SANDBOX_OFF });
+  await s.service.settled();
+  assert.deepEqual(s.asked('restart'), restart, 'switched off');
+  assert.equal(s.settingsOf(bot.bot_id).sandbox.enabled, false, 'the settings were written before the engine was asked to read them');
+  // The engine that was started again was launched with what is now.
+  await s.service.launchSettings(own, SESSION);
+  s.calls.length = 0;
+  await s.service.update(bot.bot_id, 2, { sandbox: { enabled: false, allowedDomains: [] }, name: 'Renamed' });
+  await s.service.settled();
+  assert.deepEqual(s.asked('restart'), [], 'nothing it reads has changed');
+  await s.service.update(bot.bot_id, 3, { sandbox: { enabled: true, allowedDomains: ['example.com'] } });
+  await s.service.settled();
+  assert.deepEqual(s.asked('restart'), restart, 'switched on');
+  await s.service.launchSettings(own, SESSION);
+  s.calls.length = 0;
+  await s.service.update(bot.bot_id, 4, { sandbox: { enabled: true, allowedDomains: ['example.com', '*.docs.example.com'] } });
+  await s.service.settled();
+  assert.deepEqual(s.asked('restart'), restart, 'a host allowed');
+  assert.deepEqual(s.settingsOf(bot.bot_id).sandbox.network.allowedDomains, ['example.com', '*.docs.example.com']);
+});
+
+test('a chat that is working keeps its sandbox until it is idle, and then is started again with the one the Bot has', async (t) => {
+  const s = setup(t, { retryMs: 5 });
+  const { bot, own, runtime } = await launchedChat(s);
+  runtime.hasActiveWork = true;
+  await s.service.update(bot.bot_id, 1, { sandbox: SANDBOX_OFF });
+  await s.service.settled();
+  assert.deepEqual(s.asked('restart'), [], 'it is working');
+  runtime.hasActiveWork = false;
+  await until(() => s.asked('restart').length === 1);
+  assert.deepEqual(s.asked('restart'), [['restart', { projectPath: own, sessionId: SESSION, mode: 'code' }]]);
 });
 
 test('a chat that is working keeps what it has and is looked at again until it is idle', async (t) => {

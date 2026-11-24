@@ -749,6 +749,18 @@ test('the sandbox, scope and automatic replies are checked before anything is ma
   assert.deepEqual(parseScope({ localApps: [], datasets: [] }), { localApps: [], datasets: [] });
 });
 
+test('a host the sandbox allows is a name or every name below one, in lower case, and never a scheme, a port, a path or a malformed name', () => {
+  const kept = (domain: string) => parseSandbox({ enabled: true, allowedDomains: [domain] }).allowedDomains[0];
+  assert.equal(kept(' Example.COM '), 'example.com', 'trimmed and lower case');
+  for (const name of ['localhost', 'a-b.example.com', '*.example.com', 'xn--bcher-kva.example', '1.example.com', `${'a'.repeat(63)}.com`]) assert.equal(kept(name), name, name);
+  for (const name of [
+    '', ' ', '*', '*.', '*a.com', 'a.*.com', '**.a.com', 'a..b', '.a.com', 'a.com.', '-a.com', 'a-.com', 'a_b.com', 'a b.com',
+    'https://a.com', 'a.com:443', 'a.com/path', 'user@a.com', 'a.com?x=1', `${'a'.repeat(64)}.com`, `${'a.'.repeat(127)}com`,
+  ]) assert.throws(() => parseSandbox({ enabled: true, allowedDomains: [name] }), /invalid sandbox domain/, JSON.stringify(name));
+  assert.throws(() => parseSandbox({ enabled: true, allowedDomains: [1] }), /invalid sandbox domain/, 'a name is a string');
+  assert.equal(parseSandbox({ enabled: true, allowedDomains: Array.from({ length: 64 }, (_, index) => `h${index}.example.com`) }).allowedDomains.length, 64, 'sixty-four is the most');
+});
+
 test('the folder a routine runs in is kept beside the Bot, one id per routine, and what is not listed runs in the Bot own folder', (t) => {
   const f = botFixture(t);
   const bot = f.store.create({ name: 'Clockwork' });

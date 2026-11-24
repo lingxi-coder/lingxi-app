@@ -127,6 +127,7 @@ import { scheduledRunIdentity } from './scheduled-run-identity.js';
 import { NativeMediaDevices } from './media/nativeMediaDevices.js';
 import {
   DiagnosticBuffer,
+  ENGINE_SANDBOX_REFUSAL,
   buildBridgeArguments,
   buildBridgeEnvironment,
   buildCredentialEnvelope,
@@ -220,6 +221,8 @@ export class SessionRuntime {
   readonly sessionId: string;
   readonly projectPath: string;
   private child: ChildProcess | null = null;
+  /** The line of the engine's error output that says it will not run without the sandbox it was asked to require; of the launch under way. */
+  private sandboxRefusal: string | undefined;
   private client: BridgeClient | null = null;
   private telemetry: DesktopTelemetry | undefined;
   private telemetryRevoked = false;
@@ -2319,6 +2322,7 @@ export class SessionRuntime {
     const bridgeDir = this.createLaunchDirectory();
 
     this.setState({ status: 'spawning' });
+    this.sandboxRefusal = undefined;
     let child: ChildProcess;
     try {
       child = this.spawnServer(launch, bridgeDir);
@@ -2607,6 +2611,7 @@ export class SessionRuntime {
     const record = (line: string, fallbackLevel: 'info' | 'error'): void => {
       const text = sanitizeDiagnostic(line.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, ''), secrets);
       if (!text) return;
+      if (generation === this.generation && ENGINE_SANDBOX_REFUSAL.test(text)) this.sandboxRefusal = text;
       const level = /\bERROR\b/.test(text) ? 'error' : /\bWARN\b/.test(text) ? 'warn' : fallbackLevel;
       this.diagnostics.add(level, 'bridge', diagnosticEvent('engine_log', {
         sessionId: this.opts.sessionId,
@@ -2643,7 +2648,8 @@ export class SessionRuntime {
     return new Promise<string>((resolve, reject) => {
       const tick = (): void => {
         if (this.disposed || generation !== this.generation) return reject(new Error('bridge launch superseded'));
-        if (!this.child) return reject(new Error('bridge-server exited before publishing a lockfile'));
+        // An engine that would not start without a sandbox said so on its way out: that, and not a bare exit, is why it did not publish.
+        if (!this.child) return reject(new Error(this.sandboxRefusal ?? 'bridge-server exited before publishing a lockfile'));
         for (const name of lockfiles(dir).sort((left, right) => left.localeCompare(right))) {
           const path = join(dir, name);
           try {

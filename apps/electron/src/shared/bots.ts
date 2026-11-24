@@ -16,6 +16,12 @@ import type { BotMarketOrigin, BotMarketRequest, BotMarketResponse } from './bot
  */
 export const BOT_CONFLICT_MESSAGE = 'This Bot changed. Reload and try again.';
 
+/**
+ * What a Bot that cannot be made or started says when its sandbox is on and this computer cannot provide
+ * one. The window tells this apart from other failures by the text, as it does a conflict.
+ */
+export const BOT_SANDBOX_UNAVAILABLE_MESSAGE = "This device can't isolate this Bot.";
+
 /** Invoke → `BotsAvailability`. The only channel that answers when Bots cannot be used here. */
 export const CH_BOTS_AVAILABILITY = 'lingxi:bots:availability';
 /** Invoke → `BotUi[]`. */
@@ -87,11 +93,19 @@ export const CH_BOTS_LOGIN_ITEM_SET = 'lingxi:bots:login-item:set';
 /** Invoke → `void`. Opens the Login Items pane of System Settings, where the owner allows the app. */
 export const CH_BOTS_LOGIN_ITEMS_OPEN = 'lingxi:bots:login-item:open-settings';
 
-/** Whether Bots can be used on this computer, and if not, why (in words fit for the owner). */
-export interface BotsAvailability {
-  available: boolean;
-  reason?: string;
-}
+/**
+ * Whether this computer can confine the commands of a Bot's shell to its folders. When it cannot, `reason` is the
+ * key of the text that says why: the window shows it, and a Bot's sandbox can only be switched off.
+ */
+export type BotSandboxAvailability = { available: true } | { available: false; reason: string };
+
+/**
+ * Whether Bots can be used here, and with the sandbox or not. They are unavailable on Windows, and to a window
+ * that has no host to ask or whose host did not answer.
+ */
+export type BotsAvailability =
+  | { available: true; sandbox: BotSandboxAvailability }
+  | { available: false; reason?: string };
 
 /** The app as a login item, as the system has it. */
 export interface BotsLoginItemUi {
@@ -128,6 +142,20 @@ export const BOT_DEFAULT_WORKSPACE_ID = 'default';
 export interface BotSandboxUi {
   enabled: boolean;
   allowedDomains: string[];
+}
+
+/** How many hosts a Bot's commands may be allowed to reach. */
+export const BOT_ALLOWED_DOMAINS_MAX = 64;
+const DOMAIN_LABEL = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?';
+const DOMAIN = new RegExp(`^(?:\\*\\.)?${DOMAIN_LABEL}(?:\\.${DOMAIN_LABEL})*$`);
+
+/**
+ * A host a Bot's commands may reach, as the engine reads it: a name (`example.com`), or every name below one
+ * (`*.example.com`), in lower case, with no scheme, port or path. `undefined` for anything else.
+ */
+export function allowedDomain(text: string): string | undefined {
+  const name = text.trim().toLowerCase();
+  return name.length > 0 && name.length <= 253 && DOMAIN.test(name) ? name : undefined;
 }
 
 export interface BotDatasetScopeUi {

@@ -367,7 +367,7 @@ export class BotTasks implements DelegationBackend {
   }
 
   private assertCaller(caller: Caller): void {
-    if (!this.options.available()) throw new DelegationError('unavailable', 'Bots are available on macOS only.');
+    if (!this.options.available()) throw new DelegationError('unavailable', 'Bots are not available on this computer.');
     if (this.options.isDeleting(caller.botId) || this.record(caller.botId) === undefined) throw new DelegationError('unavailable', 'Your Bot is no longer there.');
   }
 
@@ -419,7 +419,7 @@ export class BotTasks implements DelegationBackend {
   /** Why a task whose Bot has been asked to start it may no longer be started, if it may not. */
   private mayStart(task: TaskRecord, target: BotRecord | undefined): DelegationError | undefined {
     const { isDeleting, available } = this.options;
-    if (!available()) return new DelegationError('unavailable', 'Bots are available on macOS only.');
+    if (!available()) return new DelegationError('unavailable', 'Bots are not available on this computer.');
     if (target === undefined) return new DelegationError('unavailable', 'The Bot is no longer there.');
     if (isDeleting(target.bot_id) || isDeleting(task.sender.bot_id)) return new DelegationError('unavailable', `${target.name} is being deleted.`);
     if (this.record(task.sender.bot_id) === undefined) return new DelegationError('unavailable', 'The Bot that sent the task is no longer there.');

@@ -57,8 +57,7 @@ pub(super) async fn run_config_startup(command: Option<&crate::commands::Command
     let initializes_device_identity = command.is_none() || command_initializes_user_id(command);
 
     if migration_pending || initializes_device_identity {
-        let first_start_time =
-            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let first_start_time = format!("{:.3}", jiff::Timestamp::now());
         if let Err(error) = migrations::global_config::ensure_first_start_metadata(
             &global_config_path,
             &first_start_time,

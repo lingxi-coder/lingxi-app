@@ -180,14 +180,13 @@ impl PeerHandle for NativePeer {
 
 fn state(value: RTCPeerConnectionState) -> PeerConnectionState {
     match value {
-        RTCPeerConnectionState::Unspecified | RTCPeerConnectionState::New => {
-            PeerConnectionState::New
-        }
         RTCPeerConnectionState::Connecting => PeerConnectionState::Connecting,
         RTCPeerConnectionState::Connected => PeerConnectionState::Connected,
         RTCPeerConnectionState::Disconnected => PeerConnectionState::Disconnected,
         RTCPeerConnectionState::Failed => PeerConnectionState::Failed,
         RTCPeerConnectionState::Closed => PeerConnectionState::Closed,
+        // New, Unspecified, and any state a later webrtc release adds.
+        _ => PeerConnectionState::New,
     }
 }
 

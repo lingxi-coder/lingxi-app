@@ -308,8 +308,8 @@ pub(super) fn read(path: &Path, session_id: uuid::Uuid, cursor: Cursor) -> Resul
                 let uuid = id.as_uuid().to_string();
                 message.sent_at_ms = timestamps
                     .get(uuid.as_str())
-                    .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
-                    .map(|at| at.timestamp_millis());
+                    .and_then(|at| at.parse::<jiff::Timestamp>().ok())
+                    .map(|at| at.as_millisecond());
                 message.transcript_uuid = Some(uuid);
                 message
             })

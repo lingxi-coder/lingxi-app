@@ -1428,9 +1428,9 @@ impl RemoteHostMediaSession {
             Peer::Failed => MediaSessionState::Failed,
             Peer::Closed if self.stopped.load(Ordering::Acquire) => MediaSessionState::Ended,
             Peer::Closed => MediaSessionState::Failed,
-            Peer::New | Peer::Connecting | Peer::Disconnected | Peer::Unspecified => {
-                MediaSessionState::Preparing
-            }
+            // New, Unspecified, Connecting/Disconnected before the first
+            // connection, and any state a later webrtc release adds.
+            _ => MediaSessionState::Preparing,
         };
         self.set_state(mapped);
     }

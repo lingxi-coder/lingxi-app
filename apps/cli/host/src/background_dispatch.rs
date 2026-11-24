@@ -106,7 +106,7 @@ impl DaemonSpawner for RealSpawner {
 
 /// Epoch-millis used by the durable background launch specification.
 fn now_millis() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+    jiff::Timestamp::now().as_millisecond()
 }
 
 /// The first line of the prompt, trimmed and length-capped, used as the job
@@ -485,7 +485,7 @@ fn dispatch_background_inner<LP: LockProbe, S: DaemonSpawner>(
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let created_at = format!("{:.3}", jiff::Timestamp::now());
     let intent = intent_from_prompt(argv.prompt.as_deref());
     let terminal = captured_terminal_size();
     let transcript_path = session::jsonl::path::session_path(config_home, &cwd, &session_id)
@@ -740,7 +740,7 @@ fn dispatch_resumed_session_inner<LP: LockProbe, S: DaemonSpawner>(
 
     let short = agents_registry::mint_short_id(config_home);
     let worker_generation = uuid::Uuid::new_v4().to_string();
-    let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let created_at = format!("{:.3}", jiff::Timestamp::now());
     let seed_prompt = (!source_prompt_is_blank(prompt)).then(|| prompt.clone());
     let intent = seed_prompt.as_ref().and_then(intent_from_source_prompt);
     let terminal = captured_terminal_size();

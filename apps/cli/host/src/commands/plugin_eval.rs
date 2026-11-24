@@ -1054,7 +1054,7 @@ async fn run_evaluation(
     // Keep its V2 archive session alive until all cases and plugin hooks finish.
     let archive_session = plugin::PluginArchiveSession::new();
     let started = std::time::Instant::now();
-    let started_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let started_at = format!("{:.3}", jiff::Timestamp::now());
     let target_text = cli.target.clone().unwrap_or_else(|| ".".to_string());
     let target = resolve_target(&target_text, plugins_dir, home, cwd, &archive_session).await?;
     if cli.eval_dir.is_none() {
@@ -1385,7 +1385,7 @@ async fn run_one_arm(
 ) -> EvalRunResult {
     let arm = planned.label.as_str();
     let plugin_enabled = planned.plugin_enabled;
-    let started_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let started_at = format!("{:.3}", jiff::Timestamp::now());
     let discovered_mocks = if plugin_enabled && cli.mocks == "record" {
         match discover_eval_mocks(cli, plugin_root, case) {
             Ok(mocks) => mocks,
@@ -2137,7 +2137,7 @@ fn failed_run(arm: &str, run: u32, error: String) -> EvalRunResult {
         judge_cost_usd: 0.0,
         turns: 0,
         duration_seconds: 0.0,
-        started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        started_at: format!("{:.3}", jiff::Timestamp::now()),
         trace_path: None,
         skipped_paid_graders: false,
         graders: Vec::new(),

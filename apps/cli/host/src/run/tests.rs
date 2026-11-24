@@ -102,8 +102,7 @@ fn write_session(project_dir: &std::path::Path, prompt: &str, mtime: SystemTime)
         "uuid": uuid.to_string(),
         "parentUuid": null,
         "sessionId": uuid.to_string(),
-        "timestamp": chrono::DateTime::<chrono::Utc>::from(mtime)
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "timestamp": format!("{:.3}", jiff::Timestamp::try_from(mtime).unwrap()),
         "cwd": "/tmp/workproj",
         "version": "0.8.0",
         "isSidechain": false,

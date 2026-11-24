@@ -480,8 +480,8 @@ pub fn cwd_matches(filter: Option<&Path>, cwd: &str) -> bool {
 #[must_use]
 pub fn parse_created_at_ms(created_at: Option<&str>) -> i64 {
     created_at
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map_or(0, |dt| dt.timestamp_millis())
+        .and_then(|s| s.parse::<jiff::Timestamp>().ok())
+        .map_or(0, |dt| dt.as_millisecond())
 }
 
 /// Build the `agents --json` array — the faithful `printAgentsJson` merge.
@@ -1452,7 +1452,7 @@ impl SessionRegistration {
     ) -> Self {
         let pid = std::process::id();
         let pid = i32::try_from(pid).unwrap_or(i32::MAX);
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = jiff::Timestamp::now().as_millisecond();
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
@@ -1523,7 +1523,7 @@ impl SessionRegistration {
         {
             return;
         }
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = jiff::Timestamp::now().as_millisecond();
         record.status = Some(status.to_string());
         record.waiting_for = waiting_for.map(str::to_string);
         record.updated_at = Some(now_ms);
@@ -1550,7 +1550,7 @@ impl SessionRegistration {
         else {
             return;
         };
-        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_ms = jiff::Timestamp::now().as_millisecond();
         if record.name.as_deref() != Some(name) {
             if let Some(prev) = record.name.clone() {
                 record.former_names.get_or_insert_with(Vec::new).push(prev);
@@ -1586,7 +1586,7 @@ impl SessionRegistration {
             return;
         };
         record.messaging_socket_path = Some(sock.display().to_string());
-        record.updated_at = Some(chrono::Utc::now().timestamp_millis());
+        record.updated_at = Some(jiff::Timestamp::now().as_millisecond());
         persist_live_record(path, record, &["messagingSocketPath", "updatedAt"]);
     }
 
@@ -1607,7 +1607,7 @@ impl SessionRegistration {
             return;
         };
         record.permission_class = Some(class.to_string());
-        record.updated_at = Some(chrono::Utc::now().timestamp_millis());
+        record.updated_at = Some(jiff::Timestamp::now().as_millisecond());
         persist_live_record(path, record, &["permissionClass", "updatedAt"]);
     }
 
@@ -1627,7 +1627,7 @@ impl SessionRegistration {
             return;
         };
         record.session_id = Some(session_id.to_string());
-        record.updated_at = Some(chrono::Utc::now().timestamp_millis());
+        record.updated_at = Some(jiff::Timestamp::now().as_millisecond());
         persist_live_record(path, record, &["sessionId", "updatedAt"]);
     }
 

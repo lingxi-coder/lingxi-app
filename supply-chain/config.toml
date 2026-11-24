@@ -55,16 +55,10 @@ audit-as-crates-io = true
 [policy.mbedtls-sys]
 audit-as-crates-io = true
 
-[policy."nix:0.31.3@git:d71ae35dc5b214cfffdd63aadc31ddaac4fc00e5"]
-audit-as-crates-io = true
-
 [policy.platform-pty]
 audit-as-crates-io = true
 
 [policy.syntect]
-audit-as-crates-io = true
-
-[policy.webrtc]
 audit-as-crates-io = true
 
 [policy.xcap]

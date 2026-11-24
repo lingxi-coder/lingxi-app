@@ -33,7 +33,7 @@ lingxi-webrtc-core = { workspace = true, optional = true }
 media-api = { workspace = true, optional = true }
 media-runtime = { workspace = true, optional = true }
 lingxi-webrtc-media = { workspace = true, optional = true }
-webrtc = { version = "=0.20.3", optional = true }
+webrtc = { version = "=0.21.1", optional = true }
 
 # Mobile applications link the explicit static SDK selected by their build
 # toolchain. Host-side contract checks use the native GStreamer SDK instead.

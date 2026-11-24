@@ -48,7 +48,7 @@ pub fn replies_dir(config_home: &Path, short: &str) -> PathBuf {
 
 /// Epoch-millis clock (matches the roster/job timestamp unit).
 fn now_millis() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+    jiff::Timestamp::now().as_millisecond()
 }
 
 /// Collect the pending reply filenames under `dir`, sorted lexically (== enqueue

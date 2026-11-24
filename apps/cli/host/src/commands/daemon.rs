@@ -360,7 +360,7 @@ pub struct Cli {}
 
 /// Current epoch-millis (roster `updatedAt` is epoch-millis `i64`).
 fn now_millis() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+    jiff::Timestamp::now().as_millisecond()
 }
 
 /// Run the supervisor. Acquires the lock (or yields), adopts the roster, then

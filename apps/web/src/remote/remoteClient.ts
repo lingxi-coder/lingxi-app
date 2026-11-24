@@ -15,9 +15,11 @@ import {
   randomId,
   systemClock,
   type BotThreadCreateResult,
+  type BotWorkspacesResult,
   type Clock,
   type ModelsListResult,
   type RemoteBotSummary,
+  type RemoteBotWorkspaceMode,
   type RemoteCursor,
   type RemotePending,
   type RemoteSeqRecord,
@@ -867,6 +869,151 @@ export class BotThreads {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// The folders a Bot works in
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface BotWorkspacesState {
+  /** The Bot's folders, the desktop's projects it could be given and what it asked for, as the desktop said last; `undefined` until it has. */
+  folders: BotWorkspacesResult | undefined;
+  /** Why the last listing or change failed; the next one that works clears it. */
+  error?: { code: string; message: string };
+  /** A change is on its way: no other is sent until it is answered. */
+  busy: boolean;
+}
+
+/** What a Bot has when the desktop does not know folders: none of any kind. */
+const NO_FOLDERS: BotWorkspacesResult = { workspaces: [], projects: [], requests: [] };
+
+interface BotWorkspacesIo {
+  request: Request;
+  /** Whether a request can go out now: the connection is ready and the desktop knows Bots. */
+  canRequest(): boolean;
+}
+
+/**
+ * The folders of one Bot. They are asked for when a page shows them (`activate`), after each reconnect, and when
+ * `bots.changed` says the Bot has folders to answer for (`refresh`). Each change (`add`, `setMode`, `removeFolder`,
+ * `decide`) is one request, which the desktop answers with the folders as they are afterwards. A viewer gives a Bot
+ * only a folder from `projects`: it never names a path of its own.
+ */
+export class BotWorkspaces {
+  private current: BotWorkspacesState = { folders: undefined, busy: false };
+  private readonly listeners = new Set<() => void>();
+  private shown = 0;
+  private fetching = false;
+  /** A change came in while a listing was on its way: that listing may be out of date. */
+  private stale = false;
+  /** The desktop answered that it does not know folders (a version from before them): it is asked again after the next reconnect. */
+  private unsupported = false;
+
+  constructor(
+    readonly botId: string,
+    private readonly io: BotWorkspacesIo,
+  ) {}
+
+  getState = (): BotWorkspacesState => this.current;
+
+  subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  };
+
+  private commit(change: Partial<BotWorkspacesState>): void {
+    this.current = { ...this.current, ...change };
+    for (const listener of [...this.listeners]) listener();
+  }
+
+  /** A page is showing the Bot's folders: list them now, and keep them current until `deactivate`. */
+  activate(): void {
+    this.shown += 1;
+    if (!this.fetching) this.refresh();
+  }
+
+  deactivate(): void {
+    this.shown = Math.max(0, this.shown - 1);
+  }
+
+  /** The connection became ready again, to a desktop that may be of another version. */
+  connectionReady(): void {
+    this.unsupported = false;
+    this.refresh();
+  }
+
+  /** List the folders again, if a page is showing them. */
+  refresh(): void {
+    if (this.shown === 0 || this.unsupported || !this.io.canRequest()) return;
+    if (this.fetching || this.current.busy) {
+      this.stale = true;
+      return;
+    }
+    this.fetching = true;
+    void this.load();
+  }
+
+  private async load(): Promise<void> {
+    try {
+      const result = await this.io.request('bot.workspaces.list', { bot_id: this.botId });
+      // A change made meanwhile has its own, newer answer.
+      if (!this.current.busy) this.commit({ folders: cleanFolders(result), error: undefined });
+    } catch (error) {
+      if (isUnknownMethod(error)) {
+        // A desktop with Bots but not folders has none to show, and is not asked again on this connection.
+        this.unsupported = true;
+        this.commit({ folders: NO_FOLDERS, error: undefined });
+      } else if (!(error instanceof RemoteRpcError && error.code === 'closed')) {
+        // (A dropped link is not a failure: the next `connectionReady` asks again.)
+        this.commit({ error: errorMessage(error) });
+      }
+    } finally {
+      this.fetching = false;
+      if (this.stale) {
+        this.stale = false;
+        this.refresh();
+      }
+    }
+  }
+
+  /** Give the Bot one of the desktop's projects (a `path` of `projects`). Resolves to whether the desktop took it. */
+  add(path: string, mode: RemoteBotWorkspaceMode): Promise<boolean> {
+    return this.change(() => this.io.request('bot.workspace.add', { bot_id: this.botId, path, mode }));
+  }
+
+  /** Change how far the Bot may go in one of its folders. */
+  setMode(workspaceId: string, mode: RemoteBotWorkspaceMode): Promise<boolean> {
+    return this.change(() => this.io.request('bot.workspace.set_mode', { bot_id: this.botId, workspace_id: workspaceId, mode }));
+  }
+
+  /** Take a folder away from the Bot: its chats in the folder end, and what was said in them is kept. */
+  removeFolder(workspaceId: string): Promise<boolean> {
+    return this.change(() => this.io.request('bot.workspace.remove', { bot_id: this.botId, workspace_id: workspaceId }));
+  }
+
+  /** Answer a folder the Bot asked for: approving gives it the folder with the access it asked for. */
+  decide(requestId: string, decision: 'approve' | 'deny'): Promise<boolean> {
+    return this.change(() => this.io.request('bot.workspace.request.decide', { bot_id: this.botId, request_id: requestId, decision }));
+  }
+
+  /** One change at a time, as a page disables what would be a second. Resolves to whether the desktop took it; why not is in `error`. */
+  private async change(send: () => Promise<BotWorkspacesResult>): Promise<boolean> {
+    if (this.current.busy || !this.io.canRequest()) return false;
+    this.commit({ busy: true });
+    try {
+      const result = await send();
+      this.commit({ folders: cleanFolders(result), error: undefined, busy: false });
+      return true;
+    } catch (error) {
+      this.commit({ error: errorMessage(error), busy: false });
+      return false;
+    } finally {
+      if (this.stale) {
+        this.stale = false;
+        this.refresh();
+      }
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // RemoteClient
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -899,11 +1046,26 @@ function cleanSummary(summary: RemoteSessionSummary): RemoteSessionSummary {
 }
 
 function cleanBot(bot: RemoteBotSummary): RemoteBotSummary {
-  return {
+  const clean: RemoteBotSummary = {
     ...bot,
     name: displayText(bot.name, 60),
     description: displayText(bot.description, 160),
     waiting_threads: typeof bot.waiting_threads === 'number' ? bot.waiting_threads : 0,
+  };
+  // Folders asked for: a count, and none when it is anything else.
+  if (!Number.isInteger(bot.pending_workspace_requests) || bot.pending_workspace_requests! <= 0) delete clean.pending_workspace_requests;
+  return clean;
+}
+
+/**
+ * What the desktop sends of a Bot's folders, made safe to show: names and reasons on one line, cut. Paths stay as
+ * they are, since a project's path is what `bot.workspace.add` is asked with.
+ */
+function cleanFolders(result: BotWorkspacesResult): BotWorkspacesResult {
+  return {
+    workspaces: result.workspaces.map((folder) => ({ ...folder, label: displayText(folder.label, 60) })),
+    projects: result.projects.map((project) => ({ ...project, label: displayText(project.label, 60) })),
+    requests: result.requests.map((request) => ({ ...request, reason: displayText(request.reason, 300) })),
   };
 }
 
@@ -939,6 +1101,7 @@ export class RemoteClient {
   private readonly listeners = new Set<() => void>();
   private readonly controllers = new Map<string, SessionController>();
   private readonly threadStores = new Map<string, BotThreads>();
+  private readonly workspaceStores = new Map<string, BotWorkspaces>();
   /** The Bot each chat belongs to, for the chats listed to this browser and the ones it started. */
   private readonly threadBots = new Map<string, string>();
   private readonly clock: Clock;
@@ -1005,20 +1168,33 @@ export class RemoteClient {
     return store;
   }
 
+  /** The folders of a Bot, created on first use and kept. A page must `activate` it for it to list anything. */
+  botWorkspaces(botId: string): BotWorkspaces {
+    let store = this.workspaceStores.get(botId);
+    if (store === undefined) {
+      store = new BotWorkspaces(botId, {
+        request: (method, params, options) => this.connection.request(method, params, options),
+        canRequest: () => this.connection.state.phase === 'ready' && this.current.bots !== 'unsupported',
+      });
+      this.workspaceStores.set(botId, store);
+    }
+    return store;
+  }
+
   /** The Bot a chat belongs to, if this browser has been told: from a list of the Bot's chats, or by starting the chat. */
   botOfThread(sessionId: string): string | undefined {
     return this.threadBots.get(sessionId);
   }
 
   /**
-   * Start a new chat of a Bot and resolve to its session id. If the link drops
-   * with the request on it, the desktop may have made the chat already: ask once
-   * more when the link is back, with the same `client_request_id`, which the
-   * desktop answers with the first chat instead of a second.
+   * Start a new chat of a Bot and resolve to its session id: in the folder `workspaceId` names (a `workspace_id` of
+   * `BotWorkspaces`), or in the Bot's own folder if there is none. If the link drops with the request on it, the
+   * desktop may have made the chat already: ask once more when the link is back, with the same `client_request_id`,
+   * which the desktop answers with the first chat instead of a second.
    */
-  async createBotThread(botId: string): Promise<string> {
+  async createBotThread(botId: string, workspaceId?: string): Promise<string> {
     if (this.current.bots === 'unsupported') throw new RemoteRpcError('unknown_session', 'this computer does not know Bots');
-    const params = { bot_id: botId, client_request_id: randomId() };
+    const params = { bot_id: botId, client_request_id: randomId(), ...(workspaceId !== undefined ? { workspace_id: workspaceId } : {}) };
     let created: BotThreadCreateResult;
     try {
       created = await this.connection.request('bot.thread.create', params);
@@ -1079,6 +1255,7 @@ export class RemoteClient {
       .catch(() => undefined);
     this.watchBots();
     for (const store of this.threadStores.values()) store.connectionReady();
+    for (const store of this.workspaceStores.values()) store.connectionReady();
     for (const controller of this.controllers.values()) controller.connectionReady();
   }
 
@@ -1109,6 +1286,12 @@ export class RemoteClient {
     for (const [botId, store] of this.threadStores) {
       const now = bots.find((bot) => bot.bot_id === botId);
       if (now !== undefined && activityChanged(before.find((bot) => bot.bot_id === botId), now)) store.refresh();
+    }
+    // A Bot that asked for a folder, or whose request was answered elsewhere, or whose chats ended with a folder, has its folders listed again.
+    for (const [botId, store] of this.workspaceStores) {
+      const now = bots.find((bot) => bot.bot_id === botId);
+      const was = before.find((bot) => bot.bot_id === botId);
+      if (now !== undefined && (activityChanged(was, now) || (was?.pending_workspace_requests ?? 0) !== (now.pending_workspace_requests ?? 0))) store.refresh();
     }
   }
 

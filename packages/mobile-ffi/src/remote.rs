@@ -35,7 +35,8 @@ use remote_control_client::media::{
     RemoteMediaIntent, RemoteMediaMode, RemoteMediaOffer,
 };
 use remote_control_client::messages::{
-    PermissionModeId, RemoteBotStatus, RemoteBotSummary, RemoteImageRef, RemotePending,
+    BotWorkspacesResult, PermissionModeId, RemoteBotStatus, RemoteBotSummary,
+    RemoteBotWorkspaceDecision, RemoteBotWorkspaceMode, RemoteImageRef, RemotePending,
     RemotePendingAction, RemotePromptOrigin, RemoteRecord, RemoteSeqRecord, RemoteSessionStatus,
     RemoteSessionSummary, RemoteTurnState,
 };
@@ -61,6 +62,16 @@ use tokio::task::JoinHandle;
 
 /// Largest image the desktop accepts in a prompt.
 const MAX_PROMPT_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+
+/// An argument that names something is not empty.
+fn non_empty(name: &str, value: &str) -> Result<(), RemoteFfiError> {
+    if value.is_empty() {
+        return Err(RemoteFfiError::InvalidArgument {
+            message: format!("{name} is empty"),
+        });
+    }
+    Ok(())
+}
 
 fn validate_remote_provider_account_request(request: &str) -> Result<(), RemoteFfiError> {
     if request.len() > 65_536 {
@@ -1079,6 +1090,10 @@ pub struct RemoteBotSummaryFfi {
     pub waiting_threads: u32,
     /// Epoch milliseconds of the Bot's latest chat activity.
     pub last_activity_at_ms: Option<u64>,
+    /// Folders the Bot asked for that nobody has answered; read them with
+    /// `bot_workspaces` and answer them with `decide_bot_workspace_request`.
+    #[uniffi(default = 0)]
+    pub pending_workspace_requests: u32,
 }
 
 /// What the app knows of the computer's Bots.
@@ -1105,6 +1120,73 @@ pub struct RemoteBotThreadsStateFfi {
     /// Why the last listing failed; the next one that works clears it. The codes
     /// `unknown_session` and `not_remote_enabled` say that the Bot cannot be reached.
     pub error: Option<RemoteSessionErrorFfi>,
+}
+
+/// How far a Bot may go in a folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum RemoteBotWorkspaceModeFfi {
+    /// The Bot may read what the folder holds.
+    Read,
+    /// The Bot may read and change it.
+    Write,
+}
+
+/// A folder of the owner's that a Bot works in, besides its own.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RemoteBotWorkspaceFfi {
+    /// Names the folder for as long as the Bot has it: for `create_bot_thread_in_folder`,
+    /// `set_bot_workspace_mode` and `remove_bot_workspace`.
+    pub workspace_id: String,
+    /// What the owner calls the folder, cleaned for one line.
+    pub label: String,
+    /// Where the folder is, on the computer.
+    pub path: String,
+    /// How far the Bot may go in it.
+    pub mode: RemoteBotWorkspaceModeFfi,
+}
+
+/// A project of the computer that the Bot does not have yet.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RemoteBotProjectFfi {
+    /// Where the project is; what `add_bot_workspace` takes.
+    pub path: String,
+    /// The project's name, cleaned for one line.
+    pub label: String,
+}
+
+/// A folder a Bot asked for while it worked, and nobody has answered.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RemoteBotWorkspaceRequestFfi {
+    /// Names the request, for `decide_bot_workspace_request`.
+    pub request_id: String,
+    /// The folder.
+    pub path: String,
+    /// How far the Bot asked to go in it.
+    pub mode: RemoteBotWorkspaceModeFfi,
+    /// What the Bot said it wants the folder for, cleaned for one line.
+    pub reason: String,
+    /// Epoch milliseconds.
+    pub created_at_ms: u64,
+}
+
+/// A Bot's folders as the computer has them, after each of the calls that read or change them.
+#[derive(Debug, Clone, PartialEq, Eq, Default, uniffi::Record)]
+pub struct RemoteBotWorkspacesFfi {
+    /// The folders the owner gave the Bot, besides its own.
+    pub workspaces: Vec<RemoteBotWorkspaceFfi>,
+    /// The computer's projects that the Bot does not have: what `add_bot_workspace` may be given.
+    pub projects: Vec<RemoteBotProjectFfi>,
+    /// What the Bot asked for and nobody answered, oldest first.
+    pub requests: Vec<RemoteBotWorkspaceRequestFfi>,
+}
+
+/// The answer to a folder a Bot asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum RemoteBotWorkspaceDecisionFfi {
+    /// Give the Bot the folder, with the access it asked for.
+    Approve,
+    /// Give it nothing.
+    Deny,
 }
 
 // ---------------------------------------------------------------------------
@@ -1202,6 +1284,55 @@ fn bot_summary_to_ffi(bot: &RemoteBotSummary) -> RemoteBotSummaryFfi {
         },
         waiting_threads: bot.waiting_threads,
         last_activity_at_ms: bot.last_activity_at,
+        pending_workspace_requests: bot.pending_workspace_requests,
+    }
+}
+
+fn workspace_mode_to_ffi(mode: RemoteBotWorkspaceMode) -> RemoteBotWorkspaceModeFfi {
+    match mode {
+        RemoteBotWorkspaceMode::Read => RemoteBotWorkspaceModeFfi::Read,
+        RemoteBotWorkspaceMode::Write => RemoteBotWorkspaceModeFfi::Write,
+    }
+}
+
+fn workspace_mode_from_ffi(mode: RemoteBotWorkspaceModeFfi) -> RemoteBotWorkspaceMode {
+    match mode {
+        RemoteBotWorkspaceModeFfi::Read => RemoteBotWorkspaceMode::Read,
+        RemoteBotWorkspaceModeFfi::Write => RemoteBotWorkspaceMode::Write,
+    }
+}
+
+fn bot_workspaces_to_ffi(folders: &BotWorkspacesResult) -> RemoteBotWorkspacesFfi {
+    RemoteBotWorkspacesFfi {
+        workspaces: folders
+            .workspaces
+            .iter()
+            .map(|folder| RemoteBotWorkspaceFfi {
+                workspace_id: folder.workspace_id.clone(),
+                label: folder.label.clone(),
+                path: folder.path.clone(),
+                mode: workspace_mode_to_ffi(folder.mode),
+            })
+            .collect(),
+        projects: folders
+            .projects
+            .iter()
+            .map(|project| RemoteBotProjectFfi {
+                path: project.path.clone(),
+                label: project.label.clone(),
+            })
+            .collect(),
+        requests: folders
+            .requests
+            .iter()
+            .map(|request| RemoteBotWorkspaceRequestFfi {
+                request_id: request.request_id.clone(),
+                path: request.path.clone(),
+                mode: workspace_mode_to_ffi(request.mode),
+                reason: request.reason.clone(),
+                created_at_ms: request.created_at,
+            })
+            .collect(),
     }
 }
 
@@ -2848,11 +2979,7 @@ impl RemoteControlCore {
     /// arrive through `on_bot_threads`. Screens are counted per connection: when the
     /// connection is replaced, activate again.
     pub async fn activate_bot_threads(&self, bot_id: String) -> Result<(), RemoteFfiError> {
-        if bot_id.is_empty() {
-            return Err(RemoteFfiError::InvalidArgument {
-                message: "bot_id is empty".into(),
-            });
-        }
+        non_empty("bot_id", &bot_id)?;
         self.client()?.bot_threads(&bot_id).activate();
         Ok(())
     }
@@ -2868,15 +2995,120 @@ impl RemoteControlCore {
     /// `attach_session`. A link that drops with the request on it is waited for, up to
     /// 30 s, and the request repeated once. Fails at once on a computer from before Bots.
     pub async fn create_bot_thread(&self, bot_id: String) -> Result<String, RemoteFfiError> {
-        if bot_id.is_empty() {
-            return Err(RemoteFfiError::InvalidArgument {
-                message: "bot_id is empty".into(),
-            });
-        }
+        non_empty("bot_id", &bot_id)?;
         self.client()?
-            .create_bot_thread(&bot_id)
+            .create_bot_thread(&bot_id, None)
             .await
             .map_err(rpc_error)
+    }
+
+    /// Start a new chat with a Bot in one of its folders, `workspace_id` being a
+    /// `workspace_id` of `bot_workspaces`, and return its session id. Otherwise as
+    /// `create_bot_thread`, which starts the chat in the Bot's own workspace.
+    pub async fn create_bot_thread_in_folder(
+        &self,
+        bot_id: String,
+        workspace_id: String,
+    ) -> Result<String, RemoteFfiError> {
+        non_empty("bot_id", &bot_id)?;
+        non_empty("workspace_id", &workspace_id)?;
+        self.client()?
+            .create_bot_thread(&bot_id, Some(&workspace_id))
+            .await
+            .map_err(rpc_error)
+    }
+
+    /// The folders a Bot works in besides its own workspace, the computer's
+    /// projects it could be given, and what it asked for that nobody answered. Fails
+    /// at once on a computer from before Bots.
+    pub async fn bot_workspaces(
+        &self,
+        bot_id: String,
+    ) -> Result<RemoteBotWorkspacesFfi, RemoteFfiError> {
+        non_empty("bot_id", &bot_id)?;
+        let folders = self
+            .client()?
+            .bot_workspaces(&bot_id)
+            .await
+            .map_err(rpc_error)?;
+        Ok(bot_workspaces_to_ffi(&folders))
+    }
+
+    /// Give a Bot one of the computer's projects: `path` is the `path` of one of the
+    /// `projects` of `bot_workspaces`, and nothing else is accepted. Answers with the
+    /// folders as they are afterwards.
+    pub async fn add_bot_workspace(
+        &self,
+        bot_id: String,
+        path: String,
+        mode: RemoteBotWorkspaceModeFfi,
+    ) -> Result<RemoteBotWorkspacesFfi, RemoteFfiError> {
+        non_empty("bot_id", &bot_id)?;
+        non_empty("path", &path)?;
+        let folders = self
+            .client()?
+            .add_bot_workspace(&bot_id, &path, workspace_mode_from_ffi(mode))
+            .await
+            .map_err(rpc_error)?;
+        Ok(bot_workspaces_to_ffi(&folders))
+    }
+
+    /// Change how far a Bot may go in one of its folders. Answers with the folders as
+    /// they are afterwards.
+    pub async fn set_bot_workspace_mode(
+        &self,
+        bot_id: String,
+        workspace_id: String,
+        mode: RemoteBotWorkspaceModeFfi,
+    ) -> Result<RemoteBotWorkspacesFfi, RemoteFfiError> {
+        non_empty("bot_id", &bot_id)?;
+        non_empty("workspace_id", &workspace_id)?;
+        let folders = self
+            .client()?
+            .set_bot_workspace_mode(&bot_id, &workspace_id, workspace_mode_from_ffi(mode))
+            .await
+            .map_err(rpc_error)?;
+        Ok(bot_workspaces_to_ffi(&folders))
+    }
+
+    /// Take a folder away from a Bot: its chats in the folder end, and what was said in
+    /// them is kept. Answers with the folders as they are afterwards.
+    pub async fn remove_bot_workspace(
+        &self,
+        bot_id: String,
+        workspace_id: String,
+    ) -> Result<RemoteBotWorkspacesFfi, RemoteFfiError> {
+        non_empty("bot_id", &bot_id)?;
+        non_empty("workspace_id", &workspace_id)?;
+        let folders = self
+            .client()?
+            .remove_bot_workspace(&bot_id, &workspace_id)
+            .await
+            .map_err(rpc_error)?;
+        Ok(bot_workspaces_to_ffi(&folders))
+    }
+
+    /// Answer a folder a Bot asked for: approving gives the Bot the folder with the
+    /// access it asked for, denying gives it nothing. Answers with the folders as they
+    /// are afterwards.
+    pub async fn decide_bot_workspace_request(
+        &self,
+        bot_id: String,
+        request_id: String,
+        decision: RemoteBotWorkspaceDecisionFfi,
+    ) -> Result<RemoteBotWorkspacesFfi, RemoteFfiError> {
+        non_empty("bot_id", &bot_id)?;
+        non_empty("request_id", &request_id)?;
+        let decision = match decision {
+            RemoteBotWorkspaceDecisionFfi::Approve => RemoteBotWorkspaceDecision::Approve,
+            RemoteBotWorkspaceDecisionFfi::Deny => RemoteBotWorkspaceDecision::Deny,
+        };
+        let folders = self
+            .client()?
+            .decide_bot_workspace_request(&bot_id, &request_id, decision)
+            .await
+            .map_err(rpc_error)?;
+        Ok(bot_workspaces_to_ffi(&folders))
     }
 
     /// The Bot a chat belongs to, if the computer has listed it under a Bot on this

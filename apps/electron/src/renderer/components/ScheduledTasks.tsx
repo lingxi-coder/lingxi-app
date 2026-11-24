@@ -9,6 +9,7 @@ import {
   type ScheduledCronJob,
   type ScheduledTaskDraft,
 } from '../bridge/scheduledTaskDraft';
+import { loadRoutineFolders, routineFolderToSet } from '../bridge/botRoutines';
 import { scheduleLabel, scopeName } from '../bridge/scheduledPresentation';
 import { currentLocale, tr } from '../i18n/locale';
 import { useT } from '../theme/ThemeContext';
@@ -41,6 +42,8 @@ export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget, sid
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   const [jobs, setJobs] = useState<ScopedJob[]>([]);
+  /** The folder each routine of a Bot runs in, by scope and routine; a routine that is not listed runs in the Bot's own. */
+  const [routineFolders, setRoutineFolders] = useState<Record<string, Record<string, string>>>({});
   const [selected, setSelected] = useState<ScopedJob | null>(null);
   const [initial, setInitial] = useState<Initial | null>(null);
   const [editorVersion, setEditorVersion] = useState(0);
@@ -68,7 +71,8 @@ export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget, sid
   selectedRef.current = selected;
   const version = useRef(0);
   const scopes = bridge.scheduledScopes;
-  const scopesKey = scopes.map((scope) => scope.id).join('\n');
+  // Which scopes there are, and which of them are Bots with folders: what a read of the tasks asks the host for.
+  const scopesKey = scopes.map((scope) => `${scope.id}${scope.folders ? '*' : ''}`).join('\n');
   const scopeLabel = (scopeId: string): string | undefined => { const scope = scopes.find((item) => item.id === scopeId); return scope && scopeName(scope); };
   const refresh = useCallback(async (quiet = false) => {
     if (mutation.current || (quiet && dirtyRef.current)) return;
@@ -76,14 +80,17 @@ export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget, sid
     // action, so it must not erase the message a failed delete or save just put
     // on screen. Its own failures still call `setError` below.
     const current = ++version.current; if (!quiet) { setLoading(true); setError(''); }
-    const results = await Promise.allSettled(scopes.map(async (scope) => (await bridge.manageScheduled(scope.id, { action: 'list' })).map((job) => ({ job, scopeId: scope.id }))));
+    const [results, folders] = await Promise.all([
+      Promise.allSettled(scopes.map(async (scope) => (await bridge.manageScheduled(scope.id, { action: 'list' })).map((job) => ({ job, scopeId: scope.id })))),
+      loadRoutineFolders(scopes, bridge.scheduledRoutineFolders),
+    ]);
     // A superseded refresh must still clear the spinner it raised: the newer
     // run owns the data, but this one owns the `loading` it set, and leaving it
     // true wedges the panel on "Loading scheduled tasks…" with Refresh disabled.
     if (current !== version.current) { setLoading(false); return; }
     if (quiet && (dirtyRef.current || mutation.current)) { setLoading(false); return; }
     const loaded = results.flatMap((result) => result.status === 'fulfilled' ? result.value : []);
-    setJobs(loaded);
+    setJobs(loaded); setRoutineFolders(folders);
     const before = selectedRef.current;
     if (quiet && before) {
       const latest = loaded.find((item) => taskKey(item) === taskKey(before));
@@ -95,7 +102,7 @@ export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget, sid
     const failed = results.flatMap((result, index) => result.status === 'rejected' ? [`${scopes[index].label}: ${String(result.reason)}`] : []);
     if (failed.length) setError(failed.join(' · '));
     setLoading(false);
-  }, [scopesKey, bridge.manageScheduled]);
+  }, [scopesKey, bridge.manageScheduled, bridge.scheduledRoutineFolders]);
   useEffect(() => { if (visible) void refresh(); return () => { version.current++; }; }, [visible, refresh]);
   useEffect(() => {
     if (!visible) return;
@@ -167,11 +174,14 @@ export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget, sid
     if (mutation.current) throw new Error('desktop_scheduled_wait_change');
     const input = scheduledTaskInput(draft);
     const scopeId = selected?.scopeId ?? draft.scopeId ?? 'global';
+    const folderId = routineFolderToSet(scopes.find((scope) => scope.id === scopeId), draft);
     mutation.current = true; setBusy(true); version.current++;
     try {
-      const result = await bridge.manageScheduled(scopeId, { ...input, action: selected ? 'update' : 'create', ...(selected ? { id: selected.job.id } : {}) });
+      const request = { ...input, action: selected ? 'update' as const : 'create' as const, ...(selected ? { id: selected.job.id } : {}) };
+      const result = await (folderId === undefined ? bridge.manageScheduled(scopeId, request) : bridge.manageScheduled(scopeId, request, folderId));
       setJobs((previous) => [...previous.filter((item) => item.scopeId !== scopeId), ...result.map((job) => ({ job, scopeId }))]);
       const saved = selected ? result.find((job) => job.id === selected.job.id) : result.find((job) => !jobs.some((item) => item.scopeId === scopeId && item.job.id === job.id));
+      if (saved && folderId !== undefined) setRoutineFolders((previous) => ({ ...previous, [scopeId]: { ...previous[scopeId], [saved.id]: folderId } }));
       if (saved) setSelected({ job: saved, scopeId });
       setInitial(null); setDirty(false); setError(''); setNotice('cron_task_updated');
     } finally { mutation.current = false; setBusy(false); setLoading(false); }
@@ -281,7 +291,7 @@ export function ScheduledTasks({ bridge, visible, onOpenChat, initialTarget, sid
         onEdit={() => setEditorOpen(true)}
       />}
       {editorOpen &&
-      <ScheduledTaskSetup key={editorVersion} initial={initial ?? undefined} editingJob={selected?.job} scopeId={selected?.scopeId ?? initial?.scopeId ?? 'global'} scopes={scopes} sessions={sessions} models={bridge.desktop.modelDetails} defaultModel={bridge.desktop.currentModel} defaultReasoning={bridge.desktop.conversationControls?.reasoning.requested} onBack={() => choose(close)} onSave={save} onDirtyChange={setDirty} loadContext={bridge.scheduledContext} />}
+      <ScheduledTaskSetup key={editorVersion} initial={initial ?? undefined} editingJob={selected?.job} folderId={selected ? routineFolders[selected.scopeId]?.[selected.job.id] : undefined} scopeId={selected?.scopeId ?? initial?.scopeId ?? 'global'} scopes={scopes} sessions={sessions} models={bridge.desktop.modelDetails} defaultModel={bridge.desktop.currentModel} defaultReasoning={bridge.desktop.conversationControls?.reasoning.requested} onBack={() => choose(close)} onSave={save} onDirtyChange={setDirty} loadContext={bridge.scheduledContext} />}
       {showHistory && <section className="scheduled-history" aria-label={tr('cron_run_history_section')}><h3>{tr('cron_run_history_section')}</h3>{history.length === 0 && <p>{tr('desktop_scheduled_no_runs')}</p>}{history.map((run) => <article key={run.id} id={`scheduled-run-${run.id}`} aria-current={run.id === targetRunId ? 'true' : undefined} style={run.id === targetRunId ? { outline: '2px solid var(--scheduled-accent)', outlineOffset: 4 } : undefined}><strong>{runStatusLabel(run.status)}</strong><time>{new Date(run.scheduledAt).toLocaleString(currentLocale())}</time><p>{run.model}</p>{run.startedAt && <p>{tr('cron_started_at_label')}: {new Date(run.startedAt).toLocaleString(currentLocale())}{run.finishedAt ? ` · ${tr('cron_finished_at_label')}: ${new Date(run.finishedAt).toLocaleString(currentLocale())}` : ''}</p>}<p>{run.error ?? run.summary}</p>{run.sessionId && selected && <button type="button" onClick={() => void bridge.openScheduledSession(selected.scopeId, run.sessionId!).then(opened => { if (opened && visibleRef.current) onOpenChat?.(); }).catch((cause) => setError(String(cause)))}>{tr('cron_open_chat')}</button>}</article>)}</section>}
     </aside>}
     {deleting && selected && <div className="scheduled-confirm" role="alertdialog" aria-modal="true" aria-label={tr('desktop_scheduled_confirm_delete')} onKeyDown={event => {

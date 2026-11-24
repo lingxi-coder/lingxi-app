@@ -78,6 +78,15 @@
 .rc-bot-head > div { min-width: 0; }
 .rc-bot-description { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rc-bot-chats { margin-top: 14px; }
+.rc-bot-folders { display: grid; gap: 10px; }
+.rc-bot-folders h3 { margin: 0; }
+.rc-bot-folders .rc-note { margin: 0; }
+.rc-folder { align-items: flex-start; flex-wrap: wrap; }
+.rc-folder-path { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+.rc-folder-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.rc-folder-actions select, .rc-folder-add-row select { min-height: 36px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font: inherit; font-size: 13px; }
+.rc-folder-add-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.rc-folder-add-row select:first-child { flex: 1 1 12rem; min-width: 0; }
 
 .rc-badge { flex: none; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); font-size: 11px; color: var(--ink-3); }
 .rc-badge-direct { color: var(--accent); border-color: var(--accent); }

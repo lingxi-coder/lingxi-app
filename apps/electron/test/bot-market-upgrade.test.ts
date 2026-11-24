@@ -63,10 +63,15 @@ async function fixture(t: Parameters<typeof botFixture>[0]) {
       },
       openSession: async () => {},
       closeProject: async () => {},
+      closeSession: async () => {},
+      restart: async () => {},
+      setSessionDirectoryGrants: () => {},
+      runtimeSummaries: [],
     },
     catalogFor: () => ({
       list: async () => ({ sessions: [] }),
       find: async () => undefined,
+      select: async () => undefined,
       workspaceSettings: async () => ({ environment: {}, configHome: '/unused' }),
       invalidate: () => {},
     }),
@@ -216,7 +221,7 @@ test('an upgrade takes what the release changed, keeps what the owner changed, a
   writeFileSync(join(f.home, 'skills', 'mine', 'SKILL.md'), 'A Skill I wrote.');
   mkdirSync(join(f.home, 'memory'), { recursive: true });
   writeFileSync(join(f.home, 'memory', 'trip.md'), 'We leave on Friday.');
-  const renamed = f.service.update(f.installed.bot_id, f.installed.revision, {
+  const renamed = await f.service.update(f.installed.bot_id, f.installed.revision, {
     name: 'Our trips',
     model: 'my-own-model',
   });
@@ -366,7 +371,7 @@ test('a plan that no longer holds is refused, and so is another account, a tampe
   writeFileSync(join(f.home, 'LINGXI.md'), 'Use only published travel notes.');
 
   // The Bot's record changed after looking.
-  const edited = f.service.update(f.installed.bot_id, f.installed.revision, { name: 'Renamed' });
+  const edited = await f.service.update(f.installed.bot_id, f.installed.revision, { name: 'Renamed' });
   await assert.rejects(f.apply(plan), /BOT_UPGRADE_CHANGED/);
   await assert.rejects(f.apply({ ...plan, expectedRevision: edited.revision }), /BOT_UPGRADE_CHANGED/);
 

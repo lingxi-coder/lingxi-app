@@ -3,7 +3,8 @@ import type { PermissionModeId } from '@lingxi/bridge-client';
 import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
 import { groupModelReferences, modelBillingGroups, modelDisplayLabel, type ModelCatalogDetail } from '../bridge/modelCatalog';
-import type { BotUi } from '../../shared/bots';
+import type { BotUi, BotWorkspaceUi } from '../../shared/bots';
+import { BOT_FOLDER_LABEL_MAX, folderBaseName, ownFolderTitle } from '../bridge/botFolders';
 import { BOT_DESCRIPTION_MAX, BOT_FOLDERS_MAX, ipcErrorMessage, permissionModeNeedsConfirmation, withFolder, type BotDraft, type BotDraftProblem, type BotDraftProblems } from '../bridge/botForm';
 import type { BotMemoryProblem } from '../bridge/botMemory';
 import type { ObservableState } from '../bridge/observableState';
@@ -33,6 +34,7 @@ export function problemText(problem: BotDraftProblem | BotMemoryProblem): string
     case 'persona_too_long': return tr('bots_problem_persona_too_long');
     case 'folders_too_many': return tr('bots_problem_folders_too_many');
     case 'folders_duplicate': return tr('bots_problem_folders_duplicate');
+    case 'folders_label_too_long': return tr('bots_problem_folders_label_too_long', BOT_FOLDER_LABEL_MAX);
     case 'accept_too_many': return tr('bots_problem_accept_too_many');
     case 'too_large': return tr('bots_problem_memory_too_large');
     case 'invalid': return tr('bots_problem_memory_invalid');
@@ -205,9 +207,15 @@ export function BotRemoteField({ draft, availability, disabled = false, onChange
   </ul>;
 }
 
-export function BotFoldersField({ draft, problems, disabled = false, pickFolder, onChange }: FieldsProps & {
+export function BotFoldersField({ draft, problems, disabled = false, pickFolder, saved, chatDisabled = false, onNewChat, onChange }: FieldsProps & {
   /** Ask the owner for a folder with the system dialog; null when they cancel. */
   pickFolder(): Promise<{ path: string } | null>;
+  /** The folders as the Bot has them saved: the ones a chat can be started in. Absent while the Bot is not made yet. */
+  saved?: readonly BotWorkspaceUi[];
+  /** A chat is being opened, or the window is busy showing one. */
+  chatDisabled?: boolean;
+  /** Start a chat of the Bot in a folder: `workspaceId` is absent for the Bot's own folder. Absent where the Bot is not made yet. */
+  onNewChat?(workspaceId: string | undefined): void;
 }) {
   const [picking, setPicking] = useState(false);
   const [error, setError] = useState('');
@@ -224,21 +232,38 @@ export function BotFoldersField({ draft, problems, disabled = false, pickFolder,
       setPicking(false);
     }
   };
+  const change = (path: string, change: { mode?: 'read' | 'write'; label?: string }) =>
+    onChange({ workspaces: draft.workspaces.map((entry) => entry.path === path ? { ...entry, ...change } : entry) });
   return <fieldset className="bots-fields bots-folders" disabled={disabled}>
     <legend className="bots-label">{tr('bots_tab_folders')}</legend>
     <p className="bots-hint">{tr('bots_folders_hint')}</p>
-    {draft.workspaces.length === 0 ? <p className="bots-empty-line">{tr('bots_folders_empty')}</p> : <ul className="bots-folder-list">
-      {draft.workspaces.map((folder) => <li key={folder.path}>
-        <span className="bots-folder-path mono" title={folder.path}>{folder.path}</span>
-        <select aria-label={tr('bots_folder_access', folder.path)} value={folder.mode}
-          onChange={(event) => onChange({ workspaces: draft.workspaces.map((entry) => entry.path === folder.path ? { ...entry, mode: event.target.value === 'write' ? 'write' : 'read' } : entry) })}>
-          <option value="read">{tr('bots_folder_read')}</option>
-          <option value="write">{tr('bots_folder_write')}</option>
-        </select>
-        <button type="button" data-variant="quiet" aria-label={tr('bots_folder_remove', folder.path)}
-          onClick={() => onChange({ workspaces: draft.workspaces.filter((entry) => entry.path !== folder.path) })}><Icon name="x" size={15} /></button>
-      </li>)}
-    </ul>}
+    <ul className="bots-folder-list">
+      {onNewChat ? <li className="bots-folder-own">
+        <span className="bots-folder-name-text">{ownFolderTitle()}</span>
+        <span className="bots-hint bots-folder-own-hint">{tr('bots_folder_own_hint')}</span>
+        <button type="button" className="bots-folder-chat" data-variant="quiet" disabled={chatDisabled} aria-label={tr('bots_folder_new_chat_in', ownFolderTitle())}
+          onClick={() => onNewChat(undefined)}>{tr('bots_new_chat')}</button>
+      </li> : null}
+      {draft.workspaces.map((folder) => {
+        // A folder is one a chat can start in once it is saved, with the access it was saved with.
+        const bound = saved?.find((entry) => entry.path === folder.path);
+        return <li key={folder.path}>
+          <input className="bots-folder-name" value={folder.label ?? ''} placeholder={folderBaseName(folder.path)} aria-label={tr('bots_folder_name', folder.path)}
+            autoComplete="off" onChange={(event) => change(folder.path, { label: event.target.value })} />
+          <select aria-label={tr('bots_folder_access', folder.path)} value={folder.mode}
+            onChange={(event) => change(folder.path, { mode: event.target.value === 'write' ? 'write' : 'read' })}>
+            <option value="read">{tr('bots_folder_read')}</option>
+            <option value="write">{tr('bots_folder_write')}</option>
+          </select>
+          <button type="button" data-variant="quiet" aria-label={tr('bots_folder_remove', folder.path)}
+            onClick={() => onChange({ workspaces: draft.workspaces.filter((entry) => entry.path !== folder.path) })}><Icon name="x" size={15} /></button>
+          <span className="bots-folder-path mono" title={folder.path}>{folder.path}</span>
+          {onNewChat && bound ? <button type="button" className="bots-folder-chat" data-variant="quiet" disabled={chatDisabled}
+            aria-label={tr('bots_folder_new_chat_in', folder.label?.trim() || folderBaseName(folder.path))} onClick={() => onNewChat(bound.id)}>{tr('bots_new_chat')}</button> : null}
+        </li>;
+      })}
+    </ul>
+    {draft.workspaces.length === 0 ? <p className="bots-empty-line">{tr('bots_folders_empty')}</p> : null}
     <div><button type="button" disabled={picking || draft.workspaces.length >= BOT_FOLDERS_MAX} onClick={() => void add()}>{tr('bots_folders_add')}</button></div>
     {problems.folders ? <p className="bots-problem" role="alert">{problemText(problems.folders)}</p> : null}
     {error ? <p className="bots-problem" role="alert">{error}</p> : null}

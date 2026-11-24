@@ -1,17 +1,19 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import type { ModelDetailsDto, ReasoningSelectionDto } from '@lingxi/bridge-client';
+import type { ScheduledScope } from '../../shared/scheduled';
+import { routineFolderOptions, routineFolderValue } from '../bridge/botRoutines';
 import { scopeName } from '../bridge/scheduledPresentation';
 import { localScheduledTimezone, localExpiryInput, scheduledTaskCron, scheduledTaskAdvice, scheduledTaskFromJob, type ScheduledCronJob, type ScheduledTaskDraft as Draft, type ScheduledTaskFrequency as Frequency, type ScheduledAutomation } from '../bridge/scheduledTaskDraft';
 import './ScheduledTaskSetup.css';
 import { currentLocale, tr } from '../i18n/locale';
 import { DateTimePicker } from './ui/DateTimePicker';
 
-export type ScheduledScope = { id: string; projectPath?: string; label: string; botId?: string };
 export type ScheduledSession = { id: string; title: string; scopeId: string };
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-export function ScheduledTaskSetup({ initial, editingJob, scopeId, scopes, sessions, models, defaultModel, defaultReasoning, onBack, onSave, onDirtyChange, loadContext }: {
+export function ScheduledTaskSetup({ initial, editingJob, folderId, scopeId, scopes, sessions, models, defaultModel, defaultReasoning, onBack, onSave, onDirtyChange, loadContext }: {
   initial?: { title: string; description: string; draft?: Draft; preset?: Pick<Draft, 'frequency' | 'day' | 'time'> };
-  editingJob?: ScheduledCronJob; scopeId: string; scopes: ScheduledScope[]; sessions: ScheduledSession[];
+  /** The folder of its Bot that the routine being changed was told to run in; not set for one that runs in the Bot's own. */
+  editingJob?: ScheduledCronJob; folderId?: string; scopeId: string; scopes: ScheduledScope[]; sessions: ScheduledSession[];
   loadContext: (scopeId: string) => Promise<{ models: ModelDetailsDto[]; currentModel: string; sessions: { uuid: string; title?: string }[] }>;
   models: readonly ModelDetailsDto[]; defaultModel?: string | null; defaultReasoning?: ReasoningSelectionDto;
   onBack: () => void; onSave: (draft: Draft) => Promise<void>; onDirtyChange: (dirty: boolean) => void;
@@ -23,7 +25,7 @@ export function ScheduledTaskSetup({ initial, editingJob, scopeId, scopes, sessi
       frequency: initial?.preset?.frequency ?? 'Weekdays' as const, day: initial?.preset?.day ?? 'Monday',
       time: initial?.preset?.time ?? '08:00', timezone: localScheduledTimezone(), recurring: true, durable: true,
     });
-    return { ...base, scopeId, automation: base.automation ?? { version: 2, status: 'active', model: defaultModel ?? '',
+    return { ...base, scopeId, folderId: editingJob ? folderId : base.folderId, automation: base.automation ?? { version: 2, status: 'active', model: defaultModel ?? '',
       reasoning: defaultReasoning ?? { type: 'automatic' }, runMode: 'new_session', notificationPolicy: 'all' } };
   });
   const [context, setContext] = useState<{ models: ModelDetailsDto[]; currentModel: string; sessions: { uuid: string; title?: string }[] } | null>(null);
@@ -50,6 +52,8 @@ export function ScheduledTaskSetup({ initial, editingJob, scopeId, scopes, sessi
   }, [draft.scopeId, loadContext]);
   const availableModels = context?.models ?? models;
   const availableSessions = context ? context.sessions.map((session) => ({ id: session.uuid, title: session.title ?? `${tr('drawer_tab_chat')} ${session.uuid.slice(0, 8)}`, scopeId: draft.scopeId ?? 'global' })) : sessions;
+  const folderOptions = routineFolderOptions(scopes.find((scope) => scope.id === draft.scopeId));
+  const folderValue = routineFolderValue(folderOptions, draft.folderId);
   const selectedModel = availableModels.find((model) => model.reference === automation.model);
   const reasoningOptions = selectedModel?.reasoning.options.filter((option) => option.persistable && option.selection.type !== 'automatic' && option.selection.type !== 'disabled').map((option) => option.selection) ?? [];
   const update = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((previous) => ({ ...previous, [key]: value }));
@@ -114,7 +118,12 @@ export function ScheduledTaskSetup({ initial, editingJob, scopeId, scopes, sessi
           const session = availableSessions.find((item) => item.id === event.target.value); if (!session) return;
           setDraft((previous) => ({ ...previous, scopeId: session.scopeId, automation: { ...previous.automation!, targetSessionId: session.id } }));
         }}><option value="">{tr('cron_select_chat')}</option>{availableSessions.filter((session) => !editingJob || session.scopeId === scopeId).map((session) => <option key={`${session.scopeId}:${session.id}`} value={session.id}>{session.title}</option>)}</select></label>}
-        <label className="scheduled-setup-field">{tr('cron_run_project_label')}<select value={draft.scopeId} disabled={Boolean(editingJob) || (automation.runMode === 'selected_session' && Boolean(automation.targetSessionId))} onChange={(event) => update('scopeId', event.target.value)}>{scopes.map((scope) => <option key={scope.id} value={scope.id}>{scopeName(scope)}</option>)}</select></label>
+        <label className="scheduled-setup-field">{tr('cron_run_project_label')}<select value={draft.scopeId} disabled={Boolean(editingJob) || (automation.runMode === 'selected_session' && Boolean(automation.targetSessionId))} onChange={(event) => setDraft((previous) => ({ ...previous, scopeId: event.target.value, folderId: undefined }))}>{scopes.map((scope) => <option key={scope.id} value={scope.id}>{scopeName(scope)}</option>)}</select></label>
+        {/* A chat that is chosen works where it works, so only a routine that starts its own chats is given a folder. */}
+        {folderOptions.length > 0 && automation.runMode !== 'selected_session' && <label className="scheduled-setup-field">{tr('bots_routine_folder')}<select value={folderValue} onChange={(event) => update('folderId', event.target.value)}>
+          {folderValue === '' && <option value="" disabled>{tr('bots_routine_folder_choose')}</option>}
+          {folderOptions.map((folder) => <option key={folder.id} value={folder.id}>{folder.title}</option>)}
+        </select></label>}
         <label className="scheduled-setup-field">{tr('session_details_model')}<select required value={automation.model} onChange={(event) => {
           const model = availableModels.find((item) => item.reference === event.target.value);
           const compatible = model?.reasoning.options.some((option) => JSON.stringify(option.selection) === JSON.stringify(automation.reasoning));

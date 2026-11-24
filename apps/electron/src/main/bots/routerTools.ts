@@ -5,7 +5,9 @@
  * Free of Electron.
  */
 
+import type { BotWorkspaceMode } from './store.js';
 import { MAX_GOAL_CHARS, MAX_KEY_CHARS, MAX_MESSAGE_CHARS, isTaskId, type TaskState } from './tasks.js';
+import type { WorkspaceBackend } from './workspaceRequests.js';
 
 /** What the engine calls the router: the name of the server in the Bot's configuration. */
 export const ROUTER_SERVER_NAME = 'bots';
@@ -18,10 +20,11 @@ export const DEFAULT_DEADLINE_MINUTES = 30;
 export const MAX_WAIT_SECONDS = 120;
 const MAX_INPUT_PATH_CHARS = 4096;
 const MAX_BOT_REFERENCE_CHARS = 200;
+const MAX_REASON_ARGUMENT_CHARS = 300;
 // eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u001f\u007f]/;
 
-export const ROUTER_TOOL_NAMES = ['list_bots', 'delegate_task', 'get_task', 'message_bot', 'cancel_task', 'attach_artifact'] as const;
+export const ROUTER_TOOL_NAMES = ['list_bots', 'delegate_task', 'get_task', 'message_bot', 'cancel_task', 'attach_artifact', 'request_workspace'] as const;
 export type RouterToolName = (typeof ROUTER_TOOL_NAMES)[number];
 
 export function isRouterTool(name: unknown): name is RouterToolName {
@@ -179,6 +182,24 @@ export const ROUTER_TOOLS: readonly ToolDefinition[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'request_workspace',
+    description: 'Ask your owner for a folder of theirs to work in. Nothing is shared until they approve on this computer; this call only asks. '
+      + 'Say in reason what you need it for: the owner reads it. mode is read (you may look) or write (you may also change things). '
+      + `Returns a request_id and a status that is pending until the owner answers. With wait_seconds (up to ${MAX_WAIT_SECONDS}) the call waits for the answer. `
+      + 'An approved folder is yours from your next turn, not in the one you are in. You can not approve your own request.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'The absolute path of the folder.' },
+        mode: { type: 'string', enum: ['read', 'write'], description: 'read to look at it; write to change it too.' },
+        reason: { type: 'string', maxLength: 300, description: 'What you need the folder for, in a sentence.' },
+        wait_seconds: { type: 'integer', minimum: 0, maximum: MAX_WAIT_SECONDS, description: 'How long to wait for the owner\'s answer; 0 answers at once.' },
+      },
+      required: ['path', 'mode', 'reason'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 /** What the router tells the engine about itself, for the Bot's instructions. */
@@ -227,6 +248,7 @@ function integer(input: Record<string, unknown>, key: string, min: number, max: 
 
 export type ToolCall =
   | { tool: 'list_bots' }
+  | { tool: 'request_workspace'; path: string; mode: BotWorkspaceMode; reason: string; waitSeconds: number }
   | ({ tool: 'delegate_task' } & DelegateArguments)
   | { tool: 'get_task'; taskId: string; waitSeconds: number }
   | { tool: 'message_bot'; taskId: string; text: string }
@@ -276,6 +298,18 @@ export function parseToolCall(tool: RouterToolName, value: unknown): ToolCall {
       const input = exactObject(value, ['task_id', 'path']);
       return { tool, taskId: taskId(input), path: required(input, 'path', MAX_INPUT_PATH_CHARS) };
     }
+    case 'request_workspace': {
+      const input = exactObject(value, ['path', 'mode', 'reason', 'wait_seconds']);
+      const mode = input['mode'];
+      if (mode !== 'read' && mode !== 'write') throw new ArgumentError('mode must be read or write.');
+      return {
+        tool,
+        path: required(input, 'path', MAX_INPUT_PATH_CHARS),
+        mode,
+        reason: required(input, 'reason', MAX_REASON_ARGUMENT_CHARS),
+        waitSeconds: integer(input, 'wait_seconds', 0, MAX_WAIT_SECONDS) ?? 0,
+      };
+    }
   }
 }
 
@@ -309,9 +343,16 @@ export async function runToolCall(
   call: ToolCall,
   signal: AbortSignal,
   warn?: (message: string) => void,
+  workspaces?: WorkspaceBackend,
 ): Promise<ToolResult> {
   try {
     switch (call.tool) {
+      case 'request_workspace': {
+        if (workspaces === undefined) throw new DelegationError('unavailable', 'Folders cannot be asked for here.');
+        const { tool: _tool, ...args } = call;
+        const request = await workspaces.request(caller, args, signal);
+        return answer({ ...request });
+      }
       case 'list_bots': return answer({ bots: backend.listBots(caller) });
       case 'delegate_task': {
         const { tool: _tool, ...args } = call;

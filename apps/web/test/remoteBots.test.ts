@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { RemoteRpcError } from '@lingxi/bridge-client/remote';
 import { knownBots } from '../src/remote/remoteClient';
-import { BotHost, announce, answered, bot, open, quiet, reconnect, thread } from './support/botHost';
+import { BotHost, announce, answered, bot, folder, folderRequest, open, quiet, reconnect, thread } from './support/botHost';
 import { harness, settle, waitFor } from './support/remoteHarness';
 import { drive } from './support/botHost';
 
@@ -384,4 +384,264 @@ test('a chat of the desktop that has none to give is not made up', async () => {
   h.host.requestHandler = async (method) => (method === 'bot.thread.create' ? { session_id: '' } : { bots: host.bots });
   await assert.rejects(client.createBotThread('a'), (error: unknown) => error instanceof RemoteRpcError && error.code === 'internal');
   assert.equal(client.botOfThread(''), undefined);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The folders a Bot works in
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('a new chat in a folder names the folder, and the request repeated after a dropped link names it again', async () => {
+  const h = await harness();
+  const host = new BotHost(h.host);
+  host.bots = [bot('a')];
+  const { client } = await open(h);
+  await answered(h, client);
+
+  const inFolder = await client.createBotThread('a', 'w1');
+  const own = await client.createBotThread('a');
+  const [first, second] = host.requests('bot.thread.create');
+  assert.deepEqual(Object.keys(first!.params).sort(), ['bot_id', 'client_request_id', 'workspace_id']);
+  assert.equal(first!.params.workspace_id, 'w1');
+  assert.deepEqual(Object.keys(second!.params).sort(), ['bot_id', 'client_request_id'], 'no folder named: the Bot\'s own workspace');
+  assert.equal(client.botOfThread(inFolder), 'a');
+  assert.equal(client.botOfThread(own), 'a');
+
+  host.dropping = { method: 'bot.thread.create', times: 1 };
+  let created: string | undefined;
+  const pending = client.createBotThread('a', 'w2').then((sessionId) => { created = sessionId; });
+  await drive(h.clock, () => created !== undefined, 'the chat');
+  await pending;
+  const [sent, repeated] = host.requests('bot.thread.create').slice(2);
+  assert.equal(sent!.params.workspace_id, 'w2');
+  assert.equal(repeated!.params.workspace_id, 'w2');
+  assert.equal(sent!.params.client_request_id, repeated!.params.client_request_id);
+});
+
+test('a Bot that has asked for folders says how many, and anything but a count is none', async () => {
+  const h = await harness();
+  const host = new BotHost(h.host);
+  host.bots = [
+    bot('a', { pending_workspace_requests: 2 }),
+    bot('b', { pending_workspace_requests: 'lots' as never }),
+    bot('c', { pending_workspace_requests: -1 }),
+    bot('d', { pending_workspace_requests: 1.5 }),
+    bot('e'),
+  ];
+  const { client } = await open(h);
+  await answered(h, client);
+  assert.deepEqual(knownBots(client.getState()).map((entry) => entry.pending_workspace_requests), [2, undefined, undefined, undefined, undefined]);
+});
+
+test('the folders of a Bot are asked for when a page shows them, cleaned, and kept for the Bot', async () => {
+  const h = await harness();
+  const host = new BotHost(h.host);
+  host.bots = [bot('a')];
+  host.folders.set('a', {
+    workspaces: [folder('w1', { label: 'No‮tes\nof​ mine', path: '/Users/me/notes' })],
+    projects: [{ path: '/Users/me/site', label: 'x'.repeat(100) }],
+    requests: [folderRequest('r1', { reason: 'to\u0007 read\nthe export' })],
+  });
+  const { client } = await open(h);
+  await answered(h, client);
+  const store = client.botWorkspaces('a');
+  assert.equal(client.botWorkspaces('a'), store, 'one store per Bot');
+  assert.equal(store.getState().folders, undefined);
+
+  await quiet(h);
+  assert.equal(host.requests('bot.workspaces.list').length, 0, 'nobody shows the folders yet: nothing is asked');
+
+  store.activate();
+  await drive(h.clock, () => store.getState().folders !== undefined, 'the folders');
+  assert.deepEqual(host.requests('bot.workspaces.list').map((request) => request.params), [{ bot_id: 'a' }]);
+  const folders = store.getState().folders!;
+  assert.equal(folders.workspaces[0]!.label, 'Notes of mine');
+  assert.equal(folders.workspaces[0]!.path, '/Users/me/notes');
+  assert.equal(Array.from(folders.projects[0]!.label).length, 60);
+  assert.ok(folders.projects[0]!.label.endsWith('…'));
+  assert.equal(folders.projects[0]!.path, '/Users/me/site', 'a path is what the desktop is asked with, so it is left as it is');
+  assert.equal(folders.requests[0]!.reason, 'to read the export');
+  assert.equal(store.getState().error, undefined);
+});
+
+test('every change of folders is one request that names what it changes, and what comes back replaces what was held', async () => {
+  const h = await harness();
+  const host = new BotHost(h.host);
+  host.bots = [bot('a')];
+  host.folders.set('a', {
+    workspaces: [folder('w1', { mode: 'read' })],
+    projects: [{ path: '/Users/me/site', label: 'site' }],
+    requests: [folderRequest('r1', { path: '/Users/me/data', mode: 'write' })],
+  });
+  const { client } = await open(h);
+  await answered(h, client);
+  const store = client.botWorkspaces('a');
+  store.activate();
+  await drive(h.clock, () => store.getState().folders !== undefined, 'the folders');
+
+  assert.equal(await store.setMode('w1', 'write'), true);
+  assert.deepEqual(host.requests('bot.workspace.set_mode').map((request) => request.params), [{ bot_id: 'a', workspace_id: 'w1', mode: 'write' }]);
+  assert.equal(store.getState().folders!.workspaces[0]!.mode, 'write');
+
+  assert.equal(await store.add('/Users/me/site', 'read'), true);
+  assert.deepEqual(host.requests('bot.workspace.add').map((request) => request.params), [{ bot_id: 'a', path: '/Users/me/site', mode: 'read' }]);
+  assert.deepEqual(store.getState().folders!.workspaces.map((entry) => entry.path), ['/Users/me/w1', '/Users/me/site']);
+  assert.deepEqual(store.getState().folders!.projects, [], 'a project the Bot has is no longer one to give');
+
+  assert.equal(await store.decide('r1', 'approve'), true);
+  assert.deepEqual(host.requests('bot.workspace.request.decide').map((request) => request.params), [{ bot_id: 'a', request_id: 'r1', decision: 'approve' }]);
+  assert.deepEqual(store.getState().folders!.requests, []);
+  assert.equal(store.getState().folders!.workspaces.length, 3);
+
+  assert.equal(await store.removeFolder('w-site'), true);
+  assert.deepEqual(host.requests('bot.workspace.remove').map((request) => request.params), [{ bot_id: 'a', workspace_id: 'w-site' }]);
+  assert.deepEqual(store.getState().folders!.projects.map((entry) => entry.path), ['/Users/me/site'], 'back among the projects it may be given again');
+  assert.equal(store.getState().busy, false);
+});
+
+test('a change the desktop refuses is told as it came, leaves the folders as they were, and can be tried again', async () => {
+  const h = await harness();
+  const host = new BotHost(h.host);
+  host.bots = [bot('a')];
+  host.folders.set('a', { workspaces: [folder('w1')], projects: [{ path: '/Users/me/site', label: 'site' }], requests: [] });
+  const { client } = await open(h);
+  await answered(h, client);
+  const store = client.botWorkspaces('a');
+  store.activate();
+  await drive(h.clock, () => store.getState().folders !== undefined, 'the folders');
+  const held = store.getState().folders;
+
+  // The desktop does not take a path that is not one of its projects.
+  assert.equal(await store.add('/etc', 'write'), false);
+  assert.equal(store.getState().error!.code, 'invalid_params');
+  assert.match(store.getState().error!.message, /not one of the desktop/u);
+  assert.equal(store.getState().folders, held);
+  assert.equal(store.getState().busy, false);
+
+  assert.equal(await store.add('/Users/me/site', 'read'), true);
+  assert.equal(store.getState().error, undefined, 'the next change that works clears it');
+});
+
+test('one change at a time: a second one while the first is on its way is not sent', async () => {
+  const h = await harness();
+  const host = new BotHost(h.host);
+  host.bots = [bot('a')];
+  host.folders.set('a', { workspaces: [folder('w1')], projects: [], requests: [] });
+  const { client } = await open(h);
+  await answered(h, client);
+  const store = client.botWorkspaces('a');
+  store.activate();
+  await drive(h.clock, () => store.getState().folders !== undefined, 'the folders');
+
+  let release!: () => void;
+  const answerLater = new Promise<void>((resolve) => { release = resolve; });
+  h.host.requestHandler = async (method, params) => {
+    if (method === 'bot.workspace.set_mode') await answerLater;
+    return { workspaces: [{ ...folder('w1'), mode: (params as { mode: 'read' | 'write' }).mode }], projects: [], requests: [] };
+  };
+  const first = store.setMode('w1', 'write');
+  await drive(h.clock, () => store.getState().busy, 'the change on its way');
+  assert.equal(await store.removeFolder('w1'), false, 'not sent while the first is on its way');
+  assert.equal(await store.decide('r1', 'deny'), false);
+  release();
+  assert.equal(await first, true);
+  assert.equal(store.getState().busy, false);
+  assert.equal(host.requests('bot.workspace.remove').length, 0);
+  assert.equal(host.requests('bot.workspace.request.decide').length, 0);
+});
+
+test('the folders are listed again when the Bot has requests to answer or its activity changed, not for other changes', async () => {
+  const h = await harness();
+  const host = new BotHost(h.host);
+  host.bots = [bot('a', { last_activity_at: 1 }), bot('b')];
+  host.folders.set('a', { workspaces: [folder('w1')], projects: [], requests: [] });
+  const { connection, client } = await open(h);
+  await answered(h, client);
+  const listings = (): number => host.requests('bot.workspaces.list').length;
+  const store = client.botWorkspaces('a');
+  store.activate();
+  await drive(h.clock, () => store.getState().folders !== undefined, 'the folders');
+  assert.equal(listings(), 1);
+
+  // The same, a new name, and another Bot's changes say nothing about this Bot's folders.
+  await announce(h, client, host);
+  host.bots = [bot('a', { last_activity_at: 1, name: 'Renamed' }), bot('b', { last_activity_at: 9, pending_workspace_requests: 3, status: 'running' })];
+  await announce(h, client, host);
+  assert.equal(listings(), 1);
+
+  // The Bot asked for a folder.
+  host.folders.get('a')!.requests.push(folderRequest('r1'));
+  host.bots = [bot('a', { last_activity_at: 1, pending_workspace_requests: 1 }), bot('b')];
+  await announce(h, client, host);
+  await drive(h.clock, () => listings() === 2, 'the listing the request asked for');
+  await quiet(h);
+  assert.deepEqual(store.getState().folders!.requests.map((request) => request.request_id), ['r1']);
+
+  // The request was answered elsewhere.
+  host.folders.get('a')!.requests.length = 0;
+  host.bots = [bot('a', { last_activity_at: 1 }), bot('b')];
+  await announce(h, client, host);
+  await drive(h.clock, () => listings() === 3, 'the listing after it was answered');
+  await quiet(h);
+  assert.deepEqual(store.getState().folders!.requests, []);
+
+  // Its chats ended with a folder.
+  host.bots = [bot('a', { last_activity_at: 5 }), bot('b')];
+  await announce(h, client, host);
+  await drive(h.clock, () => listings() === 4, 'the listing after the activity');
+  await quiet(h);
+
+  // A reconnect lists them once more.
+  await reconnect(h, connection);
+  await drive(h.clock, () => listings() === 5, 'the listing after the reconnect');
+  await quiet(h);
+  assert.equal(listings(), 5);
+
+  // A page that left is not served.
+  store.deactivate();
+  host.bots = [bot('a', { last_activity_at: 6, pending_workspace_requests: 2 }), bot('b')];
+  await announce(h, client, host);
+  await reconnect(h, connection);
+  await quiet(h);
+  assert.equal(listings(), 5);
+});
+
+test('a desktop with Bots but not folders has none to show, is not asked again on that connection, and is asked after the next', async () => {
+  const h = await harness();
+  const host = new BotHost(h.host);
+  host.bots = [bot('a')];
+  host.failWith.set('bot.workspaces.list', new RemoteRpcError('invalid_params', 'unknown method bot.workspaces.list'));
+  const { connection, client } = await open(h);
+  await answered(h, client);
+  const store = client.botWorkspaces('a');
+  store.activate();
+  await drive(h.clock, () => store.getState().folders !== undefined, 'the answer');
+  assert.deepEqual(store.getState().folders, { workspaces: [], projects: [], requests: [] });
+  assert.equal(store.getState().error, undefined, 'no failure to show');
+
+  store.refresh();
+  host.bots = [bot('a', { last_activity_at: 4 })];
+  await announce(h, client, host);
+  await quiet(h);
+  assert.equal(host.requests('bot.workspaces.list').length, 1);
+
+  host.failWith.clear();
+  host.folders.set('a', { workspaces: [folder('w1')], projects: [], requests: [] });
+  await reconnect(h, connection);
+  await drive(h.clock, () => store.getState().folders!.workspaces.length === 1, 'the folders of the updated desktop');
+  assert.equal(host.requests('bot.workspaces.list').length, 2);
+});
+
+test('on a desktop that does not know Bots the folders are not asked for', async () => {
+  const h = await harness();
+  const host = new BotHost(h.host);
+  host.supported = false;
+  const { client } = await open(h);
+  await answered(h, client);
+  const store = client.botWorkspaces('a');
+  store.activate();
+  store.refresh();
+  assert.equal(await store.add('/Users/me/site', 'read'), false);
+  await quiet(h);
+  assert.deepEqual(host.botRequests(), ['bots.watch']);
+  assert.equal(store.getState().folders, undefined);
 });

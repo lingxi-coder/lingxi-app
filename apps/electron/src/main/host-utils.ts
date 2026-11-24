@@ -788,6 +788,7 @@ export function buildBridgeArguments(config: {
   initialProjectRoot?: string;
   configHome?: string;
   globalConfigPath?: string;
+  userSettingsOnly?: boolean;
   model?: string;
   hasCredentialStdin?: boolean;
   trusted: boolean;
@@ -818,6 +819,7 @@ export function buildBridgeArguments(config: {
   if (config.initialProjectRoot) args.push('--session-project-root', config.initialProjectRoot);
   if (config.configHome) args.push('--session-config-home', config.configHome);
   if (config.globalConfigPath) args.push('--session-global-config-path', config.globalConfigPath);
+  if (config.userSettingsOnly) args.push('--session-user-settings-only');
   for (const directory of config.additionalDirectories ?? []) args.push('--add-dir', directory);
   for (const directory of config.promptDirectories ?? []) args.push('--session-prompt-directory', directory);
   if (config.model) args.push('--model', config.model);

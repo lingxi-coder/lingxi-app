@@ -5,7 +5,9 @@ mod support;
 
 use async_trait::async_trait;
 use remote_control_client::connection::ConnectionListener;
-use remote_control_client::messages::{RemoteBotStatus, RemoteSessionSummary};
+use remote_control_client::messages::{
+    RemoteBotStatus, RemoteBotWorkspaceDecision, RemoteBotWorkspaceMode, RemoteSessionSummary,
+};
 use remote_control_client::rpc::{RemoteErrorCode, RpcError};
 use remote_control_client::session::{
     BotThreadsState, BotsState, RemoteClient, RemoteClientListener, SessionController, SessionIo,
@@ -296,6 +298,7 @@ async fn a_desktop_that_has_bots_is_asked_for_them_next_to_the_sessions_and_what
                     "name": "Re\u{202E}search\ner",
                     "description": "Reads\u{200B} the\u{7} papers",
                     "waiting_threads": "many",
+                    "pending_workspace_requests": "lots",
                 }),
             ),
             bot(
@@ -303,6 +306,7 @@ async fn a_desktop_that_has_bots_is_asked_for_them_next_to_the_sessions_and_what
                 json!({
                     "name": "x".repeat(100), "description": "d".repeat(300),
                     "waiting_threads": 2, "last_activity_at": 12, "status": "requires_action",
+                    "pending_workspace_requests": 4,
                 }),
             ),
             Value::Null,
@@ -327,10 +331,12 @@ async fn a_desktop_that_has_bots_is_asked_for_them_next_to_the_sessions_and_what
     assert_eq!(a.name, "Research er");
     assert_eq!(a.description, "Reads the papers");
     assert_eq!(a.waiting_threads, 0, "a count that is none is none");
+    assert_eq!(a.pending_workspace_requests, 0, "so is a count of requests");
     assert_eq!(b.name.chars().count(), 60);
     assert!(b.name.ends_with('…'));
     assert_eq!(b.description.chars().count(), 160);
     assert_eq!((b.waiting_threads, b.last_activity_at), (2, Some(12)));
+    assert_eq!(b.pending_workspace_requests, 4);
     assert_eq!(b.status, RemoteBotStatus::RequiresAction);
     assert_eq!(
         rig.client.sessions().unwrap().len(),
@@ -419,7 +425,7 @@ async fn a_desktop_from_before_bots_answers_unknown_method_and_nothing_more_is_a
     let store = rig.client.bot_threads("a");
     store.activate();
     store.refresh();
-    let error = rig.client.create_bot_thread("a").await.unwrap_err();
+    let error = rig.client.create_bot_thread("a", None).await.unwrap_err();
     assert_eq!(error.code, RemoteErrorCode::UnknownSession);
     settle().await;
     assert_eq!(rig.bot_calls(), ["bots.watch"]);
@@ -543,6 +549,19 @@ async fn a_bots_chats_are_listed_when_a_screen_shows_them_and_again_when_the_bot
 
     // Changes that say nothing about the chats of this Bot.
     rig.announce().await;
+    rig.host().bots = vec![
+        bot(
+            "a",
+            json!({ "last_activity_at": 2, "pending_workspace_requests": 1 }),
+        ),
+        bot("b", json!({})),
+    ];
+    rig.announce().await;
+    assert_eq!(
+        rig.client.bots().known()[0].pending_workspace_requests,
+        1,
+        "a screen is told of the request"
+    );
     rig.host().bots = vec![
         bot(
             "a",
@@ -835,8 +854,8 @@ async fn a_new_chat_is_asked_for_with_a_fresh_request_id_and_its_bot_is_remember
     rig.host().bots = vec![bot("a", json!({}))];
     rig.ready().await;
 
-    let first = rig.client.create_bot_thread("a").await.unwrap();
-    let second = rig.client.create_bot_thread("a").await.unwrap();
+    let first = rig.client.create_bot_thread("a", None).await.unwrap();
+    let second = rig.client.create_bot_thread("a", None).await.unwrap();
     let creates = rig.calls("bot.thread.create");
     assert_eq!(creates.len(), 2);
     for create in &creates {
@@ -856,6 +875,38 @@ async fn a_new_chat_is_asked_for_with_a_fresh_request_id_and_its_bot_is_remember
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_new_chat_in_a_folder_names_the_folder_and_the_same_folder_again_on_the_one_more_request()
+{
+    let rig = Rig::new();
+    rig.host().bots = vec![bot("a", json!({}))];
+    rig.ready().await;
+
+    assert_eq!(
+        rig.client.create_bot_thread("a", Some("w1")).await.unwrap(),
+        "chat-1"
+    );
+    let creates = rig.calls("bot.thread.create");
+    assert_eq!(creates.len(), 1);
+    let mut keys: Vec<&String> = creates[0].as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["bot_id", "client_request_id", "workspace_id"]);
+    assert_eq!(creates[0]["workspace_id"], "w1");
+    assert_eq!(rig.client.bot_of_thread("chat-1").as_deref(), Some("a"));
+
+    // The request repeated after a dropped link is the same request.
+    rig.host().lose_creates = 1;
+    rig.client.create_bot_thread("a", Some("w2")).await.unwrap();
+    let creates = rig.calls("bot.thread.create");
+    assert_eq!(creates.len(), 3);
+    assert_eq!(creates[1]["workspace_id"], "w2");
+    assert_eq!(creates[2]["workspace_id"], "w2");
+    assert_eq!(
+        creates[1]["client_request_id"],
+        creates[2]["client_request_id"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_link_that_drops_with_the_request_on_it_gets_one_more_request_with_the_same_id_and_the_same_chat(
 ) {
     let rig = Rig::new();
@@ -864,7 +915,7 @@ async fn a_link_that_drops_with_the_request_on_it_gets_one_more_request_with_the
 
     rig.host().drop_creates = 1;
     let client = rig.client.clone();
-    let creating = tokio::spawn(async move { client.create_bot_thread("a").await });
+    let creating = tokio::spawn(async move { client.create_bot_thread("a", None).await });
     settle().await;
     assert_eq!(rig.calls("bot.thread.create").len(), 1);
     assert!(!rig.desk.connected());
@@ -891,7 +942,10 @@ async fn a_link_that_is_back_already_needs_no_wait() {
 
     // The link dropped under the request and was up again before the failure was seen.
     rig.host().lose_creates = 1;
-    assert_eq!(rig.client.create_bot_thread("a").await.unwrap(), "chat-1");
+    assert_eq!(
+        rig.client.create_bot_thread("a", None).await.unwrap(),
+        "chat-1"
+    );
     let creates = rig.calls("bot.thread.create");
     assert_eq!(creates.len(), 2);
     assert_eq!(
@@ -909,7 +963,7 @@ async fn the_request_is_repeated_once_not_again_and_again() {
 
     rig.host().drop_creates = usize::MAX; // every link it goes over dies under it
     let client = rig.client.clone();
-    let creating = tokio::spawn(async move { client.create_bot_thread("a").await });
+    let creating = tokio::spawn(async move { client.create_bot_thread("a", None).await });
     settle().await;
     rig.desk.connected.store(true, Ordering::SeqCst);
     rig.ready().await;
@@ -932,7 +986,7 @@ async fn a_link_that_does_not_come_back_in_time_ends_the_wait_with_an_error_and_
 
     rig.host().drop_creates = 1;
     let client = rig.client.clone();
-    let creating = tokio::spawn(async move { client.create_bot_thread("a").await });
+    let creating = tokio::spawn(async move { client.create_bot_thread("a", None).await });
     settle().await;
     advance(Duration::from_secs(29)).await;
     assert!(!creating.is_finished(), "it waits for the link");
@@ -965,7 +1019,7 @@ async fn what_the_desktop_refuses_surfaces_as_it_came_with_no_second_request() {
             .fail_with
             .insert("bot.thread.create".into(), RpcError::new(code, "refused"));
         let before = rig.calls("bot.thread.create").len();
-        let error = rig.client.create_bot_thread("a").await.unwrap_err();
+        let error = rig.client.create_bot_thread("a", None).await.unwrap_err();
         assert_eq!(error.code, code);
         assert_eq!(rig.calls("bot.thread.create").len(), before + 1, "{code:?}");
     }
@@ -973,7 +1027,7 @@ async fn what_the_desktop_refuses_surfaces_as_it_came_with_no_second_request() {
 
     rig.host().fail_with.clear();
     assert_eq!(
-        rig.client.create_bot_thread("a").await.unwrap(),
+        rig.client.create_bot_thread("a", None).await.unwrap(),
         "chat-1",
         "the next try works"
     );
@@ -992,10 +1046,195 @@ async fn a_chat_the_desktop_has_none_to_give_is_not_made_up() {
         rig.host()
             .answers
             .insert("bot.thread.create".into(), answer);
-        let error = rig.client.create_bot_thread("a").await.unwrap_err();
+        let error = rig.client.create_bot_thread("a", None).await.unwrap_err();
         assert_eq!(error.code, RemoteErrorCode::Internal);
     }
     assert_eq!(rig.client.bot_of_thread(""), None);
+}
+
+// ---------------------------------------------------------------------------
+// The folders a Bot works in
+// ---------------------------------------------------------------------------
+
+fn folders_answer() -> Value {
+    json!({
+        "workspaces": [
+            { "workspace_id": "w1", "label": "Notes", "path": "/Users/me/notes", "mode": "read" },
+            { "workspace_id": "w2", "label": "app", "path": "/Users/me/app", "mode": "write" },
+        ],
+        "projects": [{ "path": "/Users/me/site", "label": "site" }],
+        "requests": [{
+            "request_id": "r1", "path": "/Users/me/data", "mode": "write",
+            "reason": "to read the export", "created_at": 1_700_000_000_000u64,
+        }],
+    })
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_folders_of_a_bot_are_asked_for_by_its_id_and_what_comes_back_is_cleaned() {
+    let rig = Rig::new();
+    rig.host().bots = vec![bot("a", json!({}))];
+    rig.ready().await;
+
+    let mut answer = folders_answer();
+    answer["workspaces"][0]["label"] = json!("No\u{202E}tes\nof\u{200B} mine");
+    answer["projects"][0]["label"] = json!("s".repeat(100));
+    answer["requests"][0]["reason"] = json!("to\u{7} read\nthe export ".repeat(40));
+    rig.host()
+        .answers
+        .insert("bot.workspaces.list".into(), answer);
+
+    let folders = rig.client.bot_workspaces("a").await.unwrap();
+    assert_eq!(rig.calls("bot.workspaces.list"), [json!({ "bot_id": "a" })]);
+    assert_eq!(folders.workspaces.len(), 2);
+    assert_eq!(folders.workspaces[0].workspace_id, "w1");
+    assert_eq!(folders.workspaces[0].label, "Notes of mine");
+    assert_eq!(folders.workspaces[0].path, "/Users/me/notes");
+    assert_eq!(folders.workspaces[0].mode, RemoteBotWorkspaceMode::Read);
+    assert_eq!(folders.workspaces[1].mode, RemoteBotWorkspaceMode::Write);
+    assert_eq!(folders.projects.len(), 1);
+    assert_eq!(folders.projects[0].path, "/Users/me/site");
+    assert_eq!(folders.projects[0].label.chars().count(), 60);
+    assert!(folders.projects[0].label.ends_with('…'));
+    assert_eq!(folders.requests.len(), 1);
+    assert_eq!(folders.requests[0].request_id, "r1");
+    assert_eq!(folders.requests[0].mode, RemoteBotWorkspaceMode::Write);
+    assert_eq!(folders.requests[0].created_at, 1_700_000_000_000);
+    assert_eq!(folders.requests[0].reason.chars().count(), 300);
+    assert!(folders.requests[0]
+        .reason
+        .starts_with("to read the export to read"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_change_of_folders_is_one_request_that_names_what_it_changes_and_answers_with_the_folders_after_it(
+) {
+    let rig = Rig::new();
+    rig.host().bots = vec![bot("a", json!({}))];
+    rig.ready().await;
+    for method in [
+        "bot.workspace.add",
+        "bot.workspace.set_mode",
+        "bot.workspace.remove",
+        "bot.workspace.request.decide",
+    ] {
+        rig.host().answers.insert(method.into(), folders_answer());
+    }
+
+    let after = rig
+        .client
+        .add_bot_workspace("a", "/Users/me/site", RemoteBotWorkspaceMode::Read)
+        .await
+        .unwrap();
+    assert_eq!(after.workspaces.len(), 2);
+    assert_eq!(
+        rig.calls("bot.workspace.add"),
+        [json!({ "bot_id": "a", "path": "/Users/me/site", "mode": "read" })]
+    );
+
+    rig.client
+        .set_bot_workspace_mode("a", "w1", RemoteBotWorkspaceMode::Write)
+        .await
+        .unwrap();
+    assert_eq!(
+        rig.calls("bot.workspace.set_mode"),
+        [json!({ "bot_id": "a", "workspace_id": "w1", "mode": "write" })]
+    );
+
+    rig.client.remove_bot_workspace("a", "w2").await.unwrap();
+    assert_eq!(
+        rig.calls("bot.workspace.remove"),
+        [json!({ "bot_id": "a", "workspace_id": "w2" })]
+    );
+
+    rig.client
+        .decide_bot_workspace_request("a", "r1", RemoteBotWorkspaceDecision::Approve)
+        .await
+        .unwrap();
+    rig.client
+        .decide_bot_workspace_request("a", "r1", RemoteBotWorkspaceDecision::Deny)
+        .await
+        .unwrap();
+    assert_eq!(
+        rig.calls("bot.workspace.request.decide"),
+        [
+            json!({ "bot_id": "a", "request_id": "r1", "decision": "approve" }),
+            json!({ "bot_id": "a", "request_id": "r1", "decision": "deny" }),
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_desktop_from_before_bots_is_not_asked_about_folders() {
+    let rig = Rig::new();
+    rig.host().supported = false;
+    rig.ready().await;
+    assert_eq!(rig.client.bots(), BotsState::Unsupported);
+
+    let errors = [
+        rig.client.bot_workspaces("a").await.unwrap_err(),
+        rig.client
+            .add_bot_workspace("a", "/p", RemoteBotWorkspaceMode::Read)
+            .await
+            .unwrap_err(),
+        rig.client
+            .set_bot_workspace_mode("a", "w1", RemoteBotWorkspaceMode::Read)
+            .await
+            .unwrap_err(),
+        rig.client
+            .remove_bot_workspace("a", "w1")
+            .await
+            .unwrap_err(),
+        rig.client
+            .decide_bot_workspace_request("a", "r1", RemoteBotWorkspaceDecision::Deny)
+            .await
+            .unwrap_err(),
+        rig.client
+            .create_bot_thread("a", Some("w1"))
+            .await
+            .unwrap_err(),
+    ];
+    for error in errors {
+        assert_eq!(error.code, RemoteErrorCode::UnknownSession);
+    }
+    settle().await;
+    assert_eq!(rig.bot_calls(), ["bots.watch"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn what_the_desktop_refuses_about_folders_surfaces_as_it_came_and_an_answer_that_is_not_folders_is_an_error(
+) {
+    let rig = Rig::new();
+    rig.host().bots = vec![bot("a", json!({}))];
+    rig.ready().await;
+
+    rig.host().fail_with.insert(
+        "bot.workspace.add".into(),
+        RpcError::new(RemoteErrorCode::InvalidParams, "not one of the projects"),
+    );
+    let error = rig
+        .client
+        .add_bot_workspace("a", "/etc", RemoteBotWorkspaceMode::Write)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, RemoteErrorCode::InvalidParams);
+    assert_eq!(rig.calls("bot.workspace.add").len(), 1, "asked once");
+    rig.host().fail_with.clear();
+
+    // The scripted desktop answers `{}` to what it has no answer for: that is not the folders.
+    let error = rig.client.bot_workspaces("a").await.unwrap_err();
+    assert_eq!(error.code, RemoteErrorCode::Internal);
+    for answer in [
+        json!({ "workspaces": [{ "workspace_id": "w1", "label": "x", "path": "/p", "mode": "owner" }],
+                "projects": [], "requests": [] }),
+        json!({ "workspaces": "none", "projects": [], "requests": [] }),
+    ] {
+        rig.host()
+            .answers
+            .insert("bot.workspaces.list".into(), answer);
+        let error = rig.client.bot_workspaces("a").await.unwrap_err();
+        assert_eq!(error.code, RemoteErrorCode::Internal);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -177,6 +177,38 @@ test('newSession reuses one unsent draft per project until the first prompt cros
   }
 });
 
+test('newSession keeps the unsent drafts of different draft keys apart, and reuses the one of the same key', async () => {
+  const originalStart = SessionRuntime.prototype.start;
+  SessionRuntime.prototype.start = async function () {
+    (this as any).activeWorkspace = (this as any).opts.projectPath;
+    (this as any).activeWorkspaceTrusted = true;
+    (this as any).state = { status: 'connected' };
+    (this as any).draftModeRestorationRequired = false;
+  };
+  const allocated: string[] = [];
+  const manager = new SessionRuntimeManager({
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+  });
+  try {
+    const one = { mode: 'code' as const, projectId: null, draftKey: 'bot:one:default', onAllocated: async (ref: { sessionId: string }) => { allocated.push(ref.sessionId); } };
+    const two = { mode: 'code' as const, projectId: null, draftKey: 'bot:two:default' };
+    const first = await manager.newSession('/bots/one/workspace', undefined, one);
+    const other = await manager.newSession('/bots/two/workspace', undefined, two);
+    const owner = await manager.newSession('/owner/chat', undefined, { mode: 'code', projectId: null });
+    assert.deepEqual(new Set([first.sessionId, other.sessionId, owner.sessionId]).size, 3, 'a Bot never gets another Bot\'s draft, nor the owner\'s');
+    assert.equal(first.projectPath, '/bots/one/workspace');
+    assert.equal(other.projectPath, '/bots/two/workspace');
+    assert.equal((await manager.newSession('/bots/one/workspace', undefined, one)).sessionId, first.sessionId, 'its own draft is reused');
+    assert.deepEqual(allocated, [first.sessionId], 'the allocation is announced once, before the engine is started');
+    assert.equal(manager.hasOwnedDraft(first), true);
+    assert.equal(manager.hasOwnedDraft(other), true);
+    await assert.rejects(manager.newSession('/bots/one/workspace', undefined, { mode: 'code', projectId: null, draftKey: '' }), /draft is unavailable/);
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    await manager.dispose();
+  }
+});
+
 test('newSession deduplicates concurrent draft creation and closeSession clears the draft slot', async () => {
   const projectPath = '/workspace-race';
   const gate = deferred<void>();

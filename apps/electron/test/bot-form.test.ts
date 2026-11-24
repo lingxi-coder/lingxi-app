@@ -8,6 +8,7 @@ import {
   botDraftProblems,
   createBot,
   draftFromBot,
+  draftWithNewFolders,
   emptyBotDraft,
   hasBotDraftProblems,
   ipcErrorMessage,
@@ -213,4 +214,41 @@ test('a folder is added once, read-only unless said otherwise', () => {
   assert.deepEqual(withFolder([{ path: '/work/a', mode: 'write' }], '/work/a'), [{ path: '/work/a', mode: 'write' }]);
   assert.deepEqual(withFolder(folders, '/work/b', 'write'), [{ path: '/work/a', mode: 'read' }, { path: '/work/b', mode: 'write' }]);
   assert.deepEqual(folders, [{ path: '/work/a', mode: 'read' }]);
+});
+
+test('a folder carries the name the owner gave it, trimmed, and no name when there is none', () => {
+  const saved = bot({ workspaces: [{ id: 'wA', path: '/work/a', mode: 'read', addedAt: 5, label: 'Notes' }, { id: 'wB', path: '/work/b', mode: 'write', addedAt: 6 }] });
+  const draft = draftFromBot(saved, '');
+  // The draft holds what the owner edits, not what the main process keeps (the id and the time the folder was added).
+  assert.deepEqual(draft.workspaces, [{ path: '/work/a', mode: 'read', label: 'Notes' }, { path: '/work/b', mode: 'write' }]);
+  assert.deepEqual(botChanges(saved, '', draft).patch, {});
+  // Spaces around a name are no change, and a name of spaces is no name.
+  const spaced = { ...draft, workspaces: [{ ...draft.workspaces[0]!, label: '  Notes ' }, { ...draft.workspaces[1]!, label: '   ' }] };
+  assert.deepEqual(botChanges(saved, '', spaced).patch, {});
+  const renamed = { ...draft, workspaces: [{ ...draft.workspaces[0]!, label: ' Reading ' }, draft.workspaces[1]!] };
+  assert.deepEqual(botChanges(saved, '', renamed).patch, { workspaces: [{ path: '/work/a', mode: 'read', label: 'Reading' }, { path: '/work/b', mode: 'write' }] });
+  const cleared = { ...draft, workspaces: [{ path: '/work/a', mode: 'read' as const, label: '' }, draft.workspaces[1]!] };
+  assert.deepEqual(botChanges(saved, '', cleared).patch, { workspaces: [{ path: '/work/a', mode: 'read' }, { path: '/work/b', mode: 'write' }] });
+  const made = botCreateRequest({ ...emptyBotDraft(), name: 'Scribe', workspaces: [{ path: '/work/a', mode: 'read', label: ' Notes ' }, { path: '/work/b', mode: 'write', label: ' ' }] });
+  assert.deepEqual(made.workspaces, [{ path: '/work/a', mode: 'read', label: 'Notes' }, { path: '/work/b', mode: 'write' }]);
+});
+
+test('a name for a folder may have as many characters as the main process allows', () => {
+  const draft = (label: string): BotDraft => ({ ...emptyBotDraft(), name: 'Scribe', workspaces: [{ path: '/work/a', mode: 'read', label }] });
+  assert.deepEqual(botDraftProblems(draft('x'.repeat(80))), {});
+  assert.deepEqual(botDraftProblems(draft(`  ${'x'.repeat(80)}  `)), {});
+  assert.deepEqual(botDraftProblems(draft('x'.repeat(81))), { folders: 'folders_label_too_long' });
+});
+
+test('folders bound to the Bot while the owner edits it are added to the draft, which is otherwise left as it is', () => {
+  const before = bot({ workspaces: [{ id: 'wA', path: '/work/a', mode: 'read', addedAt: 5 }] });
+  const after = bot({ revision: 4, workspaces: [...before.workspaces, { id: 'wB', path: '/work/b', mode: 'write', addedAt: 9, label: 'Specs' }] });
+  const editing: BotDraft = { ...draftFromBot(before, 'persona'), name: 'Renamed', workspaces: [{ path: '/work/a', mode: 'write' }, { path: '/work/c', mode: 'read' }] };
+  const next = draftWithNewFolders(editing, before, after);
+  assert.equal(next.name, 'Renamed');
+  assert.deepEqual(next.workspaces, [{ path: '/work/a', mode: 'write' }, { path: '/work/c', mode: 'read' }, { path: '/work/b', mode: 'write', label: 'Specs' }]);
+  // A folder the owner added to the draft by hand is not added twice, nor is one they took out brought back.
+  const same = draftWithNewFolders({ ...editing, workspaces: [{ path: '/work/b', mode: 'read' }] }, before, after);
+  assert.deepEqual(same.workspaces, [{ path: '/work/b', mode: 'read' }]);
+  assert.equal(draftWithNewFolders(editing, before, before), editing, 'nothing new: the draft itself');
 });

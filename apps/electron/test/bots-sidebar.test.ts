@@ -412,3 +412,100 @@ test('the menu\'s deletion asks to delete and deletes nothing itself', () => {
   elements(MenuItems({ ...props, target: { kind: 'chat', botId: 'a', sessionId: 's1', title: 'First', transcriptPath: '/chosen/s1.jsonl' } }))[0]!.props.onClick!();
   assert.deepEqual(calls, [['open', 'a', 's1', '/chosen/s1.jsonl']]);
 });
+
+// ---- A Bot that works in folders of the owner's ----
+
+const NOTES = { id: 'wNotes', path: '/work/notes', mode: 'read' as const, addedAt: 1, label: 'Notes' };
+const SITE = { id: 'wSite', path: '/work/site', mode: 'write' as const, addedAt: 2 };
+/** A chat as the host lists it for a Bot: with the folder it worked in, or the folder it worked in before the Bot lost it. */
+const inFolder = (row: SessionRowDto, where: { workspaceId: string } | { removedPath: string }) => ({ ...row, ...where }) as SessionRowDto;
+
+test('a Bot with folders of its own has its chats under a heading for each folder, the Bot\'s own first and the folders it no longer has last', async () => {
+  const html = await sidebar({
+    bots: [bot('a', { name: 'Alpha', workspaces: [NOTES, SITE] })], expanded: ['a'],
+    chats: { a: [
+      inFolder(chat('s1', 5, 'In notes'), { workspaceId: 'wNotes' }), inFolder(chat('s2', 6, 'At home'), { workspaceId: 'default' }),
+      inFolder(chat('s3', 7, 'In the site'), { workspaceId: 'wSite' }), inFolder(chat('s4', 8, 'Long ago'), { removedPath: '/work/gone' }),
+    ] },
+  });
+  const headings = [...html.matchAll(/<div role="group" aria-label="([^"]*)" class="bots-sidebar-folder" data-kind="(\w+)">/g)].map((match) => [match[1], match[2]]);
+  assert.deepEqual(headings, [['Own workspace', 'own'], ['Notes', 'folder'], ['site', 'folder'], ['Removed folders', 'removed']], 'a name the owner gave, else the folder\'s own');
+  const at = (text: string) => html.indexOf(text);
+  assert.ok(at('>Own workspace<') < at('>At home<') && at('>At home<') < at('>Notes<') && at('>Notes<') < at('>In notes<') && at('>In notes<') < at('>site<') && at('>site<') < at('>In the site<') && at('>In the site<') < at('>Removed folders<'));
+  assert.match(html, /class="bots-sidebar-folder-name" title="\/work\/notes">Notes</, 'the path is there to read');
+  // What can be opened is a row; what the Bot no longer has a folder for is read about, not opened.
+  for (const sessionId of ['s1', 's2', 's3']) assert.ok(html.includes(`data-session-id="${sessionId}"`), sessionId);
+  assert.ok(!html.includes('data-session-id="s4"'));
+  assert.match(html, /class="bots-sidebar-removed-chat" title="This chat worked in \/work\/gone, which is no longer one of the Bot&#x27;s folders\."><span class="bots-sidebar-removed-title">Long ago<\/span><span class="bots-sidebar-removed-folder">gone<\/span>/);
+  assert.ok(html.includes('The Bot no longer works in these folders.'));
+});
+
+test('each folder\'s heading starts a chat there, and the heading is a row the arrow keys visit before the folder\'s chats', async () => {
+  const html = await sidebar({
+    bots: [bot('a', { name: 'Alpha', workspaces: [NOTES, SITE] })], expanded: ['a'],
+    chats: { a: [inFolder(chat('s1', 5, 'In notes'), { workspaceId: 'wNotes' }), inFolder(chat('s2', 6, 'At home'), { workspaceId: 'default' }), inFolder(chat('s4', 8, 'Long ago'), { removedPath: '/work/gone' })] },
+  });
+  assert.deepEqual(rowsOf(html).map((row) => row.row), ['bot/a', 'folder/a/default', 'chat/a/s2', 'folder/a/wNotes', 'chat/a/s1', 'folder/a/wSite'], 'no row for the folder that is gone or for its chat');
+  assert.equal(rowsOf(html).filter((row) => row.tabindex === '0').length, 1, 'Tab still reaches one');
+  for (const name of ['Own workspace', 'Notes', 'site']) assert.ok(html.includes(`aria-label="New chat in ${name}"`), name);
+  assert.ok(!html.includes('aria-label="New chat in Removed folders"'), 'a folder that is gone cannot start a chat');
+});
+
+test('a Bot with no folders but its own has no headings, and its list is the one it always had', async () => {
+  const html = await sidebar({ bots: [bot('a', { name: 'Alpha' })], expanded: ['a'], chats: { a: [chat('s1', 5, 'First')] } });
+  assert.ok(!html.includes('bots-sidebar-folder') && !html.includes('role="group"'));
+  assert.deepEqual(rowsOf(html).map((row) => row.row), ['bot/a', 'chat/a/s1']);
+});
+
+test('the first five chats of each folder are listed, with one Show more for what is left out', async () => {
+  const many = Array.from({ length: 7 }, (_, index) => inFolder(chat(`n${index}`, index + 1, `Note ${index}`), { workspaceId: 'wNotes' }));
+  const home = Array.from({ length: 6 }, (_, index) => inFolder(chat(`h${index}`, index + 1, `Home ${index}`), { workspaceId: 'default' }));
+  const html = await sidebar({ bots: [bot('a', { workspaces: [NOTES] })], expanded: ['a'], chats: { a: [...many, ...home] } });
+  assert.equal([...html.matchAll(/data-session-id="n\d"/g)].length, 5);
+  assert.equal([...html.matchAll(/data-session-id="h\d"/g)].length, 5);
+  assert.ok(html.includes(tr('desktop_chat_show_more', 3)), 'two of the folder\'s and one of the Bot\'s own');
+  const unfolded = render(React.createElement(BotChatList, {
+    bot: bot('a', { workspaces: [NOTES] }), entry: (await sessionsOf({ a: [...many, ...home] })).getSnapshot().entries.a, query: '', all: true, matches: () => true,
+    visibleChat: undefined, opening: undefined, bridge: bridgeStub(), onOpen: noop, onMenu: noop, onToggleAll: noop, onRetry: noop,
+  }));
+  assert.equal([...unfolded.matchAll(/data-session-id="/g)].length, 13);
+  assert.ok(unfolded.includes(tr('chat_tool_show_less')));
+});
+
+test('a search leaves out the folders it found nothing in', async () => {
+  const chats = { a: [inFolder(chat('s1', 5, 'Plan the launch'), { workspaceId: 'wNotes' }), inFolder(chat('s2', 6, 'Weekly review'), { workspaceId: 'wSite' })] };
+  const html = await sidebar({ bots: [bot('a', { name: 'Alpha', workspaces: [NOTES, SITE] })], expanded: ['a'], chats, query: 'launch' });
+  assert.deepEqual([...html.matchAll(/<div role="group" aria-label="([^"]*)"/g)].map((match) => match[1]), ['Notes']);
+  assert.deepEqual(rowsOf(html).map((row) => row.row), ['bot/a', 'folder/a/wNotes', 'chat/a/s1']);
+});
+
+test('a chat that is only just started stands under the folder where it works', async () => {
+  const active = { activeBotId: 'a', activeSession: { projectPath: '/work/notes', sessionId: 'fresh-chat' } };
+  const html = await sidebar({
+    bots: [bot('a', { workspaces: [NOTES, SITE] })], expanded: ['a'], bridge: active,
+    chats: { a: [inFolder(chat('s1', 5, 'In notes'), { workspaceId: 'wNotes' })] },
+  });
+  const at = (text: string) => html.indexOf(text);
+  assert.ok(at('aria-label="Notes"') < at('data-session-id="fresh-chat"') && at('data-session-id="fresh-chat"') < at('aria-label="site"'));
+});
+
+test('a Bot with folders offers a new chat in each of them from its menu, and one without offers just the new chat', () => {
+  const calls: unknown[][] = [];
+  const onNewChat = (...args: unknown[]) => { calls.push(args); };
+  const target: MenuTarget = { kind: 'bot', botId: 'a', name: 'Alpha', folders: [{ id: 'wNotes', title: 'Notes' }, { id: 'wSite', title: 'site' }] };
+  const html = render(React.createElement(MenuItems, { target, busy: false, danger: 'red', onNewChat, onSettings: noop, onDelete: noop, onOpen: noop }));
+  const labels = [...html.matchAll(/role="menuitem"[^>]*>(?:<svg[\s\S]*?<\/svg>)? ?([^<]+)</g)].map((match) => match[1]);
+  assert.deepEqual(labels, ['New chat in Own workspace', 'New chat in Notes', 'New chat in site', 'Bot settings', 'Delete Bot…']);
+  const items: Array<React.ReactElement<{ role?: string; onClick?: () => void }>> = [];
+  const collect = (element: React.ReactNode) => React.Children.forEach(element, (child) => {
+    if (!React.isValidElement(child)) return;
+    const props = child.props as { role?: string; children?: React.ReactNode };
+    if (props.role === 'menuitem') items.push(child as never); else collect(props.children);
+  });
+  collect(MenuItems({ target, busy: false, danger: 'red', onNewChat, onSettings: noop, onDelete: noop, onOpen: noop }));
+  items[0]!.props.onClick!();
+  items[2]!.props.onClick!();
+  assert.deepEqual(calls, [['a'], ['a', 'wSite']], 'the Bot\'s own folder is the one a chat starts in when none is named');
+  const plain = render(React.createElement(MenuItems, { target: { kind: 'bot', botId: 'a', name: 'Alpha' }, busy: false, danger: 'red', onNewChat: noop, onSettings: noop, onDelete: noop, onOpen: noop }));
+  assert.ok(plain.includes('> New chat<') && !plain.includes('New chat in'));
+});

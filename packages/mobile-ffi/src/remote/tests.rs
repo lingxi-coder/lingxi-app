@@ -3,6 +3,9 @@
 
 use super::*;
 use remote_control_client::clock::ManualClock;
+use remote_control_client::messages::{
+    RemoteBotProject, RemoteBotWorkspace, RemoteBotWorkspaceRequest,
+};
 use remote_control_client::rpc::RemoteErrorCode;
 use remote_control_client::rtdb::MemoryRtdb;
 use remote_control_client::session::SessionError;
@@ -476,6 +479,7 @@ fn a_bot(id: &str, status: RemoteBotStatus) -> RemoteBotSummary {
         status,
         waiting_threads: 2,
         last_activity_at: Some(1_790_000_000_000),
+        pending_workspace_requests: 3,
     }
 }
 
@@ -491,6 +495,7 @@ fn bots_map_status_waiting_chats_and_activity() {
             status: RemoteBotStatusFfi::RequiresAction,
             waiting_threads: 2,
             last_activity_at_ms: Some(1_790_000_000_000),
+            pending_workspace_requests: 3,
         }
     );
     for (status, expected) in [
@@ -540,6 +545,81 @@ fn the_bots_state_keeps_unknown_unsupported_and_no_bots_apart() {
             "in the computer's order"
         ),
         other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_bots_folders_map_with_their_modes_and_requests() {
+    let folders = BotWorkspacesResult {
+        workspaces: vec![
+            RemoteBotWorkspace {
+                workspace_id: "w1".into(),
+                label: "Notes".into(),
+                path: "/Users/me/notes".into(),
+                mode: RemoteBotWorkspaceMode::Read,
+            },
+            RemoteBotWorkspace {
+                workspace_id: "w2".into(),
+                label: "app".into(),
+                path: "/Users/me/app".into(),
+                mode: RemoteBotWorkspaceMode::Write,
+            },
+        ],
+        projects: vec![RemoteBotProject {
+            path: "/Users/me/site".into(),
+            label: "site".into(),
+        }],
+        requests: vec![RemoteBotWorkspaceRequest {
+            request_id: "r1".into(),
+            path: "/Users/me/data".into(),
+            mode: RemoteBotWorkspaceMode::Write,
+            reason: "to read the export".into(),
+            created_at: 1_790_000_000_000,
+        }],
+    };
+    assert_eq!(
+        bot_workspaces_to_ffi(&folders),
+        RemoteBotWorkspacesFfi {
+            workspaces: vec![
+                RemoteBotWorkspaceFfi {
+                    workspace_id: "w1".into(),
+                    label: "Notes".into(),
+                    path: "/Users/me/notes".into(),
+                    mode: RemoteBotWorkspaceModeFfi::Read,
+                },
+                RemoteBotWorkspaceFfi {
+                    workspace_id: "w2".into(),
+                    label: "app".into(),
+                    path: "/Users/me/app".into(),
+                    mode: RemoteBotWorkspaceModeFfi::Write,
+                },
+            ],
+            projects: vec![RemoteBotProjectFfi {
+                path: "/Users/me/site".into(),
+                label: "site".into(),
+            }],
+            requests: vec![RemoteBotWorkspaceRequestFfi {
+                request_id: "r1".into(),
+                path: "/Users/me/data".into(),
+                mode: RemoteBotWorkspaceModeFfi::Write,
+                reason: "to read the export".into(),
+                created_at_ms: 1_790_000_000_000,
+            }],
+        }
+    );
+    assert_eq!(
+        bot_workspaces_to_ffi(&BotWorkspacesResult::default()),
+        RemoteBotWorkspacesFfi::default()
+    );
+    for mode in [
+        RemoteBotWorkspaceModeFfi::Read,
+        RemoteBotWorkspaceModeFfi::Write,
+    ] {
+        assert_eq!(
+            workspace_mode_to_ffi(workspace_mode_from_ffi(mode)),
+            mode,
+            "a mode goes there and back"
+        );
     }
 }
 
@@ -1812,6 +1892,42 @@ async fn bots_calls_without_a_connection_say_so_and_empty_arguments_are_refused(
         client.create_bot_thread("b1".into()).await,
         Err(RemoteFfiError::NotConnected)
     );
+    assert_eq!(
+        client
+            .create_bot_thread_in_folder("b1".into(), "w1".into())
+            .await,
+        Err(RemoteFfiError::NotConnected)
+    );
+    assert_eq!(
+        client.bot_workspaces("b1".into()).await,
+        Err(RemoteFfiError::NotConnected)
+    );
+    assert_eq!(
+        client
+            .add_bot_workspace("b1".into(), "/p".into(), RemoteBotWorkspaceModeFfi::Read)
+            .await,
+        Err(RemoteFfiError::NotConnected)
+    );
+    assert_eq!(
+        client
+            .set_bot_workspace_mode("b1".into(), "w1".into(), RemoteBotWorkspaceModeFfi::Write)
+            .await,
+        Err(RemoteFfiError::NotConnected)
+    );
+    assert_eq!(
+        client.remove_bot_workspace("b1".into(), "w1".into()).await,
+        Err(RemoteFfiError::NotConnected)
+    );
+    assert_eq!(
+        client
+            .decide_bot_workspace_request(
+                "b1".into(),
+                "r1".into(),
+                RemoteBotWorkspaceDecisionFfi::Deny
+            )
+            .await,
+        Err(RemoteFfiError::NotConnected)
+    );
     client.deactivate_bot_threads("b1".into());
     assert_eq!(client.bot_of_thread("t1".into()), None);
     assert_eq!(client.prompt_origin_bot_name("s1".into(), 1), None);
@@ -1821,6 +1937,51 @@ async fn bots_calls_without_a_connection_say_so_and_empty_arguments_are_refused(
     ));
     assert!(matches!(
         client.create_bot_thread(String::new()).await,
+        Err(RemoteFfiError::InvalidArgument { .. })
+    ));
+    // Whatever names a Bot, a folder, a project or a request is not empty.
+    assert!(matches!(
+        client
+            .create_bot_thread_in_folder(String::new(), "w1".into())
+            .await,
+        Err(RemoteFfiError::InvalidArgument { .. })
+    ));
+    assert!(matches!(
+        client
+            .create_bot_thread_in_folder("b1".into(), String::new())
+            .await,
+        Err(RemoteFfiError::InvalidArgument { .. })
+    ));
+    assert!(matches!(
+        client.bot_workspaces(String::new()).await,
+        Err(RemoteFfiError::InvalidArgument { .. })
+    ));
+    assert!(matches!(
+        client
+            .add_bot_workspace("b1".into(), String::new(), RemoteBotWorkspaceModeFfi::Read)
+            .await,
+        Err(RemoteFfiError::InvalidArgument { .. })
+    ));
+    assert!(matches!(
+        client
+            .set_bot_workspace_mode("b1".into(), String::new(), RemoteBotWorkspaceModeFfi::Read)
+            .await,
+        Err(RemoteFfiError::InvalidArgument { .. })
+    ));
+    assert!(matches!(
+        client
+            .remove_bot_workspace(String::new(), "w1".into())
+            .await,
+        Err(RemoteFfiError::InvalidArgument { .. })
+    ));
+    assert!(matches!(
+        client
+            .decide_bot_workspace_request(
+                "b1".into(),
+                String::new(),
+                RemoteBotWorkspaceDecisionFfi::Approve
+            )
+            .await,
         Err(RemoteFfiError::InvalidArgument { .. })
     ));
     // The listener may be set and cleared at any time.
@@ -1842,13 +2003,21 @@ async fn bots_their_chats_and_the_bot_of_a_prompt_over_the_tunnel() {
                   "status": "idle", "waiting_threads": 0 },
                 { "bot_id": "b2", "name": "Writer", "description": "",
                   "status": "requires_action", "waiting_threads": 1,
-                  "last_activity_at": 1_790_000_000_000_u64 },
+                  "last_activity_at": 1_790_000_000_000_u64, "pending_workspace_requests": 2 },
             ] }))),
             "bot.threads.list" => Some(Ok(json!({ "sessions": [{
                 "session_id": "t1", "title": "Reading list", "project_label": "Researcher",
                 "status": "idle", "viewers": 0, "bot_id": params["bot_id"],
             }] }))),
             "bot.thread.create" => Some(Ok(json!({ "session_id": "t2" }))),
+            "bot.workspaces.list" | "bot.workspace.add" | "bot.workspace.set_mode"
+            | "bot.workspace.remove" | "bot.workspace.request.decide" => Some(Ok(json!({
+                "workspaces": [{ "workspace_id": "w1", "label": "Notes\nof mine",
+                                 "path": "/Users/me/notes", "mode": "read" }],
+                "projects": [{ "path": "/Users/me/site", "label": "site" }],
+                "requests": [{ "request_id": "r1", "path": "/Users/me/data", "mode": "write",
+                               "reason": "to read the export", "created_at": 1_790_000_000_001_u64 }],
+            }))),
             _ => None,
         }));
     });
@@ -1889,6 +2058,8 @@ async fn bots_their_chats_and_the_bot_of_a_prompt_over_the_tunnel() {
         ["b1", "b2"]
     );
     assert_eq!(listed[0].last_activity_at_ms, None);
+    assert_eq!(listed[0].pending_workspace_requests, 0);
+    assert_eq!(listed[1].pending_workspace_requests, 2);
     assert_eq!(listed[1].status, RemoteBotStatusFfi::RequiresAction);
     assert_eq!(
         (listed[1].waiting_threads, listed[1].last_activity_at_ms),
@@ -1930,6 +2101,100 @@ async fn bots_their_chats_and_the_bot_of_a_prompt_over_the_tunnel() {
     let created = &requests_of(&rig.host, "bot.thread.create")[0];
     assert_eq!(created["bot_id"], "b2");
     assert!(!created["client_request_id"].as_str().unwrap().is_empty());
+    assert!(
+        created.get("workspace_id").is_none(),
+        "no folder named: the Bot's own"
+    );
+
+    // A chat in one of the Bot's folders names the folder.
+    assert_eq!(
+        client
+            .create_bot_thread_in_folder("b2".into(), "w1".into())
+            .await
+            .unwrap(),
+        "t2"
+    );
+    assert_eq!(
+        requests_of(&rig.host, "bot.thread.create")[1]["workspace_id"],
+        "w1"
+    );
+
+    // The folders of a Bot, and each change of them, answer with the folders as they are then.
+    let folders = client.bot_workspaces("b2".into()).await.unwrap();
+    assert_eq!(
+        folders,
+        RemoteBotWorkspacesFfi {
+            workspaces: vec![RemoteBotWorkspaceFfi {
+                workspace_id: "w1".into(),
+                label: "Notes of mine".into(),
+                path: "/Users/me/notes".into(),
+                mode: RemoteBotWorkspaceModeFfi::Read,
+            }],
+            projects: vec![RemoteBotProjectFfi {
+                path: "/Users/me/site".into(),
+                label: "site".into(),
+            }],
+            requests: vec![RemoteBotWorkspaceRequestFfi {
+                request_id: "r1".into(),
+                path: "/Users/me/data".into(),
+                mode: RemoteBotWorkspaceModeFfi::Write,
+                reason: "to read the export".into(),
+                created_at_ms: 1_790_000_000_001,
+            }],
+        },
+        "cleaned for one line, and in the shapes of the app"
+    );
+    assert_eq!(
+        requests_of(&rig.host, "bot.workspaces.list"),
+        [json!({ "bot_id": "b2" })]
+    );
+    assert_eq!(
+        client
+            .add_bot_workspace(
+                "b2".into(),
+                "/Users/me/site".into(),
+                RemoteBotWorkspaceModeFfi::Write
+            )
+            .await
+            .unwrap(),
+        folders
+    );
+    assert_eq!(
+        requests_of(&rig.host, "bot.workspace.add"),
+        [json!({ "bot_id": "b2", "path": "/Users/me/site", "mode": "write" })]
+    );
+    client
+        .set_bot_workspace_mode("b2".into(), "w1".into(), RemoteBotWorkspaceModeFfi::Write)
+        .await
+        .unwrap();
+    assert_eq!(
+        requests_of(&rig.host, "bot.workspace.set_mode"),
+        [json!({ "bot_id": "b2", "workspace_id": "w1", "mode": "write" })]
+    );
+    client
+        .remove_bot_workspace("b2".into(), "w1".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        requests_of(&rig.host, "bot.workspace.remove"),
+        [json!({ "bot_id": "b2", "workspace_id": "w1" })]
+    );
+    for decision in [
+        RemoteBotWorkspaceDecisionFfi::Approve,
+        RemoteBotWorkspaceDecisionFfi::Deny,
+    ] {
+        client
+            .decide_bot_workspace_request("b2".into(), "r1".into(), decision)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        requests_of(&rig.host, "bot.workspace.request.decide"),
+        [
+            json!({ "bot_id": "b2", "request_id": "r1", "decision": "approve" }),
+            json!({ "bot_id": "b2", "request_id": "r1", "decision": "deny" }),
+        ]
+    );
 
     // The record of a Bot's prompt reads as scheduled; the lookup tells which Bot.
     client.attach_session("t1".into()).await.unwrap();
@@ -2039,10 +2304,12 @@ async fn a_computer_from_before_bots_reads_as_unsupported_and_is_asked_nothing_m
     let heard = BotsRecorder::default();
     rig.host.configure(|config| {
         config.respond = Some(Arc::new(|method: &str, _params: &Value| match method {
-            "bots.watch" | "bot.threads.list" | "bot.thread.create" => Some(Err(RpcError::new(
-                RemoteErrorCode::InvalidParams,
-                format!("unknown method {method}"),
-            ))),
+            "bots.watch" | "bot.threads.list" | "bot.thread.create" | "bot.workspaces.list" => {
+                Some(Err(RpcError::new(
+                    RemoteErrorCode::InvalidParams,
+                    format!("unknown method {method}"),
+                )))
+            }
             "sessions.watch" => Some(Ok(json!({ "sessions": [] }))),
             _ => None,
         }));
@@ -2075,10 +2342,15 @@ async fn a_computer_from_before_bots_reads_as_unsupported_and_is_asked_nothing_m
         Err(RemoteFfiError::Rpc { code, .. }) => assert_eq!(code, "unknown_session"),
         other => panic!("{other:?}"),
     }
+    match client.bot_workspaces("b1".into()).await {
+        Err(RemoteFfiError::Rpc { code, .. }) => assert_eq!(code, "unknown_session"),
+        other => panic!("{other:?}"),
+    }
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(requests_of(&rig.host, "bots.watch").len(), 1);
     assert!(requests_of(&rig.host, "bot.threads.list").is_empty());
     assert!(requests_of(&rig.host, "bot.thread.create").is_empty());
+    assert!(requests_of(&rig.host, "bot.workspaces.list").is_empty());
 }
 
 #[tokio::test(start_paused = true)]

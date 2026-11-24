@@ -70,6 +70,8 @@ export interface BridgeLaunchConfig {
   initialProjectRoot?: string;
   configHome?: string;
   globalConfigPath?: string;
+  /** Load only the config home's user settings; the workspace's project and local settings never apply (Bot sessions). */
+  userSettingsOnly?: boolean;
   providerAccounts?: ProviderAccountSnapshot;
   providerAccountHome?: string;
   providerAccountBackend?: 'desktop-broker:development' | 'desktop-broker:production';
@@ -346,6 +348,8 @@ export interface WorkspaceLaunchSettings {
   environment: Record<string, string>;
   configHome: string;
   globalConfigPath?: string;
+  /** A Bot's own settings are the only file-backed settings its sessions read, whichever folder they run in. */
+  userSettingsOnly?: boolean;
   /** Directories granted to every session of this workspace unless the session carries grants of its own. */
   additionalDirectories?: readonly string[];
 }

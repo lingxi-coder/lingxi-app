@@ -14,6 +14,11 @@ import { FakeRuntimes } from './bot-tasks-helpers.js';
 
 const OTHER_SESSION = '99999999-2222-4333-8444-555555555555';
 const ROUTER_URL = 'http://127.0.0.1:4242/mcp';
+/** A runtime manager that has no session open and starts none. */
+const NO_RUNTIMES = {
+  newSession: async (): Promise<never> => { throw new Error('unused'); }, openSession: async () => ({}), closeProject: async () => undefined,
+  closeSession: async () => undefined, restart: async () => undefined, setSessionDirectoryGrants: () => undefined, runtimeSummaries: [],
+};
 
 /** A router that hands out tokens one after another and notes who it was asked to forget. */
 function stubRouter(calls: string[]) {
@@ -42,12 +47,11 @@ function setup(t: { after(fn: () => void): void }, options: { router?: boolean; 
     store: f.store,
     platform: 'darwin',
     runtimes: {
-      newSession: async () => { throw new Error('unused'); },
-      openSession: async () => ({}),
+      ...NO_RUNTIMES,
       closeProject: async () => { calls.push('closeProject'); if (failures.close) throw new Error('cancel active turns and pending interactions before removing a project'); },
     },
     catalogFor: (configHome): BotCatalog => ({
-      list: async () => ({ sessions: [] }), find: async () => undefined, invalidate: () => undefined,
+      list: async () => ({ sessions: [] }), find: async () => undefined, select: async () => undefined, invalidate: () => undefined,
       workspaceSettings: async () => ({ environment: { FROM_SETTINGS: 'yes', ...options.botEnvironment }, configHome }),
     }),
     routines: { isControllerSession: () => false, releaseScope: () => { calls.push('releaseScope'); } },
@@ -177,7 +181,7 @@ test('deleting a Bot ends its tasks before anything is stopped, and takes its se
   assert.deepEqual(s.calls, [`botDeleting ${gone.bot_id}`, 'releaseScope', 'closeProject', `revokeBot ${gone.bot_id}`]);
   assert.equal(deletingAtTheTime, true, 'no task is taken for the Bot from that moment');
   assert.ok(!existsSync(s.store.botDir(gone.bot_id)));
-  assert.equal(s.service.ownsWorkspace(workspace), false);
+  assert.equal(s.service.ownsSession({ projectPath: workspace, sessionId: SESSION }), false);
   assert.equal(s.service.isDeleting(gone.bot_id), false);
 });
 
@@ -203,7 +207,7 @@ test('the runtime manager tells the settings which session it is launching, so t
   const bot = s.service.create({ name: 'Caller' });
   const workspace = s.store.workspaceDir(bot.bot_id);
   const manager = new SessionRuntimeManager({
-    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: s.service.ownsWorkspace(ref.projectPath) }),
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: s.service.ownsSession(ref) }),
     workspaceSettings: (projectPath, ref) => s.service.launchSettings(projectPath, ref.sessionId),
   });
   t.after(() => manager.dispose());
@@ -250,23 +254,23 @@ test('the engine that is started is given the router\'s address and a token that
     platform: 'darwin',
     router,
     delegation: tasks,
-    runtimes: { newSession: async () => { throw new Error('unused'); }, openSession: async () => ({}), closeProject: async () => undefined },
+    runtimes: NO_RUNTIMES,
     catalogFor: (configHome): BotCatalog => ({
-      list: async () => ({ sessions: [] }), find: async () => undefined, invalidate: () => undefined,
+      list: async () => ({ sessions: [] }), find: async () => undefined, select: async () => undefined, invalidate: () => undefined,
       workspaceSettings: async () => ({ environment: {}, configHome }),
     }),
     warn: (message) => warnings.push(message),
   });
   const caller = service.create({ name: 'Caller' });
   const target = service.create({ name: 'Target' });
-  service.update(target.bot_id, target.revision, { acceptFrom: [caller.bot_id] });
+  await service.update(target.bot_id, target.revision, { acceptFrom: [caller.bot_id] });
 
   const root = mkdtempSync(join(tmpdir(), 'lingxi-bot-router-spawn-'));
   const serverBin = join(root, 'capture');
   writeFileSync(serverBin, CAPTURE, { mode: 0o700 });
   const manager = new SessionRuntimeManager({
     serverBin, bridgeRoot: join(root, 'runtime'), stopTimeoutMs: 500, listProcessCommands: () => [],
-    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: service.ownsWorkspace(ref.projectPath) }),
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: service.ownsSession(ref) }),
     workspaceSettings: (projectPath, ref) => service.launchSettings(projectPath, ref.sessionId),
   });
   router.watchRuntimes(manager);

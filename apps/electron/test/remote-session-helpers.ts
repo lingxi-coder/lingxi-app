@@ -397,7 +397,7 @@ export function newClock(): ManualClock { return new ManualClock(START); }
 
 import { RemoteCommands, type ImageCodec, type RemotePromptEcho } from '../src/main/remoteControl/remoteCommands.js';
 import { RemotePolicy, type RemotePolicyOptions, type RemotePolicySettings } from '../src/main/remoteControl/policy.js';
-import type { RemoteBotDirectory } from '../src/main/remoteControl/remoteBots.js';
+import type { RemoteBotDirectory, RemoteBotFolderSource } from '../src/main/remoteControl/remoteBots.js';
 import { SessionGateway, LEASE_GRACE_MS } from '../src/main/remoteControl/sessionGateway.js';
 
 export class FakeSettings implements RemotePolicySettings {
@@ -440,6 +440,8 @@ export function gatewayFixture(options: {
   files?: RemoteFileStore;
   /** The Bots, as the policy and the gateway ask for them. */
   bots?: () => RemoteBotDirectory | null | undefined;
+  /** The desktop's projects and what the Bots asked for, as the gateway asks for them. */
+  botFolders?: () => RemoteBotFolderSource | null | undefined;
   /** More of what the policy is made from: whether Remote Control is on for the computer, the managed directory. */
   policy?: Partial<RemotePolicyOptions>;
 } = {}): GatewayFixture {
@@ -463,6 +465,7 @@ export function gatewayFixture(options: {
     runtimes,
     policy,
     ...(options.bots ? { bots: options.bots } : {}),
+    ...(options.botFolders ? { botFolders: options.botFolders } : {}),
     files: options.files,
     commands,
     titleOf: async (ref) => titles.get(ref.sessionId),

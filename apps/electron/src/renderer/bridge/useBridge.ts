@@ -2093,10 +2093,10 @@ export function useBridge(): UseBridge {
   }, [applyBootstrap, beginNavigationOperation, host, isCurrentNavigationOperation]);
 
   /** Show a chat of a Bot in the chat view: a new one, or the one named. */
-  const openBotSession = useCallback(async (botId: string, sessionId?: string, transcriptPath?: string): Promise<BotSessionRefUi> => {
+  const openBotSession = useCallback(async (botId: string, sessionId?: string, transcriptPath?: string, workspaceId?: string): Promise<BotSessionRefUi> => {
     const bots = host?.bots;
     if (!bots) throw new Error('Desktop host unavailable.');
-    return followBotSession(botId, sessionId, () => bots.openSession(botId, sessionId, transcriptPath));
+    return followBotSession(botId, sessionId, () => bots.openSession(botId, sessionId, transcriptPath, workspaceId));
   }, [followBotSession, host]);
 
   /** The host opened a chat of a Bot on its own: show it, and say so in the error banner if the window cannot. */
@@ -2812,9 +2812,13 @@ export function useBridge(): UseBridge {
     if (!host?.scheduled) throw new Error('Scheduled task service unavailable.');
     return host.scheduled.context(scopeId);
   }, [host, bootstrap?.conversationSpaces.activeMode]);
-  const manageScheduled = useCallback(async (scopeId: string, request: CronRequestDto) => {
+  const manageScheduled = useCallback(async (scopeId: string, request: CronRequestDto, folderId?: string) => {
     if (!host?.scheduled) throw new Error('Scheduled task service unavailable.');
-    return host.scheduled.manage(scopeId, request);
+    return host.scheduled.manage(scopeId, request, folderId);
+  }, [host]);
+  const scheduledRoutineFolders = useCallback(async (scopeId: string): Promise<Record<string, string>> => {
+    if (!host?.scheduled) throw new Error('Scheduled task service unavailable.');
+    return host.scheduled.routineFolders(scopeId);
   }, [host]);
   const readScheduledHistory = useCallback(async (scopeId: string, jobId: string): Promise<CronRunDto[]> => {
     const jobs = await manageScheduled(scopeId, { action: 'history', id: jobId });
@@ -2939,7 +2943,7 @@ export function useBridge(): UseBridge {
   return {
     history: runtime?.history ?? EMPTY_TRANSCRIPT_HISTORY, loadMoreHistory,
     linkDraft, offerLinkDraft: setLinkDraft, clearLinkDraft: () => setLinkDraft(null),
-    scheduledScopes, refreshScheduledScopes, scheduledContext, manageScheduled, readScheduledHistory, openScheduledSession,
+    scheduledScopes, refreshScheduledScopes, scheduledContext, manageScheduled, scheduledRoutineFolders, readScheduledHistory, openScheduledSession,
     uiSurfaceClientId: stableUiSurfaceClientId,
     updatePromptSuggestionContext, promptSuggestionFeedback,
     hosted,

@@ -131,7 +131,7 @@ export class SessionRuntimeManager {
   private readonly sessionTranscriptPaths = new Map<string, string>();
   private readonly sourceCaptureWanted = new Map<string, { ref: SessionRef; scheduled: boolean }>();
   private readonly sourceCapturePending = new Map<string, Promise<void>>();
-  private readonly sessionConfigOwners = new Map<string, { configHome: string; globalConfigPath?: string }>();
+  private readonly sessionConfigOwners = new Map<string, { configHome: string; globalConfigPath?: string; userSettingsOnly?: boolean }>();
   private readonly pendingEvictions = new Set<Promise<void>>();
   private readonly evictingSessions = new Map<string, Promise<void>>();
   private readonly maxCachedRuntimes: number;
@@ -684,13 +684,16 @@ export class SessionRuntimeManager {
     }
   }
 
-  async newSession(projectPath: string, model: string | undefined, ownership: { mode: RuntimeSessionMode; projectId: string | null; activate?: () => boolean; forceNew?: boolean; durableDraftTitle?: string; onAllocated?: (ref: SessionRef) => Promise<void> }): Promise<SessionRef> {
+  async newSession(projectPath: string, model: string | undefined, ownership: { mode: RuntimeSessionMode; projectId: string | null; activate?: () => boolean; forceNew?: boolean; durableDraftTitle?: string; onAllocated?: (ref: SessionRef) => Promise<void>; draftKey?: string }): Promise<SessionRef> {
     if (typeof projectPath !== 'string' || projectPath.length === 0) throw new Error('invalid project path');
     this.assertProjectNotClosing(projectPath);
     if (!ownership || (ownership.mode !== 'chat' && ownership.mode !== 'code')) throw new Error('The session creation mode is unavailable.');
     const { mode, projectId } = ownership;
     if (projectId !== null && (typeof projectId !== 'string' || !projectId)) throw new Error('The session project owner is unavailable.');
-    const key = ownership.forceNew ? `${draftScope(mode, projectId)}:${randomUUID()}` : draftScope(mode, projectId);
+    // A Bot's folder has an unsent draft of its own: the shared one of the mode would hand a Bot another Bot's draft, or the owner's.
+    if (ownership.draftKey !== undefined && (typeof ownership.draftKey !== 'string' || ownership.draftKey.length === 0)) throw new Error('The session draft is unavailable.');
+    const key = ownership.draftKey !== undefined ? `${draftScope(mode, projectId)}:${ownership.draftKey}`
+      : ownership.forceNew ? `${draftScope(mode, projectId)}:${randomUUID()}` : draftScope(mode, projectId);
     const pendingDraft = this.openingDraftSessions.get(key);
     if (pendingDraft) return pendingDraft;
     const draft = this.draftSessions.get(key);
@@ -1045,6 +1048,7 @@ export class SessionRuntimeManager {
         } : config.settingsEnvironment;
         const owner = this.sessionConfigOwners.get(ref.sessionId) ?? (settings ? {
           configHome: settings.configHome, globalConfigPath: settings.globalConfigPath,
+          ...(settings.userSettingsOnly ? { userSettingsOnly: true } : {}),
         } : undefined);
         if (owner) this.sessionConfigOwners.set(ref.sessionId, owner);
         if (environment) this.sessionSettingsEnvironment.set(ref.sessionId, { ...environment });

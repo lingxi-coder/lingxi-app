@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { CronJobDto, CronRequestDto } from '@lingxi/bridge-client';
 import type { ScheduledScope } from '../src/shared/scheduled';
-import { BotRoutinesController, botScopesKey, routineRow, routineScopeOf } from '../src/renderer/bridge/botRoutines';
+import { BotRoutinesController, botScopesKey, loadRoutineFolders, routineFolderOptions, routineFolderToSet, routineFolderValue, routineRow, routineScopeOf } from '../src/renderer/bridge/botRoutines';
 import { jobStatus, nextRunLabel, scopeName } from '../src/renderer/bridge/scheduledPresentation';
 import { tr } from '../src/renderer/i18n/locale';
 import { BotRoutinesPanel } from '../src/renderer/components/BotPanels';
@@ -232,4 +232,84 @@ test('the editor says nothing of a Bot for a project or for no project', () => {
     assert.match(html, /Bot · Scribe/, 'the Bot is still among the places to run in');
   }
   assert.match(setup('global'), new RegExp(tr('desktop_scheduled_no_project').slice(0, 20)));
+});
+
+// ---- The folder a routine runs in ----
+
+const FOLDER_BOT: ScheduledScope = { ...BOT_SCOPE, folders: [{ id: 'default', label: '' }, { id: 'wnotes', label: 'Notes' }, { id: 'wdocs', label: 'Docs' }] };
+const FOLDER_SCOPES: ScheduledScope[] = [{ id: 'global', label: 'No project' }, { id: '/work/app', projectPath: '/work/app', label: 'app' }, FOLDER_BOT];
+
+function folderSetup(props: { scopeId?: string; scopes?: ScheduledScope[]; editing?: { job: CronJobDto; folderId?: string } } = {}): string {
+  return render(React.createElement(ScheduledTaskSetup, {
+    ...(props.editing ? { editingJob: props.editing.job, folderId: props.editing.folderId } : { initial: { title: '', description: '' } }),
+    scopeId: props.scopeId ?? FOLDER_BOT.id, scopes: props.scopes ?? FOLDER_SCOPES, sessions: [], models: [], defaultModel: 'a/b',
+    loadContext: async () => ({ models: [], currentModel: 'a/b', sessions: [] }), onBack: noop, onSave: async () => undefined, onDirtyChange: noop,
+  }));
+}
+const folderSelect = (html: string): string | undefined => /Folder<select[^>]*>([^]*?)<\/select>/.exec(html)?.[1];
+
+test('the folders a routine can run in are the Bot\'s own, named by the window, and the ones the owner gave', () => {
+  assert.deepEqual(routineFolderOptions(FOLDER_BOT), [
+    { id: 'default', title: 'Own workspace' }, { id: 'wnotes', title: 'Notes' }, { id: 'wdocs', title: 'Docs' },
+  ]);
+  assert.deepEqual(routineFolderOptions(BOT_SCOPE), [], 'a Bot with only its own folder has nothing to choose');
+  assert.deepEqual(routineFolderOptions({ id: '/work/app' } as ScheduledScope), [], 'a project has none');
+  assert.deepEqual(routineFolderOptions(undefined), []);
+});
+
+test('the folder shown for a routine is the one it was given, the Bot\'s own when it was given none, and none when it is gone', () => {
+  const options = routineFolderOptions(FOLDER_BOT);
+  assert.equal(routineFolderValue(options, undefined), 'default');
+  assert.equal(routineFolderValue(options, 'default'), 'default');
+  assert.equal(routineFolderValue(options, 'wdocs'), 'wdocs');
+  assert.equal(routineFolderValue(options, 'wgone'), '', 'a folder that is not the Bot\'s any more is not shown as chosen');
+  assert.equal(routineFolderValue([], 'wdocs'), '');
+});
+
+test('a folder is sent to the host only when it is one of the Bot\'s and the routine starts its own chats', () => {
+  const draft = (folderId: string | undefined, runMode: 'new_session' | 'selected_session' | 'task_session' = 'new_session') =>
+    ({ folderId, automation: { ...job().automation!, runMode } });
+  assert.equal(routineFolderToSet(FOLDER_BOT, draft('wnotes')), 'wnotes');
+  assert.equal(routineFolderToSet(FOLDER_BOT, draft('default')), 'default', 'going back to the Bot\'s own folder is a choice too');
+  assert.equal(routineFolderToSet(FOLDER_BOT, draft('wnotes', 'task_session')), 'wnotes');
+  assert.equal(routineFolderToSet(FOLDER_BOT, draft(undefined)), undefined, 'nothing chosen leaves the routine where it was put');
+  assert.equal(routineFolderToSet(FOLDER_BOT, draft('wgone')), undefined, 'a folder the Bot has not is never sent');
+  assert.equal(routineFolderToSet(FOLDER_BOT, draft('wnotes', 'selected_session')), undefined, 'a chosen chat works where it works');
+  assert.equal(routineFolderToSet(BOT_SCOPE, draft('wnotes')), undefined);
+  assert.equal(routineFolderToSet(undefined, draft('wnotes')), undefined);
+});
+
+test('the routines of a Bot that has folders are asked for, and of no other scope; a Bot that cannot say is left out', async () => {
+  const asked: string[] = [];
+  const answers: Record<string, Record<string, string>> = { a: { 'task-1': 'wnotes' }, c: {} };
+  const folders = [{ id: 'default', label: '' }, { id: 'wnotes', label: 'Notes' }];
+  const got = await loadRoutineFolders([{ id: 'global' }, { id: '/work/app' }, { id: 'a', folders }, { id: 'b', folders }, { id: 'c', folders }, { id: 'd' }], async (scopeId) => {
+    asked.push(scopeId);
+    if (scopeId === 'b') throw new Error('unavailable');
+    return answers[scopeId]!;
+  });
+  assert.deepEqual([...asked].sort(), ['a', 'b', 'c']);
+  assert.deepEqual(got, { a: { 'task-1': 'wnotes' }, c: {} });
+  assert.deepEqual(await loadRoutineFolders([{ id: 'global' }], async () => { throw new Error('never asked'); }), {});
+});
+
+test('the editor of a Bot\'s routine offers its folders, the Bot\'s own first and chosen unless the routine was given another', () => {
+  const select = folderSelect(folderSetup());
+  assert.ok(select, 'the choice of folder is there');
+  assert.equal(select, '<option value="default" selected="">Own workspace</option><option value="wnotes">Notes</option><option value="wdocs">Docs</option>');
+  const given = folderSelect(folderSetup({ editing: { job: job(), folderId: 'wdocs' } }));
+  assert.equal(given, '<option value="default">Own workspace</option><option value="wnotes">Notes</option><option value="wdocs" selected="">Docs</option>');
+});
+
+test('the editor asks for a folder again when the one a routine was given is not the Bot\'s any more', () => {
+  const select = folderSelect(folderSetup({ editing: { job: job(), folderId: 'wgone' } }));
+  assert.equal(select, '<option value="" disabled="" selected="">Choose a folder</option><option value="default">Own workspace</option><option value="wnotes">Notes</option><option value="wdocs">Docs</option>');
+});
+
+test('the editor offers no folder where there is nothing to choose: a project, no project, a Bot with only its own folder, a chosen chat', () => {
+  assert.equal(folderSelect(folderSetup({ scopeId: '/work/app' })), undefined, 'a project');
+  assert.equal(folderSelect(folderSetup({ scopeId: 'global' })), undefined, 'no project');
+  assert.equal(folderSelect(folderSetup({ scopes: SCOPES })), undefined, 'a Bot with only its own folder');
+  const chat = job({ automation: { ...job().automation!, runMode: 'selected_session', targetSessionId: 'chat-1' } });
+  assert.equal(folderSelect(folderSetup({ editing: { job: chat, folderId: 'wnotes' } })), undefined, 'a routine that works in a chosen chat');
 });

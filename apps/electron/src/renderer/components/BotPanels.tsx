@@ -1,8 +1,10 @@
+import type { BotUi } from '../../shared/bots';
 import { tr } from '../i18n/locale';
 import { botMemoryProblem, type BotMemoryController } from '../bridge/botMemory';
 import { routineRow, type BotRoutinesController } from '../bridge/botRoutines';
 import type { BotSkillsController } from '../bridge/botSkills';
 import { taskRow, type BotTasksController } from '../bridge/botTasks';
+import { requestsOfBot, type BotWorkspaceRequestsController } from '../bridge/botWorkspaceRequests';
 import { relativeActivity } from '../bridge/botSession';
 import { BotConfirm, BotDialog, problemText, useObservable } from './BotFields';
 import { DesktopDialogActions, DesktopDialogButton } from './DesktopDialog';
@@ -188,4 +190,52 @@ export function BotTasksPanel({ controller, opening, disabled, onOpen }: {
       <p className="bots-muted">{stopping.title}: {stopping.summary}</p>
     </BotConfirm> : null}
   </div>;
+}
+
+/**
+ * The folders this Bot asked to be given while it worked, for the owner to answer. Nothing is shown while there is
+ * nothing to answer. The request says what the Bot gave as its reason; allowing it binds the folder to the Bot with the
+ * access asked for, and the Bot's open chats are given it as soon as they are not working.
+ */
+export function BotWorkspaceRequestsPanel({ controller, botId, onApproved }: {
+  controller: BotWorkspaceRequestsController;
+  botId: string;
+  /** A folder was bound to the Bot: the page takes the Bot as it is now. */
+  onApproved(bot: BotUi): void;
+}) {
+  const state = useObservable(controller);
+  const requests = requestsOfBot(state, botId);
+  if (requests.length === 0) return null;
+  const answer = async (requestId: string, decision: 'approve' | 'deny') => {
+    const bot = await controller.decide(botId, requestId, decision);
+    if (bot) onApproved(bot);
+  };
+  return <section className="bots-requests" aria-label={tr('bots_requests_title')}>
+    <h2 className="bots-label">{tr('bots_requests_title')}</h2>
+    <p className="bots-hint">{tr('bots_requests_hint')}</p>
+    <ul className="bots-rows">
+      {requests.map((request) => {
+        const deciding = state.deciding?.requestId === request.requestId ? state.deciding.decision : undefined;
+        const failed = state.decideError?.requestId === request.requestId ? state.decideError.message : undefined;
+        return <li key={request.requestId} className="bots-row bots-request">
+          <div className="bots-row-main">
+            <span className="bots-row-title"><span className="mono">{request.path}</span><span className="bots-tag">{request.mode === 'write' ? tr('bots_folder_write') : tr('bots_folder_read')}</span></span>
+            {request.reason ? <span className="bots-row-text">{request.reason}</span> : null}
+            <span className="bots-muted">{tr('bots_request_asked', relativeActivity(request.createdAt))}</span>
+            {failed !== undefined ? <span role="alert" className="bots-problem">{tr('bots_action_failed', failed)}</span> : null}
+          </div>
+          <div className="bots-row-actions">
+            <button type="button" data-variant="primary" disabled={state.deciding !== undefined} aria-busy={deciding === 'approve' || undefined}
+              aria-label={`${tr('bots_request_allow')}: ${request.path}`} onClick={() => void answer(request.requestId, 'approve')}>
+              {deciding === 'approve' ? tr('bots_request_allowing') : tr('bots_request_allow')}
+            </button>
+            <button type="button" data-variant="quiet" disabled={state.deciding !== undefined} aria-busy={deciding === 'deny' || undefined}
+              aria-label={`${tr('bots_request_deny')}: ${request.path}`} onClick={() => void answer(request.requestId, 'deny')}>
+              {tr('bots_request_deny')}
+            </button>
+          </div>
+        </li>;
+      })}
+    </ul>
+  </section>;
 }

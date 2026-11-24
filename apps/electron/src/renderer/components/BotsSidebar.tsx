@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import type { SessionRowDto } from '@lingxi/bridge-client';
 import type { BotUi } from '../../shared/bots';
 import { tr } from '../i18n/locale';
+import { chatGroups, folderBaseName, folderTitle, ownFolderTitle, workspaceIdAtPath, type ChatGroup } from '../bridge/botFolders';
 import { botActivity, botRuntimes, pendingBotPath, startBotChat, type BotActivity } from '../bridge/botSession';
 import { recentBots, type BotSessionsController, type BotSessionsEntry } from '../bridge/botSessionsStore';
 import type { UseBridge } from '../bridge/bridgeTypes';
@@ -25,7 +26,8 @@ type Point = { left: number; top: number };
 
 /** What a menu is open on: a Bot, or one of its chats. */
 export type MenuTarget =
-  | { kind: 'bot'; botId: string; name: string }
+  /** `folders` are the ones the owner gave the Bot: a chat can be started in each of them. */
+  | { kind: 'bot'; botId: string; name: string; folders?: ReadonlyArray<{ id: string; title: string }> }
   | { kind: 'chat'; botId: string; sessionId: string; title: string; transcriptPath?: string };
 
 interface OpenMenu {
@@ -56,33 +58,62 @@ export interface BotsSidebarProps {
 
 const titleOf = (session: Pick<SessionRowDto, 'title'>) => session.title.trim() || tr('remote_untitled');
 
+/** What says which chat is being opened: a chat of the Bot, or a new one, in the Bot's own folder or in the folder named. */
+const openingKey = (botId: string, sessionId?: string, workspaceId?: string) => workspaceId === undefined ? `${botId}\0${sessionId ?? ''}` : `${botId}\0\0${workspaceId}`;
+
 /** What names a row in the list the arrow keys move through: a Bot, or one of its chats. */
 const botRowKey = (botId: string) => `bot/${encodeURIComponent(botId)}`;
 const chatRowKey = (botId: string, sessionId: string) => `chat/${encodeURIComponent(botId)}/${encodeURIComponent(sessionId)}`;
+/** The button of a folder's heading that starts a chat in it. */
+const folderRowKey = (botId: string, groupKey: string) => `folder/${encodeURIComponent(botId)}/${encodeURIComponent(groupKey)}`;
 
-type Chat = Pick<SessionRowDto, 'uuid' | 'title' | 'modified_rfc3339' | 'message_count'> & { path?: string };
+type Chat = Pick<SessionRowDto, 'uuid' | 'title' | 'modified_rfc3339' | 'message_count'> & { path?: string; workspaceId?: string; removedPath?: string };
+
+/** A folder of a Bot as the list draws it: its chats, and of them the ones shown. */
+type FolderChats = ChatGroup<Chat> & { listed: Chat[] };
 
 /**
  * The chats of one open Bot: what was read of them, newest first; the ones a search keeps; and of those the first few
- * unless all are asked for. The list draws `listed`, and the sidebar names the rows from the same.
+ * unless all are asked for. The list draws `listed`, and the sidebar names the rows from the same. A Bot with folders of
+ * its own has its chats under a heading for each folder, the first few of each; a Bot with none has one list, as it always had.
  */
-function chatsOf({ bot, entry, query, all, matches, visibleChat }: {
+function chatsOf({ bot, entry, query, all, matches, visibleChat, visiblePath }: {
   bot: BotUi;
   entry: BotSessionsEntry | undefined;
   query: string;
   all: boolean;
   matches(value: string): boolean;
   visibleChat: string | undefined;
-}): { chats: Chat[]; searched: Chat[]; listed: Chat[] } {
+  /** Where the chat on screen works, which says which folder a chat that has no transcript yet belongs to. */
+  visiblePath?: string | undefined;
+}): { chats: Chat[]; searched: Chat[]; listed: Chat[]; groups: FolderChats[]; headed: boolean } {
   const read = entry?.sessions;
   // A chat just started has no transcript yet, so it is not in what was read: it stands in the list until it is.
   const pending = read !== undefined && visibleChat !== undefined && !visibleChat.startsWith('pending-new:') && !read.some((row) => row.uuid === visibleChat);
   const chats: Chat[] = [
-    ...(pending ? [{ uuid: visibleChat, title: tr('bots_new_chat'), modified_rfc3339: '', message_count: 0 }] : []),
+    ...(pending ? [{ uuid: visibleChat, title: tr('bots_new_chat'), modified_rfc3339: '', message_count: 0, workspaceId: workspaceIdAtPath(bot, visiblePath) }] : []),
     ...(read ?? []).map((row) => ({ ...row, title: row.title.trim() })),
   ];
   const searched = query === '' ? chats : matches(bot.name) ? chats : chats.filter((chat) => matches(titleOf(chat)));
-  return { chats, searched, listed: query !== '' || all ? searched : searched.slice(0, FIRST_CHATS) };
+  const { groups: all_, headed } = chatGroups(bot, searched);
+  // A search leaves out the folders it found nothing in.
+  const groups: FolderChats[] = all_
+    .filter((group) => !headed || query === '' || group.chats.length > 0)
+    .map((group) => ({ ...group, listed: query !== '' || all || group.kind === 'removed' ? group.chats : group.chats.slice(0, FIRST_CHATS) }));
+  return { chats, searched, listed: groups.flatMap((group) => group.listed), groups, headed };
+}
+
+/** The rows of a Bot's chats that the arrow keys visit, in the order they are drawn: each folder's button, then its chats. A chat of a folder the Bot no longer has is no row: it cannot be opened. */
+function chatRowsOf(botId: string, { groups, headed }: Pick<ReturnType<typeof chatsOf>, 'groups' | 'headed'>): string[] {
+  return groups.flatMap((group) => group.kind === 'removed' ? [] : [
+    ...(headed ? [folderRowKey(botId, group.key)] : []),
+    ...group.listed.map((chat) => chatRowKey(botId, chat.uuid)),
+  ]);
+}
+
+/** How many chats the first few of each folder leave out. */
+function hiddenChats(groups: readonly FolderChats[]): number {
+  return groups.reduce((count, group) => count + (group.kind === 'removed' ? 0 : Math.max(0, group.chats.length - FIRST_CHATS)), 0);
 }
 
 /** The sidebar in Bots mode: each Bot, and under the ones that are open, its chats. */
@@ -131,13 +162,13 @@ export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpen
     const listed = new Set(state.bots.map((bot) => bot.botId));
     void bridge.updateSidebarPreferences({ expandedBots: [...next].filter((id) => listed.size === 0 || listed.has(id)) });
   };
-  const openChat = (botId: string, sessionId?: string, transcriptPath?: string) => {
+  const openChat = (botId: string, sessionId?: string, transcriptPath?: string, workspaceId?: string) => {
     if (bridge.sessionLoading || opening !== undefined) return;
     onLeave(async () => {
-      const key = `${botId}\0${sessionId ?? ''}`;
+      const key = openingKey(botId, sessionId, workspaceId);
       setOpening(key);
       setProblem(undefined);
-      const outcome = await startBotChat(() => bridge.openBotSession(botId, sessionId, transcriptPath));
+      const outcome = await startBotChat(() => bridge.openBotSession(botId, sessionId, transcriptPath, workspaceId));
       setOpening((current) => current === key ? undefined : current);
       if (outcome.ok) onOpenChat();
       else setProblem(outcome.message);
@@ -156,10 +187,11 @@ export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpen
 
   // The chat of a Bot that the chat view shows, if it shows one.
   const visibleChatOf = (botId: string) => chatVisible && activeBotId === botId ? activeSession?.sessionId : undefined;
-  const listedOf = (bot: BotUi) => chatsOf({ bot, entry: entries[bot.botId], query, all: showAll.has(bot.botId), matches, visibleChat: visibleChatOf(bot.botId) }).listed;
+  const visiblePathOf = (botId: string) => chatVisible && activeBotId === botId ? activeSession?.projectPath : undefined;
+  const chatsOfBot = (bot: BotUi) => chatsOf({ bot, entry: entries[bot.botId], query, all: showAll.has(bot.botId), matches, visibleChat: visibleChatOf(bot.botId), visiblePath: visiblePathOf(bot.botId) });
   // The rows, in the order they are drawn, are one list for the arrow keys; Tab reaches one of them: the row that last had
   // the focus, else the chat on screen, else the first.
-  const rows = visible.flatMap((bot) => [botRowKey(bot.botId), ...(expanded.has(bot.botId) ? listedOf(bot).map((chat) => chatRowKey(bot.botId, chat.uuid)) : [])]);
+  const rows = visible.flatMap((bot) => [botRowKey(bot.botId), ...(expanded.has(bot.botId) ? chatRowsOf(bot.botId, chatsOfBot(bot)) : [])]);
   const shownRow = activeBotId !== undefined && visibleChatOf(activeBotId) !== undefined ? chatRowKey(activeBotId, visibleChatOf(activeBotId)!) : undefined;
   const tabStop = focusedRow !== undefined && rows.includes(focusedRow) ? focusedRow : shownRow !== undefined && rows.includes(shownRow) ? shownRow : rows[0];
   const noteFocus = (event: FocusEvent<HTMLElement>) => {
@@ -214,8 +246,8 @@ export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpen
           const activity = botActivity(bot.botId, runtimes);
           const groupId = `bot-chats-${encodeURIComponent(bot.botId)}`;
           const menuTrigger = menu?.trigger !== undefined && menu.target.kind === 'bot' && menu.target.botId === bot.botId;
-          const target: MenuTarget = { kind: 'bot', botId: bot.botId, name: bot.name };
-          const openingNew = opening === `${bot.botId}\0`;
+          const target: MenuTarget = { kind: 'bot', botId: bot.botId, name: bot.name, ...(bot.workspaces.length > 0 ? { folders: bot.workspaces.map((folder) => ({ id: folder.id, title: folderTitle(folder) })) } : {}) };
+          const openingNew = opening === openingKey(bot.botId);
           const rowKey = botRowKey(bot.botId);
           // The row that Tab reaches takes its two buttons with it; the others are reached by the arrow keys.
           const rowTab = rowKey === tabStop ? 0 : -1;
@@ -285,10 +317,13 @@ export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpen
                     all={showAll.has(bot.botId)}
                     matches={matches}
                     visibleChat={visibleChatOf(bot.botId)}
+                    visiblePath={visiblePathOf(bot.botId)}
                     tabStop={tabStop}
                     opening={opening}
+                    busy={busy}
                     bridge={bridge}
                     onOpen={(sessionId, transcriptPath) => void openChat(bot.botId, sessionId, transcriptPath)}
+                    onNewChat={(workspaceId) => void openChat(bot.botId, undefined, undefined, workspaceId)}
                     onMenu={(sessionId, title, transcriptPath, at, opener) => openMenu({ kind: 'chat', botId: bot.botId, sessionId, title, transcriptPath }, at, opener)}
                     onToggleAll={() => setShowAll((current) => {
                       const next = new Set(current);
@@ -306,7 +341,7 @@ export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpen
 
       {menu ? <RowMenu menu={menu} onClose={closeMenu}>
         <MenuItems target={menu.target} busy={busy} danger={t.danger}
-          onNewChat={(botId) => { closeMenu(); void openChat(botId); }}
+          onNewChat={(botId, workspaceId) => { closeMenu(); void openChat(botId, undefined, undefined, workspaceId); }}
           onSettings={(botId) => { closeMenu(); onOpenBot(botId); }}
           onDelete={(botId) => { closeMenu(); onOpenBot(botId, 'delete'); }}
           onOpen={(botId, sessionId, transcriptPath) => { closeMenu(); void openChat(botId, sessionId, transcriptPath); }} />
@@ -325,8 +360,12 @@ function ActivityDot({ activity }: { activity: BotActivity }) {
   return <span role="img" aria-label={label} title={label} data-state={activity} className="bots-sidebar-activity" />;
 }
 
-/** The chats of one open Bot: what was read of them, newest first, the first few unless all are asked for. */
-export function BotChatList({ bot, entry, query, all, matches, visibleChat, tabStop, opening, bridge, onOpen, onMenu, onToggleAll, onRetry }: {
+/**
+ * The chats of one open Bot: what was read of them, newest first, the first few unless all are asked for. A Bot that
+ * works in folders of the owner's has them under a heading for each folder, with a button that starts a chat there; the
+ * chats of a folder the Bot no longer has are kept at the end, to be read about and not opened.
+ */
+export function BotChatList({ bot, entry, query, all, matches, visibleChat, visiblePath, tabStop, opening, busy = false, bridge, onOpen, onNewChat, onMenu, onToggleAll, onRetry }: {
   bot: BotUi;
   entry: BotSessionsEntry | undefined;
   query: string;
@@ -334,51 +373,96 @@ export function BotChatList({ bot, entry, query, all, matches, visibleChat, tabS
   matches(value: string): boolean;
   /** The chat of this Bot that the chat view shows, if it shows one. */
   visibleChat: string | undefined;
+  /** Where that chat works. */
+  visiblePath?: string | undefined;
   /** The row of the sidebar that Tab reaches. Given, the chats are rows of the list the arrow keys move through; not given, they are reached by Tab each. */
   tabStop?: string;
   opening: string | undefined;
+  /** A chat is being opened, or the window is: no other can be started. */
+  busy?: boolean;
   bridge: Pick<UseBridge, 'sessionRuntimeStatus'>;
   onOpen(sessionId: string, transcriptPath?: string): void;
+  /** Start a chat in a folder of the Bot: `workspaceId` is absent for the Bot's own folder. */
+  onNewChat?(workspaceId: string | undefined): void;
   onMenu(sessionId: string, title: string, transcriptPath: string | undefined, at: Point, opener: HTMLElement): void;
   onToggleAll(): void;
   onRetry(): void;
 }) {
   const read = entry?.sessions;
-  const { chats, searched, listed } = chatsOf({ bot, entry, query, all, matches, visibleChat });
+  const { chats, groups, headed } = chatsOf({ bot, entry, query, all, matches, visibleChat, visiblePath });
   const failed = entry?.error;
+  const chatRow = (chat: Chat) => {
+    const key = `${bot.botId}\0${chat.uuid}`;
+    const rowKey = chatRowKey(bot.botId, chat.uuid);
+    return <SessionRow
+      key={chat.uuid}
+      projectPath={pendingBotPath(bot.botId)}
+      session={chat}
+      metadata={chat.modified_rfc3339 === '' ? tr('desktop_session_just_now') : undefined}
+      active={visibleChat === chat.uuid}
+      pinned={false}
+      opening={opening === key}
+      status={bridge.sessionRuntimeStatus(chat.uuid)}
+      roving={tabStop === undefined ? undefined : { id: rowKey, tabStop: rowKey === tabStop }}
+      onClick={() => onOpen(chat.uuid, chat.path)}
+      onMenu={(at, opener) => onMenu(chat.uuid, titleOf(chat), chat.path, at, opener)}
+    />;
+  };
+  const hidden = hiddenChats(groups);
   return <>
     {read === undefined && failed === undefined ? <p role="status" className="bots-sidebar-note" data-nested>{tr('bots_chats_loading')}</p> : null}
     {failed !== undefined ? <p role="alert" className="bots-sidebar-note" data-tone="danger" data-nested>
       {tr('bots_chats_failed', failed)} <button type="button" className="bots-sidebar-link" onClick={onRetry}>{tr('common_retry')}</button>
     </p> : null}
     {read !== undefined && chats.length === 0 && failed === undefined ? <p className="bots-sidebar-note" data-nested>{tr('bots_no_chats_yet')}</p> : null}
-    {listed.map((chat) => {
-      const key = `${bot.botId}\0${chat.uuid}`;
-      const rowKey = chatRowKey(bot.botId, chat.uuid);
-      return <SessionRow
-        key={chat.uuid}
-        projectPath={pendingBotPath(bot.botId)}
-        session={chat}
-        metadata={chat.modified_rfc3339 === '' ? tr('desktop_session_just_now') : undefined}
-        active={visibleChat === chat.uuid}
-        pinned={false}
-        opening={opening === key}
-        status={bridge.sessionRuntimeStatus(chat.uuid)}
-        roving={tabStop === undefined ? undefined : { id: rowKey, tabStop: rowKey === tabStop }}
-        onClick={() => onOpen(chat.uuid, chat.path)}
-        onMenu={(at, opener) => onMenu(chat.uuid, titleOf(chat), chat.path, at, opener)}
-      />;
-    })}
-    {query === '' && searched.length > FIRST_CHATS ? (
+    {headed
+      ? groups.map((group) => <FolderChatList key={group.key} group={group} botId={bot.botId} tabStop={tabStop} busy={busy} chatRow={chatRow} onNewChat={onNewChat} />)
+      : groups[0]!.listed.map(chatRow)}
+    {query === '' && hidden > 0 ? (
       <button type="button" className="bots-sidebar-more" onClick={onToggleAll}>
-        {all ? tr('chat_tool_show_less') : tr('desktop_chat_show_more', searched.length - FIRST_CHATS)}
+        {all ? tr('chat_tool_show_less') : tr('desktop_chat_show_more', hidden)}
       </button>
     ) : null}
   </>;
 }
 
+/** One folder's chats under its heading. A folder the Bot no longer has lists its chats as they were, which cannot be opened until the folder is given to the Bot again. */
+function FolderChatList({ group, botId, tabStop, busy, chatRow, onNewChat }: {
+  group: FolderChats;
+  botId: string;
+  tabStop: string | undefined;
+  busy: boolean;
+  chatRow(chat: Chat): ReactNode;
+  onNewChat: ((workspaceId: string | undefined) => void) | undefined;
+}) {
+  const rowKey = folderRowKey(botId, group.key);
+  return <div role="group" aria-label={group.title} className="bots-sidebar-folder" data-kind={group.kind}>
+    <div className="sidebar-tree-row bots-sidebar-folder-head">
+      <span className="bots-sidebar-folder-name" title={group.path}>{group.title}</span>
+      {group.kind !== 'removed' && onNewChat ? <button
+        type="button"
+        className="sidebar-row-action"
+        data-slot="new-chat"
+        data-row={tabStop === undefined ? undefined : rowKey}
+        tabIndex={tabStop === undefined ? undefined : rowKey === tabStop ? 0 : -1}
+        disabled={busy}
+        aria-label={tr('bots_folder_new_chat_in', group.title)}
+        title={tr('bots_folder_new_chat_in', group.title)}
+        onClick={() => onNewChat(group.workspaceId)}
+      ><DesktopIcon name="compose" size={14} /></button> : null}
+    </div>
+    {group.kind === 'removed' ? <p className="bots-sidebar-note" data-nested>{tr('bots_folders_removed_hint')}</p> : null}
+    {group.kind === 'removed'
+      ? group.listed.map((chat) => <div key={chat.uuid} className="bots-sidebar-removed-chat" title={tr('bots_folders_removed_chat', chat.removedPath ?? '')}>
+        <span className="bots-sidebar-removed-title">{titleOf(chat)}</span>
+        <span className="bots-sidebar-removed-folder">{folderBaseName(chat.removedPath ?? '')}</span>
+      </div>)
+      : group.listed.map(chatRow)}
+  </div>;
+}
+
 const clampLeft = (left: number) => Math.max(12, Math.min(left, window.innerWidth - 220));
-const clampTop = (top: number) => Math.max(12, Math.min(top, window.innerHeight - 190));
+const clampTop = (top: number, items = 3) => Math.max(12, Math.min(top, window.innerHeight - 70 - 40 * items));
 
 /**
  * The popup over a row, shown at the pointer for a right click and below the
@@ -391,21 +475,22 @@ function RowMenu({ menu, onClose, children }: { menu: OpenMenu; onClose(): void;
   useEffect(() => attachPopupMenu({ menu: ref.current, opener, trigger, onClose }), [onClose, opener, trigger]);
   const label = target.kind === 'bot' ? tr('desktop_chat_session_actions', target.name) : tr('desktop_chat_session_actions', target.title);
   return createPortal(
-    <div ref={ref} className="session-actions-menu" role="menu" aria-label={label} style={{ left: clampLeft(menu.at.left), top: clampTop(menu.at.top) }}>
+    <div ref={ref} className="session-actions-menu" role="menu" aria-label={label} style={{ left: clampLeft(menu.at.left), top: clampTop(menu.at.top, target.kind === 'bot' ? 3 + (target.folders?.length ?? 0) : 1) }}>
       {children}
     </div>,
     document.body,
   );
 }
 
-/** What a menu offers: for a Bot, a new chat, its page, and its deletion, which only asks; for one of its chats, to open it. */
+/** What a menu offers: for a Bot, a new chat (in each of its folders, if it has some), its page, and its deletion, which only asks; for one of its chats, to open it. */
 export function MenuItems({ target, busy, danger, onNewChat, onSettings, onDelete, onOpen }: {
   target: MenuTarget;
   /** A chat is being opened, or the window is: no other can be started. */
   busy: boolean;
   /** The color of what is destructive. */
   danger: string;
-  onNewChat(botId: string): void;
+  /** Start a chat of the Bot: in the folder `workspaceId` names, or in the Bot's own folder if it is absent. */
+  onNewChat(botId: string, workspaceId?: string): void;
   onSettings(botId: string): void;
   /** Ask whether to delete the Bot; the Bot is not deleted until that is answered. */
   onDelete(botId: string): void;
@@ -417,11 +502,14 @@ export function MenuItems({ target, busy, danger, onNewChat, onSettings, onDelet
       <Icon name="chat" size={16} /> {tr('common_open')}
     </button>;
   }
-  const { botId } = target;
+  const { botId, folders = [] } = target;
   return <>
     <button type="button" role="menuitem" disabled={busy} onClick={() => onNewChat(botId)}>
-      <DesktopIcon name="compose" size={16} /> {tr('bots_new_chat')}
+      <DesktopIcon name="compose" size={16} /> {folders.length > 0 ? tr('bots_folder_new_chat_in', ownFolderTitle()) : tr('bots_new_chat')}
     </button>
+    {folders.map((folder) => <button key={folder.id} type="button" role="menuitem" disabled={busy} onClick={() => onNewChat(botId, folder.id)}>
+      <DesktopIcon name="compose" size={16} /> {tr('bots_folder_new_chat_in', folder.title)}
+    </button>)}
     <button type="button" role="menuitem" onClick={() => onSettings(botId)}>
       <Icon name="cog" size={16} /> {tr('bots_sidebar_settings')}
     </button>

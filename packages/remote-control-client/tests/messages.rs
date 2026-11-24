@@ -311,6 +311,14 @@ fn bot_messages_match_the_typescript_shapes() {
     assert_eq!(methods::BOTS_CHANGED, "bots.changed");
     assert_eq!(methods::BOT_THREADS_LIST, "bot.threads.list");
     assert_eq!(methods::BOT_THREAD_CREATE, "bot.thread.create");
+    assert_eq!(methods::BOT_WORKSPACES_LIST, "bot.workspaces.list");
+    assert_eq!(methods::BOT_WORKSPACE_ADD, "bot.workspace.add");
+    assert_eq!(methods::BOT_WORKSPACE_SET_MODE, "bot.workspace.set_mode");
+    assert_eq!(methods::BOT_WORKSPACE_REMOVE, "bot.workspace.remove");
+    assert_eq!(
+        methods::BOT_WORKSPACE_REQUEST_DECIDE,
+        "bot.workspace.request.decide"
+    );
 
     let list = json!({ "bots": [
         { "bot_id": "b1", "name": "Researcher", "description": "Reads the web", "status": "requires_action",
@@ -356,14 +364,140 @@ fn bot_messages_match_the_typescript_shapes() {
     let create = BotThreadCreateParams {
         bot_id: "b1".into(),
         client_request_id: "req-1".into(),
+        workspace_id: None,
     };
     assert_eq!(
         serde_json::to_value(&create).unwrap(),
-        json!({ "bot_id": "b1", "client_request_id": "req-1" })
+        json!({ "bot_id": "b1", "client_request_id": "req-1" }),
+        "no folder named: the Bot's own"
+    );
+    let in_folder = BotThreadCreateParams {
+        workspace_id: Some("w1".into()),
+        ..create
+    };
+    assert_eq!(
+        serde_json::to_value(&in_folder).unwrap(),
+        json!({ "bot_id": "b1", "client_request_id": "req-1", "workspace_id": "w1" })
     );
     let created: BotThreadCreateResult =
         serde_json::from_value(json!({ "session_id": "s9" })).unwrap();
     assert_eq!(created.session_id, "s9");
+}
+
+#[test]
+fn bot_folder_messages_match_the_typescript_shapes() {
+    let wire = json!({
+        "workspaces": [
+            { "workspace_id": "w1", "label": "Notes", "path": "/Users/me/notes", "mode": "read" },
+            { "workspace_id": "w2", "label": "app", "path": "/Users/me/app", "mode": "write" },
+        ],
+        "projects": [{ "path": "/Users/me/site", "label": "site" }],
+        "requests": [{
+            "request_id": "r1", "path": "/Users/me/data", "mode": "write",
+            "reason": "to read the export", "created_at": 1_790_000_000_000_u64,
+        }],
+    });
+    let folders: BotWorkspacesResult = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(folders.workspaces[0].mode, RemoteBotWorkspaceMode::Read);
+    assert_eq!(folders.workspaces[1].mode, RemoteBotWorkspaceMode::Write);
+    assert_eq!(folders.projects[0].path, "/Users/me/site");
+    assert_eq!(folders.requests[0].created_at, 1_790_000_000_000);
+    assert_eq!(serde_json::to_value(&folders).unwrap(), wire);
+    assert_eq!(
+        serde_json::to_value(BotWorkspacesResult::default()).unwrap(),
+        json!({ "workspaces": [], "projects": [], "requests": [] })
+    );
+
+    // A mode that is neither read nor write is not made into one of them.
+    assert!(serde_json::from_value::<RemoteBotWorkspace>(json!({
+        "workspace_id": "w", "label": "l", "path": "/p", "mode": "owner"
+    }))
+    .is_err());
+
+    assert_eq!(
+        serde_json::to_value(BotWorkspacesListParams {
+            bot_id: "b1".into()
+        })
+        .unwrap(),
+        json!({ "bot_id": "b1" })
+    );
+    assert_eq!(
+        serde_json::to_value(BotWorkspaceAddParams {
+            bot_id: "b1".into(),
+            path: "/Users/me/site".into(),
+            mode: RemoteBotWorkspaceMode::Read,
+        })
+        .unwrap(),
+        json!({ "bot_id": "b1", "path": "/Users/me/site", "mode": "read" })
+    );
+    assert_eq!(
+        serde_json::to_value(BotWorkspaceSetModeParams {
+            bot_id: "b1".into(),
+            workspace_id: "w1".into(),
+            mode: RemoteBotWorkspaceMode::Write,
+        })
+        .unwrap(),
+        json!({ "bot_id": "b1", "workspace_id": "w1", "mode": "write" })
+    );
+    assert_eq!(
+        serde_json::to_value(BotWorkspaceRemoveParams {
+            bot_id: "b1".into(),
+            workspace_id: "w1".into(),
+        })
+        .unwrap(),
+        json!({ "bot_id": "b1", "workspace_id": "w1" })
+    );
+    for (decision, wire) in [
+        (RemoteBotWorkspaceDecision::Approve, "approve"),
+        (RemoteBotWorkspaceDecision::Deny, "deny"),
+    ] {
+        assert_eq!(
+            serde_json::to_value(BotWorkspaceRequestDecideParams {
+                bot_id: "b1".into(),
+                request_id: "r1".into(),
+                decision,
+            })
+            .unwrap(),
+            json!({ "bot_id": "b1", "request_id": "r1", "decision": wire })
+        );
+    }
+}
+
+#[test]
+fn the_requests_a_bot_has_open_are_a_count_that_reads_as_none_when_it_is_not_one() {
+    let wire = |extra: Value| {
+        let mut bot = json!({
+            "bot_id": "b", "name": "n", "description": "d", "status": "idle", "waiting_threads": 0
+        });
+        bot.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        bot
+    };
+    let missing: RemoteBotSummary = serde_json::from_value(wire(json!({}))).unwrap();
+    assert_eq!(missing.pending_workspace_requests, 0);
+    for pending in [
+        json!(null),
+        json!("lots"),
+        json!(-1),
+        json!(1.5),
+        json!([2]),
+    ] {
+        let bot: RemoteBotSummary =
+            serde_json::from_value(wire(json!({ "pending_workspace_requests": pending }))).unwrap();
+        assert_eq!(bot.pending_workspace_requests, 0, "{pending}");
+    }
+    let counted = wire(json!({ "pending_workspace_requests": 2 }));
+    let bot: RemoteBotSummary = serde_json::from_value(counted.clone()).unwrap();
+    assert_eq!(bot.pending_workspace_requests, 2);
+    assert_eq!(serde_json::to_value(&bot).unwrap(), counted);
+    assert!(
+        serde_json::to_value(&missing)
+            .unwrap()
+            .get("pending_workspace_requests")
+            .is_none(),
+        "none is not written"
+    );
 }
 
 #[test]

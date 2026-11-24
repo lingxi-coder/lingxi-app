@@ -51,15 +51,27 @@ async function hostFixture(t: TestContext) {
     closeSession: async (ref: { sessionId: string }) => { closed.push(ref.sessionId); },
     newSession: async (projectPath: string) => { created.push(projectPath); return { projectPath, sessionId: REPLACEMENT }; },
   };
-  const botWorkspaces = new Map<string, string>();
+  let started = 0;
+  /** The folders the Bots' chats were started in. */
+  const botChats: string[] = [];
   // As the app wires them: the scheduler is made first and learns of the Bots afterwards.
   let scheduled: ScheduledTaskService | undefined;
   const service = new BotService({
     store: f.store, platform: 'darwin',
     runtimes: {
-      newSession: async (projectPath) => ({ projectPath, sessionId: SESSION }),
+      // The first chat of a Bot is `SESSION`; the one that replaces it, when it is cleared, is `REPLACEMENT`.
+      newSession: async (projectPath, _model, owner) => {
+        const ref = { projectPath, sessionId: started++ === 0 ? SESSION : REPLACEMENT };
+        botChats.push(projectPath);
+        await owner.onAllocated?.(ref);
+        return ref;
+      },
       openSession: async (ref) => ({ ...ref }),
       closeProject: async (projectPath) => { closed.push(projectPath); },
+      closeSession: async () => undefined,
+      restart: async () => undefined,
+      setSessionDirectoryGrants: () => undefined,
+      runtimeSummaries: [],
     },
     catalogFor: () => ({
       list: async () => ({ sessions: [] }), find: async (_path, sessionId) => botSessions.get(sessionId.toLowerCase()) as any,
@@ -94,7 +106,7 @@ async function hostFixture(t: TestContext) {
   const event = { sender, senderFrame: frame };
   const call = async (channel: string, ...args: unknown[]): Promise<any> => registered.get(channel)!(event, ...args);
   return {
-    ...f, settings, project, ownerRef, host, service, scheduled, registered, call, closed, created, picks, sent, botSessions, activated,
+    ...f, settings, project, ownerRef, host, service, scheduled, registered, call, closed, created, botChats, picks, sent, botSessions, activated,
     pickReturns(path: string | undefined) { pickResult = path; },
     setSummaries(value: any[]) { summaries = value; },
     freshSettings: () => new SettingsStore(f.userData),
@@ -110,7 +122,7 @@ test('opening a Bot\'s session shows it in the window without making it a projec
   const f = await hostFixture(t);
   const { bot, workspace } = await newBot(f);
   const opened = await f.call(CH_BOTS_SESSION_OPEN, bot.botId);
-  assert.deepEqual(opened, { botId: bot.botId, projectPath: workspace, sessionId: SESSION });
+  assert.deepEqual(opened, { botId: bot.botId, projectPath: workspace, sessionId: SESSION, workspaceId: 'default' });
   assert.deepEqual(f.settings.getPublic().activeSession, { projectPath: workspace, sessionId: SESSION }, 'the window is shown the Bot\'s session');
   assert.deepEqual(f.settings.getPublic().projects, [f.project], 'and no project was added');
   assert.deepEqual(f.freshSettings().getPublic().activeSession, f.ownerRef, 'but the session the app restores is still the owner\'s');
@@ -183,23 +195,37 @@ test('clearing a Bot\'s chat starts a new chat of the same Bot without touching 
   const f = await hostFixture(t);
   const { bot, workspace } = await newBot(f);
   await f.call(CH_BOTS_SESSION_OPEN, bot.botId);
+  f.botChats.length = 0;
   await f.call('lingxi:session:clear', SESSION);
-  assert.deepEqual(f.created, [workspace]);
+  assert.deepEqual(f.botChats, [workspace], 'the new chat is the Bot\'s, started in the folder the old one worked in');
+  assert.deepEqual(f.created, [], 'and the owner\'s way of starting a chat was not used');
   assert.deepEqual(f.settings.getPublic().activeSession, { projectPath: workspace, sessionId: REPLACEMENT });
   assert.deepEqual(f.settings.getPublic().projects, [f.project]);
   assert.equal(f.settings.getPublic().activeProject, f.project, 'the owner\'s active project is not the Bot\'s folder');
   assert.deepEqual(f.freshSettings().getPublic().activeSession, f.ownerRef);
 });
 
-test('a Bot\'s chat cannot move to another folder or take one on', async (t) => {
+test('a Bot\'s chat does not move to another folder, and the folder the owner adds in it becomes one of the Bot\'s, to read', async (t) => {
   const f = await hostFixture(t);
-  const { bot } = await newBot(f);
+  const { bot, workspace } = await newBot(f);
   await f.call(CH_BOTS_SESSION_OPEN, bot.botId);
-  for (const action of ['cd', 'add-dir'] as const) {
-    await assert.rejects(f.host.updateSessionWorkspace(SESSION, { action, path: f.folder('elsewhere') }), /A Bot works in its own folder/);
-  }
-  assert.deepEqual(f.picks, [], 'the owner is not even asked to pick a folder');
-  assert.deepEqual(f.settings.getPublic().projects, [f.project]);
+  const repo = f.folder('elsewhere');
+  await assert.rejects(f.host.updateSessionWorkspace(SESSION, { action: 'cd', path: repo }), /works in the folder it was started in/);
+  assert.deepEqual(f.settings.getPublic().activeSession, { projectPath: workspace, sessionId: SESSION }, 'the chat stayed where it was');
+  assert.deepEqual(f.service.get(bot.botId).workspaces, []);
+  // Adding is the owner's: through the dialog when no path is given, and what the owner picks goes to the Bot, not to the projects.
+  f.pickReturns(repo);
+  await f.host.updateSessionWorkspace(SESSION, { action: 'add-dir' });
+  assert.deepEqual(f.picks, [workspace], 'the owner picks, starting from where the chat works');
+  assert.deepEqual(f.service.get(bot.botId).workspaces.map((folder) => [folder.path, folder.mode]), [[repo, 'read']]);
+  assert.deepEqual(f.settings.getPublic().projects, [f.project], 'no project was added');
+  const second = f.folder('second');
+  await f.host.updateSessionWorkspace(SESSION, { action: 'add-dir', path: second });
+  assert.deepEqual(f.service.get(bot.botId).workspaces.map((folder) => folder.path), [repo, second]);
+  f.pickReturns(undefined);
+  assert.equal(await f.host.updateSessionWorkspace(SESSION, { action: 'add-dir' }), null, 'the owner left the dialog');
+  assert.equal(f.service.get(bot.botId).workspaces.length, 2);
+  await assert.rejects(f.host.updateSessionWorkspace(SESSION, { action: 'add-dir', path: f.userData }), /own data/, 'a folder a Bot may not have is refused, as it is anywhere');
 });
 
 // The app's own data is no place for a project
@@ -280,7 +306,7 @@ test('the chat of a routine\'s run opens as a chat of the Bot, not of a project'
   assert.deepEqual(f.scheduled.scopes().filter((scope) => scope.botId === bot.botId).map((scope) => scope.id), [workspace], 'the Bot\'s workspace is a scope');
   const opened = await f.call(CH_SCHEDULED, { action: 'open', scopeId: workspace, sessionId: RUN_SESSION });
   assert.deepEqual(opened.activeSession, { projectPath: workspace, sessionId: RUN_SESSION });
-  assert.deepEqual(f.activated, [{ botId: bot.botId, projectPath: workspace, sessionId: RUN_SESSION }]);
+  assert.deepEqual(f.activated, [{ botId: bot.botId, projectPath: workspace, sessionId: RUN_SESSION, workspaceId: 'default' }]);
   assert.deepEqual(f.settings.getPublic().activeSession, { projectPath: workspace, sessionId: RUN_SESSION }, 'the window is shown the run\'s chat');
   assert.deepEqual(f.settings.getPublic().projects, [f.project], 'and no project was added');
   assert.deepEqual(f.freshSettings().getPublic().activeSession, f.ownerRef, 'the session the app restores is still the owner\'s');
@@ -312,7 +338,7 @@ test('clicking the notification of a Bot\'s routine shows its chat and tells the
   runSession(f);
   await f.host.showNotifiedSession({ projectPath: workspace, sessionId: RUN_SESSION });
   assert.deepEqual(f.settings.getPublic().activeSession, { projectPath: workspace, sessionId: RUN_SESSION });
-  assert.deepEqual(f.sent.filter(([channel]) => channel === CH_BOTS_SESSION_SHOWN), [[CH_BOTS_SESSION_SHOWN, { botId: bot.botId, projectPath: workspace, sessionId: RUN_SESSION }]]);
+  assert.deepEqual(f.sent.filter(([channel]) => channel === CH_BOTS_SESSION_SHOWN), [[CH_BOTS_SESSION_SHOWN, { botId: bot.botId, projectPath: workspace, sessionId: RUN_SESSION, workspaceId: 'default' }]]);
   assert.deepEqual(f.settings.getPublic().projects, [f.project]);
   assert.deepEqual(f.freshSettings().getPublic().activeSession, f.ownerRef);
 });

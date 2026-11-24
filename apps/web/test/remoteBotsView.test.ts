@@ -10,7 +10,7 @@ import { SessionList } from '../src/remote/SessionList';
 import { SessionView } from '../src/remote/SessionView';
 import { TranscriptView } from '../src/remote/Transcript';
 import type { ConnectionState, ViewerConnection } from '../src/remote/viewerConnection';
-import { BotHost, announce, bot, open, quiet, thread } from './support/botHost';
+import { BotHost, announce, bot, folder, folderRequest, open, quiet, thread } from './support/botHost';
 import { Mounted } from './support/render';
 import { harness, type Harness } from './support/remoteHarness';
 import { drive } from './support/botHost';
@@ -452,6 +452,234 @@ test('a Bot page lists the chats again as the Bot is active, and stops when it i
   c.host.bots = [bot('a', { last_activity_at: 20 })];
   await page.during(() => announce(c.h, c.client, c.host));
   assert.equal(listings(), 2, 'nothing asks for the chats of a page nobody sees');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The folders of a Bot
+// ─────────────────────────────────────────────────────────────────────────────
+
+const withFolders = (host: BotHost): void => {
+  withChats(host);
+  host.folders.set('a', {
+    workspaces: [folder('notes', { label: 'Notes', mode: 'read' }), folder('app', { label: 'App', mode: 'write' })],
+    projects: [{ path: '/Users/me/site', label: 'site' }, { path: '/Users/me/docs', label: 'docs' }],
+    requests: [folderRequest('data', { reason: 'to read the export', mode: 'write' })],
+  });
+};
+
+test('a Bot page shows the folders of the Bot, what it may do in each, and what it asked for', async () => {
+  const c = await computer(withFolders);
+  const page = await Mounted.create(botPage(c.client, c.connection.state, 'a'), c.wait);
+  try {
+    assert.deepEqual(page.texts('.rc-bot-folders h3'), ['Folder requests', 'Folders', 'Add a project from the computer']);
+    assert.deepEqual(page.texts('.rc-folder-requests .rc-folder-path'), ['/Users/me/data']);
+    assert.deepEqual(page.texts('.rc-folder-requests .rc-row-sub'), ['Read and write', 'to read the export']);
+    assert.ok(page.has('Allow') && page.has('Deny'));
+    assert.deepEqual(page.texts('.rc-folder-list strong'), ['Notes', 'App'].map((label) => label), 'the folders by their names');
+    assert.equal(page.value('Access to Notes'), 'read');
+    assert.equal(page.value('Access to App'), 'write');
+    assert.deepEqual(page.options('Access to Notes'), ['Read only', 'Read and write']);
+    assert.deepEqual(page.options('Choose a project'), ['Choose a project', 'site', 'docs'], 'only what the computer offers');
+    assert.deepEqual(c.host.requests('bot.workspaces.list').map((request) => request.params), [{ bot_id: 'a' }]);
+    assert.deepEqual(page.texts('.rc-bot-chats strong'), ['Newer', 'Older'], 'the chats are as they were');
+  } finally {
+    await page.unmount();
+  }
+});
+
+test('a Bot with no folder, no request and no project to give shows nothing about folders', async () => {
+  const c = await computer(withChats);
+  const page = await Mounted.create(botPage(c.client, c.connection.state, 'a'), c.wait);
+  try {
+    assert.deepEqual(page.texts('.rc-bot-folders'), []);
+    assert.equal(c.host.requests('bot.workspaces.list').length, 1);
+  } finally {
+    await page.unmount();
+  }
+});
+
+test('a desktop with Bots but not folders shows no folders and no failure', async () => {
+  const c = await computer((host) => {
+    withChats(host);
+    host.failWith.set('bot.workspaces.list', new RemoteRpcError('invalid_params', 'unknown method bot.workspaces.list'));
+  });
+  const page = await Mounted.create(botPage(c.client, c.connection.state, 'a'), c.wait);
+  try {
+    assert.deepEqual(page.texts('.rc-bot-folders'), []);
+    assert.deepEqual(page.texts('.rc-folder-failure'), []);
+    assert.deepEqual(page.texts('.rc-bot-chats strong'), ['Newer', 'Older']);
+  } finally {
+    await page.unmount();
+  }
+});
+
+test('the access to a folder is changed from the page', async () => {
+  const c = await computer(withFolders);
+  const page = await Mounted.create(botPage(c.client, c.connection.state, 'a'), c.wait);
+  try {
+    await page.choose('Access to Notes', 'write');
+    assert.deepEqual(c.host.requests('bot.workspace.set_mode').map((request) => request.params), [{ bot_id: 'a', workspace_id: 'notes', mode: 'write' }]);
+    assert.equal(page.value('Access to Notes'), 'write');
+    assert.equal(page.value('Access to App'), 'write');
+    await page.choose('Access to App', 'read');
+    assert.equal(page.value('Access to App'), 'read');
+    assert.deepEqual(page.texts('.rc-folder-failure'), []);
+  } finally {
+    await page.unmount();
+  }
+});
+
+test('a folder is added from the computer\'s projects, with the access chosen, and is then no longer one to add', async () => {
+  const c = await computer(withFolders);
+  const page = await Mounted.create(botPage(c.client, c.connection.state, 'a'), c.wait);
+  try {
+    assert.ok(page.disabled('Add'), 'nothing is chosen yet');
+    await page.choose('Choose a project', '/Users/me/site');
+    await page.choose('Access to Add a project from the computer', 'write');
+    assert.ok(!page.disabled('Add'));
+    await page.click('Add');
+    assert.deepEqual(c.host.requests('bot.workspace.add').map((request) => request.params), [{ bot_id: 'a', path: '/Users/me/site', mode: 'write' }]);
+    assert.deepEqual(page.texts('.rc-folder-list strong'), ['Notes', 'App', 'site']);
+    assert.deepEqual(page.options('Choose a project'), ['Choose a project', 'docs']);
+    assert.equal(page.value('Choose a project'), '', 'the choice is cleared');
+    assert.ok(page.disabled('Add'));
+  } finally {
+    await page.unmount();
+  }
+});
+
+test('a folder is taken away after one confirmation, which can be cancelled', async () => {
+  const c = await computer(withFolders);
+  const page = await Mounted.create(botPage(c.client, c.connection.state, 'a'), c.wait);
+  try {
+    await page.clickLabelled('Remove folder Notes');
+    assert.deepEqual(c.host.requests('bot.workspace.remove'), [], 'one tap removes nothing');
+    assert.deepEqual(page.texts('.rc-folder-confirm'), ['The Bot’s chats in Notes will end; what was said in them is kept.']);
+    await page.click('Cancel');
+    assert.deepEqual(page.texts('.rc-folder-confirm'), []);
+
+    await page.clickLabelled('Remove folder Notes');
+    await page.click('Remove it');
+    assert.deepEqual(c.host.requests('bot.workspace.remove').map((request) => request.params), [{ bot_id: 'a', workspace_id: 'notes' }]);
+    assert.deepEqual(page.texts('.rc-folder-list strong'), ['App'], 'the Bot has no more than that');
+    assert.deepEqual(page.options('Choose a project'), ['Choose a project', 'site', 'docs', 'Notes']);
+  } finally {
+    await page.unmount();
+  }
+});
+
+test('a folder the Bot asked for is allowed or denied from the page', async () => {
+  const c = await computer((host) => {
+    withFolders(host);
+    host.folders.get('a')!.requests.push(folderRequest('logs', { reason: 'to find the error' }));
+  });
+  const page = await Mounted.create(botPage(c.client, c.connection.state, 'a'), c.wait);
+  try {
+    assert.deepEqual(page.texts('.rc-folder-requests .rc-folder-path'), ['/Users/me/data', '/Users/me/logs']);
+    // The buttons of the first request come first.
+    const [allow] = page.buttons('Allow');
+    await page.pressButton(allow!);
+    assert.deepEqual(c.host.requests('bot.workspace.request.decide').map((request) => request.params), [{ bot_id: 'a', request_id: 'data', decision: 'approve' }]);
+    assert.deepEqual(page.texts('.rc-folder-requests .rc-folder-path'), ['/Users/me/logs']);
+    assert.deepEqual(page.texts('.rc-folder-list strong'), ['Notes', 'App', 'data'], 'the allowed folder is the Bot\'s now');
+
+    await page.click('Deny');
+    assert.deepEqual(c.host.requests('bot.workspace.request.decide').map((request) => request.params).at(-1), { bot_id: 'a', request_id: 'logs', decision: 'deny' });
+    assert.deepEqual(page.texts('.rc-folder-requests'), [], 'no request is left');
+    assert.deepEqual(page.texts('.rc-folder-list strong'), ['Notes', 'App', 'data'], 'a denied folder is not given');
+  } finally {
+    await page.unmount();
+  }
+});
+
+test('a chat is started in a folder of the Bot, and the page goes to it', async () => {
+  const c = await computer(withFolders);
+  const opened: string[] = [];
+  const page = await Mounted.create(botPage(c.client, c.connection.state, 'a', { onOpenSession: (id) => opened.push(id) }), c.wait);
+  try {
+    await page.clickLabelled('New chat in App');
+    const [create] = c.host.requests('bot.thread.create');
+    assert.equal(create!.params.workspace_id, 'app');
+    assert.deepEqual(opened, ['chat-1']);
+    assert.ok(page.disabledLabelled('New chat in Notes'), 'no second chat while the page goes to the first');
+  } finally {
+    await page.unmount();
+  }
+
+  // The button of the header, the first of them, starts a chat in the Bot's own workspace.
+  const again = await Mounted.create(botPage(c.client, c.connection.state, 'a', { onOpenSession: (id) => opened.push(id) }), c.wait);
+  try {
+    await again.pressButton(again.buttons('New chat')[0]!);
+    assert.equal(c.host.requests('bot.thread.create')[1]!.params.workspace_id, undefined);
+    assert.deepEqual(opened, ['chat-1', 'chat-2']);
+  } finally {
+    await again.unmount();
+  }
+});
+
+test('a change the computer refuses says why, in place, and leaves the folders as they were', async () => {
+  const c = await computer(withFolders);
+  const page = await Mounted.create(botPage(c.client, c.connection.state, 'a'), c.wait);
+  try {
+    c.host.failWith.set('bot.workspace.set_mode', new RemoteRpcError('invalid_params', 'the folder is gone'));
+    await page.choose('Access to Notes', 'write');
+    assert.deepEqual(page.texts('.rc-folder-failure'), ['That did not work: the folder is gone']);
+    assert.equal(page.value('Access to Notes'), 'read');
+    assert.ok(!page.disabledSelect('Access to Notes'), 'it can be tried again');
+
+    c.host.failWith.clear();
+    await page.choose('Access to Notes', 'write');
+    assert.deepEqual(page.texts('.rc-folder-failure'), []);
+    assert.equal(page.value('Access to Notes'), 'write');
+  } finally {
+    await page.unmount();
+  }
+});
+
+test('while the connection is down the folders can be seen but not changed', async () => {
+  const c = await computer(withFolders);
+  const page = await Mounted.create(botPage(c.client, { ...c.connection.state, phase: 'reconnecting' }, 'a'), c.wait);
+  try {
+    assert.deepEqual(page.texts('.rc-folder-list strong'), ['Notes', 'App']);
+    assert.ok(page.disabledSelect('Access to Notes'));
+    assert.ok(page.disabledSelect('Choose a project'));
+    assert.ok(page.disabledLabelled('New chat in Notes'));
+    assert.ok(page.disabledLabelled('Remove folder Notes'));
+    assert.ok(page.disabled('Add'));
+    await page.update(botPage(c.client, c.connection.state, 'a'));
+    assert.ok(!page.disabledSelect('Access to Notes'));
+  } finally {
+    await page.unmount();
+  }
+});
+
+test('the folders are in the language of the page', async () => {
+  const c = await computer(withFolders);
+  const page = await Mounted.create(botPage(c.client, c.connection.state, 'a', { locale: 'zh' }), c.wait);
+  try {
+    assert.deepEqual(page.texts('.rc-bot-folders h3'), ['文件夹申请', '文件夹', '添加电脑上的项目']);
+    assert.deepEqual(page.texts('.rc-folder-requests .rc-row-sub'), ['可读写', 'to read the export']);
+    assert.deepEqual(page.options('对 Notes 的访问权限'), ['只读', '可读写']);
+    assert.ok(page.has('允许') && page.has('拒绝') && page.has('添加'));
+  } finally {
+    await page.unmount();
+  }
+});
+
+test('a Bot that asked for folders says so in the list and on its page', async () => {
+  const c = await computer((host) => {
+    withFolders(host);
+    host.bots = [bot('a', { description: 'Plans trips', pending_workspace_requests: 2 }), bot('b')];
+  });
+  const list = await Mounted.create(botList(c.client), c.wait);
+  const page = await Mounted.create(botPage(c.client, c.connection.state, 'a'), c.wait);
+  try {
+    assert.deepEqual(list.texts('.rc-pending-tag'), ['Folder requests: 2']);
+    assert.deepEqual(page.texts('.rc-bot-head .rc-pending-tag'), ['Folder requests: 2']);
+  } finally {
+    await list.unmount();
+    await page.unmount();
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

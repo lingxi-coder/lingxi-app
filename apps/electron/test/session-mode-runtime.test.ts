@@ -1029,7 +1029,7 @@ for (const afterStart of [false, true]) {
     const target = { projectPath: '/bots/bot', sessionId: targetId, botId: 'bot' };
     const entered = deferred<void>(), ready = deferred<void>();
     let starts = 0, activations = 0;
-    (host as any).botsUi = { handlers: () => [], botIdFor: () => 'bot', openSession: async (_bot: unknown, _id: unknown, _path: unknown, activate: boolean) => { assert.equal(activate, false); starts++; entered.resolve(); await ready.promise; return target; } };
+    (host as any).botsUi = { handlers: () => [], botIdFor: () => 'bot', botIdOfSession: () => 'bot', openSession: async (_bot: unknown, _id: unknown, _path: unknown, activate: boolean) => { assert.equal(activate, false); starts++; entered.resolve(); await ready.promise; return target; } };
     (host as any).showBotSession = () => { activations++; };
     (host as any).bootstrap = () => ({});
     host.attachScheduled({ resolveSession: () => target } as any);

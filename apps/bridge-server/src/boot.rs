@@ -190,6 +190,11 @@ pub struct BridgeArgs {
     pub credential_stdin: bool,
     /// Allow workspace-controlled configuration and customization sources.
     pub trusted_workspace: bool,
+    /// `--session-user-settings-only`: of the file-backed settings, read only
+    /// the session config home's user tier, never the workspace's project or
+    /// local tier or its `.mcp.json`. A Bot runs in folders it does not own,
+    /// and their settings must not loosen its sandbox or permission rules.
+    pub session_user_settings_only: bool,
     /// Private parent-provided local policy verdict for `/insights`.
     pub insights_policy_gate: Option<bool>,
     /// Private parent-provided local policy verdict for `/team-onboarding`.
@@ -383,6 +388,7 @@ impl BridgeArgs {
                 }
                 "--credential-stdin" => out.credential_stdin = true,
                 "--trusted-workspace" => out.trusted_workspace = true,
+                "--session-user-settings-only" => out.session_user_settings_only = true,
                 "--host-insights-policy-gate" => {
                     let value = it.next().ok_or_else(|| {
                         "--host-insights-policy-gate requires true or false".to_string()
@@ -534,6 +540,8 @@ pub fn usage() -> String {
                               Read a provider credential envelope from stdin\n    \
              --trusted-workspace\n    \
                               Enable workspace settings, hooks, MCP, agents, plugins, and memory\n    \
+             --session-user-settings-only\n    \
+                              Read only the config home's user settings, not the workspace's\n    \
              --scheduled-controller\n    \
                               Own versioned scheduled tasks for this workspace\n    \
              --packaged-credential-stdin-only\n    \
@@ -905,7 +913,9 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> Result<DesktopConfig, String
         __desktop_config.flag_settings_source = None;
         __desktop_config.provider_profiles = provider_profiles;
         __desktop_config.routing = routing;
-        __desktop_config.mcp_paths = if trusted {
+        __desktop_config.mcp_paths = if trusted && args.session_user_settings_only {
+            vec![global_mcp_path]
+        } else if trusted {
             vec![project_mcp_path, global_mcp_path]
         } else {
             Vec::new()
@@ -989,7 +999,7 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> Result<DesktopConfig, String
         __desktop_config.exclude_dynamic_system_prompt_sections = false;
         // The bridge has no `--setting-sources` flag; load all tiers.
         __desktop_config.setting_source_scope = if trusted {
-            (true, true)
+            (true, !args.session_user_settings_only)
         } else {
             (false, false)
         };
@@ -4954,6 +4964,17 @@ mod tests {
         assert!(cfg.memory_provider.is_none());
         assert_eq!(cfg.permission_mode, permission::PermissionMode::Default);
         assert!(!cfg.allow_dangerously_skip_permissions);
+    }
+
+    #[test]
+    fn user_settings_only_drops_workspace_settings_and_mcp() {
+        let args =
+            BridgeArgs::parse(["--trusted-workspace", "--session-user-settings-only"]).unwrap();
+        assert!(args.session_user_settings_only);
+        let cfg = resolve_desktop_config(&args).unwrap();
+        assert_eq!(cfg.host_workspace_trusted, Some(true));
+        assert_eq!(cfg.setting_source_scope, (true, false));
+        assert_eq!(cfg.mcp_paths.len(), 1);
     }
 
     #[test]

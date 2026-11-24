@@ -10,6 +10,7 @@ import {
   botChanges,
   botDraftProblems,
   draftFromBot,
+  draftWithNewFolders,
   emptyBotDraft,
   hasBotDraftProblems,
   ipcErrorMessage,
@@ -72,6 +73,16 @@ export class BotEditorController extends ObservableState<BotEditorState> {
     } catch (error) {
       if (request === this.request) this.update({ phase: 'failed', loadError: ipcErrorMessage(error) });
     }
+  }
+
+  /**
+   * Take in the Bot as it is after folders were bound to it elsewhere, without losing what is being edited:
+   * the record is the new one, and the draft has the new folders besides what it had.
+   */
+  adopt(bot: BotUi): void {
+    const state = this.getSnapshot();
+    if (state.phase !== 'ready' || !state.bot || bot.botId !== state.bot.botId || bot.revision <= state.bot.revision || state.save.kind === 'saving') return;
+    this.update({ bot, draft: draftWithNewFolders(state.draft, state.bot, bot) });
   }
 
   setDraft(change: Partial<BotDraft>): void {

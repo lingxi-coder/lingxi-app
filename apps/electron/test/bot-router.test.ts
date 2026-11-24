@@ -6,11 +6,13 @@ import type { AddressInfo } from 'node:net';
 import type { RemoteObserver } from '../src/main/bridgeTypes.js';
 import { BotRouter, SUPPORTED_PROTOCOLS, type RuntimeSource, type WatchedRuntime } from '../src/main/bots/router.js';
 import {
+  DelegationError,
   ROUTER_TOOL_NAMES,
   type Caller,
   type DelegationBackend,
   type TaskView,
 } from '../src/main/bots/routerTools.js';
+import type { WorkspaceBackend } from '../src/main/bots/workspaceRequests.js';
 
 const BOT = 'Bot0000000000000000001';
 const OTHER_BOT = 'Bot0000000000000000002';
@@ -37,15 +39,31 @@ function fakeBackend() {
   return { backend, calls, hooks };
 }
 
-async function setup(t: { after(fn: () => void | Promise<void>): void }, options: { maxRequestBytes?: number } = {}) {
+/** A backend for the folders the Bots ask for, which notes who asked for what and answers as the test says. */
+function fakeWorkspaces() {
+  const asked: Array<{ caller: Caller; args: { path: string; mode: string; reason: string; waitSeconds: number } }> = [];
+  const hooks: { answer?: (signal: AbortSignal) => Promise<void> } = {};
+  const workspaces: WorkspaceBackend = {
+    request: async (caller, args, signal) => {
+      asked.push({ caller, args });
+      await hooks.answer?.(signal);
+      return { request_id: 'Req000000000000000001', path: args.path, mode: args.mode as 'read' | 'write', status: { state: 'pending', message: 'asked' } };
+    },
+  };
+  return { workspaces, asked, workspaceHooks: hooks };
+}
+
+async function setup(t: { after(fn: () => void | Promise<void>): void }, options: { maxRequestBytes?: number; withoutWorkspaces?: boolean } = {}) {
   const fake = fakeBackend();
+  const folders = fakeWorkspaces();
   const warnings: string[] = [];
-  const router = new BotRouter({ backend: fake.backend, warn: (message) => warnings.push(message), ...options });
+  const { withoutWorkspaces, ...routerOptions } = options;
+  const router = new BotRouter({ backend: fake.backend, ...(withoutWorkspaces ? {} : { workspaces: folders.workspaces }), warn: (message) => warnings.push(message), ...routerOptions });
   t.after(() => router.dispose());
   const url = await router.start();
   const { port } = new URL(url);
   const token = router.issue(BOT, SESSION);
-  return { ...fake, router, url, port, token, warnings };
+  return { ...fake, ...folders, router, url, port, token, warnings };
 }
 
 interface Reply { status: number; headers: IncomingHttpHeaders; text: string }
@@ -257,10 +275,10 @@ test('notifications are accepted and answered with nothing; ping is answered', a
   assert.deepEqual(s.calls, []);
 });
 
-test('tools/list offers the six tools, each with a schema that takes no argument it does not name', async (t) => {
+test('tools/list offers the seven tools, each with a schema that takes no argument it does not name', async (t) => {
   const s = await setup(t);
   const { result } = JSON.parse((await rpc(s.port, s.token, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).text);
-  assert.deepEqual(result.tools.map((tool: { name: string }) => tool.name), ['list_bots', 'delegate_task', 'get_task', 'message_bot', 'cancel_task', 'attach_artifact']);
+  assert.deepEqual(result.tools.map((tool: { name: string }) => tool.name), ['list_bots', 'delegate_task', 'get_task', 'message_bot', 'cancel_task', 'attach_artifact', 'request_workspace']);
   assert.deepEqual(result.tools.map((tool: { name: string }) => tool.name), [...ROUTER_TOOL_NAMES]);
   for (const tool of result.tools) {
     assert.equal(typeof tool.description, 'string');
@@ -322,7 +340,62 @@ test('arguments that do not fit are a result the Bot can read, not a protocol er
   assert.match(await bad('attach_artifact', { task_id: TASK }), /path must be/);
   assert.match(await bad('attach_artifact', { task_id: TASK, path: 'a\0b' }), /path must be/);
   assert.match(await bad('list_bots', { all: true }), /Unknown argument: all/);
+  assert.match(await bad('request_workspace', { mode: 'read', reason: 'x' }), /path must be/);
+  assert.match(await bad('request_workspace', { path: '/a', reason: 'x' }), /mode must be read or write/);
+  assert.match(await bad('request_workspace', { path: '/a', mode: 'rw', reason: 'x' }), /mode must be read or write/);
+  assert.match(await bad('request_workspace', { path: '/a', mode: 'read' }), /reason must be/);
+  assert.match(await bad('request_workspace', { path: '/a', mode: 'read', reason: '  ' }), /reason must be/);
+  assert.match(await bad('request_workspace', { path: '/a', mode: 'read', reason: 'x'.repeat(2001) }), /reason must be/);
+  assert.match(await bad('request_workspace', { path: 'a\0b', mode: 'read', reason: 'x' }), /path must be/);
+  assert.match(await bad('request_workspace', { path: '/a', mode: 'read', reason: 'x', wait_seconds: 121 }), /wait_seconds must be a whole number from 0 to 120/);
+  assert.match(await bad('request_workspace', { path: '/a', mode: 'read', reason: 'x', approve: true }), /Unknown argument: approve/);
   assert.deepEqual(s.calls, [], 'none of them reached the backend');
+  assert.deepEqual(s.asked, [], 'nor the owner');
+});
+
+test('a Bot asks for a folder as itself, the question reaches the owner\'s side with what it said, and what comes back is what the owner decided', async (t) => {
+  const s = await setup(t);
+  const other = s.router.issue(OTHER_BOT, OTHER_SESSION);
+  const asked = JSON.parse((await rpc(s.port, s.token, call(1, 'request_workspace', { path: '/Users/me/notes', mode: 'write', reason: 'To file the minutes' }))).text).result;
+  assert.equal(asked.isError, undefined);
+  assert.deepEqual(asked.structuredContent, { request_id: 'Req000000000000000001', path: '/Users/me/notes', mode: 'write', status: { state: 'pending', message: 'asked' } });
+  assert.deepEqual(JSON.parse(asked.content[0].text), asked.structuredContent);
+  await rpc(s.port, other, call(2, 'request_workspace', { path: '/Users/me/repo', mode: 'read', reason: 'To read it', wait_seconds: 0 }));
+  assert.deepEqual(s.asked, [
+    { caller: { botId: BOT, sessionId: SESSION }, args: { path: '/Users/me/notes', mode: 'write', reason: 'To file the minutes', waitSeconds: 0 } },
+    { caller: { botId: OTHER_BOT, sessionId: OTHER_SESSION }, args: { path: '/Users/me/repo', mode: 'read', reason: 'To read it', waitSeconds: 0 } },
+  ], 'the Bot that asks is the one the token says');
+  assert.deepEqual(s.calls, [], 'it is not a task');
+});
+
+test('a refusal to take the request is a result the Bot reads; so is a router that has no folders to give', async (t) => {
+  const s = await setup(t);
+  s.workspaceHooks.answer = async () => { throw new DelegationError('busy', 'Your owner has several requests of yours to answer already. Wait for them.'); };
+  const busy = JSON.parse((await rpc(s.port, s.token, call(1, 'request_workspace', { path: '/a', mode: 'read', reason: 'x' }))).text).result;
+  assert.equal(busy.isError, true);
+  assert.equal(busy.structuredContent.error.code, 'busy');
+  s.workspaceHooks.answer = async () => { throw new Error('EACCES: /Users/someone/secret'); };
+  const broken = JSON.parse((await rpc(s.port, s.token, call(2, 'request_workspace', { path: '/a', mode: 'read', reason: 'x' }))).text).result;
+  assert.equal(broken.content[0].text, 'The Bot router could not do that.');
+  assert.equal(JSON.stringify(broken).includes('secret'), false);
+  const bare = await setup(t, { withoutWorkspaces: true });
+  const none = JSON.parse((await rpc(bare.port, bare.token, call(1, 'request_workspace', { path: '/a', mode: 'read', reason: 'x' }))).text).result;
+  assert.equal(none.isError, true);
+  assert.equal(none.structuredContent.error.code, 'unavailable');
+});
+
+test('a request that waits for the owner is answered as an event stream when the client can read one, and is not kept waiting when the call ends', async (t) => {
+  const s = await setup(t);
+  let seen: AbortSignal | undefined;
+  s.workspaceHooks.answer = (signal) => { seen = signal; return Promise.resolve(); };
+  const streamed = await rpc(s.port, s.token, call(1, 'request_workspace', { path: '/a', mode: 'read', reason: 'x', wait_seconds: 30 }));
+  assert.match(String(streamed.headers['content-type']), /text\/event-stream/);
+  assert.equal(JSON.parse(streamed.text.split('\n').find((line) => line.startsWith('data: '))!.slice(6)).result.structuredContent.path, '/a');
+  assert.deepEqual(s.asked.map((entry) => entry.args.waitSeconds), [30]);
+  const plain = await send(s.port, { token: s.token, headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(call(2, 'request_workspace', { path: '/b', mode: 'read', reason: 'x', wait_seconds: 120 })) });
+  assert.match(String(plain.headers['content-type']), /application\/json/);
+  assert.ok(s.asked[1]!.args.waitSeconds < 120, 'a client that cannot read a stream is not kept waiting for minutes');
+  assert.ok(seen !== undefined);
 });
 
 test('a tool that does not exist is a protocol error; params that are not an object, too', async (t) => {

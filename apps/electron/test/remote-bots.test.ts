@@ -85,8 +85,27 @@ function world(t: { after(fn: () => void): void }, options: { ordinary?: boolean
   let holdClose: Promise<void> | undefined;
   let sequence = 0;
   let service!: BotService;
+  /** What the desktop keeps that a phone chooses folders from, and what the Bots asked for. */
+  const desktop = {
+    projects: [] as string[],
+    requests: [] as Array<{ id: string; botId: string; path: string; mode: 'read' | 'write'; reason: string; createdAt: number }>,
+    decided: [] as Array<[string, string, string]>,
+  };
   const fx = gatewayFixture({
     bots: () => service,
+    botFolders: () => ({
+      projects: () => desktop.projects,
+      requests: (botId) => desktop.requests.filter((request) => request.botId === botId),
+      // As the app answers one: approving gives the Bot the folder, and either way the request is gone and the viewers hear of it.
+      decide: async (botId, requestId, decision) => {
+        desktop.decided.push([botId, requestId, decision]);
+        const request = desktop.requests.find((entry) => entry.id === requestId && entry.botId === botId);
+        if (request === undefined) throw new Error('This request was answered already, or has expired.');
+        if (decision === 'approve') await service.grantWorkspace(botId, { path: request.path, mode: request.mode });
+        desktop.requests.splice(desktop.requests.indexOf(request), 1);
+        fx.policy.notifySessionsChanged();
+      },
+    }),
     policy: {
       computerEnabled: () => flags.computer,
       managedDirectory: '/managed',
@@ -94,9 +113,11 @@ function world(t: { after(fn: () => void): void }, options: { ordinary?: boolean
     },
   });
   const runtimes: BotRuntimes = {
-    newSession: async (projectPath) => {
+    newSession: async (projectPath, _model, ownership) => {
       if (flags.failNew) throw flags.failNew;
       const sessionId = `aaaaaaaa-bbbb-4ccc-8ddd-${String(++sequence).padStart(12, '0')}`;
+      // As the runtime manager does: the session has its id and is the Bot's before anything starts.
+      await ownership.onAllocated?.({ projectPath, sessionId });
       created.push(sessionId);
       fx.runtimes.add(new FakeRuntime(sessionId, projectPath, `rt-new-${sequence}`)).resume();
       return { projectPath, sessionId };
@@ -111,6 +132,15 @@ function world(t: { after(fn: () => void): void }, options: { ordinary?: boolean
         fx.runtimes.runtimes.delete(runtime.sessionId);
       }
     },
+    closeSession: async (ref) => {
+      const runtime = fx.runtimes.runtimes.get(ref.sessionId);
+      if (runtime === undefined) return;
+      runtime.dispose();
+      fx.runtimes.runtimes.delete(ref.sessionId);
+    },
+    restart: async () => undefined,
+    setSessionDirectoryGrants: () => undefined,
+    get runtimeSummaries() { return [...fx.runtimes.runtimes.values()].map((runtime) => ({ projectPath: runtime.projectPath, sessionId: runtime.sessionId })); },
   };
   service = new BotService({
     store: f.store,
@@ -124,6 +154,7 @@ function world(t: { after(fn: () => void): void }, options: { ordinary?: boolean
         return { sessions: rows.get(configHome) ?? [] };
       },
       find: async (_project, sessionId) => (rows.get(configHome) ?? []).find((candidate) => candidate.uuid === sessionId),
+      select: async () => undefined,
       workspaceSettings: async () => ({ environment: {}, configHome }),
       invalidate: () => undefined,
     }),
@@ -137,16 +168,19 @@ function world(t: { after(fn: () => void): void }, options: { ordinary?: boolean
   const aware = newViewer('aware', true);
   const unaware = newViewer('unaware', false);
   const world = {
-    ...f, fx, service, flags, hooks, created, aware, unaware,
+    ...f, fx, service, flags, hooks, created, aware, unaware, desktop,
     /** Make a Bot; `remote` turns its switch on. */
     bot(name: string, bot: { remote?: boolean; description?: string } = {}): string {
       const record = service.create({ name, ...(bot.description !== undefined ? { description: bot.description } : {}) });
       revisions.set(record.bot_id, record.revision);
-      if (bot.remote) world.patch(record.bot_id, { remote: true });
+      if (bot.remote) void world.patch(record.bot_id, { remote: true });
       return record.bot_id;
     },
-    patch(botId: string, patch: Parameters<BotService['update']>[2]): void {
-      revisions.set(botId, service.update(botId, revisions.get(botId)!, patch).revision);
+    /** Change a Bot. The record is changed at once; what follows (the news for the viewers) is what the promise is for. */
+    patch(botId: string, patch: Parameters<BotService['update']>[2]): Promise<void> {
+      const pending = service.update(botId, revisions.get(botId)!, patch).then(() => undefined);
+      revisions.set(botId, service.get(botId).revision);
+      return pending;
     },
     workspace: (botId: string): string => f.store.workspaceDir(botId),
     /** A chat of the Bot with a transcript on disk, last written `seconds` after the epoch. */
@@ -287,12 +321,12 @@ test('chats of ordinary sessions never move the Bots, and a viewer that did not 
   ordinary.push({ type: 'turn_started', turn_id: 1 } as any);
   await w.noBots();
 
-  w.patch(bot, { name: 'Renamed' });
+  await w.patch(bot, { name: 'Renamed' });
   assert.equal((await w.nextBots())[0]!.name, 'Renamed');
   assert.deepEqual(listing.channel.methods(), [], 'bots.list does not subscribe');
 
   w.fx.gateway.viewerClosed(w.aware.viewer);
-  w.patch(bot, { name: 'Again' });
+  await w.patch(bot, { name: 'Again' });
   await w.noBots();
 });
 
@@ -305,14 +339,14 @@ test('a Bot made, renamed, switched on or off, or deleted reaches the watchers w
   const second = w.bot('Second');
   await w.noBots(); // a new Bot is off, so there is nothing to show
 
-  w.patch(second, { remote: true });
+  await w.patch(second, { remote: true });
   assert.deepEqual(botIds(await w.nextBots()), [first, second]);
 
-  w.patch(first, { name: 'Renamed', description: 'Now described' });
+  await w.patch(first, { name: 'Renamed', description: 'Now described' });
   const renamed = (await w.nextBots())[0]!;
   assert.deepEqual([renamed.name, renamed.description], ['Renamed', 'Now described']);
 
-  w.patch(second, { remote: false });
+  await w.patch(second, { remote: false });
   assert.deepEqual(botIds(await w.nextBots()), [first]);
 
   await w.service.delete(first);
@@ -327,6 +361,11 @@ test('to a viewer that is not Bot-aware the Bot methods are unknown methods, and
     ['bots.watch', {}],
     ['bot.threads.list', { bot_id: bot }],
     ['bot.thread.create', { bot_id: bot, client_request_id: 'r1' }],
+    ['bot.workspaces.list', { bot_id: bot }],
+    ['bot.workspace.add', { bot_id: bot, path: w.folder('notes'), mode: 'read' }],
+    ['bot.workspace.set_mode', { bot_id: bot, workspace_id: 'wX', mode: 'write' }],
+    ['bot.workspace.remove', { bot_id: bot, workspace_id: 'wX' }],
+    ['bot.workspace.request.decide', { bot_id: bot, request_id: 'r1', decision: 'approve' }],
   ];
   for (const [method, params] of calls) {
     const error = await rpcError(w.call(method, params, w.unaware));
@@ -334,7 +373,7 @@ test('to a viewer that is not Bot-aware the Bot methods are unknown methods, and
   }
   assert.equal((await rpcError(w.call('nonsense.method', {}, w.unaware))).message, 'unknown method nonsense.method');
   assert.deepEqual(w.created, [], 'no chat was started');
-  w.patch(bot, { name: 'Renamed' });
+  await w.patch(bot, { name: 'Renamed' });
   await w.noBots(w.unaware);
   assert.deepEqual(w.unaware.channel.methods(), [], 'it did not start watching');
 });
@@ -474,8 +513,169 @@ test('a retry of a chat made before the Bot was switched off is refused too', as
   const w = world(t);
   const bot = w.bot('Scribe', { remote: true });
   await w.call('bot.thread.create', { bot_id: bot, client_request_id: 'req-1' });
-  w.patch(bot, { remote: false });
+  await w.patch(bot, { remote: false });
   assert.equal(await rpcCode(w.call('bot.thread.create', { bot_id: bot, client_request_id: 'req-1' })), 'not_remote_enabled');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The folders a Bot works in
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('bot.workspaces.list gives the Bot\'s folders, the desktop\'s projects it does not have yet, and what it asked for', async (t) => {
+  const w = world(t);
+  const bot = w.bot('Scribe', { remote: true });
+  const notes = w.folder('notes');
+  const site = w.folder('site');
+  const spare = w.folder('spare');
+  await w.service.addWorkspace(bot, { path: notes, mode: 'read', label: 'Reading' });
+  await w.service.addWorkspace(bot, { path: site, mode: 'write' });
+  w.desktop.projects.push(notes, site, spare);
+  w.desktop.requests.push({ id: 'req1', botId: bot, path: spare, mode: 'write', reason: 'to publish the notes', createdAt: 1_000 });
+  const ids = w.service.get(bot).workspaces.map((folder) => folder.id);
+  assert.deepEqual(await w.call('bot.workspaces.list', { bot_id: bot }), {
+    workspaces: [
+      { workspace_id: ids[0], label: 'Reading', path: notes, mode: 'read' },
+      { workspace_id: ids[1], label: 'site', path: site, mode: 'write' },
+    ],
+    projects: [{ path: spare, label: 'spare' }],
+    requests: [{ request_id: 'req1', path: spare, mode: 'write', reason: 'to publish the notes', created_at: 1_000 }],
+  });
+  // The requests of another Bot are not this one's.
+  const other = w.bot('Other', { remote: true });
+  assert.deepEqual((await w.call('bot.workspaces.list', { bot_id: other })).requests, []);
+});
+
+test('the folder methods refuse a Bot that is unknown or switched off, and parameters that are not right', async (t) => {
+  const w = world(t);
+  const off = w.bot('Off');
+  const on = w.bot('On', { remote: true });
+  const notes = w.folder('notes');
+  w.desktop.projects.push(notes);
+  for (const [method, extra] of [['bot.workspaces.list', {}], ['bot.workspace.add', { path: notes, mode: 'read' }], ['bot.workspace.set_mode', { workspace_id: 'wX', mode: 'read' }],
+    ['bot.workspace.remove', { workspace_id: 'wX' }], ['bot.workspace.request.decide', { request_id: 'r', decision: 'deny' }]] as const) {
+    assert.equal(await rpcCode(w.call(method, { bot_id: off, ...extra })), 'not_remote_enabled', method);
+    assert.equal(await rpcCode(w.call(method, { bot_id: 'N'.repeat(22), ...extra })), 'unknown_session', method);
+    assert.equal(await rpcCode(w.call(method, { ...extra })), 'invalid_params', `${method} without a Bot`);
+    assert.equal(await rpcCode(w.call(method, null)), 'invalid_params', `${method} without parameters`);
+  }
+  assert.equal(await rpcCode(w.call('bot.workspace.add', { bot_id: on, path: notes, mode: 'admin' })), 'invalid_params');
+  assert.equal(await rpcCode(w.call('bot.workspace.add', { bot_id: on, path: '', mode: 'read' })), 'invalid_params');
+  assert.equal(await rpcCode(w.call('bot.workspace.add', { bot_id: on, mode: 'read' })), 'invalid_params');
+  assert.equal(await rpcCode(w.call('bot.workspace.set_mode', { bot_id: on, workspace_id: 'wX', mode: 'maybe' })), 'invalid_params');
+  assert.equal(await rpcCode(w.call('bot.workspace.request.decide', { bot_id: on, request_id: 'r', decision: 'maybe' })), 'invalid_params');
+  assert.deepEqual(w.service.get(on).workspaces, [], 'nothing was given');
+});
+
+test('bot.workspace.add gives the Bot one of the desktop\'s projects and no folder of the viewer\'s own', async (t) => {
+  const w = world(t);
+  const bot = w.bot('Scribe', { remote: true });
+  const notes = w.folder('notes');
+  const secret = w.folder('secret');
+  w.desktop.projects.push(notes);
+  const answer = await w.call('bot.workspace.add', { bot_id: bot, path: notes, mode: 'read' });
+  assert.deepEqual(answer.workspaces.map((folder: { path: string; mode: string }) => [folder.path, folder.mode]), [[notes, 'read']]);
+  assert.deepEqual(answer.projects, [], 'it has it now');
+  assert.deepEqual(w.service.get(bot).workspaces.map((folder) => [folder.path, folder.mode]), [[notes, 'read']]);
+  // A folder the desktop does not list as a project is refused, whatever it is.
+  const refused = await rpcError(w.call('bot.workspace.add', { bot_id: bot, path: secret, mode: 'write' }));
+  assert.deepEqual([refused.code, refused.message], ['invalid_params', 'the folder is not one of the desktop\'s projects']);
+  assert.equal((await rpcError(w.call('bot.workspace.add', { bot_id: bot, path: `${notes}/../secret`, mode: 'write' }))).code, 'invalid_params', 'a spelling of the path is not the project');
+  assert.equal(w.service.get(bot).workspaces.length, 1);
+  // Giving it again is a mistake the Bot's record names, which the viewer is told.
+  const twice = await rpcError(w.call('bot.workspace.add', { bot_id: bot, path: notes, mode: 'write' }));
+  assert.equal(twice.code, 'invalid_params');
+  assert.match(twice.message, /already/);
+});
+
+test('bot.workspace.set_mode and .remove change the folder the id names, and a folder that is not the Bot\'s is not found', async (t) => {
+  const w = world(t);
+  const bot = w.bot('Scribe', { remote: true });
+  const notes = w.folder('notes');
+  const site = w.folder('site');
+  w.desktop.projects.push(notes, site);
+  await w.call('bot.workspace.add', { bot_id: bot, path: notes, mode: 'read' });
+  await w.call('bot.workspace.add', { bot_id: bot, path: site, mode: 'read' });
+  const [first, second] = w.service.get(bot).workspaces.map((folder) => folder.id);
+  const raised = await w.call('bot.workspace.set_mode', { bot_id: bot, workspace_id: first, mode: 'write' });
+  assert.deepEqual(raised.workspaces.map((folder: { workspace_id: string; mode: string }) => [folder.workspace_id, folder.mode]), [[first, 'write'], [second, 'read']]);
+  assert.equal(w.service.get(bot).workspaces[0]!.mode, 'write');
+  const removed = await w.call('bot.workspace.remove', { bot_id: bot, workspace_id: first });
+  assert.deepEqual(removed.workspaces.map((folder: { workspace_id: string }) => folder.workspace_id), [second]);
+  assert.deepEqual(removed.projects, [{ path: notes, label: 'notes' }], 'the project can be given again');
+  assert.equal((await rpcError(w.call('bot.workspace.remove', { bot_id: bot, workspace_id: first }))).code, 'invalid_params', 'it is not the Bot\'s any more');
+  assert.equal((await rpcError(w.call('bot.workspace.set_mode', { bot_id: bot, workspace_id: 'default', mode: 'write' }))).code, 'invalid_params', 'the Bot\'s own folder is not changed');
+  assert.deepEqual(w.service.get(bot).workspaces.map((folder) => folder.id), [second]);
+});
+
+test('bot.workspace.request.decide gives the Bot the folder it asked for, or forgets the request, and says so to the watchers', async (t) => {
+  const w = world(t);
+  const bot = w.bot('Scribe', { remote: true });
+  const specs = w.folder('specs');
+  const other = w.folder('other');
+  w.desktop.requests.push(
+    { id: 'req1', botId: bot, path: specs, mode: 'write', reason: 'to update the specs', createdAt: 1 },
+    { id: 'req2', botId: bot, path: other, mode: 'read', reason: 'to compare', createdAt: 2 },
+  );
+  await w.call('bots.watch', {});
+  assert.equal((await w.call('bots.list', {})).bots[0].pending_workspace_requests, 2);
+  const approved = await w.call('bot.workspace.request.decide', { bot_id: bot, request_id: 'req1', decision: 'approve' });
+  assert.deepEqual(approved.workspaces.map((folder: { path: string; mode: string }) => [folder.path, folder.mode]), [[specs, 'write']]);
+  assert.deepEqual(approved.requests.map((request: { request_id: string }) => request.request_id), ['req2']);
+  assert.equal((await w.nextBots())[0]!.pending_workspace_requests, 1, 'the watchers are told the count');
+  const denied = await w.call('bot.workspace.request.decide', { bot_id: bot, request_id: 'req2', decision: 'deny' });
+  assert.deepEqual(denied.requests, []);
+  assert.deepEqual(denied.workspaces.map((folder: { path: string }) => folder.path), [specs], 'denying gave nothing');
+  assert.deepEqual(w.desktop.decided, [[bot, 'req1', 'approve'], [bot, 'req2', 'deny']]);
+  const bots = await w.nextBots();
+  assert.ok(!('pending_workspace_requests' in bots[0]!), 'none left: nothing to say');
+  // A request that was answered, or is another Bot's, is not answered again.
+  const error = await rpcError(w.call('bot.workspace.request.decide', { bot_id: bot, request_id: 'req1', decision: 'deny' }));
+  assert.deepEqual([error.code, error.message], ['invalid_params', 'This request was answered already, or has expired.']);
+});
+
+test('bot.thread.create starts the chat in the folder the viewer chose, and only in one the Bot has', async (t) => {
+  const w = world(t);
+  const bot = w.bot('Scribe', { remote: true });
+  const notes = w.folder('notes');
+  w.desktop.projects.push(notes);
+  await w.call('bot.workspace.add', { bot_id: bot, path: notes, mode: 'read' });
+  const [folder] = w.service.get(bot).workspaces;
+  const own = await w.call('bot.thread.create', { bot_id: bot, client_request_id: 'own' });
+  assert.equal(w.fx.runtimes.get(own.session_id)?.projectPath, w.workspace(bot), 'the Bot\'s own folder is where it starts without a choice');
+  const chosen = await w.call('bot.thread.create', { bot_id: bot, client_request_id: 'chosen', workspace_id: folder!.id });
+  assert.equal(w.fx.runtimes.get(chosen.session_id)?.projectPath, notes);
+  assert.deepEqual(await w.call('bot.thread.create', { bot_id: bot, client_request_id: 'chosen', workspace_id: folder!.id }), chosen, 'a retry is the same chat');
+  assert.equal(w.created.length, 2);
+  const error = await rpcError(w.call('bot.thread.create', { bot_id: bot, client_request_id: 'bad', workspace_id: 'wNope' }));
+  assert.deepEqual([error.code, error.message], ['invalid_params', 'no such folder']);
+  assert.equal(await rpcCode(w.call('bot.thread.create', { bot_id: bot, client_request_id: 'bad2', workspace_id: '' })), 'invalid_params');
+  assert.equal(w.created.length, 2, 'neither started a chat');
+});
+
+test('a chat that works in a folder the Bot was given is listed in its chats and reached like the others, and its changes move the Bot\'s status', async (t) => {
+  const w = world(t);
+  const bot = w.bot('Scribe', { remote: true });
+  const notes = w.folder('notes');
+  w.desktop.projects.push(notes);
+  await w.call('bot.workspace.add', { bot_id: bot, path: notes, mode: 'write' });
+  const [folder] = w.service.get(bot).workspaces;
+  const chosen = await w.call('bot.thread.create', { bot_id: bot, client_request_id: 'r', workspace_id: folder!.id });
+  const listed = await w.call('bot.threads.list', { bot_id: bot });
+  w.transcript(bot, chosen.session_id);
+  w.catalog(bot, [row(chosen.session_id, new Date(5_000).toISOString())]);
+  const again = await w.call('bot.threads.list', { bot_id: bot });
+  assert.deepEqual(listed.sessions, [], 'no transcript yet');
+  assert.deepEqual(again.sessions.map((session: { session_id: string; bot_id: string }) => [session.session_id, session.bot_id]), [[chosen.session_id, bot]]);
+  // The phone reaches the chat as the Bot's: the Bot's switch decides, though the folder is not shaped like the Bot's.
+  assert.equal(w.fx.policy.botChat(chosen.session_id)?.reachable, true);
+  assert.equal(w.fx.policy.botChat(chosen.session_id)?.ref.projectPath, notes);
+  // What the chat does moves the Bot's status, though it works in a folder that is not shaped like a Bot's.
+  await w.call('bots.watch', {});
+  w.aware.channel.clear();
+  const runtime = w.fx.runtimes.get(chosen.session_id) as FakeRuntime;
+  runtime.turnActive = true;
+  runtime.push({ type: 'turn_started', turn_id: 1 } as any);
+  assert.equal((await w.nextBots())[0]!.status, 'running');
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -579,7 +779,7 @@ test('switching a Bot off closes the attachments to its chats with session.close
   const runtime = w.fx.runtimes.get(SESSION_A) as FakeRuntime;
   w.aware.channel.clear();
 
-  w.patch(bot, { remote: false });
+  await w.patch(bot, { remote: false });
   assert.deepEqual(w.aware.channel.of('session.closed'), [{ session_id: SESSION_A, reason: 'remote_disabled' }], 'at once');
   assert.equal(w.fx.gateway.attachedViewers(SESSION_A), 0);
   assert.equal(w.aware.channel.of('bots.changed').length, 0, 'the list follows after the debounce');
@@ -592,7 +792,7 @@ test('switching a Bot off closes the attachments to its chats with session.close
   w.fx.clock.advance(LIVE_BATCH_MS);
   assert.deepEqual(w.aware.channel.of('session.event'), [], 'nothing more is sent to a viewer that was let go');
 
-  w.patch(bot, { remote: true });
+  await w.patch(bot, { remote: true });
   assert.equal((await w.call('session.attach', { session_id: SESSION_A })).mode, 'snapshot');
   assert.equal(w.fx.gateway.attachedViewers(SESSION_A), 1);
 });
@@ -604,7 +804,7 @@ test('a viewer that is attaching when its Bot is switched off is turned away, an
   let wake!: () => void;
   w.fx.runtimes.openDelay = new Promise<void>((resolve) => { wake = resolve; });
   const pending = w.call('session.attach', { session_id: SESSION_A });
-  w.patch(bot, { remote: false });
+  await w.patch(bot, { remote: false });
   wake();
   assert.equal(await rpcCode(pending), 'not_remote_enabled');
   assert.equal(w.fx.gateway.attachedViewers(), 0);
@@ -713,9 +913,9 @@ test('an older viewer that watches the list is not sent a notice because a Bot r
   chat.turnActive = true;
   chat.push({ type: 'turn_started', turn_id: 1 } as any);
   chat.askPermission(permissionRequest(1));
-  w.patch(bot, { name: 'Renamed' });
-  w.patch(bot, { remote: false });
-  w.patch(bot, { remote: true });
+  await w.patch(bot, { name: 'Renamed' });
+  await w.patch(bot, { remote: false });
+  await w.patch(bot, { remote: true });
   chat.turnActive = false;
   chat.push({ type: 'turn_ended', outcome: { type: 'completed' }, cost: {} } as any);
   w.fx.clock.advance(LIST_DEBOUNCE_MS * 3);
@@ -849,7 +1049,7 @@ test('the push for a Bot\'s chat is asked for like any session\'s, with no title
   assert.deepEqual(bodies, []);
 
   // And none for a Bot that is switched off, or a chat that is nobody's.
-  w.patch(bot, { remote: false });
+  await w.patch(bot, { remote: false });
   assert.equal(w.fx.gateway.isEnabled(SESSION_A), false);
   w.fx.clock.advance(60_000);
   push.notify('question', SESSION_A);

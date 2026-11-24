@@ -83,6 +83,7 @@ const runtime = (session: { projectPath: string; sessionId: string }, botId?: st
     memory: { list: async () => [], read: async () => '', write: async () => {}, delete: async () => {} },
     skills: { list: async () => [], delete: async () => {}, importFromUser: async () => ({ name: '', active: { received: 0, sent: 0 } }), listImportable: async () => [] },
     tasks: { list: async () => ({ tasks: [], truncated: false, active: { received: 0, sent: 0 } }), cancel: async () => {}, onChanged: () => () => {} },
+    workspaceRequests: { list: async () => [], decide: async () => { throw new Error('Fixture: no request to answer.'); }, onChanged: () => () => {} },
     loginItem: { status: async () => ({ available: false, enabled: false, needsApproval: false }), set: async () => ({ available: false, enabled: false, needsApproval: false }), openSettings: async () => {} },
   },
 };

@@ -317,6 +317,13 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "ja": "同じフォルダが 2 回指定されています。",
     "ko": "같은 폴더가 두 번 지정되었습니다."
   },
+  "bots_problem_folders_label_too_long": {
+    "zh-Hans": "文件夹名称最多 %1$s 个字符。",
+    "zh-Hant": "資料夾名稱最多 %1$s 個字元。",
+    "en": "A folder's name can have up to %1$s characters.",
+    "ja": "フォルダの名前は %1$s 文字までです。",
+    "ko": "폴더 이름은 최대 %1$s자까지 가능합니다."
+  },
   "bots_problem_memory_too_large": {
     "zh-Hans": "这条记忆太大（最多 128 KB）。",
     "zh-Hant": "這條記憶太大（最多 128 KB）。",
@@ -444,11 +451,11 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "ko": "전체 접근 사용"
   },
   "bots_folders_hint": {
-    "zh-Hans": "除了自己的工作区，这个 Bot 还可以使用的文件夹。设为只读的文件夹，Bot 无法修改。",
-    "zh-Hant": "除了自己的工作區，這個 Bot 還可以使用的資料夾。設為唯讀的資料夾，Bot 無法修改。",
-    "en": "The folders this Bot may use besides its own workspace. A read-only folder cannot be changed by the Bot.",
-    "ja": "この Bot が専用のワークスペース以外に使えるフォルダです。読み取り専用のフォルダは Bot が変更できません。",
-    "ko": "이 Bot이 자체 작업 공간 외에 사용할 수 있는 폴더입니다. 읽기 전용 폴더는 Bot이 변경할 수 없습니다."
+    "zh-Hans": "这个 Bot 除了自己的工作区，还可以使用的文件夹。每个对话在其中一个文件夹里工作，Bot 的所有对话共用同一份记忆。设为只读的文件夹，Bot 无法修改。",
+    "zh-Hant": "這個 Bot 除了自己的工作區，還可以使用的資料夾。每個對話在其中一個資料夾中工作，Bot 的所有對話共用同一份記憶。設為唯讀的資料夾，Bot 無法修改。",
+    "en": "The folders this Bot may use besides its own workspace. A chat works in one folder at a time, and all of the Bot's chats share its memory. A read-only folder cannot be changed by the Bot.",
+    "ja": "この Bot が専用のワークスペース以外に使えるフォルダです。チャットは一度に 1 つのフォルダで作業し、Bot のすべてのチャットが同じ記憶を共有します。読み取り専用のフォルダは Bot が変更できません。",
+    "ko": "이 Bot이 자체 작업 공간 외에 사용할 수 있는 폴더입니다. 채팅은 한 번에 한 폴더에서 작업하며, Bot의 모든 채팅이 같은 기억을 공유합니다. 읽기 전용 폴더는 Bot이 변경할 수 없습니다."
   },
   "bots_folders_empty": {
     "zh-Hans": "还没有文件夹。Bot 只在自己的工作区里工作。",
@@ -498,6 +505,111 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "en": "The folder could not be chosen: %1$s",
     "ja": "フォルダを選択できませんでした：%1$s",
     "ko": "폴더를 선택할 수 없습니다: %1$s"
+  },
+  "bots_folder_own": {
+    "zh-Hans": "自己的工作区",
+    "zh-Hant": "自己的工作區",
+    "en": "Own workspace",
+    "ja": "専用ワークスペース",
+    "ko": "자체 작업 공간"
+  },
+  "bots_folder_own_hint": {
+    "zh-Hans": "始终存在。除非选择下面的某个文件夹，新对话都从这里开始。",
+    "zh-Hant": "一律存在。除非選擇下方的某個資料夾，新對話都從這裡開始。",
+    "en": "Always there. A new chat starts here unless you pick one of the folders below.",
+    "ja": "常に利用できます。下のフォルダを選ばない限り、新しいチャットはここで始まります。",
+    "ko": "항상 있습니다. 아래 폴더 중 하나를 고르지 않으면 새 채팅은 여기서 시작합니다."
+  },
+  "bots_folder_new_chat_in": {
+    "zh-Hans": "在 %1$s 中新建对话",
+    "zh-Hant": "在 %1$s 中新增對話",
+    "en": "New chat in %1$s",
+    "ja": "%1$s で新しいチャット",
+    "ko": "%1$s에서 새 채팅"
+  },
+  "bots_folder_name": {
+    "zh-Hans": "文件夹 %1$s 的名称",
+    "zh-Hant": "資料夾 %1$s 的名稱",
+    "en": "Name of folder %1$s",
+    "ja": "フォルダ %1$s の名前",
+    "ko": "폴더 %1$s 이름"
+  },
+  "bots_folders_removed": {
+    "zh-Hans": "已移除的文件夹",
+    "zh-Hant": "已移除的資料夾",
+    "en": "Removed folders",
+    "ja": "削除したフォルダ",
+    "ko": "제거한 폴더"
+  },
+  "bots_folders_removed_hint": {
+    "zh-Hans": "这个 Bot 不再使用这些文件夹。重新添加文件夹后，可以继续其中的对话。",
+    "zh-Hant": "這個 Bot 不再使用這些資料夾。重新新增資料夾後，即可繼續其中的對話。",
+    "en": "The Bot no longer works in these folders. Add a folder again to go on with its chats.",
+    "ja": "この Bot はこれらのフォルダでは作業しなくなりました。フォルダをもう一度追加すると、チャットを再開できます。",
+    "ko": "이 Bot은 더 이상 이 폴더들에서 작업하지 않습니다. 폴더를 다시 추가하면 해당 채팅을 이어갈 수 있습니다."
+  },
+  "bots_folders_removed_chat": {
+    "zh-Hans": "这个对话在 %1$s 中进行，该文件夹已不再属于这个 Bot。",
+    "zh-Hant": "這個對話在 %1$s 中進行，該資料夾已不再屬於這個 Bot。",
+    "en": "This chat worked in %1$s, which is no longer one of the Bot's folders.",
+    "ja": "このチャットは %1$s で行われました。このフォルダはもう Bot のフォルダではありません。",
+    "ko": "이 채팅은 %1$s에서 진행되었으며, 이 폴더는 더 이상 Bot의 폴더가 아닙니다."
+  },
+  "bots_requests_title": {
+    "zh-Hans": "文件夹申请",
+    "zh-Hant": "資料夾申請",
+    "en": "Folder requests",
+    "ja": "フォルダのリクエスト",
+    "ko": "폴더 요청"
+  },
+  "bots_requests_hint": {
+    "zh-Hans": "这个 Bot 在工作时申请了这些文件夹。你允许的文件夹会立即交给 Bot，它已打开的对话在不工作时即可使用。",
+    "zh-Hant": "這個 Bot 在工作時申請了這些資料夾。你允許的資料夾會立即交給 Bot，它已開啟的對話在不工作時即可使用。",
+    "en": "The Bot asked for these folders while it worked. A folder you allow is given to the Bot at once, and its open chats can use it as soon as they are not working.",
+    "ja": "この Bot が作業中に、これらのフォルダを求めました。許可したフォルダはすぐに Bot に渡され、開いているチャットは作業が止まり次第、使えるようになります。",
+    "ko": "이 Bot이 작업 중에 이 폴더들을 요청했습니다. 허용한 폴더는 즉시 Bot에 주어지며, 열려 있는 채팅은 작업 중이 아닐 때 바로 사용할 수 있습니다."
+  },
+  "bots_request_asked": {
+    "zh-Hans": "申请于 %1$s",
+    "zh-Hant": "申請於 %1$s",
+    "en": "Asked %1$s",
+    "ja": "リクエスト：%1$s",
+    "ko": "요청: %1$s"
+  },
+  "bots_request_allow": {
+    "zh-Hans": "允许",
+    "zh-Hant": "允許",
+    "en": "Allow",
+    "ja": "許可",
+    "ko": "허용"
+  },
+  "bots_request_allowing": {
+    "zh-Hans": "正在允许…",
+    "zh-Hant": "正在允許…",
+    "en": "Allowing…",
+    "ja": "許可しています…",
+    "ko": "허용하는 중…"
+  },
+  "bots_request_deny": {
+    "zh-Hans": "拒绝",
+    "zh-Hant": "拒絕",
+    "en": "Deny",
+    "ja": "拒否",
+    "ko": "거부"
+  },
+  "bots_requests_waiting": {
+    "zh-Hans": "待处理的申请：%1$s",
+    "zh-Hant": "待處理的申請：%1$s",
+    "en": "Requests waiting: %1$s",
+    "ja": "未対応のリクエスト：%1$s",
+    "ko": "대기 중인 요청: %1$s"
+  },
+  "bots_card_asking": {
+    "zh-Hans": "申请文件夹",
+    "zh-Hant": "申請資料夾",
+    "en": "Asking for a folder",
+    "ja": "フォルダを要求中",
+    "ko": "폴더 요청 중"
   },
   "bots_memory_hint": {
     "zh-Hans": "这个 Bot 在各次对话之间选择记住的内容。",
@@ -813,6 +925,20 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "en": "This task runs as the Bot, in its own workspace, with its persona, memory and skills.",
     "ja": "このタスクは Bot として、Bot 専用のワークスペースで、そのペルソナ・記憶・スキルを使って実行されます。",
     "ko": "이 작업은 Bot으로서 Bot 전용 작업 공간에서 해당 Bot의 페르소나, 기억, 스킬로 실행됩니다."
+  },
+  "bots_routine_folder": {
+    "zh-Hans": "文件夹",
+    "zh-Hant": "資料夾",
+    "en": "Folder",
+    "ja": "フォルダ",
+    "ko": "폴더"
+  },
+  "bots_routine_folder_choose": {
+    "zh-Hans": "选择文件夹",
+    "zh-Hant": "選擇資料夾",
+    "en": "Choose a folder",
+    "ja": "フォルダを選択",
+    "ko": "폴더 선택"
   },
   "bots_tab_tasks": {
     "zh-Hans": "委派任务",

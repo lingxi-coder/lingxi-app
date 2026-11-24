@@ -226,8 +226,8 @@ export interface UseBridge {
   renameSession(projectPath: string, sessionId: string, title: string, selection: SessionMetadataSelection): Promise<void>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<void>;
   openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: import('../../shared/conversationSpaces').ConversationSpace, authoringAppId?: string, authoringVersion?: number): Promise<SessionRef | false>;
-  /** Show a chat of a Bot in the chat view; a new one when `sessionId` is absent. Rejects with the reason it could not start. */
-  openBotSession(botId: string, sessionId?: string, transcriptPath?: string): Promise<import('../../shared/bots').BotSessionRefUi>;
+  /** Show a chat of a Bot in the chat view; a new one when `sessionId` is absent, in the folder `workspaceId` names (the Bot's own if it is left out). Rejects with the reason it could not start. */
+  openBotSession(botId: string, sessionId?: string, transcriptPath?: string, workspaceId?: string): Promise<import('../../shared/bots').BotSessionRefUi>;
   /** Follow the host, which made a chat of a Bot the displayed one on its own (the owner clicked a notification). */
   showBotSession(session: import('../../shared/bots').BotSessionRefUi): Promise<void>;
   deleteBot(botId: string): Promise<void>;
@@ -320,7 +320,10 @@ export interface UseBridge {
   /** Ask the host for the scopes again, as when a Bot was made, renamed or deleted. */
   refreshScheduledScopes(): void;
   scheduledContext(scopeId: string): Promise<ScheduledContext>;
-  manageScheduled(scopeId: string, request: CronRequestDto): Promise<CronJobDto[]>;
+  /** `folderId` names the folder of a Bot that its routine runs in, when the routine is made or changed. */
+  manageScheduled(scopeId: string, request: CronRequestDto, folderId?: string): Promise<CronJobDto[]>;
+  /** The folder each routine of a Bot runs in, by routine id; a routine that is not listed runs in the Bot's own folder. */
+  scheduledRoutineFolders(scopeId: string): Promise<Record<string, string>>;
   readScheduledHistory(scopeId: string, jobId: string): Promise<CronRunDto[]>;
   openScheduledSession(scopeId: string, sessionId: string): Promise<boolean>;
   skillAdmin(command: SkillAdminCommandDto): Promise<ConfigurationOperationEvent | void>;

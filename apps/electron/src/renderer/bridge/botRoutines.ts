@@ -7,15 +7,63 @@
  */
 
 import type { CronJobDto, CronRequestDto } from '@lingxi/bridge-client';
+import { BOT_DEFAULT_WORKSPACE_ID } from '../../shared/bots';
 import type { ScheduledScope } from '../../shared/scheduled';
 import { ipcErrorMessage } from './botForm';
+import { ownFolderTitle } from './botFolders';
 import { ObservableState } from './observableState';
 import { jobStatus, nextRunLabel, scheduleLabel, taskStatusLabel } from './scheduledPresentation';
-import { scheduledTaskFromJob } from './scheduledTaskDraft';
+import { scheduledTaskFromJob, type ScheduledTaskDraft } from './scheduledTaskDraft';
 
 /** The scope a Bot's routines are in, once the scheduler has listed it. */
 export function routineScopeOf(scopes: readonly Pick<ScheduledScope, 'id' | 'botId'>[], botId: string): string | undefined {
   return scopes.find((scope) => scope.botId === botId)?.id;
+}
+
+/** A folder a routine of a Bot can be told to run in, as the form offers it. */
+export interface RoutineFolderOption {
+  id: string;
+  title: string;
+}
+
+/**
+ * The folders a routine of the scope can run in, the Bot's own first and named as the window names it. None for a
+ * scope that is not a Bot's, or a Bot that has no folder besides its own: there is nothing to choose then.
+ */
+export function routineFolderOptions(scope: Pick<ScheduledScope, 'folders'> | undefined): RoutineFolderOption[] {
+  return (scope?.folders ?? []).map((folder) => ({ id: folder.id, title: folder.id === BOT_DEFAULT_WORKSPACE_ID ? ownFolderTitle() : folder.label }));
+}
+
+/**
+ * What the folder choice shows: the folder the routine was given, the Bot's own for one that was given none, and
+ * nothing (`''`) for one whose folder is not the Bot's any more, so that the owner is asked to choose again.
+ */
+export function routineFolderValue(options: readonly RoutineFolderOption[], chosen: string | undefined): string {
+  const id = chosen ?? BOT_DEFAULT_WORKSPACE_ID;
+  return options.some((folder) => folder.id === id) ? id : '';
+}
+
+/**
+ * What the host is told when a routine is saved: the folder chosen, if it is one of the Bot's. Nothing leaves the
+ * routine where it was put. A routine that works in a chat chosen for it is given none: it works where that chat does.
+ */
+export function routineFolderToSet(scope: Pick<ScheduledScope, 'folders'> | undefined, draft: Pick<ScheduledTaskDraft, 'folderId' | 'automation'>): string | undefined {
+  if (draft.automation?.runMode === 'selected_session') return undefined;
+  return draft.folderId !== undefined && routineFolderOptions(scope).some((folder) => folder.id === draft.folderId) ? draft.folderId : undefined;
+}
+
+/**
+ * What the owner chose for the routines of every Bot that has folders, by scope and then routine; a routine that is
+ * not listed runs in the Bot's own. A Bot that cannot say is left out, which shows its routines as in the own folder.
+ */
+export async function loadRoutineFolders(
+  scopes: readonly Pick<ScheduledScope, 'id' | 'folders'>[],
+  load: (scopeId: string) => Promise<Record<string, string>>,
+): Promise<Record<string, Record<string, string>>> {
+  const answers = await Promise.all(scopes.filter((scope) => scope.folders !== undefined).map(async (scope) => {
+    try { return [[scope.id, await load(scope.id)] as const]; } catch { return []; }
+  }));
+  return Object.fromEntries(answers.flat());
 }
 
 /**

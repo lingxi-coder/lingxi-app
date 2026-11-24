@@ -94,6 +94,16 @@ export class Mounted {
     return found[0];
   }
 
+  /** Every button whose text is `text`, in tree order. */
+  buttons(text: string): any[] {
+    return this.select('button').filter((node) => textOf(node) === text);
+  }
+
+  /** Press a button found with `buttons`. */
+  async pressButton(button: any): Promise<void> {
+    await this.press(button);
+  }
+
   has(text: string): boolean {
     return this.select('button').some((node) => textOf(node) === text);
   }
@@ -107,6 +117,56 @@ export class Mounted {
 
   async click(text: string): Promise<void> {
     await this.press(this.button(text));
+  }
+
+  /** The one button with this `aria-label`. */
+  private labelled(label: string): any {
+    const found = this.select('button').filter((node) => node.props['aria-label'] === label);
+    if (found.length !== 1) throw new Error(`expected one button labelled "${label}", found ${found.length}`);
+    return found[0];
+  }
+
+  /** Press the one button with this `aria-label`. */
+  async clickLabelled(label: string): Promise<void> {
+    await this.press(this.labelled(label));
+  }
+
+  /** Whether the button with this `aria-label` is disabled. */
+  disabledLabelled(label: string): boolean {
+    return this.labelled(label).props.disabled === true;
+  }
+
+  /** The one `<select>` with this `aria-label`. */
+  private picker(label: string): any {
+    const found = this.select('select').filter((node) => node.props['aria-label'] === label);
+    if (found.length !== 1) throw new Error(`expected one select labelled "${label}", found ${found.length}`);
+    return found[0];
+  }
+
+  /** The value the `<select>` with this `aria-label` shows. */
+  value(label: string): unknown {
+    return this.picker(label).props.value;
+  }
+
+  /** Whether the `<select>` with this `aria-label` is disabled. */
+  disabledSelect(label: string): boolean {
+    return this.picker(label).props.disabled === true;
+  }
+
+  /** The texts of the options of the `<select>` with this `aria-label`. */
+  options(label: string): string[] {
+    return this.picker(label).findAll((node: any) => node.type === 'option').map(textOf);
+  }
+
+  /** Pick `value` in the `<select>` with this `aria-label`. */
+  async choose(label: string, value: string): Promise<void> {
+    const select = this.picker(label);
+    if (select.props.disabled === true) throw new Error('a disabled select cannot be changed');
+    await act(async () => {
+      select.props.onChange({ target: { value } });
+      await this.wait();
+    });
+    await this.settle();
   }
 
   async clickRow(title: string): Promise<void> {

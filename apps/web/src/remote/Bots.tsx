@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChatTopbarControl } from '../../../../packages/teams/ChatTopbar';
-import { RemoteRpcError, type RemoteBotSummary } from '@lingxi/bridge-client/remote';
+import { RemoteRpcError, type RemoteBotSummary, type RemoteBotWorkspaceMode } from '@lingxi/bridge-client/remote';
 import type { Locale } from '../utils/locale';
 import { requestErrorStringKey } from './failureText';
 import { knownBots, type RemoteClient } from './remoteClient';
@@ -37,6 +37,7 @@ export function BotList({ locale, client, onOpen }: BotListProps) {
                 <strong>{bot.name}</strong>
                 {bot.description ? <span className="rc-row-sub rc-bot-description">{bot.description}</span> : null}
                 {bot.waiting_threads > 0 ? <span className="rc-pending-tag">{t(locale, 'botWaiting', { n: bot.waiting_threads })}</span> : null}
+                {bot.pending_workspace_requests ? <span className="rc-pending-tag">{t(locale, 'botFolderAsks', { n: bot.pending_workspace_requests })}</span> : null}
               </span>
               <span className={`rc-status rc-status-${bot.status}`}>{t(locale, STATUS[bot.status] ?? 'statusIdle')}</span>
             </button>
@@ -123,10 +124,11 @@ function BotChats({ locale, client, bot, connection, hostName, onBack, onOpenSes
   }, []);
 
   // The chat is made on the computer whether or not this page waits for it: a page that was left is not taken to it afterwards.
-  const create = (): void => {
+  // It works in the folder `workspaceId` names, or in the Bot's own workspace if there is none.
+  const create = (workspaceId?: string): void => {
     setCreating(true);
     setFailure(null);
-    client.createBotThread(bot.bot_id).then(
+    client.createBotThread(bot.bot_id, workspaceId).then(
       (sessionId) => {
         if (mounted.current) onOpenSession(sessionId);
       },
@@ -148,14 +150,17 @@ function BotChats({ locale, client, bot, connection, hostName, onBack, onOpenSes
           <h2>{bot.name}</h2>
           {!gone && bot.description ? <p title={bot.description}>{bot.description}</p> : null}
           {bot.waiting_threads > 0 ? <span className="rc-pending-tag">{t(locale, 'botWaiting', { n: bot.waiting_threads })}</span> : null}
+          {bot.pending_workspace_requests ? <span className="rc-pending-tag">{t(locale, 'botFolderAsks', { n: bot.pending_workspace_requests })}</span> : null}
         </div>
         <span className={`rc-status rc-status-${bot.status}`}>{t(locale, STATUS[bot.status] ?? 'statusIdle')}</span>
         {connection.phase !== 'ready' ? <span className="rc-topbar-status" role="status">{t(locale, 'reconnecting')}</span> : null}
-        {!gone ? <button type="button" className="button primary rc-new-chat" disabled={creating || connection.phase !== 'ready'} onClick={create}>
+        {!gone ? <button type="button" className="button primary rc-new-chat" disabled={creating || connection.phase !== 'ready'} onClick={() => create()}>
           {t(locale, 'botNewChat')}
         </button> : null}
       </header></ChatTopbarControl>
-      {gone ? <BotGone locale={locale} /> : <section className="rc-panel">
+      {gone ? <BotGone locale={locale} /> : <>
+      <BotFolders locale={locale} client={client} bot={bot} connection={connection} creating={creating} onNewChat={create} />
+      <section className="rc-panel">
         {failure !== null ? <p className="rc-note rc-danger" role="alert">{t(locale, newChatErrorKey(failure))}</p> : null}
         <div className="rc-bot-chats">
           {state.threads === undefined && state.error === undefined ? <p className="rc-note" role="status">{t(locale, 'loading')}</p> : null}
@@ -176,7 +181,124 @@ function BotChats({ locale, client, bot, connection, hostName, onBack, onOpenSes
             ))}
           </ul>
         </div>
-      </section>}
+      </section></>}
     </>
+  );
+}
+
+const MODE_STRINGS: Record<RemoteBotWorkspaceMode, StringKey> = { read: 'botFolderRead', write: 'botFolderWrite' };
+
+const asMode = (value: string): RemoteBotWorkspaceMode => (value === 'write' ? 'write' : 'read');
+
+interface BotFoldersProps {
+  locale: Locale;
+  client: RemoteClient;
+  bot: RemoteBotSummary;
+  connection: ConnectionState;
+  /** A chat is being started. */
+  creating: boolean;
+  /** Start a chat in the folder with this `workspace_id`. */
+  onNewChat(workspaceId: string): void;
+}
+
+/**
+ * The folders the Bot works in besides its own workspace: how far it may go in each, a chat in one, taking one away,
+ * the folders it asked for, and adding one of the computer's projects. A folder is only ever one of the computer's
+ * projects, never a path typed here. Nothing is shown for a Bot with no folder, no request and no project to give.
+ */
+function BotFolders({ locale, client, bot, connection, creating, onNewChat }: BotFoldersProps) {
+  const store = useMemo(() => client.botWorkspaces(bot.bot_id), [client, bot.bot_id]);
+  const state = useStore(store)!;
+  const [project, setProject] = useState('');
+  const [mode, setMode] = useState<RemoteBotWorkspaceMode>('read');
+  /** The folder whose removal is waiting to be confirmed. */
+  const [removing, setRemoving] = useState<string | null>(null);
+
+  useEffect(() => {
+    store.activate();
+    return () => store.deactivate();
+  }, [store]);
+
+  const folders = state.folders;
+  const idle = connection.phase === 'ready' && !state.busy;
+  const failed = state.error !== undefined ? <p className="rc-note rc-danger rc-folder-failure" role="alert">{t(locale, 'botFolderFailed', { reason: state.error.message })}</p> : null;
+  if (folders === undefined || (folders.workspaces.length === 0 && folders.requests.length === 0 && folders.projects.length === 0)) return failed === null ? null : <section className="rc-panel rc-bot-folders">{failed}</section>;
+
+  const add = (): void => {
+    if (project === '') return;
+    void store.add(project, mode).then((taken) => {
+      if (taken) setProject('');
+    });
+  };
+  return (
+    <section className="rc-panel rc-bot-folders" aria-label={t(locale, 'botFolders')}>
+      {folders.requests.length > 0 ? (
+        <div className="rc-folder-requests">
+          <h3>{t(locale, 'botFolderRequests')}</h3>
+          <ul className="rc-list">
+            {folders.requests.map((request) => (
+              <li key={request.request_id} className="rc-row rc-folder">
+                <span className="rc-row-main">
+                  <strong className="rc-folder-path" title={request.path}>{request.path}</strong>
+                  <span className="rc-row-sub">{t(locale, MODE_STRINGS[request.mode] ?? 'botFolderRead')}</span>
+                  {request.reason ? <span className="rc-row-sub">{request.reason}</span> : null}
+                </span>
+                <span className="rc-folder-actions">
+                  <button type="button" className="button primary small" disabled={!idle} onClick={() => void store.decide(request.request_id, 'approve')}>{t(locale, 'botFolderAllow')}</button>
+                  <button type="button" className="button secondary small" disabled={!idle} onClick={() => void store.decide(request.request_id, 'deny')}>{t(locale, 'deny')}</button>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      <h3>{t(locale, 'botFolders')}</h3>
+      <p className="rc-note">{t(locale, 'botFoldersHint')}</p>
+      {folders.workspaces.length === 0 ? <p className="rc-note">{t(locale, 'botFoldersEmpty')}</p> : (
+        <ul className="rc-list rc-folder-list">
+          {folders.workspaces.map((folder) => (
+            <li key={folder.workspace_id} className="rc-row rc-folder">
+              <span className="rc-row-main">
+                <strong>{folder.label}</strong>
+                <span className="rc-row-sub rc-folder-path" title={folder.path}>{folder.path}</span>
+                {removing === folder.workspace_id ? <span className="rc-row-sub rc-danger rc-folder-confirm" role="status">{t(locale, 'botFolderRemoveAsk', { name: folder.label })}</span> : null}
+              </span>
+              <span className="rc-folder-actions">
+                <select aria-label={t(locale, 'botFolderAccess', { name: folder.label })} value={folder.mode} disabled={!idle} onChange={(event) => void store.setMode(folder.workspace_id, asMode(event.target.value))}>
+                  <option value="read">{t(locale, 'botFolderRead')}</option>
+                  <option value="write">{t(locale, 'botFolderWrite')}</option>
+                </select>
+                <button type="button" className="button secondary small" disabled={!idle || creating} aria-label={t(locale, 'botFolderNewChatIn', { name: folder.label })} onClick={() => onNewChat(folder.workspace_id)}>{t(locale, 'botNewChat')}</button>
+                {removing === folder.workspace_id ? (
+                  <>
+                    <button type="button" className="button secondary small rc-danger" disabled={!idle} onClick={() => { setRemoving(null); void store.removeFolder(folder.workspace_id); }}>{t(locale, 'botFolderRemoveConfirm')}</button>
+                    <button type="button" className="rc-link" onClick={() => setRemoving(null)}>{t(locale, 'cancel')}</button>
+                  </>
+                ) : (
+                  <button type="button" className="rc-link rc-danger" disabled={!idle} aria-label={t(locale, 'botFolderRemoveNamed', { name: folder.label })} onClick={() => setRemoving(folder.workspace_id)}>{t(locale, 'botFolderRemove')}</button>
+                )}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {folders.projects.length > 0 ? (
+        <div className="rc-folder-add">
+          <h3>{t(locale, 'botFolderAddTitle')}</h3>
+          <div className="rc-folder-add-row">
+            <select aria-label={t(locale, 'botFolderPick')} value={project} disabled={!idle} onChange={(event) => setProject(event.target.value)}>
+              <option value="">{t(locale, 'botFolderPick')}</option>
+              {folders.projects.map((entry) => <option key={entry.path} value={entry.path} title={entry.path}>{entry.label}</option>)}
+            </select>
+            <select aria-label={t(locale, 'botFolderAccess', { name: t(locale, 'botFolderAddTitle') })} value={mode} disabled={!idle} onChange={(event) => setMode(asMode(event.target.value))}>
+              <option value="read">{t(locale, 'botFolderRead')}</option>
+              <option value="write">{t(locale, 'botFolderWrite')}</option>
+            </select>
+            <button type="button" className="button primary small" disabled={!idle || project === ''} onClick={add}>{t(locale, 'botFolderAdd')}</button>
+          </div>
+        </div>
+      ) : null}
+      {failed}
+    </section>
   );
 }

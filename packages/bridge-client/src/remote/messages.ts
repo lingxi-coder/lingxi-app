@@ -437,6 +437,8 @@ export interface RemoteBotSummary {
   waiting_threads: number;
   /** Epoch milliseconds of the Bot's latest chat activity, absent before it has any. */
   last_activity_at?: number;
+  /** Folders the Bot asked for that nobody has answered yet; absent when there are none. Answer them with `bot.workspace.request.decide`. */
+  pending_workspace_requests?: number;
 }
 
 /** `bots.list` (request). */
@@ -468,9 +470,90 @@ export interface BotThreadCreateParams {
   bot_id: string;
   /** Chosen by the viewer; makes a retry after a reconnect recognizable. */
   client_request_id: string;
+  /** The folder the chat works in, one of the `workspace_id`s of `bot.workspaces.list`. Absent: the Bot's own folder. */
+  workspace_id?: string;
 }
 export interface BotThreadCreateResult {
   session_id: string;
+}
+
+// ── The folders a Bot works in ───────────────────────────────────────────────
+//
+// Besides its own folder a Bot works in folders of the owner's. A viewer sees them, changes how far the Bot may go in
+// one, takes one away, answers the requests the Bot made for more, and starts a chat in one. A viewer can give the Bot
+// only a folder that is among the projects of the desktop: it never names a path of its own. Every method answers with
+// the folders as they are after it, so a viewer replaces what it showed.
+
+/** How far a Bot may go in a folder. */
+export type RemoteBotWorkspaceMode = 'read' | 'write';
+
+/** A folder of the owner's that a Bot works in, besides its own. */
+export interface RemoteBotWorkspace {
+  /** Names the folder for as long as the Bot has it, and the same whenever it is given again. */
+  workspace_id: string;
+  /** What the owner calls the folder; the folder's name if they did not name it. */
+  label: string;
+  /** Where the folder is, on the desktop. */
+  path: string;
+  mode: RemoteBotWorkspaceMode;
+}
+
+/** A project of the desktop that the Bot does not have yet. */
+export interface RemoteBotProject {
+  path: string;
+  label: string;
+}
+
+/** A folder the Bot asked for while it worked, and nobody has answered. */
+export interface RemoteBotWorkspaceRequest {
+  request_id: string;
+  path: string;
+  mode: RemoteBotWorkspaceMode;
+  /** What the Bot said it wants the folder for. One line. */
+  reason: string;
+  /** Epoch milliseconds. */
+  created_at: number;
+}
+
+/** `bot.workspaces.list` (request). */
+export interface BotWorkspacesListParams {
+  bot_id: string;
+}
+/** The answer to `bot.workspaces.list` and to every method below: the Bot's folders as they are now. */
+export interface BotWorkspacesResult {
+  workspaces: RemoteBotWorkspace[];
+  /** The desktop's projects that the Bot does not have: what a viewer may add. */
+  projects: RemoteBotProject[];
+  /** Oldest first. */
+  requests: RemoteBotWorkspaceRequest[];
+}
+
+/** `bot.workspace.add` (request): give the Bot one of the desktop's projects. */
+export interface BotWorkspaceAddParams {
+  bot_id: string;
+  /** The `path` of one of the `projects` of `bot.workspaces.list`. */
+  path: string;
+  mode: RemoteBotWorkspaceMode;
+}
+
+/** `bot.workspace.set_mode` (request): let the Bot read only, or change, what a folder holds. Its open chats get the change as soon as they are not working. */
+export interface BotWorkspaceSetModeParams {
+  bot_id: string;
+  workspace_id: string;
+  mode: RemoteBotWorkspaceMode;
+}
+
+/** `bot.workspace.remove` (request): take the folder away. The Bot's chats in it end; what was said in them is kept, and is back if the folder is given again. */
+export interface BotWorkspaceRemoveParams {
+  bot_id: string;
+  workspace_id: string;
+}
+
+/** `bot.workspace.request.decide` (request): answer a folder the Bot asked for. Approving gives it the folder with the access it asked for. */
+export interface BotWorkspaceRequestDecideParams {
+  bot_id: string;
+  request_id: string;
+  decision: 'approve' | 'deny';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -508,6 +591,11 @@ export interface ViewerRequests {
   'bots.watch': { params: BotsWatchParams; result: BotsWatchResult };
   'bot.threads.list': { params: BotThreadsListParams; result: BotThreadsListResult };
   'bot.thread.create': { params: BotThreadCreateParams; result: BotThreadCreateResult };
+  'bot.workspaces.list': { params: BotWorkspacesListParams; result: BotWorkspacesResult };
+  'bot.workspace.add': { params: BotWorkspaceAddParams; result: BotWorkspacesResult };
+  'bot.workspace.set_mode': { params: BotWorkspaceSetModeParams; result: BotWorkspacesResult };
+  'bot.workspace.remove': { params: BotWorkspaceRemoveParams; result: BotWorkspacesResult };
+  'bot.workspace.request.decide': { params: BotWorkspaceRequestDecideParams; result: BotWorkspacesResult };
 }
 
 /** Notifications a viewer sends to the host: method name to params. */

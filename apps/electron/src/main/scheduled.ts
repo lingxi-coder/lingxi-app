@@ -16,7 +16,8 @@ import type { ProjectSessionCatalog, ProjectSessionCatalogRow } from './session-
 import type { SessionRef } from '../shared/settings.js';
 import type { ConversationSpace } from '../shared/conversationSpaces.js';
 
-type ScheduledRunResult = { sessionId: string; summary: string };
+/** What a run came to. `projectPath` is where it worked when that is not its scope: a folder of a Bot. */
+type ScheduledRunResult = { sessionId: string; summary: string; projectPath?: string };
 
 /** What of a session catalog the scheduler reads: the owner's, or the one a Bot keeps in its own home. */
 export interface RoutineCatalog {
@@ -25,16 +26,34 @@ export interface RoutineCatalog {
   find(projectPath: string, sessionId: string): Promise<ProjectSessionCatalogRow | undefined>;
 }
 
+/** A folder a routine of a Bot runs in. */
+export interface RoutineFolder {
+  id: string;
+  path: string;
+}
+
 /** What the scheduler needs of one Bot to run its routines. */
 export interface RoutineBot {
   botId: string;
   name: string;
-  /** The Bot's working directory: the scope its routines live in. */
+  /** The Bot's own working directory: the scope its routines live in, and where the clock is watched from. */
   workspace: string;
   /** The Bot's own model, if it has one. */
   model?: string;
-  /** The catalog of the Bot's home, where its chats are; they are not in the owner's. */
+  /** The catalog of the Bot's home, where its chats are, in every folder it has; they are not in the owner's. */
   catalog(): RoutineCatalog;
+  /** The folders a routine may run in, the Bot's own first (its label is empty: the window names it). */
+  folders(): Array<RoutineFolder & { label: string }>;
+  /** The folder a routine runs in: the Bot's own unless the owner chose another; `undefined` when the one chosen is not the Bot's any more. */
+  folderOf(routineId: string): RoutineFolder | undefined;
+  /** Choose the folder a routine runs in; `undefined` puts it back in the Bot's own. */
+  setFolder(routineId: string, workspaceId: string | undefined): void;
+  /** What the owner chose for each routine, by routine id: the id of a folder, even one the Bot has not any more. Routines in the Bot's own folder are not listed. */
+  chosenFolders(): Record<string, string>;
+  /** A session is the Bot's from now on, before its engine starts. */
+  claim(sessionId: string): void;
+  /** The folder a chat of the Bot works in, if it is one of its chats. */
+  folderOfChat(sessionId: string): string | undefined;
 }
 
 /** What the scheduler asks of the Bots. */
@@ -47,6 +66,8 @@ export interface RoutineBots {
   isBotWorkspace(workspace: string): boolean;
 }
 
+/** The id of a Bot's own folder, which a routine runs in unless it was given another. */
+const DEFAULT_ROUTINE_FOLDER = 'default';
 const MAX_RECENT_SCHEDULED_RUNS = 500;
 /** How long before a Bot's routine is due the computer starts being kept awake, so that it does not drift into sleep just before the routine runs. */
 export const DUE_SOON_MS = 10 * 60_000;
@@ -108,8 +129,16 @@ export class ScheduledTaskService {
 
   scopes(): ScheduledScope[] {
     // A Bot's workspace is a scope of its own, named for the Bot. It is not a project, so it has no `projectPath`.
-    const bots = (this.bots?.routineBots() ?? []).map((bot): ScheduledScope => ({ id: bot.workspace, label: bot.name, botId: bot.botId }));
+    const bots = (this.bots?.routineBots() ?? []).map((bot): ScheduledScope => {
+      const folders = this.foldersOf(bot);
+      return { id: bot.workspace, label: bot.name, botId: bot.botId, ...(folders.length > 1 ? { folders } : {}) };
+    });
     return [{ id: 'global', label: 'No project' }, ...this.settings.getPublic().projects.map((path) => ({ id: path, projectPath: path, label: basename(path) })), ...bots, ...[...this.scopeCache].filter(([path, value]) => path !== this.settings.scheduledWorkspace && !this.settings.hasProject(path) && !this.bots?.isBotWorkspace(path) && value.jobs.length > 0).map(([path, value]) => ({ id: path, projectPath: path, label: `${value.label} (unavailable)`, unavailable: true }))];
+  }
+
+  /** The folders of a Bot a routine can be given: only worth choosing from when it has more than its own. */
+  private foldersOf(bot: RoutineBot): Array<{ id: string; label: string }> {
+    try { return bot.folders().map(({ id, label }) => ({ id, label })); } catch (error) { this.report(error); return []; }
   }
 
   resolveScope(id: string): string {
@@ -125,7 +154,9 @@ export class ScheduledTaskService {
   }
 
   private targetRef(scopePath: string, sessionId: string): SessionRef {
-    if (this.bots?.routineBotFor(scopePath)) return { projectPath: scopePath, sessionId };
+    // A Bot's chat is in whichever of the Bot's folders it works; the scope is the Bot's own.
+    const bot = this.bots?.routineBotFor(scopePath);
+    if (bot) return { projectPath: bot.folderOfChat(sessionId) ?? scopePath, sessionId };
     const owner = this.settings.conversationSpaces.findBySessionId(sessionId);
     if (owner) {
       const projectId = scopePath === this.settings.scheduledWorkspace ? null : scopePath;
@@ -275,7 +306,13 @@ export class ScheduledTaskService {
       sessions: sessions.map(session => ({ uuid: session.uuid, title: session.title })) };
   }
 
-  async manage(scopeId: string, request: CronRequestDto, mode: ConversationSpace = this.settings.conversationSpaces.snapshot().activeMode): Promise<CronJobDto[]> {
+  /** The folder each routine of a Bot runs in, by routine id. A routine that is not listed runs in the Bot's own folder. Nothing for anything but a Bot's scope. */
+  routineFolders(scopeId: string): Record<string, string> {
+    const bot = this.bots?.routineBotFor(scopeId);
+    return bot ? bot.chosenFolders() : {};
+  }
+
+  async manage(scopeId: string, request: CronRequestDto, mode: ConversationSpace = this.settings.conversationSpaces.snapshot().activeMode, folderId?: string): Promise<CronJobDto[]> {
     if (scopeId !== 'global' && !this.settings.hasProject(scopeId) && !this.bots?.routineBotFor(scopeId)) {
       // A Bot that is gone took its routines with it; nothing is kept to show.
       if (this.bots?.isBotWorkspace(scopeId)) throw new Error('This Bot is unavailable.');
@@ -284,6 +321,12 @@ export class ScheduledTaskService {
       throw new Error('Project is unavailable. Add it again to manage this task.');
     }
     const path = this.resolveScope(scopeId);
+    const bot = this.bots?.routineBotFor(path);
+    if (folderId !== undefined) {
+      if (!bot) throw new Error('Only the routines of a Bot run in a folder of their own.');
+      if (request.action !== 'create' && request.action !== 'update') throw new Error('A folder is chosen when a routine is made or changed.');
+      if (!bot.folders().some((folder) => folder.id === folderId)) throw new Error('The Bot has no such folder.');
+    }
     if ((request.action === 'create' || request.action === 'update') && request.automation) {
       // The Global task list spans both spaces. Editing its title or schedule
       // must preserve the task's captured mode, even from the other space.
@@ -319,12 +362,31 @@ export class ScheduledTaskService {
       return [];
     }
     const runtime = await this.controller(path);
+    // The engine names a new routine; the folder it runs in is told apart by what is new in the list.
+    const before = bot && folderId !== undefined && request.action === 'create'
+      ? new Set((await runtime.manageCron({ action: 'list' })).map((job) => job.id)) : undefined;
     const jobs = await runtime.manageCron(request);
+    if (bot) this.rememberRoutineFolder(bot, request, jobs, before, folderId);
     await this.cacheJobs(path, jobs);
     if (!jobs.some((job) => !job.automation || job.automation.status === 'active')) {
       this.controllers.get(path)?.release(); this.controllers.delete(path);
     }
     return jobs;
+  }
+
+  /** What a Bot's routines are told to run in follows them: chosen when made or changed, gone with the routine. */
+  private rememberRoutineFolder(bot: RoutineBot, request: CronRequestDto, jobs: readonly CronJobDto[], before: ReadonlySet<string> | undefined, folderId: string | undefined): void {
+    try {
+      const own = (id: string | undefined): string | undefined => (id === DEFAULT_ROUTINE_FOLDER ? undefined : id);
+      if (request.action === 'create' && folderId !== undefined && before) {
+        const made = jobs.filter((job) => !before.has(job.id));
+        if (made.length === 1) bot.setFolder(made[0]!.id, own(folderId));
+      } else if (request.action === 'update' && folderId !== undefined && request.id !== undefined) {
+        bot.setFolder(request.id, own(folderId));
+      } else if (request.action === 'delete' && request.id !== undefined) {
+        bot.setFolder(request.id, undefined);
+      }
+    } catch (error) { this.report(error); }
   }
 
   /** Persisted task count for a scope; `undefined` when the catalog is
@@ -486,7 +548,7 @@ export class ScheduledTaskService {
       this.assertRunAllowed();
       if (hostAdmitted) throw new Error('interrupted: This scheduled run was already started, but its completion is unavailable. Retry the task to start a new run.');
       const result = await this.keepingAwake(source.projectPath, () => this.execute(source, runId, task, occurrenceId));
-      if (task.automation?.notificationPolicy === 'all') await this.notifyOnce(`${source.projectPath}:${occurrenceId}`, task.prompt.split('\n')[0].replace(/^# /, ''), result.summary.slice(0, 240) || 'Scheduled task completed.', source.projectPath === this.settings.scheduledWorkspace ? this.resolveSession('global', result.sessionId) : { projectPath: source.projectPath, sessionId: result.sessionId });
+      if (task.automation?.notificationPolicy === 'all') await this.notifyOnce(`${source.projectPath}:${occurrenceId}`, task.prompt.split('\n')[0].replace(/^# /, ''), result.summary.slice(0, 240) || 'Scheduled task completed.', source.projectPath === this.settings.scheduledWorkspace ? this.resolveSession('global', result.sessionId) : { projectPath: result.projectPath ?? source.projectPath, sessionId: result.sessionId });
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -510,6 +572,7 @@ export class ScheduledTaskService {
     if (!config) throw new Error('paused: Scheduled task configuration is missing.');
     const path = source.projectPath;
     this.assertTrusted(path);
+    const bot = this.bots?.routineBotFor(path);
     const existing = config.runMode === 'selected_session' ? config.targetSessionId : config.runMode === 'task_session' ? config.ownedSessionId : undefined;
     const target = existing ? await this.validateTarget(path, existing) : undefined;
     if (!existing && config.runMode === 'selected_session') throw new Error('paused: Select a target chat.');
@@ -531,7 +594,10 @@ export class ScheduledTaskService {
     const managed = path === this.settings.scheduledWorkspace ? this.settings.scheduledSessionWorkspace(sessionId) : undefined;
     const mode = target?.mode ?? config.sessionMode;
     if (mode !== 'chat' && mode !== 'code') throw new Error('paused: The scheduled conversation mode is unavailable.');
-    const ref = target?.ref ?? { projectPath: managed?.projectPath ?? path, sessionId, mode };
+    // A new run of a Bot's routine works in the folder the routine was given, else in the Bot's own.
+    const folder = bot && !target && !managed ? bot.folderOf(task.id) : undefined;
+    if (bot && !target && !managed && folder === undefined) throw new Error('paused: The folder this routine works in is not one of the Bot\'s any more. Add it again, or choose another folder for the routine.');
+    const ref = target?.ref ?? { projectPath: managed?.projectPath ?? folder?.path ?? path, sessionId, mode };
     const previous = this.sessionQueues.get(ref.sessionId) ?? Promise.resolve();
     const operation = previous.catch(() => undefined).then(async () => {
       // Revalidate after waiting: the service, projects and targets may disappear while queued.
@@ -568,6 +634,8 @@ export class ScheduledTaskService {
         executionTask = { ...executionTask, prompt: `${executionTask.prompt}\n\n${scheduledWorkspaceInstructions({ directory: ref.projectPath, work: join(ref.projectPath, 'work'), outputs: join(ref.projectPath, 'outputs'), memory: managed.taskId === task.id ? managed.memory : undefined })}` };
       }
       this.assertRunAllowed();
+      // The run is the Bot's before its engine starts, in whichever of the Bot's folders it works.
+      this.bots?.routineBotFor(path)?.claim(ref.sessionId);
       // A live runtime already owns its exact transcript. A cold target uses
       // the freshly validated catalog path before any startup hook can write.
       const transcriptPath = this.bridge.get(ref.sessionId) ? undefined : refreshedTarget?.path;
@@ -591,7 +659,7 @@ export class ScheduledTaskService {
           this.assertTrusted(path);
           await data.finish({ summary });
         }
-        return { sessionId: ref.sessionId, summary };
+        return { sessionId: ref.sessionId, summary, ...(ref.projectPath !== path ? { projectPath: ref.projectPath } : {}) };
       }, transcriptPath, !existing ? (config.name?.trim() || task.prompt.split('\n')[0].replace(/^# /, '').trim() || 'Scheduled task') : undefined);
     });
     this.sessionQueues.set(ref.sessionId, operation);

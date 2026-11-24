@@ -243,6 +243,28 @@ test('edits are ignored while a save is in flight', async () => {
   assert.equal(editor.getSnapshot().save.kind, 'saved');
 });
 
+test('a folder that was bound elsewhere reaches the open page without losing the edits, and saving then does not conflict', async () => {
+  const { api, state } = editorApi(bot({ workspaces: [{ id: 'wA', path: '/work/a', mode: 'read', addedAt: 1 }] }));
+  const editor = new BotEditorController(api, 'b1', () => undefined);
+  await editor.load();
+  editor.setDraft({ name: 'Renamed' });
+  // The owner allows the Bot's request for /work/b: the main process answers with the Bot as it is now.
+  state.bot = { ...state.bot, revision: 2, workspaces: [...state.bot.workspaces, { id: 'wB', path: '/work/b', mode: 'write', addedAt: 2 }] };
+  editor.adopt(state.bot);
+  const adopted = editor.getSnapshot();
+  assert.equal(adopted.bot?.revision, 2);
+  assert.equal(adopted.draft.name, 'Renamed', 'the edit is still there');
+  assert.deepEqual(adopted.draft.workspaces, [{ path: '/work/a', mode: 'read' }, { path: '/work/b', mode: 'write' }]);
+  assert.equal(botEditorDirty(adopted), true, 'only the rename is unsaved');
+  await editor.save();
+  assert.deepEqual(state.updates, [[2, { name: 'Renamed' }]], 'saved at the new revision, and the new folder is not taken away');
+  // A record that is not newer, or is another Bot's, changes nothing.
+  const saved = editor.getSnapshot();
+  editor.adopt({ ...saved.bot!, revision: saved.bot!.revision });
+  editor.adopt({ ...saved.bot!, botId: 'other', revision: 99 });
+  assert.equal(editor.getSnapshot(), saved);
+});
+
 // ---- Memory ----
 
 function memoryApi(entries: BotMemoryEntryUi[], files: Record<string, string>, options: { deleteError?: Error; writeError?: Error } = {}) {

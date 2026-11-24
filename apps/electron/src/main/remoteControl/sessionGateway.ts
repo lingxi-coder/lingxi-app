@@ -49,7 +49,7 @@ import { describeError, type RemoteDiagnostics } from './diagnostics.js';
 import type { RemoteSessionGateway, RemoteViewer, RemoteViewerChannel } from './gateway.js';
 import type { RemotePolicy } from './policy.js';
 import type { PushPresence } from './pushRequests.js';
-import { RemoteBots, type RemoteBotDirectory } from './remoteBots.js';
+import { RemoteBots, type RemoteBotDirectory, type RemoteBotFolderSource } from './remoteBots.js';
 import type { RemoteCommands } from './remoteCommands.js';
 import type { RemoteRuntime, RemoteRuntimes, RuntimeLease } from './remoteRuntime.js';
 import { SessionAttachment } from './sessionAttachment.js';
@@ -71,6 +71,8 @@ export interface SessionGatewayDeps {
   policy: Pick<RemotePolicy, 'enabledSessions' | 'find' | 'wasEnabled' | 'onChange' | 'botChat'>;
   /** The Bots, asked each time: they are made after the gateway, and only where Bots can run. */
   bots?: () => RemoteBotDirectory | null | undefined;
+  /** The desktop's projects and the Bots' requests for folders, asked each time. */
+  botFolders?: () => RemoteBotFolderSource | null | undefined;
   commands: RemoteCommands;
   files?: RemoteFileStore;
   /** The session's title, from the persisted transcript. */
@@ -140,6 +142,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   constructor(private readonly deps: SessionGatewayDeps) {
     this.bots = new RemoteBots({
       directory: () => deps.bots?.(),
+      folders: () => deps.botFolders?.(),
       runtimes: () => this.open.values(),
       summary: (ref, title) => this.summary(ref, title || UNTITLED),
       clock: deps.clock,
@@ -184,6 +187,21 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
       case 'bot.thread.create':
         this.requireBotAware(viewer, method);
         return this.bots.create(viewer, params);
+      case 'bot.workspaces.list':
+        this.requireBotAware(viewer, method);
+        return this.bots.workspaces(params);
+      case 'bot.workspace.add':
+        this.requireBotAware(viewer, method);
+        return this.bots.addWorkspace(params);
+      case 'bot.workspace.set_mode':
+        this.requireBotAware(viewer, method);
+        return this.bots.setWorkspaceMode(params);
+      case 'bot.workspace.remove':
+        this.requireBotAware(viewer, method);
+        return this.bots.removeWorkspace(params);
+      case 'bot.workspace.request.decide':
+        this.requireBotAware(viewer, method);
+        return this.bots.decideWorkspaceRequest(params);
       case 'session.attach':
         return this.attach(state, params);
       case 'session.detach':

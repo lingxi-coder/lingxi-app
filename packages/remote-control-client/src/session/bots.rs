@@ -1,7 +1,8 @@
 //! The Bots of a computer as a viewer sees them: the list (`bots.watch`, then
-//! `bots.changed`), the chats of a Bot a screen shows (`bot.threads.list`) and
-//! starting a chat (`bot.thread.create`). The Rust twin of the Bot parts of
-//! `apps/web/src/remote/remoteClient.ts`.
+//! `bots.changed`), the chats of a Bot a screen shows (`bot.threads.list`),
+//! starting a chat (`bot.thread.create`) and the folders a Bot works in
+//! (`bot.workspaces.list` and the methods that change them). The Rust twin of
+//! the Bot parts of `apps/web/src/remote/remoteClient.ts`.
 //!
 //! Only a computer that has Bots answers any of it. One from before them answers
 //! `bots.watch` with the unknown-method error: the state is then
@@ -22,7 +23,10 @@ use super::{
 use crate::encoding::random_id;
 use crate::messages::{
     methods, BotThreadCreateParams, BotThreadCreateResult, BotThreadsListParams,
-    BotThreadsListResult, RemoteBotSummary, RemoteSessionSummary,
+    BotThreadsListResult, BotWorkspaceAddParams, BotWorkspaceRemoveParams,
+    BotWorkspaceRequestDecideParams, BotWorkspaceSetModeParams, BotWorkspacesListParams,
+    BotWorkspacesResult, RemoteBotSummary, RemoteBotWorkspaceDecision, RemoteBotWorkspaceMode,
+    RemoteSessionSummary,
 };
 use crate::rpc::{RemoteErrorCode, RpcError};
 use crate::text::display_text;
@@ -31,6 +35,8 @@ use crate::text::display_text;
 const RECONNECT_WAIT: Duration = Duration::from_secs(30);
 /// Longest description shown of a Bot, in characters.
 const BOT_DESCRIPTION_CHARS: usize = 160;
+/// Longest reason a Bot gives for a folder it asks for, in characters.
+const WORKSPACE_REASON_CHARS: usize = 300;
 
 /// What the viewer knows of the computer's Bots.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -98,6 +104,22 @@ fn clean_bot(mut bot: RemoteBotSummary) -> RemoteBotSummary {
     bot.name = display_text(&bot.name, BOT_NAME_CHARS);
     bot.description = display_text(&bot.description, BOT_DESCRIPTION_CHARS);
     bot
+}
+
+/// What the computer sends of a Bot's folders is shown on one line, cut to a
+/// length. Paths are left as they are: they are what `bot.workspace.add` is
+/// asked with, and a screen cuts them to fit.
+fn clean_workspaces(mut result: BotWorkspacesResult) -> BotWorkspacesResult {
+    for folder in &mut result.workspaces {
+        folder.label = display_text(&folder.label, BOT_NAME_CHARS);
+    }
+    for project in &mut result.projects {
+        project.label = display_text(&project.label, BOT_NAME_CHARS);
+    }
+    for request in &mut result.requests {
+        request.reason = display_text(&request.reason, WORKSPACE_REASON_CHARS);
+    }
+    result
 }
 
 /// The Bots of a `bots.watch` answer or a `bots.changed` notification, or `None`
@@ -176,12 +198,18 @@ impl RemoteClient {
             .cloned()
     }
 
-    /// Start a new chat of a Bot and return its session id. If the link drops
+    /// Start a new chat of a Bot and return its session id: in the folder
+    /// `workspace_id` names (one of [`bot_workspaces`](Self::bot_workspaces)), or
+    /// in the Bot's own workspace if there is none. If the link drops
     /// with the request on it, the computer may have made the chat already: ask
     /// once more when the link is back (for up to 30 s), with the same
     /// `client_request_id`, which it answers with the first chat instead of a
     /// second. Any other failure, or no link in time, is returned as it came.
-    pub async fn create_bot_thread(&self, bot_id: &str) -> Result<String, RpcError> {
+    pub async fn create_bot_thread(
+        &self,
+        bot_id: &str,
+        workspace_id: Option<&str>,
+    ) -> Result<String, RpcError> {
         if !self.inner.can_ask_bots() {
             return Err(RpcError::new(
                 RemoteErrorCode::UnknownSession,
@@ -191,6 +219,7 @@ impl RemoteClient {
         let params = json!(BotThreadCreateParams {
             bot_id: bot_id.to_owned(),
             client_request_id: random_id(),
+            workspace_id: workspace_id.map(str::to_owned),
         });
         let io = &self.inner.io;
         let created = match io
@@ -215,6 +244,109 @@ impl RemoteClient {
             .expect("thread bots")
             .insert(session_id.clone(), bot_id.to_owned());
         Ok(session_id)
+    }
+
+    /// The folders a Bot works in besides its own workspace, the desktop's
+    /// projects it could be given, and what it asked for and nobody answered.
+    pub async fn bot_workspaces(&self, bot_id: &str) -> Result<BotWorkspacesResult, RpcError> {
+        self.workspaces_request(
+            methods::BOT_WORKSPACES_LIST,
+            json!(BotWorkspacesListParams {
+                bot_id: bot_id.to_owned(),
+            }),
+        )
+        .await
+    }
+
+    /// Give a Bot one of the desktop's projects: `path` is the `path` of one of
+    /// the `projects` that [`bot_workspaces`](Self::bot_workspaces) listed, and
+    /// nothing else is accepted. Answers with the folders as they are now.
+    pub async fn add_bot_workspace(
+        &self,
+        bot_id: &str,
+        path: &str,
+        mode: RemoteBotWorkspaceMode,
+    ) -> Result<BotWorkspacesResult, RpcError> {
+        self.workspaces_request(
+            methods::BOT_WORKSPACE_ADD,
+            json!(BotWorkspaceAddParams {
+                bot_id: bot_id.to_owned(),
+                path: path.to_owned(),
+                mode,
+            }),
+        )
+        .await
+    }
+
+    /// Change how far a Bot may go in one of its folders.
+    pub async fn set_bot_workspace_mode(
+        &self,
+        bot_id: &str,
+        workspace_id: &str,
+        mode: RemoteBotWorkspaceMode,
+    ) -> Result<BotWorkspacesResult, RpcError> {
+        self.workspaces_request(
+            methods::BOT_WORKSPACE_SET_MODE,
+            json!(BotWorkspaceSetModeParams {
+                bot_id: bot_id.to_owned(),
+                workspace_id: workspace_id.to_owned(),
+                mode,
+            }),
+        )
+        .await
+    }
+
+    /// Take a folder away from a Bot. Its chats in the folder end; what was said
+    /// in them is kept.
+    pub async fn remove_bot_workspace(
+        &self,
+        bot_id: &str,
+        workspace_id: &str,
+    ) -> Result<BotWorkspacesResult, RpcError> {
+        self.workspaces_request(
+            methods::BOT_WORKSPACE_REMOVE,
+            json!(BotWorkspaceRemoveParams {
+                bot_id: bot_id.to_owned(),
+                workspace_id: workspace_id.to_owned(),
+            }),
+        )
+        .await
+    }
+
+    /// Answer a folder a Bot asked for: approving gives the Bot the folder with
+    /// the access it asked for, denying gives it nothing.
+    pub async fn decide_bot_workspace_request(
+        &self,
+        bot_id: &str,
+        request_id: &str,
+        decision: RemoteBotWorkspaceDecision,
+    ) -> Result<BotWorkspacesResult, RpcError> {
+        self.workspaces_request(
+            methods::BOT_WORKSPACE_REQUEST_DECIDE,
+            json!(BotWorkspaceRequestDecideParams {
+                bot_id: bot_id.to_owned(),
+                request_id: request_id.to_owned(),
+                decision,
+            }),
+        )
+        .await
+    }
+
+    /// One of the folder methods, which all answer with the Bot's folders as
+    /// they are afterwards. A computer from before Bots is not asked.
+    async fn workspaces_request(
+        &self,
+        method: &'static str,
+        params: Value,
+    ) -> Result<BotWorkspacesResult, RpcError> {
+        if !self.inner.can_ask_bots() {
+            return Err(RpcError::new(
+                RemoteErrorCode::UnknownSession,
+                "this computer does not know Bots",
+            ));
+        }
+        let answer = self.inner.io.request(method, Some(params), None).await?;
+        Ok(clean_workspaces(parse::<BotWorkspacesResult>(answer)?))
     }
 
     /// Resolve once the link is ready (now, if it is); fail with `closed` if it

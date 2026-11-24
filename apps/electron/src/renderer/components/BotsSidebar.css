@@ -30,6 +30,19 @@
 .bots-sidebar-row > .sidebar-row-action[data-slot='new-chat'] { right: 32px; }
 .bots-sidebar-row > .sidebar-row-action[data-slot='menu'] { right: 4px; }
 .bots-sidebar-row > .sidebar-row-action:disabled { cursor: wait; }
+/*
+ * A Bot that works in folders of the owner's has its chats under a heading for each folder, and the heading's own button
+ * starts a chat there. The headings start where the chats' titles do. The chats of a folder the Bot no longer has are
+ * kept at the end as plain lines: they are read about, and are resumed by giving the folder to the Bot again.
+ */
+.bots-sidebar-folder { margin-top: 2px; }
+.bots-sidebar-folder-head { position: relative; min-height: 28px; display: flex; align-items: center; padding: 3px 34px 3px 30px; }
+.bots-sidebar-folder-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--bots-sidebar-text4); font-size: 11.5px; font-weight: 500; }
+.bots-sidebar-folder-head > .sidebar-row-action { position: absolute; top: 2px; right: 4px; width: 24px; height: 24px; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--bots-sidebar-text3); cursor: pointer; }
+.bots-sidebar-folder-head > .sidebar-row-action:disabled { cursor: wait; }
+.bots-sidebar-removed-chat { display: grid; gap: 1px; padding: 5px 10px 5px 30px; color: var(--bots-sidebar-text4); font-size: 12px; line-height: 1.4; cursor: default; }
+.bots-sidebar-removed-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bots-sidebar-removed-folder { font-size: 11px; }
 .bots-sidebar-more { min-height: 32px; margin-left: 30px; padding: 5px 8px; border: 0; border-radius: 7px; background: transparent; color: var(--bots-sidebar-text4); cursor: pointer; font-size: 11.5px; }
 
 /*

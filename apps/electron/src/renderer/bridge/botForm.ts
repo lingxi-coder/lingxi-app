@@ -10,10 +10,11 @@ import {
   type BotCreateRequest,
   type BotUi,
   type BotUpdateRequest,
+  type BotWorkspaceInputUi,
   type BotWorkspaceMode,
-  type BotWorkspaceUi,
   type BotsApi,
 } from '../../shared/bots';
+import { BOT_FOLDER_LABEL_MAX } from './botFolders';
 
 export const BOT_NAME_MAX = 80;
 export const BOT_DESCRIPTION_MAX = 500;
@@ -31,7 +32,8 @@ export interface BotDraft {
   model: string;
   /** Empty: leave the Bot's settings in charge. `default` explicitly asks for approval. */
   permissionMode: PermissionModeId | '';
-  workspaces: BotWorkspaceUi[];
+  /** The folders besides the Bot's own: where they are, how far the Bot may go in them, and what the owner calls them. */
+  workspaces: BotWorkspaceInputUi[];
   /** The ids of the Bots that may hand this one tasks, as saved; a Bot that was deleted since may still be among them. */
   acceptFrom: string[];
   /** Whether the owner's approved phones and browsers can reach this Bot. A new Bot is made with this off. */
@@ -42,7 +44,7 @@ export type BotDraftProblem =
   | 'name_required' | 'name_too_long' | 'name_invalid'
   | 'description_too_long'
   | 'persona_too_long'
-  | 'folders_too_many' | 'folders_duplicate'
+  | 'folders_too_many' | 'folders_duplicate' | 'folders_label_too_long'
   | 'accept_too_many';
 
 export type BotDraftProblems = Partial<Record<'name' | 'description' | 'persona' | 'folders' | 'accept', BotDraftProblem>>;
@@ -86,10 +88,20 @@ export function draftFromBot(bot: BotUi, persona: string): BotDraft {
     persona,
     model: bot.model ?? '',
     permissionMode: bot.permissionMode ?? '',
-    workspaces: bot.workspaces.map((workspace) => ({ ...workspace })),
+    workspaces: bot.workspaces.map(folderInput),
     acceptFrom: [...(bot.acceptFrom ?? [])],
     remote: bot.remote === true,
   };
+}
+
+/**
+ * The draft once folders were bound to the Bot somewhere else (the owner allowed a request of the Bot's): what is being
+ * edited stays as it is, and the folders that are new are added to the list, so that saving does not take them away again.
+ */
+export function draftWithNewFolders(draft: BotDraft, before: Pick<BotUi, 'workspaces'>, after: Pick<BotUi, 'workspaces'>): BotDraft {
+  const known = new Set([...before.workspaces, ...draft.workspaces].map((folder) => folder.path));
+  const added = after.workspaces.filter((folder) => !known.has(folder.path)).map(folderInput);
+  return added.length === 0 ? draft : { ...draft, workspaces: [...draft.workspaces, ...added] };
 }
 
 export function botDraftProblems(draft: BotDraft, peers?: BotPeers): BotDraftProblems {
@@ -102,6 +114,7 @@ export function botDraftProblems(draft: BotDraft, peers?: BotPeers): BotDraftPro
   if (new TextEncoder().encode(draft.persona).length > BOT_PERSONA_MAX_BYTES) problems.persona = 'persona_too_long';
   if (draft.workspaces.length > BOT_FOLDERS_MAX) problems.folders = 'folders_too_many';
   else if (new Set(draft.workspaces.map((workspace) => workspace.path)).size !== draft.workspaces.length) problems.folders = 'folders_duplicate';
+  else if (draft.workspaces.some((workspace) => (workspace.label?.trim().length ?? 0) > BOT_FOLDER_LABEL_MAX)) problems.folders = 'folders_label_too_long';
   // Ids of Bots that are gone are dropped when the list is saved, so they are not counted.
   if (present(draft.acceptFrom, peers).length > BOT_ACCEPT_MAX) problems.accept = 'accept_too_many';
   return problems;
@@ -119,12 +132,21 @@ export function botCreateRequest(draft: BotDraft): BotCreateRequest {
     ...(draft.persona.trim() ? { persona: draft.persona } : {}),
     ...(draft.model ? { model: draft.model } : {}),
     ...(draft.permissionMode ? { permissionMode: draft.permissionMode } : {}),
-    ...(draft.workspaces.length > 0 ? { workspaces: draft.workspaces.map((workspace) => ({ ...workspace })) } : {}),
+    ...(draft.workspaces.length > 0 ? { workspaces: draft.workspaces.map(folderInput) } : {}),
   };
 }
 
-function sameFolders(left: readonly BotWorkspaceUi[], right: readonly BotWorkspaceUi[]): boolean {
-  return left.length === right.length && left.every((folder, index) => folder.path === right[index]!.path && folder.mode === right[index]!.mode);
+/** A folder as it is sent: a path and a mode, and a name only if the owner gave one. */
+function folderInput(folder: BotWorkspaceInputUi): BotWorkspaceInputUi {
+  const label = folder.label?.trim();
+  return { path: folder.path, mode: folder.mode, ...(label ? { label } : {}) };
+}
+
+function sameFolders(left: readonly BotWorkspaceInputUi[], right: readonly BotWorkspaceInputUi[]): boolean {
+  return left.length === right.length && left.every((folder, index) => {
+    const other = right[index]!;
+    return folder.path === other.path && folder.mode === other.mode && (folder.label?.trim() || undefined) === (other.label?.trim() || undefined);
+  });
 }
 
 /**
@@ -138,7 +160,7 @@ export function botChanges(bot: BotUi, persona: string, draft: BotDraft, peers?:
   if (draft.description.trim() !== bot.description) patch.description = draft.description.trim();
   if (draft.model !== (bot.model ?? '')) patch.model = draft.model || null;
   if (draft.permissionMode !== (bot.permissionMode ?? '')) patch.permissionMode = draft.permissionMode || null;
-  if (!sameFolders(draft.workspaces, bot.workspaces)) patch.workspaces = draft.workspaces.map((workspace) => ({ ...workspace }));
+  if (!sameFolders(draft.workspaces, bot.workspaces)) patch.workspaces = draft.workspaces.map(folderInput);
   if (draft.remote !== (bot.remote === true)) patch.remote = draft.remote;
   if (peers !== undefined) {
     const accepted = present(draft.acceptFrom, peers);
@@ -212,6 +234,6 @@ export function sortBots(bots: readonly BotUi[]): BotUi[] {
 }
 
 /** Add a folder the owner picked. One that is already there is kept as it is. */
-export function withFolder(workspaces: readonly BotWorkspaceUi[], path: string, mode: BotWorkspaceMode = 'read'): BotWorkspaceUi[] {
+export function withFolder(workspaces: readonly BotWorkspaceInputUi[], path: string, mode: BotWorkspaceMode = 'read'): BotWorkspaceInputUi[] {
   return workspaces.some((folder) => folder.path === path) ? workspaces.map((folder) => ({ ...folder })) : [...workspaces.map((folder) => ({ ...folder })), { path, mode }];
 }

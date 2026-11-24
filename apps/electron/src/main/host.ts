@@ -721,9 +721,13 @@ export class HostController {
         }
         if (channel === CH_BOTS_DELETE) {
           return this.enqueueNavigation(async () => {
+            // The chat the window shows may be in any folder of the Bot, and goes with it.
+            const shown = this.settings.getPublic().activeSession;
+            const mine = typeof args[0] === 'string' && shown !== undefined && this.botsUi?.botIdOfSession(shown) === args[0] ? shown.projectPath : undefined;
             const workspace = typeof args[0] === 'string' ? this.botsUi?.workspaceOf(args[0]) : undefined;
             await handler(...args);
             if (workspace !== undefined) this.settings.dropVolatileSessionIn(workspace);
+            if (mine !== undefined) this.settings.dropVolatileSessionIn(mine);
           });
         }
         return handler(...args);
@@ -748,8 +752,14 @@ export class HostController {
     return this.showBotSession(await this.botsUi.openSession(botId, sessionId));
   }
 
+  /** Whether a working directory is the own folder of a Bot. */
   private isBotWorkspace(projectPath: string): boolean {
     return this.botsUi?.botIdFor(projectPath) !== undefined;
+  }
+
+  /** Whether a session is a Bot's chat, whichever of the Bot's folders it works in. */
+  private isBotSession(ref: { projectPath: string; sessionId: string }): boolean {
+    return this.botsUi?.botIdOfSession(ref) !== undefined;
   }
 
   /**
@@ -1432,16 +1442,20 @@ export class HostController {
       }
       if (typeof request['scopeId'] !== 'string') throw new Error('Invalid scheduled scope');
       if (request['action'] === 'context') return this.scheduled.context(request['scopeId'], this.settings.conversationSpaces.snapshot().activeMode);
+      if (request['action'] === 'folders') return this.scheduled.routineFolders(request['scopeId']);
       if (request['action'] === 'manage') {
         const validated = validateClientCommand({ type: 'cron_manage', request_id: 'host-scheduled', request: request['request'] });
         if (validated.type !== 'cron_manage') throw new Error('Invalid scheduled request');
-        return this.scheduled.manage(request['scopeId'], validated.request, this.settings.conversationSpaces.snapshot().activeMode);
+        // Only a Bot's routine has a folder of its own to run in.
+        const folderId = request['folderId'];
+        if (folderId !== undefined && (typeof folderId !== 'string' || folderId.length === 0 || folderId.length > 64)) throw new Error('Invalid scheduled folder');
+        return this.scheduled.manage(request['scopeId'], validated.request, this.settings.conversationSpaces.snapshot().activeMode, folderId);
       }
       if (request['action'] === 'open') {
         const generation = ++this.navigationGeneration;
         if (!isSessionId(request['sessionId'])) throw new Error('Invalid scheduled session');
         const ref = this.scheduled.resolveSession(request['scopeId'], request['sessionId'] as string);
-        const botId = this.botsUi?.botIdFor(ref.projectPath);
+        const botId = this.botsUi?.botIdOfSession(ref);
         if (botId !== undefined) return this.enqueueNavigation(async () => {
           if (generation !== this.navigationGeneration) return this.bootstrap();
           if (!this.botsUi) throw new Error('Bots are unavailable.');
@@ -2000,12 +2014,14 @@ export class HostController {
   }
 
   private workspace(): WorkspaceMetadata {
-    const workspace = this.settings.getPublic().activeSession?.projectPath ?? this.settings.getWorkspace();
+    const active = this.settings.getPublic().activeSession;
+    const workspace = active?.projectPath ?? this.settings.getWorkspace();
     if (!workspace) return { trusted: false };
     try {
       const trust = this.settings.getTrust(workspace);
-      // A Bot's folder is trusted without being a project.
-      return { path: workspace, fingerprint: trust.fingerprint, trusted: this.settings.isTrustedWorkspace(workspace) || this.isBotWorkspace(workspace) };
+      // A Bot's chat is trusted without its folder being a project, in whichever of the Bot's folders it works.
+      const botChat = active !== undefined ? this.isBotSession(active) : this.isBotWorkspace(workspace);
+      return { path: workspace, fingerprint: trust.fingerprint, trusted: this.settings.isTrustedWorkspace(workspace) || botChat };
     } catch (error) {
       this.diagnostics.add('warn', 'host', error);
       return { path: workspace, trusted: false, recovery: workspaceRecovery(workspace, error) };
@@ -2128,7 +2144,7 @@ export class HostController {
 
   private runtimeSummaries(): SessionRuntimeSummary[] {
     return this.bridge.runtimeSummaries.flatMap((summary) => {
-      const botId = this.botsUi?.botIdFor(summary.projectPath);
+      const botId = this.botsUi?.botIdOfSession(summary);
       // The hidden session that watches a Bot's clock is no chat of the Bot's, and must not make the Bot look at work.
       if (botId !== undefined && this.scheduled?.isControllerSession(summary.projectPath, summary.sessionId)) return [];
       return [{
@@ -3028,13 +3044,28 @@ export class HostController {
     return this.enqueueSessionOpen(ref.sessionId, current => this.openSessionAndActivateInternal(ref, selection, generation, undefined, undefined, current));
   }
 
+  /**
+   * The owner adds a folder in a Bot's chat: it becomes one of the Bot's folders, read-only until the
+   * owner says otherwise in the Bot's settings, and the Bot's open chats are given it as soon as they
+   * are not working. A chat does not change the folder it works in.
+   */
+  private async updateBotSessionWorkspace(ref: SessionRef, operation: SessionWorkspaceOperation): Promise<BootstrapState | null> {
+    const botId = this.botsUi?.botIdOfSession(ref);
+    if (!this.botsUi || botId === undefined) throw new Error('Bots are unavailable.');
+    if (operation.action !== 'add-dir') throw new Error('A Bot\'s chat works in the folder it was started in. Start a chat in another folder of the Bot to work there.');
+    const path = operation.path ?? await this.directoryDialogs.pickDirectory(ref.projectPath);
+    if (path === undefined) return null;
+    await this.botsUi.addWorkspace(botId, path);
+    return this.bootstrap();
+  }
+
   async updateSessionWorkspace(sessionId: string, operation: SessionWorkspaceOperation): Promise<BootstrapState | null> {
     ++this.navigationGeneration;
     return this.enqueueNavigation(async () => {
       const ref = this.settings.getPublic().activeSession;
       if (!ref || ref.sessionId !== sessionId) throw new Error('This chat is no longer active.');
-      // The folders a Bot may use are the ones in its settings, not whatever a chat asks for.
-      if (this.isBotWorkspace(ref.projectPath)) throw new Error("A Bot works in its own folder. Change the folders it may use in the Bot's settings.");
+      // The folders a Bot may use are the ones in its settings: a folder added in a chat is added there, and a chat does not move.
+      if (this.isBotSession(ref)) return this.updateBotSessionWorkspace(ref, operation);
       const runtime = this.bridge.require(ref);
       const release = runtime.beginWorkspaceChange();
       let originalCwd: string | undefined;
@@ -3497,7 +3528,7 @@ export class HostController {
    * which session it now shows, because it shows only what it has been given.
    */
   async showNotifiedSession(ref: SessionRef): Promise<void> {
-    const botId = this.botsUi?.botIdFor(ref.projectPath);
+    const botId = this.botsUi?.botIdOfSession(ref);
     if (botId === undefined) {
       const generation = ++this.navigationGeneration;
       await this.enqueueSessionOpen(ref.sessionId, async (publicationCurrent) => {
@@ -3630,9 +3661,13 @@ export class HostController {
     }
     const runtime = this.bridge.get(active.sessionId);
     const owner = this.settings.conversationSpaces.find(active);
-    const botWorkspace = this.isBotWorkspace(active.projectPath);
+    const botId = this.botsUi?.botIdOfSession(active);
+    const botWorkspace = botId !== undefined;
     const mode = owner?.mode ?? (botWorkspace ? runtime?.sessionMode : undefined);
     if (!mode) throw new Error('The session mode is unavailable.');
+    // A Bot's replacement chat works in the folder the old one did; one that is not the Bot's any more is not swapped for its own.
+    const botFolderId = botId !== undefined ? this.botsUi?.workspaceIdAt(botId, active.projectPath) : undefined;
+    if (botId !== undefined && botFolderId === undefined) throw new Error('This chat\'s folder is not one of the Bot\'s any more.');
     const generation = this.navigationGeneration;
     if (this.hasActiveWork(active.projectPath)) {
       throw new Error('cancel the active turn before clearing the session');
@@ -3652,8 +3687,10 @@ export class HostController {
     await this.bridge.closeSession(active);
     const current = () => generation === this.navigationGeneration && (!owner
       || this.settings.conversationSpaces.snapshot().activeMode === owner.mode);
-    const replacement = await this.bridge.newSession(active.projectPath, undefined,
-      { mode, projectId: owner?.projectId ?? null, activate: current });
+    // A Bot's replacement chat is the Bot's before it starts, in the folder the old one worked in.
+    const replacement = botId !== undefined && this.botsUi
+      ? await this.botsUi.openSession(botId, undefined, undefined, true, botFolderId)
+      : await this.bridge.newSession(active.projectPath, undefined, { mode, projectId: owner?.projectId ?? null, activate: current });
     if (owner) {
       const draft: OwnedConversation = { ...replacement, mode: owner.mode, projectId: owner.projectId };
       await this.settings.conversationSpaces.register(draft);
@@ -3661,7 +3698,7 @@ export class HostController {
         this.draftSelections.set(owner.mode, draft);
         this.settings.setActiveSessionDraft(draft);
       }
-    } else if (current() && botWorkspace) this.settings.setActiveBotSession(replacement);
+    } else if (current() && botWorkspace) this.settings.setActiveBotSession({ projectPath: replacement.projectPath, sessionId: replacement.sessionId });
     this.workspaceFiles.invalidate();
   }
 

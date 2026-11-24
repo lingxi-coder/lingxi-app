@@ -3,7 +3,7 @@
  *
  *     <userData>/bots/<botId>/bot.json     the record (the last file written when a Bot is made)
  *                            home/         the Bot's configuration home: LINGXI.md, settings.json, skills/, its sessions and memory
- *                            workspace/    the folder the Bot's sessions run in
+ *                            workspace/    the Bot's own folder, the default one its sessions run in; the owner may add more
  *                            tasks/        the tasks other Bots handed this one, a file each
  *     <userData>/bots-trash/<botId>-<ms>/  a deleted Bot, kept until its owner removes it
  *
@@ -14,7 +14,7 @@
  * or working files.
  */
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { BotMarketOrigin } from '../../shared/botMarket.js';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, parse, resolve } from 'node:path';
@@ -26,30 +26,105 @@ import { isSessionId } from '../sessionIdentity.js';
 import { isInside, writeFileAtomic } from './files.js';
 import { projectDirName } from './projectDirName.js';
 
-export const BOT_RECORD_VERSION = 1;
+export const BOT_RECORD_VERSION = 2;
+/** The id of the Bot's own folder, `<bot>/workspace`: always there, never removed. */
+export const DEFAULT_WORKSPACE_ID = 'default';
+/** How many folders the owner may add to the Bot's own one. */
 export const MAX_BOT_WORKSPACES = 16;
 export const MAX_ACCEPT_FROM = 64;
 export const MAX_PERSONA_BYTES = 64 * 1024;
+export const MAX_ALLOWED_DOMAINS = 64;
+export const MAX_SCOPE_ENTRIES = 64;
+export const MAX_REPLY_KEYWORDS = 32;
+export const MAX_REPLY_POLICY_CHARS = 4000;
+export const MAX_COOLDOWN_SEC = 24 * 60 * 60;
 const MAX_RECORD_BYTES = 64 * 1024;
 const MAX_NAME_CHARS = 80;
+const MAX_LABEL_CHARS = 80;
 const MAX_DESCRIPTION_CHARS = 500;
 const MAX_MODEL_CHARS = 256;
 const MAX_PATH_CHARS = 4096;
+const MAX_DOMAIN_CHARS = 253;
+const MAX_REFERENCE_CHARS = 128;
 const BOT_ID = /^[A-Za-z0-9_-]{22}$/;
+const WORKSPACE_ID = /^[A-Za-z0-9_-]{1,32}$/;
+const DOMAIN = /^(\*\.)?[a-z0-9][a-z0-9.-]*$/;
+const LOCAL_APP_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+const CLOCK_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+const ROUTINE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+const ROUTINE_FOLDERS_FILE = 'routine-folders.json';
+const MAX_ROUTINE_FOLDERS = 256;
 // eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u001f\u007f]/;
 
 export type BotWorkspaceMode = 'read' | 'write';
 
+/** A folder of the Bot's besides its own: the owner's, bound to it. */
 export interface BotWorkspace {
+  /** Names the folder for as long as it is bound; the Bot's own folder is {@link DEFAULT_WORKSPACE_ID}. */
+  id: string;
   /** The real path of an existing directory. */
   path: string;
   mode: BotWorkspaceMode;
+  /** What the owner calls the folder; absent: its name. */
+  label?: string;
+  /** Epoch milliseconds. */
+  addedAt: number;
 }
 
-/** `bot.json`, version 1. */
+/** What the owner gives to bind a folder. */
+export interface BotWorkspaceInput {
+  path: string;
+  mode: BotWorkspaceMode;
+  label?: string;
+}
+
+/** Whether the Bot's commands run in the engine's sandbox, and which hosts they may reach. */
+export interface BotSandbox {
+  enabled: boolean;
+  allowedDomains: string[];
+}
+
+/** One dataset of a data source the Bot may be given. */
+export interface BotDatasetScope {
+  source: string;
+  dataset: string;
+  write: boolean;
+  reportReview: boolean;
+}
+
+/** What of the owner's Local Apps and datasets the Bot may reach. */
+export interface BotScope {
+  localApps: string[];
+  datasets: BotDatasetScope[];
+}
+
+export type BotReplyApproval = 'never' | 'uncertain' | 'always';
+
+export interface BotQuietHours {
+  /** `HH:MM`, 24-hour. */
+  start: string;
+  end: string;
+  /** An IANA time zone name. */
+  timeZone: string;
+}
+
+/** How the Bot answers in the channels it was published to. */
+export interface BotAutoReply {
+  /** What the owner wants the Bot to answer and what not, in their words. */
+  policy: string;
+  keywords: string[];
+  quietHours?: BotQuietHours;
+  cooldownSec: number;
+  /** Below `decline` the Bot stays silent; from `run` it answers; in between it is uncertain. */
+  thresholds: { decline: number; run: number };
+  approval: BotReplyApproval;
+  decisionProviderId?: string;
+}
+
+/** `bot.json`, version 2. */
 export interface BotRecord {
-  v: 1;
+  v: 2;
   bot_id: string;
   name: string;
   description: string;
@@ -65,9 +140,25 @@ export interface BotRecord {
   /** Whether the owner's approved devices may reach this Bot's chats through Remote Control. Absent: they may not. */
   remote?: boolean;
   marketOrigin?: BotMarketOrigin;
+  /** The folders added to the Bot's own one, `<bot>/workspace`, which is not listed. */
   workspaces: BotWorkspace[];
+  sandbox: BotSandbox;
+  scope: BotScope;
+  autoReply: BotAutoReply;
   /** Only the owner exists in this version. */
   audiences: Array<{ id: 'owner'; kind: 'owner' }>;
+}
+
+export function defaultSandbox(): BotSandbox {
+  return { enabled: true, allowedDomains: [] };
+}
+
+export function defaultScope(): BotScope {
+  return { localApps: [], datasets: [] };
+}
+
+export function defaultAutoReply(): BotAutoReply {
+  return { policy: '', keywords: [], cooldownSec: 0, thresholds: { decline: 0.3, run: 0.75 }, approval: 'never' };
 }
 
 export interface BotCreateInput {
@@ -77,7 +168,10 @@ export interface BotCreateInput {
   model?: string;
   permissionMode?: PermissionModeId;
   acceptFrom?: ReadonlyArray<string>;
-  workspaces?: ReadonlyArray<{ path: string; mode: BotWorkspaceMode }>;
+  workspaces?: ReadonlyArray<BotWorkspaceInput>;
+  sandbox?: BotSandbox;
+  scope?: BotScope;
+  autoReply?: BotAutoReply;
 }
 
 export interface BotPatch {
@@ -91,7 +185,12 @@ export interface BotPatch {
   acceptFrom?: ReadonlyArray<string>;
   /** Whether Remote Control reaches this Bot. */
   remote?: boolean;
-  workspaces?: ReadonlyArray<{ path: string; mode: BotWorkspaceMode }>;
+  /** Replaces the whole list. A folder that is bound already keeps its id and the time it was added; one that is left out is unbound. */
+  workspaces?: ReadonlyArray<BotWorkspaceInput>;
+  /** Each replaces the whole of what it names. */
+  sandbox?: BotSandbox;
+  scope?: BotScope;
+  autoReply?: BotAutoReply;
 }
 
 export interface BotStoreOptions {
@@ -105,6 +204,8 @@ export interface BotStoreOptions {
   defaultWorkspaceRoot: string;
   now?: () => number;
   newId?: () => string;
+  /** A record could not be moved to the current version. */
+  warn?: (message: string) => void;
 }
 
 /** The places the isolation of Bots is about, with every spelling they have. */
@@ -203,41 +304,157 @@ function sameBotIds(left: readonly string[] | undefined, right: readonly string[
   return JSON.stringify([...(left ?? [])].sort()) === JSON.stringify([...(right ?? [])].sort());
 }
 
-function parseWorkspaceEntry(value: unknown): { path: string; mode: BotWorkspaceMode } {
-  const entry = plainObject(value, 'workspace');
-  exactKeys(entry, ['path', 'mode'], [], 'workspace');
-  if (typeof entry['path'] !== 'string' || entry['path'].length === 0 || entry['path'].length > MAX_PATH_CHARS || entry['path'].includes('\0')
-    || !isAbsolute(entry['path'])) throw new Error('invalid workspace path');
-  if (entry['mode'] !== 'read' && entry['mode'] !== 'write') throw new Error('invalid workspace mode');
-  return { path: entry['path'], mode: entry['mode'] };
+function checkedPath(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_PATH_CHARS || value.includes('\0') || !isAbsolute(value)) throw new Error('invalid workspace path');
+  return value;
 }
 
-/** Read `bot.json` strictly: the one version, the exact fields, nothing else. */
-export function parseRecord(text: string, expectedId: string): BotRecord {
-  let parsed: unknown;
-  try { parsed = JSON.parse(text); } catch { throw new Error('bot.json is not valid JSON'); }
-  const input = plainObject(parsed, 'bot.json');
-  if (input['v'] !== BOT_RECORD_VERSION) throw new Error('bot.json has an unsupported version');
-  exactKeys(input, ['v', 'bot_id', 'name', 'description', 'created_at', 'updated_at', 'revision', 'workspaces', 'audiences'], ['model', 'permission_mode', 'accept_from', 'remote', 'marketOrigin'], 'bot.json');
+function checkedMode(value: unknown): BotWorkspaceMode {
+  if (value !== 'read' && value !== 'write') throw new Error('invalid workspace mode');
+  return value;
+}
+
+function checkedLabel(value: unknown): string {
+  return singleLine(value, 'workspace label', MAX_LABEL_CHARS);
+}
+
+/**
+ * The id a folder is bound under. The same real path always has the same one, so a folder that is
+ * bound again after it was unbound is the folder it was: its chats are found under it once more.
+ */
+export function workspaceIdOf(path: string): string {
+  return `w${createHash('sha256').update(path).digest('base64url').slice(0, 10)}`;
+}
+
+/** What the owner gives to bind a folder: exactly a path and a mode, and a label if they name it. */
+export function parseWorkspaceInput(value: unknown): BotWorkspaceInput {
+  const entry = plainObject(value, 'workspace');
+  exactKeys(entry, ['path', 'mode'], ['label'], 'workspace');
+  return {
+    path: checkedPath(entry['path']),
+    mode: checkedMode(entry['mode']),
+    ...(entry['label'] !== undefined ? { label: checkedLabel(entry['label']) } : {}),
+  };
+}
+
+function parseStoredWorkspace(value: unknown): BotWorkspace {
+  const entry = plainObject(value, 'workspace');
+  exactKeys(entry, ['id', 'path', 'mode', 'addedAt'], ['label'], 'workspace');
+  const id = entry['id'];
+  if (typeof id !== 'string' || !WORKSPACE_ID.test(id) || id === DEFAULT_WORKSPACE_ID) throw new Error('invalid workspace id');
+  const label = entry['label'] === undefined ? undefined : checkedLabel(entry['label']);
+  if (label !== undefined && label !== entry['label']) throw new Error('invalid workspace label');
+  return {
+    id,
+    path: checkedPath(entry['path']),
+    mode: checkedMode(entry['mode']),
+    ...(label !== undefined ? { label } : {}),
+    addedAt: timestamp(entry['addedAt'], 'workspace time'),
+  };
+}
+
+export function parseSandbox(value: unknown): BotSandbox {
+  const input = plainObject(value, 'sandbox');
+  exactKeys(input, ['enabled', 'allowedDomains'], [], 'sandbox');
+  if (typeof input['enabled'] !== 'boolean') throw new Error('invalid sandbox');
+  const domains = input['allowedDomains'];
+  if (!Array.isArray(domains) || domains.length > MAX_ALLOWED_DOMAINS) throw new Error('invalid sandbox domains');
+  const allowedDomains = domains.map((domain: unknown) => {
+    const name = typeof domain === 'string' ? domain.trim().toLowerCase() : '';
+    if (name.length === 0 || name.length > MAX_DOMAIN_CHARS || !DOMAIN.test(name)) throw new Error('invalid sandbox domain');
+    return name;
+  });
+  if (new Set(allowedDomains).size !== allowedDomains.length) throw new Error('invalid sandbox domains');
+  return { enabled: input['enabled'], allowedDomains };
+}
+
+export function parseScope(value: unknown): BotScope {
+  const input = plainObject(value, 'scope');
+  exactKeys(input, ['localApps', 'datasets'], [], 'scope');
+  const apps = input['localApps'];
+  if (!Array.isArray(apps) || apps.length > MAX_SCOPE_ENTRIES || !apps.every((id) => typeof id === 'string' && LOCAL_APP_ID.test(id))
+    || new Set(apps).size !== apps.length) throw new Error('invalid scope apps');
+  const datasets = input['datasets'];
+  if (!Array.isArray(datasets) || datasets.length > MAX_SCOPE_ENTRIES) throw new Error('invalid scope datasets');
+  const parsed = datasets.map((entry: unknown): BotDatasetScope => {
+    const dataset = plainObject(entry, 'scope dataset');
+    exactKeys(dataset, ['source', 'dataset', 'write', 'reportReview'], [], 'scope dataset');
+    if (typeof dataset['write'] !== 'boolean' || typeof dataset['reportReview'] !== 'boolean') throw new Error('invalid scope dataset');
+    return {
+      source: singleLine(dataset['source'], 'scope dataset source', MAX_REFERENCE_CHARS),
+      dataset: singleLine(dataset['dataset'], 'scope dataset', MAX_REFERENCE_CHARS),
+      write: dataset['write'],
+      reportReview: dataset['reportReview'],
+    };
+  });
+  if (new Set(parsed.map((dataset) => `${dataset.source}\0${dataset.dataset}`)).size !== parsed.length) throw new Error('invalid scope datasets');
+  return { localApps: [...apps] as string[], datasets: parsed };
+}
+
+function validTimeZone(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 64 || CONTROL.test(value)) return false;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: value }); return true; } catch { return false; }
+}
+
+function parseQuietHours(value: unknown): BotQuietHours {
+  const input = plainObject(value, 'quiet hours');
+  exactKeys(input, ['start', 'end', 'timeZone'], [], 'quiet hours');
+  const { start, end, timeZone } = input;
+  if (typeof start !== 'string' || typeof end !== 'string' || !CLOCK_TIME.test(start) || !CLOCK_TIME.test(end) || start === end || !validTimeZone(timeZone)) {
+    throw new Error('invalid quiet hours');
+  }
+  return { start, end, timeZone };
+}
+
+export function parseAutoReply(value: unknown): BotAutoReply {
+  const input = plainObject(value, 'autoReply');
+  exactKeys(input, ['policy', 'keywords', 'cooldownSec', 'thresholds', 'approval'], ['quietHours', 'decisionProviderId'], 'autoReply');
+  const policy = input['policy'];
+  if (typeof policy !== 'string' || policy.length > MAX_REPLY_POLICY_CHARS || policy.includes('\0')) throw new Error('invalid reply policy');
+  const keywords = input['keywords'];
+  if (!Array.isArray(keywords) || keywords.length > MAX_REPLY_KEYWORDS) throw new Error('invalid reply keywords');
+  const listed = keywords.map((keyword: unknown) => singleLine(keyword, 'reply keyword', 64));
+  if (new Set(listed.map((keyword) => keyword.toLowerCase())).size !== listed.length) throw new Error('invalid reply keywords');
+  const cooldown = input['cooldownSec'];
+  if (!Number.isSafeInteger(cooldown) || (cooldown as number) < 0 || (cooldown as number) > MAX_COOLDOWN_SEC) throw new Error('invalid reply cooldown');
+  const thresholds = plainObject(input['thresholds'], 'reply thresholds');
+  exactKeys(thresholds, ['decline', 'run'], [], 'reply thresholds');
+  const { decline, run } = thresholds;
+  if (typeof decline !== 'number' || typeof run !== 'number' || !Number.isFinite(decline) || !Number.isFinite(run)
+    || decline < 0 || run > 1 || decline > run) throw new Error('invalid reply thresholds');
+  const approval = input['approval'];
+  if (approval !== 'never' && approval !== 'uncertain' && approval !== 'always') throw new Error('invalid reply approval');
+  return {
+    policy,
+    keywords: listed,
+    ...(input['quietHours'] !== undefined ? { quietHours: parseQuietHours(input['quietHours']) } : {}),
+    cooldownSec: cooldown as number,
+    thresholds: { decline, run },
+    approval,
+    ...(input['decisionProviderId'] !== undefined ? { decisionProviderId: singleLine(input['decisionProviderId'], 'decision provider', MAX_REFERENCE_CHARS) } : {}),
+  };
+}
+
+function parseAudiences(value: unknown): BotRecord['audiences'] {
+  if (!Array.isArray(value) || value.length !== 1) throw new Error('invalid audiences');
+  const owner = plainObject(value[0], 'audience');
+  exactKeys(owner, ['id', 'kind'], [], 'audience');
+  if (owner['id'] !== 'owner' || owner['kind'] !== 'owner') throw new Error('invalid audiences');
+  return [{ id: 'owner', kind: 'owner' }];
+}
+
+/** The fields a record has in every version, read strictly. */
+function parseCommon(input: Record<string, unknown>, expectedId: string): Omit<BotRecord, 'v' | 'workspaces' | 'sandbox' | 'scope' | 'autoReply' | 'audiences'> {
   if (input['bot_id'] !== expectedId || !isBotId(input['bot_id'])) throw new Error('bot.json belongs to a different Bot');
   const name = botName(input['name']);
   if (name !== input['name']) throw new Error('invalid name');
   const revision = input['revision'];
   if (!Number.isSafeInteger(revision) || (revision as number) < 1) throw new Error('invalid revision');
-  if (!Array.isArray(input['workspaces']) || input['workspaces'].length > MAX_BOT_WORKSPACES) throw new Error('invalid workspaces');
-  const workspaces = input['workspaces'].map(parseWorkspaceEntry);
-  if (new Set(workspaces.map((workspace) => workspace.path)).size !== workspaces.length) throw new Error('invalid workspaces');
-  const audiences = input['audiences'];
-  if (!Array.isArray(audiences) || audiences.length !== 1) throw new Error('invalid audiences');
-  const owner = plainObject(audiences[0], 'audience');
-  exactKeys(owner, ['id', 'kind'], [], 'audience');
-  if (owner['id'] !== 'owner' || owner['kind'] !== 'owner') throw new Error('invalid audiences');
   const description = botDescription(input['description']);
   if (description !== input['description']) throw new Error('invalid description');
   const acceptFrom = input['accept_from'] === undefined ? [] : acceptFromList(input['accept_from'], expectedId);
   const remote = input['remote'] === undefined ? false : botRemote(input['remote']);
   return {
-    v: BOT_RECORD_VERSION,
     bot_id: expectedId,
     name,
     description,
@@ -249,8 +466,64 @@ export function parseRecord(text: string, expectedId: string): BotRecord {
     ...(acceptFrom.length > 0 ? { accept_from: acceptFrom } : {}),
     ...(remote ? { remote } : {}),
     ...(input['marketOrigin'] !== undefined ? { marketOrigin: parseMarketOrigin(input['marketOrigin']) } : {}),
+  };
+}
+
+const COMMON_REQUIRED = ['v', 'bot_id', 'name', 'description', 'created_at', 'updated_at', 'revision', 'workspaces', 'audiences'] as const;
+const COMMON_OPTIONAL = ['model', 'permission_mode', 'accept_from', 'remote', 'marketOrigin'] as const;
+
+/** Read `bot.json` strictly: the one version, the exact fields, nothing else. */
+export function parseRecord(text: string, expectedId: string): BotRecord {
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); } catch { throw new Error('bot.json is not valid JSON'); }
+  const input = plainObject(parsed, 'bot.json');
+  if (input['v'] !== BOT_RECORD_VERSION) throw new Error('bot.json has an unsupported version');
+  exactKeys(input, [...COMMON_REQUIRED, 'sandbox', 'scope', 'autoReply'], COMMON_OPTIONAL, 'bot.json');
+  const common = parseCommon(input, expectedId);
+  if (!Array.isArray(input['workspaces']) || input['workspaces'].length > MAX_BOT_WORKSPACES) throw new Error('invalid workspaces');
+  const workspaces = input['workspaces'].map(parseStoredWorkspace);
+  if (new Set(workspaces.map((workspace) => workspace.path)).size !== workspaces.length
+    || new Set(workspaces.map((workspace) => workspace.id)).size !== workspaces.length) throw new Error('invalid workspaces');
+  return {
+    v: BOT_RECORD_VERSION,
+    ...common,
     workspaces,
-    audiences: [{ id: 'owner', kind: 'owner' }],
+    sandbox: parseSandbox(input['sandbox']),
+    scope: parseScope(input['scope']),
+    autoReply: parseAutoReply(input['autoReply']),
+    audiences: parseAudiences(input['audiences']),
+  };
+}
+
+/**
+ * The one place a version 1 record is read. It becomes a version 2 record: its folders get ids and the
+ * time the Bot was made as the time they were added, and the sandbox, scope and replies start as
+ * they start in a new Bot. A text that is not a version 1 record is none of this function's business.
+ */
+export function upgradeRecord(text: string, expectedId: string): BotRecord | undefined {
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); } catch { return undefined; }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed) || (parsed as Record<string, unknown>)['v'] !== 1) return undefined;
+  const input = parsed as Record<string, unknown>;
+  exactKeys(input, COMMON_REQUIRED, COMMON_OPTIONAL, 'bot.json');
+  const common = parseCommon(input, expectedId);
+  const folders = input['workspaces'];
+  if (!Array.isArray(folders) || folders.length > MAX_BOT_WORKSPACES) throw new Error('invalid workspaces');
+  const workspaces = folders.map((entry: unknown): BotWorkspace => {
+    const folder = plainObject(entry, 'workspace');
+    exactKeys(folder, ['path', 'mode'], [], 'workspace');
+    const path = checkedPath(folder['path']);
+    return { id: workspaceIdOf(path), path, mode: checkedMode(folder['mode']), addedAt: common.created_at };
+  });
+  if (new Set(workspaces.map((workspace) => workspace.path)).size !== workspaces.length) throw new Error('invalid workspaces');
+  return {
+    v: BOT_RECORD_VERSION,
+    ...common,
+    workspaces,
+    sandbox: defaultSandbox(),
+    scope: defaultScope(),
+    autoReply: defaultAutoReply(),
+    audiences: parseAudiences(input['audiences']),
   };
 }
 
@@ -310,9 +583,29 @@ export class BotStore {
     };
     this.now = options.now ?? Date.now;
     this.newId = options.newId ?? (() => randomBytes(16).toString('base64url'));
+    this.upgradeRecords(options.warn);
   }
 
   get root(): string { return this.locations.root; }
+
+  /**
+   * Bring every record on disk to the current version, once, when the store opens: a version 1 record is
+   * rewritten whole as version 2, atomically, and nothing reads version 1 after that. A record that is
+   * current, damaged or of another version is left as it is; reading it says what is wrong.
+   */
+  private upgradeRecords(warn: ((message: string) => void) | undefined): void {
+    for (const botId of readdirSync(this.root).sort()) {
+      if (!isBotId(botId)) continue;
+      const path = this.recordPath(botId);
+      try {
+        if (!existsSync(path) || statSync(path).size > MAX_RECORD_BYTES) continue;
+        const upgraded = upgradeRecord(readFileSync(path, 'utf8'), botId);
+        if (upgraded !== undefined) writeFileAtomic(path, serialize(upgraded));
+      } catch (error) {
+        warn?.(`Bot ${botId}: bot.json could not be moved to version ${BOT_RECORD_VERSION}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
 
   botDir(botId: string): string { return join(this.root, this.checkedId(botId)); }
   recordPath(botId: string): string { return join(this.botDir(botId), 'bot.json'); }
@@ -321,14 +614,36 @@ export class BotStore {
   /** `<bot>/tasks`: the tasks other Bots handed this one, a file each. They go to the trash with the Bot. */
   tasksDir(botId: string): string { return join(this.botDir(botId), 'tasks'); }
 
-  /** `<home>/projects/<project dir>`: where the engine keeps this Bot's transcripts, and its memory. */
+  /** `<home>/projects/<project dir>`: where the engine keeps the transcripts of the Bot's own folder, and the Bot's memory. */
   transcriptsDir(botId: string): string {
-    return join(this.homeDir(botId), 'projects', projectDirName(this.workspaceDir(botId)));
+    return this.transcriptsDirOf(botId, this.workspaceDir(botId));
+  }
+
+  /** Where the engine keeps the transcripts of sessions that ran in a folder: one project folder in the Bot's home for each. */
+  transcriptsDirOf(botId: string, projectPath: string): string {
+    return join(this.homeDir(botId), 'projects', projectDirName(projectPath));
+  }
+
+  /**
+   * Every folder the Bot works in, its own first: `<bot>/workspace` is always there and always writable,
+   * and the owner's are listed after it.
+   */
+  allWorkspaces(record: BotRecord): BotWorkspace[] {
+    return [{ id: DEFAULT_WORKSPACE_ID, path: this.workspaceDir(record.bot_id), mode: 'write', addedAt: record.created_at }, ...record.workspaces];
+  }
+
+  /** A folder of the Bot by its id, the Bot's own one included. */
+  workspaceById(record: BotRecord, workspaceId: string): BotWorkspace | undefined {
+    return this.allWorkspaces(record).find((workspace) => workspace.id === workspaceId);
   }
 
   /** Private exact-source record; Bot sessions never enter the owner's space store. */
   sessionSource(botId: string, sessionId: string): { path: string; mode: 'chat' | 'code' } | undefined {
     this.get(botId);
+    return this.readSessionSource(botId, sessionId);
+  }
+
+  private readSessionSource(botId: string, sessionId: string): { path: string; mode: 'chat' | 'code' } | undefined {
     if (!isSessionId(sessionId)) throw new Error('invalid session id');
     const file = join(this.botDir(botId), 'session-sources', `${sessionId.toLowerCase()}.json`);
     let value: unknown;
@@ -351,6 +666,86 @@ export class BotStore {
       || (source.mode !== 'chat' && source.mode !== 'code')) throw new Error('invalid Bot session source');
     if (previous && (previous.path !== source.path || previous.mode !== source.mode)) throw new Error('The Bot session already has a different saved source.');
     if (!previous) writeFileAtomic(join(this.botDir(botId), 'session-sources', `${sessionId.toLowerCase()}.json`), JSON.stringify(source));
+  }
+
+  /**
+   * The Bot that recorded a session as its own and kept its transcript in the project folder of
+   * `projectPath`. This is how a session of a folder the owner bound, which has the same working
+   * directory as the owner's own sessions there, is known for a Bot's after the app restarted.
+   */
+  botIdOfRecordedSession(sessionId: string, projectPath: string): string | undefined {
+    if (!isSessionId(sessionId) || typeof projectPath !== 'string' || !isAbsolute(projectPath)) return undefined;
+    for (const botId of readdirSync(this.root)) {
+      if (!isBotId(botId)) continue;
+      try {
+        const source = this.readSessionSource(botId, sessionId);
+        if (source !== undefined && dirname(source.path) === this.transcriptsDirOf(botId, projectPath)) return botId;
+      } catch { /* A damaged record says nothing. */ }
+    }
+    return undefined;
+  }
+
+  /**
+   * The folder of `<home>/projects` (by name) that holds a session's transcript: where the Bot recorded
+   * it, else wherever a transcript of that name is.
+   */
+  private transcriptFolder(botId: string, sessionId: string): string | undefined {
+    const projects = join(this.homeDir(botId), 'projects');
+    try {
+      const source = this.readSessionSource(botId, sessionId);
+      if (source !== undefined && dirname(dirname(source.path)) === projects) return basename(dirname(source.path));
+    } catch { /* A damaged record says nothing. */ }
+    let folders: string[];
+    try { folders = readdirSync(projects); } catch { return undefined; }
+    return folders.find((folder) => existsSync(join(projects, folder, `${sessionId}.jsonl`)));
+  }
+
+  /** The folder of the Bot that a session ran in, if it is one the Bot works in now. */
+  workspaceOfTranscript(record: BotRecord, sessionId: string): BotWorkspace | undefined {
+    if (!isSessionId(sessionId)) return undefined;
+    const folder = this.transcriptFolder(record.bot_id, sessionId);
+    return folder === undefined ? undefined : this.allWorkspaces(record).find((workspace) => projectDirName(workspace.path) === folder);
+  }
+
+  /**
+   * Which folder each routine of the Bot runs in, by routine id. A routine that is not listed runs in
+   * the Bot's own folder. The scheduler's tasks are the engine's and have nowhere to say this.
+   */
+  routineFolders(botId: string): Record<string, string> {
+    this.get(botId);
+    const file = join(this.botDir(botId), ROUTINE_FOLDERS_FILE);
+    let value: unknown;
+    try {
+      const stat = lstatSync(file);
+      if (!stat.isFile() || stat.size > MAX_RECORD_BYTES) throw new Error('invalid routine folders');
+      value = JSON.parse(readFileSync(file, 'utf8'));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+      throw error;
+    }
+    const input = plainObject(value, 'routine folders');
+    exactKeys(input, ['v', 'folders'], [], 'routine folders');
+    const folders = plainObject(input['folders'], 'routine folders');
+    if (input['v'] !== 1 || Object.keys(folders).length > MAX_ROUTINE_FOLDERS) throw new Error('invalid routine folders');
+    const result: Record<string, string> = {};
+    for (const [routineId, workspaceId] of Object.entries(folders)) {
+      if (!ROUTINE_ID.test(routineId) || typeof workspaceId !== 'string' || !WORKSPACE_ID.test(workspaceId) || workspaceId === DEFAULT_WORKSPACE_ID) throw new Error('invalid routine folders');
+      result[routineId] = workspaceId;
+    }
+    return result;
+  }
+
+  /** The folder a routine runs in; `undefined` puts it back in the Bot's own folder. */
+  setRoutineFolder(botId: string, routineId: string, workspaceId: string | undefined): void {
+    if (!ROUTINE_ID.test(routineId)) throw new Error('invalid routine id');
+    if (workspaceId !== undefined && (!WORKSPACE_ID.test(workspaceId) || workspaceId === DEFAULT_WORKSPACE_ID)) throw new Error('invalid workspace id');
+    const folders = this.routineFolders(botId);
+    if (workspaceId === undefined) delete folders[routineId];
+    else folders[routineId] = workspaceId;
+    if (Object.keys(folders).length > MAX_ROUTINE_FOLDERS) throw new Error('A Bot has too many routines with a folder of their own.');
+    const file = join(this.botDir(botId), ROUTINE_FOLDERS_FILE);
+    if (Object.keys(folders).length === 0) { rmSync(file, { force: true }); return; }
+    writeFileAtomic(file, `${JSON.stringify({ v: 1, folders }, null, 2)}\n`);
   }
 
   /** `<transcripts>/memdir`: where the engine keeps what this Bot remembers. */
@@ -378,13 +773,13 @@ export class BotStore {
   }
 
   /**
-   * The Bot whose home holds the transcript of a session, if any. The id must
-   * be a session's: it becomes part of a file name.
+   * The Bot whose home holds the transcript of a session, in whichever of its folders the session ran, if
+   * any. The id must be a session's: it becomes part of a file name.
    */
   botIdOfTranscript(sessionId: string): string | undefined {
     if (!isSessionId(sessionId)) return undefined;
     for (const botId of readdirSync(this.root)) {
-      if (isBotId(botId) && existsSync(join(this.transcriptsDir(botId), `${sessionId}.jsonl`))) return botId;
+      if (isBotId(botId) && this.transcriptFolder(botId, sessionId) !== undefined) return botId;
     }
     return undefined;
   }
@@ -450,7 +845,11 @@ export class BotStore {
     const model = input.model === undefined ? undefined : botModel(input.model);
     const permissionMode = input.permissionMode === undefined ? undefined : botPermissionMode(input.permissionMode);
     const acceptFrom = this.acceptFrom(input.acceptFrom ?? [], undefined, []);
-    const workspaces = this.workspaces(input.workspaces ?? []);
+    const now = this.now();
+    const workspaces = this.boundFolders(input.workspaces ?? [], [], now);
+    const sandbox = input.sandbox === undefined ? defaultSandbox() : parseSandbox(input.sandbox);
+    const scope = input.scope === undefined ? defaultScope() : parseScope(input.scope);
+    const autoReply = input.autoReply === undefined ? defaultAutoReply() : parseAutoReply(input.autoReply);
     const persona = input.persona === undefined ? defaultPersona(name, description) : personaText(input.persona);
     let botId = '';
     for (let attempt = 0; attempt < 5 && botId === ''; attempt += 1) {
@@ -468,7 +867,6 @@ export class BotStore {
       mkdirSync(join(this.homeDir(botId), 'skills'), { recursive: true, mode: 0o700 });
       mkdirSync(this.workspaceDir(botId), { mode: 0o700 });
       writeFileAtomic(join(this.homeDir(botId), 'LINGXI.md'), persona);
-      const now = this.now();
       const record: BotRecord = {
         v: BOT_RECORD_VERSION,
         bot_id: botId,
@@ -481,6 +879,9 @@ export class BotStore {
         ...(permissionMode !== undefined ? { permission_mode: permissionMode } : {}),
         ...(acceptFrom.length > 0 ? { accept_from: acceptFrom } : {}),
         workspaces,
+        sandbox,
+        scope,
+        autoReply,
         audiences: [{ id: 'owner', kind: 'owner' }],
       };
       prepare?.(record);
@@ -522,7 +923,10 @@ export class BotStore {
       ...current,
       ...(patch.name !== undefined ? { name: botName(patch.name) } : {}),
       ...(patch.description !== undefined ? { description: botDescription(patch.description) } : {}),
-      ...(patch.workspaces !== undefined ? { workspaces: this.workspaces(patch.workspaces) } : {}),
+      ...(patch.workspaces !== undefined ? { workspaces: this.boundFolders(patch.workspaces, current.workspaces, this.now()) } : {}),
+      ...(patch.sandbox !== undefined ? { sandbox: parseSandbox(patch.sandbox) } : {}),
+      ...(patch.scope !== undefined ? { scope: parseScope(patch.scope) } : {}),
+      ...(patch.autoReply !== undefined ? { autoReply: parseAutoReply(patch.autoReply) } : {}),
     };
     if (patch.model === null) delete next.model;
     else if (patch.model !== undefined) next.model = botModel(patch.model);
@@ -539,7 +943,7 @@ export class BotStore {
     }
     const unchanged = (['name', 'description', 'model', 'permission_mode', 'remote'] as const).every((key) => next[key] === current[key])
       && sameBotIds(next.accept_from, current.accept_from)
-      && JSON.stringify(next.workspaces) === JSON.stringify(current.workspaces);
+      && (['workspaces', 'sandbox', 'scope', 'autoReply'] as const).every((key) => JSON.stringify(next[key]) === JSON.stringify(current[key]));
     if (unchanged) return current;
     next.revision = current.revision + 1;
     next.updated_at = Math.max(this.now(), current.updated_at);
@@ -565,8 +969,8 @@ export class BotStore {
    * or a folder that contains it, anything of the app's own data (the Bots
    * included), or the configuration home and workspace root of normal sessions.
    */
-  workspace(path: unknown, mode: unknown): BotWorkspace {
-    const entry = parseWorkspaceEntry({ path, mode });
+  workspace(path: unknown, mode: unknown): { path: string; mode: BotWorkspaceMode } {
+    const entry = { path: checkedPath(path), mode: checkedMode(mode) };
     let real: string;
     try { real = realDirectory(entry.path); } catch { throw new Error('The folder does not exist or is not a directory.'); }
     const { userData, root, home, defaultConfigHomes, defaultWorkspaceRoots } = this.locations;
@@ -589,15 +993,78 @@ export class BotStore {
     return list.sort();
   }
 
-  private workspaces(entries: ReadonlyArray<{ path: string; mode: BotWorkspaceMode }>): BotWorkspace[] {
+  /**
+   * The folders a list names, as the Bot has them. One that the Bot has bound already keeps its id and
+   * the time it was added; the others are bound as of `now`.
+   */
+  private boundFolders(entries: ReadonlyArray<BotWorkspaceInput>, existing: readonly BotWorkspace[], now: number): BotWorkspace[] {
     if (!Array.isArray(entries) || entries.length > MAX_BOT_WORKSPACES) throw new Error('invalid workspaces');
-    const bound = entries.map((entry) => {
-      const parsed = plainObject(entry, 'workspace');
-      exactKeys(parsed, ['path', 'mode'], [], 'workspace');
-      return this.workspace(parsed['path'], parsed['mode']);
+    const bound = entries.map((entry): BotWorkspace => {
+      const input = parseWorkspaceInput(entry);
+      const checked = this.workspace(input.path, input.mode);
+      const earlier = existing.find((workspace) => workspace.path === checked.path);
+      return {
+        id: earlier?.id ?? workspaceIdOf(checked.path),
+        path: checked.path,
+        mode: checked.mode,
+        ...(input.label !== undefined ? { label: input.label } : {}),
+        addedAt: earlier?.addedAt ?? now,
+      };
     });
     if (new Set(bound.map((workspace) => workspace.path)).size !== bound.length) throw new Error('The same folder is bound twice.');
     return bound;
+  }
+
+  /** Write the record that follows `current`, once `prepare` has had its say. */
+  private commit(current: BotRecord, changes: Partial<BotRecord>, prepare?: (record: BotRecord) => void): BotRecord {
+    const next: BotRecord = { ...current, ...changes, revision: current.revision + 1, updated_at: Math.max(this.now(), current.updated_at) };
+    prepare?.(next);
+    writeFileAtomic(this.recordPath(current.bot_id), serialize(next));
+    return next;
+  }
+
+  /** Bind one more folder to a Bot, whatever revision it is at. A folder it has bound already is refused. */
+  addWorkspace(botId: string, entry: BotWorkspaceInput, prepare?: (record: BotRecord) => void): BotRecord {
+    const current = this.get(botId);
+    const input = parseWorkspaceInput(entry);
+    const checked = this.workspace(input.path, input.mode);
+    if (current.workspaces.some((workspace) => workspace.path === checked.path)) throw new Error("The folder is one of the Bot's folders already.");
+    if (current.workspaces.length >= MAX_BOT_WORKSPACES) throw new Error(`A Bot can work in ${MAX_BOT_WORKSPACES} folders besides its own, and no more.`);
+    const added: BotWorkspace = {
+      id: workspaceIdOf(checked.path),
+      path: checked.path,
+      mode: checked.mode,
+      ...(input.label !== undefined ? { label: input.label } : {}),
+      addedAt: this.now(),
+    };
+    return this.commit(current, { workspaces: [...current.workspaces, added] }, prepare);
+  }
+
+  /** Change the mode or the label of a folder that was bound: `label: null` removes the label. Nothing changes if nothing would. */
+  changeWorkspace(botId: string, workspaceId: string, change: { mode?: BotWorkspaceMode; label?: string | null }, prepare?: (record: BotRecord) => void): BotRecord {
+    const current = this.get(botId);
+    if (workspaceId === DEFAULT_WORKSPACE_ID) throw new Error("The Bot's own folder cannot be changed.");
+    const index = current.workspaces.findIndex((workspace) => workspace.id === workspaceId);
+    if (index < 0) throw new Error('The Bot has no such folder.');
+    const before = current.workspaces[index]!;
+    const label = change.label === undefined ? before.label : change.label === null ? undefined : checkedLabel(change.label);
+    const after: BotWorkspace = {
+      id: before.id,
+      path: before.path,
+      mode: change.mode === undefined ? before.mode : checkedMode(change.mode),
+      ...(label !== undefined ? { label } : {}),
+      addedAt: before.addedAt,
+    };
+    if (JSON.stringify(after) === JSON.stringify(before)) return current;
+    return this.commit(current, { workspaces: current.workspaces.map((workspace, at) => at === index ? after : workspace) }, prepare);
+  }
+
+  /** Unbind a folder. The Bot's own one cannot be unbound. What the Bot did there stays in its home. */
+  removeWorkspace(botId: string, workspaceId: string, prepare?: (record: BotRecord) => void): BotRecord {
+    const current = this.get(botId);
+    if (workspaceId === DEFAULT_WORKSPACE_ID) throw new Error("The Bot's own folder cannot be removed.");
+    if (!current.workspaces.some((workspace) => workspace.id === workspaceId)) throw new Error('The Bot has no such folder.');
+    return this.commit(current, { workspaces: current.workspaces.filter((workspace) => workspace.id !== workspaceId) }, prepare);
   }
 
   private checkedId(botId: string): string {
@@ -607,7 +1074,7 @@ export class BotStore {
 }
 
 /** A folder bound earlier that still is what it was: a real directory at the same real path, still allowed. */
-export function stillBound(store: BotStore, workspace: BotWorkspace): boolean {
+export function stillBound(store: BotStore, workspace: Pick<BotWorkspace, 'path' | 'mode'>): boolean {
   try {
     if (lstatSync(workspace.path).isSymbolicLink()) return false;
     return store.workspace(workspace.path, workspace.mode).path === workspace.path;

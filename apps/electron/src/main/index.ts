@@ -40,7 +40,7 @@ import { applicationMenuTemplate } from './applicationMenu.js';
 import { CH_APPLICATION_MENU } from '../shared/applicationMenu.js';
 import { installDesktopUpdates } from './desktopUpdates.js';
 import { desktopUpdateManifestUrl } from '../shared/productConfig.js';
-import { CH_BOTS_PROMPT_SENT, CH_BOTS_TASKS_CHANGED, type BotPromptSentUi, type BotTasksChangedUi } from '../shared/bots.js';
+import { CH_BOTS_PROMPT_SENT, CH_BOTS_TASKS_CHANGED, CH_BOTS_WORKSPACE_REQUESTS_CHANGED, type BotPromptSentUi, type BotTasksChangedUi, type BotWorkspaceRequestsChangedUi } from '../shared/bots.js';
 import { join } from 'node:path';
 import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -68,7 +68,9 @@ import { BotService } from './bots/service.js';
 import { BotStore } from './bots/store.js';
 import { TaskChangeAnnouncer } from './bots/taskChanges.js';
 import { BotTasks } from './bots/taskService.js';
+import { WorkspaceRequests } from './bots/workspaceRequests.js';
 import { SessionGateway } from './remoteControl/sessionGateway.js';
+import type { RemoteBotFolderSource } from './remoteControl/remoteBots.js';
 import { activityPreview } from './remoteControl/snapshot.js';
 import { LocalAppsGateway } from './remoteControl/localAppsGateway.js';
 import { createRemoteLocalAppsDelegate } from './remoteControl/localAppsBindings.js';
@@ -166,6 +168,8 @@ let teamConnector: TeamConnector | undefined;
 /** The endpoint through which Bots hand tasks to each other; made with the Bots. */
 let botRouter: BotRouter | null = null;
 let botTasks: BotTasks | null = null;
+/** What the Bots ask the owner for and the desktop's projects, as Remote Control answers on them; made with the Bots. */
+let remoteBotFolders: RemoteBotFolderSource | null = null;
 let remotePolicyTimer: NodeJS.Timeout | undefined;
 /** How often the administrator's `managed-settings.json` is read again. */
 const REMOTE_POLICY_RECHECK_MS = 30_000;
@@ -607,23 +611,23 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     getTelemetryConfig: () => settings.getTelemetryConfig(),
     // A Bot's working directory is not a project: it has its own configuration home and grants.
     workspaceSettings: async (projectPath, ref) => {
-      if (bots?.ownsWorkspace(projectPath)) return bots.launchSettings(projectPath, ref.sessionId);
+      if (bots?.ownsSession({ projectPath, sessionId: ref.sessionId })) return bots.launchSettings(projectPath, ref.sessionId);
       const config = await sessionCatalog.workspaceSettings(projectPath);
       const additionalDirectories = ref.projectId ? settings.getProjectAdditionalFolders(ref.projectId) : [];
       return additionalDirectories.length ? { ...config, additionalDirectories } : config;
     },
     appVersion: app.getVersion(),
-    ...ownerPreferenceHooks(settings, (ref) => bots?.ownsWorkspace(ref.projectPath) === true),
+    ...ownerPreferenceHooks(settings, (ref) => bots?.ownsSession(ref) === true),
     resolveSessionMode: async (ref) => {
       const owner = settings.conversationSpaces.find(ref);
       if (owner) return owner.mode;
-      if (bots?.ownsWorkspace(ref.projectPath)) return (await bots.resolveSavedTranscript(ref))?.mode;
+      if (bots?.ownsSession(ref)) return (await bots.resolveSavedTranscript(ref))?.mode;
       return undefined;
     },
-    resolveSavedTranscript: (ref) => bots?.ownsWorkspace(ref.projectPath)
+    resolveSavedTranscript: (ref) => bots?.ownsSession(ref)
       ? bots.resolveSavedTranscript(ref) : resolveSavedConversationTranscript(settings, sessionCatalog, ref),
     captureSessionSource: async (ref, runtime, scheduled) => {
-      if (bots?.ownsWorkspace(ref.projectPath)) return bots.captureSessionSource(ref, runtime);
+      if (bots?.ownsSession(ref)) return bots.captureSessionSource(ref, runtime);
       if (!host) throw new Error('Desktop host is unavailable.');
       return host.rememberCreatedSessionSource(ref, runtime, scheduled);
     },
@@ -650,20 +654,20 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         // Adding a Project is the Desktop trust decision. Repository edits must
         // not silently revoke a live session or reintroduce the removed setup
         // prompt; removal from the Project list revokes access instead.
-        return { workspace: ref.projectPath, trusted: settings.isTrustedWorkspace(ref.projectPath) || bots?.ownsWorkspace(ref.projectPath) === true };
+        return { workspace: ref.projectPath, trusted: settings.isTrustedWorkspace(ref.projectPath) || bots?.ownsSession(ref) === true };
       } catch {
         return { workspace: ref.projectPath, trusted: false };
       }
     },
     // A Bot's model is its own; choosing one in a Bot's session must not become the default of the owner's sessions.
-    onModelSelected: (ref, model) => { if (!bots?.ownsWorkspace(ref.projectPath)) settings.setSessionModel(ref, model); },
-    getSavedModel: (ref) => bots?.ownsWorkspace(ref.projectPath) ? undefined : settings.getSessionModel(ref),
+    onModelSelected: (ref, model) => { if (!bots?.ownsSession(ref)) settings.setSessionModel(ref, model); },
+    getSavedModel: (ref) => bots?.ownsSession(ref) ? undefined : settings.getSessionModel(ref),
     resolveProviderAccounts: () => providerAccounts?.launch() ?? Promise.resolve(undefined),
     renewProviderAccount,
     onProviderAccountRouting: event => { if (providerAccounts?.recordRouting(event)) host?.sendToWindows('lingxi:provider-accounts:routing', event); },
     onFirstPromptSent: (ref, isActive) => {
       // A Bot's session is not one of the owner's: it is neither the one to restore at startup nor one to share.
-      if (bots?.ownsWorkspace(ref.projectPath)) return;
+      if (bots?.ownsSession(ref)) return;
       if (isActive) settings.setActiveSession(ref);
       void host?.commitConversationDraft(ref).catch(error => diagnostics.add('warn', 'host', `conversation navigation: ${sanitizeDiagnostic(error)}`));
       // `remoteControlAtStartup`: a new chat starts shared with the user's other devices.
@@ -698,9 +702,9 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     launchConfig: async (ref: SessionRef, resumeModel?: string) => {
       const workspace = ref.projectPath;
       const configured = settings.getPublic();
-      const botWorkspace = bots?.ownsWorkspace(workspace) === true;
+      const botWorkspace = bots?.ownsSession(ref) === true;
       const model = botWorkspace
-        ? resumeModel ?? bots?.modelFor(workspace) ?? configured.model
+        ? resumeModel ?? bots?.modelFor(workspace, ref.sessionId) ?? configured.model
         : settings.getSessionModel(ref) ?? resumeModel ?? configured.model;
       const startedAt = Date.now();
       // History does not need account credentials. The connected runtime
@@ -922,6 +926,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     runtimes,
     policy,
     bots: () => bots,
+    botFolders: () => remoteBotFolders,
     commands: new RemoteCommands({
       providerAccounts,
       authorizeProviderAccounts: viewer => remoteControlOn() && policy.allows() && account.snapshot().user?.uid === viewer.account_uid,
@@ -998,7 +1003,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     runtimeRef: (sessionId) => {
       const runtime = bridge?.get(sessionId);
       // A Bot's chats stay on this computer: `/remote-control` in one finds no session to share.
-      return runtime && !bots?.ownsWorkspace(runtime.projectPath) ? { projectPath: runtime.projectPath, sessionId } : undefined;
+      return runtime && !bots?.ownsSession({ projectPath: runtime.projectPath, sessionId }) ? { projectPath: runtime.projectPath, sessionId } : undefined;
     },
     signedIn: () => account.snapshot().user !== null,
     onAccountChanged: (callback) => account.onChanged(() => callback()),
@@ -1059,7 +1064,31 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       });
       botTasks = tasks;
       tasks.load();
-      const router = new BotRouter({ backend: tasks, warn: botWarn });
+      // What the Bots ask of their owner: a folder to work in. The owner answers in the window.
+      const workspaceRequests = new WorkspaceRequests({
+        store: botStore,
+        grant: (botId, input) => { if (bots === null) throw new Error('Bots are unavailable.'); return bots.grantWorkspace(botId, input); },
+        usable: (botId) => bots?.availability().available === true && bots.isDeleting(botId) === false,
+        changed: (botIds) => {
+          host?.sendToWindows(CH_BOTS_WORKSPACE_REQUESTS_CHANGED, { botIds: [...botIds] } satisfies BotWorkspaceRequestsChangedUi);
+          // A phone that lists the Bots hears that one asked for a folder, or that the request was answered.
+          remotePolicy?.notifySessionsChanged();
+        },
+        notify: (request, botName) => {
+          // The window shows the request itself when the owner is looking at it.
+          if (windowFocused) return;
+          showNotification(nativeTr('native_workspace_request_title', botName),
+            nativeTr(request.mode === 'write' ? 'native_workspace_request_write' : 'native_workspace_request_read', request.path, request.reason));
+        },
+        warn: botWarn,
+      });
+      // A phone or a browser gives a Bot only what the desktop already lists as a project, and answers what the Bots ask for.
+      remoteBotFolders = {
+        projects: () => settings.getPublic().projects,
+        requests: (botId) => workspaceRequests.pending(botId),
+        decide: (botId, requestId, decision) => workspaceRequests.decide(botId, requestId, decision),
+      };
+      const router = new BotRouter({ backend: tasks, workspaces: workspaceRequests, warn: botWarn });
       botRouter = router;
       router.start().catch((error: unknown) => botWarn(`the router cannot listen: ${sanitizeDiagnostic(error)}`));
       router.watchRuntimes(manager);
@@ -1071,6 +1100,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         // Remote devices reach a Bot's chats by session id, and its switch decides whether they may.
         openProject: (sessionId) => manager.get(sessionId)?.projectPath,
         changed: () => remotePolicy?.notifySessionsChanged(),
+        deleted: (botId) => workspaceRequests.dropBot(botId),
         teamRevoking: (botId) => teamConnector?.botChanged(botId),
         catalogFor: (configHome) => new ProjectSessionCatalog({ ...catalogOptions, configHome }),
         // The scheduler was made first; it learns of the Bots below, and is asked for these only when used.
@@ -1081,7 +1111,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         warn: botWarn,
       });
       scheduled?.attachBots(bots);
-      host.attachBots(new BotsUi({ service: bots, content: new BotContent(botStore), tasks, loginItem,
+      host.attachBots(new BotsUi({ service: bots, content: new BotContent(botStore), tasks, loginItem, workspaceRequests,
         market: new BotMarketHost({store:botStore,service:bots,accountToken:()=>account.getIdToken(),accountId:()=>account.snapshot().user?.uid??undefined,changed:()=>remotePolicy?.notifySessionsChanged()}) }));
     } catch (error) {
       diagnostics.add('warn', 'host', `bots unavailable: ${sanitizeDiagnostic(error)}`);

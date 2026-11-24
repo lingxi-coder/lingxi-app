@@ -49,6 +49,9 @@ import {
   CH_BOTS_TASKS_CHANGED,
   CH_BOTS_TASKS_LIST,
   CH_BOTS_UPDATE,
+  CH_BOTS_WORKSPACE_REQUEST_DECIDE,
+  CH_BOTS_WORKSPACE_REQUESTS_CHANGED,
+  CH_BOTS_WORKSPACE_REQUESTS_LIST,
   type BotsApi,
 } from '../shared/bots.js';
 import {
@@ -581,7 +584,8 @@ const api: LingxiApi = {
   scheduled: {
     context: (scopeId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'context', scopeId }),
     scopes: () => ipcRenderer.invoke(CH_SCHEDULED, { action: 'scopes' }),
-    manage: (scopeId, request) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'manage', scopeId, request }),
+    manage: (scopeId, request, folderId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'manage', scopeId, request, ...(folderId !== undefined ? { folderId } : {}) }),
+    routineFolders: (scopeId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'folders', scopeId }),
     openSession: (scopeId, sessionId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'open', scopeId, sessionId }),
   } satisfies ScheduledApi,
   remoteControl: {
@@ -605,8 +609,8 @@ const api: LingxiApi = {
     create: request => ipcRenderer.invoke(CH_BOTS_CREATE, request),
     update: (botId, expectedRevision, patch) => ipcRenderer.invoke(CH_BOTS_UPDATE, botId, expectedRevision, patch),
     delete: botId => ipcRenderer.invoke(CH_BOTS_DELETE, botId),
-    openSession: (botId, sessionId, transcriptPath) => (sessionId === undefined
-      ? ipcRenderer.invoke(CH_BOTS_SESSION_OPEN, botId)
+    openSession: (botId, sessionId, transcriptPath, workspaceId) => (sessionId === undefined
+      ? ipcRenderer.invoke(CH_BOTS_SESSION_OPEN, botId, undefined, undefined, workspaceId)
       : ipcRenderer.invoke(CH_BOTS_SESSION_OPEN, botId, sessionId, transcriptPath)),
     onSessionShown: callback => subscribe(CH_BOTS_SESSION_SHOWN, callback),
     listSessions: botId => ipcRenderer.invoke(CH_BOTS_SESSIONS_LIST, botId),
@@ -630,6 +634,11 @@ const api: LingxiApi = {
       list: botId => ipcRenderer.invoke(CH_BOTS_TASKS_LIST, botId),
       cancel: (botId, taskId) => ipcRenderer.invoke(CH_BOTS_TASK_CANCEL, botId, taskId),
       onChanged: callback => subscribe(CH_BOTS_TASKS_CHANGED, callback),
+    },
+    workspaceRequests: {
+      list: botId => ipcRenderer.invoke(CH_BOTS_WORKSPACE_REQUESTS_LIST, botId),
+      decide: (botId, requestId, decision) => ipcRenderer.invoke(CH_BOTS_WORKSPACE_REQUEST_DECIDE, botId, requestId, decision),
+      onChanged: callback => subscribe(CH_BOTS_WORKSPACE_REQUESTS_CHANGED, callback),
     },
     onPromptSent: callback => subscribe(CH_BOTS_PROMPT_SENT, callback),
     loginItem: {

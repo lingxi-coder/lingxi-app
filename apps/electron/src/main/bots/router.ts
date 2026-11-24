@@ -32,6 +32,7 @@ import {
   type ToolCall,
   type ToolResult,
 } from './routerTools.js';
+import type { WorkspaceBackend } from './workspaceRequests.js';
 
 /** The newest protocol revision first. */
 export const SUPPORTED_PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26'] as const;
@@ -42,6 +43,8 @@ const TOKEN = /^Bearer ([A-Za-z0-9_-]{43})$/;
 
 export interface BotRouterOptions {
   backend: DelegationBackend;
+  /** What `request_workspace` does; without it the tool answers that it cannot. */
+  workspaces?: WorkspaceBackend;
   warn?: (message: string) => void;
   /** Smaller in tests. */
   maxRequestBytes?: number;
@@ -307,8 +310,9 @@ export class BotRouter {
     // The engine gives up on a POST that has sent no headers within a minute, so
     // a call that may wait longer is answered as an event stream whose headers go
     // out at once. A client that cannot read one is never kept waiting that long.
-    const streaming = call.tool === 'get_task' && call.waitSeconds > 0 && String(request.headers.accept ?? '').includes('text/event-stream');
-    if (call.tool === 'get_task' && !streaming) call = { ...call, waitSeconds: Math.min(call.waitSeconds, PLAIN_WAIT_SECONDS) };
+    const streaming = (call.tool === 'get_task' || call.tool === 'request_workspace') && call.waitSeconds > 0
+      && String(request.headers.accept ?? '').includes('text/event-stream');
+    if ((call.tool === 'get_task' || call.tool === 'request_workspace') && !streaming) call = { ...call, waitSeconds: Math.min(call.waitSeconds, PLAIN_WAIT_SECONDS) };
     if (streaming) {
       response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store, no-transform', 'X-Content-Type-Options': 'nosniff' });
       response.flushHeaders();
@@ -319,7 +323,7 @@ export class BotRouter {
     response.once('close', () => controller.abort());
     let result: ToolResult;
     try {
-      result = await runToolCall(this.options.backend, caller, call, controller.signal, this.options.warn);
+      result = await runToolCall(this.options.backend, caller, call, controller.signal, this.options.warn, this.options.workspaces);
     } finally {
       this.calls.delete(controller);
     }

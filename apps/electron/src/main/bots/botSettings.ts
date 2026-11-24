@@ -1,22 +1,32 @@
 /**
  * The `settings.json` of a Bot's configuration home, and with it what the Bot
  * may touch. LingXi generates it; the engine reads it as the user settings of
- * the Bot's sessions. Project settings come only from the Bot's own workspace,
- * never from a folder bound to it, and the files that could loosen these
- * settings are among those the Bot may not edit.
+ * the Bot's sessions, whichever of the Bot's folders they work in. A session
+ * in a folder the owner bound reads that folder's own project settings as well
+ * (its hooks, MCP servers and skills are the owner's, as in any of their
+ * sessions there), and the files that could loosen these settings are among
+ * those the Bot may not edit, in the Bot's own folder and in the bound ones.
  *
  * What is generated:
- *  - `permissions.additionalDirectories`: the folders bound to the Bot.
+ *  - `permissions.additionalDirectories`: every folder the Bot works in, its
+ *    own `<bot>/workspace` included, so that a session in any of them reaches
+ *    the others.
  *  - `permissions.deny`: no `Read` (which the engine also applies to Grep and
  *    Glob) and no `Edit` (Edit, Write, NotebookEdit) in the other Bots, the other
  *    private data of the app, or the configuration home of normal sessions; no
  *    `Edit` in a folder bound read-only; no `Edit` in the files that decide what
- *    the Bot may do (`bot.json`, its settings and persona, `.mcp.json`) or in the
- *    tasks other Bots handed it.
+ *    the Bot may do (`bot.json`, its settings and persona, `.mcp.json`, and the
+ *    project settings of a bound folder) or in the tasks other Bots handed it.
  *  - `permissions.allow`: reading and writing the Bot's own memory, which the
  *    engine does not exempt from the working-directory rule, and the tools of the
  *    Bot router, which hand work to other Bots (what that work may do is decided
  *    by the permissions of the Bot that gets it, not by this).
+ *  - `autoMemoryDirectory`: the Bot's memory folder, so that a session in any
+ *    folder remembers the same things. This is the user layer of the engine's
+ *    settings, the one every session of the Bot reads whether or not its folder
+ *    is trusted; a trusted bound folder whose own project settings name another
+ *    memory folder would take precedence over it, which is the owner's choice
+ *    to make in their own folder.
  *  - `sandbox`: on, refusing to start without it, and the same private places
  *    unreadable to the commands of the Bash tool, which no permission rule
  *    reaches. The sandbox is off in the engine unless the settings turn it on.
@@ -46,6 +56,8 @@ export const MANAGED_FILE = '.lingxi-bot-managed.json';
 export interface ManagedSettings {
   model?: string;
   defaultMode?: PermissionModeId;
+  /** Where the Bot's memory is, for a session in whichever folder. */
+  autoMemoryDirectory?: string;
   additionalDirectories: string[];
   allow: string[];
   deny: string[];
@@ -82,6 +94,11 @@ function isolatedPaths(store: BotStore, botId: string): string[] {
   return [...paths].sort();
 }
 
+/** What decides, in a folder the owner bound, what a session there may do next time: the Bot may not edit it. */
+function projectConfigFiles(folder: string): string[] {
+  return [join(folder, '.lingxi', 'settings.json'), join(folder, '.lingxi', 'settings.local.json'), join(folder, '.mcp.json')];
+}
+
 export function buildManagedSettings(store: BotStore, record: BotRecord, workspaces: readonly BotWorkspace[]): ManagedSettings {
   const botId = record.bot_id;
   const botDir = store.botDir(botId);
@@ -96,14 +113,16 @@ export function buildManagedSettings(store: BotStore, record: BotRecord, workspa
     ...[
       join(botDir, 'bot.json'),
       join(home, 'LINGXI.md'), join(home, 'settings.json'), join(home, 'settings.local.json'), join(home, '.lingxi.json'), join(home, MANAGED_FILE),
-      join(workspace, '.lingxi', 'settings.json'), join(workspace, '.lingxi', 'settings.local.json'), join(workspace, '.mcp.json'),
+      ...projectConfigFiles(workspace),
+      ...workspaces.flatMap((bound) => projectConfigFiles(bound.path)),
     ].map((path) => pathRule('Edit', path, false)),
     pathRule('Edit', store.tasksDir(botId)),
   ];
   return {
     ...(record.model !== undefined ? { model: record.model } : {}),
     ...(record.permission_mode !== undefined ? { defaultMode: record.permission_mode } : {}),
-    additionalDirectories: workspaces.map((bound) => bound.path),
+    autoMemoryDirectory: memory,
+    additionalDirectories: [workspace, ...workspaces.map((bound) => bound.path)],
     allow: [pathRule('Read', memory), pathRule('Edit', memory), ...routerToolRules()],
     deny,
     denyRead: isolated,
@@ -136,15 +155,17 @@ function writeIfChanged(path: string, text: string): void {
 function parseManaged(text: string, path: string): ManagedSettings {
   try {
     const input = plainObject(JSON.parse(text), 'managed settings');
-    if (input['v'] !== 1 || Object.keys(input).some((key) => !['v', 'model', 'defaultMode', 'additionalDirectories', 'allow', 'deny', 'denyRead'].includes(key))) {
+    if (input['v'] !== 1 || Object.keys(input).some((key) => !['v', 'model', 'defaultMode', 'autoMemoryDirectory', 'additionalDirectories', 'allow', 'deny', 'denyRead'].includes(key))) {
       throw new Error('unsupported');
     }
     const lists = (['additionalDirectories', 'allow', 'deny', 'denyRead'] as const).map((key) => stringList(input[key], key));
     if (lists.some((list) => list === undefined) || (input['model'] !== undefined && typeof input['model'] !== 'string')
+      || (input['autoMemoryDirectory'] !== undefined && typeof input['autoMemoryDirectory'] !== 'string')
       || (input['defaultMode'] !== undefined && !isPermissionModeId(input['defaultMode']))) throw new Error('invalid');
     return {
       ...(typeof input['model'] === 'string' ? { model: input['model'] } : {}),
       ...(isPermissionModeId(input['defaultMode']) ? { defaultMode: input['defaultMode'] } : {}),
+      ...(typeof input['autoMemoryDirectory'] === 'string' ? { autoMemoryDirectory: input['autoMemoryDirectory'] } : {}),
       additionalDirectories: lists[0]!, allow: lists[1]!, deny: lists[2]!, denyRead: lists[3]!,
     };
   } catch {
@@ -161,9 +182,11 @@ function union(left: ManagedSettings, right: ManagedSettings): ManagedSettings {
   const merge = (a: string[], b: string[]): string[] => [...new Set([...a, ...b])];
   const model = right.model ?? left.model;
   const defaultMode = right.defaultMode ?? left.defaultMode;
+  const autoMemoryDirectory = right.autoMemoryDirectory ?? left.autoMemoryDirectory;
   return {
     ...(model !== undefined ? { model } : {}),
     ...(defaultMode !== undefined ? { defaultMode } : {}),
+    ...(autoMemoryDirectory !== undefined ? { autoMemoryDirectory } : {}),
     additionalDirectories: merge(left.additionalDirectories, right.additionalDirectories),
     allow: merge(left.allow, right.allow),
     deny: merge(left.deny, right.deny),
@@ -197,6 +220,8 @@ export function applyManagedSettings(
   const settings = structuredClone(existing);
   if (next.model !== undefined) settings['model'] = next.model;
   else if (previous?.model !== undefined && settings['model'] === previous.model) delete settings['model'];
+  if (next.autoMemoryDirectory !== undefined) settings['autoMemoryDirectory'] = next.autoMemoryDirectory;
+  else if (previous?.autoMemoryDirectory !== undefined && settings['autoMemoryDirectory'] === previous.autoMemoryDirectory) delete settings['autoMemoryDirectory'];
   const permissions = objectField(settings, 'permissions', 'permissions');
   if (next.defaultMode !== undefined) permissions['defaultMode'] = next.defaultMode;
   else if (previous?.defaultMode !== undefined && permissions['defaultMode'] === previous.defaultMode) delete permissions['defaultMode'];

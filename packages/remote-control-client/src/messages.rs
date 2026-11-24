@@ -85,6 +85,17 @@ pub mod methods {
     pub const BOT_THREADS_LIST: &str = "bot.threads.list";
     /// Viewer request (Bot-aware viewers only): start a new chat of a Bot.
     pub const BOT_THREAD_CREATE: &str = "bot.thread.create";
+    /// Viewer request (Bot-aware viewers only): the folders a Bot works in, the
+    /// desktop's projects it can be given, and what it asked for.
+    pub const BOT_WORKSPACES_LIST: &str = "bot.workspaces.list";
+    /// Viewer request (Bot-aware viewers only): give a Bot one of the desktop's projects.
+    pub const BOT_WORKSPACE_ADD: &str = "bot.workspace.add";
+    /// Viewer request (Bot-aware viewers only): change how far a Bot may go in a folder.
+    pub const BOT_WORKSPACE_SET_MODE: &str = "bot.workspace.set_mode";
+    /// Viewer request (Bot-aware viewers only): take a folder away from a Bot.
+    pub const BOT_WORKSPACE_REMOVE: &str = "bot.workspace.remove";
+    /// Viewer request (Bot-aware viewers only): answer a folder a Bot asked for.
+    pub const BOT_WORKSPACE_REQUEST_DECIDE: &str = "bot.workspace.request.decide";
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,6 +1083,17 @@ pub struct RemoteBotSummary {
     /// Epoch milliseconds of the Bot's latest chat activity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<u64>,
+    /// Folders the Bot asked for that nobody has answered. Missing, or anything but a count, reads as none.
+    #[serde(
+        default,
+        deserialize_with = "count_or_zero",
+        skip_serializing_if = "is_zero"
+    )]
+    pub pending_workspace_requests: u32,
+}
+
+fn is_zero(count: &u32) -> bool {
+    *count == 0
 }
 
 /// A count, and zero for anything else: the Bot stays in the list with a bad number.
@@ -1120,6 +1142,10 @@ pub struct BotThreadCreateParams {
     pub bot_id: String,
     /// Chosen by the viewer; makes a retry after a reconnect recognizable.
     pub client_request_id: String,
+    /// The folder the chat works in: a `workspace_id` of `bot.workspaces.list`.
+    /// Absent, the chat works in the Bot's own folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
 }
 
 /// `bot.thread.create` result.
@@ -1127,6 +1153,135 @@ pub struct BotThreadCreateParams {
 pub struct BotThreadCreateResult {
     /// The new chat's session id.
     pub session_id: String,
+}
+
+// ---------------------------------------------------------------------------
+// The folders a Bot works in
+// ---------------------------------------------------------------------------
+//
+// Besides its own folder a Bot works in folders of the owner's. A viewer sees
+// them, changes how far the Bot may go in one, takes one away, answers the
+// requests the Bot made for more, and starts a chat in one. A viewer can give a
+// Bot only a folder that is among the desktop's projects: it never names a path
+// of its own. Every method answers with the folders as they are after it.
+
+/// How far a Bot may go in a folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteBotWorkspaceMode {
+    /// The Bot may read what the folder holds.
+    Read,
+    /// The Bot may read and change it.
+    Write,
+}
+
+/// A folder of the owner's that a Bot works in, besides its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteBotWorkspace {
+    /// Names the folder for as long as the Bot has it, and the same whenever it
+    /// is given again: for `bot.thread.create`, `set_mode` and `remove`.
+    pub workspace_id: String,
+    /// What the owner calls the folder; the folder's name if they did not name it.
+    pub label: String,
+    /// Where the folder is, on the desktop.
+    pub path: String,
+    /// How far the Bot may go in it.
+    pub mode: RemoteBotWorkspaceMode,
+}
+
+/// A project of the desktop that the Bot does not have yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteBotProject {
+    /// Where the project is; what `bot.workspace.add` takes.
+    pub path: String,
+    /// The project's name.
+    pub label: String,
+}
+
+/// A folder the Bot asked for while it worked, and nobody has answered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteBotWorkspaceRequest {
+    /// Names the request, for `bot.workspace.request.decide`.
+    pub request_id: String,
+    /// The folder.
+    pub path: String,
+    /// How far the Bot asked to go in it.
+    pub mode: RemoteBotWorkspaceMode,
+    /// What the Bot said it wants the folder for. One line.
+    pub reason: String,
+    /// Epoch milliseconds.
+    pub created_at: u64,
+}
+
+/// `bot.workspaces.list` (request).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotWorkspacesListParams {
+    /// Bot id.
+    pub bot_id: String,
+}
+
+/// The answer to `bot.workspaces.list` and to each method below: the Bot's
+/// folders as they are now.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct BotWorkspacesResult {
+    /// The folders the owner gave the Bot, besides its own.
+    pub workspaces: Vec<RemoteBotWorkspace>,
+    /// The desktop's projects that the Bot does not have: what may be added.
+    pub projects: Vec<RemoteBotProject>,
+    /// What the Bot asked for and nobody answered, oldest first.
+    pub requests: Vec<RemoteBotWorkspaceRequest>,
+}
+
+/// `bot.workspace.add` (request): give the Bot one of the desktop's projects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotWorkspaceAddParams {
+    /// Bot id.
+    pub bot_id: String,
+    /// The `path` of one of the `projects` of `bot.workspaces.list`.
+    pub path: String,
+    /// How far the Bot may go in it.
+    pub mode: RemoteBotWorkspaceMode,
+}
+
+/// `bot.workspace.set_mode` (request).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotWorkspaceSetModeParams {
+    /// Bot id.
+    pub bot_id: String,
+    /// The folder.
+    pub workspace_id: String,
+    /// How far the Bot may go in it from now on.
+    pub mode: RemoteBotWorkspaceMode,
+}
+
+/// `bot.workspace.remove` (request): take the folder away from the Bot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotWorkspaceRemoveParams {
+    /// Bot id.
+    pub bot_id: String,
+    /// The folder.
+    pub workspace_id: String,
+}
+
+/// The answer to a folder a Bot asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteBotWorkspaceDecision {
+    /// Give the Bot the folder, with the access it asked for.
+    Approve,
+    /// Give it nothing.
+    Deny,
+}
+
+/// `bot.workspace.request.decide` (request).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotWorkspaceRequestDecideParams {
+    /// Bot id.
+    pub bot_id: String,
+    /// The request.
+    pub request_id: String,
+    /// The answer.
+    pub decision: RemoteBotWorkspaceDecision,
 }
 
 #[cfg(test)]

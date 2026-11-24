@@ -16,6 +16,8 @@ export interface ScheduledCronJob {
 }
 export type ScheduledTaskDraft = {
   scopeId?: string;
+  /** For a Bot's routine: the id of the folder of the Bot it runs in. Not set, it runs in the Bot's own, or stays where it was put. */
+  folderId?: string;
   automation?: ScheduledAutomation;
   title: string;
   instructions: string;

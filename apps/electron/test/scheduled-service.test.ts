@@ -122,6 +122,7 @@ async function harness(t: TestContext) {
   let checkBinding = async (_sessionId: string) => {};
   let ensureFailure: Error | undefined;
   let managed: CronJobDto[] = [];
+  let manageHook: ((request: CronRequestDto) => CronJobDto[] | undefined) | undefined;
   const runtime = (ref: SessionRef, transcriptPath?: string) => ({ projectPath: ref.projectPath, sessionMode: ref.mode ?? 'code',
     fixtureTask: (saved: CronJobDto): CronJobDto => {
       const config = saved.automation!;
@@ -142,7 +143,7 @@ async function harness(t: TestContext) {
     },
     getWorkspaceState: async () => ({ transcript_path: transcriptPath ?? catalogRows.get(ref.projectPath)?.find(row => row.uuid === ref.sessionId)?.path ?? join(ref.projectPath, `${ref.sessionId}.jsonl`) }),
     markCronRunStarted: async (runId: string, sessionId: string) => { await checkBinding(sessionId); bindings.push({ runId, sessionId }); },
-    manageCron: async (request: CronRequestDto) => { requests.push(request); return managed; },
+    manageCron: async (request: CronRequestDto) => { requests.push(request); return manageHook?.(request) ?? managed; },
     scheduledModelCatalog: async () => ({ details: [], current: 'openai/project-model' }),
     runScheduledTurn: async (runId: string, saved: CronJobDto, beforeStart?: () => Promise<void>) => { await beforeStart?.(); await afterBinding(); turns.push({ runId, task: saved, ref }); return execute(runId, saved); },
   }) as unknown as SessionRuntime;
@@ -197,6 +198,7 @@ async function harness(t: TestContext) {
     globalSource: runtime({ projectPath: global, sessionId: targetId }),
     runtime, mounted,
     setManaged: (jobs: CronJobDto[]) => { managed = jobs; },
+    setManageHook: (hook: typeof manageHook) => { manageHook = hook; },
     setExecute: (callback: typeof execute) => { execute = callback; },
     setPrepareTarget: (callback: typeof prepareTarget) => { prepareTarget = callback; },
     setResolveSource: (callback: typeof resolveSource) => { resolveSource = callback; },
@@ -552,7 +554,7 @@ test('brand discovery failures never fall back to an unrelated workspace', async
 const botTarget = '66666666-7777-4888-8999-000000000000';
 
 /** The Bots the scheduler is told of: one that exists, as `BotService` answers for its folder. */
-function botsOf(h: Awaited<ReturnType<typeof harness>>, options: { model?: string } = {}) {
+function botsOf(h: Awaited<ReturnType<typeof harness>>, options: { model?: string; folders?: { id: string; path: string; label?: string }[] } = {}) {
   const root = join(h.directory, 'bots');
   const workspace = join(root, 'Bot0000000000000000001', 'workspace');
   const rows: { uuid: string; title: string; mode: 'code' }[] = [{ uuid: botTarget, title: 'Bot chat', mode: 'code' }];
@@ -561,7 +563,21 @@ function botsOf(h: Awaited<ReturnType<typeof harness>>, options: { model?: strin
     list: async (path) => { catalogCalls.push(`list ${path}`); return { sessions: rows } as never; },
     find: async (path, sessionId) => { catalogCalls.push(`find ${path} ${sessionId}`); return rows.find((row) => row.uuid === sessionId) as never; },
   };
-  const bot: RoutineBot = { botId: 'Bot0000000000000000001', name: 'Research', workspace, ...(options.model ? { model: options.model } : {}), catalog: () => catalog };
+  // The folders the owner gave the Bot, what each routine was told, the chats that work in a folder, and the sessions claimed (with how many runs had started by then).
+  const extra = [...(options.folders ?? [])];
+  const chosen = new Map<string, string>();
+  const claims: { sessionId: string; startedBefore: number }[] = [];
+  const chats = new Map<string, string>();
+  const folders = () => [{ id: 'default', path: workspace, label: '' }, ...extra.map((folder) => ({ id: folder.id, path: folder.path, label: folder.label ?? basename(folder.path) }))];
+  const bot: RoutineBot = {
+    botId: 'Bot0000000000000000001', name: 'Research', workspace, ...(options.model ? { model: options.model } : {}), catalog: () => catalog,
+    folders,
+    folderOf: (routineId) => { const found = folders().find((folder) => folder.id === (chosen.get(routineId) ?? 'default')); return found && { id: found.id, path: found.path }; },
+    setFolder: (routineId, workspaceId) => { if (workspaceId === undefined) chosen.delete(routineId); else chosen.set(routineId, workspaceId); },
+    chosenFolders: () => Object.fromEntries(chosen),
+    claim: (sessionId) => { claims.push({ sessionId, startedBefore: h.background.length }); },
+    folderOfChat: (sessionId) => chats.get(sessionId),
+  };
   const present = new Set([workspace]);
   const deleting = new Set<string>();
   const api: RoutineBots = {
@@ -570,7 +586,7 @@ function botsOf(h: Awaited<ReturnType<typeof harness>>, options: { model?: strin
     isBotWorkspace: (path) => basename(path) === 'workspace' && dirname(dirname(path)) === root,
   };
   h.service.attachBots(api);
-  return { bot, workspace, rows, catalogCalls, deleting, remove: () => { present.delete(workspace); }, api };
+  return { bot, workspace, rows, catalogCalls, deleting, remove: () => { present.delete(workspace); }, api, extra, chosen, claims, chats };
 }
 
 async function until(condition: () => Promise<boolean>): Promise<void> {
@@ -680,6 +696,101 @@ test('a routine of a Bot runs in the Bot\'s workspace although it is not a proje
   assert.deepEqual(h.background.map((item) => [item.ref.projectPath, item.empty, item.model]), [[b.workspace, true, 'bot/model']]);
   assert.deepEqual(h.notifications.map((item) => item.ref), [{ projectPath: b.workspace, sessionId: result.sessionId }], 'the notification names the Bot\'s workspace, which the host opens as the Bot\'s chat');
   assert.deepEqual(h.bindings.map((binding) => binding.sessionId), [result.sessionId]);
+});
+
+test('a routine of a Bot runs as the Bot in the folder it was given, and the notification names that folder', async (t) => {
+  const h = await harness(t);
+  const folder = join(h.directory, 'owner-repo');
+  const b = botsOf(h, { folders: [{ id: 'wabc', path: folder }] });
+  b.chosen.set('task-1', 'wabc');
+  const source = h.runtime({ projectPath: b.workspace, sessionId: targetId });
+  const result = await runClaim(h.service, source, 'bot-folder', task({ model: 'bot/model' }));
+  assert.deepEqual(h.background.map((item) => [item.ref.projectPath, item.empty]), [[folder, true]], 'the run works in the folder, not in the Bot\'s own');
+  assert.deepEqual(b.claims, [{ sessionId: result.sessionId, startedBefore: 0 }], 'the session is the Bot\'s before its engine starts');
+  assert.deepEqual(h.notifications.map((item) => item.ref), [{ projectPath: folder, sessionId: result.sessionId }]);
+  assert.deepEqual(h.bindings.map((binding) => binding.sessionId), [result.sessionId]);
+  assert.deepEqual(h.errors, []);
+});
+
+test('a routine of a Bot that was given no folder runs in the Bot\'s own, and is claimed all the same', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h, { folders: [{ id: 'wabc', path: join(h.directory, 'owner-repo') }] });
+  const result = await runClaim(h.service, h.runtime({ projectPath: b.workspace, sessionId: targetId }), 'bot-own', task());
+  assert.deepEqual(h.background.map((item) => item.ref.projectPath), [b.workspace]);
+  assert.deepEqual(b.claims, [{ sessionId: result.sessionId, startedBefore: 0 }]);
+});
+
+test('a routine whose folder is not the Bot\'s any more pauses with the reason instead of running somewhere else', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  b.chosen.set('task-1', 'wgone');
+  const source = h.runtime({ projectPath: b.workspace, sessionId: targetId });
+  await assert.rejects(runClaim(h.service, source, 'folder-gone', task()), /paused: The folder this routine works in is not one of the Bot's any more/);
+  assert.equal(h.background.length, 0, 'nothing started, in the Bot\'s own folder or anywhere');
+  assert.deepEqual(b.claims, []);
+  assert.match(h.notifications.at(-1)?.body ?? '', /not one of the Bot's any more/);
+  // The folder comes back, and the routine runs again where it was.
+  b.extra.push({ id: 'wgone', path: join(h.directory, 'back') });
+  await runClaim(h.service, source, 'folder-back', task());
+  assert.deepEqual(h.background.map((item) => item.ref.projectPath), [join(h.directory, 'back')]);
+});
+
+test('a routine that targets a chat of the Bot runs where that chat works, in a folder of the Bot or its own', async (t) => {
+  const h = await harness(t);
+  const folder = join(h.directory, 'owner-repo');
+  const b = botsOf(h, { folders: [{ id: 'wabc', path: folder }] });
+  const inFolder = '22222222-3333-4444-8555-666666666666';
+  b.chats.set(inFolder, folder);
+  h.setResolveSource(async (ref) => ({ path: join(ref.projectPath, `${ref.sessionId}.jsonl`), mode: 'code' }));
+  const source = h.runtime({ projectPath: b.workspace, sessionId: targetId });
+  await runClaim(h.service, source, 'target-folder', task({ runMode: 'selected_session', targetSessionId: inFolder }));
+  assert.deepEqual(h.background.map((item) => [item.ref.projectPath, item.ref.sessionId]), [[folder, inFolder]]);
+  assert.deepEqual(b.claims.map((claim) => claim.sessionId), [inFolder]);
+  await runClaim(h.service, source, 'target-own', task({ runMode: 'selected_session', targetSessionId: botTarget }));
+  assert.equal(h.background[1]!.ref.projectPath, b.workspace, 'a chat the Bot has not put elsewhere is in its own folder');
+});
+
+test('a Bot\'s scope lists its folders for the routine to choose from, only when it has folders besides its own', async (t) => {
+  const h = await harness(t);
+  const alone = botsOf(h);
+  assert.equal('folders' in h.service.scopes()[2]!, false);
+  alone.extra.push({ id: 'wabc', path: join(h.directory, 'owner-repo'), label: 'Repo' }, { id: 'wdef', path: join(h.directory, 'notes') });
+  assert.deepEqual(h.service.scopes()[2], { id: alone.workspace, label: 'Research', botId: alone.bot.botId, folders: [{ id: 'default', label: '' }, { id: 'wabc', label: 'Repo' }, { id: 'wdef', label: 'notes' }] });
+});
+
+test('the folder of a routine is chosen when it is made or changed, and forgotten with it', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h, { folders: [{ id: 'wabc', path: join(h.directory, 'owner-repo') }] });
+  await writeCatalog(b.workspace, [task()]);
+  const second = { ...task(), id: 'task-2', automation: { ...task().automation!, sessionMode: 'code' as const } };
+  let made = false;
+  h.setManageHook((request) => {
+    if (request.action === 'create') { made = true; return [task(), second]; }
+    if (request.action === 'delete') { made = false; return [task()]; }
+    return made ? [task(), second] : [task()];
+  });
+  await h.service.manage(b.workspace, { action: 'create', automation: task().automation }, 'code', 'wabc');
+  assert.deepEqual(b.chosen, new Map([['task-2', 'wabc']]), 'the routine that is new is the one that was told a folder');
+  assert.deepEqual(h.service.routineFolders(b.workspace), { 'task-2': 'wabc' });
+  await h.service.manage(b.workspace, { action: 'update', id: 'task-2', automation: second.automation }, 'code', 'default');
+  assert.deepEqual(h.service.routineFolders(b.workspace), {}, 'the Bot\'s own folder is the one nothing is kept for');
+  await h.service.manage(b.workspace, { action: 'update', id: 'task-2', automation: second.automation }, 'code', 'wabc');
+  assert.deepEqual(h.service.routineFolders(b.workspace), { 'task-2': 'wabc' });
+  await h.service.manage(b.workspace, { action: 'update', id: 'task-2', automation: second.automation });
+  assert.deepEqual(h.service.routineFolders(b.workspace), { 'task-2': 'wabc' }, 'a change that names no folder leaves it');
+  await h.service.manage(b.workspace, { action: 'delete', id: 'task-2' });
+  assert.deepEqual(h.service.routineFolders(b.workspace), {}, 'the folder goes with the routine');
+  assert.deepEqual(h.errors, []);
+});
+
+test('only the routines of a Bot have a folder to choose, and only one the Bot has, when made or changed', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h, { folders: [{ id: 'wabc', path: join(h.directory, 'owner-repo') }] });
+  await assert.rejects(h.service.manage(h.project, { action: 'create', automation: task().automation }, 'code', 'wabc'), /Only the routines of a Bot/);
+  await assert.rejects(h.service.manage(b.workspace, { action: 'create', automation: task().automation }, 'code', 'wnope'), /no such folder/);
+  await assert.rejects(h.service.manage(b.workspace, { action: 'list' }, 'code', 'wabc'), /made or changed/);
+  assert.equal(h.ensured.length, 0, 'nothing started for a request that was refused');
+  assert.deepEqual(h.service.routineFolders(h.project), {}, 'a project has no folders of routines');
 });
 
 test('a routine of a Bot that is being deleted, or is gone, does not run', async (t) => {

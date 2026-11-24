@@ -11,6 +11,11 @@ import { SessionRuntimeManager } from '../src/main/sessionRuntimeManager.js';
 import { botFixture, SESSION } from './bot-helpers.js';
 
 const OTHER = '22222222-3333-4444-8555-666666666666';
+/** A runtime manager that has no session open and starts none. */
+const NO_RUNTIMES = {
+  newSession: async (): Promise<never> => { throw new Error('unused'); }, openSession: async () => ({}), closeProject: async () => undefined,
+  closeSession: async () => undefined, restart: async () => undefined, setSessionDirectoryGrants: () => undefined, runtimeSummaries: [],
+};
 
 test('a workspace\'s launch settings carry its directory grants unless the session has grants of its own', async (t) => {
   const manager = new SessionRuntimeManager({
@@ -36,9 +41,9 @@ test('the engine of a Bot is started in the Bot workspace with the Bot home, its
   const service = new BotService({
     store: f.store,
     platform: 'darwin',
-    runtimes: { newSession: async () => { throw new Error('unused'); }, openSession: async () => ({}), closeProject: async () => undefined },
+    runtimes: NO_RUNTIMES,
     catalogFor: () => ({
-      list: async () => ({ sessions: [] }), find: async () => undefined, invalidate: () => undefined,
+      list: async () => ({ sessions: [] }), find: async () => undefined, select: async () => undefined, invalidate: () => undefined,
       workspaceSettings: async () => ({ environment: { FROM_SETTINGS: 'x' }, configHome: '/ignored' }),
     }),
   });
@@ -46,8 +51,8 @@ test('the engine of a Bot is started in the Bot workspace with the Bot home, its
   const workspace = f.store.workspaceDir(bot.bot_id);
   const home = f.store.homeDir(bot.bot_id);
   const manager = new SessionRuntimeManager({
-    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: service.ownsWorkspace(ref.projectPath), model: service.modelFor(ref.projectPath) }),
-    workspaceSettings: (projectPath) => service.launchSettings(projectPath),
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: service.ownsSession(ref), model: service.modelFor(ref.projectPath, ref.sessionId) }),
+    workspaceSettings: (projectPath, ref) => service.launchSettings(projectPath, ref.sessionId),
   });
   t.after(() => manager.dispose());
   const runtime = await manager.ensure({ projectPath: workspace, sessionId: SESSION }, false);
@@ -58,15 +63,54 @@ test('the engine of a Bot is started in the Bot workspace with the Bot home, its
   assert.equal(launch.configHome, home);
   assert.equal(launch.globalConfigPath, join(home, '.lingxi.json'));
   assert.deepEqual(launch.additionalDirectories, [repo, docs]);
+  // The folder's own project/local settings never apply to a Bot session.
+  assert.equal(launch.userSettingsOnly, true);
   assert.deepEqual(launch.settingsEnvironment, { FROM_SETTINGS: 'x', LINGXI_CONFIG_DIR: home });
   assert.deepEqual(buildBridgeArguments({
     workspace: launch.workspace, bridgeDir: '/bridge', sessionId: SESSION, configHome: launch.configHome, globalConfigPath: launch.globalConfigPath,
-    additionalDirectories: launch.additionalDirectories, model: launch.model, hasApiKey: false, trusted: launch.trusted,
+    userSettingsOnly: launch.userSettingsOnly, additionalDirectories: launch.additionalDirectories, model: launch.model, hasApiKey: false, trusted: launch.trusted,
   }), [
     '--cwd', workspace, '--bridge-dir', '/bridge', '--session-id', SESSION,
     '--session-config-home', home, '--session-global-config-path', join(home, '.lingxi.json'),
-    '--add-dir', repo, '--add-dir', docs, '--model', 'a/b', '--trusted-workspace',
+    '--session-user-settings-only', '--add-dir', repo, '--add-dir', docs, '--model', 'a/b', '--trusted-workspace',
   ]);
+});
+
+test('a session of a Bot in a folder of the owner\'s is started there, trusted, with the Bot home and every other folder granted, while the owner\'s own session there is not', async (t) => {
+  const f = botFixture(t);
+  const repo = f.folder('repo');
+  const docs = f.folder('docs');
+  const service = new BotService({
+    store: f.store,
+    platform: 'darwin',
+    runtimes: NO_RUNTIMES,
+    catalogFor: () => ({
+      list: async () => ({ sessions: [] }), find: async () => undefined, select: async () => undefined, invalidate: () => undefined,
+      workspaceSettings: async () => ({ environment: {}, configHome: '/ignored' }),
+    }),
+  });
+  const bot = service.create({ name: 'Wide', model: 'a/b', workspaces: [{ path: repo, mode: 'write' }, { path: docs, mode: 'read' }] });
+  const own = f.store.workspaceDir(bot.bot_id);
+  const home = f.store.homeDir(bot.bot_id);
+  service.claimSession(bot.bot_id, SESSION);
+  const manager = new SessionRuntimeManager({
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: service.ownsSession(ref), model: service.modelFor(ref.projectPath, ref.sessionId) }),
+    workspaceSettings: async (projectPath, ref) => service.ownsSession({ projectPath, sessionId: ref.sessionId })
+      ? service.launchSettings(projectPath, ref.sessionId) : { environment: {}, configHome: '/owner-home' },
+  });
+  t.after(() => manager.dispose());
+  const inRepo: BridgeLaunchConfig = await ((await manager.ensure({ projectPath: repo, sessionId: SESSION }, false)) as any).opts.launchConfig();
+  assert.equal(inRepo.workspace, repo);
+  assert.equal(inRepo.trusted, true, 'the owner bound the folder to the Bot by making it');
+  assert.equal(inRepo.model, 'a/b');
+  assert.equal(inRepo.configHome, home);
+  assert.deepEqual(inRepo.additionalDirectories, [own, docs], 'the folder it works in is not granted to itself; the Bot\'s own folder is');
+  const owners: BridgeLaunchConfig = await ((await manager.ensure({ projectPath: repo, sessionId: OTHER }, false)) as any).opts.launchConfig();
+  assert.equal(owners.trusted, false, 'a session of the owner\'s in the same folder is no Bot\'s');
+  assert.equal(owners.configHome, '/owner-home');
+  assert.equal(owners.model, undefined);
+  manager.setSessionDirectoryGrants(SESSION, [own, docs, f.folder('added')]);
+  assert.deepEqual(((await ((await manager.ensure({ projectPath: repo, sessionId: SESSION }, false)) as any).opts.launchConfig()) as BridgeLaunchConfig).additionalDirectories, [own, docs, f.folder('added')], 'a folder given later is what the next launch reads');
 });
 
 test('the process that is started reads the Bot home, whatever the owner\'s environment says', { skip: process.platform === 'win32' }, async (t) => {
@@ -74,9 +118,9 @@ test('the process that is started reads the Bot home, whatever the owner\'s envi
   const service = new BotService({
     store: f.store,
     platform: 'darwin',
-    runtimes: { newSession: async () => { throw new Error('unused'); }, openSession: async () => ({}), closeProject: async () => undefined },
+    runtimes: NO_RUNTIMES,
     catalogFor: () => ({
-      list: async () => ({ sessions: [] }), find: async () => undefined, invalidate: () => undefined,
+      list: async () => ({ sessions: [] }), find: async () => undefined, select: async () => undefined, invalidate: () => undefined,
       // The Bot's own settings try to point the engine back at the owner's home.
       workspaceSettings: async () => ({ environment: { LINGXI_CONFIG_DIR: f.defaultConfigHome, KEPT: 'yes' }, configHome: f.defaultConfigHome }),
     }),
@@ -95,8 +139,8 @@ setInterval(() => {}, 1000);
   process.env['LINGXI_CONFIG_DIR'] = f.defaultConfigHome;
   const manager = new SessionRuntimeManager({
     serverBin, bridgeRoot: join(root, 'runtime'), stopTimeoutMs: 500, listProcessCommands: () => [],
-    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: service.ownsWorkspace(ref.projectPath) }),
-    workspaceSettings: (projectPath) => service.launchSettings(projectPath),
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: service.ownsSession(ref) }),
+    workspaceSettings: (projectPath, ref) => service.launchSettings(projectPath, ref.sessionId),
   });
   t.after(async () => {
     await manager.dispose();

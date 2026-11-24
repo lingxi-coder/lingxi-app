@@ -1,4 +1,14 @@
-import { DATA_CHANNEL_DEAD_MS, RemoteRpcError, type ManualClock, type RemoteBotSummary, type RemoteSessionSummary } from '@lingxi/bridge-client/remote';
+import {
+  DATA_CHANNEL_DEAD_MS,
+  RemoteRpcError,
+  type BotWorkspacesResult,
+  type ManualClock,
+  type RemoteBotSummary,
+  type RemoteBotWorkspace,
+  type RemoteBotWorkspaceMode,
+  type RemoteBotWorkspaceRequest,
+  type RemoteSessionSummary,
+} from '@lingxi/bridge-client/remote';
 import { RemoteClient } from '../../src/remote/remoteClient';
 import type { ViewerConnection } from '../../src/remote/viewerConnection';
 import type { FakeHost, HostConnection } from './fakeHost';
@@ -23,6 +33,31 @@ export const thread = (id: string, botId: string, change: Partial<RemoteSessionS
   ...change,
 });
 
+export const folder = (id: string, change: Partial<RemoteBotWorkspace> = {}): RemoteBotWorkspace => ({
+  workspace_id: id,
+  label: `Folder ${id}`,
+  path: `/Users/me/${id}`,
+  mode: 'read',
+  ...change,
+});
+
+export const folderRequest = (id: string, change: Partial<RemoteBotWorkspaceRequest> = {}): RemoteBotWorkspaceRequest => ({
+  request_id: id,
+  path: `/Users/me/${id}`,
+  mode: 'write',
+  reason: `${id} is needed`,
+  created_at: 1_790_000_000_000,
+  ...change,
+});
+
+/** What of a Bot's folders the scripted desktop has: the folders, the projects it could be given, and the requests. */
+export interface BotFolders {
+  workspaces: RemoteBotWorkspace[];
+  /** The desktop's own project list: a viewer may add only these, and only the ones the Bot does not have. */
+  projects: Array<{ path: string; label: string }>;
+  requests: RemoteBotWorkspaceRequest[];
+}
+
 const isBotMethod = (method: string): boolean => /^bots?\./u.test(method);
 
 /**
@@ -39,6 +74,8 @@ export class BotHost {
   readonly failWith = new Map<string, RemoteRpcError>();
   /** The chats made so far, by `client_request_id`: a repeat is given the first one, as the real desktop does. */
   readonly created = new Map<string, string>();
+  /** The folders of each Bot; a Bot that is not in it has none. */
+  readonly folders = new Map<string, BotFolders>();
   /** The next `times` requests of this method are done, and then the link they came over is ended: no answer arrives. */
   dropping: { method: string; times: number } | undefined;
   /** While set, `bot.thread.create` and `bot.threads.list` wait for it before they answer. */
@@ -94,11 +131,57 @@ export class BotHost {
         await this.holdCreate;
         return { session_id: sessionId };
       }
+      case 'bot.workspaces.list':
+        return this.foldersOf(String(params['bot_id']));
+      case 'bot.workspace.add': {
+        const entry = this.entryOf(String(params['bot_id']));
+        const project = entry.projects.find((candidate) => candidate.path === params['path']);
+        if (project === undefined) throw new RemoteRpcError('invalid_params', 'the folder is not one of the desktop\'s projects');
+        entry.projects = entry.projects.filter((candidate) => candidate !== project);
+        entry.workspaces.push({ workspace_id: `w-${project.label}`, label: project.label, path: project.path, mode: params['mode'] as RemoteBotWorkspaceMode });
+        return this.foldersOf(String(params['bot_id']));
+      }
+      case 'bot.workspace.set_mode': {
+        const found = this.entryOf(String(params['bot_id'])).workspaces.find((candidate) => candidate.workspace_id === params['workspace_id']);
+        if (found === undefined) throw new RemoteRpcError('invalid_params', 'no such folder');
+        found.mode = params['mode'] as RemoteBotWorkspaceMode;
+        return this.foldersOf(String(params['bot_id']));
+      }
+      case 'bot.workspace.remove': {
+        const entry = this.entryOf(String(params['bot_id']));
+        const found = entry.workspaces.find((candidate) => candidate.workspace_id === params['workspace_id']);
+        if (found === undefined) throw new RemoteRpcError('invalid_params', 'no such folder');
+        entry.workspaces = entry.workspaces.filter((candidate) => candidate !== found);
+        entry.projects.push({ path: found.path, label: found.label });
+        return this.foldersOf(String(params['bot_id']));
+      }
+      case 'bot.workspace.request.decide': {
+        const entry = this.entryOf(String(params['bot_id']));
+        const asked = entry.requests.find((candidate) => candidate.request_id === params['request_id']);
+        if (asked === undefined) throw new RemoteRpcError('invalid_params', 'no such request');
+        entry.requests = entry.requests.filter((candidate) => candidate !== asked);
+        if (params['decision'] === 'approve') entry.workspaces.push({ workspace_id: `w-${asked.request_id}`, label: asked.request_id, path: asked.path, mode: asked.mode });
+        return this.foldersOf(String(params['bot_id']));
+      }
       case 'session.attach':
         return { mode: 'snapshot', epoch: 'e1' };
       default:
         return {};
     }
+  }
+
+  private entryOf(botId: string): BotFolders {
+    let entry = this.folders.get(botId);
+    if (entry === undefined) {
+      entry = { workspaces: [], projects: [], requests: [] };
+      this.folders.set(botId, entry);
+    }
+    return entry;
+  }
+
+  /** The folders as the real desktop answers with them, copied: what a viewer holds is not what the desktop changes next. */
+  private foldersOf(botId: string): BotWorkspacesResult {
+    return structuredClone(this.entryOf(botId));
   }
 }
 

@@ -11,13 +11,14 @@ import { BotMemoryController } from '../bridge/botMemory';
 import { BotRoutinesController, routineScopeOf } from '../bridge/botRoutines';
 import { BotSkillsController } from '../bridge/botSkills';
 import { BotTasksController, type BotTasksState } from '../bridge/botTasks';
+import { requestsOfBot, type BotWorkspaceRequestsController } from '../bridge/botWorkspaceRequests';
 import { relativeActivity, removeBot, startBotChat, type BotActivity } from '../bridge/botSession';
 import { botRemoteAvailability, useRemoteControl } from '../bridge/remoteControl';
 import type { BotsController } from '../bridge/botsStore';
 import type { UseBridge } from '../bridge/bridgeTypes';
 import { AgentAvatar } from './AgentAvatar';
 import { rovingIndex } from './rovingIndex';
-import { BotMemoryPanel, BotRoutinesPanel, BotSkillsPanel, BotTasksPanel } from './BotPanels';
+import { BotMemoryPanel, BotRoutinesPanel, BotSkillsPanel, BotTasksPanel, BotWorkspaceRequestsPanel } from './BotPanels';
 import {
   BotAcceptField,
   BotConfirm,
@@ -93,7 +94,7 @@ export function BotDeleteTasksNote({ state }: { state: Pick<BotTasksState, 'view
 /** What of the Scheduled page's data a Bot's routines panel reads. */
 export type BotRoutinesBridge = Pick<UseBridge, 'scheduledScopes' | 'manageScheduled'>;
 
-export function BotDetail({ botId, listed, api, bots, guard, activity, models, pickFolder, visible, sessionLoading, routines: routinesBridge, onBack, onOpenChat, onOpenTaskChat, onNewRoutine, onOpenRoutine, onDelete, deleteRequest }: {
+export function BotDetail({ botId, listed, api, bots, guard, activity, models, pickFolder, visible, sessionLoading, routines: routinesBridge, requests, onBack, onOpenChat, onOpenTaskChat, onNewRoutine, onOpenRoutine, onDelete, deleteRequest }: {
   botId: string;
   /** The Bot as the list has it: its name is there to show before the Bot itself has been read. */
   listed: BotUi | undefined;
@@ -108,9 +109,11 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
   visible: boolean;
   sessionLoading: boolean;
   routines: BotRoutinesBridge;
+  /** The folders the Bots asked for and the owner has not answered; the page that lists the Bots reads them. */
+  requests: BotWorkspaceRequestsController;
   onBack(): void;
-  /** Show a new chat of this Bot in the chat view. Rejects with the reason it could not start. Its earlier chats are listed in the sidebar. */
-  onOpenChat(): Promise<void>;
+  /** Show a new chat of this Bot in the chat view, in the folder `workspaceId` names (the Bot's own if it is absent). Rejects with the reason it could not start. Its earlier chats are listed in the sidebar. */
+  onOpenChat(workspaceId?: string): Promise<void>;
   /** Show the chat that does a task, which is a chat of the Bot that was given the task: this one or another. Rejects with the reason it could not start. */
   onOpenTaskChat(botId: string, sessionId: string): Promise<void>;
   /** Go to the Scheduled page to make a task that runs as this Bot, in the scope the scheduler lists for it. */
@@ -130,6 +133,7 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
   const state = useObservable(editor);
   const leaving = useObservable(guard);
   const taskState = useObservable(tasks);
+  const waiting = requestsOfBot(useObservable(requests), botId).length;
   const known = useObservable(bots);
   const remoteAvailability = botRemoteAvailability(useRemoteControl().status);
   const [tab, setTab] = useState<BotTab>('general');
@@ -177,7 +181,8 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
     if (!outcome.ok) setOpenError(outcome.message);
     setOpening(undefined);
   };
-  const open = () => openWith('new', onOpenChat);
+  const open = () => openWith('new', () => onOpenChat());
+  const openIn = (workspaceId: string | undefined) => openWith(`folder:${workspaceId ?? ''}`, () => onOpenChat(workspaceId));
   const remove = async () => {
     setDeleting({ busy: true, error: '' });
     const outcome = await removeBot(onDelete);
@@ -217,7 +222,10 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
     {state.phase === 'failed' ? <p role="alert" className="bots-problem">{tr('bots_detail_failed', state.loadError ?? '')} <button type="button" onClick={() => void editor.load()}>{tr('common_retry')}</button></p> : null}
     {state.phase === 'loading' ? <p role="status" className="bots-muted">{tr('bots_detail_loading')}</p> : null}
     <div className="bots-tabs" role="tablist" aria-label={tr('bots_sections_label')} onKeyDown={tabKey}>
-      {TABS.map((id) => <button key={id} type="button" role="tab" id={`${tabsId}-tab-${id}`} aria-selected={tab === id} aria-controls={`${tabsId}-panel`} tabIndex={tab === id ? 0 : -1} onClick={() => setTab(id)}>{tabLabel(id)}</button>)}
+      {TABS.map((id) => <button key={id} type="button" role="tab" id={`${tabsId}-tab-${id}`} aria-selected={tab === id} aria-controls={`${tabsId}-panel`} tabIndex={tab === id ? 0 : -1} onClick={() => setTab(id)}>
+        {tabLabel(id)}
+        {id === 'folders' && waiting > 0 ? <span className="bots-tab-badge" role="img" aria-label={tr('bots_requests_waiting', waiting)}>{waiting}</span> : null}
+      </button>)}
     </div>
     <div className="bots-tabpanel" role="tabpanel" id={`${tabsId}-panel`} aria-labelledby={`${tabsId}-tab-${tab}`} tabIndex={0}>
     {tab === 'routines' ? <BotRoutinesPanel controller={routines} scopeId={routineScope} onNew={onNewRoutine} onOpen={onOpenRoutine} /> : null}
@@ -226,10 +234,12 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
     {tab === 'memory' ? <BotMemoryPanel controller={memory} /> : null}
     {tab === 'market' && state.bot ? <BotMarketPanel api={api} bot={state.bot} onInstalled={bot=>bots.put(bot)} /> : null}
     {tab === 'skills' ? <BotSkillsPanel controller={skills} /> : null}
+    {tab === 'folders' ? <BotWorkspaceRequestsPanel controller={requests} botId={botId} onApproved={(bot) => editor.adopt(bot)} /> : null}
     {DRAFT_TABS.has(tab) && state.phase === 'ready' ? <>
       {tab === 'general' ? <BotGeneralFields draft={state.draft} problems={problems} models={models} disabled={state.save.kind === 'saving'} onChange={(change) => editor.setDraft(change)} /> : null}
       {tab === 'persona' ? <BotPersonaField draft={state.draft} problems={problems} disabled={state.save.kind === 'saving'} onChange={(change) => editor.setDraft(change)} /> : null}
-      {tab === 'folders' ? <BotFoldersField draft={state.draft} problems={problems} disabled={state.save.kind === 'saving'} pickFolder={pickFolder} onChange={(change) => editor.setDraft(change)} /> : null}
+      {tab === 'folders' ? <BotFoldersField draft={state.draft} problems={problems} disabled={state.save.kind === 'saving'} pickFolder={pickFolder} saved={state.bot?.workspaces}
+        chatDisabled={opening !== undefined || sessionLoading} onNewChat={(workspaceId) => void openIn(workspaceId)} onChange={(change) => editor.setDraft(change)} /> : null}
       {tab === 'permissions' ? <>
         <BotPermissionField draft={state.draft} disabled={state.save.kind === 'saving'} onChange={(change) => editor.setDraft(change)} />
         <BotRemoteField draft={state.draft} availability={remoteAvailability} disabled={state.save.kind === 'saving'} onChange={(change) => editor.setDraft(change)} />

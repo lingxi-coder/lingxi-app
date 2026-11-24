@@ -28,7 +28,10 @@ export const CH_BOTS_CREATE = 'lingxi:bots:create';
 export const CH_BOTS_UPDATE = 'lingxi:bots:update';
 /** Invoke(`botId: string`) → `void`. Stops the Bot's sessions, then moves its folder to the trash folder. */
 export const CH_BOTS_DELETE = 'lingxi:bots:delete';
-/** Invoke(`botId: string, sessionId?: string`) → `BotSessionRefUi`. Without `sessionId` a new session starts. */
+/**
+ * Invoke(`botId: string, sessionId?: string, transcriptPath?: string, workspaceId?: string`) → `BotSessionRefUi`.
+ * Without `sessionId` a new session starts, in the folder `workspaceId` names (the Bot's own folder if it is left out).
+ */
 export const CH_BOTS_SESSION_OPEN = 'lingxi:bots:sessions:open';
 /**
  * Event(`BotSessionRefUi`). The host opened a session of a Bot on its own (the owner clicked
@@ -71,6 +74,12 @@ export const CH_BOTS_TASKS_CHANGED = 'lingxi:bots:tasks:changed';
  * was handed to it). The engine's events carry no user prompts, so the window shows the row itself.
  */
 export const CH_BOTS_PROMPT_SENT = 'lingxi:bots:prompt:sent';
+/** Invoke(`botId?: string`) → `BotWorkspaceRequestUi[]`. What the Bots have asked to be given and the owner has not answered, newest last; of one Bot, or of all. */
+export const CH_BOTS_WORKSPACE_REQUESTS_LIST = 'lingxi:bots:workspace-requests:list';
+/** Invoke(`botId: string, requestId: string, decision: 'approve' | 'deny'`) → `BotUi`. The owner answers a Bot's request for a folder; approving binds the folder to the Bot. */
+export const CH_BOTS_WORKSPACE_REQUEST_DECIDE = 'lingxi:bots:workspace-requests:decide';
+/** Event(`BotWorkspaceRequestsChangedUi`). A Bot asked for a folder, or a request was answered or expired. The window reads the requests again. */
+export const CH_BOTS_WORKSPACE_REQUESTS_CHANGED = 'lingxi:bots:workspace-requests:changed';
 /** Invoke → `BotsLoginItemUi`. Whether the system opens the app in the background when the owner logs in, read from the system each time. */
 export const CH_BOTS_LOGIN_ITEM_GET = 'lingxi:bots:login-item:get';
 /** Invoke(`enabled: boolean`) → `BotsLoginItemUi`. Turns the login item on or off and answers how the system has it now. Rejects where the app cannot be a login item. */
@@ -96,10 +105,63 @@ export interface BotsLoginItemUi {
 
 export type BotWorkspaceMode = 'read' | 'write';
 
-/** A folder of the owner's that the Bot may read, or read and change. */
-export interface BotWorkspaceUi {
+/** What the owner gives to bind a folder: one of theirs that the Bot may read, or read and change. */
+export interface BotWorkspaceInputUi {
   path: string;
   mode: BotWorkspaceMode;
+  /** What the owner calls the folder; absent: its name. */
+  label?: string;
+}
+
+/** A folder as the Bot has it. */
+export interface BotWorkspaceUi extends BotWorkspaceInputUi {
+  /** Names the folder for as long as it is bound, and the same whenever it is bound again. */
+  id: string;
+  /** Epoch milliseconds. */
+  addedAt: number;
+}
+
+/** The id of the Bot's own folder, which every Bot has and none gives up. It is not among the folders of a `BotUi`. */
+export const BOT_DEFAULT_WORKSPACE_ID = 'default';
+
+/** Whether the Bot's commands run in the engine's sandbox, and which hosts they may reach. */
+export interface BotSandboxUi {
+  enabled: boolean;
+  allowedDomains: string[];
+}
+
+export interface BotDatasetScopeUi {
+  source: string;
+  dataset: string;
+  write: boolean;
+  reportReview: boolean;
+}
+
+/** What of the owner's Local Apps and datasets the Bot may reach. */
+export interface BotScopeUi {
+  localApps: string[];
+  datasets: BotDatasetScopeUi[];
+}
+
+export type BotReplyApprovalUi = 'never' | 'uncertain' | 'always';
+
+export interface BotQuietHoursUi {
+  /** `HH:MM`, 24-hour. */
+  start: string;
+  end: string;
+  /** An IANA time zone name. */
+  timeZone: string;
+}
+
+/** How the Bot answers in the channels it was published to. */
+export interface BotAutoReplyUi {
+  policy: string;
+  keywords: string[];
+  quietHours?: BotQuietHoursUi;
+  cooldownSec: number;
+  thresholds: { decline: number; run: number };
+  approval: BotReplyApprovalUi;
+  decisionProviderId?: string;
 }
 
 export interface BotUi {
@@ -120,7 +182,11 @@ export interface BotUi {
   acceptFrom?: string[];
   /** Whether the owner's approved devices can reach this Bot through Remote Control. Absent: they cannot. */
   remote?: boolean;
+  /** The folders of the owner's that the Bot may work in, besides its own. */
   workspaces: BotWorkspaceUi[];
+  sandbox: BotSandboxUi;
+  scope: BotScopeUi;
+  autoReply: BotAutoReplyUi;
   /** Epoch milliseconds; absent while the Bot has had no session. */
   lastActivityAt?: number;
 }
@@ -133,7 +199,10 @@ export interface BotCreateRequest {
   model?: string;
   permissionMode?: PermissionModeId;
   acceptFrom?: string[];
-  workspaces?: BotWorkspaceUi[];
+  workspaces?: BotWorkspaceInputUi[];
+  sandbox?: BotSandboxUi;
+  scope?: BotScopeUi;
+  autoReply?: BotAutoReplyUi;
 }
 
 export interface BotUpdateRequest {
@@ -147,8 +216,12 @@ export interface BotUpdateRequest {
   acceptFrom?: string[];
   /** Whether the owner's approved devices can reach this Bot through Remote Control. */
   remote?: boolean;
-  /** Replaces the whole list. */
-  workspaces?: BotWorkspaceUi[];
+  /** Replaces the whole list. A folder that is in it already keeps its id; one that is left out is removed, and its chats end. */
+  workspaces?: BotWorkspaceInputUi[];
+  /** Each replaces the whole of what it names. */
+  sandbox?: BotSandboxUi;
+  scope?: BotScopeUi;
+  autoReply?: BotAutoReplyUi;
 }
 
 /** Enough to attach the window's session view to a Bot's session. */
@@ -156,10 +229,37 @@ export interface BotSessionRefUi {
   botId: string;
   projectPath: string;
   sessionId: string;
+  /** The folder of the Bot the session works in. */
+  workspaceId?: string;
 }
 
+/** A chat of a Bot, and the folder it works in. */
+export type BotSessionRowUi = SessionRowDto & {
+  /** The folder of the Bot the chat worked in, if the Bot still works there. */
+  workspaceId?: string;
+  /** Where the chat worked, when that folder was removed from the Bot: the history is kept, and the chat is resumed by adding the folder again. */
+  removedPath?: string;
+};
+
 export interface BotSessionsUi {
-  sessions: SessionRowDto[];
+  sessions: BotSessionRowUi[];
+}
+
+/** A Bot asked for a folder; the owner decides. */
+export interface BotWorkspaceRequestUi {
+  requestId: string;
+  botId: string;
+  botName: string;
+  path: string;
+  mode: BotWorkspaceMode;
+  /** What the Bot said it wants the folder for. One line. */
+  reason: string;
+  /** Epoch milliseconds. */
+  createdAt: number;
+}
+
+export interface BotWorkspaceRequestsChangedUi {
+  botIds: string[];
 }
 
 export interface BotMemoryEntryUi {
@@ -245,7 +345,7 @@ export interface BotsApi {
   create(request: BotCreateRequest): Promise<BotUi>;
   update(botId: string, expectedRevision: number, patch: BotUpdateRequest): Promise<BotUi>;
   delete(botId: string): Promise<void>;
-  openSession(botId: string, sessionId?: string, transcriptPath?: string): Promise<BotSessionRefUi>;
+  openSession(botId: string, sessionId?: string, transcriptPath?: string, workspaceId?: string): Promise<BotSessionRefUi>;
   /** Called when the host made a session of a Bot the displayed one without being asked by the window. */
   onSessionShown(callback: (session: BotSessionRefUi) => void): () => void;
   listSessions(botId: string): Promise<BotSessionsUi>;
@@ -271,6 +371,14 @@ export interface BotsApi {
     cancel(botId: string, taskId: string): Promise<void>;
     /** Called, after a burst of changes, with the Bots whose tasks changed. */
     onChanged(callback: (change: BotTasksChangedUi) => void): () => void;
+  };
+  /** The folders the Bots asked for and the owner has not answered. */
+  workspaceRequests: {
+    list(botId?: string): Promise<BotWorkspaceRequestUi[]>;
+    /** Approving binds the folder to the Bot; its open chats are given it as soon as they are not working. */
+    decide(botId: string, requestId: string, decision: 'approve' | 'deny'): Promise<BotUi>;
+    /** Called when a Bot asked for a folder or a request was answered or expired. */
+    onChanged(callback: (change: BotWorkspaceRequestsChangedUi) => void): () => void;
   };
   /** Called when the host sent a prompt to a session of a Bot on its own. */
   onPromptSent(callback: (prompt: BotPromptSentUi) => void): () => void;

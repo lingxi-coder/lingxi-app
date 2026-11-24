@@ -5,9 +5,10 @@ import { join } from 'node:path';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import type { BotMemoryEntryUi, BotSkillUi, BotUi, BotsApi } from '../src/shared/bots';
+import type { BotMemoryEntryUi, BotSkillUi, BotUi, BotWorkspaceRequestUi, BotsApi } from '../src/shared/bots';
 import { BotMemoryController } from '../src/renderer/bridge/botMemory';
 import { BotSkillsController } from '../src/renderer/bridge/botSkills';
+import { BotWorkspaceRequestsController } from '../src/renderer/bridge/botWorkspaceRequests';
 import { BotLeaveGuard } from '../src/renderer/bridge/botLeaveGuard';
 import { BotsController, type BotsState } from '../src/renderer/bridge/botsStore';
 import { botDraftProblems, emptyBotDraft, permissionModeNeedsConfirmation } from '../src/renderer/bridge/botForm';
@@ -19,7 +20,7 @@ import { tr } from '../src/renderer/i18n/locale';
 import { agentAvatarIndex } from '../src/renderer/components/AgentAvatar';
 import { BotSaveBar } from '../src/renderer/components/BotDetail';
 import { BotFoldersField, BotGeneralFields, BotPermissionField, BotPersonaField } from '../src/renderer/components/BotFields';
-import { BotMemoryPanel, BotSkillsPanel } from '../src/renderer/components/BotPanels';
+import { BotMemoryPanel, BotSkillsPanel, BotWorkspaceRequestsPanel } from '../src/renderer/components/BotPanels';
 import { BotCreate, BotList, Bots, shownProblems } from '../src/renderer/components/Bots';
 import { BetaSidebar, BetaTopBar } from '../src/renderer/components/BetaDesktop';
 import { Theme } from '../src/renderer/theme/ThemeContext';
@@ -186,6 +187,46 @@ test('folders show their access and can be removed; a Bot with none works only i
   assert.match(render(React.createElement(BotFoldersField, { draft: full, problems: {}, pickFolder: async () => null, onChange: noop })), /<button type="button" disabled="">Add folder…<\/button>/);
   const duplicated = render(React.createElement(BotFoldersField, { draft, problems: { folders: 'folders_duplicate' }, pickFolder: async () => null, onChange: noop }));
   assert.match(duplicated, /role="alert"[^>]*>The same folder is listed twice\./);
+});
+
+test('a folder can be given a name, and a Bot that exists offers a chat in its own folder and in each folder it has saved', () => {
+  const draft = { ...emptyBotDraft(), workspaces: [
+    { path: '/work/notes', mode: 'read' as const, label: 'Notes' }, { path: '/work/site', mode: 'write' as const }, { path: '/work/new', mode: 'read' as const },
+  ] };
+  const saved = [{ id: 'wNotes', path: '/work/notes', mode: 'read' as const, addedAt: 1, label: 'Notes' }, { id: 'wSite', path: '/work/site', mode: 'write' as const, addedAt: 2 }];
+  const html = render(React.createElement(BotFoldersField, { draft, problems: {}, pickFolder: async () => null, saved, onNewChat: noop, onChange: noop }));
+  assert.match(html, /<input[^>]*class="bots-folder-name"[^>]*value="Notes"[^>]*>/, 'the name the owner gave');
+  assert.match(html, /<input[^>]*placeholder="site"[^>]*aria-label="Name of folder \/work\/site"/, 'without one, the folder\'s own name is what shows through');
+  assert.match(html, /<li class="bots-folder-own"><span class="bots-folder-name-text">Own workspace<\/span>/);
+  assert.ok(html.includes('aria-label="New chat in Own workspace"'));
+  assert.ok(html.includes('aria-label="New chat in Notes"'));
+  assert.ok(html.includes('aria-label="New chat in site"'));
+  assert.ok(!html.includes('New chat in new'), 'a folder that is not saved yet has no chat: the Bot does not have it');
+  // Where the Bot is not made yet there is nothing to start a chat of.
+  const unmade = render(React.createElement(BotFoldersField, { draft, problems: {}, pickFolder: async () => null, onChange: noop }));
+  assert.ok(!unmade.includes('New chat in') && !unmade.includes('bots-folder-own'));
+  // A chat is not started while another is being opened.
+  assert.equal([...render(React.createElement(BotFoldersField, { draft, problems: {}, pickFolder: async () => null, saved, chatDisabled: true, onNewChat: noop, onChange: noop })).matchAll(/class="bots-folder-chat"[^>]*disabled=""|disabled=""[^>]*class="bots-folder-chat"/g)].length, 3);
+  const tooLong = render(React.createElement(BotFoldersField, { draft, problems: { folders: 'folders_label_too_long' }, pickFolder: async () => null, onChange: noop }));
+  assert.match(tooLong, /role="alert"[^>]*>A folder&#x27;s name can have up to 80 characters\./);
+});
+
+test('what a Bot asked for is shown with the reason and the access, and can be allowed or denied; with nothing asked nothing is shown', async () => {
+  const asked: BotWorkspaceRequestUi[] = [
+    { requestId: 'r1', botId: 'b1', botName: 'Scribe', path: '/work/specs', mode: 'write', reason: 'to update the specs it was asked about', createdAt: Date.now() - 5 * MINUTES },
+    { requestId: 'r2', botId: 'b2', botName: 'Other', path: '/work/else', mode: 'read', reason: 'another Bot\'s', createdAt: Date.now() },
+  ];
+  const controller = new BotWorkspaceRequestsController({ list: async () => asked, decide: async () => bot(), onChanged: () => noop } as unknown as BotsApi['workspaceRequests'], noop);
+  await controller.load();
+  const html = render(React.createElement(BotWorkspaceRequestsPanel, { controller, botId: 'b1', onApproved: noop }));
+  assert.match(html, /<h2[^>]*>Folder requests<\/h2>/);
+  assert.match(html, /<span class="mono">\/work\/specs<\/span><span class="bots-tag">Read and write<\/span>/);
+  assert.ok(html.includes('to update the specs it was asked about'));
+  assert.ok(html.includes('Asked 5 minutes ago'));
+  assert.ok(html.includes('aria-label="Allow: /work/specs"') && html.includes('aria-label="Deny: /work/specs"'));
+  assert.ok(!html.includes('/work/else'), 'only this Bot\'s requests');
+  const none = render(React.createElement(BotWorkspaceRequestsPanel, { controller, botId: 'b3', onApproved: noop }));
+  assert.equal(none, '');
 });
 
 // ---- Saving ----

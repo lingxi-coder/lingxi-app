@@ -61,10 +61,11 @@ test('a Bot may use its bound folders and its own memory, and is walled off from
   const settings = settingsOf(f, bot);
   const memory = join(f.store.homeDir(bot.bot_id), 'projects', projectDirName(f.store.workspaceDir(bot.bot_id)), 'memdir');
   assert.equal(settings.model, 'anthropic/claude-test');
-  assert.deepEqual(settings.permissions.additionalDirectories, [writable, readonly]);
+  assert.deepEqual(settings.permissions.additionalDirectories, [f.store.workspaceDir(bot.bot_id), writable, readonly], 'the Bot own folder first, then the owner ones');
+  assert.equal(settings.autoMemoryDirectory, memory, 'a session in any folder keeps the one memory');
   assert.deepEqual(settings.permissions.allow, [read(memory), edit(memory), ...routerToolRules()]);
   assert.deepEqual(routerToolRules(), [
-    'mcp__bots__list_bots', 'mcp__bots__delegate_task', 'mcp__bots__get_task', 'mcp__bots__message_bot', 'mcp__bots__cancel_task', 'mcp__bots__attach_artifact',
+    'mcp__bots__list_bots', 'mcp__bots__delegate_task', 'mcp__bots__get_task', 'mcp__bots__message_bot', 'mcp__bots__cancel_task', 'mcp__bots__attach_artifact', 'mcp__bots__request_workspace',
   ], 'the engine names a tool of an MCP server mcp__<server>__<tool>, and each rule names exactly one');
 
   const isolated = [
@@ -92,6 +93,7 @@ test('a Bot may use its bound folders and its own memory, and is walled off from
     join(f.store.homeDir(bot.bot_id), 'settings.local.json'), join(f.store.homeDir(bot.bot_id), '.lingxi.json'), join(f.store.homeDir(bot.bot_id), MANAGED_FILE),
     join(f.store.workspaceDir(bot.bot_id), '.lingxi', 'settings.json'), join(f.store.workspaceDir(bot.bot_id), '.lingxi', 'settings.local.json'),
     join(f.store.workspaceDir(bot.bot_id), '.mcp.json'),
+    ...[writable, readonly].flatMap((folder) => [join(folder, '.lingxi', 'settings.json'), join(folder, '.lingxi', 'settings.local.json'), join(folder, '.mcp.json')]),
   ]) assert.ok(settings.permissions.deny.includes(edit(file, false)), `no changing ${file}`);
   assert.ok(settings.permissions.deny.includes(edit(f.store.tasksDir(bot.bot_id))), 'no changing the tasks other Bots handed it');
 
@@ -99,16 +101,52 @@ test('a Bot may use its bound folders and its own memory, and is walled off from
   assert.equal(settings.sandbox.failIfUnavailable, true);
 });
 
-test('a fresh file lists model, permissions and sandbox, and without a model or folders has neither', (t) => {
+test('a fresh file lists the memory folder, permissions and sandbox, and a model only when the Bot has one', (t) => {
   const f = botFixture(t);
   const bare = makeBot(f, { name: 'Bare' });
   const settings = settingsOf(f, bare);
-  assert.deepEqual(Object.keys(settings), ['permissions', 'sandbox']);
-  assert.ok(!('additionalDirectories' in settings.permissions));
-  assert.deepEqual(Object.keys(settings.permissions), ['allow', 'deny']);
+  assert.deepEqual(Object.keys(settings), ['autoMemoryDirectory', 'permissions', 'sandbox']);
+  assert.deepEqual(settings.permissions.additionalDirectories, [f.store.workspaceDir(bare.bot_id)], 'its own folder is always granted');
+  assert.deepEqual(Object.keys(settings.permissions), ['additionalDirectories', 'allow', 'deny']);
   assert.deepEqual(Object.keys(settings.sandbox), ['enabled', 'failIfUnavailable', 'filesystem']);
   const full = makeBot(f, { name: 'Full', model: 'a/b', workspaces: [{ path: f.folder('one'), mode: 'write' }] });
-  assert.deepEqual(Object.keys(settingsOf(f, full)), ['model', 'permissions', 'sandbox']);
+  assert.deepEqual(Object.keys(settingsOf(f, full)), ['model', 'autoMemoryDirectory', 'permissions', 'sandbox']);
+});
+
+test('the memory folder is the same whichever folder a session works in, and is set in the settings of the Bot home', (t) => {
+  const f = botFixture(t);
+  const bot = makeBot(f, { name: 'Remembers', workspaces: [{ path: f.folder('one'), mode: 'write' }, { path: f.folder('two'), mode: 'read' }] });
+  const memory = f.store.memoryDir(bot.bot_id);
+  assert.equal(settingsOf(f, bot).autoMemoryDirectory, memory);
+  assert.match(memory, /\/home\/projects\/[^/]+\/memdir$/, 'the folder the Bot has always kept it in: nothing is moved');
+  assert.deepEqual(readFileSync(settingsPath(f, bot), 'utf8').includes('autoMemoryDirectory'), true);
+  // Someone else's value is replaced while the Bot is, and what LingXi wrote is not left behind when it no longer writes it.
+  writeFileSync(settingsPath(f, bot), JSON.stringify({ autoMemoryDirectory: '/somewhere/else', theme: 'x' }));
+  writeBotSettings(f.store, bot);
+  assert.equal(settingsOf(f, bot).autoMemoryDirectory, memory);
+  assert.equal(JSON.parse(readFileSync(join(f.store.homeDir(bot.bot_id), MANAGED_FILE), 'utf8')).autoMemoryDirectory, memory);
+  const merged = applyManagedSettings({ autoMemoryDirectory: memory, theme: 'x' }, { autoMemoryDirectory: memory, additionalDirectories: [], allow: [], deny: [], denyRead: [] },
+    { additionalDirectories: [], allow: [], deny: [], denyRead: [] });
+  assert.ok(!('autoMemoryDirectory' in merged), 'a value LingXi wrote and no longer writes goes');
+  const kept = applyManagedSettings({ autoMemoryDirectory: '/mine' }, { autoMemoryDirectory: memory, additionalDirectories: [], allow: [], deny: [], denyRead: [] },
+    { additionalDirectories: [], allow: [], deny: [], denyRead: [] });
+  assert.equal(kept.autoMemoryDirectory, '/mine', 'and one somebody else wrote stays');
+});
+
+test('every folder of the Bot is granted to a session in any of them, and a bound one is protected from edits to what decides its sessions', (t) => {
+  const f = botFixture(t);
+  const one = f.folder('one');
+  const bot = makeBot(f, { name: 'Roams', workspaces: [{ path: one, mode: 'write' }] });
+  const settings = settingsOf(f, bot);
+  assert.deepEqual(settings.permissions.additionalDirectories, [f.store.workspaceDir(bot.bot_id), one]);
+  for (const file of ['.mcp.json', join('.lingxi', 'settings.json'), join('.lingxi', 'settings.local.json')]) {
+    assert.ok(settings.permissions.deny.includes(edit(join(one, file), false)), `no changing ${file} of a folder that is writable`);
+  }
+  assert.ok(!settings.permissions.deny.includes(edit(one)), 'but the rest of it is writable');
+  const unbound = f.store.update(bot.bot_id, 1, { workspaces: [] });
+  writeBotSettings(f.store, unbound);
+  assert.ok(!settingsOf(f, bot).permissions.deny.includes(edit(join(one, '.mcp.json'), false)), 'once it is unbound nothing is said of it');
+  assert.deepEqual(settingsOf(f, bot).permissions.additionalDirectories, [f.store.workspaceDir(bot.bot_id)]);
 });
 
 test('the sibling Bots are walled off from each other, and a new or a removed Bot changes every other Bot', (t) => {
@@ -189,12 +227,13 @@ test('what was put in the file by someone else stays, in place, once, however of
   assert.deepEqual(settings.sandbox.network, { allowLocalBinding: true });
   assert.deepEqual(settings.permissions.allow.slice(0, 1), ['Bash(ls:*)']);
   assert.deepEqual(settings.permissions.deny.slice(0, 1), ['Read(//somewhere/secret/**)']);
-  assert.deepEqual(settings.permissions.additionalDirectories, ['/extra', one]);
+  assert.deepEqual(settings.permissions.additionalDirectories, ['/extra', f.store.workspaceDir(bot.bot_id), one]);
   assert.deepEqual(settings.sandbox.filesystem.denyRead.slice(0, 1), ['/extra-secret']);
   for (const list of [settings.permissions.allow, settings.permissions.deny, settings.permissions.additionalDirectories, settings.sandbox.filesystem.denyRead]) {
     assert.equal(new Set(list).size, list.length, 'nothing is listed twice');
   }
   assert.deepEqual(Object.keys(settings).slice(0, 4), ['theme', 'env', 'hooks', 'permissions'], 'the file keeps its order');
+  assert.equal(settings.autoMemoryDirectory, f.store.memoryDir(bot.bot_id));
 });
 
 test('a change to the Bot takes out what it had put in and nothing else', (t) => {
@@ -208,14 +247,14 @@ test('a change to the Bot takes out what it had put in and nothing else', (t) =>
   const changed = f.store.update(bot.bot_id, 1, { workspaces: [{ path: keep, mode: 'read' }], model: null });
   writeBotSettings(f.store, changed);
   const settings = settingsOf(f, bot);
-  assert.deepEqual(settings.permissions.additionalDirectories, ['/mine', keep]);
+  assert.deepEqual(settings.permissions.additionalDirectories, ['/mine', f.store.workspaceDir(bot.bot_id), keep]);
   assert.ok(settings.permissions.deny.includes('Read(//mine/**)'));
   assert.ok(settings.permissions.deny.includes(edit(keep)), 'now read-only');
   assert.ok(!settings.permissions.deny.includes(edit(drop)), 'and the one that was dropped is not mentioned');
   assert.ok(!('model' in settings), 'the model it set is removed');
   const unbound = f.store.update(bot.bot_id, 2, { workspaces: [] });
   writeBotSettings(f.store, unbound);
-  assert.deepEqual(settingsOf(f, bot).permissions.additionalDirectories, ['/mine']);
+  assert.deepEqual(settingsOf(f, bot).permissions.additionalDirectories, ['/mine', f.store.workspaceDir(bot.bot_id)]);
   assert.ok(!settingsOf(f, bot).permissions.deny.includes(edit(keep)));
 });
 
@@ -288,7 +327,7 @@ test('a folder that is gone, or has become a link, is no longer granted', (t) =>
   assert.deepEqual(result.bound.map((workspace) => workspace.path), [fine]);
   assert.deepEqual(result.skipped.map((workspace) => workspace.path), [gone, swapped]);
   const settings = settingsOf(f, bot);
-  assert.deepEqual(settings.permissions.additionalDirectories, [fine]);
+  assert.deepEqual(settings.permissions.additionalDirectories, [f.store.workspaceDir(bot.bot_id), fine]);
   assert.ok(!settings.permissions.deny.includes(edit(swapped)));
 });
 

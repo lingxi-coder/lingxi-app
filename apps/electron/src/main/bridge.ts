@@ -2517,6 +2517,7 @@ export class SessionRuntime {
       initialProjectRoot: launch.initialProjectRoot,
       configHome: launch.configHome,
       globalConfigPath: launch.globalConfigPath,
+      userSettingsOnly: launch.userSettingsOnly,
       model: launch.model,
       hasCredentialStdin: true,
       trusted: launch.trusted,

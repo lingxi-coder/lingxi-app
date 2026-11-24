@@ -459,6 +459,63 @@ impl IosRemoteControlClient {
     pub async fn create_bot_thread(&self, bot_id: String) -> Result<String, RemoteFfiError> {
         self.inner.create_bot_thread(bot_id).await
     }
+    /// Start a Bot chat in one of the Bot's folders and return its session id.
+    pub async fn create_bot_thread_in_folder(
+        &self,
+        bot_id: String,
+        workspace_id: String,
+    ) -> Result<String, RemoteFfiError> {
+        self.inner
+            .create_bot_thread_in_folder(bot_id, workspace_id)
+            .await
+    }
+    /// The folders a Bot works in, the computer's projects it could be given, and
+    /// what it asked for.
+    pub async fn bot_workspaces(
+        &self,
+        bot_id: String,
+    ) -> Result<RemoteBotWorkspacesFfi, RemoteFfiError> {
+        self.inner.bot_workspaces(bot_id).await
+    }
+    /// Give a Bot one of the computer's projects.
+    pub async fn add_bot_workspace(
+        &self,
+        bot_id: String,
+        path: String,
+        mode: RemoteBotWorkspaceModeFfi,
+    ) -> Result<RemoteBotWorkspacesFfi, RemoteFfiError> {
+        self.inner.add_bot_workspace(bot_id, path, mode).await
+    }
+    /// Change how far a Bot may go in one of its folders.
+    pub async fn set_bot_workspace_mode(
+        &self,
+        bot_id: String,
+        workspace_id: String,
+        mode: RemoteBotWorkspaceModeFfi,
+    ) -> Result<RemoteBotWorkspacesFfi, RemoteFfiError> {
+        self.inner
+            .set_bot_workspace_mode(bot_id, workspace_id, mode)
+            .await
+    }
+    /// Take a folder away from a Bot.
+    pub async fn remove_bot_workspace(
+        &self,
+        bot_id: String,
+        workspace_id: String,
+    ) -> Result<RemoteBotWorkspacesFfi, RemoteFfiError> {
+        self.inner.remove_bot_workspace(bot_id, workspace_id).await
+    }
+    /// Answer a folder a Bot asked for.
+    pub async fn decide_bot_workspace_request(
+        &self,
+        bot_id: String,
+        request_id: String,
+        decision: RemoteBotWorkspaceDecisionFfi,
+    ) -> Result<RemoteBotWorkspacesFfi, RemoteFfiError> {
+        self.inner
+            .decide_bot_workspace_request(bot_id, request_id, decision)
+            .await
+    }
     /// The Bot a known chat belongs to.
     pub fn bot_of_thread(&self, session_id: String) -> Option<String> {
         self.inner.bot_of_thread(session_id)

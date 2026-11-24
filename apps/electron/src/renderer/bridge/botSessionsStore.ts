@@ -5,16 +5,15 @@
  * only when something has happened that adds to a chat or makes one.
  */
 
-import type { SessionRowDto } from '@lingxi/bridge-client';
-import type { BotPromptSentUi, BotUi, BotsApi } from '../../shared/bots';
+import type { BotPromptSentUi, BotSessionRowUi, BotUi, BotsApi } from '../../shared/bots';
 import { ipcErrorMessage, sortBots } from './botForm';
 import type { BotRuntimeActivity } from './botSession';
 import { ObservableState } from './observableState';
 import { sidebarSessionTimestamp } from './sessionPresentation';
 
 export interface BotSessionsEntry {
-  /** Newest first. Absent until a read has worked. */
-  sessions: readonly SessionRowDto[] | undefined;
+  /** Newest first, whichever of the Bot's folders each worked in. Absent until a read has worked. */
+  sessions: readonly BotSessionRowUi[] | undefined;
   /** A read is under way. While there are `sessions`, they are those of the read before. */
   loading: boolean;
   /** Why the last read failed. */

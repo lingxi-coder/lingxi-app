@@ -9,6 +9,7 @@ import { controlBorder } from '../theme/teamsTheme';
 import { botDraftProblems, createBot, emptyBotDraft, hasBotDraftProblems, sortBots, type BotDraft, type BotDraftProblems } from '../bridge/botForm';
 import { LoginItemController } from '../bridge/botLoginItem';
 import { botActivity, botRuntimes, relativeActivity, type BotActivity } from '../bridge/botSession';
+import { BotWorkspaceRequestsController, requestsOfBot } from '../bridge/botWorkspaceRequests';
 import type { BotsState } from '../bridge/botsStore';
 import type { UseBots } from '../bridge/useBots';
 import type { UseBridge } from '../bridge/bridgeTypes';
@@ -50,6 +51,15 @@ export function Bots({ visible, bots, api, bridge, onOpenChat, onNewRoutine, onO
     return () => window.removeEventListener('focus', refresh);
   }, [loginItem, visible]);
 
+  // What the Bots asked for and the owner has not answered is read whenever the page is on screen, and follows the host's word that it changed.
+  const [requests] = useState(() => new BotWorkspaceRequestsController(api.workspaceRequests, (bot) => controller.put(bot)));
+  useEffect(() => {
+    if (!visible) return undefined;
+    void requests.load();
+    return requests.watch();
+  }, [requests, visible]);
+  const asking = useObservable(requests);
+
   const runtimes = botRuntimes(bridge.bootstrap?.runtimes ?? [], bridge.sessionRuntimeStatus);
   const activityOf = (botId: string): BotActivity => botActivity(botId, runtimes);
   const models: ModelChoices = { references: bridge.desktop.models, details: bridge.desktop.modelDetails };
@@ -68,20 +78,22 @@ export function Bots({ visible, bots, api, bridge, onOpenChat, onNewRoutine, onO
       : view.kind === 'detail'
         ? <BotDetail key={view.botId} botId={view.botId} listed={state.bots.find((bot) => bot.botId === view.botId)} api={api} bots={controller} guard={bots.guard}
           activity={activityOf(view.botId)} models={models} pickFolder={bridge.pickBotFolder} visible={visible} sessionLoading={bridge.sessionLoading}
-          routines={bridge} onNewRoutine={onNewRoutine} onOpenRoutine={onOpenRoutine} deleteRequest={view.deleteRequest}
+          routines={bridge} requests={requests} onNewRoutine={onNewRoutine} onOpenRoutine={onOpenRoutine} deleteRequest={view.deleteRequest}
           onBack={() => setView({ kind: 'list' })}
-          onOpenChat={async () => { await bridge.openBotSession(view.botId); onOpenChat(); }}
+          onOpenChat={async (workspaceId) => { await bridge.openBotSession(view.botId, undefined, undefined, workspaceId); onOpenChat(); }}
           onOpenTaskChat={async (botId, sessionId) => { await bridge.openBotSession(botId, sessionId); onOpenChat(); }}
           onDelete={async () => { await bridge.deleteBot(view.botId); controller.remove(view.botId); setView({ kind: 'list' }); }} />
-        : <BotList state={state} activityOf={activityOf} onNew={() => setView({ kind: 'create' })}
+        : <BotList state={state} activityOf={activityOf} asking={(botId) => requestsOfBot(asking, botId).length} onNew={() => setView({ kind: 'create' })}
           onOpen={(botId) => setView({ kind: 'detail', botId })} onRetry={() => void controller.reload()}
           background={<BotsBackground keepAwake={bridge.bootstrap?.settings?.botsKeepAwake === true} onKeepAwake={(enabled) => void bridge.setBotsKeepAwake(enabled)} loginItem={loginItem} />} />}
   </section></ChatTopbarTarget.Provider>;
 }
 
-export function BotList({ state, activityOf, onNew, onOpen, onRetry, background }: {
+export function BotList({ state, activityOf, asking = () => 0, onNew, onOpen, onRetry, background }: {
   state: BotsState;
   activityOf(botId: string): BotActivity;
+  /** How many folders the Bot asked for that the owner has not answered. */
+  asking?(botId: string): number;
   onNew(): void;
   onOpen(botId: string): void;
   onRetry(): void;
@@ -106,13 +118,13 @@ export function BotList({ state, activityOf, onNew, onOpen, onRetry, background 
       <button type="button" data-variant="primary" onClick={onNew}>{tr('bots_create_first')}</button>
     </div> : null}
     {bots.length > 0 ? <ul className="bots-grid" aria-label={tr('bots_list_label')}>
-      {bots.map((bot) => <BotCard key={bot.botId} bot={bot} activity={activityOf(bot.botId)} onOpen={() => onOpen(bot.botId)} />)}
+      {bots.map((bot) => <BotCard key={bot.botId} bot={bot} activity={activityOf(bot.botId)} asking={asking(bot.botId)} onOpen={() => onOpen(bot.botId)} />)}
     </ul> : null}
     {bots.length > 0 ? background : null}
   </>;
 }
 
-function BotCard({ bot, activity, onOpen }: { bot: BotUi; activity: BotActivity; onOpen(): void }) {
+function BotCard({ bot, activity, asking, onOpen }: { bot: BotUi; activity: BotActivity; asking: number; onOpen(): void }) {
   return <li>
     <button type="button" className="bots-card" onClick={onOpen}>
       <span className="bots-avatar" aria-hidden="true"><AgentAvatar agentId={bot.botId} size={40} /></span>
@@ -120,6 +132,7 @@ function BotCard({ bot, activity, onOpen }: { bot: BotUi; activity: BotActivity;
       <span className="bots-card-description">{bot.description}</span>
       <span className="bots-card-footer">
         <BotStateChip activity={activity} />
+        {asking > 0 ? <span className="bots-state" data-state="waiting">{tr('bots_card_asking')}</span> : null}
         <span className="bots-muted">{bot.lastActivityAt !== undefined ? tr('bots_last_active', relativeActivity(bot.lastActivityAt)) : tr('bots_no_chats_yet')}</span>
       </span>
     </button>

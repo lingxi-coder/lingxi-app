@@ -22,7 +22,7 @@ import {
 } from '../src/renderer/bridge/botForm';
 
 function bot(overrides: Partial<BotUi> = {}): BotUi {
-  return { botId: 'b1', name: 'Scribe', description: 'Writes things down', createdAt: 1_000, updatedAt: 1_000, revision: 3, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, ...overrides };
+  return { botId: 'b1', name: 'Scribe', description: 'Writes things down', createdAt: 1_000, updatedAt: 1_000, revision: 3, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, scope: { localApps: [], datasets: [] }, ...overrides };
 }
 
 /** The wrapper Electron puts around an error thrown by an IPC handler. */
@@ -80,7 +80,7 @@ test('a new Bot sends the displayed approval mode and the trimmed fields the own
   assert.deepEqual(botCreateRequest({ ...emptyBotDraft(), name: '  Scribe  ' }), { name: 'Scribe', permissionMode: 'default' });
   assert.deepEqual(botCreateRequest({
     name: 'Scribe', description: ' notes ', persona: '# Scribe\n', model: 'builtin/small', permissionMode: 'plan',
-    workspaces: [{ path: '/work/a', mode: 'write' }], acceptFrom: [], remote: false, sandbox: { enabled: true, allowedDomains: [] },
+    workspaces: [{ path: '/work/a', mode: 'write' }], acceptFrom: [], remote: false, sandbox: { enabled: true, allowedDomains: [] }, scope: { localApps: [], datasets: [] },
   }), { name: 'Scribe', description: 'notes', persona: '# Scribe\n', model: 'builtin/small', permissionMode: 'plan', workspaces: [{ path: '/work/a', mode: 'write' }] });
 });
 

@@ -34,7 +34,7 @@ import { LocalAppRemoteGateway, type RemoteOwner, type RemoteRun } from './remot
 import type { LocalAppRtc } from './remoteRtc.js';
 import { LOCAL_APP_RTC_BROWSER_SOURCE } from './remoteRtcBrowser.js';
 import { LocalAppMcpManager } from './mcp.js';
-import { LocalAppMcpGateway } from './mcpGateway.js';
+import { LocalAppMcpGateway, type LocalAppBotAudience } from './mcpGateway.js';
 
 function withAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -457,6 +457,8 @@ export interface LocalAppHostOptions extends RuntimeOptions {
   edit: (request: LocalAppEditRequest) => Promise<void>;
   agentCatalog?: () => Promise<LocalAppAgentCatalog>;
   onMcpChanged?: () => void;
+  /** Every Bot and the applications it may use, asked once when the MCP gateway starts; later changes come through {@link LocalAppHost.publishBot}. */
+  bots?: () => LocalAppBotAudience[];
 }
 interface SourceSessionRef { projectPath: string; sessionId: string }
 type LocalAppRequestOrigin = { kind: 'native'; mode: 'chat' | 'code' | undefined; authoringOrder?: number; recoverExplicitBinding?: boolean; authoringSource?: AuthoringSessionSource } | { kind: 'tool' };
@@ -550,7 +552,7 @@ export class LocalAppHost {
       installed: () => this.changed(),
     });
     this.mcp = new LocalAppMcpManager({ changed: () => { this.changed(); options.onMcpChanged?.(); } });
-    this.mcpGateway = new LocalAppMcpGateway(options.configHome, this.mcp);
+    this.mcpGateway = new LocalAppMcpGateway(options.configHome, this.mcp, options.bots);
     this.runtime = new LocalAppRuntime(this.store, () => this.changed(), { ...options, mcp: this.mcp,
       onRunEnded: (appId, runId, reason) => this.runEnded(appId, runId, reason) });
     options.core.onDisconnected?.(error => {
@@ -944,6 +946,10 @@ export class LocalAppHost {
     await atomicJson(join(this.options.configHome, 'desktop-local-app-host.json'), { port: address.port, token: this.token, pid: process.pid });
   }
   async list(): Promise<DesktopLocalApp[]> { return (await this.store.list()).map(row => this.runtime.status(row)); }
+  /** Let a Bot's engine use these applications and no others; none takes its way in back. */
+  publishBot(audience: LocalAppBotAudience): Promise<void> { return this.mcpGateway.publishBot(audience); }
+  /** The Bot is gone: what it was given stops working at once. */
+  revokeBot(botId: string): Promise<void> { return this.mcpGateway.revokeBot(botId); }
   private get remoteSettingsPath(): string { return join(this.store.root, 'remote-access.v1.json'); }
   async remoteSettings(): Promise<Record<string, boolean>> {
     try {

@@ -170,6 +170,13 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "ja": "サンドボックス",
     "ko": "샌드박스"
   },
+  "bots_tab_scope": {
+    "zh-Hans": "范围",
+    "zh-Hant": "範圍",
+    "en": "Scope",
+    "ja": "スコープ",
+    "ko": "범위"
+  },
   "bots_sandbox_switch_title": {
     "zh-Hans": "Shell 命令沙箱",
     "zh-Hant": "Shell 指令沙箱",
@@ -1387,6 +1394,181 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "en": "At most 64 Bots can be chosen.",
     "ja": "選べる Bot は最大 64 個です。",
     "ko": "최대 64개의 Bot을 선택할 수 있습니다."
+  },
+  "bots_scope_intro": {
+    "zh-Hans": "这个 Bot 最多可以使用你的哪些本地应用和数据集。没有选中的，它都用不到。",
+    "zh-Hant": "這個 Bot 最多可以使用你的哪些本機應用程式和資料集。沒有選取的，它都用不到。",
+    "en": "The most this Bot can use of your Local Apps and datasets. What you leave out is not available to it.",
+    "ja": "この Bot が使えるローカルアプリとデータセットの上限です。選ばなかったものは、この Bot には使えません。",
+    "ko": "이 Bot이 사용할 수 있는 로컬 앱과 데이터세트의 최대 범위입니다. 선택하지 않은 것은 이 Bot이 사용할 수 없습니다."
+  },
+  "bots_scope_apps_hint": {
+    "zh-Hans": "在这台电脑上的对话里，这个 Bot 可以使用你选中的应用。",
+    "zh-Hant": "在這台電腦上的對話中，這個 Bot 可以使用你選取的應用程式。",
+    "en": "In its chats on this computer, the Bot can use the apps you choose.",
+    "ja": "このコンピュータ上のチャットで、Bot は選んだアプリを使えます。",
+    "ko": "이 컴퓨터의 채팅에서 Bot은 선택한 앱을 사용할 수 있습니다."
+  },
+  "bots_scope_apps_unknown": {
+    "zh-Hans": "本地应用列表尚未加载。",
+    "zh-Hant": "本機應用程式清單尚未載入。",
+    "en": "The list of Local Apps has not loaded yet.",
+    "ja": "ローカルアプリの一覧はまだ読み込まれていません。",
+    "ko": "로컬 앱 목록을 아직 불러오지 못했습니다."
+  },
+  "bots_scope_apps_empty": {
+    "zh-Hans": "这台电脑上还没有安装本地应用。",
+    "zh-Hant": "這台電腦上還沒有安裝本機應用程式。",
+    "en": "No Local Apps are installed on this computer.",
+    "ja": "このコンピュータにはローカルアプリがインストールされていません。",
+    "ko": "이 컴퓨터에 설치된 로컬 앱이 없습니다."
+  },
+  "bots_scope_app_missing": {
+    "zh-Hans": "这台电脑上没有安装。",
+    "zh-Hant": "這台電腦上沒有安裝。",
+    "en": "Not installed on this computer.",
+    "ja": "このコンピュータにはインストールされていません。",
+    "ko": "이 컴퓨터에 설치되어 있지 않습니다."
+  },
+  "bots_scope_app_unchecked": {
+    "zh-Hans": "无法确认它是否已安装。",
+    "zh-Hant": "無法確認它是否已安裝。",
+    "en": "Could not check whether it is installed.",
+    "ja": "インストールされているか確認できませんでした。",
+    "ko": "설치되어 있는지 확인하지 못했습니다."
+  },
+  "bots_scope_data_title": {
+    "zh-Hans": "数据集",
+    "zh-Hant": "資料集",
+    "en": "Datasets",
+    "ja": "データセット",
+    "ko": "데이터세트"
+  },
+  "bots_scope_data_hint": {
+    "zh-Hans": "这个 Bot 在这台电脑上还不能自行访问数据源。目前这里只是记录它最多可以获得哪些数据集。",
+    "zh-Hant": "這個 Bot 在這台電腦上還不能自行存取資料來源。目前這裡只是記錄它最多可以取得哪些資料集。",
+    "en": "On this computer the Bot cannot reach data sources by itself yet. For now this only records what it may be given.",
+    "ja": "このコンピュータでは、Bot はまだ自分でデータソースにアクセスできません。今のところ、ここでは Bot に渡せるデータセットを記録するだけです。",
+    "ko": "이 컴퓨터에서 Bot은 아직 스스로 데이터 소스에 접근할 수 없습니다. 지금은 Bot에 줄 수 있는 데이터세트를 기록해 두기만 합니다."
+  },
+  "bots_scope_data_loading": {
+    "zh-Hans": "正在加载你的数据源。",
+    "zh-Hant": "正在載入你的資料來源。",
+    "en": "Your data sources are loading.",
+    "ja": "データソースを読み込んでいます。",
+    "ko": "데이터 소스를 불러오는 중입니다."
+  },
+  "bots_scope_data_unavailable": {
+    "zh-Hans": "无法读取你的数据源。下面按原样显示你为这个 Bot 选的数据集。",
+    "zh-Hant": "無法讀取你的資料來源。下方按原樣顯示你為這個 Bot 選的資料集。",
+    "en": "Your data sources could not be read. What you chose for this Bot is shown as it is.",
+    "ja": "データソースを読み込めませんでした。この Bot に選んだものは、そのまま表示しています。",
+    "ko": "데이터 소스를 읽지 못했습니다. 이 Bot에 선택한 항목은 그대로 표시됩니다."
+  },
+  "bots_scope_data_empty": {
+    "zh-Hans": "你还没有数据源。",
+    "zh-Hant": "你還沒有資料來源。",
+    "en": "You have no data sources yet.",
+    "ja": "データソースはまだありません。",
+    "ko": "아직 데이터 소스가 없습니다."
+  },
+  "bots_scope_source_unreadable": {
+    "zh-Hans": "无法读取这个数据源的数据集。",
+    "zh-Hant": "無法讀取這個資料來源的資料集。",
+    "en": "The datasets of this source could not be read.",
+    "ja": "このデータソースのデータセットを読み込めませんでした。",
+    "ko": "이 데이터 소스의 데이터세트를 읽지 못했습니다."
+  },
+  "bots_scope_source_empty": {
+    "zh-Hans": "这个数据源里没有你可以使用的数据集。",
+    "zh-Hant": "這個資料來源裡沒有你可以使用的資料集。",
+    "en": "This source has no datasets you can use.",
+    "ja": "このデータソースには、使えるデータセットがありません。",
+    "ko": "이 데이터 소스에는 사용할 수 있는 데이터세트가 없습니다."
+  },
+  "bots_scope_data_read_only": {
+    "zh-Hans": "你对这个数据集只有读取权限。",
+    "zh-Hant": "你對這個資料集只有讀取權限。",
+    "en": "You can only read this dataset.",
+    "ja": "このデータセットは読み取りのみ可能です。",
+    "ko": "이 데이터세트는 읽기만 할 수 있습니다."
+  },
+  "bots_scope_data_write": {
+    "zh-Hans": "可以写入",
+    "zh-Hant": "可以寫入",
+    "en": "May write",
+    "ja": "書き込みを許可",
+    "ko": "쓰기 허용"
+  },
+  "bots_scope_data_review": {
+    "zh-Hans": "可以打开复核单",
+    "zh-Hant": "可以開啟複核單",
+    "en": "May open review cases",
+    "ja": "確認案件を開くことを許可",
+    "ko": "검토 건 열기 허용"
+  },
+  "bots_scope_data_gone": {
+    "zh-Hans": "已不存在。",
+    "zh-Hant": "已不存在。",
+    "en": "No longer available.",
+    "ja": "もう利用できません。",
+    "ko": "더 이상 사용할 수 없습니다."
+  },
+  "bots_scope_source_gone": {
+    "zh-Hans": "它的数据源已不存在。",
+    "zh-Hant": "它的資料來源已不存在。",
+    "en": "Its data source is gone.",
+    "ja": "このデータソースはもうありません。",
+    "ko": "이 데이터 소스가 더 이상 없습니다."
+  },
+  "bots_scope_data_unchecked": {
+    "zh-Hans": "无法确认它是否仍然存在。",
+    "zh-Hant": "無法確認它是否仍然存在。",
+    "en": "Could not check whether it still exists.",
+    "ja": "まだ存在するか確認できませんでした。",
+    "ko": "아직 있는지 확인하지 못했습니다."
+  },
+  "bots_scope_data_other": {
+    "zh-Hans": "其他数据集",
+    "zh-Hant": "其他資料集",
+    "en": "Other datasets",
+    "ja": "その他のデータセット",
+    "ko": "기타 데이터세트"
+  },
+  "bots_scope_remove": {
+    "zh-Hans": "移除 %1$s",
+    "zh-Hant": "移除 %1$s",
+    "en": "Remove %1$s",
+    "ja": "%1$s を削除",
+    "ko": "%1$s 제거"
+  },
+  "bots_problem_scope_too_many": {
+    "zh-Hans": "本地应用和数据集最多各可以选择 64 个。",
+    "zh-Hant": "本機應用程式和資料集最多各可以選擇 64 個。",
+    "en": "At most 64 Local Apps and 64 datasets can be chosen.",
+    "ja": "選べるローカルアプリとデータセットは、それぞれ最大 64 個です。",
+    "ko": "로컬 앱과 데이터세트는 각각 최대 64개까지 선택할 수 있습니다."
+  },
+  "bots_reach_app_title": {
+    "zh-Hans": "可以使用这个应用的 Bot",
+    "zh-Hant": "可以使用這個應用程式的 Bot",
+    "en": "Bots that can use this app",
+    "ja": "このアプリを使える Bot",
+    "ko": "이 앱을 사용할 수 있는 Bot"
+  },
+  "bots_reach_source_title": {
+    "zh-Hans": "可以访问这个数据源的 Bot",
+    "zh-Hant": "可以存取這個資料來源的 Bot",
+    "en": "Bots that can reach this data source",
+    "ja": "このデータソースにアクセスできる Bot",
+    "ko": "이 데이터 소스에 접근할 수 있는 Bot"
+  },
+  "bots_reach_none": {
+    "zh-Hans": "没有 Bot 的范围里包含它。",
+    "zh-Hant": "沒有 Bot 的範圍裡包含它。",
+    "en": "No Bot has this in its scope.",
+    "ja": "これをスコープに含む Bot はありません。",
+    "ko": "이것을 범위에 포함한 Bot이 없습니다."
   },
   "bots_delete_tasks": {
     "zh-Hans": "仍在进行的任务：收到 %1$s 个，交出 %2$s 个。删除这个 Bot 会取消它们。",

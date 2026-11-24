@@ -22,6 +22,8 @@ import {
   CH_BOTS_MEMORY_WRITE,
   CH_BOTS_PERSONA_GET,
   CH_BOTS_PERSONA_SET,
+  CH_BOTS_REACH_DATASET,
+  CH_BOTS_REACH_LOCAL_APP,
   CH_BOTS_SESSION_OPEN,
   CH_BOTS_SESSIONS_LIST,
   CH_BOTS_SKILL_DELETE,
@@ -34,6 +36,7 @@ import {
   CH_BOTS_WORKSPACE_REQUEST_DECIDE,
   CH_BOTS_WORKSPACE_REQUESTS_LIST,
   type BotCreateRequest,
+  type BotReachUi,
   type BotsLoginItemUi,
   type BotSessionRefUi,
   type BotSessionsUi,
@@ -90,6 +93,12 @@ function botId(value: unknown): string {
 
 function taskId(value: unknown): string {
   if (!isTaskId(value)) throw new Error('invalid task id');
+  return value;
+}
+
+/** The id of a Local App, or of a data source or dataset, as a stranger might spell it: a short single line. */
+function reference(value: unknown, what: string): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 128 || /[\u0000-\u001f\u007f]/.test(value)) throw new Error(`invalid ${what}`);
   return value;
 }
 
@@ -321,6 +330,8 @@ export class BotsUi {
         return loginItem.status();
       },
       [CH_BOTS_LOGIN_ITEMS_OPEN]: (): Promise<void> => loginItem.openSettings(),
+      [CH_BOTS_REACH_LOCAL_APP]: (appId): BotReachUi[] => service.botsReachingLocalApp(reference(appId, 'Local App id')),
+      [CH_BOTS_REACH_DATASET]: (source, dataset): BotReachUi[] => service.botsReachingDataset(reference(source, 'data source'), dataset === undefined ? undefined : reference(dataset, 'dataset')),
     };
     // Where Bots cannot run, nothing but the question whether they can is answered.
     return {

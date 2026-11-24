@@ -29,7 +29,7 @@ const status = (patch: Partial<RemoteControlUiStatus> = {}): RemoteControlUiStat
 });
 
 function bot(overrides: Partial<BotUi> = {}): BotUi {
-  return { botId: 'b1', name: 'Scribe', description: '', createdAt: 1_000, updatedAt: 1_000, revision: 1, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, ...overrides };
+  return { botId: 'b1', name: 'Scribe', description: '', createdAt: 1_000, updatedAt: 1_000, revision: 1, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, scope: { localApps: [], datasets: [] }, ...overrides };
 }
 
 // ---- When the switch can be turned on ----

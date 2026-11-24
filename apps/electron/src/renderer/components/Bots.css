@@ -112,6 +112,22 @@
 .bots-sandbox-ack { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; line-height: 1.5; cursor: pointer; }
 .bots-page .bots-sandbox-ack input[type='checkbox'] { width: auto; margin-top: 3px; }
 
+/* The Scope tab: the Local Apps and datasets a Bot may be given. What is gone is greyed and can only be removed. */
+.bots-scope { gap: 24px; }
+.bots-scope-section { gap: 14px; }
+.bots-row-main.bots-scope-app { flex-direction: row; align-items: center; gap: 10px; }
+.bots-scope-avatar { width: 28px; height: 28px; flex: none; display: grid; place-items: center; border: 1px solid var(--bots-line); border-radius: 8px; background: var(--bots-background); color: var(--bots-accent); font-size: 14px; font-weight: 560; }
+.bots-scope-group { display: flex; flex-direction: column; gap: 8px; }
+.bots-scope-source { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.bots-scope-flags { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 0; margin: 4px 0 0; list-style: none; }
+.bots-scope-flags li { display: flex; align-items: center; gap: 8px; color: var(--bots-muted); font-size: 12px; }
+.bots-row[data-gone] .bots-row-main { opacity: .6; }
+
+/* The Bots whose scope reaches a Local App or a data source, on the page of that app or source (outside .bots-page, so no page variables). */
+.bots-reach-title { margin: 10px 0 4px; font-size: 13px; font-weight: 600; }
+.bots-reach-list { margin: 0; padding-left: 18px; font-size: 13px; overflow-wrap: anywhere; }
+.bots-reach-none { margin: 0; font-size: 12px; opacity: .7; }
+
 .bots-panel { display: flex; flex-direction: column; gap: 14px; }
 .bots-rows { display: flex; flex-direction: column; gap: 8px; padding: 0; margin: 0; list-style: none; }
 .bots-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 14px; border: 1px solid var(--bots-line); border-radius: 10px; background: var(--bots-surface); }

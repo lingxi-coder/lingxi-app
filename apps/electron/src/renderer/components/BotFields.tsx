@@ -37,6 +37,7 @@ export function problemText(problem: BotDraftProblem | BotMemoryProblem): string
     case 'folders_label_too_long': return tr('bots_problem_folders_label_too_long', BOT_FOLDER_LABEL_MAX);
     case 'accept_too_many': return tr('bots_problem_accept_too_many');
     case 'sandbox_too_many': return tr('bots_sandbox_host_too_many');
+    case 'scope_too_many': return tr('bots_problem_scope_too_many');
     case 'too_large': return tr('bots_problem_memory_too_large');
     case 'invalid': return tr('bots_problem_memory_invalid');
   }

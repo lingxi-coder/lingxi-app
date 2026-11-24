@@ -28,9 +28,10 @@ import { readdir, stat } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 
 import type { SessionRowDto } from '@lingxi/bridge-client';
-import type { BotSandboxAvailability, BotsAvailability } from '../../shared/bots.js';
+import type { BotReachUi, BotSandboxAvailability, BotsAvailability } from '../../shared/bots.js';
 import type { BotMarketOrigin } from '../../shared/botMarket.js';
 import type { SessionRef, WorkspaceLaunchSettings } from '../bridgeTypes.js';
+import type { LocalAppBotAudience } from '../local-apps/mcpGateway.js';
 import type { SessionRuntime } from '../bridge.js';
 import type { RemoteBot, RemoteBotLookup, BotChat } from '../remoteControl/remoteBots.js';
 import type { RoutineBot, RoutineCatalog, RoutineFolder } from '../scheduled.js';
@@ -117,6 +118,18 @@ export interface BotDelegation {
   botDeleting(botId: string): Promise<void>;
 }
 
+/**
+ * What of the Local Apps' MCP gateway the service uses. Each Bot that was given applications has a
+ * credential of its own, kept in its home for its engine to find, which names those applications
+ * and no others.
+ */
+export interface BotLocalApps {
+  /** The Bot's engine may use these applications and no others; none takes the Bot's way in back. */
+  publish(audience: LocalAppBotAudience): Promise<void>;
+  /** The Bot is gone: its credential stops working at once. */
+  revoke(botId: string): Promise<void>;
+}
+
 export interface BotServiceOptions {
   store: BotStore;
   runtimes: BotRuntimes;
@@ -127,6 +140,8 @@ export interface BotServiceOptions {
   router?: BotRouterAccess;
   /** Tasks between Bots; absent where there are none. */
   delegation?: BotDelegation;
+  /** The Local Apps' MCP gateway; without it no Bot can use a Local App. */
+  localApps?: BotLocalApps;
   /** The working directory a session is open in, if it is open; without it only a chat's transcript tells whose it is. */
   openProject?: (sessionId: string) => string | undefined;
   /** A Bot was made, changed or deleted, which Remote Control must hear of: its switch, name and chats are what viewers see. */
@@ -167,9 +182,19 @@ export type BotSessionRow = SessionRowDto & {
   removedPath?: string;
 };
 
-/** What decides what the engine of a session was given (the Bot's folders, and whether and how its commands are confined): when it differs from the Bot's, the session is launched again. */
+/**
+ * What decides what the engine of a session was given (the Bot's folders, whether and how its commands are
+ * confined, and whether it was given Local Apps, which its settings allow and which its engine finds a way
+ * to only when it starts): when it differs from the Bot's, the session is launched again. Which Local Apps
+ * they are is no part of it: a session that has the way in is told when they change.
+ */
 function launchKeyOf(record: BotRecord): string {
-  return JSON.stringify([record.workspaces.map((workspace) => [workspace.path, workspace.mode]), record.sandbox]);
+  return JSON.stringify([record.workspaces.map((workspace) => [workspace.path, workspace.mode]), record.sandbox, record.scope.localApps.length > 0]);
+}
+
+/** Whether two lists name the same applications, whatever the order. */
+function sameApps(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((id) => right.includes(id));
 }
 
 function realOrSame(path: string): string {
@@ -290,6 +315,7 @@ export class BotService {
       this.writeSettings(draft);
     });
     if (record.revision !== expectedRevision) {
+      if (!sameApps(before.scope.localApps, record.scope.localApps)) await this.publishLocalApps(record);
       await this.endChatsIn(botId, removed);
       this.syncSoon(botId);
       this.changed();
@@ -390,6 +416,10 @@ export class BotService {
       this.options.routines?.releaseScope(workspace);
       await this.options.runtimes.closeProject(workspace);
       for (const chat of elsewhere) await this.closeChat(chat);
+      // What the Bot was given of the Local Apps stops working before its folder moves.
+      try { await this.options.localApps?.revoke(botId); } catch (error) {
+        this.warn(`Bot ${botId}: its Local Apps could not be taken back cleanly: ${error instanceof Error ? error.message : String(error)}`);
+      }
       this.store.trash(botId);
       this.options.teamRevoking?.(botId);
       this.catalogs.delete(botId);
@@ -959,6 +989,8 @@ export class BotService {
     if (folder.id !== DEFAULT_WORKSPACE_ID && !bound.some((workspace) => workspace.id === folder.id)) {
       throw new Error(`${folder.path} is no longer a folder a Bot may work in.`);
     }
+    // Its way in to its Local Apps is there before the engine looks for it.
+    await this.publishLocalApps(record);
     const home = this.store.homeDir(botId);
     const base = await this.catalog(botId).workspaceSettings(folder.path);
     const globalConfigPath = join(home, '.lingxi.json');
@@ -979,6 +1011,42 @@ export class BotService {
       userSettingsOnly: true,
       additionalDirectories: grants,
     };
+  }
+
+  private localAppAudience(record: BotRecord): LocalAppBotAudience {
+    return { botId: record.bot_id, home: this.store.homeDir(record.bot_id), apps: record.scope.localApps };
+  }
+
+  /** Every Bot and the Local Apps it may use, those with none included: the gateway starts from this, and removes what an earlier run left for the others. */
+  localAppAudiences(): LocalAppBotAudience[] {
+    if (!this.availability().available) return [];
+    return this.store.entries().flatMap((entry) => entry.record === undefined ? [] : [this.localAppAudience(entry.record)]);
+  }
+
+  /** The Bots whose scope names the Local App, oldest first. */
+  botsReachingLocalApp(appId: string): BotReachUi[] {
+    return this.botsWhere((scope) => scope.localApps.includes(appId));
+  }
+
+  /** The Bots whose scope names the dataset of the data source, or any dataset of it, oldest first. */
+  botsReachingDataset(source: string, dataset?: string): BotReachUi[] {
+    return this.botsWhere((scope) => scope.datasets.some((entry) => entry.source === source && (dataset === undefined || entry.dataset === dataset)));
+  }
+
+  /** A Bot that cannot be read, or is being deleted, reaches nothing. */
+  private botsWhere(reaches: (scope: BotRecord['scope']) => boolean): BotReachUi[] {
+    return this.store.entries()
+      .flatMap((entry) => entry.record !== undefined && !this.deleting.has(entry.botId) && reaches(entry.record.scope) ? [entry.record] : [])
+      .sort((left, right) => left.created_at - right.created_at || left.bot_id.localeCompare(right.bot_id))
+      .map((record) => ({ botId: record.bot_id, name: record.name }));
+  }
+
+  /** Make the Bot's way in to its Local Apps what its record says. A Bot that cannot be given it still runs, without them. */
+  private async publishLocalApps(record: BotRecord): Promise<void> {
+    if (this.options.localApps === undefined) return;
+    try { await this.options.localApps.publish(this.localAppAudience(record)); } catch (error) {
+      this.warn(`Bot ${record.bot_id}: its Local Apps are not available to it: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   /**

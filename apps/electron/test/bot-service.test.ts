@@ -34,7 +34,7 @@ function chatOf(s: { store: BotStore }, botId: string, uuid: string, folder = s.
   return row(uuid, { path: join(s.store.transcriptsDirOf(botId, folder), `${uuid}.jsonl`), workspace_path: folder, ...extra });
 }
 
-function setup(t: { after(fn: () => void): void }, options: Pick<BotServiceOptions, 'openProject' | 'changed' | 'teamRevoking' | 'retryMs' | 'deleted'> = {}) {
+function setup(t: { after(fn: () => void): void }, options: Pick<BotServiceOptions, 'openProject' | 'changed' | 'teamRevoking' | 'retryMs' | 'deleted' | 'localApps'> = {}) {
   const f = botFixture(t);
   const calls: unknown[][] = [];
   const warnings: string[] = [];
@@ -1205,4 +1205,150 @@ test('the chats a routine can target are the Bot\'s in every folder it has, and 
   s.service.claimSession(bot.bot_id, SESSION);
   assert.equal(routine.folderOfChat(SESSION), repo, 'a chat that is open is where it is open');
   assert.equal(routine.folderOfChat(OTHER_SESSION), undefined, 'one that is not open and has no transcript yet is nobody\'s');
+});
+
+// The Local Apps a Bot was given
+
+const APP_A = `a${'a'.repeat(32)}`;
+const APP_B = `a${'b'.repeat(32)}`;
+const DATASET = { source: 'source-1', dataset: 'dataset-1', write: false, reportReview: false };
+
+/** What the Local Apps' gateway is told, and what the Bots' folders looked like when it was. */
+function localAppsFixture(options: { publishFails?: boolean; revokeFails?: boolean } = {}) {
+  const told: Array<{ call: 'publish' | 'revoke'; botId: string; apps?: string[]; homeExists: boolean }> = [];
+  let homes: (botId: string) => string = () => '';
+  return {
+    told,
+    homesAre(find: (botId: string) => string) { homes = find; },
+    localApps: {
+      publish: async (audience: { botId: string; home: string; apps: readonly string[] }) => {
+        told.push({ call: 'publish', botId: audience.botId, apps: [...audience.apps], homeExists: existsSync(audience.home) });
+        if (options.publishFails) throw new Error('disk full');
+      },
+      revoke: async (botId: string) => {
+        told.push({ call: 'revoke', botId, homeExists: existsSync(homes(botId)) });
+        if (options.revokeFails) throw new Error('busy');
+      },
+    },
+  };
+}
+
+test('every launch of a Bot makes its way in to its Local Apps what its record says, before the engine starts, and a Bot given none is told so', async (t) => {
+  const fixture = localAppsFixture();
+  const s = setup(t, { localApps: fixture.localApps });
+  const given = s.service.create({ name: 'Given', scope: { localApps: [APP_A, APP_B], datasets: [] } });
+  const none = s.service.create({ name: 'None' });
+  assert.deepEqual(fixture.told, [], 'nothing starts when a Bot is made');
+  await s.service.launchSettings(s.store.workspaceDir(given.bot_id));
+  await s.service.launchSettings(s.store.workspaceDir(none.bot_id));
+  assert.deepEqual(fixture.told, [
+    { call: 'publish', botId: given.bot_id, apps: [APP_A, APP_B], homeExists: true },
+    { call: 'publish', botId: none.bot_id, apps: [], homeExists: true },
+  ]);
+  assert.ok(s.settingsOf(given.bot_id).permissions.allow.includes('mcp__lingxi-local-apps'), 'the settings were written to let it, before the engine reads them');
+  assert.ok(!s.settingsOf(none.bot_id).permissions.allow.includes('mcp__lingxi-local-apps'));
+});
+
+test('a Bot whose Local Apps cannot be made available still starts, and the log says why', async (t) => {
+  const fixture = localAppsFixture({ publishFails: true });
+  const s = setup(t, { localApps: fixture.localApps });
+  const bot = s.service.create({ name: 'Given', scope: { localApps: [APP_A], datasets: [] } });
+  const launch = await s.service.launchSettings(s.store.workspaceDir(bot.bot_id));
+  assert.equal(launch.configHome, s.store.homeDir(bot.bot_id));
+  assert.equal(s.warnings.length, 1);
+  assert.match(s.warnings[0]!, new RegExp(`Bot ${bot.bot_id}: its Local Apps are not available to it: disk full`));
+});
+
+test('changing the Local Apps of a Bot passes them on, once, and changing anything else passes nothing on', async (t) => {
+  const fixture = localAppsFixture();
+  const s = setup(t, { localApps: fixture.localApps });
+  const bot = s.service.create({ name: 'Scoped', scope: { localApps: [APP_A], datasets: [] } });
+  await s.service.update(bot.bot_id, 1, { name: 'Renamed' });
+  await s.service.update(bot.bot_id, 2, { scope: { localApps: [APP_A], datasets: [DATASET] } });
+  await s.service.update(bot.bot_id, 3, { scope: { localApps: [APP_A], datasets: [{ ...DATASET, write: true }] } });
+  assert.deepEqual(fixture.told, [], 'a name, and datasets, are no concern of the Local Apps');
+  await s.service.update(bot.bot_id, 4, { scope: { localApps: [APP_B, APP_A], datasets: [{ ...DATASET, write: true }] } });
+  assert.deepEqual(fixture.told, [{ call: 'publish', botId: bot.bot_id, apps: [APP_B, APP_A], homeExists: true }]);
+  await s.service.update(bot.bot_id, 5, { scope: { localApps: [APP_A, APP_B], datasets: [] } });
+  assert.equal(fixture.told.length, 1, 'the same applications in another order are the same applications');
+  await s.service.update(bot.bot_id, 6, { scope: { localApps: [], datasets: [] } });
+  assert.deepEqual(fixture.told.slice(1), [{ call: 'publish', botId: bot.bot_id, apps: [], homeExists: true }], 'none takes the way in back');
+  assert.deepEqual(s.service.get(bot.bot_id).scope, { localApps: [], datasets: [] });
+});
+
+test('a Bot whose Local Apps could not be passed on is changed all the same, and the log says why', async (t) => {
+  const fixture = localAppsFixture({ publishFails: true });
+  const s = setup(t, { localApps: fixture.localApps });
+  const bot = s.service.create({ name: 'Scoped' });
+  const changed = await s.service.update(bot.bot_id, 1, { scope: { localApps: [APP_A], datasets: [] } });
+  assert.deepEqual(changed.scope.localApps, [APP_A]);
+  assert.equal(changed.revision, 2);
+  assert.match(s.warnings.join('\n'), /its Local Apps are not available to it: disk full/);
+});
+
+test('the open chats of a Bot are started again when it is given Local Apps for the first time or its last is taken away, and not when it changes which', async (t) => {
+  const fixture = localAppsFixture();
+  const s = setup(t, { localApps: fixture.localApps });
+  const { bot, own } = await launchedChat(s);
+  const restart = [['restart', { projectPath: own, sessionId: SESSION, mode: 'code' }]];
+  await s.service.update(bot.bot_id, 1, { scope: { localApps: [APP_A], datasets: [] } });
+  await s.service.settled();
+  assert.deepEqual(s.asked('restart'), restart, 'its engine reads the settings that allow the server, and finds the descriptor, only when it starts');
+  assert.ok(s.settingsOf(bot.bot_id).permissions.allow.includes('mcp__lingxi-local-apps'), 'written before the engine was asked to read them');
+  await s.service.launchSettings(own, SESSION);
+  s.calls.length = 0;
+  await s.service.update(bot.bot_id, 2, { scope: { localApps: [APP_B], datasets: [] } });
+  await s.service.settled();
+  assert.deepEqual(s.asked('restart'), [], 'which applications they are is passed on to the sessions that have the way in, which are told');
+  await s.service.update(bot.bot_id, 3, { scope: { localApps: [], datasets: [] } });
+  await s.service.settled();
+  assert.deepEqual(s.asked('restart'), restart, 'the last one taken away');
+  assert.ok(!s.settingsOf(bot.bot_id).permissions.allow.includes('mcp__lingxi-local-apps'));
+});
+
+test('deleting a Bot takes its Local Apps back while its folder is still there, and a deletion that stops short takes nothing back', async (t) => {
+  const fixture = localAppsFixture();
+  const s = setup(t, { localApps: fixture.localApps });
+  const bot = s.service.create({ name: 'Gone', scope: { localApps: [APP_A], datasets: [] } });
+  fixture.homesAre((botId) => s.store.homeDir(botId));
+  s.setActiveWork(true);
+  await assert.rejects(s.service.delete(bot.bot_id), /cancel active turns/);
+  assert.deepEqual(fixture.told, [], 'its chats were still working: it is not gone');
+  s.setActiveWork(false);
+  await s.service.delete(bot.bot_id);
+  assert.deepEqual(fixture.told, [{ call: 'revoke', botId: bot.bot_id, homeExists: true }]);
+  assert.ok(!existsSync(s.store.botDir(bot.bot_id)));
+});
+
+test('a Bot is deleted even if taking its Local Apps back goes wrong, and the log says so', async (t) => {
+  const fixture = localAppsFixture({ revokeFails: true });
+  const s = setup(t, { localApps: fixture.localApps });
+  const bot = s.service.create({ name: 'Gone', scope: { localApps: [APP_A], datasets: [] } });
+  await s.service.delete(bot.bot_id);
+  assert.ok(!existsSync(s.store.botDir(bot.bot_id)));
+  assert.match(s.warnings.join('\n'), new RegExp(`Bot ${bot.bot_id}: its Local Apps could not be taken back cleanly: busy`));
+});
+
+test('the gateway is told of every Bot to start from, those given none included, and of none where Bots are not available', (t) => {
+  const s = setup(t);
+  const first = s.service.create({ name: 'First', scope: { localApps: [APP_A], datasets: [DATASET] } });
+  const second = s.service.create({ name: 'Second' });
+  assert.deepEqual(s.service.localAppAudiences(), [
+    { botId: first.bot_id, home: s.store.homeDir(first.bot_id), apps: [APP_A] },
+    { botId: second.bot_id, home: s.store.homeDir(second.bot_id), apps: [] },
+  ]);
+  writeFileSync(join(s.store.botDir(second.bot_id), 'bot.json'), '{ damaged');
+  assert.deepEqual(s.service.localAppAudiences().map((audience) => audience.botId), [first.bot_id], 'one that cannot be read is left out');
+  const windows = new BotService({ store: s.store, sandbox: () => ({ available: true }), runtimes: NO_RUNTIMES, catalogFor: NO_CATALOGS, platform: 'win32' });
+  assert.deepEqual(windows.localAppAudiences(), []);
+});
+
+test('without a gateway a Bot launches and changes as before', async (t) => {
+  const s = setup(t);
+  const bot = s.service.create({ name: 'Scoped', scope: { localApps: [APP_A], datasets: [] } });
+  const launch = await s.service.launchSettings(s.store.workspaceDir(bot.bot_id));
+  assert.equal(launch.configHome, s.store.homeDir(bot.bot_id));
+  await s.service.update(bot.bot_id, 1, { scope: { localApps: [], datasets: [] } });
+  await s.service.delete(bot.bot_id);
+  assert.deepEqual(s.warnings, []);
 });

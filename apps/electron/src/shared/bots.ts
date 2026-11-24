@@ -92,6 +92,10 @@ export const CH_BOTS_LOGIN_ITEM_GET = 'lingxi:bots:login-item:get';
 export const CH_BOTS_LOGIN_ITEM_SET = 'lingxi:bots:login-item:set';
 /** Invoke → `void`. Opens the Login Items pane of System Settings, where the owner allows the app. */
 export const CH_BOTS_LOGIN_ITEMS_OPEN = 'lingxi:bots:login-item:open-settings';
+/** Invoke(`appId: string`) → `BotReachUi[]`. The Bots whose scope names this Local App, read from their records on this computer. */
+export const CH_BOTS_REACH_LOCAL_APP = 'lingxi:bots:reach:local-app';
+/** Invoke(`source: string, dataset?: string`) → `BotReachUi[]`. The Bots whose scope names this data source, or this dataset of it. */
+export const CH_BOTS_REACH_DATASET = 'lingxi:bots:reach:dataset';
 
 /**
  * Whether this computer can confine the commands of a Bot's shell to its folders. When it cannot, `reason` is the
@@ -169,6 +173,12 @@ export interface BotDatasetScopeUi {
 export interface BotScopeUi {
   localApps: string[];
   datasets: BotDatasetScopeUi[];
+}
+
+/** A Bot that may reach something of the owner's, as the page of that thing lists it: who it is, and nothing of its scope. */
+export interface BotReachUi {
+  botId: string;
+  name: string;
 }
 
 export type BotReplyApprovalUi = 'never' | 'uncertain' | 'always';
@@ -417,5 +427,11 @@ export interface BotsApi {
     set(enabled: boolean): Promise<BotsLoginItemUi>;
     /** Opens the Login Items pane of System Settings. */
     openSettings(): Promise<void>;
+  };
+  /** Which Bots may reach one of the owner's things, for the page of that thing. Answered from the Bots' records on this computer. */
+  reach: {
+    localApp(appId: string): Promise<BotReachUi[]>;
+    /** Without a dataset, the Bots that were given any dataset of the source. */
+    dataset(source: string, dataset?: string): Promise<BotReachUi[]>;
   };
 }

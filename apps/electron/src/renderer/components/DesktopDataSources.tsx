@@ -3,6 +3,7 @@ import type { TeamSummary, TeamsApi } from '../../../../../packages/teams/index.
 import { DATA_SOURCE_KINDS, type DataScope, type ManagedDataSource, type SourceDraft, type TeamDataScope } from '../../../../../packages/teams/lingxi-data.js';
 import type { TeamConversation } from '../../../../../packages/teams/messages.js';
 import { ReportPublisher } from '../../../../../packages/teams/ReportViews.js';
+import { BotReachList } from './BotReachList';
 
 type Row = ManagedDataSource & { running: boolean };
 
@@ -125,6 +126,7 @@ export function DesktopDataSources({ api, uid, teams, locale }: { api: TeamsApi;
             })}>{source.pending ? (zh ? '重试同步' : 'Retry sync') : source.enabled ? (zh ? '停用并撤权' : 'Disable and revoke') : (zh ? '重新启用' : 'Enable')}</button>
           </div>
           {preview?.source === source.source && <pre>{JSON.stringify(preview.rows, null, 2)}</pre>}
+          {open && <BotReachList target={{ kind: 'dataSource', source: source.source }} />}
         </li>)}</ul>}
         <button type="button" disabled={running} onClick={() => void run(async () => {
           const result = await send(uid, { action: 'import' });

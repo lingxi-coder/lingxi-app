@@ -24,7 +24,7 @@ const BOB = id('B');
 const GONE = id('G');
 
 function bot(overrides: Partial<BotUi> = {}): BotUi {
-  return { botId: ME, name: 'Me', description: '', createdAt: 1_000, updatedAt: 1_000, revision: 1, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, ...overrides };
+  return { botId: ME, name: 'Me', description: '', createdAt: 1_000, updatedAt: 1_000, revision: 1, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, scope: { localApps: [], datasets: [] }, ...overrides };
 }
 
 const peers = (...ids: string[]) => new Set(ids);

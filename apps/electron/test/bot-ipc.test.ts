@@ -17,7 +17,7 @@ import { SettingsStore } from '../src/main/settings.js';
 import {
   BOT_CONFLICT_MESSAGE, BOT_SANDBOX_UNAVAILABLE_MESSAGE, CH_BOTS_AVAILABILITY, CH_BOTS_CREATE, CH_BOTS_DELETE, CH_BOTS_GET, CH_BOTS_LIST, CH_BOTS_LOGIN_ITEM_GET, CH_BOTS_LOGIN_ITEM_SET,
   CH_BOTS_LOGIN_ITEMS_OPEN, CH_BOTS_MEMORY_DELETE, CH_BOTS_MEMORY_LIST, CH_BOTS_MEMORY_READ,
-  CH_BOTS_MEMORY_WRITE, CH_BOTS_PERSONA_GET, CH_BOTS_PERSONA_SET, CH_BOTS_SESSION_OPEN, CH_BOTS_SESSIONS_LIST, CH_BOTS_SKILL_DELETE, CH_BOTS_SKILL_IMPORT,
+  CH_BOTS_MEMORY_WRITE, CH_BOTS_PERSONA_GET, CH_BOTS_PERSONA_SET, CH_BOTS_REACH_DATASET, CH_BOTS_REACH_LOCAL_APP, CH_BOTS_SESSION_OPEN, CH_BOTS_SESSIONS_LIST, CH_BOTS_SKILL_DELETE, CH_BOTS_SKILL_IMPORT,
   CH_BOTS_SKILLS_IMPORTABLE, CH_BOTS_SKILLS_LIST, CH_BOTS_TASK_CANCEL, CH_BOTS_TASKS_LIST, CH_BOTS_UPDATE,
   CH_BOTS_WORKSPACE_REQUEST_DECIDE, CH_BOTS_WORKSPACE_REQUESTS_LIST,
   type BotUi,
@@ -31,6 +31,7 @@ const ALL_CHANNELS = [
   CH_BOTS_SKILLS_LIST, CH_BOTS_SKILL_DELETE, CH_BOTS_SKILL_IMPORT, CH_BOTS_SKILLS_IMPORTABLE, CH_BOTS_TASKS_LIST, CH_BOTS_TASK_CANCEL,
   CH_BOTS_LOGIN_ITEM_GET, CH_BOTS_LOGIN_ITEM_SET, CH_BOTS_LOGIN_ITEMS_OPEN,
   CH_BOTS_WORKSPACE_REQUESTS_LIST, CH_BOTS_WORKSPACE_REQUEST_DECIDE,
+  CH_BOTS_REACH_LOCAL_APP, CH_BOTS_REACH_DATASET,
 ];
 
 /** What a Bot's service is given to run sessions with, where the test does not look at them. */
@@ -454,6 +455,33 @@ test('the sandbox, the scope and the automatic replies go through whole, and are
   await assert.rejects(s.call(CH_BOTS_UPDATE, bot.botId, 2, { sandbox: { enabled: 'yes', allowedDomains: [] } }), /invalid/);
   await assert.rejects(s.call(CH_BOTS_UPDATE, bot.botId, 2, { autoReply: { ...autoReply, approval: 'sometimes' } }), /invalid/);
   assert.equal((await s.call(CH_BOTS_GET, bot.botId)).revision, 2, 'nothing above changed the Bot');
+});
+
+test('the pages of a Local App and of a data source ask which Bots reach them, and are told the names of those and nothing of their scope', async (t) => {
+  const s = setup(t);
+  const app = 'app-one';
+  const order = { source: 'warehouse', dataset: 'orders', write: false, reportReview: false };
+  const first = await s.call(CH_BOTS_CREATE, { name: 'First', scope: { localApps: [app], datasets: [order] } });
+  const second = await s.call(CH_BOTS_CREATE, { name: 'Second', scope: { localApps: ['app-two'], datasets: [{ ...order, dataset: 'returns', write: true, reportReview: true }] } });
+  await s.call(CH_BOTS_CREATE, { name: 'Neither' });
+  const third = await s.call(CH_BOTS_CREATE, { name: 'Third', scope: { localApps: [app, 'app-two'], datasets: [{ source: 'crm', dataset: 'orders', write: false, reportReview: false }] } });
+  const names = (list: Array<{ botId: string; name: string }>) => list.map((bot) => bot.name);
+  assert.deepEqual(await s.call(CH_BOTS_REACH_LOCAL_APP, app), [{ botId: first.botId, name: 'First' }, { botId: third.botId, name: 'Third' }], 'only the id and the name, oldest first');
+  assert.deepEqual(names(await s.call(CH_BOTS_REACH_LOCAL_APP, 'app-two')), ['Second', 'Third']);
+  assert.deepEqual(await s.call(CH_BOTS_REACH_LOCAL_APP, 'app-nobody'), []);
+  assert.deepEqual(names(await s.call(CH_BOTS_REACH_DATASET, 'warehouse')), ['First', 'Second'], 'any dataset of the source');
+  assert.deepEqual(names(await s.call(CH_BOTS_REACH_DATASET, 'warehouse', 'orders')), ['First']);
+  assert.deepEqual(names(await s.call(CH_BOTS_REACH_DATASET, 'warehouse', 'returns')), ['Second']);
+  assert.deepEqual(names(await s.call(CH_BOTS_REACH_DATASET, 'crm', 'orders')), ['Third'], 'a dataset of the same name in another source is another dataset');
+  assert.deepEqual(await s.call(CH_BOTS_REACH_DATASET, 'warehouse', 'invoices'), []);
+  // A Bot whose record is damaged reaches nothing, and does not keep the others from being found.
+  writeFileSync(join(s.store.botDir(second.botId), 'bot.json'), '{ damaged');
+  assert.deepEqual(names(await s.call(CH_BOTS_REACH_LOCAL_APP, 'app-two')), ['Third']);
+  for (const bad of [undefined, '', 5, null, {}, 'x'.repeat(129), 'a\nb']) {
+    await assert.rejects(s.call(CH_BOTS_REACH_LOCAL_APP, bad), /invalid Local App id/, JSON.stringify(bad));
+    await assert.rejects(s.call(CH_BOTS_REACH_DATASET, bad), /invalid data source/, JSON.stringify(bad));
+  }
+  for (const bad of ['', 5, null, {}, 'x'.repeat(129)]) await assert.rejects(s.call(CH_BOTS_REACH_DATASET, 'warehouse', bad), /invalid dataset/, JSON.stringify(bad));
 });
 
 test('a chat is started in the folder the window names, and a name that is no folder id is refused before the Bot is asked', async (t) => {

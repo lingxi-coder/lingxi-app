@@ -51,7 +51,7 @@ function render(element: React.ReactElement): string {
 const avatarsOf = (html: string) => [...html.matchAll(/data-agent-avatar="(\d+)"/g)].map((match) => Number(match[1]));
 
 function bot(overrides: Partial<BotUi> = {}): BotUi {
-  return { botId: 'b1', name: 'Scribe', description: 'Writes things down', createdAt: Date.now() - 60 * MINUTES, updatedAt: Date.now(), revision: 1, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, ...overrides };
+  return { botId: 'b1', name: 'Scribe', description: 'Writes things down', createdAt: Date.now() - 60 * MINUTES, updatedAt: Date.now(), revision: 1, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, scope: { localApps: [], datasets: [] }, ...overrides };
 }
 
 /** What a computer that can give a Bot a sandbox says, and one that cannot. */
@@ -549,7 +549,7 @@ test('a Bot opens to its general settings, with the routines and tasks listed fi
   assert.match(html, /<div class="bots-detail-identity"><span class="bots-avatar" aria-hidden="true"><img [^>]*data-agent-avatar="\d+"[^>]*\/><\/span><div class="bots-detail-title"><h1>Alpha<\/h1>/, 'its avatar stands beside the name');
   assert.deepEqual(avatarsOf(html), [agentAvatarIndex('a')], 'the one the list shows for it');
   assert.match(html, /First helper/);
-  for (const tab of ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions', 'Sandbox']) assert.match(html, new RegExp(`<button type="button"[^>]*>${tab}</button>`), tab);
+  for (const tab of ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions', 'Sandbox', 'Scope']) assert.match(html, new RegExp(`<button type="button"[^>]*>${tab}</button>`), tab);
   assert.ok(html.indexOf('>Routines</button>') < html.indexOf('>Tasks</button>') && html.indexOf('>Tasks</button>') < html.indexOf('>General</button>'), 'the routines and the tasks come before the settings');
   assert.ok(!html.includes('aria-current'), 'the sections are tabs, not links to pages');
   assert.ok(!html.includes('>Chats</button>'), 'the chats of a Bot are listed under it in the sidebar, not here');
@@ -565,7 +565,7 @@ test('the sections of a Bot are a tab list: one tab selected and in the tab orde
   assert.match(html, /<div class="bots-tabs" role="tablist" aria-label="Bot settings">/);
   const tabs = [...html.matchAll(/<button type="button" role="tab" id="([^"]+)" aria-selected="(true|false)" aria-controls="([^"]+)" tabindex="(-?\d+)">([^<]+)<\/button>/g)]
     .map((match) => ({ id: match[1]!, selected: match[2], controls: match[3]!, tabindex: match[4], label: match[5] }));
-  assert.deepEqual(tabs.map((tab) => tab.label), ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions', 'Sandbox', 'Package &amp; Market']);
+  assert.deepEqual(tabs.map((tab) => tab.label), ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions', 'Sandbox', 'Scope', 'Package &amp; Market']);
   assert.deepEqual(tabs.filter((tab) => tab.selected === 'true').map((tab) => tab.label), ['General'], 'one is selected');
   assert.deepEqual(tabs.filter((tab) => tab.tabindex === '0').map((tab) => tab.label), ['General'], 'and it is the one Tab reaches: the arrow keys go to the others');
   assert.ok(tabs.every((tab) => tab.selected === 'true' || tab.tabindex === '-1'));

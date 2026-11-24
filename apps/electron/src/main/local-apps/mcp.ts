@@ -31,6 +31,8 @@ interface ServerState {
 }
 interface RunState { run: LocalAppMcpRun; controller: AbortController; published: boolean; servers: ServerState[]; abort(): void }
 export interface LocalAppMcpOptions { changed?(): void; retryMs?: number; heartbeatMs?: number; timeoutMs?: number }
+/** Which applications' tools a host client may see; a client given none sees every application's. */
+export type LocalAppFilter = (appId: string) => boolean;
 const key = (appId: string, runId: string) => `${appId}/${runId}`;
 
 /** One upstream connection per declared server and app run, shared by all host MCP clients. */
@@ -183,25 +185,27 @@ export class LocalAppMcpManager implements LocalAppMcpLifecycle {
   private publicName(server: ServerState, tool: Tool): string {
     return `app_${createHash('sha256').update(JSON.stringify([server.owner.run.appId, server.name, tool.name])).digest('hex')}`;
   }
-  private entries(): Array<{ name: string; server: ServerState; tool: Tool; channel: Channel }> {
-    return [...this.runs.values()].filter(owner => owner.published && this.live(owner)).flatMap(owner => owner.servers.flatMap(server =>
+  private entries(allowed?: LocalAppFilter): Array<{ name: string; server: ServerState; tool: Tool; channel: Channel }> {
+    return [...this.runs.values()].filter(owner => owner.published && this.live(owner) && (allowed?.(owner.run.appId) ?? true)).flatMap(owner => owner.servers.flatMap(server =>
       server.channel && server.phase === 'connected' ? server.tools.map(tool => ({ name: this.publicName(server, tool), server, tool, channel: server.channel! })) : []));
   }
-  tools(): Tool[] {
-    return this.entries().map(({ name, server, tool }) => ({ ...tool, name, title: `${server.owner.run.manifest.name} / ${server.name} / ${tool.title ?? tool.name}`,
+  tools(allowed?: LocalAppFilter): Tool[] {
+    return this.entries(allowed).map(({ name, server, tool }) => ({ ...tool, name, title: `${server.owner.run.manifest.name} / ${server.name} / ${tool.title ?? tool.name}`,
       inputSchema: { ...tool.inputSchema, $comment: `LingXi application release: ${server.owner.run.releaseDigest}. ${typeof tool.inputSchema.$comment === 'string' ? tool.inputSchema.$comment : ''}` },
       description: `${server.owner.run.manifest.name} / ${server.name} / ${tool.name}\n${tool.description ?? ''}` })).sort((a, b) => a.name.localeCompare(b.name));
   }
-  async call(params: CallToolRequest['params'], signal: AbortSignal, discoveredDefinition: string | undefined): Promise<CallToolResult> {
+  /** `allowed` is asked again when the tool answers: a client that lost the application meanwhile gets no result, and the application's connection is left alone. */
+  async call(params: CallToolRequest['params'], signal: AbortSignal, discoveredDefinition: string | undefined, allowed?: LocalAppFilter): Promise<CallToolResult> {
     if (params.task) throw new McpError(ErrorCode.InvalidParams, 'Application MCP gateway supports synchronous tools only.');
-    const entry = this.entries().find(entry => entry.name === params.name);
-    if (!entry || !discoveredDefinition || JSON.stringify(this.tools().find(tool => tool.name === params.name)) !== discoveredDefinition)
+    const entry = this.entries(allowed).find(entry => entry.name === params.name);
+    if (!entry || !discoveredDefinition || JSON.stringify(this.tools(allowed).find(tool => tool.name === params.name)) !== discoveredDefinition)
       throw new McpError(ErrorCode.InvalidParams, 'The application tool is unavailable or changed. Refresh the tool list and review its permissions.');
     const { server, channel, tool } = entry;
     try {
       const result = await channel.client.callTool({ ...params, name: tool.name }, CallToolResultSchema, {
         signal: AbortSignal.any([signal, server.owner.controller.signal, server.owner.run.signal]), timeout: 120_000,
       });
+      if (allowed && !allowed(server.owner.run.appId)) throw new McpError(ErrorCode.InvalidParams, 'The application tool is unavailable or changed. Refresh the tool list and review its permissions.');
       if (!this.live(server.owner) || !server.owner.published || server.channel !== channel
         || JSON.stringify(this.tools().find(tool => tool.name === params.name)) !== discoveredDefinition) throw new Error('Application authorization changed');
       return CallToolResultSchema.parse(result);

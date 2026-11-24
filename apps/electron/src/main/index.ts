@@ -1097,6 +1097,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         runtimes: bridge,
         router,
         delegation: tasks,
+        // The Local Apps start below, after the Bots: what a Bot was given is passed on to them once they are there.
+        localApps: { publish: audience => localApps?.publishBot(audience) ?? Promise.resolve(), revoke: botId => localApps?.revokeBot(botId) ?? Promise.resolve() },
         // Remote devices reach a Bot's chats by session id, and its switch decides whether they may.
         openProject: (sessionId) => manager.get(sessionId)?.projectPath,
         changed: () => remotePolicy?.notifySessionsChanged(),
@@ -1192,6 +1194,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     localApps = new LocalAppHost({
       configHome: productPaths.brandHome,
       appProjectsRoot: productPaths.appProjectsRoot,
+      bots: () => bots?.localAppAudiences() ?? [],
       onRemoteAccessEnded: quitIfNothingNeedsTheApp,
       accountToken: () => account.getIdToken(),
       accountId: () => account.snapshot().user?.uid ?? undefined,

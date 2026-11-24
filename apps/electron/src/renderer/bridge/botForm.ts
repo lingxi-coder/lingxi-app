@@ -11,7 +11,9 @@ import {
   BOT_SANDBOX_UNAVAILABLE_MESSAGE,
   allowedDomain,
   type BotCreateRequest,
+  type BotDatasetScopeUi,
   type BotSandboxUi,
+  type BotScopeUi,
   type BotUi,
   type BotUpdateRequest,
   type BotWorkspaceInputUi,
@@ -26,6 +28,8 @@ export const BOT_PERSONA_MAX_BYTES = 64 * 1024;
 export const BOT_FOLDERS_MAX = 16;
 /** How many Bots may be allowed to hand tasks to one. */
 export const BOT_ACCEPT_MAX = 64;
+/** How many Local Apps, and how many datasets, a Bot's scope may name. */
+export const BOT_SCOPE_MAX = 64;
 
 export interface BotDraft {
   name: string;
@@ -44,6 +48,8 @@ export interface BotDraft {
   remote: boolean;
   /** Whether the Bot's shell commands run in the sandbox, and which hosts they may reach in it. A new Bot is made with the sandbox on and no host. */
   sandbox: BotSandboxUi;
+  /** The Local Apps and datasets of the owner's that the Bot may be given, at the most. A new Bot is made with none. */
+  scope: BotScopeUi;
 }
 
 export type BotDraftProblem =
@@ -52,9 +58,10 @@ export type BotDraftProblem =
   | 'persona_too_long'
   | 'folders_too_many' | 'folders_duplicate' | 'folders_label_too_long'
   | 'accept_too_many'
-  | 'sandbox_too_many';
+  | 'sandbox_too_many'
+  | 'scope_too_many';
 
-export type BotDraftProblems = Partial<Record<'name' | 'description' | 'persona' | 'folders' | 'accept' | 'sandbox', BotDraftProblem>>;
+export type BotDraftProblems = Partial<Record<'name' | 'description' | 'persona' | 'folders' | 'accept' | 'sandbox' | 'scope', BotDraftProblem>>;
 
 /**
  * The ids of the owner's other Bots, which the accept list is chosen among.
@@ -85,7 +92,7 @@ export function permissionModeNeedsConfirmation(mode: PermissionModeId | ''): bo
 }
 
 export function emptyBotDraft(): BotDraft {
-  return { name: '', description: '', persona: '', model: '', permissionMode: 'default', workspaces: [], acceptFrom: [], remote: false, sandbox: { enabled: true, allowedDomains: [] } };
+  return { name: '', description: '', persona: '', model: '', permissionMode: 'default', workspaces: [], acceptFrom: [], remote: false, sandbox: { enabled: true, allowedDomains: [] }, scope: { localApps: [], datasets: [] } };
 }
 
 export function draftFromBot(bot: BotUi, persona: string): BotDraft {
@@ -99,6 +106,7 @@ export function draftFromBot(bot: BotUi, persona: string): BotDraft {
     acceptFrom: [...(bot.acceptFrom ?? [])],
     remote: bot.remote === true,
     sandbox: { enabled: bot.sandbox.enabled, allowedDomains: [...bot.sandbox.allowedDomains] },
+    scope: scopeInput(bot.scope),
   };
 }
 
@@ -126,6 +134,7 @@ export function botDraftProblems(draft: BotDraft, peers?: BotPeers): BotDraftPro
   // Ids of Bots that are gone are dropped when the list is saved, so they are not counted.
   if (present(draft.acceptFrom, peers).length > BOT_ACCEPT_MAX) problems.accept = 'accept_too_many';
   if (draft.sandbox.allowedDomains.length > BOT_ALLOWED_DOMAINS_MAX) problems.sandbox = 'sandbox_too_many';
+  if (draft.scope.localApps.length > BOT_SCOPE_MAX || draft.scope.datasets.length > BOT_SCOPE_MAX) problems.scope = 'scope_too_many';
   return problems;
 }
 
@@ -148,6 +157,19 @@ function sandboxInput(sandbox: BotSandboxUi): BotSandboxUi {
 
 function sameSandbox(left: BotSandboxUi, right: BotSandboxUi): boolean {
   return left.enabled === right.enabled && left.allowedDomains.length === right.allowedDomains.length && left.allowedDomains.every((domain, index) => domain === right.allowedDomains[index]);
+}
+
+/** A copy of the scope with what is sent of it: the apps, and the four things that are said of each dataset. */
+function scopeInput(scope: BotScopeUi): BotScopeUi {
+  return { localApps: [...scope.localApps], datasets: scope.datasets.map((entry) => ({ source: entry.source, dataset: entry.dataset, write: entry.write, reportReview: entry.reportReview })) };
+}
+
+/** The same Local Apps, and the same datasets with the same things allowed in each, in whatever order. */
+export function sameScope(left: BotScopeUi, right: BotScopeUi): boolean {
+  const within = (from: readonly BotDatasetScopeUi[], among: readonly BotDatasetScopeUi[]) => from.every((entry) => among.some((other) =>
+    other.source === entry.source && other.dataset === entry.dataset && other.write === entry.write && other.reportReview === entry.reportReview));
+  return sameIds(left.localApps, right.localApps) && left.datasets.length === right.datasets.length
+    && within(left.datasets, right.datasets) && within(right.datasets, left.datasets);
 }
 
 export function hasBotDraftProblems(problems: BotDraftProblems): boolean {
@@ -194,6 +216,7 @@ export function botChanges(bot: BotUi, persona: string, draft: BotDraft, peers?:
   if (!sameFolders(draft.workspaces, bot.workspaces)) patch.workspaces = draft.workspaces.map(folderInput);
   if (draft.remote !== (bot.remote === true)) patch.remote = draft.remote;
   if (!sameSandbox(draft.sandbox, bot.sandbox)) patch.sandbox = sandboxInput(draft.sandbox);
+  if (!sameScope(draft.scope, bot.scope)) patch.scope = scopeInput(draft.scope);
   if (peers !== undefined) {
     const accepted = present(draft.acceptFrom, peers);
     if (!sameIds(accepted, present(bot.acceptFrom ?? [], peers))) patch.acceptFrom = accepted;

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { MANAGED_FILE, applyManagedSettings, pathRule, writeAllBotSettings, writeBotSettings } from '../src/main/bots/botSettings.js';
+import { LOCAL_APP_RULE, MANAGED_FILE, applyManagedSettings, pathRule, writeAllBotSettings, writeBotSettings } from '../src/main/bots/botSettings.js';
+import { LOCAL_APP_MCP_DESCRIPTOR } from '../src/main/local-apps/mcpGateway.js';
 import { projectDirName } from '../src/main/bots/projectDirName.js';
 import { routerToolRules } from '../src/main/bots/routerTools.js';
 import type { BotCreateInput, BotRecord } from '../src/main/bots/store.js';
@@ -94,6 +95,7 @@ test('a Bot may use its bound folders and its own memory, and is walled off from
     join(f.store.botDir(bot.bot_id), 'bot.json'),
     join(f.store.homeDir(bot.bot_id), 'LINGXI.md'), join(f.store.homeDir(bot.bot_id), 'settings.json'),
     join(f.store.homeDir(bot.bot_id), 'settings.local.json'), join(f.store.homeDir(bot.bot_id), '.lingxi.json'), join(f.store.homeDir(bot.bot_id), MANAGED_FILE),
+    join(f.store.homeDir(bot.bot_id), LOCAL_APP_MCP_DESCRIPTOR),
     join(f.store.workspaceDir(bot.bot_id), '.lingxi', 'settings.json'), join(f.store.workspaceDir(bot.bot_id), '.lingxi', 'settings.local.json'),
     join(f.store.workspaceDir(bot.bot_id), '.mcp.json'),
     ...[writable, readonly].flatMap((folder) => [join(folder, '.lingxi', 'settings.json'), join(folder, '.lingxi', 'settings.local.json'), join(folder, '.mcp.json')]),
@@ -102,6 +104,61 @@ test('a Bot may use its bound folders and its own memory, and is walled off from
 
   assert.equal(settings.sandbox.enabled, true);
   assert.equal(settings.sandbox.failIfUnavailable, true);
+});
+
+const APP_A = `a${'a'.repeat(32)}`;
+const APP_B = `a${'b'.repeat(32)}`;
+
+test('a Bot that was given Local Apps may use their MCP server without being asked, and one that was given none may not', (t) => {
+  const f = botFixture(t);
+  const none = makeBot(f, { name: 'None' });
+  const given = makeBot(f, { name: 'Given', scope: { localApps: [APP_A, APP_B], datasets: [] } });
+  const memory = settingsOf(f, none).autoMemoryDirectory;
+  assert.equal(LOCAL_APP_RULE, 'mcp__lingxi-local-apps', 'the server as a whole: the engine matches an allow rule to a tool by its whole name or to a server, and the names of the tools are made when an application runs');
+  assert.deepEqual(settingsOf(f, none).permissions.allow, [read(memory), edit(memory), ...routerToolRules()]);
+  assert.deepEqual(settingsOf(f, given).permissions.allow, [read(settingsOf(f, given).autoMemoryDirectory), edit(settingsOf(f, given).autoMemoryDirectory), ...routerToolRules(), LOCAL_APP_RULE]);
+  // Which applications they are is not in the rule: what the server lists is decided by the Bot's credential.
+  assert.ok(!JSON.stringify(settingsOf(f, given)).includes(APP_A));
+});
+
+test('taking the Local Apps away takes the rule out, and a rule that someone else allowed stays', (t) => {
+  const f = botFixture(t);
+  const bot = makeBot(f, { name: 'Changing', scope: { localApps: [APP_A], datasets: [] } });
+  const other = 'Bash(git status)';
+  const file = settingsOf(f, bot);
+  file.permissions.allow = [other, ...file.permissions.allow];
+  writeFileSync(settingsPath(f, bot), JSON.stringify(file));
+  const without = f.store.update(bot.bot_id, 1, { scope: { localApps: [], datasets: [{ source: 's', dataset: 'd', write: false, reportReview: false }] } });
+  writeBotSettings(f.store, without);
+  assert.ok(!settingsOf(f, bot).permissions.allow.includes(LOCAL_APP_RULE), 'what the Bot put in is removed');
+  assert.ok(settingsOf(f, bot).permissions.allow.includes(other), 'and what someone else put in is not');
+  const again = f.store.update(bot.bot_id, 2, { scope: { localApps: [APP_B], datasets: [] } });
+  writeBotSettings(f.store, again);
+  assert.equal(settingsOf(f, bot).permissions.allow.filter((rule: string) => rule === LOCAL_APP_RULE).length, 1);
+  // Regenerating twice changes nothing.
+  const text = readFileSync(settingsPath(f, bot), 'utf8');
+  writeBotSettings(f.store, again);
+  assert.equal(readFileSync(settingsPath(f, bot), 'utf8'), text);
+});
+
+test('the engine of a Bot reads its own descriptor, which nobody else can: it is under the Bot\'s home and no other Bot may read it', (t) => {
+  const f = botFixture(t);
+  const first = makeBot(f, { name: 'First', scope: { localApps: [APP_A], datasets: [] } });
+  const second = makeBot(f, { name: 'Second', scope: { localApps: [APP_A], datasets: [] } });
+  // A new Bot changes every other Bot: they must now keep out of it.
+  writeAllBotSettings(f.store, () => undefined);
+  const descriptor = (bot: BotRecord) => join(f.store.homeDir(bot.bot_id), LOCAL_APP_MCP_DESCRIPTOR);
+  const own = settingsOf(f, first), other = settingsOf(f, second);
+  assert.ok(!own.permissions.deny.includes(read(descriptor(first))), 'it is not hidden from the engine of its own Bot by a rule of the Bot');
+  assert.ok(own.permissions.deny.includes(edit(descriptor(first), false)), 'it cannot be pointed somewhere else by the Bot it is for');
+  // The other Bot\'s whole folder is denied, which takes in everything below it, the descriptor too.
+  assert.ok(own.permissions.deny.includes(read(f.store.botDir(second.bot_id))));
+  assert.ok(own.permissions.deny.includes(edit(f.store.botDir(second.bot_id))));
+  assert.ok(own.sandbox.filesystem.denyRead.includes(f.store.botDir(second.bot_id)), 'and so are its commands');
+  assert.ok(other.permissions.deny.includes(read(f.store.botDir(first.bot_id))));
+  assert.ok(descriptor(second).startsWith(f.store.botDir(second.bot_id)));
+  // The owner\'s descriptor is in the configuration home of normal sessions, which every Bot is walled off from.
+  assert.ok(own.permissions.deny.includes(read(f.defaultConfigHome)));
 });
 
 test('a fresh file lists the memory folder, permissions and sandbox, and a model only when the Bot has one', (t) => {

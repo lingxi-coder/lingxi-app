@@ -8,7 +8,7 @@ import { BotSkillsController, importCandidates } from '../src/renderer/bridge/bo
 import { BotsController, sandboxOf } from '../src/renderer/bridge/botsStore';
 
 function bot(overrides: Partial<BotUi> = {}): BotUi {
-  return { botId: 'b1', name: 'Scribe', description: 'Writes things down', createdAt: 1_000, updatedAt: 1_000, revision: 1, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, ...overrides };
+  return { botId: 'b1', name: 'Scribe', description: 'Writes things down', createdAt: 1_000, updatedAt: 1_000, revision: 1, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, scope: { localApps: [], datasets: [] }, ...overrides };
 }
 
 function ipc(message: string): Error {

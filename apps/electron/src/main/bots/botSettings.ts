@@ -15,12 +15,14 @@
  *    Glob) and no `Edit` (Edit, Write, NotebookEdit) in the other Bots, the other
  *    private data of the app, or the configuration home of normal sessions; no
  *    `Edit` in a folder bound read-only; no `Edit` in the files that decide what
- *    the Bot may do (`bot.json`, its settings and persona, `.mcp.json`, and the
- *    project settings of a bound folder) or in the tasks other Bots handed it.
+ *    the Bot may do (`bot.json`, its settings and persona, `.mcp.json`, the project
+ *    settings of a bound folder, and the descriptor that tells its engine where
+ *    the Local Apps are) or in the tasks other Bots handed it.
  *  - `permissions.allow`: reading and writing the Bot's own memory, which the
- *    engine does not exempt from the working-directory rule, and the tools of the
+ *    engine does not exempt from the working-directory rule, the tools of the
  *    Bot router, which hand work to other Bots (what that work may do is decided
- *    by the permissions of the Bot that gets it, not by this).
+ *    by the permissions of the Bot that gets it, not by this), and, once the Bot
+ *    was given Local Apps, the Local Apps' MCP server.
  *  - `autoMemoryDirectory`: the Bot's memory folder, so that a session in any
  *    folder remembers the same things. This is the user layer of the engine's
  *    settings, the one every session of the Bot reads whether or not its folder
@@ -50,6 +52,7 @@ import { join } from 'node:path';
 import type { PermissionModeId } from '@lingxi/bridge-client';
 
 import { isPermissionModeId } from '../host-utils.js';
+import { LOCAL_APP_MCP_DESCRIPTOR, LOCAL_APP_MCP_SERVER_NAME } from '../local-apps/mcpGateway.js';
 import { writeFileAtomic } from './files.js';
 import { routerToolRules } from './routerTools.js';
 import { stillBound, type BotRecord, type BotStore, type BotWorkspace } from './store.js';
@@ -102,6 +105,14 @@ function isolatedPaths(store: BotStore, botId: string): string[] {
   return [...paths].sort();
 }
 
+/**
+ * The rule that lets a Bot use the Local Apps it was given without being asked each time. It names the
+ * server, not its tools: the engine's allow rules match a tool by its whole name or a server as a whole,
+ * and the names of the tools are made when an application is running. What the server lists to the Bot
+ * is decided by the Bot's own credential, so the Bot is allowed what it was given and nothing else.
+ */
+export const LOCAL_APP_RULE = `mcp__${LOCAL_APP_MCP_SERVER_NAME}`;
+
 /** What decides, in a folder the owner bound, what a session there may do next time: the Bot may not edit it. */
 function projectConfigFiles(folder: string): string[] {
   return [join(folder, '.lingxi', 'settings.json'), join(folder, '.lingxi', 'settings.local.json'), join(folder, '.mcp.json')];
@@ -122,6 +133,7 @@ export function buildManagedSettings(store: BotStore, record: BotRecord, workspa
     ...[
       join(botDir, 'bot.json'),
       join(home, 'LINGXI.md'), join(home, 'settings.json'), join(home, 'settings.local.json'), join(home, '.lingxi.json'), join(home, MANAGED_FILE),
+      join(home, LOCAL_APP_MCP_DESCRIPTOR),
       ...projectConfigFiles(workspace),
       ...workspaces.flatMap((bound) => projectConfigFiles(bound.path)),
     ].map((path) => pathRule('Edit', path, false)),
@@ -133,7 +145,7 @@ export function buildManagedSettings(store: BotStore, record: BotRecord, workspa
     autoMemoryDirectory: memory,
     sandbox: sandboxed,
     additionalDirectories: [workspace, ...workspaces.map((bound) => bound.path)],
-    allow: [pathRule('Read', memory), pathRule('Edit', memory), ...routerToolRules()],
+    allow: [pathRule('Read', memory), pathRule('Edit', memory), ...routerToolRules(), ...(record.scope.localApps.length > 0 ? [LOCAL_APP_RULE] : [])],
     deny,
     denyRead: sandboxed ? isolated : [],
     allowedDomains: sandboxed ? [...record.sandbox.allowedDomains] : [],

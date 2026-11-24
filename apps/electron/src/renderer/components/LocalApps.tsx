@@ -12,6 +12,7 @@ import type { ToolRunItem } from '../model/runItem';
 import { localAppReference } from '../model/localAppReference';
 import { useT } from '../theme/ThemeContext';
 import { LocalAppAgentQuestions, LocalAppAgentSettingsDialog } from './LocalAppAgentSettings';
+import { BotReachList } from './BotReachList';
 
 function appsApi() { const api = desktopHost()?.localApps; if (!api) throw new Error('Desktop application host is unavailable'); return api; }
 const phaseLabels: Record<LocalAppPhase, string> = { stopped: 'desktop_apps_ready', installing: 'desktop_apps_installing', building: 'desktop_apps_building', starting: 'desktop_apps_starting', running: 'desktop_apps_running', stopping: 'desktop_apps_stopping', failed: 'desktop_apps_attention' };
@@ -125,6 +126,7 @@ export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop 
       <h3>Permissions</h3><p>{apps.find(a => a.id === selected)?.grants.join(', ') || 'No capabilities granted for the latest release.'}</p>
       {apps.filter(app => app.id === selected && Object.keys(app.manifest.dataBindings ?? {}).length > 0).map(app =>
         <LocalAppDataSettings key={app.id + ':' + app.revision} app={app} api={appsApi()}/>)}
+      <BotReachList target={{ kind: 'localApp', appId: selected }}/>
       <h3>{tr('desktop_logs')}</h3><pre>{logs.length ? logs.map(l => `[${new Date(l.time).toLocaleTimeString(locale)}] ${l.process}: ${l.text}`).join('\n') : tr('desktop_apps_log_empty')}</pre></aside>}
     {publication && <LocalAppPublish key={publication.id} app={publication} canDevelop={canDevelop} onClose={() => setPublication(undefined)}/>}
     {agentSettings && apps.find(app => app.id === agentSettings) && <LocalAppAgentSettingsDialog key={agentSettings} app={apps.find(app => app.id === agentSettings)!} onClose={() => setAgentSettings(null)} onSaved={() => void refresh()}/>}

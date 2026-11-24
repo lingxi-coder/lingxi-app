@@ -24,6 +24,8 @@ export const docPageIds = [
   'models',
   'teams',
   'bots',
+  'friends',
+  'datasets',
   'local-apps',
   'remote-control',
   'mobile-execution',

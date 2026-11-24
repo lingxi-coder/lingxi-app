@@ -25,6 +25,11 @@ export const collaborationPages: DocPage[] = [
       { id: 'invite', title: t('Invite a member or join a team', '邀请成员或加入团队'), paragraphs: [
         t('An owner or admin opens the team details, creates an invitation and shares its link. The recipient can open the link or paste the code under Join with an invite, sign in and confirm. An expired or revoked invitation needs replacing.', '团队所有者或管理员在团队详情里创建邀请并分享链接。接收者可以打开链接，也可以在「通过邀请加入」里粘贴邀请码，登录并确认。邀请过期或已撤销时，请对方重新邀请。'),
       ] },
+      { id: 'roles', title: t('Roles, ownership and leaving a team', '角色、所有权与退出团队'), bullets: [
+        t('Owner: everything an admin can do, plus delete the team, make or remove admins and Make owner. Handing over ownership keeps the old owner as an admin. The single owner cannot leave.', '所有者：拥有管理员的全部权限，还可以删除团队、设置或取消管理员，以及「设为所有者」。转让后原所有者保留管理员身份。唯一的所有者不能退出团队。'),
+        t('Admin: create and revoke invites, invite friends and remove ordinary members. Member: use permitted conversations and shared Bots, and Leave team.', '管理员：创建和撤销邀请、邀请好友、移除普通成员。成员：使用有权限的对话和共享 Bot，也可以「退出团队」。'),
+        t('An invite link allows 1–50 uses and expires after 1 hour to 7 days. Leaving or removal ends access to the team’s conversations and shared Bots; returning needs a new invite. Delete team removes access for everyone and cannot be undone. A team has at most 200 members and a person joins at most 20 teams.', '邀请链接可用 1–50 次，有效期 1 小时到 7 天。退出或被移除后将无法访问团队对话和共享 Bot，重新加入需要新邀请。「删除团队」会让所有人失去访问权限，且无法撤销。每个团队最多 200 名成员，每人最多加入 20 个团队。'),
+      ] },
       { id: 'chat-type', title: t('Choose a chat', '新建哪种对话'), paragraphs: [
         t('To chat privately with the LingXi assistant, use New Chat in the main workspace. Open a team to start a DM with a member, a group chat with several participants, a named channel, or a direct chat with a shared Bot. A conversation in Friends reaches the friend you select.', '想单独问灵犀助手，在主界面新建对话。想找团队成员说话，进入团队后选成员私信、多人群聊或有名称的频道；想找共享 Bot，选择 Bot 对话。联系好友可以从「好友」选人打开对话。'),
       ] },
@@ -75,6 +80,75 @@ export const collaborationPages: DocPage[] = [
       { id: 'no-reply', title: t('When a Bot does not reply', 'Bot 不回消息时'), paragraphs: [
         t('Check the conversation first. In a team, check the published Bot’s availability, your access, remaining quota and any waiting task card. For an unaddressed group message, check this Bot’s auto-reply publication option and then the conversation switch. Even with both enabled it may choose silence. For a personal Bot opened remotely, check the Mac and the Bot’s remote access.', '先确认是哪种对话。团队里先看 Bot 的发布状态、宿主是否在线、自己的权限和剩余额度，再看任务卡是否在等人回答。若发的是未点名的群消息，先查这个 Bot 的自主回复发布选项，再查本对话的开关。两者都开启时它仍可能选择沉默。远程打开个人 Bot 时则检查 Mac 和该 Bot 的远程访问开关。'),
       ], links: [{ label: t('Auto-reply settings', '自主回复设置'), href: '/docs/teams#auto-reply' }, { label: t('Remote connection checks', '检查远控连接'), href: '/docs/remote-control#direct' }] },
+    ],
+  },
+  {
+    id: 'friends', group: 'product', sourceUrl,
+    title: t('Friends', '好友'),
+    description: t('Add a friend, chat one-to-one, share a Bot with a friend or invite a friend to a team.', '添加好友，一对一聊天，把 Bot 分享给好友，或邀请好友加入团队。'),
+    sources: [
+      { repo: 'lingxi-app', path: 'packages/teams/AddFriendView.tsx' },
+      { repo: 'lingxi-app', path: 'packages/teams/FriendsMain.tsx' },
+      { repo: 'lingxi-app', path: 'packages/teams/FriendProfileSettings.tsx' },
+      { repo: 'lingxi-app', path: 'packages/teams/FriendBotsPanel.tsx' },
+      { repo: 'lingxi-app', path: 'apps/firebase/src/friends.mjs' },
+    ],
+    sections: [
+      { id: 'add-friend', title: t('Add a friend', '添加好友'), steps: [
+        t('Open Friends → Profile settings, set a display name and an optional username, and choose whether people may find you by username or by email.', '打开「好友 → 个人资料设置」，设置显示名称和可选的用户名，并选择是否允许别人通过用户名或邮箱找到你。'),
+        t('Choose Add friend, enter an exact @username, an email address or a friend link and choose Look up. Add an optional note and send the request. To add someone from a shared team, open the team details → Members and choose Add friend on that member.', '点「添加好友」，输入准确的 @用户名、邮箱地址或好友链接后查找。可附上备注再发送请求。添加同一团队的成员时，在团队详情的「成员」里对该成员选择「添加好友」。'),
+      ], note: t('Only an exact username or a verified email finds you, and your email address is never shown. Every miss looks the same.', '只有准确的用户名或已验证的邮箱才能找到你，邮箱地址不会显示给对方。找不到时的提示都一样。'), links: [{ label: t('Open Friends', '打开好友'), href: '/friends' }] },
+      { id: 'friend-link', title: t('Share your friend link', '分享好友链接'), paragraphs: [
+        t('Under Add friend → My friend link choose Copy link or Share link. Anyone who opens it and confirms becomes your friend right away, without your approval. Reset link stops the old link immediately; Turn off link disables it until you create a new one.', '在「添加好友 → 我的好友链接」里复制或分享链接。任何人打开并确认后会立即成为你的好友，无需你批准。「重置链接」会让旧链接立即失效；「关闭链接」后，在重新创建之前没人能用它添加你。'),
+      ] },
+      { id: 'requests', title: t('Answer friend requests', '处理好友请求'), paragraphs: [
+        t('Friend requests → Received lists requests to Accept or Decline; Sent lets you Cancel request. If the other person already asked you, sending your own request accepts theirs. You can have 50 outgoing requests and 500 friends.', '在「好友请求 → 收到的」里接受或拒绝；在「发出的」里可以取消请求。对方已经向你发出请求时，你再发送请求会直接成为好友。最多可同时有 50 个待处理的发出请求，好友上限为 500 人。'),
+      ] },
+      { id: 'block', title: t('Remove or block someone', '删除或拉黑好友'), paragraphs: [
+        t('In the friend’s menu choose Remove friend or Block. Both end the friendship and delete the chat for both people. A blocked person cannot find you or send requests until you unblock them in Blocked people. Unblocking does not restore the friendship.', '在好友菜单里选择「删除好友」或「拉黑」。两者都会结束好友关系，并为双方删除聊天。被拉黑的人在你从「已拉黑」中解除之前无法找到你或发送请求。解除拉黑不会恢复好友关系。'),
+      ] },
+      { id: 'friend-bots', title: t('Share a Bot with a friend', '把 Bot 分享给好友'), paragraphs: [
+        t('Open the friend chat → Shared Bots. To share one of your Bots, use LingXi Desktop on the Mac that runs it, choose Share a Bot with the friend, review and confirm. The friend gets one Bot DM per Bot. The Bot runs on its maintainer’s Desktop and the maintainer can read every conversation with it. Stop sharing blocks new requests and keeps history.', '打开好友对话的「共享 Bot」。要分享自己的 Bot，在运行它的 Mac 上用灵犀桌面端选择「与好友分享 Bot」，复核后确认。好友对每个 Bot 有一个 Bot 私聊。Bot 运行在维护者的桌面端，维护者能看到与它的所有对话。「停止共享」会阻止新请求，保留历史记录。'),
+      ], links: [{ label: t('Other ways to share a Bot', '其他 Bot 共享方式'), href: '/docs/bots#audience' }] },
+      { id: 'team-offer', title: t('Invite a friend to a team', '邀请好友加入团队'), paragraphs: [
+        t('A team owner or admin opens the team details → Invite friends, picks a current friend and chooses Invite. The friend sees the team name and your name under Team invitations in Friends and can Join or Dismiss. Nothing else is shared until they join, always as a member. The invitation expires after 7 days.', '团队所有者或管理员在团队详情里选择「邀请好友」，选中一位当前好友并发送邀请。好友会在「好友」的「团队邀请」中看到团队名称和你的名字，可以加入或忽略。加入前不会共享其他内容，加入后身份为成员。邀请 7 天后过期。'),
+      ], links: [{ label: t('Team invite links', '团队邀请链接'), href: '/docs/teams#invite' }] },
+    ],
+  },
+  {
+    id: 'datasets', group: 'product', sourceUrl,
+    title: t('Datasets', '数据集'),
+    description: t('Create a Dataset, share it into a conversation with fixed, latest or editable access, connect a data source and bind data to apps, pages, Bots and tasks.', '创建数据集，以固定版本、最新数据或共同编辑的方式分享到会话，连接数据源，并把数据绑定到应用、页面、Bot 和任务。'),
+    sources: [
+      { repo: 'lingxi-app', path: 'packages/teams/PersonalChatData.tsx' },
+      { repo: 'lingxi-app', path: 'packages/teams/DatasetConversation.tsx' },
+      { repo: 'lingxi-app', path: 'packages/teams/ConversationData.tsx' },
+      { repo: 'lingxi-app', path: 'packages/teams/DatasetPage.tsx' },
+      { repo: 'lingxi-app', path: 'packages/teams/BotDatasetTaskSettings.tsx' },
+      { repo: 'lingxi-app', path: 'apps/electron/src/renderer/components/DesktopDataSources.tsx' },
+      { repo: 'lingxi-app', path: 'apps/electron/src/renderer/components/LocalAppDataSettings.tsx' },
+    ],
+    sections: [
+      { id: 'personal-data', title: t('Create a Dataset and add records', '创建数据集并添加记录'), paragraphs: [
+        t('In Desktop Chat open Personal data in the top bar and choose Create a dataset from JSON Schema; Use schema from the latest reply takes a schema the assistant just drafted. Select the Dataset to Add record or Select and edit. In Web Chat turn on Dataset beside the composer, or attach one of My datasets; the assistant’s create, write and read requests wait for your approval.', '在桌面端 Chat 顶栏打开「个人数据」，选择「用 JSON Schema 新建数据集」；「使用最近回复中的 Schema」可以直接采用助手刚起草的 Schema。选中数据集后可以「添加记录」或「选择与编辑」。在 Web Chat 中，打开输入框旁的「数据集」开关，或附加「我的数据集」中的一项；助手创建、写入和读取数据的请求都要等你批准。'),
+      ] },
+      { id: 'share-data', title: t('Share data into a conversation', '把数据分享到会话'), steps: [
+        t('In the team conversation choose Add data and pick a Data location: My datasets, Team datasets or Shared in this conversation.', '在团队会话中点「添加数据」，选择数据位置：我的数据集、团队数据集或本会话中已共享的数据。'),
+        t('Choose Access: Use fixed version shares one immutable snapshot, See latest shares read-only current records, and Edit together lets the audience read and write. Narrow Visible fields and optional Partitions.', '选择访问方式：「使用固定版本」分享一份不可变快照，「查看最新」分享只读的当前记录，「共同编辑」允许对方读写。可以限制可见字段和分区。'),
+        t('Check Share with … and choose Share data. To publish personal records instead, use Personal data → Publish to Team, pick the conversation, Preview publication audience and Confirm publication.', '确认「分享给 …」的受众后点「分享数据」。要发布个人记录，可在「个人数据」里选择「发布到团队」，选好会话，预览发布受众后确认发布。'),
+      ], note: t('Revoking access or leaving the team affects later reads only. What people already saw or exported stays with them.', '撤销权限或退出团队只影响之后的读取。对方已经看到或导出的内容由对方持有。') },
+      { id: 'conversation-data', title: t('Browse a conversation’s data', '查看会话数据'), paragraphs: [
+        t('Open Conversation data in the conversation header, pick a Dataset, switch between Table and its views, read its history and send a record into the chat. If a save reports that the record changed, load the latest revision and save again.', '在会话顶部打开「会话数据」，选择数据集，在表格和视图之间切换，查看历史，并把记录发到对话里。保存时提示记录已变化，请先加载最新版本再保存。'),
+      ] },
+      { id: 'data-sources', title: t('Connect a database or file', '连接数据库或文件'), paragraphs: [
+        t('On Desktop open Data sources, choose the host configuration and Test and preview. Set Private preview permissions for who may request a preview and which fields, then Prepare report to publish a reviewed, versioned report into a conversation. MySQL, PostgreSQL, SQLite, MongoDB, Redis, CSV and JSON are read on the owner’s Mac with read-only credentials from Keychain; raw rows and connection details stay there. Disable and revoke ends later reads.', '在桌面端打开「数据源」，选择宿主配置并「测试并预览」。在「私有预览许可」中设置谁可以请求预览以及哪些字段，再用「准备报表」把复核后的版本化报表发布到会话。MySQL、PostgreSQL、SQLite、MongoDB、Redis、CSV 和 JSON 在所有者的 Mac 上以钥匙串中的只读凭据读取，原始行和连接信息都留在本机。「停用并撤权」会停止之后的读取。'),
+      ] },
+      { id: 'bindings', title: t('Use a Dataset in apps, pages, Bots and tasks', '在应用、页面、Bot 和任务中使用数据集'), bullets: [
+        t('Local App: the app declares a data binding. On Desktop open Apps → the app’s details panel → Data bindings and enter the Dataset ID, the share grant and, for read access, an optional fixed snapshot.', 'Local App：应用声明数据绑定。在桌面端打开「应用」→ 该应用的详情面板 →「数据绑定」，填写数据集 ID、共享授权；只读绑定还可以指定固定快照。'),
+        t('Interactive page: from a visualization choose Publish interactive page, pick the conversation and its Dataset share, then review the code, assets and permitted actions before publishing.', '交互页面：在可视化中选择「发布交互页面」，选好会话和其中的数据分享，复核代码、资源和允许的操作后发布。'),
+        t('Shared Bot: the maintainer opens Bot Dataset permission in the conversation, enters the Dataset ID and task plan and chooses Review plan. It applies to the current published Bot in that conversation and can be revoked there.', '共享 Bot：维护者在会话中打开「Bot 数据集权限」，填写数据集 ID 和任务计划后复核。权限只适用于该会话中当前发布的 Bot，并可在同一处撤销。'),
+        t('Scheduled task: open the task in Scheduled, choose Bind Dataset, enter the Dataset ID and task plan and review it.', '定时任务：在「定时任务」中打开任务，选择「绑定数据集」，填写数据集 ID 和任务计划并复核。'),
+      ] },
     ],
   },
   {

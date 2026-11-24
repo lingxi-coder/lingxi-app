@@ -122,6 +122,12 @@ test('product questions open the right section in both languages', () => {
     ['zh', '我的手机通过远控打开电脑上的应用，我昨天记的数据这次还能继续用吗？', 'local-apps', 'paired-devices'],
     ['zh', '如何共享 Local App', 'local-apps', 'share-options'],
     ['zh', '让别人安装我的应用', 'local-apps', 'market'],
+    ['zh', '如何添加好友？', 'friends', 'add-friend'],
+    ['en', 'How do I reset my friend link?', 'friends', 'friend-link'],
+    ['zh', '怎么邀请好友加入团队', 'friends', 'team-offer'],
+    ['zh', '如何转让团队', 'teams', 'roles'],
+    ['zh', '如何创建数据集？', 'datasets', 'personal-data'],
+    ['en', 'How do I share a dataset in a group?', 'datasets', 'share-data'],
   ] as const) {
     const first = searchDocs(query, locale)[0];
     assert.deepEqual([first?.page.id, first?.sectionId], [pageId, sectionId], query);

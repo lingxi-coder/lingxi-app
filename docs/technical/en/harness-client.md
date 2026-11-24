@@ -211,17 +211,17 @@ Returns false when the parked request is unknown or no longer has a receiver. Ro
 
 [Source repository](https://github.com/lingxi-coder/harness-runtime)
 
-- [harness-runtime/crates/client/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/client/src/lib.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
-- [harness-runtime/crates/client/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/client/Cargo.toml) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
-- [harness-runtime/crates/client/src/protocol/version.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/client/src/protocol/version.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
-- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/client/src/protocol/commands.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
-- [harness-runtime/crates/client/src/protocol/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/client/src/protocol/events.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
-- [harness-runtime/crates/client/src/adapter/output_stream.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/client/src/adapter/output_stream.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
-- [harness-runtime/crates/client/src/protocol/message.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/client/src/protocol/message.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
-- [harness-runtime/crates/client/src/adapter/turn.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/client/src/adapter/turn.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
-- [harness-runtime/crates/client/src/adapter/permission_gate.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/client/src/adapter/permission_gate.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
-- [harness-runtime/crates/client/src/protocol/permission.rs](https://github.com/lingxi-coder/harness-runtime/blob/f50814ec8381f10756f66eadf457474d90bcc69a/crates/client/src/protocol/permission.rs) — Committed source (f50814ec8381f10756f66eadf457474d90bcc69a)
+- [harness-runtime/crates/client/src/lib.rs](https://github.com/lingxi-coder/harness-runtime/blob/16cded0d03f9cd83b2e69436ee2367200268e088/crates/client/src/lib.rs) — Committed source (16cded0d03f9cd83b2e69436ee2367200268e088)
+- [harness-runtime/crates/client/Cargo.toml](https://github.com/lingxi-coder/harness-runtime/blob/16cded0d03f9cd83b2e69436ee2367200268e088/crates/client/Cargo.toml) — Committed source (16cded0d03f9cd83b2e69436ee2367200268e088)
+- [harness-runtime/crates/client/src/protocol/version.rs](https://github.com/lingxi-coder/harness-runtime/blob/16cded0d03f9cd83b2e69436ee2367200268e088/crates/client/src/protocol/version.rs) — Committed source (16cded0d03f9cd83b2e69436ee2367200268e088)
+- [harness-runtime/crates/client/src/protocol/commands.rs](https://github.com/lingxi-coder/harness-runtime/blob/16cded0d03f9cd83b2e69436ee2367200268e088/crates/client/src/protocol/commands.rs) — Committed source (16cded0d03f9cd83b2e69436ee2367200268e088)
+- [harness-runtime/crates/client/src/protocol/events.rs](https://github.com/lingxi-coder/harness-runtime/blob/16cded0d03f9cd83b2e69436ee2367200268e088/crates/client/src/protocol/events.rs) — Committed source (16cded0d03f9cd83b2e69436ee2367200268e088)
+- [harness-runtime/crates/client/src/adapter/output_stream.rs](https://github.com/lingxi-coder/harness-runtime/blob/16cded0d03f9cd83b2e69436ee2367200268e088/crates/client/src/adapter/output_stream.rs) — Committed source (16cded0d03f9cd83b2e69436ee2367200268e088)
+- [harness-runtime/crates/client/src/protocol/message.rs](https://github.com/lingxi-coder/harness-runtime/blob/16cded0d03f9cd83b2e69436ee2367200268e088/crates/client/src/protocol/message.rs) — Committed source (16cded0d03f9cd83b2e69436ee2367200268e088)
+- [harness-runtime/crates/client/src/adapter/turn.rs](https://github.com/lingxi-coder/harness-runtime/blob/16cded0d03f9cd83b2e69436ee2367200268e088/crates/client/src/adapter/turn.rs) — Committed source (16cded0d03f9cd83b2e69436ee2367200268e088)
+- [harness-runtime/crates/client/src/adapter/permission_gate.rs](https://github.com/lingxi-coder/harness-runtime/blob/16cded0d03f9cd83b2e69436ee2367200268e088/crates/client/src/adapter/permission_gate.rs) — Committed source (16cded0d03f9cd83b2e69436ee2367200268e088)
+- [harness-runtime/crates/client/src/protocol/permission.rs](https://github.com/lingxi-coder/harness-runtime/blob/16cded0d03f9cd83b2e69436ee2367200268e088/crates/client/src/protocol/permission.rs) — Committed source (16cded0d03f9cd83b2e69436ee2367200268e088)
 
-- harness-runtime: HEAD f50814ec8381f10756f66eadf457474d90bcc69a; Referenced input fingerprint sha256:6fe1d28e55bd5b9d72e3fe6ee54f892c7efe64b640840a407ccee12dcef85567; Product pin f50814ec8381f10756f66eadf457474d90bcc69a
+- harness-runtime: HEAD 16cded0d03f9cd83b2e69436ee2367200268e088; Referenced input fingerprint sha256:af27a44ee002fcbf278f333efb7f9daebd6c6fd92a6e21f86383c0deb5fea242; Product pin 16cded0d03f9cd83b2e69436ee2367200268e088
 
 <!-- Generated from apps/web/src/data/docs. Do not edit this file directly. -->

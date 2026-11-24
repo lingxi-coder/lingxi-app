@@ -4,6 +4,7 @@ import type { AppDevelopmentChat } from './bridge/localAppWorkspace';
 import { tr } from './i18n/locale';
 import { useI18n } from './i18n/useI18n';
 import { LocalApps, LocalAppsTopBar } from './components/LocalApps';
+import { LocalAppDatasets } from './components/LocalAppDatasets';
 import './components/LocalApps.css';
 import { Bots } from './components/Bots';
 import { BotProposalAction } from './components/BotProposalCard';
@@ -462,6 +463,7 @@ export function App() {
     setActivityView(false);
   }, [cancelLocalAppNavigation]);
   const showAppLibrary = useCallback(() => { setSidebarMode('apps'); openPage('apps'); }, [openPage, setSidebarMode]);
+  const showAppDatasets = useCallback(() => { setSidebarMode('apps'); openPage('datasets'); }, [openPage, setSidebarMode]);
   const openAppDevelopmentChat = useCallback(async (chat: AppDevelopmentChat) => {
     if (sessionNavigationBlocked()) return;
     cancelLocalAppNavigation();
@@ -809,7 +811,7 @@ export function App() {
             pageSidebarRef={setPageSidebar}
             activityView={activityView}
             onToggleActivityView={toggleActivityView}
-            apps={page === 'apps'}
+            apps={page === 'apps' || page === 'datasets'}
             changes={page === 'changes'}
             onOpenApps={showAppLibrary}
             botsAvailable={bots.available}
@@ -834,9 +836,9 @@ export function App() {
             onSelectSidebarMode={selectSidebarMode}
             modePanel={(mode, search) => mode === 'apps'
               ? <LocalAppsSidebar groups={appWorkspace.groups} activeSessionId={bridge.activeSession?.sessionId}
-                  chatVisible={page === 'chat'} libraryVisible={page === 'apps'} query={search}
+                  chatVisible={page === 'chat'} libraryVisible={page === 'apps'} datasetsVisible={page === 'datasets'} query={search}
                   busy={sessionNavigationBlocked()} loading={appWorkspace.loading} error={appWorkspace.error} onRetry={() => { void appWorkspace.refresh(); }}
-                  onLibrary={showAppLibrary} onCreate={() => openLocalAppChat()}
+                  onLibrary={showAppLibrary} onDatasets={showAppDatasets} onCreate={() => openLocalAppChat()}
                   onNewChat={group => openLocalAppChat({ id: group.app?.id ?? '', name: group.name,
                     authoring: group.app?.authoring ?? { sourceDirectory: group.projectPath! },
                     authoringAction: 'createSession', authoringSetCurrent: Boolean(group.app) })}
@@ -863,7 +865,7 @@ export function App() {
             topbar={<>
               {hasChatTopbar && <div ref={setChatTopbar} className="desktop-chat-topbar-slot no-drag" />}
               {page === 'scheduled' && <ScheduledTasksTopBar />}
-              {page === 'apps' && <LocalAppsTopBar onOpenMarket={() => { void window.lingxi?.localApps?.marketBrowse().catch(error => setLocalAppNavigationError(error instanceof Error ? error.message : String(error))); }} />}
+              {(page === 'apps' || page === 'datasets') && <LocalAppsTopBar onOpenMarket={() => { void window.lingxi?.localApps?.marketBrowse().catch(error => setLocalAppNavigationError(error instanceof Error ? error.message : String(error))); }} />}
               <div style={{ display: page === 'chat' && (sidebarMode === 'home' || sidebarMode === 'apps' || botChat) ? 'contents' : 'none' }}>
                 <BetaTopBar
                   bridge={bridge}
@@ -905,6 +907,8 @@ export function App() {
             }} />
           {page === 'friends' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('friends_loading')}</p>}><FriendsPage friends={friends} locale={locale} notificationTarget={conversationNoticeTarget} /></Suspense>}
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps sidebarTarget={pageSidebar} visible={page === 'apps'} onCreate={() => openLocalAppChat()} onDevelopmentBlocked={() => setLocalAppNavigationError(tr('local_app_development_requires_code'))} canDevelop={bridge.bootstrap?.conversationSpaces.activeMode === 'code' && !bridge.sessionLoading} /></div>
+          {page === 'datasets' && <LocalAppDatasets locale={locale} teamsTheme={teamsTheme}
+            workspace={teams.workspace && teams.snapshot ? { uid: teams.snapshot.uid, api: teams.workspace.api, teams: teams.snapshot.teams } : undefined} />}
           {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>
             <Bots visible={page === 'bots'} bots={bots} api={botsApi} bridge={bridge}
               onAssist={openBotCreationChat}

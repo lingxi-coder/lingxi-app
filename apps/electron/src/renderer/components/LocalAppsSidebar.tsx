@@ -5,10 +5,14 @@ import { tr } from '../i18n/locale';
 import { AppsGlyph } from './LocalApps';
 import { Icon } from './Icon';
 
-export function LocalAppsSidebar({ groups, activeSessionId, chatVisible, libraryVisible, query, busy, error, loading = false,
-  onLibrary, onCreate, onOpen, onEdit, onNewChat, onChat, onRetry }: {
-  groups: readonly AppWorkspaceGroup[]; activeSessionId?: string; chatVisible: boolean; libraryVisible: boolean;
-  query: string; busy: boolean; error: string; loading?: boolean; onLibrary(): void; onCreate(): void;
+export function DatasetGlyph({ size = 20 }: { size?: number }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" aria-hidden="true"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.75"/><path d="M4.5 5.5v13c0 1.52 3.36 2.75 7.5 2.75s7.5-1.23 7.5-2.75v-13"/><path d="M4.5 12c0 1.52 3.36 2.75 7.5 2.75s7.5-1.23 7.5-2.75"/></svg>;
+}
+
+export function LocalAppsSidebar({ groups, activeSessionId, chatVisible, libraryVisible, datasetsVisible = false, query, busy, error, loading = false,
+  onLibrary, onDatasets, onCreate, onOpen, onEdit, onNewChat, onChat, onRetry }: {
+  groups: readonly AppWorkspaceGroup[]; activeSessionId?: string; chatVisible: boolean; libraryVisible: boolean; datasetsVisible?: boolean;
+  query: string; busy: boolean; error: string; loading?: boolean; onLibrary(): void; onDatasets?(): void; onCreate(): void;
   onOpen(id: string): void; onEdit(id: string): void; onChat(chat: AppDevelopmentChat): void; onRetry(): void;
   onNewChat(group: AppWorkspaceGroup): void;
 }) {
@@ -31,6 +35,9 @@ export function LocalAppsSidebar({ groups, activeSessionId, chatVisible, library
     <button type="button" className="local-apps-library-link" aria-current={libraryVisible ? 'page' : undefined} onClick={onLibrary}>
       <AppsGlyph size={18}/><span>{tr('apps_library')}</span>
     </button>
+    {onDatasets && <button type="button" className="local-apps-library-link" aria-current={datasetsVisible ? 'page' : undefined} onClick={onDatasets}>
+      <DatasetGlyph size={18}/><span>{tr('apps_datasets')}</span>
+    </button>}
     {error && <p className="local-apps-sidebar-note" role="alert">{error} <button type="button" onClick={onRetry}>{tr('common_retry')}</button></p>}
     {loading && !groups.length && <p className="local-apps-sidebar-note" role="status">{tr('apps_loading')}</p>}
     {!loading && !groups.length && !error && <div className="local-apps-sidebar-empty"><p>{tr('apps_sidebar_empty')}</p><button type="button" disabled={busy} onClick={onCreate}>{tr('apps_create')}</button></div>}

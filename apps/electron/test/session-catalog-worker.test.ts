@@ -65,6 +65,59 @@ function processes() {
   return { calls, spawnProcess, get live() { return live; }, get peak() { return peak; } };
 }
 
+test('workspace launch settings reuse only an idle reader started in the requested cwd', async t => {
+  const cwd = project(t), other = project(t), children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const listing = catalog.listComplete(cwd);
+  await nextTurn();
+  const reader = children.calls[0];
+  const settings = { version: 1, config_home: cwd, environment: { FROM_DISK: 'one' } };
+  const concurrent = catalog.workspaceSettings(cwd);
+  await nextTurn();
+  assert.ok(children.calls[1].args.includes('--workspace-environment-json'));
+  children.calls[1].finish(settings);
+  await concurrent;
+  reader.reply();
+  await listing;
+  const same = catalog.workspaceSettings(cwd);
+  await nextTurn();
+  assert.deepEqual(reader.queries.at(-1), { version: 2, id: 2, cwd, workspaceEnvironment: true });
+  reader.reply(JSON.stringify(settings));
+  assert.deepEqual((await same).environment, settings.environment);
+
+  const different = catalog.workspaceSettings(other);
+  await nextTurn();
+  assert.ok(children.calls[2].args.includes('--workspace-environment-json'));
+  children.calls[2].finish({ ...settings, config_home: other });
+  assert.equal((await different).configHome, other);
+});
+
+test('real warm worker reads current workspace settings and preserves native merge errors',
+  { skip: !process.env.LINGXI_SESSION_CATALOG_TEST_BIN, timeout: 60_000 }, async t => {
+    const cwd = project(t), home = join(cwd, 'config');
+    mkdirSync(home);
+    const file = join(home, 'settings.json');
+    let spawns = 0;
+    const options = { serverBin: process.env.LINGXI_SESSION_CATALOG_TEST_BIN, configHome: home };
+    const catalog = new ProjectSessionCatalog({ ...options, spawnProcess: ((...args: Parameters<typeof spawn>) => {
+      spawns++;
+      return spawn(...args);
+    }) as typeof spawn });
+    const oneshot = new ProjectSessionCatalog({ ...options, catalogWorker: false });
+    t.after(() => { catalog.dispose(); oneshot.dispose(); });
+    await catalog.listComplete(cwd);
+    for (const value of ['first', 'updated']) {
+      writeFileSync(file, JSON.stringify({ env: { TEST_RESUME_SETTING: value } }));
+      const actual = await catalog.workspaceSettings(cwd);
+      assert.deepEqual(actual, await oneshot.workspaceSettings(cwd));
+      assert.equal(actual.environment.TEST_RESUME_SETTING, value);
+    }
+    assert.equal(spawns, 1);
+    writeFileSync(file, '{');
+    await assert.rejects(catalog.workspaceSettings(cwd), /workspace environment settings are unavailable/);
+  });
+
 test('history pages reuse their worker and validate that cursors advance', async t => {
   const cwd = project(t), process = processes();
   const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: process.spawnProcess });
@@ -166,6 +219,65 @@ test('concurrent exact selection shares one read for the same scope and transcri
   assert.equal(worker.queries.length, 4);
   worker.reply(output(uuid, 'updated'));
   assert.equal((await fresh)?.title, 'updated');
+});
+
+test('selected transcripts resolve while directory scans are pending, in selection order', async t => {
+  const cwd = project(t), other = project(t), process = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: process.spawnProcess });
+  t.after(() => catalog.dispose());
+  const selection = { scope: 'repository', transcriptPath: row().path } as const;
+  const firstScan = catalog.list(cwd);
+  const nextScan = catalog.list(cwd, 'all');
+  const first = catalog.select(other, uuid, selection);
+  const same = catalog.select(other, uuid, selection);
+  const changedScope = catalog.select(other, uuid, { ...selection, scope: 'all' });
+  await nextTurn();
+  assert.equal(process.calls.length, 2);
+  const [scans, selections] = process.calls;
+  assert.deepEqual(scans.queries, [{ version: 2, id: 1, cwd, scope: 'current' }]);
+  assert.deepEqual(selections.queries, [{ version: 2, id: 1, cwd: other, sessionId: uuid, ...selection }]);
+  selections.reply(output(uuid, 'selected source'));
+  assert.deepEqual((await Promise.all([first, same])).map(hit => hit?.title), ['selected source', 'selected source']);
+  await nextTurn();
+  assert.equal(selections.queries.length, 2);
+  assert.equal(selections.queries[1].scope, 'all');
+  selections.reply(output(uuid, 'second selection'));
+  assert.equal((await changedScope)?.title, 'second selection');
+  scans.reply(output(uuid, 'directory'));
+  await firstScan;
+  await nextTurn();
+  assert.equal(scans.queries[1].scope, 'all');
+  scans.reply();
+  await nextScan;
+  assert.equal(process.peak, 2);
+});
+
+test('invalidation retires a selected-source worker without waiting for an older directory scan', async t => {
+  const cwd = project(t), process = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: process.spawnProcess });
+  t.after(() => catalog.dispose());
+  const selection = { scope: 'current', transcriptPath: row().path } as const;
+  const oldScan = catalog.list(cwd);
+  const oldSelection = catalog.select(cwd, uuid, selection);
+  await nextTurn();
+  const [scan, selected] = process.calls;
+  catalog.invalidate(cwd);
+  const refreshed = catalog.select(cwd, uuid, selection);
+  selected.reply(output(uuid, 'previous revision'));
+  assert.equal((await oldSelection)?.title, 'previous revision');
+  await nextTurn();
+  assert.equal(selected.kills, 1);
+  assert.equal(process.calls.length, 3);
+  const current = process.calls[2];
+  assert.deepEqual(current.queries, [{ version: 2, id: 1, cwd, sessionId: uuid, ...selection }]);
+  current.reply(output(uuid, 'new revision'));
+  assert.equal((await refreshed)?.title, 'new revision');
+  scan.reply();
+  await oldScan;
+  catalog.dispose();
+  await nextTurn();
+  assert.equal(process.live, 0);
+  assert.equal(process.peak, 2);
 });
 
 test('history and foreground lanes keep one active request each and share the bounded operation budget', async t => {

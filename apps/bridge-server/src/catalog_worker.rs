@@ -27,6 +27,14 @@ struct Request {
     transcript_path: Option<PathBuf>,
     history_before: Option<super::history_page::Cursor>,
     activity_after: Option<u64>,
+    #[serde(default, deserialize_with = "workspace_environment_flag")]
+    workspace_environment: Option<bool>,
+}
+
+fn workspace_environment_flag<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
+    bool::deserialize(deserializer).map(Some)
 }
 
 #[derive(Serialize)]
@@ -202,6 +210,28 @@ impl CatalogWorker {
         let cwd = tokio::fs::canonicalize(&request.cwd)
             .await
             .map_err(|_| "session catalog workspace is unavailable".to_string())?;
+        if let Some(enabled) = request.workspace_environment {
+            if !enabled
+                || request.session_id.is_some()
+                || request.scope.is_some()
+                || request.transcript_path.is_some()
+                || request.history_before.is_some()
+                || request.activity_after.is_some()
+            {
+                return Err("invalid workspace environment request".into());
+            }
+            // The one-shot command resolves relative configuration paths against this cwd.
+            let process_cwd = std::env::current_dir()
+                .map_err(|_| "workspace environment working directory is unavailable")?;
+            if tokio::fs::canonicalize(&process_cwd).await.ok() != Some(cwd) {
+                return Err("workspace environment requires the worker's launch directory".into());
+            }
+            let output = super::workspace_environment_json(&process_cwd).await?;
+            if output.len() > MAX_OUTPUT_BYTES {
+                return Err("workspace environment output is too large".into());
+            }
+            return Ok(output);
+        }
         let home = if self.home.is_absolute() {
             self.home.clone()
         } else {
@@ -518,6 +548,44 @@ mod tests {
         assert_eq!(lines[1].0["id"], 2);
         let catalog: serde_json::Value = serde_json::from_slice(lines[1].1).unwrap();
         assert_eq!(catalog, serde_json::json!({"version":1,"sessions":[]}));
+    }
+
+    #[tokio::test]
+    async fn workspace_environment_requires_a_dedicated_request_in_the_worker_directory() {
+        use serde_json::json;
+
+        let root = tempfile::tempdir().unwrap();
+        let mut worker = CatalogWorker::new(root.path().join("home"));
+        let mut query = json!({"version": 2, "id": 1, "cwd": std::env::current_dir().unwrap(), "workspaceEnvironment": true});
+        for (field, value) in [
+            ("sessionId", json!("11111111-2222-4333-8444-555555555555")),
+            ("scope", json!("current")),
+            ("transcriptPath", json!(root.path())),
+            (
+                "historyBefore",
+                json!({"uuid": "11111111-2222-4333-8444-555555555555"}),
+            ),
+            ("activityAfter", json!(0)),
+            ("workspaceEnvironment", json!(false)),
+        ] {
+            let mut invalid = query.clone();
+            invalid[field] = value;
+            let request = serde_json::from_value(invalid).unwrap();
+            assert_eq!(
+                worker.list(&request).await.unwrap_err(),
+                "invalid workspace environment request"
+            );
+        }
+        query["cwd"] = json!(root.path());
+        let other_project = serde_json::from_value(query.clone()).unwrap();
+        assert_eq!(
+            worker.list(&other_project).await.unwrap_err(),
+            "workspace environment requires the worker's launch directory"
+        );
+        for invalid in [json!(null), json!("true")] {
+            query["workspaceEnvironment"] = invalid;
+            assert!(serde_json::from_value::<Request>(query.clone()).is_err());
+        }
     }
 
     #[tokio::test]

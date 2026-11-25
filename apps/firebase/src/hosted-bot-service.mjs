@@ -238,11 +238,15 @@ export class HostedBotServices {
   async view(tx, root, service, self, user, now) {
     if (service.publisher === user) return publisherView(service);
     const botDoc = await tx.get(root.collection('sharedBots').doc(service.sharedBotId)), bot = botDoc.data();
-    const deployment = bot ? (await tx.get(root.collection('deployments').doc(bot.identity.activeDeploymentId))).data() : undefined;
-    // The ledger's own daily counters: one for the whole scope, one per person and generation.
-    const today = day(now), used = async key => (await tx.get(root.collection('requestQuotas').doc(hash(key)))).data()?.used ?? 0;
-    const serviceUsed = bot ? await used([today, 'team']) : 0;
-    const userUsed = bot && self ? await used([today, 'member', user, self.generation]) : 0;
+    const today = day(now), quotas = root.collection('requestQuotas');
+    const [deploymentDoc, serviceQuota, memberQuota] = bot ? await tx.getAll(
+      root.collection('deployments').doc(bot.identity.activeDeploymentId),
+      quotas.doc(hash([today, 'team'])),
+      ...(self ? [quotas.doc(hash([today, 'member', user, self.generation]))] : []),
+    ) : [];
+    const deployment = deploymentDoc?.data();
+    const serviceUsed = serviceQuota?.data()?.used ?? 0;
+    const userUsed = memberQuota?.data()?.used ?? 0;
     const availability = service.state !== 'active' ? 'withdrawn' : !service.online ? 'disabled'
       : !bot || bot.identity.state !== 'published' ? 'not_ready'
       : !deployment?.enabled || !deployment.ready || deployment.onlineUntil <= now ? 'host_offline'

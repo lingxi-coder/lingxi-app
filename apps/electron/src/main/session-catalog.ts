@@ -193,6 +193,7 @@ class CatalogChildTermination {
 
 interface CatalogWorkerQuery {
   cwd: string;
+  workspaceEnvironment?: true;
   sessionId?: string;
   scope?: SessionCatalogScope;
   transcriptPath?: string;
@@ -215,6 +216,7 @@ class CatalogWorker {
 
   constructor(
     private readonly child: ReturnType<typeof spawn>,
+    readonly cwd: string,
     private readonly release: () => void,
     private readonly timeoutMs: number,
     private readonly idleMs: number,
@@ -348,6 +350,7 @@ interface CatalogWorkerLane {
   key?: string;
   pending?: Promise<CatalogWorker>;
   tail: Promise<void>;
+  queued: number;
 }
 
 function boundedOutput(value: string): string {
@@ -430,8 +433,10 @@ export class ProjectSessionCatalog {
   private readonly pendingHistory = new Map<string, Promise<TranscriptHistoryPage>>();
   private nativeProductPaths?: Promise<ProductPaths>;
   private generation = 0;
-  private readonly foregroundLane: CatalogWorkerLane = { tail: Promise.resolve() };
-  private readonly historyLane: CatalogWorkerLane = { tail: Promise.resolve() };
+  private readonly foregroundLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
+  private readonly overlappingCatalogLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
+  private readonly historyLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
+  private foregroundKind: 'directory' | 'session' = 'directory';
   private catalogQueued = 0;
   private disposed = false;
 
@@ -562,7 +567,14 @@ export class ProjectSessionCatalog {
   /** Read settings with the engine's merge rules before starting its process. */
   async workspaceSettings(projectPath: string): Promise<WorkspaceLaunchSettings> {
     const canonical = realpathSync.native(projectPath);
-    const output = await this.runOutput(canonical, ['--cwd', canonical, '--workspace-environment-json']);
+    const readOnce = () => this.runOutput(canonical, ['--cwd', canonical, '--workspace-environment-json']);
+    // A selected transcript usually leaves a reader idle in the target workspace.
+    // Read current settings there, with the same process cwd as the one-shot CLI.
+    const idle = [this.foregroundLane, this.overlappingCatalogLane].find(lane =>
+      lane.queued === 0 && lane.worker?.available && lane.worker.cwd === canonical);
+    const output = idle
+      ? await this.runWorker({ cwd: canonical, workspaceEnvironment: true }, idle).catch(readOnce)
+      : await readOnce();
     const input = JSON.parse(boundedOutput(output)) as { version?: unknown; environment?: unknown; config_home?: unknown; global_config_path?: unknown };
     if (input?.version !== 1 || !input.environment || typeof input.environment !== 'object' || Array.isArray(input.environment)) {
       throw new Error('invalid workspace environment response');
@@ -687,7 +699,7 @@ export class ProjectSessionCatalog {
     this.pendingHistory.clear();
     // Retire after the current captured response; a mutation must never reuse
     // projections from before its durable revision/generation boundary.
-    for (const lane of [this.foregroundLane, this.historyLane]) {
+    for (const lane of [this.foregroundLane, this.overlappingCatalogLane, this.historyLane]) {
       lane.worker?.retire();
       lane.worker = undefined;
       lane.key = undefined;
@@ -737,8 +749,13 @@ export class ProjectSessionCatalog {
   private run(canonical: string, sessionId?: string, scope?: SessionCatalogScope, transcriptPath?: string): Promise<ProjectSessionCatalogResult> {
     if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
     if (this.options.catalogWorker !== false) {
+      // Reuse one worker for sequential reads. While a directory scan and a
+      // session lookup overlap, give each its own FIFO under the shared child limit.
+      const kind = sessionId ? 'session' : 'directory';
+      if (this.foregroundLane.queued === 0 && this.overlappingCatalogLane.queued === 0) this.foregroundKind = kind;
+      const lane = this.foregroundKind === kind ? this.foregroundLane : this.overlappingCatalogLane;
       return this.runWorker({ cwd: canonical, ...(sessionId ? { sessionId } : {}),
-        ...(scope ? { scope } : {}), ...(transcriptPath ? { transcriptPath } : {}) }).then(parseCatalog);
+        ...(scope ? { scope } : {}), ...(transcriptPath ? { transcriptPath } : {}) }, lane).then(parseCatalog);
     }
     const args = buildBridgeArguments({
       workspace: canonical,
@@ -752,10 +769,11 @@ export class ProjectSessionCatalog {
     return this.runOutput(canonical, args).then((output) => parseCatalog(output));
   }
 
-  private runWorker(query: CatalogWorkerQuery, lane = this.foregroundLane): Promise<string> {
+  private runWorker(query: CatalogWorkerQuery, lane: CatalogWorkerLane): Promise<string> {
     if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
     if (this.catalogQueued >= MAX_QUEUED_CATALOG_OPERATIONS) return Promise.reject(new Error('session catalog is busy; try again shortly'));
     this.catalogQueued++;
+    lane.queued++;
     const operation = lane.tail.then(async () => {
       if (this.disposed) throw new Error('session catalog is disposed');
       const worker = await this.getWorker(query.cwd, lane);
@@ -768,7 +786,7 @@ export class ProjectSessionCatalog {
       }
     });
     lane.tail = operation.then(() => undefined, () => undefined);
-    return operation.finally(() => { this.catalogQueued--; });
+    return operation.finally(() => { this.catalogQueued--; lane.queued--; });
   }
 
   private getWorker(canonical: string, lane: CatalogWorkerLane): Promise<CatalogWorker> {
@@ -788,7 +806,7 @@ export class ProjectSessionCatalog {
       const child = (this.options.spawnProcess ?? spawn)(bin, ['--session-catalog-worker-json'], {
         cwd: canonical, env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
       });
-      return new CatalogWorker(child, release, this.options.timeoutMs ?? 15_000, this.options.workerIdleMs ?? DEFAULT_WORKER_IDLE_MS);
+      return new CatalogWorker(child, canonical, release, this.options.timeoutMs ?? 15_000, this.options.workerIdleMs ?? DEFAULT_WORKER_IDLE_MS);
     }, this.options.timeoutMs).then((worker) => {
       if (generation !== this.generation) {
         worker.retire();

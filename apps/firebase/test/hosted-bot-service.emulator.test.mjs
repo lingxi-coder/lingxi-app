@@ -85,6 +85,28 @@ test('service: a new service is off; a caller is told why it cannot answer, and 
   await assert.rejects(ledger('submit', ask('session_alice'), alice, generation), { code: 'HOST_UNAVAILABLE' });
 });
 
+test('getService reads the deployment and applicable quotas in one transaction round trip', options, async () => {
+  await online();
+  await enter(alice);
+  const reads = [];
+  const measured = new HostedBotServices({
+    doc: path => db.doc(path),
+    runTransaction: callback => db.runTransaction(tx => callback({
+      get: ref => { reads.push([ref.parent.id]); return tx.get(ref); },
+      getAll: (...refs) => { reads.push(refs.map(ref => ref.parent.id)); return tx.getAll(...refs); },
+    })),
+  }, () => now);
+  for (const [actor, expected] of [
+    [alice, [['deployments', 'requestQuotas', 'requestQuotas']]],
+    [bob, [['deployments', 'requestQuotas']]],
+    [publisher, []],
+  ]) {
+    reads.length = 0;
+    await measured.execute(actor, { action: 'getService', serviceId });
+    assert.deepEqual(reads.filter(batch => batch.includes('deployments') || batch.includes('requestQuotas')), expected);
+  }
+});
+
 test('grant recovery: a service grant nonce uses the service scope and never replays a permit or authorizes a Team-domain candidate', options, async () => {
   await online(); await enter(alice);
   const receipt = await ledger('submit', ask('session_alice'), alice), taskId = receipt.tasks[0].taskId, permitNonce = '71'.repeat(32);

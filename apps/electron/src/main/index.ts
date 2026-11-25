@@ -35,7 +35,7 @@ import { accountSessionDiagnosticScope, brokerAccountSessionStore } from './acco
 import firebaseConfig from '../shared/firebaseConfig.json';
 import { ScheduledTaskService } from './scheduled.js';
 import { GitService } from './git.js';
-import { app, BrowserWindow, dialog, Menu, net, powerMonitor, powerSaveBlocker, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
+import { app, BrowserWindow, dialog, Menu, net, powerMonitor, powerSaveBlocker, protocol, safeStorage, session as electronSession, shell, Notification, type Session } from 'electron';
 import { applicationMenuTemplate } from './applicationMenu.js';
 import { CH_APPLICATION_MENU } from '../shared/applicationMenu.js';
 import { installDesktopUpdates } from './desktopUpdates.js';
@@ -608,7 +608,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     // A Bot's working directory is not a project: it has its own configuration home and grants.
     workspaceSettings: async (projectPath, ref) => {
       if (bots?.ownsWorkspace(projectPath)) return bots.launchSettings(projectPath, ref.sessionId);
+      const startedAt = performance.now();
       const config = await sessionCatalog.workspaceSettings(projectPath);
+      diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_phase', {
+        phase: 'workspace_settings', sessionId: ref.sessionId, durationMs: Math.round(performance.now() - startedAt),
+      }));
       const additionalDirectories = ref.projectId ? settings.getProjectAdditionalFolders(ref.projectId) : [];
       return additionalDirectories.length ? { ...config, additionalDirectories } : config;
     },
@@ -823,7 +827,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   }
   const account = new AccountService(accountConfig, credentialBroker
     ? brokerAccountSessionStore(credentialBroker, diagnosticAccountScope)
-    : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
+    : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc'), safeStorage), url => shell.openExternal(url));
   host.attachAccount(account, undefined, new ProviderVaultLinks(app.getPath('userData')));
   const teamsService = new TeamsService(account, accountConfig, teamsOrigin);
   const datasetOrigin = process.env.LINGXI_DATASET_PRODUCT_ORIGIN ?? teamsOrigin;
@@ -841,7 +845,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   });
   inboxService = new InboxService({
     account, teams: teamsService, userData,
-    sourceCredentials: accountSessionStore(join(userData, 'inbox', 'source-credentials.enc')),
+    sourceCredentials: accountSessionStore(join(userData, 'inbox', 'source-credentials.enc'), safeStorage),
     isFocused: () => windowFocused,
     notificationsEnabled: () => settings.getPublic().notifications?.enabled !== false,
     localSessions: async () => {
@@ -1035,6 +1039,13 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   } });
   host.attachGit(git);
   host.registerIpc();
+  // Guest partitions can install their scheme, network and permission rules while
+  // independent services recover. Wait for both before the first normal window.
+  const guestRuntimes = bridge;
+  const guestPartitionsReady = Promise.allSettled([
+    () => installVisualizationSession(electronSession.fromPartition(VISUALIZATION_PARTITION), guestRuntimes.visualizations),
+    () => installPrivatePageSession(electronSession.fromPartition(PRIVATE_PAGE_PARTITION), guestRuntimes.pages),
+  ].map(async install => install()));
   if (productPaths) {
     let teamBotStore: BotStore | undefined;
     // The Bots live beside the app's other data and keep clear of the default configuration home.
@@ -1229,11 +1240,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       }
     }
   }
-  try {
-    await installVisualizationSession(electronSession.fromPartition(VISUALIZATION_PARTITION), bridge.visualizations);
-    await installPrivatePageSession(electronSession.fromPartition(PRIVATE_PAGE_PARTITION), bridge.pages);
-  } catch (error) {
-    diagnostics.add('warn', 'host', `inline visualizations unavailable: ${sanitizeDiagnostic(error)}`);
+  for (const result of await guestPartitionsReady) {
+    if (result.status === 'rejected') {
+      diagnostics.add('warn', 'host', `inline content setup failed: ${sanitizeDiagnostic(result.reason)}`);
+    }
   }
   deepLinkProjects = () => settings.getPublic().projects;
   resolveDeepLinkSession = async (sessionId, requestedPath, requestedKey) => {

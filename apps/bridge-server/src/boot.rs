@@ -631,16 +631,17 @@ pub fn resolve_api_base() -> String {
     std::env::var(API_BASE_ENV).unwrap_or_else(|_| DEFAULT_API_BASE.to_string())
 }
 
-async fn desktop_provider_catalog_listings(
+fn desktop_provider_catalog_fallback(
     cfg: &DesktopConfig,
     region: llm_runtime::Region,
 ) -> Vec<lingxi_core::host::ModelListing> {
+    // ListModels reads the live official snapshot directly whenever it is configured.
+    if cfg.startup_catalog.is_some() {
+        return Vec::new();
+    }
     let assembled = provider_config::assemble_for_region(
         provider_config::AssembleInputs {
-            official_catalog: match &cfg.startup_catalog {
-                Some(source) => Some((*source.load().await).clone()),
-                None => None,
-            },
+            official_catalog: None,
             anthropic_api_base: cfg.api_base.clone(),
             anthropic_models: desktop_provider_catalog_anthropic_models(
                 &cfg.default_model,
@@ -2411,12 +2412,11 @@ pub async fn assemble_with_account_credentials(
         connection.event_sink(),
     ));
     let official_catalog = cfg.startup_catalog.clone();
-    let provider_model_catalog_listings = desktop_provider_catalog_listings(
+    let provider_model_catalog_listings = desktop_provider_catalog_fallback(
         &cfg,
         harness_runtime::desktop::resolve_provider_region(&cfg, &settings_context.managed)
             .map_err(|error| settings_error_message(&error))?,
-    )
-    .await;
+    );
 
     let mut shared = harness_runtime::desktop::build_shared_credential_stack_with_policy(
         &cfg.lingxi_home,
@@ -3030,6 +3030,20 @@ mod tests {
     }
     use super::*;
     use lingxi_core::host::live_sessions::LiveSessionDir;
+
+    #[test]
+    fn official_catalog_skips_fallback_model_assembly() {
+        let home = tempfile::tempdir().unwrap();
+        let mut cfg = DesktopConfig::default();
+        let region = llm_runtime::Region::International;
+        assert!(!desktop_provider_catalog_fallback(&cfg, region).is_empty());
+        cfg.startup_catalog = Some(harness_runtime::StartupCatalog::new(
+            harness_runtime::CatalogPlatform::Desktop,
+            "1.0.0",
+            home.path(),
+        ));
+        assert!(desktop_provider_catalog_fallback(&cfg, region).is_empty());
+    }
 
     #[test]
     fn remote_timeout_flags_are_validated_and_reach_the_runtime() {

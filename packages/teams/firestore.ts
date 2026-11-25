@@ -3,6 +3,7 @@ import { isResourceRef } from './dataset-resource.js';
 import { parseDataRef } from './lingxi-data.js';
 import type { DocumentData, Firestore, FirestoreError } from 'firebase/firestore';
 import { ATTACHMENT_TYPES, type MessageAttachment } from './attachments.js';
+import { decodeBotScopes } from './bot-scope.js';
 import type { BlockEntry, FriendCard, TeamOffer } from './friends.js';
 import type { ListApproval, ListApprovalChange, MessageScope, MessageSnapshot, TeamConversation, TeamMessage } from './messages.js';
 
@@ -270,7 +271,8 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
           const readers = Array.isArray(value.memberUids) && value.memberUids.every((reader: unknown) => typeof reader === 'string') ? { readers: value.memberUids as string[] } : {};
           const auto = value.autoReply, autoReply = auto && Number.isSafeInteger(auto.revision) && Array.isArray(auto.targets) && auto.targets.every((target: unknown) => typeof target === 'string')
             ? { autoReply: { revision: auto.revision as number, targets: auto.targets as string[] } } : {};
-          return { id: id, kind: value.kind, title: value.title, participants: value.participants, ...readers, ...autoReply, lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq, lastReadSeq: readSeq.get(id) ?? 0, ...(!readSeq.has(id)?{unreadCount:0}:{}), ...(lastMessage ? { lastMessage } : {}) };
+          const botScopes = decodeBotScopes(value.botScopes);
+          return { id: id, kind: value.kind, title: value.title, participants: value.participants, ...readers, ...autoReply, ...(botScopes ? { botScopes } : {}), lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq, lastReadSeq: readSeq.get(id) ?? 0, ...(!readSeq.has(id)?{unreadCount:0}:{}), ...(lastMessage ? { lastMessage } : {}) };
   }
   let sourceWindow:TeamConversation[]=[];
   let exact:TeamConversation|undefined, exactReady=!conversationId, stopExact:(()=>void)|undefined, windowCache=true;

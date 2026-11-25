@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { authorizeDataBinding, createPinnedDataClient, dataReference, LingxiDataError } from './lingxi-data.mjs';
 import { dataId, generation } from './lingxi-data-sources.mjs';
 import { SharedBotError, SharedBotsStore } from './shared-bots.mjs';
+import { effectiveScope } from './bot-scope.mjs';
 import { deliverReport, readReport, reviewReport } from './lingxi-data-reports.mjs';
 
 const cursor = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
@@ -140,8 +141,11 @@ export function createBotDataRecords({ db, endpoint, secret, projectActor, botTo
       const datasets = [];
       for (const doc of found.docs) {
         if (!dataId.safeParse(doc.id).success) continue;
+        // A grant is not enough: the Bot published this dataset, and this Chat has not narrowed it away.
+        const allowed = status.scope.datasets.find(row => row.dataset === doc.id);
+        if (!allowed) continue;
         const grant = doc.data();
-        let write = grant.access === 'edit' && status.deployment.capabilities.writeOperations;
+        let write = allowed.write && grant.access === 'edit' && status.deployment.capabilities.writeOperations;
         if (write) {
           try { await grantScope(tx, team, status, doc.id, grant, true); }
           catch (error) { if (!(error instanceof LingxiDataError) || ![403, 409].includes(error.status)) throw error; write = false; }
@@ -153,7 +157,7 @@ export function createBotDataRecords({ db, endpoint, secret, projectActor, botTo
         const canHandoff = write && parent.data()?.rootTaskId === proof.taskId && grant.handoff
           && (!parent.data()?.dataCause || parent.data().dataCause.reference.dataset === doc.id);
         datasets.push({ dataset: doc.id, version: grant.version, write,
-          ...(write && grant.reportReview ? { reportReview: true } : {}),
+          ...(write && grant.reportReview && allowed.reportReview ? { reportReview: true } : {}),
           ...(canHandoff ? { handoffTargets: grant.handoff.targets } : {}) });
         if (datasets.length === 32) break;
       }
@@ -177,6 +181,9 @@ export function createBotDataRecords({ db, endpoint, secret, projectActor, botTo
     async function authorize(tx) {
       const status = await taskAuthority(tx, team, uid, proof);
       const { task } = status;
+      // What the Bot published and this Chat leaves it comes first: outside it a live grant is not used, and a write or a report review needs its own flag.
+      const allowed = status.scope.datasets.find(row => row.dataset === dataset);
+      if (!allowed || (write && !allowed.write) || (operation.action === 'openReportReview' && !allowed.reportReview)) deny();
       const grant = (await tx.get(grants(team, task.sharedBotId).doc(dataset))).data();
       if (grant?.version !== accessVersion) deny();
       const target = await grantScope(tx, team, status, dataset, grant, write);
@@ -243,9 +250,10 @@ export function createBotDataRecords({ db, endpoint, secret, projectActor, botTo
       const parentRef = team.collection('tasks').doc(task.taskId);
       const senderRef = team.collection('sharedBots').doc(task.sharedBotId);
       const receiverRef = team.collection('sharedBots').doc(sharedBotId);
-      const [parent, sender, senderGrant, receiver, receiverGrant, requester] = (await tx.getAll(
+      const [parent, sender, senderGrant, receiver, receiverGrant, requester, room] = (await tx.getAll(
         parentRef, senderRef, grants(team, task.sharedBotId).doc(reference.dataset),
         receiverRef, grants(team, sharedBotId).doc(reference.dataset), team.collection('members').doc(task.requester.uid),
+        team.collection('conversations').doc(task.conversationId),
       )).map(doc => doc.data());
       if (!parent || parent.rootTaskId !== task.taskId || parent.dataCause?.kind === 'handoff'
         || senderGrant?.version !== accessVersion || !senderGrant.handoff?.targets.includes(sharedBotId)) deny();
@@ -253,6 +261,8 @@ export function createBotDataRecords({ db, endpoint, secret, projectActor, botTo
         || parent.dataCause.reference.record !== reference.record)) deny();
       await grantScope(tx, team, status, reference.dataset, senderGrant, false);
       if (!receiver || receiver.identity.state !== 'published') deny();
+      // The record goes to a task of the receiving Bot, which must be able to read that dataset here: the sender's own read was checked by `operate`.
+      if (!effectiveScope(receiver.scope, room?.botScopes?.[sharedBotId]).datasets.some(row => row.dataset === reference.dataset)) deny();
       await grantScope(tx, team, { task, deployment: { revision: receiver.identity.revision } }, reference.dataset, receiverGrant, false);
       return { parent, sender, senderGrant, receiverGrant, requester };
     }

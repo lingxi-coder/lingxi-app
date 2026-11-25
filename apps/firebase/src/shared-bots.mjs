@@ -9,6 +9,7 @@ import { confirmShareDelivery } from './dataset-message-grant.mjs';
 import { allowedPrivateSource } from './lingxi-data-sources.mjs';
 import { messagePreview } from './team-message-preview.mjs';
 import { prepareSharedConversation } from './team-conversations.mjs';
+import { effectiveScope, emptyScope, scopeSize, withinPublished } from './bot-scope.mjs';
 import { attachable, cancelUpload, createUpload, finalizeUpload, putUploadPart, readAttachmentPart, revokeAttachment, taskFiles } from './team-attachments.mjs';
 
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value !== null && typeof value === 'object'
@@ -200,6 +201,7 @@ export class SharedBotsStore {
       else if (action === 'reviseArtifact') response = await this.reviseArtifact(context);
       else if (action === 'setConversationPolicy') response = await this.conversationPolicy(context);
       else if (action === 'setConversationAutoReply') response = await this.conversationAutoReply(context);
+      else if (action === 'setConversationBotScope') response = await this.conversationBotScope(context);
       else if (action === 'declineTask') response = await this.decline(context);
       else if (action === 'createUpload') response = await createUpload(this, context);
       else if (action === 'putUploadPart') response = await putUploadPart(this, context);
@@ -223,6 +225,8 @@ export class SharedBotsStore {
   async publish({ tx, team, identity, command: { payload: p }, now, service }) {
     // A service's callers do not share Chats with each other: there is nothing to answer unasked.
     if (service && p.autoReply) deny(400, 'AUTO_REPLY_UNSUPPORTED');
+    // Nor does a service's Bot reach its publisher's Local Apps or datasets: whoever enters it is not a member of anything of the publisher's.
+    if (service && scopeSize(p.scope) > 0) deny(400, 'SCOPE_UNSUPPORTED');
     const ref = team.collection('sharedBots').doc(p.sharedBotId), existing = (await tx.get(ref)).data();
     if (existing && !ownerOf(existing, identity)) deny(403, 'MAINTAINER_REQUIRED');
     if ((existing?.identity.revision ?? 0) !== p.expectedRevision) deny(409, 'BOT_REVISION_CONFLICT');
@@ -257,11 +261,12 @@ export class SharedBotsStore {
     if (grants.some(grant => audience.some(member => !this.grantPermits(grant, member)))) deny(403, 'INPUT_AUDIENCE_NARROWER');
     const identityRecord = { schemaVersion: 1, sharedBotId: p.sharedBotId, teamId: team.id, maintainer: identity,
       revision: p.expectedRevision + 1, state: 'published', usePolicy: p.usePolicy, activeDeploymentId: d.deploymentId };
-    if (Buffer.byteLength(JSON.stringify({ identity: identityRecord, name: p.name, description: p.description, examples: p.examples ?? [], grants })) > 750000) deny(400, 'PUBLICATION_TOO_LARGE');
+    const scope = p.scope ?? emptyScope;
+    if (Buffer.byteLength(JSON.stringify({ identity: identityRecord, name: p.name, description: p.description, examples: p.examples ?? [], grants, scope })) > 750000) deny(400, 'PUBLICATION_TOO_LARGE');
     // One data identity per Bot: publishing again never replaces the items.
     const listRef = team.collection('lists').doc(p.sharedBotId), newList = !!p.sharedList && !(await tx.get(listRef)).exists;
     tx.set(ref, { identity: identityRecord, name: p.name, description: p.description, examples: p.examples ?? [], grants, quotas: p.quotas,
-      sharedList: p.sharedList ?? null, autoReply: p.autoReply ?? null, publishedAt: now });
+      sharedList: p.sharedList ?? null, autoReply: p.autoReply ?? null, scope, publishedAt: now });
     if (newList) tx.create(listRef, { schemaVersion: 1, listId: p.sharedBotId, dataRevision: 0, items: [], nextItem: 1, updatedAt: now });
     handover.end('cancelled', now, 'republished');
     tx.set(deploymentRef, { ...d, ready: false, onlineUntil: 0 });
@@ -310,6 +315,7 @@ export class SharedBotsStore {
         maintainer: b.identity.maintainer, usePolicy: b.identity.usePolicy, state: b.identity.state,
         onlineUntil: d?.onlineUntil ?? 0, quotas: b.quotas, ...(b.sharedList ? { sharedList: { title: b.sharedList.title, ...(b.sharedList.approval === 'requester' ? { approval: 'requester' } : {}) } } : {}),
         ...(b.autoReply ? { autoReply: { daily: b.autoReply.daily } } : {}),
+        ...(scopeSize(b.scope) ? { scope: b.scope } : {}),
         ...(activeOwner && handovers.has(doc.id) ? { transfer: handovers.get(doc.id) } : {}),
         ...(ownerOf(b, identity) && d ? { instanceId: d.instanceId } : {}) }];
     }) };
@@ -451,7 +457,8 @@ export class SharedBotsStore {
     const grants = bot.grants.map(grant => ({ ...grant, grantId: hash([t.sharedBotId, revision, grant.resourceId]), publisher: identity }));
     const { transfer: ended, ...kept } = bot, grantIds = grants.map(grant => grant.grantId);
     // The inputs are the ones published at `sourceRevision`: documents made from them since then stay readable.
-    tx.set(botRef, { ...kept, identity: { ...bot.identity, maintainer: identity, revision, activeDeploymentId: d.deploymentId }, grants,
+    // What the earlier maintainer shared of their own Desktop does not go with the Bot: the new one publishes their own scope.
+    tx.set(botRef, { ...kept, identity: { ...bot.identity, maintainer: identity, revision, activeDeploymentId: d.deploymentId }, grants, scope: emptyScope,
       sourceRevision: bot.sourceRevision ?? bot.identity.revision, publishedAt: now });
     tx.update(team.collection('deployments').doc(bot.identity.activeDeploymentId), { enabled: false, ready: false, onlineUntil: 0 });
     tx.set(deploymentRef, { ...d, ready: false, onlineUntil: 0 });
@@ -666,7 +673,8 @@ export class SharedBotsStore {
     return { task: taskView(task, now), messageId: task.messageId, messageSeq: task.messageSeq,
       ...(task.privateDataSource ? { privateDataSource: task.privateDataSource } : {}),
       inputs: bot.grants, deployment, sourceLastChangeSeq: conversation.data().lastChangeSeq, conversationKind: conversation.data().kind,
-      physicalDispatchesSpent: task.physicalDispatchesSpent, ...this.listOffer(bot, deployment) };
+      physicalDispatchesSpent: task.physicalDispatchesSpent, ...this.listOffer(bot, deployment),
+      scope: effectiveScope(bot.scope, conversation.data().botScopes?.[task.sharedBotId]) };
   }
   async checkPrivateSource(tx, team, task) {
     const { binding } = await allowedPrivateSource(tx, this.db, team, task.privateDataSource, task.conversationId, task.sharedBotId, task.requester);
@@ -701,9 +709,12 @@ export class SharedBotsStore {
       || message.data()?.recalled || message.data()?.changeId !== task.changeId) deny(403, 'TASK_REVOKED');
     if (task.dataCause) {
       const { reference, targetGrantVersion } = task.dataCause;
-      const grant = (await tx.get(team.collection('sharedBots').doc(task.sharedBotId).collection('dataGrants').doc(reference.dataset))).data();
+      const botRef = team.collection('sharedBots').doc(task.sharedBotId);
+      const [grantDoc, botDoc] = await tx.getAll(botRef.collection('dataGrants').doc(reference.dataset), botRef), grant = grantDoc.data();
       if (!grant?.access || grant.version !== targetGrantVersion || grant.conversationId !== task.conversationId
         || grant.botRevision !== task.botRevision) deny(403, 'TASK_REVOKED');
+      // The record this run is about must be one the Bot may still use here: published, and not narrowed away by the Chat.
+      if (!effectiveScope(botDoc.data()?.scope, conversation.data().botScopes?.[task.sharedBotId]).datasets.some(row => row.dataset === reference.dataset)) deny(403, 'TASK_REVOKED');
       const issuer = (await tx.get(team.collection('members').doc(grant.issuedBy.uid))).data();
       if (!['owner', 'admin'].includes(issuer?.role)) deny(403, 'TASK_REVOKED');
       const scope = { kind: 'team', teamId: team.id, conversationId: task.conversationId };
@@ -1357,6 +1368,20 @@ export class SharedBotsStore {
     if (bots.some(doc => !doc.data()?.autoReply || doc.data().identity.state !== 'published')) deny(409, 'AUTO_REPLY_UNAVAILABLE');
     const revision = p.expectedRevision + 1;
     tx.update(ref, { autoReply: { revision, targets: p.targets } });
+    return { revision };
+  }
+  /**
+   * Any member taking part in the Chat may narrow what one of its Bots can use here, within what the Bot published. The narrowing is a whole value:
+   * a list that is left out does not narrow that kind, and `null` lifts it. A cleared entry keeps its revision, so a stale caller cannot write over a later one.
+   */
+  async conversationBotScope({ tx, team, identity, command: { payload: p } }) {
+    const { ref, value } = await this.conversation(tx, team, p.conversationId, identity, true);
+    if (!value.participants.includes(`shared_bot:${p.sharedBotId}`)) deny(403, 'BOT_PARTICIPANT_REQUIRED');
+    const current = value.botScopes?.[p.sharedBotId];
+    if ((current?.revision ?? 0) !== p.expectedRevision) deny(409, 'BOT_SCOPE_REVISION_CONFLICT');
+    if (p.scope && !withinPublished((await tx.get(team.collection('sharedBots').doc(p.sharedBotId))).data()?.scope, p.scope)) deny(409, 'SCOPE_NOT_PUBLISHED');
+    const revision = p.expectedRevision + 1;
+    tx.update(ref, { botScopes: { ...(value.botScopes ?? {}), [p.sharedBotId]: { revision, ...(p.scope ?? {}) } } });
     return { revision };
   }
   async conversationPolicy({ tx, team, self, identity, command: { payload: p } }) {

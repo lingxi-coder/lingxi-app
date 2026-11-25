@@ -5,18 +5,18 @@ import { constants } from 'node:fs';
 import { open, lstat } from 'node:fs/promises';
 import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { providerAccountEnvelope, type ProviderAccountLaunch } from '../provider-accounts.js';
-import type { AcceptSharedBotInput, LocalPublishableBot, OfferSharedBotInput, PublishLocalBotInput, PublishedKnowledge, SelectedSharedFile, SharedBotCard, SharedHostBot, SharedHostStatus, SharedListItem, TaskUsage, TeamTaskView } from '../../../../../packages/teams/execution.js';
-import { isSharedListWrite } from '../../../../../packages/teams/execution-validation.js';
+import type { AcceptSharedBotInput, LocalPublishableBot, OfferSharedBotInput, PublishLocalBotInput, PublishedBotScope, PublishedKnowledge, SelectedSharedFile, SharedBotCard, SharedHostBot, SharedHostStatus, SharedListItem, TaskUsage, TeamTaskView } from '../../../../../packages/teams/execution.js';
+import { isPublishedBotScope, isSharedListWrite } from '../../../../../packages/teams/execution-validation.js';
 import { TeamsApiError, type TeamSummary } from '../../../../../packages/teams/index.js';
 import type { ChatReadRequest, ChatReadResult, ChatSourceMessage } from '../../../../../packages/teams/chat-source.js';
 import { isServiceId } from '../../../../../packages/teams/hosted-service.js';
 import { ATTACHMENT_MESSAGE_BYTES, ATTACHMENT_MESSAGE_FILES, downloadAttachment, type MessageAttachment } from '../../../../../packages/teams/attachments.js';
-import type { BotStore } from '../bots/store.js';
+import type { BotScope, BotStore } from '../bots/store.js';
 import { sandboxAvailability } from '../bots/sandboxAvailability.js';
 import type { BotSandboxAvailability } from '../../shared/bots.js';
 import { validateBotManifest } from '../bots/package.js';
-import { TeamPrivateStore, digest, validateTeamModelRoute, type TeamModelSelection, type TeamPersonaSnapshot, type SharedBotBinding, type PublishedDocument, type SavedExecution, type SavedDelivery, type TeamDataRef, type SavedGrantIntent } from './privateStore.js';
-import { runTeamHost, runResult, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult, type TeamRunResult, type TeamTaskCheckpoint, type TeamTaskWait, type TeamContinuation, type BotChatScope, type TeamOperation, type TeamOperationOutcome } from './process.js';
+import { TeamPrivateStore, digest, validateTeamModelRoute, type AppCallOutcome, type TeamModelSelection, type TeamPersonaSnapshot, type SharedBotBinding, type PublishedDocument, type SavedExecution, type SavedDelivery, type TeamDataRef, type SavedGrantIntent } from './privateStore.js';
+import { runTeamHost, runResult, LOCAL_APPS_OFFERED, OPERATION_BYTES, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult, type TeamRunResult, type TeamTaskCheckpoint, type TeamTaskWait, type TeamContinuation, type BotChatScope, type TeamOperation, type TeamOperationOutcome } from './process.js';
 import type { TeamDataProof, TeamDatasetOffer } from './process.js';
 import type { LocalTeamHost, TeamAccountContext } from './service.js';
 import type { PrivatePreviewLease, PrivatePreviewPage, PrivatePreviewProof } from './dataPreview.js';
@@ -35,6 +35,16 @@ export interface TeamHostApi {
   list(uid: string): Promise<{ teams: TeamSummary[] }>;
   onChanged(callback: (event: { invalidated?: boolean }) => void): () => void;
   onMessagesChanged(callback: () => void): () => void;
+}
+/** One tool of a running Local App as the MCP host lists it. The whole object is what a call is checked against, so it is kept as it came and only trimmed when it is handed to a worker. */
+export interface TeamLocalAppTool { name: string; description?: string | undefined; inputSchema: Record<string, unknown> }
+/** What a run of a shared Bot may use of the Local Apps on this computer (`LocalAppHost`): which are installed, the tools of the running ones `allowed` names, and one call of such a tool. */
+export interface TeamLocalApps {
+  list(): Promise<ReadonlyArray<{ id: string; name: string; summary?: string | undefined }>>;
+  tools(allowed: (appId: string) => boolean): TeamLocalAppTool[];
+  /** `discovered` is the definition the caller was given by `tools`; the host refuses the call when the tool is gone or has changed since. */
+  call(request: { name: string; arguments: Record<string, unknown> }, signal: AbortSignal, discovered: string | undefined,
+    allowed: (appId: string) => boolean): Promise<{ content?: unknown[]; isError?: boolean | undefined }>;
 }
 export interface TeamConnectorOptions {
   datasetTasks?: () => DatasetTaskHooks | undefined;
@@ -58,6 +68,8 @@ export interface TeamConnectorOptions {
   background?: () => Pick<SharedHostStatus, 'openAtLogin' | 'keepAwake' | 'onBattery'>;
   /** The owner's Decision service. It judges whether a Bot answers a message nobody asked it about; without it such tasks fall back. */
   decision?: ReplyDecision;
+  /** The Local Apps of this computer. Without it no run is offered any. */
+  localApps?: TeamLocalApps;
 }
 interface Selected { context: TeamAccountContext; instanceId: string; expires: number; document: PublishedDocument }
 /** `resume` marks a waiting task whose requester answered: it is queued again and continues from its checkpoint. */
@@ -86,6 +98,56 @@ const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(
   ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => [key, canonical(item)])) : value;
 /** A refusal of the ledger record that the Bot can act on. Nothing was recorded and nothing was sent; any other refusal ends the run like every refused worker frame. */
 const WRITE_REFUSED = ['OPERATION_LIMIT', 'OPERATION_CONFLICT', 'WRITE_OPERATIONS_UNSUPPORTED', 'APPROVAL_REQUIRED'];
+/** A publication shares no more than the local Bot's own scope allows: its Local Apps, and each dataset, with no write or report review the Bot does not have. */
+const withinBotScope = (scope: PublishedBotScope, upper: BotScope): boolean => scope.localApps.every(app => upper.localApps.includes(app.id))
+  && scope.datasets.every(row => upper.datasets.some(entry => entry.source === row.source && entry.dataset === row.dataset && (!row.write || entry.write) && (!row.reportReview || entry.reportReview)));
+/** The ids of the Local Apps the service says a task may use now, as `validateTask` answers them: what its Bot published and its Chat has not narrowed away. */
+const scopeApps = (answer: unknown): string[] => {
+  const apps = (answer as { scope?: { localApps?: unknown } } | null | undefined)?.scope?.localApps;
+  return Array.isArray(apps) ? apps.flatMap((app: { id?: unknown } | null) => typeof app?.id === 'string' ? [app.id] : []) : [];
+};
+/** What a worker is told of a Local App request it may not make, or whose call did not take effect. The call, if any, was never made. */
+const appRefused = (error: string, more: Record<string, unknown> = {}): TeamOperationOutcome => ({ established: true, succeeded: false, result: { error, ...more } });
+/** The tools of an app as a worker is given them: as many whole tools as fit within `OPERATION_BYTES`, in the order the host lists them. */
+function appTools(tools: readonly TeamLocalAppTool[]): Array<{ name: string; description?: string; inputSchema: Record<string, unknown> }> {
+  const listed: Array<{ name: string; description?: string; inputSchema: Record<string, unknown> }> = [];
+  let bytes = Buffer.byteLength(JSON.stringify({ tools: [] }));
+  for (const tool of tools) {
+    const entry = { name: tool.name, ...(tool.description ? { description: tool.description } : {}), inputSchema: tool.inputSchema }, size = Buffer.byteLength(JSON.stringify(entry)) + 1;
+    if (bytes + size <= OPERATION_BYTES) { listed.push(entry); bytes += size; }
+  }
+  return listed;
+}
+/** One piece of a tool's answer as text. A Bot is handed text only: an image, a file or a link is described by its kind and where it is, never carried. */
+function appText(block: unknown): string {
+  const part = (block && typeof block === 'object' ? block : {}) as Record<string, unknown>, resource = part['resource'] && typeof part['resource'] === 'object' ? part['resource'] as Record<string, unknown> : {};
+  if (part['type'] === 'text' && typeof part['text'] === 'string') return part['text'];
+  if (part['type'] === 'resource' && typeof resource['text'] === 'string') return resource['text'];
+  const label = (value: unknown, max: number) => typeof value === 'string' ? value.slice(0, max) : '';
+  return `[${[label(part['type'], 40) || 'content', label(resource['mimeType'] ?? part['mimeType'], 80), label(resource['uri'] ?? part['uri'], 200)].filter(Boolean).join(' ')} not carried]`;
+}
+const APP_OUTPUT_CUT = '[LingXi cut this output: it was longer than a Bot is handed.]';
+/**
+ * The answer of a Local App tool as the worker is given it: `{ content, isError? }`, text blocks only, within `OPERATION_BYTES` as JSON. `isError` is the app's own word and is passed on as it came:
+ * the call was made and answered, so the operation succeeded. What does not fit is cut at the end, on a character boundary, and the last block says so; the call is not repeated and its result is not marked failed.
+ */
+function appResult(answer: { content?: unknown[]; isError?: boolean | undefined }): Record<string, unknown> {
+  const texts = (Array.isArray(answer.content) ? answer.content : []).map(block => appText(block).replace(/[\ud800-\udfff]/gu, '\ufffd'));
+  const total = texts.reduce((sum, text) => sum + text.length, 0);
+  // Every character takes at least a byte of JSON, so no more than the limit is tried; escapes make some text longer, and the room shrinks until the answer fits.
+  for (let room = Math.min(total, OPERATION_BYTES); ; room = Math.floor(room * 0.8)) {
+    const content: Array<{ type: 'text'; text: string }> = []; let left = room;
+    for (const text of texts) {
+      if (left <= 0) break;
+      const end = text.length <= left ? text.length : left - (text.charCodeAt(left - 1) >= 0xd800 && text.charCodeAt(left - 1) <= 0xdbff ? 1 : 0);
+      if (end > 0) content.push({ type: 'text', text: text.slice(0, end) });
+      left -= text.length;
+    }
+    if (content.reduce((sum, block) => sum + block.text.length, 0) < total) content.push({ type: 'text', text: APP_OUTPUT_CUT });
+    const result = { content, ...(answer.isError === true ? { isError: true } : {}) };
+    if (room <= 0 || Buffer.byteLength(JSON.stringify(result)) <= OPERATION_BYTES) return result;
+  }
+}
 type HostPaths = Awaited<ReturnType<TeamPrivateStore['owner']>>;
 interface HostEnvironment { paths: HostPaths; bins: { host: string; worker: string } }
 const id = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{8,64}$/u.test(value);
@@ -287,7 +349,7 @@ export class TeamConnector implements LocalTeamHost {
     this.available(); const context = this.context(uid), key = JSON.stringify([uid, input?.teamId, input?.sharedBotId]);
     if (this.publishing.has(key)) throw new Error('BOT_REVISION_CONFLICT'); this.publishing.add(key);
     try {
-      if (!input || Object.keys(input).some(k => !['teamId','generation','publicationId','sharedBotId','instanceId','expectedRevision','usePolicy','fileTokens','quotas','role','resourceBindings','sharedList','keptResources','replacedResources','examples','autoReply'].includes(k))
+      if (!input || Object.keys(input).some(k => !['teamId','generation','publicationId','sharedBotId','instanceId','expectedRevision','usePolicy','fileTokens','quotas','role','resourceBindings','sharedList','keptResources','replacedResources','examples','autoReply','scope'].includes(k))
         || ![input.teamId,input.publicationId,input.sharedBotId,input.instanceId].every(id) || !Number.isSafeInteger(input.generation) || input.generation < 1
         || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0 || typeof input.role !== 'string' || !input.role.trim() || input.role.includes('\0') || Buffer.byteLength(input.role) > 64 * 1024
         || !Array.isArray(input.fileTokens) || input.fileTokens.length > 49 || new Set(input.fileTokens).size !== input.fileTokens.length) throw new Error('INVALID_INPUT');
@@ -315,6 +377,10 @@ export class TeamConnector implements LocalTeamHost {
       if (auto !== undefined && (!auto || typeof auto !== 'object' || Object.keys(auto).join(',') !== 'daily' || !Number.isSafeInteger(auto.daily) || auto.daily < 1 || auto.daily > 10000)) throw new Error('INVALID_INPUT');
       // Unasked messages are judged by the Decision service of this Desktop: without one, a Bot is not published to answer them.
       if (auto && !(await this.options.decision?.isConfigured().catch(() => false))) throw new Error('DECISION_REQUIRED');
+      // What of this Desktop the Bot may use in the Team. Left out, nothing is shared; the service stores only ids, names and flags.
+      if (input.scope !== undefined && !isPublishedBotScope(input.scope)) throw new Error('INVALID_INPUT');
+      const shared = input.scope && (input.scope.localApps.length || input.scope.datasets.length)
+        ? { localApps: input.scope.localApps.map(({ id, name }) => ({ id, name: name.trim() })), datasets: input.scope.datasets.map(({ source, dataset, write, reportReview }) => ({ source, dataset, write, reportReview })) } : undefined;
       const requestDigest = digest(JSON.stringify(input));
       const pending = await this.options.privateStore.publication(uid,input.publicationId); this.assert(context);
       if (pending) {
@@ -325,6 +391,8 @@ export class TeamConnector implements LocalTeamHost {
         await this.adoptPublication(context,pending.binding); this.wake(); return {sharedBotId:result.sharedBotId,revision:result.revision};
       }
       this.options.binaries(); const bot = this.options.store.get(input.instanceId), selected = bot.model ?? this.options.defaultModel(); if (!selected) throw new Error('TEAM_MODEL_UNAVAILABLE');
+      // The most the local Bot's own `bot.json` allows. A publication is never wider, and a run checks it again.
+      if (input.scope && !withinBotScope(input.scope, bot.scope)) throw new Error('SCOPE_OUTSIDE_BOT');
       const route = await this.options.modelRoute(selected); this.assert(context); validateTeamModelRoute(route.route);
       // A list write is recorded before it is sent and repeated from the checkpoint after an interruption: only a model route that continues can do that.
       const continues = CONTINUABLE_PROTOCOLS.includes(route.route.model_protocol); if (list && !continues) throw new Error('SHARED_LIST_UNSUPPORTED');
@@ -373,6 +441,7 @@ export class TeamConnector implements LocalTeamHost {
         sharedBotId: input.sharedBotId, expectedRevision: input.expectedRevision, name: bot.name, description: bot.description, usePolicy: input.usePolicy, quotas: input.quotas, examples,
         ...(list ? { sharedList: { title: list.title.trim(), description: list.description.trim(), ...(list.approval === 'requester' ? { approval: 'requester' } : {}) } } : {}),
         ...(auto ? { autoReply: { daily: auto.daily } } : {}),
+        ...(shared ? { scope: shared } : {}),
         deployment: { deploymentId: binding.deploymentId, sharedBotId: binding.sharedBotId, revision: binding.revision, hostId: this.options.privateStore.hostId, owner: { uid, generation: input.generation },
           instanceId: input.instanceId, definitionDigest: snapshotId, capabilitySnapshotDigest: digest(JSON.stringify({ executionVersion: 2, documents: documents.map(d => d.digest) })), executionVersion: 2,
           capabilities: { durableWait: continues, writeOperations: continues, delegation: false }, accountEpoch: binding.accountEpoch, enabled: true },
@@ -1100,7 +1169,9 @@ export class TeamConnector implements LocalTeamHost {
       : undefined;
     const references: TeamDataRef[] = []; let interval: ReturnType<typeof setInterval> | undefined;
     try {
-    const authorize = async () => { assert(); await this.command(c,b,'validateTask',{...fields,permitId,expectedLastChangeSeq:record.lastChangeSeq}); assert(); };
+    // The Local Apps the service says this run may use: refreshed by every validation, and one comes before each worker request and each tick of the poll below.
+    let liveApps: string[] = [];
+    const authorize = async () => { assert(); const answer = await this.command<unknown>(c,b,'validateTask',{...fields,permitId,expectedLastChangeSeq:record.lastChangeSeq}); liveApps = scopeApps(answer); assert(); };
     // Worker frames (authorize, read_chat, provider_account_refresh) end the run on any refusal, so they retry a transient failure a few times; the poll below has its own tolerance.
     const frame = <T>(operation: () => Promise<T>) => this.retrying(signal, record.deadlineAt, operation);
     const frameAuthorize = () => frame(authorize);
@@ -1121,8 +1192,11 @@ export class TeamConnector implements LocalTeamHost {
       try {
         assert();
         const service = this.options.service;
+        // What the service offers is already what the Bot published and the Chat allows; this Bot's own scope, as it is on this computer now, can only take more away.
         const offers = dataProof && service.hostDataOffers && service.hostDataOperation
-          ? await frame(() => service.hostDataOffers!(c, dataProof)) : [];
+          ? this.withinOwnScope(b, await frame(() => service.hostDataOffers!(c, dataProof))) : [];
+        const localApps = await this.offeredLocalApps(b, frameAuthorize, () => liveApps); assert();
+        const discovered = new Map<string, string>();
         const datasetInputs = dataRun ? await frame(() => dataRun.modelInputs(signal)) : [];
         if (datasetInputs.length) await frameAuthorize();
         assert();
@@ -1136,12 +1210,14 @@ export class TeamConnector implements LocalTeamHost {
           ],deadlineAt:record.deadlineAt,
           model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),...(continuation ? { continuation } : {}),...(record.ask ? { askRequester: true } : {}),...(record.list ? { sharedList: record.list } : {}),...(record.mayDecline ? { mayDecline: true, ...(record.unasked !== true ? { addressed: true } : {}) } : {}),
           ...(offers.length ? { sharedData: offers } : {}),
+          ...(localApps.length ? { localApps } : {}),
           limits:{max_turns:20,context_window_tokens:2000000,output_tokens_per_request:4096,physical_dispatches:Math.max(1,DISPATCH_LIMIT-record.dispatched)}},
         operate:operation => {
           if (operation.tool === 'data_read' || operation.tool === 'data_write' || operation.tool === 'data_handoff') {
             if (!dataProof) throw new Error('TEAM_HOST_PROTOCOL');
-            return this.operateData(c, dataProof, operation, frame, assert);
+            return this.operateData(c, b, dataProof, operation, frame, assert);
           }
+          if (operation.tool === 'local_app_tools' || operation.tool === 'local_app_call') return this.operateLocalApp(c, b, record, operation, () => liveApps, discovered, signal, assert);
           return this.operate(c,b,record,operation,frame,assert);
         },
         accountCredentials:async request => { await frameAuthorize();
@@ -1177,10 +1253,39 @@ export class TeamConnector implements LocalTeamHost {
       await this.command(c,b,'completeTask',delivery.payload,delivery.commandId); assert(); await this.options.privateStore.delivered(c.uid,record.taskId,record);
     } finally { clearInterval(interval); await Promise.all(references.map(ref=>this.options.privateStore.releaseDataRef(c.uid,ref))); }
   }
-  private async operateData(c: TeamAccountContext, proof: TeamDataProof, operation: Extract<TeamOperation, { tool: 'data_read' | 'data_write' | 'data_handoff' }>,
+  /** The most this Bot's own scope (`bot.json`) lets a Team run use of this computer, as it is now; none when the Bot is gone. */
+  private upperBound(b: SharedBotBinding): BotScope {
+    try { return this.options.store.get(b.instanceId).scope; } catch { return { localApps: [], datasets: [] }; }
+  }
+  /** The dataset offers of a run, cut to this Bot's own scope: a dataset it has no entry for is not offered, and neither is a write, a report review or a handoff it was not given. */
+  private withinOwnScope(b: SharedBotBinding, offers: TeamDatasetOffer[]): TeamDatasetOffer[] {
+    const { datasets } = this.upperBound(b);
+    return offers.flatMap(({ reportReview, handoffTargets, ...offer }) => {
+      const own = datasets.find(entry => entry.dataset === offer.dataset);
+      if (!own) return [];
+      const write = offer.write && own.write;
+      return [{ ...offer, write, ...(write && reportReview && own.reportReview ? { reportReview: true as const } : {}), ...(write && handoffTargets ? { handoffTargets } : {}) }];
+    });
+  }
+  /**
+   * The Local Apps a run is offered: what this Bot's own scope allows, what the service says its publication and Chat leave it, and what is installed on this computer.
+   * The run starts from what the service says now, so a Bot with no Local App in its own scope costs no request. A hosted service's Bot never has any.
+   */
+  private async offeredLocalApps(b: SharedBotBinding, refresh: () => Promise<void>, live: () => string[]): Promise<Array<{ id: string; name: string; description?: string }>> {
+    const apps = this.options.localApps, own = this.upperBound(b).localApps;
+    if (!apps || !own.length || isServiceId(b.teamId)) return [];
+    await refresh();
+    const installed = await apps.list();
+    return installed.filter(app => own.includes(app.id) && live().includes(app.id)).sort((x, y) => x.id < y.id ? -1 : x.id > y.id ? 1 : 0).slice(0, LOCAL_APPS_OFFERED)
+      .map(app => ({ id: app.id, name: app.name, ...(app.summary ? { description: app.summary } : {}) }));
+  }
+  private async operateData(c: TeamAccountContext, b: SharedBotBinding, proof: TeamDataProof, operation: Extract<TeamOperation, { tool: 'data_read' | 'data_write' | 'data_handoff' }>,
     frame: <T>(send: () => Promise<T>) => Promise<T>, assert: () => void): Promise<TeamOperationOutcome> {
     const service = this.options.service;
     if (!service.hostDataOperation) throw new Error('TEAM_HOST_PROTOCOL');
+    // The last gate on this computer: the dataset, and the write or report review asked for, must still be in this Bot's own scope.
+    const own = this.upperBound(b).datasets.find(entry => entry.dataset === operation.offer.dataset);
+    if (!own || operation.tool !== 'data_read' && !own.write || operation.arguments['action'] === 'openReportReview' && !own.reportReview) return { established: true, succeeded: false, result: { error: 'DATA_ACCESS_REQUIRED' } };
     const stepId = operation.tool === 'data_read' ? undefined : digest(operation.logicalStepId);
     try {
       const result = await frame(() => service.hostDataOperation!(c, proof, operation.offer.version, operation.arguments, stepId));
@@ -1197,6 +1302,46 @@ export class TeamConnector implements LocalTeamHost {
     }
   }
 
+  /**
+   * The tools of an offered Local App, and calls of them. What the run may reach is decided at each request, from this Bot's own scope as it is now and from what the service said at the
+   * last validation (one precedes every worker request); the apps themselves must be running for their tools to be listed. A call is made at most once per step: its record is durable before the
+   * app is asked, and a process that continues the task and sends the step again gets the recorded outcome. A call that began and left none (the app, this program or the machine stopped
+   * midway) is answered as unknown and never repeated: the app may have done what it was asked.
+   */
+  private async operateLocalApp(c: TeamAccountContext, b: SharedBotBinding, record: SavedExecution, operation: Extract<TeamOperation, { tool: 'local_app_tools' | 'local_app_call' }>,
+    live: () => string[], discovered: Map<string, string>, signal: AbortSignal, assert: () => void): Promise<TeamOperationOutcome> {
+    const apps = this.options.localApps; if (!apps) throw new Error('TEAM_HOST_PROTOCOL');
+    const { app } = operation.arguments, allowed = (id: string) => id === app && this.upperBound(b).localApps.includes(id) && live().includes(id);
+    if (operation.tool === 'local_app_tools') {
+      if (!allowed(app)) return appRefused('LOCAL_APP_UNAVAILABLE');
+      const tools = apps.tools(allowed);
+      for (const tool of tools) discovered.set(tool.name, JSON.stringify(tool));
+      return { established: true, succeeded: true, result: { tools: appTools(tools) } };
+    }
+    const { tool: name, arguments: given } = operation.arguments, store = this.options.privateStore;
+    const step = digest(operation.logicalStepId), request = digest(JSON.stringify(canonical([app, name, given])));
+    // The tool as listed now, and as the worker was shown it: a tool that changed since is refused before anything is recorded, and the worker asks for the tools again.
+    const listed = allowed(app) ? apps.tools(allowed).find(tool => tool.name === name) : undefined, shown = discovered.get(name);
+    const definition = shown ?? (listed ? JSON.stringify(listed) : undefined), admitted = !!listed && definition === JSON.stringify(listed);
+    const entry = await store.beginAppCall(c.uid, record.taskId, step, request, admitted); assert();
+    if (entry.state === 'done') return { established: true, ...entry.outcome };
+    if (entry.state === 'conflict') return appRefused('OPERATION_CONFLICT');
+    if (entry.state === 'full') return appRefused('LOCAL_APP_CALL_LIMIT');
+    if (entry.state === 'refused') return appRefused(allowed(app) ? 'LOCAL_APP_TOOL_UNAVAILABLE' : 'LOCAL_APP_UNAVAILABLE');
+    let outcome: AppCallOutcome = { succeeded: false, result: { error: 'LOCAL_APP_CALL_UNKNOWN' } };
+    if (entry.state === 'new') {
+      try { outcome = { succeeded: true, result: appResult(await apps.call({ name, arguments: given }, signal, definition, allowed)) }; }
+      catch (error) {
+        // The run itself ended: the record stays as it is, so a process that continues finds the call begun.
+        assert();
+        const { code, message } = (error ?? {}) as { code?: unknown; message?: unknown };
+        // -32602 (invalid params): the host or the app turned the request down, so nothing was done and the step may be tried again.
+        if (code === -32602) { await store.dropAppCall(c.uid, record.taskId, step); assert(); return appRefused('LOCAL_APP_CALL_REJECTED', { message: typeof message === 'string' ? message.slice(0, 300) : '' }); }
+      }
+    }
+    await store.finishAppCall(c.uid, record.taskId, step, request, outcome); assert();
+    return { established: true, ...outcome };
+  }
   /** The shared list service applies each durable step once and returns its recorded result on retry. */
   private async operate(c: TeamAccountContext, b: SharedBotBinding, record: SavedExecution, operation: Extract<TeamOperation, { tool: 'list_read' | 'list_write' }>, frame: <T>(send: () => Promise<T>) => Promise<T>, assert: () => void): Promise<TeamOperationOutcome> {
     const base = { ...this.hostFields(b), taskId: record.taskId, permitId: record.payload.permitId };

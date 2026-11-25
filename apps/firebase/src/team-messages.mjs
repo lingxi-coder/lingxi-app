@@ -44,6 +44,7 @@ function conversation(snapshot, read, generation) {
   return { id: snapshot.id, kind: value.kind, title: value.title, participants: value.participants,
     lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq,
     ...(value.autoReply ? { autoReply: { revision: value.autoReply.revision, targets: value.autoReply.targets } } : {}),
+    ...(value.botScopes ? { botScopes: value.botScopes } : {}),
     lastReadSeq: read?.generation === generation ? read.lastReadSeq : 0 };
 }
 

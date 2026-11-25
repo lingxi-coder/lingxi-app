@@ -26,6 +26,9 @@ export interface TeamHostBootstrap {
    * With `approval: 'requester'` the Bot can only propose a change and the task waits for the requester's decision; this needs `askRequester`. */
   sharedList?: { title: string; description: string; approval?: 'requester' };
   sharedData?: TeamDatasetOffer[];
+  /** The Local Apps of this Desktop the run may use (`run` and `continue`), by id: at most `LOCAL_APPS_OFFERED`, and left out when there are none.
+   * Their tools are asked for and called through the `local_app_tools` and `local_app_call` operations, and for no other app. */
+  localApps?: Array<{ id: string; name: string; description?: string }>;
   /** Nobody asked the Bot for this task (`run` and `continue`): offer it the tool that leaves the message unanswered. */
   mayDecline?: boolean;
   /** With `mayDecline` only: the member wrote this message to the Bot directly (a Bot DM), so the Bot answers unless it plainly needs no answer. */
@@ -69,10 +72,17 @@ export type TeamOperation = { tool: 'list_read' }
   | { tool: 'list_write'; logicalStepId: string; approvalRef?: string; arguments: Record<string, unknown> }
   | { tool: 'data_read'; offer: TeamDatasetOffer; arguments: Record<string, unknown> }
   | { tool: 'data_write'; offer: TeamDatasetOffer; logicalStepId: string; arguments: Record<string, unknown> }
-  | { tool: 'data_handoff'; offer: TeamDatasetOffer; logicalStepId: string; arguments: Record<string, unknown> };
+  | { tool: 'data_handoff'; offer: TeamDatasetOffer; logicalStepId: string; arguments: Record<string, unknown> }
+  /** The tools of one offered Local App, as its MCP server lists them now. */
+  | { tool: 'local_app_tools'; arguments: { app: string } }
+  /** One call of a tool of an offered Local App. Its step is its identity: a process that continues the task sends the same step again and is given the recorded result, not a second call. */
+  | { tool: 'local_app_call'; logicalStepId: string; arguments: { app: string; tool: string; arguments: Record<string, unknown> } };
 /** `established: false` says nobody knows whether the write happened: the worker then stops with the call unfinished instead of telling the model a guess. */
 export interface TeamOperationOutcome { established: boolean; succeeded: boolean; result: Record<string, unknown> }
-const OPERATION_BYTES = 64 * 1024;
+/** What one operation's result may carry back to the worker, as JSON. */
+export const OPERATION_BYTES = 64 * 1024;
+/** The most Local Apps one run is offered. */
+export const LOCAL_APPS_OFFERED = 16;
 export class TeamHostFailure extends Error { constructor(readonly code: string) { super('TEAM_HOST_FAILED'); } }
 export interface TeamHostProcessOptions {
   executable: string; home: string; tmp: string; bootstrap: TeamHostBootstrap; signal: AbortSignal;
@@ -173,6 +183,18 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
                 operation = { tool, offer, arguments: args, logicalStepId: stableStep };
               } else if (tool === 'data_read' && step === undefined && ['describe', 'get', 'list', 'getReport'].includes(args.action as string)) {
                 operation = { tool, offer, arguments: args };
+              } else throw new Error('TEAM_HOST_PROTOCOL');
+            } else if (tool === 'local_app_tools' || tool === 'local_app_call') {
+              // Only the apps this run was offered. A request for another one is a violation of the protocol, not a refusal the model is shown.
+              const app = args.app;
+              if (approval !== undefined || typeof app !== 'string' || !options.bootstrap.localApps?.some(offered => offered.id === app)) throw new Error('TEAM_HOST_PROTOCOL');
+              if (tool === 'local_app_tools' && step === undefined) {
+                exact(args, ['app']); operation = { tool, arguments: { app } };
+              } else if (tool === 'local_app_call' && stableStep) {
+                exact(args, ['app', 'tool', 'arguments']);
+                const named = args.tool, given = args.arguments;
+                if (typeof named !== 'string' || !named || named.length > 200 || !object(given)) throw new Error('TEAM_HOST_PROTOCOL');
+                operation = { tool, logicalStepId: stableStep, arguments: { app, tool: named, arguments: given } };
               } else throw new Error('TEAM_HOST_PROTOCOL');
             } else if (tool === 'list_write' && sharedList && stableStep
               && (sharedList.approval === 'requester' ? typeof approval === 'string' && WAIT_ID.test(approval) : approval === undefined)) {

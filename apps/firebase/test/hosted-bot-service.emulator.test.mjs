@@ -135,6 +135,18 @@ test('service: a caller enters by agreeing, asks in a session of their own, and 
   assert.deepEqual((await service('listServices', {}, publisher)).published.map(s => s.serviceId), [serviceId]);
 });
 
+test('service: a service Bot reaches nothing of its publisher\'s Desktop: an empty scope is the same as none, anything else is refused', options, async () => {
+  await online();
+  const row = { source: 'orders', dataset: 'dataset_01', write: false, reportReview: false };
+  const again = (scope, revision = 1) => ledger('publishSharedBot', publication({ expectedRevision: revision, scope, deployment: { ...publication().deployment, revision: revision + 1 } }), publisher);
+  await assert.rejects(again({ localApps: [{ id: 'calendar', name: 'Calendar' }], datasets: [] }), { code: 'SCOPE_UNSUPPORTED' });
+  await assert.rejects(again({ localApps: [], datasets: [row] }), { code: 'SCOPE_UNSUPPORTED' });
+  assert.equal((await db.doc(`services/${serviceId}/sharedBots/${sharedBotId}`).get()).data().identity.revision, 1, 'a refused publication changes nothing');
+  await again({ localApps: [], datasets: [] });
+  const stored = (await db.doc(`services/${serviceId}/sharedBots/${sharedBotId}`).get()).data();
+  assert.equal(stored.identity.revision, 2); assert.deepEqual(stored.scope, { localApps: [], datasets: [] });
+});
+
 test('service: the scope takes only what it lists; nothing made for a Team reaches it and the two are never mistaken for each other', options, async () => {
   await online();
   const generation = await enter(alice);
@@ -143,6 +155,7 @@ test('service: the scope takes only what it lists; nothing made for a Team reach
   for (const [action, payload] of [['publishSharedBot', publication({ sharedBotId: 'sharedbot_evil', deployment: { ...publication().deployment, sharedBotId: 'sharedbot_evil', owner: { uid: 'alice', generation: 1 } } })],
     ['listSharedBots', {}], ['readList', { sharedBotId }], ['heartbeatDeployment', { ...host, ready: true }], ['listHostTasks', { ...host }],
     ['getTransfer', { transferId: 'transfer_01' }], ['setConversationPolicy', { conversationId: 'session_alice', expectedRevision: 1, targets: [] }],
+    ['setConversationBotScope', { conversationId: 'session_alice', sharedBotId, expectedRevision: 0, scope: null }],
     ['readArtifact', { artifactId: 'artifact_01' }], ['acceptTransfer', { transferId: 'transfer_01' }]]) {
     refused.push([action, await ledger(action, payload, alice, generation).then(() => 'accepted', error => error.code ?? error.name)]);
   }
@@ -151,6 +164,7 @@ test('service: the scope takes only what it lists; nothing made for a Team reach
   await assert.rejects(read('mutate', { conversationId: 'session_alice', messageId: 'message_x1', changeId: 'change_x1', operation: 'create', text: 'hi' }, alice), { code: 'SERVICE_SCOPE_UNSUPPORTED' });
   // The publisher's own Team-only commands are not offered either, and its publication must be the service's Bot for everyone in it.
   await assert.rejects(ledger('readList', { sharedBotId }, publisher), { code: 'SERVICE_SCOPE_UNSUPPORTED' });
+  await assert.rejects(ledger('setConversationBotScope', { conversationId: 'session_alice', sharedBotId, expectedRevision: 0, scope: null }, publisher), { code: 'SERVICE_SCOPE_UNSUPPORTED' });
   await assert.rejects(ledger('publishSharedBot', publication({ expectedRevision: 1, usePolicy: { mode: 'listed', members: [{ uid: 'publisher', generation: 1 }] } }), publisher), { code: 'INVALID_SERVICE_PUBLICATION' });
   await assert.rejects(ledger('publishSharedBot', publication({ sharedBotId: 'sharedbot_02', deployment: { ...publication().deployment, sharedBotId: 'sharedbot_02' } }), publisher), { code: 'INVALID_SERVICE_PUBLICATION' });
 

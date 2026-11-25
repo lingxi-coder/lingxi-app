@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { mentionEntitiesSchema, validMentionEntities } from './team-mentions.mjs';
 import { deploymentRecord, memberRef, usePolicy } from './team-execution-contract.mjs';
 import { attachmentLimits, attachmentTypes } from './team-attachments.mjs';
+import { narrowing, publishedScope } from './bot-scope.mjs';
 
 export const executionId = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
@@ -75,6 +76,8 @@ const payloads = {
     // The Bot may answer messages nobody asked it about, in Chats whose members turned that on, at most `daily` runs a day.
     // Leaving it out turns it off.
     autoReply: z.object({ daily: quota }).strict().optional(),
+    // The most of its owner's Local Apps and datasets the Bot may use in this Team. Leaving it out shares none of them.
+    scope: publishedScope.optional(),
   }).strict().refine(value => value.inputs.filter(input => input.kind === 'persona').length === 1, 'Exactly one published persona required'),
   // Handover of a Bot to another member (detailed design 18). The package is the published role and files, in parts of at most 700 KiB.
   putTransferPart: z.object({ transferId: executionId, sharedBotId: executionId, index: z.number().int().min(0).max(7),
@@ -178,6 +181,8 @@ const payloads = {
   // The Bots of this Chat that may answer messages nobody asked them about. Each must allow it itself.
   setConversationAutoReply: z.object({ ...thread, expectedRevision: cursor,
     targets: z.array(executionId).max(8).refine(unique) }).strict(),
+  // What one Bot of this Chat may use here, within what it published: `scope: null` lifts the narrowing.
+  setConversationBotScope: z.object({ ...thread, sharedBotId: executionId, expectedRevision: cursor, scope: narrowing.nullable() }).strict(),
 };
 export const sharedBotCommand = z.discriminatedUnion('action', Object.entries(payloads).map(([action, payload]) => z.object({
   schemaVersion: z.literal(1), commandId: executionId, teamId: executionId,

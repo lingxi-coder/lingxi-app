@@ -600,6 +600,48 @@ for that Chat with the member command `setConversationAutoReply { conversationId
   (`auto-reply:`), `apps/web/test/teams-bots-ui.test.ts` (`Auto-reply:`), vectors in `contracts/execution-vectors.json`, iOS
   `TeamBotTests`/`TeamsPointerParserTests`, Android `TeamBotsTest`.
 
+## What a Bot may use of its maintainer's Desktop (Bot scope)
+
+What a shared Bot reaches of its maintainer's Desktop in a Team is four layers that each only narrow: the local Bot's own upper bound
+(`scope` of `bot.json`: Local Apps and datasets), the scope the maintainer published, what a Chat narrows it to, and, for datasets, a live
+LingXi Data grant. Nothing is shared by default: a Bot published without a scope has an empty one (no fallback for older documents).
+
+- Data (`bot-scope.mjs`, `packages/teams/bot-scope.ts`): `sharedBots/{id}.scope = { localApps: [{id, name}], datasets: [{source, dataset,
+  write, reportReview}] }`, at most 64 of each, an id or dataset once, ids and names only. It is part of the Bot's revision: `publishSharedBot`
+  takes `scope` (left out = empty), a publication replaces it and a handover resets it, so a run that started under the old one is revoked
+  like any republished Bot's. Hosted services refuse a non-empty one (`SCOPE_UNSUPPORTED`). The Chat holds
+  `conversations/{id}.botScopes[sharedBotId] = { revision, localApps?: string[], datasets?: [{source, dataset}] }`: a list that is left out
+  narrows nothing, `[]` allows none, and lifting keeps only the `revision`. Members set it with `setConversationBotScope
+  { conversationId, sharedBotId, expectedRevision, scope | null }` (the people who may use `setConversationAutoReply`; the Bot must be in the
+  Chat: `BOT_PARTICIPANT_REQUIRED`; `BOT_SCOPE_REVISION_CONFLICT`; only within what the Bot published: `SCOPE_NOT_PUBLISHED`). The field is
+  written by the service alone, the list projection of `team-messages.mjs` carries it, and neither the rules nor the indexes change.
+- Service: `effectiveScope(published, narrowing)` is what `validateTask` answers as `scope`. `hostDataOffers` offers a dataset only inside it
+  and with a grant (a write needs the `write` flag and an edit grant, a report review the `reportReview` flag), `hostDataOperation` refuses
+  outside it, a handoff receiver needs the dataset in its own scope of the target Chat, and a task caused by a dataset is revoked
+  (`TASK_REVOKED`) when the dataset leaves the Bot's scope.
+- Desktop (`teams/connector.ts`): publishing checks `scope` against the local Bot (`SCOPE_OUTSIDE_BOT`; a write or a report review the Bot
+  does not have is refused too) and a run checks the Bot's bound again as it is then: dataset offers are cut to it and `data_*` operations
+  outside it answer `DATA_ACCESS_REQUIRED`. `TeamHostBootstrap.localApps` (at most 16, left out when empty) is the bound, the service's
+  `scope` of the last `validateTask` and the installed apps; every request is checked against all three again.
+- Worker operations (`teams/process.ts`): `local_app_tools { app }` lists the tools of a running offered app (as many whole tools as fit in
+  64 KiB), `local_app_call { logicalStepId, app, tool, arguments }` calls one through the injected `TeamLocalApps` (`LocalAppMcpManager`
+  in `index.ts`). An app that was not offered is a protocol violation, not an answer the model sees. The answer is `{ content: [{type: 'text',
+  text}], isError? }` and at most 64 KiB (`OPERATION_BYTES`): only text is carried (an image or file is named by its kind and place), text
+  that does not fit is cut at the end on a character boundary and a last block says so, `isError` is the app's own word and is passed on, and
+  the operation `succeeded` when the app answered. Refusals: `LOCAL_APP_UNAVAILABLE`, `LOCAL_APP_TOOL_UNAVAILABLE` (also when the tool
+  changed since it was listed), `LOCAL_APP_CALL_LIMIT` (64 calls a task), `OPERATION_CONFLICT` (the step again with another call),
+  `LOCAL_APP_CALL_REJECTED` (the app or its host answered invalid params: nothing was done, the step may be tried again).
+- A step is called once: `TeamPrivateStore.beginAppCall` writes `app-calls/<taskId>/<step>` before the app is asked and `finishAppCall`
+  completes it with exactly what the worker is given. The same step again answers the record; one that began and has no end (the app,
+  the process or the machine stopped) answers `LOCAL_APP_CALL_UNKNOWN` and is never repeated. The records go with the task's delivery.
+- Clients: `SharedBotCard.scope`, `TeamConversation.botScopes` and `effectiveBotScope()` give a screen what the Bot may use in a Chat
+  (ids and names only); no client shows or sets it yet, and nothing publishes a scope until the publish wizard does.
+- Runtime (H): not part of this phase. The host's bootstrap refuses unknown fields, so `localApps` and the two operations need an H change
+  and a pin bump before a Bot is published with a Local App.
+- Tests: `apps/firebase/test/bot-scope.test.mjs`, `bot-scope.emulator.test.mjs` (also in `scripts/test-teams.mjs`), `handover` and
+  `hosted-bot-service` emulator tests, `apps/web/test/teams-bot-scope.test.ts` (vectors in `contracts/bot-scope-vectors.json`: the native
+  clients check every command of `execution-vectors.json`, so these join it with their B4c support), `teams-host.test.ts` (`Bot v3 B4a`).
+
 ## Current integration status, 2026-11-05
 
 The sections below record earlier increments and their failures; this table supersedes their pending source-work statements. M0/M1 release acceptance remains open.

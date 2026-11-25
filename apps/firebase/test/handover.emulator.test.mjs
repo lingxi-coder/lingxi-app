@@ -318,3 +318,24 @@ test('handover: a document made before it stays readable, and a later publicatio
   assert.equal((await botData()).sourceRevision, undefined);
   await assert.rejects(execute('readArtifact', { artifactId }, member), { code: 'ARTIFACT_READ_REQUIRED' });
 });
+
+test('handover: what the earlier maintainer shared of their own Desktop does not go with the Bot; the new one publishes their own', options, async () => {
+  const scope = { localApps: [{ id: 'calendar', name: 'Calendar' }], datasets: [{ source: 'orders', dataset: 'dataset_01', write: true, reportReview: false }] };
+  await execute('publishSharedBot', publish({ expectedRevision: 1, scope, deployment: { ...deployment(oldHost, owner), revision: 2 } }));
+  await execute('heartbeatDeployment', { ...oldHost, ready: true });
+  await execute('setConversationBotScope', { conversationId: oldChat, sharedBotId: botId, expectedRevision: 0, scope: { localApps: ['calendar'] } }, member);
+  assert.deepEqual((await card(member)).scope, scope);
+
+  await offer('transfer_0001', other, { expectedRevision: 2 }); await execute('acceptTransfer', { transferId: 'transfer_0001' }, other);
+  assert.deepEqual((await botData()).scope, scope, 'an offer changes nothing for the people who use the Bot');
+  await complete('transfer_0001'); await execute('heartbeatDeployment', { ...newHost, ready: true }, other);
+  assert.deepEqual((await botData()).scope, { localApps: [], datasets: [] });
+  assert.equal((await card(member)).scope, undefined);
+  // What the Chat narrowed stays where it was written, but narrows nothing the new maintainer has not published.
+  assert.deepEqual((await chatData(oldChat)).botScopes, { [botId]: { revision: 1, localApps: ['calendar'] } });
+  await execute('createConversation', { conversationId: newChat, kind: 'bot_dm', title: 'Travel', participantUids: [member.uid], sharedBotIds: [botId] }, member);
+  const receipt = await execute('submit', submit(newChat), member), started = await execute('startTask', { ...newHost, taskId: receipt.tasks[0].taskId }, other);
+  assert.deepEqual((await execute('validateTask', { ...newHost, taskId: started.task.taskId, permitId: started.permitId, expectedLastChangeSeq: receipt.changeSeq }, other)).scope,
+    { localApps: [], datasets: [] });
+  await assert.rejects(execute('setConversationBotScope', { conversationId: oldChat, sharedBotId: botId, expectedRevision: 1, scope: { localApps: ['calendar'] } }, member), { code: 'SCOPE_NOT_PUBLISHED' });
+});

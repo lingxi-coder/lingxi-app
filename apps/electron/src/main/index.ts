@@ -1175,6 +1175,15 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
           background: () => ({ openAtLogin: loginItem.status(), keepAwake: settings.getPublic().botsKeepAwake === true, onBattery: powerMonitor.isOnBatteryPower() }),
           // Whether a published Bot answers a message nobody asked it about is judged by this Desktop's Decision service.
           decision: decisionHost,
+          // The Local Apps a run may use. The host is made below, so each use asks for it.
+          localApps: {
+            list: async () => (await localApps?.list()) ?? [],
+            tools: allowed => localApps?.mcpTools(allowed) ?? [],
+            call: (request, signal, discovered, allowed) => {
+              if (!localApps) throw new Error('The Local App host is unavailable');
+              return localApps.mcpCall(request, signal, discovered, allowed);
+            },
+          },
           chooseFiles: async () => {
             const parent = [...mainWindows].find(window => !window.isDestroyed());
             const options = { title: 'Choose files to share with Team members', properties: ['openFile', 'multiSelections'] as Array<'openFile' | 'multiSelections'>,

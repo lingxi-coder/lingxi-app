@@ -1,4 +1,6 @@
 import { isMemberExecutionCommand } from './execution-validation.js';
+import type { BotScopeNarrowing, PublishedBotScope } from './bot-scope.js';
+export type { BotScopeEntry, BotScopeNarrowing, PublishedBotScope } from './bot-scope.js';
 /** Execution 2 contracts. No retired Bot keys or execution request adapters. */
 export interface MemberRef { uid: string; generation: number }
 export type UsePolicy = { mode: 'all' } | { mode: 'listed'; members: MemberRef[] };
@@ -23,6 +25,8 @@ export interface SharedBotCard {
   sharedList?: { title: string; approval?: 'requester' };
   /** The Bot may answer messages nobody asked it about, in Chats that turn this on, at most `daily` times a day. */
   autoReply?: { daily: number };
+  /** What the maintainer published of their Desktop for this Bot to use in the Team; absent when nothing. A Chat can narrow it (`TeamConversation.botScopes`). */
+  scope?: PublishedBotScope;
   /** The maintainer offered the Bot to another member and it is not settled yet. Only those two are told. */
   transfer?: BotTransfer;
 }
@@ -109,6 +113,8 @@ export interface MemberExecutionPayloads {
   setConversationPolicy: { conversationId: string; expectedRevision: number; targets: string[] };
   /** The Bots of this Chat that judge for themselves whether to answer its messages: each must be in the Chat and published to do so. */
   setConversationAutoReply: { conversationId: string; expectedRevision: number; targets: string[] };
+  /** What one Bot of this Chat may use here, within what it published; `null` lifts the narrowing. `expectedRevision` is the revision of that Bot's entry in `TeamConversation.botScopes` (0 when it has none). */
+  setConversationBotScope: { conversationId: string; sharedBotId: string; expectedRevision: number; scope: BotScopeNarrowing | null };
   /** The maintainer takes an offered Bot back, or the member it was offered to declines it. */
   endTransfer: { transferId: string };
 }
@@ -156,5 +162,7 @@ export interface PublishLocalBotInput extends ExecutionScope {
   sharedList?: { title: string; description: string; approval?: 'none' | 'requester' };
   /** Let the Bot answer messages nobody asked it about, at most `daily` runs a day. Needs a Decision service on this Desktop. */
   autoReply?: { daily: number };
+  /** The Local Apps and datasets of this Desktop the Bot may use in the Team: no more than the local Bot's own scope allows. Leaving it out, or publishing again without it, shares none. */
+  scope?: PublishedBotScope;
 }
 export const sharedBotUsable = (card: SharedBotCard): boolean => card.state === 'published' && card.permitted;

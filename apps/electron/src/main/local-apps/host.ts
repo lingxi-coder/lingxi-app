@@ -33,7 +33,8 @@ import { LOCAL_APP_SDK, REMOTE_LOCAL_APP_SDK } from '../../preload/localAppSdk.j
 import { LocalAppRemoteGateway, type RemoteOwner, type RemoteRun } from './remoteGateway.js';
 import type { LocalAppRtc } from './remoteRtc.js';
 import { LOCAL_APP_RTC_BROWSER_SOURCE } from './remoteRtcBrowser.js';
-import { LocalAppMcpManager } from './mcp.js';
+import { LocalAppMcpManager, type LocalAppFilter } from './mcp.js';
+import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 import { LocalAppMcpGateway, type LocalAppBotAudience } from './mcpGateway.js';
 
 function withAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -950,6 +951,12 @@ export class LocalAppHost {
   publishBot(audience: LocalAppBotAudience): Promise<void> { return this.mcpGateway.publishBot(audience); }
   /** The Bot is gone: what it was given stops working at once. */
   revokeBot(botId: string): Promise<void> { return this.mcpGateway.revokeBot(botId); }
+  /** The tools of the running applications `allowed` names, as the MCP host lists them: what a run of a shared Bot is offered of this computer. */
+  mcpTools(allowed: LocalAppFilter): Tool[] { return this.mcp.tools(allowed); }
+  /** One call of such a tool. `discovered` is the definition the caller was shown; `allowed` is asked again when the tool answers. */
+  mcpCall(params: { name: string; arguments?: Record<string, unknown> }, signal: AbortSignal, discovered: string | undefined, allowed: LocalAppFilter): Promise<CallToolResult> {
+    return this.mcp.call(params, signal, discovered, allowed);
+  }
   private get remoteSettingsPath(): string { return join(this.store.root, 'remote-access.v1.json'); }
   async remoteSettings(): Promise<Record<string, boolean>> {
     try {

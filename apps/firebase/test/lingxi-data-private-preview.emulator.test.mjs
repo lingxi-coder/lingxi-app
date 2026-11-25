@@ -53,13 +53,13 @@ test('product Bot permits gate MySQL WebRTC and durable shared record operations
     .set(team.collection('members').doc(owner), { role: 'owner', generation: 1, displayName: 'Maintainer' })
     .set(team.collection('members').doc(reader), { role: 'member', generation: 1, displayName: 'Requester' }).commit();
 
-  const publishBot = (sharedBotId, deployment, name) => run(owner, 'publishSharedBot', {
-    sharedBotId, expectedRevision: 0, name, description: 'Data fixture Bot',
-    usePolicy: { mode: 'all' }, deployment: { ...deployment, sharedBotId, revision: 1, owner: { uid: owner, generation: 1 },
+  const publishBot = (sharedBotId, deployment, name, revision = 1, scope) => run(owner, 'publishSharedBot', {
+    sharedBotId, expectedRevision: revision - 1, name, description: 'Data fixture Bot',
+    usePolicy: { mode: 'all' }, deployment: { ...deployment, sharedBotId, revision, owner: { uid: owner, generation: 1 },
       instanceId: 'private-instance', definitionDigest: 'a'.repeat(64), capabilitySnapshotDigest: 'b'.repeat(64), executionVersion: 2,
       capabilities: { durableWait: false, writeOperations: true, delegation: false }, enabled: true },
     inputs: [{ kind: 'persona', resourceId: 'private-persona', revision: 1, digest: 'a'.repeat(64), sourceAudience: { mode: 'team' } }],
-    quotas: { team: 100, member: 20, bot: 100 } });
+    quotas: { team: 100, member: 20, bot: 100 }, ...(scope ? { scope } : {}) });
   await publishBot(bot, host, 'Source Bot');
   await run(owner, 'heartbeatDeployment', { ...host, ready: true });
   await run(owner, 'createConversation', { conversationId, kind: 'group', title: 'Private preview',
@@ -224,6 +224,9 @@ test('product Bot permits gate MySQL WebRTC and durable shared record operations
   } });
   assert.equal(created.status, 200, await created.clone().text());
   const { dataset } = await created.json();
+  // A grant is not enough for a Bot to use a dataset: it also publishes it. The dataset exists only now, so both Bots publish again, and the grants below are made against that publication.
+  await publishBot(bot, host, 'Source Bot', 2, { localApps: [], datasets: [{ source: 'orders', dataset, write: true, reportReview: true }] });
+  await publishBot(receiver, receiverHost, 'Receiving Bot', 2, { localApps: [], datasets: [{ source: 'orders', dataset, write: false, reportReview: false }] });
   const grant = { action: 'setBotDataAccess', scope, dataset, sharedBotId: bot, access: 'edit', expectedVersion: 0,
     reportReview: true, handoff: { targets: [receiver], dailyLimit: 4 } };
   assert.equal((await product(grant, readerToken)).status, 403);

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
-import { link, lstat, mkdir, open, readdir, rename, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, open, readdir, rename, rm, unlink } from 'node:fs/promises';
 import type { TeamRunResult, BotChatScope, TeamTaskCheckpoint } from './process.js';
 import type { TaskUsage } from '../../../../../packages/teams/execution.js';
 import { dirname, join } from 'node:path';
@@ -46,6 +46,14 @@ export interface SavedExecution { schemaVersion: 2; scope: BotChatScope; teamId:
   /** The exact pauseTask request for a question the worker asked, saved before it is sent so every retry is identical. */ pause?: Record<string, unknown>;
   /** The server accepted the question: the task continues only through its answer. */ wait?: { waitId: string; expiresAt: number };
   /** The answer the task continued with. A later recovery of that attempt hands the same answer to the worker. */ answered?: { waitId: string; messageId: string; text: string; /** The decision, when the wait was an approval. */ approved?: boolean } }
+/** What a Local App call handed back to the worker: whether the app answered, and exactly what the worker was given. */
+export interface AppCallOutcome { succeeded: boolean; result: Record<string, unknown> }
+/** One Local App call of a task: written before the app is asked and completed with its outcome. Without an outcome the call began and how it ended is not known. */
+export interface SavedAppCall { schemaVersion: 1; taskId: string; step: string; requestDigest: string; outcome?: AppCallOutcome }
+/** `begun`: an earlier process began this call and left no outcome. `conflict`: the step is the same and the call is not. `full`: the task has made as many calls as it may. `refused`: new, and not admitted. */
+export type AppCallEntry = { state: 'new' | 'begun' | 'conflict' | 'full' | 'refused' } | { state: 'done'; outcome: AppCallOutcome };
+/** The most calls of Local Apps one task may make, and the most bytes of one record of such a call. */
+const APP_CALLS_PER_TASK = 64, APP_CALL_BYTES = 80 * 1024;
 export interface SavedDelivery { schemaVersion: 1; teamId: string; generation: number; taskId: string; deadlineAt: number; commandId: string; payload: Record<string, unknown>;
   /** The host made this failure up (no worker result), so its `finishedAt` is a host clock stamp that delivery may replace. */ synthesized?: true }
 
@@ -166,12 +174,12 @@ export class TeamPrivateStore {
     this.hostId = readPrivate(path, 22);
     if (!/^[A-Za-z0-9_-]{22}$/u.test(this.hostId)) throw new Error('UNSAFE_TEAM_STORAGE');
   }
-  async owner(uid: string): Promise<{ root: string; runtime: string; snapshots: string; bindings: string; transport: string; publications: string; executions: string; outbox: string; home: string; tmp: string }> {
+  async owner(uid: string): Promise<{ root: string; runtime: string; snapshots: string; bindings: string; transport: string; publications: string; executions: string; outbox: string; appCalls: string; home: string; tmp: string }> {
     if (!/^[A-Za-z0-9_-]{1,128}$/u.test(uid)) throw new Error('BOT_ACCOUNT_UNSUPPORTED');
     await directory(this.root); const root = await directory(join(this.root, digest(uid)));
     return { root, runtime: await directory(join(root, 'runtime')), snapshots: await directory(join(root, 'snapshots')),
       bindings: await directory(join(root, 'bindings')), transport: await directory(join(await directory(join(root, 'runtime')), 'transport')),
-      publications: await directory(join(root, 'publications')), executions: await directory(join(root, 'executions')), outbox: await directory(join(root, 'outbox')), home: await directory(join(root, 'host-home')), tmp: await directory(join(root, 'host-tmp')) };
+      publications: await directory(join(root, 'publications')), executions: await directory(join(root, 'executions')), outbox: await directory(join(root, 'outbox')), appCalls: await directory(join(root, 'app-calls')), home: await directory(join(root, 'host-home')), tmp: await directory(join(root, 'host-tmp')) };
   }
   async publication(uid: string, publicationId: string): Promise<SavedPublication | undefined> {
     return this.readPublication(uid, (await this.owner(uid)).publications, publicationId);
@@ -300,7 +308,7 @@ export class TeamPrivateStore {
     try{await lstat(join(paths.outbox,expected.taskId));return false;}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
     if(restore)await rename(await writeTemporary(paths.executions,JSON.stringify(restore)),path);else await unlink(path);
     await syncDirectory(paths.executions);
-    if(!restore)await this.releaseDataRef(uid,expected.batch);return true;
+    if(!restore){await this.releaseDataRef(uid,expected.batch);await rm(join(paths.appCalls,expected.taskId),{recursive:true,force:true});}return true;
   }); }
   async executions(uid: string): Promise<SavedExecution[]> {
     const root = (await this.owner(uid)).executions, values: SavedExecution[] = [];
@@ -367,8 +375,48 @@ export class TeamPrivateStore {
     try { batch = (JSON.parse(await read(join(paths.executions, taskId), 64 * 1024)) as SavedExecution).batch; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     await unlink(join(paths.executions, taskId)).catch(error => { if (error.code !== 'ENOENT') throw error; }); await syncDirectory(paths.executions);
     if (batch && this.transportPath(paths.transport, batch)) await unlink(batch.path).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    await rm(join(paths.appCalls, taskId), { recursive: true, force: true });
     return true;
   }); }
+  /**
+   * Begins one Local App call of a task, or says what an earlier process left of it. The record is made durable before the app is asked, so a call is never made twice:
+   * a process that continues the task and sends the same step again is given the recorded outcome, or `begun` when the call started and its end was never recorded.
+   * `admitted: false` makes no record: a call that is refused leaves nothing behind.
+   */
+  beginAppCall(uid: string, taskId: string, step: string, requestDigest: string, admitted: boolean): Promise<AppCallEntry> { return this.executionSerial(uid, taskId, async () => {
+    const root = await this.appCallRoot(uid, taskId, step, requestDigest), path = join(root, step), saved = await this.readAppCall(path, taskId, step);
+    if (saved) return saved.requestDigest !== requestDigest ? { state: 'conflict' } : saved.outcome ? { state: 'done', outcome: saved.outcome } : { state: 'begun' };
+    if (!admitted) return { state: 'refused' };
+    if ((await listed(root)).length >= APP_CALLS_PER_TASK) return { state: 'full' };
+    await create(path, JSON.stringify({ schemaVersion: 1, taskId, step, requestDigest } satisfies SavedAppCall));
+    return { state: 'new' };
+  }); }
+  /** Records how a begun call ended: exactly what the worker is given, now and for every later send of the step. */
+  finishAppCall(uid: string, taskId: string, step: string, requestDigest: string, outcome: AppCallOutcome): Promise<void> { return this.executionSerial(uid, taskId, async () => {
+    const root = await this.appCallRoot(uid, taskId, step, requestDigest), path = join(root, step), saved = await this.readAppCall(path, taskId, step);
+    if (!saved || saved.requestDigest !== requestDigest || saved.outcome) throw new Error('UNSAFE_TEAM_STORAGE');
+    const text = JSON.stringify({ ...saved, outcome });
+    if (Buffer.byteLength(text) > APP_CALL_BYTES) throw new Error('UNSAFE_TEAM_STORAGE');
+    await rename(await writeTemporary(root, text), path); await syncDirectory(root);
+  }); }
+  /** Takes a begun call back: the app was never asked (the call was refused before it was made), so the step may be tried again. */
+  dropAppCall(uid: string, taskId: string, step: string): Promise<void> { return this.executionSerial(uid, taskId, async () => {
+    const root = await this.appCallRoot(uid, taskId, step);
+    await unlink(join(root, step)).catch(error => { if (error.code !== 'ENOENT') throw error; }); await syncDirectory(root);
+  }); }
+  /** The directory of a task's Local App calls, for a task and digests that have the shape the store writes. */
+  private async appCallRoot(uid: string, taskId: string, ...digests: string[]): Promise<string> {
+    if (!/^[A-Za-z0-9_-]{8,64}$/u.test(taskId) || !digests.every(value => /^[a-f0-9]{64}$/u.test(value))) throw new Error('UNSAFE_TEAM_STORAGE');
+    return directory(join((await this.owner(uid)).appCalls, taskId));
+  }
+  private async readAppCall(path: string, taskId: string, step: string): Promise<SavedAppCall | undefined> {
+    try {
+      const value = JSON.parse(await read(path, APP_CALL_BYTES)) as SavedAppCall, outcome = value.outcome;
+      if (value.schemaVersion !== 1 || value.taskId !== taskId || value.step !== step || !/^[a-f0-9]{64}$/u.test(value.requestDigest)
+        || outcome !== undefined && (typeof outcome.succeeded !== 'boolean' || !outcome.result || typeof outcome.result !== 'object' || Array.isArray(outcome.result))) throw new Error('UNSAFE_TEAM_STORAGE');
+      return value;
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+  }
   private validateSnapshot(value: TeamPersonaSnapshot): void {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_TEAM_SNAPSHOT');
     const { instructions, documents, provider_account_profiles: profiles, ...route } = value; validateTeamModelRoute(route);

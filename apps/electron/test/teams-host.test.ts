@@ -9,9 +9,9 @@ import { join } from 'node:path';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { TeamsApiError } from '../../../packages/teams';
 import { TeamsService, type TeamAccountContext } from '../src/main/teams/service';
-import { TeamConnector, DELIVERY_SKEW_MS, grantPermit, type TeamHostApi } from '../src/main/teams/connector';
+import { TeamConnector, DELIVERY_SKEW_MS, grantPermit, type TeamHostApi, type TeamLocalApps } from '../src/main/teams/connector';
 import { TeamPrivateStore, digest, type TeamModelRoute, type TeamPersonaSnapshot } from '../src/main/teams/privateStore';
-import { runTeamHost, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult } from '../src/main/teams/process';
+import { runTeamHost, TeamHostFailure, LOCAL_APPS_OFFERED, OPERATION_BYTES, type TeamHostProcessOptions, type TeamHostResult } from '../src/main/teams/process';
 import { botFixture } from './bot-helpers';
 import type { PublishLocalBotInput } from '../../../packages/teams/execution';
 const teamId='team00001',sharedBotId='sharedbot001',conversationId='chat00001';
@@ -1681,4 +1681,244 @@ test('Dataset v2 normal Team Bot task commits its approved reply', { skip: !hasD
   }
   assert.ok(f.mock.commands.some(c => c.action === 'completeTask' && c.payload.outcome === 'completed'));
   await staging.assertOutput('Done');
+});
+
+// ---- Bot v3 B4a: what a run may use of this computer: the Local Apps and datasets in the Bot's own scope, its publication and its Chat ----
+type OwnDataset={source:string;dataset:string;write:boolean;reportReview:boolean};
+const ownData=(dataset:string,more:Partial<OwnDataset>={}):OwnDataset=>({source:'orders',dataset,write:false,reportReview:false,...more});
+const toolOf=(name:string,more:Record<string,unknown>={})=>({name,description:`Does ${name}`,inputSchema:{type:'object',properties:{q:{type:'string'}}},...more});
+/** The Local Apps of this computer: which are installed, the tools of the running ones, and every request the host got. */
+function appHost(installed:Array<{id:string;name:string;summary?:string}>,tools:Record<string,Array<ReturnType<typeof toolOf>>>){
+ const calls:any[]=[],state={tools,listed:0,answer:async(_request:any):Promise<{content?:unknown[];isError?:boolean}>=>({content:[{type:'text',text:'done'}]})};
+ const host:TeamLocalApps={list:async()=>{state.listed++;return installed;},tools:allowed=>Object.entries(state.tools).filter(([id])=>allowed(id)).flatMap(([,all])=>all),
+  call:async(request,_signal,discovered,allowed)=>{calls.push({request,discovered,apps:Object.keys(state.tools).filter(id=>allowed(id))});return state.answer(request);}};
+ return {host,calls,state};
+}
+/** A Bot whose own scope is `own`, on a computer with `apps`, running tasks whose Chat leaves it `live.localApps` (as `validateTask` says). */
+function scoped(t:any,worker:Run,own:{localApps?:string[];datasets?:OwnDataset[]},apps?:ReturnType<typeof appHost>,live:{localApps:string[]}={localApps:[]}){
+ const f=durable(t,worker),inner=f.mock.service.hostMessages.bind(f.mock.service);
+ f.mock.service.hostMessages=async(c,command)=>{const result:any=await inner(c,command);
+  return ['prepareTask','validateTask','startTask'].includes(command.action as string)?{...result,scope:{localApps:live.localApps.map(id=>({id,name:id})),datasets:[]}}:result;};
+ Object.assign((f.connector as any).options,{localApps:apps?.host});
+ f.store.update(f.bot.bot_id,f.bot.revision,{scope:{localApps:own.localApps??[],datasets:own.datasets??[]}});
+ const narrowOwn=(scope:{localApps?:string[];datasets?:OwnDataset[]})=>f.store.update(f.bot.bot_id,f.store.get(f.bot.bot_id).revision,{scope:{localApps:scope.localApps??[],datasets:scope.datasets??[]}});
+ return {...f,live,narrowOwn};
+}
+const call=(app:string,tool:string,args:Record<string,unknown>={},logicalStepId=step)=>({tool:'local_app_call' as const,logicalStepId,arguments:{app,tool,arguments:args}});
+const listTools=(app:string)=>({tool:'local_app_tools' as const,arguments:{app}});
+const bytes=(value:unknown)=>Buffer.byteLength(JSON.stringify(value));
+const unavailable={established:true,succeeded:false,result:{error:'LOCAL_APP_UNAVAILABLE'}};
+
+test('publishing a scope: only ids, names and flags go to the service, only within the local Bot\'s own scope, and none is sent unless one is given',async t=>{
+ const bound={localApps:['calendar','notes'],datasets:[ownData('d1',{write:true}),ownData('d2',{write:true,reportReview:true}),ownData('d3')]};
+ const plain=fixture(t);plain.store.update(plain.bot.bot_id,plain.bot.revision,{scope:bound});await plain.connector.publishLocalBot('owner',plain.input);
+ assert.equal('scope' in plain.mock.commands.find(c=>c.action==='publishSharedBot').payload,false,'a Bot published without a scope shares none');
+ const empty=fixture(t);empty.store.update(empty.bot.bot_id,empty.bot.revision,{scope:bound});await empty.connector.publishLocalBot('owner',{...empty.input,scope:{localApps:[],datasets:[]}});
+ assert.equal('scope' in empty.mock.commands.find(c=>c.action==='publishSharedBot').payload,false,'an empty scope is no scope');
+ const f=fixture(t);f.store.update(f.bot.bot_id,f.bot.revision,{scope:bound});
+ const scope={localApps:[{id:'calendar',name:'  Calendar '}],datasets:[{source:'orders',dataset:'d1',write:true,reportReview:false},{source:'orders',dataset:'d2',write:false,reportReview:true}]};
+ await f.connector.publishLocalBot('owner',{...f.input,scope});
+ assert.deepEqual(f.mock.commands.find(c=>c.action==='publishSharedBot').payload.scope,{localApps:[{id:'calendar',name:'Calendar'}],datasets:scope.datasets});
+ // Not wider than the local Bot's own scope: an app, a dataset or a write or review it does not have. Nothing is sent and nothing is bound.
+ const g=fixture(t);g.store.update(g.bot.bot_id,g.bot.revision,{scope:bound});
+ for(const wider of [{localApps:[{id:'mail',name:'Mail'}],datasets:[]},{localApps:[],datasets:[{source:'orders',dataset:'d9',write:false,reportReview:false}]},
+  {localApps:[],datasets:[{source:'elsewhere',dataset:'d1',write:false,reportReview:false}]},{localApps:[],datasets:[{source:'orders',dataset:'d3',write:true,reportReview:false}]},
+  {localApps:[],datasets:[{source:'orders',dataset:'d1',write:true,reportReview:true}]},{localApps:[],datasets:[{source:'orders',dataset:'d3',write:false,reportReview:true}]}])
+  await assert.rejects(g.connector.publishLocalBot('owner',{...g.input,scope:wider}),/SCOPE_OUTSIDE_BOT/,JSON.stringify(wider));
+ assert.equal(g.mock.commands.filter(c=>c.action==='publishSharedBot').length,0);assert.deepEqual(await g.privateStore.bindings('owner'),[]);
+ const row={source:'orders',dataset:'d1',write:false,reportReview:false};
+ for(const bad of [null,[],{localApps:[]},{datasets:[]},{localApps:[{id:'calendar',name:'Calendar'},{id:'calendar',name:'Again'}],datasets:[]},{localApps:[],datasets:[row,{...row,source:'other'}]},
+  {localApps:[{id:'calendar',name:'Calendar',path:'/Users/owner/Calendar'}],datasets:[]},{localApps:[{id:'calendar',name:' '}],datasets:[]},{localApps:[],datasets:[{...row,token:'secret'}]},
+  {localApps:[],datasets:[{source:'orders',dataset:'d1',write:true}]},{localApps:[],datasets:[],extra:1}])
+  await assert.rejects(g.connector.publishLocalBot('owner',{...g.input,scope:bad} as any),/INVALID_INPUT/,JSON.stringify(bad));
+ assert.equal(g.mock.commands.filter(c=>c.action==='publishSharedBot').length,0);
+});
+
+test('a run is offered the Local Apps its Bot has, the service lets it use and this computer has installed, in order, at most sixteen, and none costs nothing',async t=>{
+ const installed=[{id:'calendar',name:'Calendar',summary:'Events'},{id:'mail',name:'Mail'},{id:'notes',name:'Notes'},{id:'zeta',name:'Zeta'}];
+ const apps=appHost(installed,{});
+ const f=scoped(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint():done(),{localApps:['notes','calendar','mail','missing']},apps,{localApps:['zeta','notes','calendar']});
+ await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await finished(f);
+ // The Bot has calendar, notes, mail; the service left it calendar, notes and zeta; mail is not left, zeta is not the Bot's, and `missing` is not installed.
+ assert.deepEqual(f.launches[0]!.bootstrap.localApps,[{id:'calendar',name:'Calendar',description:'Events'},{id:'notes',name:'Notes'}]);
+ assert.ok(f.sent('validateTask').length>=1,'what the service leaves it is asked before the run starts');
+ const many=Array.from({length:LOCAL_APPS_OFFERED+4},(_,i)=>({id:`app${String(i).padStart(2,'0')}`,name:`App ${i}`})),big=appHost(many,{});
+ const g=scoped(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint():done(),{localApps:many.map(app=>app.id)},big,{localApps:[...many.map(app=>app.id)].reverse()});
+ await g.connector.publishLocalBot('owner',g.input);g.mock.tasks.push(queued());g.mock.wake();await finished(g);
+ assert.deepEqual(g.launches[0]!.bootstrap.localApps!.map(app=>app.id),many.slice(0,LOCAL_APPS_OFFERED).map(app=>app.id));
+ // A Bot with no Local App of its own is offered none, and the computer is not even asked; so does a computer with no Local App host, and a service that leaves it none.
+ const none=appHost(installed,{}),h=scoped(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint():done(),{localApps:[]},none,{localApps:['calendar']});
+ await h.connector.publishLocalBot('owner',h.input);h.mock.tasks.push(queued());h.mock.wake();await finished(h);
+ assert.equal('localApps' in h.launches[0]!.bootstrap,false);assert.equal(none.state.listed,0);
+ const bare=scoped(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint():done(),{localApps:['calendar']},undefined,{localApps:['calendar']});
+ await bare.connector.publishLocalBot('owner',bare.input);bare.mock.tasks.push(queued());bare.mock.wake();await finished(bare);
+ assert.equal('localApps' in bare.launches[0]!.bootstrap,false);
+ const left=appHost(installed,{}),k=scoped(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint():done(),{localApps:['calendar']},left,{localApps:[]});
+ await k.connector.publishLocalBot('owner',k.input);k.mock.tasks.push(queued());k.mock.wake();await finished(k);
+ assert.equal('localApps' in k.launches[0]!.bootstrap,false);
+});
+
+test('Local App tools are listed for an offered app only, and a call is made once per step: a repeat is given the recorded answer, another request under the step is refused',async t=>{
+ const outcomes:any[]=[],apps=appHost([{id:'calendar',name:'Calendar'},{id:'notes',name:'Notes'}],{calendar:[toolOf('app_aaa'),toolOf('app_bbb')],notes:[toolOf('app_ccc')]});
+ const f=scoped(t,async o=>{if(o.bootstrap.type==='inspect_task')return checkpoint();await o.authorize();
+  outcomes.push(await o.operate!(listTools('calendar')),await o.operate!(listTools('notes')),
+   await o.operate!(call('calendar','app_aaa',{q:'today'})),await o.operate!(call('calendar','app_aaa',{q:'today'})),await o.operate!(call('calendar','app_aaa',{q:'tomorrow'})),
+   await o.operate!(call('calendar','app_zzz',{},'task00001/t0/c2')),await o.operate!(call('notes','app_ccc',{},'task00001/t0/c3')));return done();},
+  {localApps:['calendar','notes']},apps,{localApps:['calendar']});
+ await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await finished(f);
+ assert.deepEqual(outcomes[0],{established:true,succeeded:true,result:{tools:[toolOf('app_aaa'),toolOf('app_bbb')]}});
+ assert.deepEqual(outcomes[1],unavailable,'the Bot has notes but the Chat leaves it none');
+ const answer={established:true,succeeded:true,result:{content:[{type:'text',text:'done'}]}};
+ assert.deepEqual(outcomes[2],answer);assert.deepEqual(outcomes[3],answer);
+ assert.equal(apps.calls.length,1,'the second request of the step did not reach the app');
+ assert.deepEqual(apps.calls[0],{request:{name:'app_aaa',arguments:{q:'today'}},discovered:JSON.stringify(toolOf('app_aaa')),apps:['calendar']},'the host is told the definition the Bot was shown, and may call only this app');
+ assert.deepEqual(outcomes[4],{established:true,succeeded:false,result:{error:'OPERATION_CONFLICT'}});
+ assert.deepEqual(outcomes[5],{established:true,succeeded:false,result:{error:'LOCAL_APP_TOOL_UNAVAILABLE'}});
+ assert.deepEqual(outcomes[6],unavailable);assert.equal(apps.calls.length,1);
+ assert.equal(completions(f)[0].payload.outcome,'completed');
+});
+
+test('a Local App call that was turned down may be tried again; any other failure is unknown, recorded, and never repeated',async t=>{
+ const outcomes:any[]=[];let mode:'reject'|'ok'|'crash'='reject';
+ const apps=appHost([{id:'calendar',name:'Calendar'}],{calendar:[toolOf('app_aaa')]});
+ apps.state.answer=async()=>{if(mode==='reject')throw Object.assign(new Error('Invalid params: q'),{code:-32602});if(mode==='crash')throw new Error('socket closed');return {content:[{type:'text',text:'fine'}]};};
+ const f=scoped(t,async o=>{if(o.bootstrap.type==='inspect_task')return checkpoint();await o.authorize();await o.operate!(listTools('calendar'));
+  outcomes.push(await o.operate!(call('calendar','app_aaa',{q:'x'})));mode='ok';outcomes.push(await o.operate!(call('calendar','app_aaa',{q:'x'})));
+  mode='crash';outcomes.push(await o.operate!(call('calendar','app_aaa',{q:'x'},'task00001/t0/c2')));mode='ok';outcomes.push(await o.operate!(call('calendar','app_aaa',{q:'x'},'task00001/t0/c2')));return done();},
+  {localApps:['calendar']},apps,{localApps:['calendar']});
+ await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await finished(f);
+ assert.deepEqual(outcomes[0],{established:true,succeeded:false,result:{error:'LOCAL_APP_CALL_REJECTED',message:'Invalid params: q'}});
+ assert.deepEqual(outcomes[1],{established:true,succeeded:true,result:{content:[{type:'text',text:'fine'}]}},'nothing was done, so the step ran when it was sent again');
+ const unknown={established:true,succeeded:false,result:{error:'LOCAL_APP_CALL_UNKNOWN'}};
+ assert.deepEqual(outcomes[2],unknown);assert.deepEqual(outcomes[3],unknown,'the app may have done what it was asked');assert.equal(apps.calls.length,3);
+});
+
+test('a Local App call that a process began and did not finish is answered as unknown by the next one, and a task\'s records go when it is delivered',async t=>{
+ const outcomes:any[]=[],apps=appHost([{id:'calendar',name:'Calendar'}],{calendar:[toolOf('app_aaa')]});let during:boolean|undefined;
+ const f=scoped(t,async o=>{if(o.bootstrap.type==='inspect_task')return checkpoint();await o.authorize();await o.operate!(listTools('calendar'));
+  outcomes.push(await o.operate!(call('calendar','app_aaa',{},step)),await o.operate!(call('calendar','app_aaa',{},'task00001/t0/c2')));
+  during=existsSync(join((await f.privateStore.owner('owner')).appCalls,'task00001'));return done();},{localApps:['calendar']},apps,{localApps:['calendar']});
+ await f.connector.publishLocalBot('owner',f.input);
+ // What the earlier process left: the request of the first step was recorded as begun, and nothing says how it ended.
+ assert.equal((await f.privateStore.beginAppCall('owner','task00001',digest(step),digest(JSON.stringify(['calendar','app_aaa',{}])),true)).state,'new');
+ f.mock.tasks.push(queued());f.mock.wake();await finished(f);
+ assert.deepEqual(outcomes[0],{established:true,succeeded:false,result:{error:'LOCAL_APP_CALL_UNKNOWN'}});
+ assert.deepEqual(outcomes[1],{established:true,succeeded:true,result:{content:[{type:'text',text:'done'}]}});assert.equal(apps.calls.length,1);
+ assert.equal(during,true);assert.equal(existsSync(join((await f.privateStore.owner('owner')).appCalls,'task00001')),false,'the records are gone once the task was delivered');
+});
+
+test('what a Local App answers is handed over as text within what a Bot may be given, cut with a note, with its own error flag passed on',async t=>{
+ const outcomes:any[]=[],apps=appHost([{id:'calendar',name:'Calendar'}],{calendar:[toolOf('app_aaa')]});
+ const answers:Array<{content?:unknown[];isError?:boolean}>=[{content:[{type:'text',text:'x'.repeat(200_000)}]},{content:[{type:'text',text:'No such event'}],isError:true},
+  {content:[{type:'image',data:'AAAA',mimeType:'image/png'},{type:'resource',resource:{uri:'file:///Users/owner/orders.csv',mimeType:'text/csv'}},{type:'resource',resource:{uri:'file:///a',text:'Row 1'}}]},
+  {content:[{type:'text',text:'😀'.repeat(60_000)}]},{}];
+ apps.state.answer=async()=>answers.shift()!;
+ const f=scoped(t,async o=>{if(o.bootstrap.type==='inspect_task')return checkpoint();await o.authorize();await o.operate!(listTools('calendar'));
+  for(let i=0;i<5;i++)outcomes.push(await o.operate!(call('calendar','app_aaa',{},`task00001/t0/c${i}`)));return done();},{localApps:['calendar']},apps,{localApps:['calendar']});
+ await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await finished(f);
+ const cut='[LingXi cut this output: it was longer than a Bot is handed.]';
+ for(const index of [0,3]){const outcome=outcomes[index];assert.equal(outcome.succeeded,true);assert.ok(bytes(outcome.result)<=OPERATION_BYTES,`${index}: ${bytes(outcome.result)} bytes`);
+  const blocks=outcome.result.content;assert.equal(blocks.at(-1).text,cut);assert.ok(blocks[0].text.length>10_000);assert.equal(outcome.result.isError,undefined);
+  for(const block of blocks)assert.equal(block.text.isWellFormed(),true,'no character is cut in half');}
+ assert.deepEqual(outcomes[1],{established:true,succeeded:true,result:{content:[{type:'text',text:'No such event'}],isError:true}},'the call was made and answered: the app\'s own error flag is its word');
+ assert.deepEqual(outcomes[2].result.content.map((block:any)=>block.text),['[image image/png not carried]','[resource text/csv file:///Users/owner/orders.csv not carried]','Row 1']);
+ assert.deepEqual(outcomes[4],{established:true,succeeded:true,result:{content:[]}});
+});
+
+test('the tools of a Local App are listed as many whole tools as fit, the number of calls of a task is limited, and a tool that changed since it was listed is refused until it is listed again',async t=>{
+ const outcomes:any[]=[],tools=Array.from({length:200},(_,i)=>toolOf(`app_${String(i).padStart(3,'0')}`,{inputSchema:{type:'object',description:'d'.repeat(1000)}}));
+ const apps=appHost([{id:'calendar',name:'Calendar'}],{calendar:tools});
+ const f=scoped(t,async o=>{if(o.bootstrap.type==='inspect_task')return checkpoint();await o.authorize();
+  outcomes.push(await o.operate!(listTools('calendar')));
+  // A tool that changes after the Bot was shown it is not called with the old arguments' meaning: the Bot lists the tools again, and the step is not recorded in between.
+  apps.state.tools={calendar:[toolOf('app_000',{inputSchema:{type:'object',properties:{when:{type:'string'}}}})]};
+  outcomes.push(await o.operate!(call('calendar','app_000',{q:'x'})));outcomes.push(await o.operate!(listTools('calendar')));outcomes.push(await o.operate!(call('calendar','app_000',{when:'now'})));
+  for(let i=1;i<=64;i++)outcomes.push(await o.operate!(call('calendar','app_000',{when:String(i)},`task00001/t1/c${i}`)));return done();},{localApps:['calendar']},apps,{localApps:['calendar']});
+ await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await waitFor(()=>completions(f).length===1,20000);await f.connector.idle();
+ const shown=outcomes[0].result.tools;assert.ok(shown.length>20&&shown.length<tools.length);assert.ok(bytes(outcomes[0].result)<=OPERATION_BYTES);
+ assert.deepEqual(shown.map((tool:any)=>tool.name),tools.slice(0,shown.length).map(tool=>tool.name),'in the order the host lists them');
+ assert.deepEqual(outcomes[1],{established:true,succeeded:false,result:{error:'LOCAL_APP_TOOL_UNAVAILABLE'}});
+ assert.equal(outcomes[2].result.tools[0].inputSchema.properties.when.type,'string');
+ assert.equal(outcomes[3].succeeded,true,'after it was listed again the same step is made');
+ // 64 calls were allowed (the first step is one of them); the next is refused and the app is not asked.
+ assert.equal(outcomes.slice(4,4+63).every(outcome=>outcome.succeeded),true);assert.deepEqual(outcomes[4+63],{established:true,succeeded:false,result:{error:'LOCAL_APP_CALL_LIMIT'}});
+ assert.equal(apps.calls.length,64);
+});
+
+test('a run stops being able to use a Local App the moment its Bot, its publication or its Chat no longer has it',async t=>{
+ const outcomes:any[]=[],apps=appHost([{id:'calendar',name:'Calendar'},{id:'notes',name:'Notes'}],{calendar:[toolOf('app_aaa')],notes:[toolOf('app_ccc')]});
+ const f=scoped(t,async o=>{if(o.bootstrap.type==='inspect_task')return checkpoint();await o.authorize();
+  outcomes.push(await o.operate!(listTools('calendar')),await o.operate!(listTools('notes')));
+  // The owner edits the Bot's own scope, with no signal to the run: the next request is already checked against it.
+  f.narrowOwn({localApps:['notes']});
+  outcomes.push(await o.operate!(listTools('calendar')),await o.operate!(call('calendar','app_aaa',{},'task00001/t0/c1')),await o.operate!(listTools('notes')));
+  // The Chat narrows it: the service says so at the next validation, which comes before the next request.
+  f.live.localApps=['calendar'];await o.authorize();
+  outcomes.push(await o.operate!(listTools('notes')),await o.operate!(call('notes','app_ccc',{},'task00001/t0/c2')));
+  f.narrowOwn({});outcomes.push(await o.operate!(listTools('calendar')));return done();},{localApps:['calendar','notes']},apps,{localApps:['calendar','notes']});
+ await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await finished(f);
+ assert.deepEqual(outcomes.map(outcome=>outcome.succeeded),[true,true,false,false,true,false,false,false]);
+ assert.deepEqual(outcomes.filter(outcome=>!outcome.succeeded).map(outcome=>outcome.result.error),Array(4).fill('LOCAL_APP_UNAVAILABLE').concat('LOCAL_APP_UNAVAILABLE'));
+ assert.equal(apps.calls.length,0,'no app was asked for what the run could no longer use');
+});
+
+test('dataset offers are cut to this Bot\'s own scope as it is now, and a data operation outside it is refused on this computer without a request',async t=>{
+ const outcomes:any[]=[],dataCalls:any[]=[];
+ const offers=[{dataset:'d1',version:1,write:true,reportReview:true as const,handoffTargets:['sharedbot002']},{dataset:'d2',version:1,write:true},{dataset:'d3',version:1,write:false},{dataset:'d4',version:2,write:true,reportReview:true as const}];
+ const f=scoped(t,async o=>{if(o.bootstrap.type==='inspect_task')return checkpoint();await o.authorize();
+  const read=(offer:typeof offers[number],dataset=offer.dataset)=>({tool:'data_read' as const,offer,arguments:{action:'describe',dataset}});
+  const write=(offer:typeof offers[number],action:string,logicalStepId:string)=>({tool:'data_write' as const,offer,logicalStepId,arguments:{action,dataset:offer.dataset}});
+  outcomes.push(await o.operate!(read(offers[0]!)),await o.operate!(read(offers[3]!)),await o.operate!(write(offers[1]!,'put',step)),
+   await o.operate!(write(offers[0]!,'openReportReview','task00001/t0/c2')),await o.operate!(write(offers[0]!,'put','task00001/t0/c3')));
+  f.narrowOwn({});outcomes.push(await o.operate!(read(offers[0]!)));return done();},
+  {datasets:[ownData('d1',{write:true,reportReview:false}),ownData('d2'),ownData('d3',{write:true})]},undefined,{localApps:[]});
+ f.mock.service.hostDataOffers=async()=>structuredClone(offers);
+ f.mock.service.hostDataOperation=async(_c,proof,version,operation,stepId)=>{dataCalls.push({proof,version,operation,stepId});return {ok:true};};
+ await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await finished(f);
+ // d4 is not in the Bot's own scope; d1 is offered without the review it has no right to and with its handoff; d2 and d3 are read only.
+ assert.deepEqual(f.launches[0]!.bootstrap.sharedData,[{dataset:'d1',version:1,write:true,handoffTargets:['sharedbot002']},{dataset:'d2',version:1,write:false},{dataset:'d3',version:1,write:false}]);
+ const refused={established:true,succeeded:false,result:{error:'DATA_ACCESS_REQUIRED'}};
+ assert.deepEqual(outcomes,[{established:true,succeeded:true,result:{ok:true}},refused,refused,refused,{established:true,succeeded:true,result:{ok:true}},refused]);
+ assert.deepEqual(dataCalls.map(call=>[call.operation.action,call.operation.dataset,call.version,call.stepId]),[['describe','d1',1,undefined],['put','d1',1,digest('task00001/t0/c3')]]);
+});
+
+test('a Chat narrowing is sent through the account session like every other member command',async t=>{
+ const service=new TeamsService({snapshot:()=>({user:{uid:'owner'}}),getIdToken:async()=>'synthetic-token',onChanged:()=>()=>{}},{});t.after(()=>service.close());
+ (service as any).connect=async()=>({db:{}});(service as any).sdk={};
+ const original=globalThis.fetch,bodies:any[]=[];t.after(()=>{globalThis.fetch=original;});
+ globalThis.fetch=(async(_url,init)=>{bodies.push(JSON.parse(String(init?.body)));return new Response(JSON.stringify({revision:1}),{status:200});}) as typeof fetch;
+ let changed=0;const stop=service.onMessagesChanged(()=>{changed++;});t.after(stop);
+ const command={schemaVersion:1 as const,commandId:'command001',teamId,generation:1,action:'setConversationBotScope' as const,payload:{conversationId,sharedBotId,expectedRevision:0,scope:{localApps:['calendar']}}};
+ assert.deepEqual(await service.messages<any>(command as any,'owner'),{revision:1});assert.deepEqual(bodies,[command]);assert.equal(changed,1,'the Chats are read again');
+ await assert.rejects(service.messages<any>(command as any,'other'),/INVALID_SESSION/);
+});
+
+test('the private process serves Local App requests only for the apps the run was offered, in exactly the shape its protocol has',async()=>{
+ const scope={teamId,sharedBotId,conversationId,sessionEpoch:1},live={scope,sessionRevision:1,lastMessageSeq:2,lastChangeSeq:2,bootstrapFromSeq:0};
+ const result={version:3,type:'result',status:'completed',cursor:live,text:'Done',finishedAt:1,dispatchedRequests:2,attemptDispatchedRequests:1,deniedTools:0,usage:{status:'missing'}};
+ const base={executable:'/mock',home:'/private-home',tmp:'/private-tmp',signal:new AbortController().signal,assertCurrent:()=>{}};
+ const offered=[{id:'calendar',name:'Calendar'}],boot=(extra:Record<string,unknown>={localApps:offered})=>({version:3 as const,type:'run' as const,storageRoot:'/private-root',workerExecutable:'/worker',scope,taskId:'task00001',...extra});
+ const tools={version:3,type:'operation',id:'operation-1',tool:'local_app_tools',arguments:{app:'calendar'}};
+ const request={version:3,type:'operation',id:'operation-1',tool:'local_app_call',logicalStepId:step,arguments:{app:'calendar',tool:'app_aaa',arguments:{q:'x'}}};
+ const calls:any[]=[];let authorized=0;const authorize=async()=>{authorized++;};const serve=(outcome:any)=>async(operation:any)=>{calls.push(operation);return outcome;};
+ const ok={established:true,succeeded:true,result:{tools:[]}};
+ let f=conversing(tools,result);
+ assert.equal((await runTeamHost({...base,bootstrap:boot(),authorize,operate:serve(ok),spawnProcess:f.spawn})).status,'completed');
+ assert.deepEqual(f.written[1],{version:3,type:'operation_result',id:'operation-1',established:true,succeeded:true,result:{tools:[]}});
+ f=conversing(request,result);await runTeamHost({...base,bootstrap:boot(),authorize,operate:serve({established:true,succeeded:true,result:{content:[{type:'text',text:'done'}]}}),spawnProcess:f.spawn});
+ assert.deepEqual(calls,[{tool:'local_app_tools',arguments:{app:'calendar'}},{tool:'local_app_call',logicalStepId:step,arguments:{app:'calendar',tool:'app_aaa',arguments:{q:'x'}}}]);
+ assert.equal(authorized,2,'every request is preceded by a validation');
+ const served=calls.length,fine=serve(ok);
+ for(const [bootstrap,frame,operate] of [
+  [boot({}),tools,fine],[boot({localApps:[{id:'notes',name:'Notes'}]}),tools,fine],[boot(),{...tools,arguments:{app:'notes'}},fine],[boot(),{...tools,arguments:{}},fine],[boot(),{...tools,arguments:{app:7}},fine],
+  [boot(),{...tools,arguments:{app:'calendar',extra:1}},fine],[boot(),{...tools,logicalStepId:step},fine],[boot(),{...tools,approvalRef:waitId},fine],[boot(),{...tools,retry:true},fine],
+  [boot({}),request,fine],[boot(),{...request,arguments:{...request.arguments,app:'notes'}},fine],[boot(),{...request,logicalStepId:undefined},fine],[boot(),{...request,logicalStepId:'task00002/t0/c1'},fine],
+  [boot(),{...request,logicalStepId:'task00001/t0'},fine],[boot(),{...request,approvalRef:waitId},fine],[boot(),{...request,arguments:{app:'calendar',arguments:{}}},fine],
+  [boot(),{...request,arguments:{app:'calendar',tool:'',arguments:{}}},fine],[boot(),{...request,arguments:{app:'calendar',tool:'t'.repeat(201),arguments:{}}},fine],
+  [boot(),{...request,arguments:{app:'calendar',tool:7,arguments:{}}},fine],[boot(),{...request,arguments:{app:'calendar',tool:'app_aaa'}},fine],
+  [boot(),{...request,arguments:{app:'calendar',tool:'app_aaa',arguments:[]}},fine],[boot(),{...request,arguments:{app:'calendar',tool:'app_aaa',arguments:'q'}},fine],
+  [boot(),{...request,arguments:{app:'calendar',tool:'app_aaa',arguments:{},extra:1}},fine],[boot(),{...request,id:'read_chat-1'},fine],
+  [boot(),tools,serve({established:true,succeeded:true,result:{tools:'x'.repeat(65*1024)}})],[boot(),request,async()=>{throw new Error('SERVICE_UNAVAILABLE');}],
+ ] as const)await assert.rejects(runTeamHost({...base,bootstrap:bootstrap as any,authorize,operate:operate as any,spawnProcess:conversing(JSON.parse(JSON.stringify(frame)),result,false).spawn}),/TEAM_HOST_PROTOCOL/,JSON.stringify(frame));
+ assert.equal(calls.length,served+1,'only the valid frame whose answer was too large reached the Desktop; every other one was refused before it');
 });

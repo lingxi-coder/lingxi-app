@@ -1,5 +1,6 @@
 import { isMentionEntity, MAX_MEMBER_MENTIONS } from './mentions.js';
 import type { MemberExecutionCommand, SharedListWrite } from './execution.js';
+import { BOT_SCOPE_ENTRIES, type BotScopeNarrowing, type PublishedBotScope } from './bot-scope.js';
 
 type Check = (value: unknown) => boolean;
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -25,6 +26,20 @@ const listChange: Check = v => record(v) && (v.op === 'add' ? shape({ op: oneOf(
 const listWrite = { expectedDataRevision: integer, changes: (v: unknown) => Array.isArray(v) && v.length >= 1 && v.length <= LIST_CHANGES && v.every(listChange) };
 /** One write to a shared list exactly as the service accepts it, from a member or from a Bot's run. */
 export const isSharedListWrite = (value: unknown): value is SharedListWrite => shape(listWrite)(value) && record(value) && Object.keys(value).length === 2;
+const bool: Check = v => typeof v === 'boolean';
+// A Local App id, a dataset id and the source it is read through, as the service accepts them. A dataset appears once: a grant names it by its id alone.
+const appId: Check = v => typeof v === 'string' && /^[A-Za-z0-9._:-]{1,128}$/u.test(v);
+const dataId: Check = v => typeof v === 'string' && /^[A-Za-z0-9_-]{1,64}$/u.test(v);
+const scopeName: Check = v => typeof v === 'string' && v.trim().length >= 1 && v.trim().length <= 100 && !/[\u0000-\u001f\u007f]/u.test(v.trim());
+const distinct = (key: string, check: Check): Check => v => Array.isArray(v) && v.length <= BOT_SCOPE_ENTRIES && v.every(check) && new Set(v.map(row => (row as Record<string, unknown>)[key])).size === v.length;
+/** What a Bot is published with of its maintainer's Desktop, exactly as the service accepts it. */
+export const isPublishedBotScope = (value: unknown): value is PublishedBotScope => shape({
+  localApps: distinct('id', shape({ id: appId, name: scopeName })),
+  datasets: distinct('dataset', shape({ source: dataId, dataset: dataId, write: bool, reportReview: bool })) })(value);
+/** A Chat's narrowing of one Bot: a list that is left out does not narrow that kind. */
+export const isBotScopeNarrowing = (value: unknown): value is BotScopeNarrowing => shape({
+  localApps: optional(list(appId, 0, BOT_SCOPE_ENTRIES)),
+  datasets: optional(distinct('dataset', shape({ source: dataId, dataset: dataId }))) })(value);
 const sha256: Check = v => typeof v === 'string' && /^[a-f0-9]{64}$/u.test(v);
 /** A 10 MiB file is fifteen parts of 700 KiB. */
 const partIndex: Check = v => integer(v) && (v as number) <= 14;
@@ -59,6 +74,7 @@ const payloads: Record<string, Check> = {
   resolveOperation: shape({ taskId: id, operationId: v => typeof v === 'string' && /^[a-f0-9]{64}$/u.test(v), resolution: oneOf('succeeded', 'failed') }),
   setConversationPolicy: shape({ conversationId: id, expectedRevision: integer, targets: list(id, 0, 8) }),
   setConversationAutoReply: shape({ conversationId: id, expectedRevision: integer, targets: list(id, 0, 8) }),
+  setConversationBotScope: shape({ conversationId: id, sharedBotId: id, expectedRevision: integer, scope: v => v === null || isBotScopeNarrowing(v) }),
   endTransfer: shape({ transferId: id }),
 };
 /** Only the current member execution envelope. Unknown fields and retired commands fail closed. */

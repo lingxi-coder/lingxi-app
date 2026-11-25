@@ -4,6 +4,7 @@ import { parseDataRef, type DataRef } from './lingxi-data.js';
 import { isMemberExecutionCommand } from './execution-validation.js';
 import { executionCommand, type MemberExecutionCommand } from './execution.js';
 import { ATTACHMENT_MESSAGE_FILES, type MessageAttachment } from './attachments.js';
+import { sameBotScopes, type BotScopeEntry } from './bot-scope.js';
 export type MessageAuthor = { kind: 'user'; uid: string; displayName?: string } | { kind: 'shared_bot'; sharedBotId: string; displayName: string }
   | { kind: 'task'; taskId: string; logicalRun: string; displayName: string };
 export function authorIdentity(author: MessageAuthor): string {
@@ -26,6 +27,8 @@ export interface TeamConversation {
   lastMessage?: { id: string; seq: number; at: string | null; author: MessageAuthor; preview: string; recalled?: true };
   /** The Bots that judge for themselves whether to answer this Chat's messages. Absent until a member first sets it. */
   autoReply?: { revision: number; targets: string[] };
+  /** What this Chat narrowed each of its Bots to use here, by shared Bot id, within what the Bot published (`effectiveBotScope`). A Bot with no entry is not narrowed. */
+  botScopes?: Record<string, BotScopeEntry>;
 }
 /** One change a Bot asks to make to its list. `item` is the text of the item it touches as it read when the Bot asked, `null` if it was gone. */
 export interface ListApprovalChange { op: 'add' | 'update' | 'remove'; text?: string; itemId?: string; done?: boolean; item?: string | null }
@@ -114,7 +117,8 @@ export function mergeConversation(old: TeamConversation | undefined, value: Team
     && sameLastMessage(old.lastMessage, merged.lastMessage)
     && old.participants.length === merged.participants.length && old.participants.every((value, index) => value === merged.participants[index])
     && (old.readers ?? []).join('\n') === (merged.readers ?? []).join('\n')
-    && old.autoReply?.revision === merged.autoReply?.revision && (old.autoReply?.targets ?? []).join('\n') === (merged.autoReply?.targets ?? []).join('\n')) return old;
+    && old.autoReply?.revision === merged.autoReply?.revision && (old.autoReply?.targets ?? []).join('\n') === (merged.autoReply?.targets ?? []).join('\n')
+    && sameBotScopes(old.botScopes, merged.botScopes)) return old;
   return merged;
 }
 export function mergeDirectory(state: MessageProjection, incoming: TeamConversation[], replace: boolean): MessageProjection {

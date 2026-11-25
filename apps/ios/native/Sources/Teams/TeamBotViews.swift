@@ -62,6 +62,8 @@ struct TeamBotCardView: View {
     let onStopSharing: () -> Void
     /// Opens the list the Bot shares. Set only for a viewer the service lets read it.
     var onList: (() -> Void)? = nil
+    /// Opens the Bot's auto-reply log. Set only for its maintainer, and only for a Bot that answers on its own.
+    var onTriageLog: (() -> Void)? = nil
     var onExample: ((String) -> Void)? = nil
     var unverified = false
 
@@ -116,6 +118,11 @@ struct TeamBotCardView: View {
                 .buttonStyle(.bordered)
                 .accessibilityIdentifier("teams.bot.list.\(bot.sharedBotId)")
         }
+        if let onTriageLog {
+            Button(action: onTriageLog) { Label("teams_triage_title", systemImage: "clock.arrow.circlepath").minimumHitTarget(minWidth: 0) }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("teams.bot.triage.\(bot.sharedBotId)")
+        }
         if isOwner && (bot.state == "published") {
             Button(role: .destructive, action: onStopSharing) { Text("friends_share_bot_stop").minimumHitTarget(minWidth: 0) }
                 .buttonStyle(.bordered)
@@ -140,6 +147,8 @@ struct TeamTaskCard: View {
     var recipientName: String = ""
     /// Starts the answer to the Bot's question. Set only on the question itself, while it can still be answered by the viewer.
     var onReply: (() -> Void)? = nil
+    /// The Bot's auto-reply log row of this task, read for the Bot's maintainer: it says why a Bot that did not reply stayed silent. Never shown to anyone else.
+    var reason: TeamTriageItem? = nil
     @State private var cancelling = false
     @State private var reviewing = false
 
@@ -170,8 +179,17 @@ struct TeamTaskCard: View {
         switch task.state {
         case "waiting": waitLine
         case "needs_reconciliation": TeamsText.localized(canResolve ? "teams_task_needs_checking_maintainer" : "teams_task_needs_checking_hint")
+        case "declined": reasonLine
         default: showsUsage ? TeamsBotText.usageLine(task.usage, strings: words) : run.detailKey.map(TeamsText.localized)
         }
+    }
+
+    /// Why the Bot stayed silent, for its maintainer: the reason the Bot's host gave and, when the Decision service judged, how likely it thought a reply was wanted.
+    private var reasonLine: String? {
+        guard task.state == "declined", let maintainer, maintainer == viewer else { return nil }
+        let parts = TeamTriageRules.reasonParts(reason)
+        let line = TeamsStreamLogic.joinedLine([parts.reasonKey.map(TeamsText.localized), parts.percent.map { String(localized: "teams_triage_probability \($0)") }])
+        return line.isEmpty ? nil : line
     }
 
     /// The text block keeps the identifier of the line it carries.

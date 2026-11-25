@@ -131,6 +131,8 @@ export interface MemberExecutionPayloads {
   cancelTask: { taskId: string };
   getTask: { taskId: string };
   listTasks: { conversationId?: string; after?: string };
+  /** The auto-reply log of one Bot, read by its maintainer: newest verdict first, optionally of one Chat; `cursor` is the `nextCursor` of the page before, `limit` at most 50. Anyone else is refused (`MAINTAINER_REQUIRED`). */
+  listTriage: { sharedBotId: string; conversationId?: string; cursor?: string; limit?: number };
   readArtifact: { artifactId: string; revision?: number };
   listArtifactRevisions: { artifactId: string };
   reviseArtifact: { artifactId: string; expectedRevision: number; operationId: string; document: TeamDocument };

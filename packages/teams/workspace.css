@@ -594,6 +594,20 @@
 .tw-bot-scope-edit legend, .tw-bot-scope-group legend { padding: 0 4px; font-size: 12px; color: var(--tw-muted); }
 .tw-bot-scope-group { min-width: 0; margin: 0; padding: 0; border: 0; }
 .tw-bot-scope-group legend { padding-inline-start: 0; }
+/* Auto-reply log: what a Bot decided about the messages nobody asked it about, newest first, for the person who maintains it. */
+.tw-triage { min-inline-size: 0; }
+.tw-triage-scope { margin: 0; overflow-wrap: anywhere; }
+.tw-triage-list { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 0; list-style: none; max-height: 50vh; overflow: auto; }
+.tw-triage-row { display: flex; align-items: flex-start; gap: 8px; min-inline-size: 0; padding-bottom: 10px; border-bottom: 1px solid var(--tw-line); }
+.tw-triage-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.tw-triage-icon { flex: none; display: inline-flex; padding-top: 2px; color: var(--tw-muted); }
+.tw-triage-row[data-action='run'] .tw-triage-icon { color: var(--tw-online); }
+.tw-triage-main { flex: 1; display: flex; flex-direction: column; gap: 2px; min-inline-size: 0; overflow-wrap: anywhere; }
+.tw-triage-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.tw-triage-why, .tw-triage-meta { font-size: 12px; color: var(--tw-muted); }
+.tw-triage-row > .tw-tag { flex: none; }
+.tw-triage-row > .tw-tag[data-outcome='replied'] { color: var(--tw-online); }
+.tw-triage-row > .tw-tag[data-outcome='failed'] { color: var(--tw-danger); }
 .tw-task-export { padding-block: .5rem 1rem; }
 .tw-task-export a { display: inline-block; padding-block: .4rem; }
 /* U6: on a touch screen no control is smaller than 44 x 44. Last in the file on purpose: the base rules of the same weight (`.tw-embed button`, `.tw-mention`, `.tw-target`) come before it and so give way. */

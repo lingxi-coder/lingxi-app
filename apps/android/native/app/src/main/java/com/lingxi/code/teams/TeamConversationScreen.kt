@@ -208,6 +208,12 @@ internal fun TeamConversationScreen(
     // The auto-reply switches wait for their own change: until the listener brings the next revision, another toggle would send the old one and conflict.
     var autoReplySent by remember(conversation?.id) { mutableStateOf<Long?>(null) }
     var showBotScope by remember(conversation?.id) { mutableStateOf(false) }
+    // The auto-reply log of one Bot of this Chat, and the Bots the service said this person does not maintain after all: their entry is not offered again.
+    var triageBot by remember(conversation?.id, team.generation) { mutableStateOf<TeamBotCard?>(null) }
+    var triageDenied by remember(conversation?.id, team.generation) { mutableStateOf(emptySet<String>()) }
+    // A friendship has no log of its own to open from its chat.
+    val logBots = if (conversation == null || friend != null || team.id.startsWith("f_")) emptyList()
+        else TeamTriageRules.bots(conversation, bots, TeamMemberRef(uid, team.generation)).filter { it.sharedBotId !in triageDenied }
     if (showDetails && conversation != null) ConversationDetailsSheet(
         conversation = conversation, label = label, members = members, bots = bots, uid = uid, strings = strings,
         unread = unread, online = online,
@@ -217,7 +223,11 @@ internal fun TeamConversationScreen(
         busy = autoReplySent != null && autoReplySent == (conversation.autoReply?.revision ?: 0),
         // Not in a friend chat, which has no Bots of its own to limit. The details give way to the editor.
         onBotScope = if (friend == null) ({ showDetails = false; showBotScope = true }) else null,
+        triageBots = logBots, onTriageLog = if (logBots.isEmpty()) null else ({ card -> showDetails = false; triageBot = card }),
     )
+    triageBot?.let { card ->
+        if (conversation != null) TeamTriageLogDialog(card, TeamTriageChat(conversation.id, label), workspace.messagingModel, onDenied = { triageDenied = triageDenied + it }) { triageBot = null }
+    }
     if (showBotScope && conversation != null) TeamBotScopeSheet(
         conversation = conversation, bots = bots, uid = uid, online = online,
         onSave = { sharedBotId, revision, narrowing -> workspace.messagingModel.setConversationBotScope(conversation.id, sharedBotId, revision, narrowing) },
@@ -420,6 +430,13 @@ private fun ConversationBody(
     }
     val copyText = rememberCopyToClipboard(stringResource(R.string.teams_clip_message))
     val viewer = TeamMemberRef(uid, team.generation)
+    // Why the Bot of a Bot DM stayed silent, for the person who maintains it: read from the Bot's log for this Chat, once, as soon as a task of the Bot has, and only
+    // while there is a connection to read it over (it is read again when the connection returns).
+    val reasonBot = TeamTriageRules.reasonBot(conversation, bots, viewer)
+    val silent = reasonBot?.let { TeamTriageRules.silentTasks(messaging.tasks, it.sharedBotId) }.orEmpty()
+    LaunchedEffect(conversationId, reasonBot?.sharedBotId, silent, messaging.offline) {
+        if (reasonBot != null && silent.isNotEmpty() && !messaging.offline) workspace.messagingModel.loadTriageReasons(reasonBot.sharedBotId, conversationId, silent)
+    }
     var reviewing by remember(conversation.id) { mutableStateOf<String?>(null) }
     reviewing?.let { taskId ->
         TeamOperationsDialog(taskId, workspace.messagingModel, TeamOperationRules.maintains(taskId, messaging.tasks, bots, viewer), members) { reviewing = null }
@@ -739,6 +756,7 @@ private fun MessageCell(
                         TeamTaskCard(
                             task, taskBot?.name ?: strings.bot, onArtifact, onRefreshTask, viewer = viewer, maintainer = taskBot?.maintainer,
                             recipientName = task.wait?.let { personName(it.recipient.uid) }.orEmpty(), onCancel = onCancelTask, onReply = if (answerable) ({ onReply(message) }) else null, onReview = onReviewTask,
+                            reason = messaging.triageReasons[taskId],
                         )
                     }
                     else TextButton(onClick = { onRefreshTask(taskId) }) { Text(stringResource(R.string.teams_task_view)) }

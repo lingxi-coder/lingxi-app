@@ -429,7 +429,8 @@ struct TeamMessageCell: View {
                 let bot = context.bots.first { $0.sharedBotId == task.sharedBotId }
                 TeamTaskCard(task: task, botName: bot?.name ?? context.strings.bot, viewer: context.viewer, maintainer: bot?.maintainer,
                              recipientName: task.wait.map { context.userName($0.recipient.uid) } ?? "",
-                             onReply: context.answerableWait(of: message) == nil ? nil : onReply.map { reply in { reply(message) } })
+                             onReply: context.answerableWait(of: message) == nil ? nil : onReply.map { reply in { reply(message) } },
+                             reason: context.model.triageReasons[taskId])
                     .padding(.top, 4)
             } else {
                 Button {

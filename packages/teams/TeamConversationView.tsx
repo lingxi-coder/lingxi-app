@@ -29,6 +29,9 @@ import { pendingPayload, type TeamConversation, type TeamMessage } from './messa
 import { ArtifactButton, BotRun } from './BotRunCards';
 import { AutoReplyDialog, autoReplyBots } from './AutoReplyDialog';
 import { BotScopeDialog, scopedBots } from './BotScopeDialog';
+import { TriageLogDialog } from './TriageLogDialog';
+import { useTriageReasons } from './triage-hooks.js';
+import { maintainsBot, triageBots } from './triage-log.js';
 import { buildStreamRows, formatClock, placeTasks, visibleStart, WINDOW_SIZE } from './stream.js';
 import { Avatar, ConversationLead, Dialog, Icon, platformChip, platformNotice, useIsoLayoutEffect, type RenderAvatar, type RenderMarkdown } from './ui';
 import { conversationLabel, unreadCount, type Identity, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';
@@ -141,6 +144,8 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   const [editing, setEditing] = useState<TeamMessage>(), [reply, setReply] = useState<TeamMessage>(), [recall, setRecall] = useState<TeamMessage>();
   const [takeBack, setTakeBack] = useState<MessageAttachment>();
   const [autoReplyOpen, setAutoReplyOpen] = useState(false), [botScopeOpen, setBotScopeOpen] = useState(false);
+  /** The auto-reply log of this Chat, and the Bots the service said this person does not maintain after all. */
+  const [triageOpen, setTriageOpen] = useState(false), [triageDenied, setTriageDenied] = useState<string[]>([]);
   const [answerWait, setAnswerWait] = useState<string>();
   const [focusToken, setFocusToken] = useState(0);
   const [peerRead,setPeerRead]=useState<number|null>(null);
@@ -195,6 +200,10 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
     return { author: authorOf(target).name, text: target.recalled ? t('tw_composer_recalled') : snippet(said(target), 140) };
   };
   const scope = { teamId: team.id, generation: team.generation };
+  // Why the Bot of this Bot DM did not reply, for the person who maintains it: read from the auto-reply log of this Chat, and only once there is a task that did not reply.
+  const reasonBot = !friend && conversationBot ? snapshot.bots.find(bot => bot.sharedBotId === conversationBot && maintainsBot(bot, uid, team.generation)) : undefined;
+  const reasons = useTriageReasons(workspace.api, scope, reasonBot ? { sharedBotId: reasonBot.sharedBotId, conversationId: conversation.id } : undefined,
+    reasonBot ? runs.tasks.filter(task => task.state === 'declined' && task.sharedBotId === reasonBot.sharedBotId).map(task => task.taskId) : [], !snapshot.offline);
   // Answer mode ends by itself once the task is not waiting for this viewer on that question any more.
   const answerTask = answerWait ? runs.tasks.find(task => task.state === 'waiting' && task.wait?.waitId === answerWait && task.wait.kind === 'human_input' && isViewer(task.wait.recipient)) : undefined;
   useEffect(() => { if (answerWait && !answerTask) setAnswerWait(undefined); }, [answerWait, answerTask]);
@@ -216,7 +225,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   // A task gets a reply message only once it is delivered. Until then (queued, running, failed, expired, …)
   // it has no message to sit under, so it is shown as its own Bot row placed by time among the messages.
   const unanswered = useMemo(() => placeTasks(visible, runs.tasks.filter(task => !task.replyId).reverse(), start > 0), [visible, runs.tasks, start]);
-  const botRun = (task: TeamTaskView) => <BotRun task={task} api={workspace.api} scope={scope} locale={locale} renderMarkdown={renderMarkdown} snapshot={snapshot}
+  const botRun = (task: TeamTaskView) => <BotRun task={task} api={workspace.api} scope={scope} locale={locale} renderMarkdown={renderMarkdown} snapshot={snapshot} reason={reasons.get(task.taskId)}
     onReply={answerable(task) ? startAnswer : undefined} onChanged={runs.refresh} />;
   const taskRow = (task: TeamTaskView) => <TaskRow key={`task:${task.taskId}`} task={task} author={botIdentity(task.sharedBotId)} locale={locale} renderAvatar={renderAvatar}>
     <div className="tw-embed">{botRun(task)}</div>
@@ -301,6 +310,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   const subtitle = conversationSubtitle(conversation, snapshot, locale);
   const auto = friend ? { bots: [], on: [] } : autoReplyBots(conversation, snapshot);
   const limitable = friend ? [] : scopedBots(conversation, snapshot);
+  const logBots = friend ? [] : triageBots(conversation, snapshot.bots, uid, team.generation).filter(bot => !triageDenied.includes(bot.sharedBotId));
   // A friendship's Bot DM (D22) has no link of its own: its pair team is not one the Teams workspace opens.
   // The header offers the conversation's link, which opens it in the app where installed and on the web otherwise; a
   // friendship's Bot DM (reached with Back) has no link of its own.
@@ -348,6 +358,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
             undefined, [offer.sharedBotId], [], undefined, offer.source))} />}
         {auto.bots.length ? <button type="button" className="tw-icon-btn" aria-pressed={auto.on.length > 0} aria-label={t('teams_auto_reply_title')} title={t('teams_auto_reply_title')} onClick={() => setAutoReplyOpen(true)}><Icon name="bot" /></button> : null}
         {limitable.length ? <button type="button" className="tw-icon-btn" aria-label={t('teams_bot_scope_title')} title={t('teams_bot_scope_title')} onClick={() => setBotScopeOpen(true)}><Icon name="sliders" /></button> : null}
+        {logBots.length ? <button type="button" className="tw-icon-btn" aria-label={t('teams_triage_title')} title={t('teams_triage_title')} onClick={() => setTriageOpen(true)}><Icon name="clock" /></button> : null}
         {onToggleDetails && !friend ? <button type="button" className="tw-icon-btn" aria-pressed={!!detailsOpen} aria-label={t('teams_team_details')} title={t('teams_team_details')} onClick={onToggleDetails}><Icon name="panel" /></button> : null}
       </div>
     </header></ChatTopbarHeader>
@@ -446,6 +457,8 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
 
     {autoReplyOpen ? <AutoReplyDialog workspace={workspace} snapshot={snapshot} conversation={conversation} scope={scope} locale={locale} onClose={() => setAutoReplyOpen(false)} /> : null}
     {botScopeOpen ? <BotScopeDialog workspace={workspace} snapshot={snapshot} conversation={conversation} scope={scope} locale={locale} onClose={() => setBotScopeOpen(false)} /> : null}
+    {triageOpen && logBots.length ? <TriageLogDialog api={workspace.api} scope={scope} bots={logBots} conversation={{ id: conversation.id, title: label }} locale={locale} onClose={() => setTriageOpen(false)}
+      onDenied={id => setTriageDenied(old => [...old, id])} /> : null}
     {takeBack ? <Dialog role="alertdialog" title={t('teams_file_take_back_confirm_fmt', takeBack.name)} onClose={() => setTakeBack(undefined)}
       description={t('teams_file_take_back_detail')}>
       <div className="tw-form">

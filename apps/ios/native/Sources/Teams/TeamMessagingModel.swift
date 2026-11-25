@@ -30,6 +30,10 @@ final class TeamMessagingModel {
     private(set) var botsUnverified = false
     private(set) var tasks: [TeamTask] = []
     private(set) var artifact: TeamArtifact?
+    /// Why the Bot of a Bot DM stayed silent, by task: the rows of the Bot's auto-reply log, read for the person who maintains the Bot and for nobody else (`loadTriageReasons`).
+    private(set) var triageReasons: [String: TeamTriageItem] = [:]
+    /// The tasks whose reason was already looked for, found or not: a task is looked for once.
+    @ObservationIgnored private var triageLooked: Set<String> = []
     var selected = ""
     /// Called once when access to this team is lost (revoked membership, rejected session): the owner of the
     /// model re-reads the team list, which is the authority on what is left.
@@ -92,7 +96,7 @@ final class TeamMessagingModel {
     func start(uid: String, team: TeamSummary) {
         stop(); active = true; lifecycle += 1
         self.uid = uid; teamId = team.id; generation = team.generation; revoked = false; offline = true; error = ""; listenersFailed = false
-        cache = nil; selected = ""; directoryCached = true; messagesCached = true; botsDirty = true; bots = []; botsLoaded = false; botsUnverified = false; tasks = []; artifact = nil
+        cache = nil; selected = ""; directoryCached = true; messagesCached = true; botsDirty = true; bots = []; botsLoaded = false; botsUnverified = false; tasks = []; artifact = nil; triageReasons = [:]; triageLooked = []
         directoryReady = false; directoryFromServer = false; readsPending = []
         let life = lifecycle
         authListener = auth.addStateDidChangeListener { [weak self] _, user in
@@ -220,7 +224,7 @@ final class TeamMessagingModel {
         pictures.removeAllObjects()
         removeListeners()
         if let authListener { auth.removeStateDidChangeListener(authListener) }; authListener = nil
-        running = false; again = false; bots = []; tasks = []; artifact = nil
+        running = false; again = false; bots = []; tasks = []; artifact = nil; triageReasons = [:]; triageLooked = []
     }
     private func invalidate() {
         guard !revoked else { return }
@@ -563,6 +567,29 @@ final class TeamMessagingModel {
         var payload: [String: Any] = ["sharedBotId": sharedBotId]
         if let beforeRevision { payload["beforeRevision"] = beforeRevision }
         return try await execute("listHistory", payload: payload, life: lifecycle)
+    }
+    /// A page of a Bot's auto-reply log, newest verdict first, for the person who maintains the Bot (anyone else is refused: `MAINTAINER_REQUIRED`). `conversationId`
+    /// asks for one Chat; `cursor` is the `nextCursor` of the page before; the service gives at most `TeamExecutionContract.triageLimit` rows.
+    func listTriage(_ sharedBotId: String, conversationId: String? = nil, cursor: String? = nil, limit: Int = TeamTriageRules.page) async throws -> TeamTriagePage {
+        var payload: [String: Any] = ["sharedBotId": sharedBotId, "limit": limit]
+        if let conversationId { payload["conversationId"] = conversationId }
+        if let cursor { payload["cursor"] = cursor }
+        do { return try await execute("listTriage", payload: payload, life: lifecycle) } catch is DecodingError { throw TeamMessageFailure(code: "INVALID_DATA") }
+    }
+    /// Looks the verdicts of these tasks of a Bot DM up in the Bot's log, once each, for `triageReasons`. The reason of a silence is a courtesy: a log that cannot be
+    /// read, or a task with no row in it, leaves the line that says the Bot did not reply as it was. Only ever asked for by the Bot's maintainer.
+    func loadTriageReasons(sharedBotId: String, conversationId: String, taskIds: [String]) async {
+        let fresh = taskIds.filter { !triageLooked.contains($0) && triageReasons[$0] == nil }
+        guard active, !revoked, !fresh.isEmpty else { return }
+        triageLooked.formUnion(fresh)
+        let life = lifecycle
+        let found = await TeamTriageSearch.find(fresh) { [self] cursor, limit in
+            try await listTriage(sharedBotId, conversationId: conversationId, cursor: cursor, limit: limit)
+        }
+        // A search that was cut short by the screen asking again is not a look: what it did not find is looked for by the next one.
+        if Task.isCancelled { triageLooked.subtract(fresh.filter { found[$0] == nil }) }
+        guard active, life == lifecycle, !found.isEmpty else { return }
+        triageReasons.merge(found) { _, new in new }
     }
     func writeList(_ sharedBotId: String, operationId: String, expectedDataRevision: Int, changes: [TeamSharedListChange]) async throws {
         let _: TeamSharedListWritten = try await execute("writeList", payload: ["sharedBotId": sharedBotId, "operationId": operationId,

@@ -221,7 +221,7 @@ test('all Bots read the service data session, including current ACL and account 
 test('public message boundary rejects retired execution and private host commands',async()=>{
  const service=new TeamsService({snapshot:()=>({user:{uid:'owner'}}),getIdToken:async()=>'',onChanged:()=>()=>{}},{});
  for(const action of ['bindBot','claimBot','startBot','finishBot','botQueue','publishSharedBot','prepareTask','validateTask','startTask','completeTask','pauseTask','continueTask','heartbeatDeployment','activateDeployment','listHostTasks',
-  'readTaskList','recordOperation','writeTaskList','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer','declineTask','recordTriage','listTriage'])await assert.rejects(service.messages({schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload:{}} as any,'owner'),/INVALID_INPUT/);service.close();
+  'readTaskList','recordOperation','writeTaskList','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer','declineTask','recordTriage'])await assert.rejects(service.messages({schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload:{}} as any,'owner'),/INVALID_INPUT/);service.close();
 });
 test('the real private TeamsService forwards every connector command while rejecting unknown actions and stale accounts',async t=>{
  let uid='owner',epoch=0,notify=()=>{},requests=0;const service=new TeamsService({snapshot:()=>({user:{uid}}),sessionEpoch:()=>epoch,getIdToken:async()=>'synthetic-token',onChanged:cb=>{notify=cb;return()=>{};}},{});t.after(()=>service.close());
@@ -2046,6 +2046,19 @@ test('a Chat narrowing is sent through the account session like every other memb
  const command={schemaVersion:1 as const,commandId:'command001',teamId,generation:1,action:'setConversationBotScope' as const,payload:{conversationId,sharedBotId,expectedRevision:0,scope:{localApps:['calendar']}}};
  assert.deepEqual(await service.messages<any>(command as any,'owner'),{revision:1});assert.deepEqual(bodies,[command]);assert.equal(changed,1,'the Chats are read again');
  await assert.rejects(service.messages<any>(command as any,'other'),/INVALID_SESSION/);
+});
+
+test('a maintainer reads the auto-reply log through the account session like every other member read, and the verdict write is not a member command',async t=>{
+ const service=new TeamsService({snapshot:()=>({user:{uid:'owner'}}),getIdToken:async()=>'synthetic-token',onChanged:()=>()=>{}},{});t.after(()=>service.close());
+ (service as any).connect=async()=>({db:{}});(service as any).sdk={};
+ const original=globalThis.fetch,bodies:any[]=[];t.after(()=>{globalThis.fetch=original;});
+ globalThis.fetch=(async(_url,init)=>{bodies.push(JSON.parse(String(init?.body)));return new Response(JSON.stringify({items:[]}),{status:200});}) as typeof fetch;
+ let changed=0;const stop=service.onMessagesChanged(()=>{changed++;});t.after(stop);
+ const read={schemaVersion:1 as const,commandId:'command002',teamId,generation:1,action:'listTriage' as const,payload:{sharedBotId,conversationId,limit:20}};
+ assert.deepEqual(await service.messages<any>(read as any,'owner'),{items:[]});assert.deepEqual(bodies,[read]);assert.equal(changed,0,'a read changes no Chat');
+ await assert.rejects(service.messages<any>(read as any,'other'),/INVALID_SESSION/);
+ await assert.rejects(service.messages<any>({...read,commandId:'command003',action:'recordTriage',payload:{taskId:'task00001',action:'decline',source:'decision'}} as any,'owner'),/INVALID_INPUT/);
+ assert.equal(bodies.length,1,'the host\'s write never left the process as a member command');
 });
 
 test('the private process serves Local App requests only for the apps the run was offered, in exactly the shape its protocol has',async()=>{

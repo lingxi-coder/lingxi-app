@@ -184,6 +184,8 @@ struct TeamConversationView: View {
         let carrying = carriesFiles(context)
         let connectionError = !model.error.isEmpty
         let connectionOffline = model.directoryReady && model.offline
+        let reasonBot = TeamTriageRules.reasonBot(conversation, cards: context.bots, viewer: context.viewer)
+        let silent = reasonBot.map { TeamTriageRules.silentTasks(model.tasks, of: $0.sharedBotId) } ?? []
         return VStack(spacing: 0) {
             banners(context)
             if let notice = inbox.inlineNotice, notice.ref == activeInboxRef {
@@ -285,6 +287,11 @@ struct TeamConversationView: View {
         } message: { _ in
             Text("teams_recall_confirm_detail")
         }
+        // Why the Bot of a Bot DM stayed silent, for the person who maintains it: read from the Bot's log for this Chat, once, as soon as a task of the Bot has,
+        // and only while there is a connection to read it over (it is read again when the connection returns).
+        .task(id: TriageWanted(bot: reasonBot?.sharedBotId, conversationId: conversation.id, taskIds: silent, offline: model.offline)) {
+            if let bot = reasonBot?.sharedBotId, !silent.isEmpty, !model.offline { await model.loadTriageReasons(sharedBotId: bot, conversationId: conversation.id, taskIds: silent) }
+        }
         // The divider's anchor: the read mark as it was on opening, once the marks are known.
         .task(id: model.readsReady) {
             guard anchorSeq == nil else { return }
@@ -316,6 +323,14 @@ struct TeamConversationView: View {
                 do { try await Task.sleep(for: .seconds(5)) } catch { return }
             }
         }
+    }
+
+    /// The Bot of a Bot DM whose silences this person is told the reasons of, and the tasks of it that stayed silent.
+    private struct TriageWanted: Equatable {
+        let bot: String?
+        let conversationId: String
+        let taskIds: [String]
+        let offline: Bool
     }
 
     private struct ReadVisibilityKey: Equatable {

@@ -613,20 +613,45 @@ for that Chat with the member command `setConversationAutoReply { conversationId
   (`TASK_NOT_OPTIONAL`). A failure to record is logged (`team_triage_not_recorded`) and the task goes on. The maintainer reads the log with
   `listTriage { sharedBotId, conversationId?, cursor?, limit ≤ 50 }` → `{ items: [{ taskId, conversationId, messageId, createdAt, triage,
   state, conversationTitle? }], nextCursor? }`, newest first, hidden tasks included, only for Chats the maintainer is in (a page can be
-  short), refused with `MAINTAINER_REQUIRED` to anyone else. Both are host commands: not in the member contract, the vectors or the native
-  validators, and refused to hosted services. Indexes (`firestore.teams.indexes.json`, to be deployed): `tasks` on `sharedBotId, triage.at
+  short), refused with `MAINTAINER_REQUIRED` to anyone else (`INVALID_TRIAGE_CURSOR` for a cursor that is not a task of that Bot and Chat). Both
+  are refused to hosted services. `recordTriage` is a host command only: it is not in the member contract and a member's envelope for it is
+  refused (vector `reject-recordTriage-member`). `listTriage` is a member read like `listTasks` (B5b): it is in the member contract
+  (`MemberExecutionPayloads`) and in the validators of Web and Desktop (`execution-validation.ts`), iOS (`TeamExecutionContract`) and
+  Android, with vectors (`valid-listTriage*`, `reject-listTriage*`: ids of 8 to 64 characters, `limit` an integer from 1 to 50) and in the
+  member allow-list of the Desktop main process. Indexes (`firestore.teams.indexes.json`, to be deployed): `tasks` on `sharedBotId, triage.at
   desc, __name__` and on `sharedBotId, conversationId, triage.at desc, __name__`.
 - Desktop screen (B5a): Bot detail → Auto-reply tab (`BotAutoReplyField.tsx`; `bots_reply_*` and `bots_triage_*` in `botsCatalog.ts`). It
   edits the settings above with the rest of the Bot (one draft, one Save; problems from `botDraftProblems`), and below them shows the log
   of each Team the Bot is published to, a page at a time (`bridge/botTriageLog.ts`). The window never holds a token: the main process
-  reads the Teams (`triageTargets`) and the pages (`triageLog`) through `TeamsService`. Web, iOS, Android and Remote Control do not show it.
+  reads the Teams (`triageTargets`) and the pages (`triageLog`) through `TeamsService`. Remote Control does not show it; Web, iOS and Android do (next bullet).
+- Log on the clients (B5b), for the Bot's maintainer only (`packages/teams/triage-log.ts`, `triage-hooks.ts`, `TriageLogDialog.tsx`; iOS
+  `TeamTriageLog.swift`, `TeamTriageLogViews.swift`; Android `TeamTriageLog.kt`, `TeamTriageLogScreen.kt`; strings `teams_triage_*`):
+  - Team: an "Auto-reply log" button on the card of a Bot the viewer maintains (same uid and generation) that has `autoReply` published (Web
+    `BotDirectory`, which Desktop's Teams pages share; iOS and Android Team details and the Friends Bots page). It opens the paged list with the
+    Desktop semantics: newest first, 20 a page, Refresh, Load more, an empty state, a retry on failure; a row shows the verdict (glyph and
+    word: no reply, reply, leave it to the Bot), the probability as a whole percent (only when the Decision service judged), the reason, the Chat's
+    title, the time and where the message ended up (completed: Replied; declined and cancelled: Stayed silent; queued, running and waiting: In
+    progress; the rest: Failed). A row this version cannot read is left out and the page is still shown; a reason or probability it does not know
+    is left out of the row. `MAINTAINER_REQUIRED` takes the entry away and closes the list; any other error shows a retry. Nobody else sees the
+    entry.
+  - Chat: the same list limited to one Chat (`conversationId`): Web a clock button in the Chat header beside the auto-reply one (a Bot select
+    when the viewer maintains several of the Chat's Bots), iOS and Android in the Chat details beside the auto-reply setting. The Bots offered are
+    those the viewer maintains that are in the Chat and have `autoReply` published or switched on for the Chat; taking part in the Chat is not
+    required, as the service shows a maintainer the Chats of their Bots. A friend chat has none.
+  - Why a Bot DM did not answer: a declined optional task in a Bot DM keeps its "Did not reply" card and, for the Bot's maintainer, that card
+    carries the reason and the probability from the log. They are read lazily, on first sight of a declined task of that Bot in that Chat, with
+    `listTriage { conversationId }` pages of 50 from the newest down until every wanted task has its row, the log ends, or 4 pages were read; each
+    task is looked for once, and only while there is a connection (the look is made when it returns; on iOS and Android a look the screen
+    cancelled is made again); a log that cannot be read or a task with no row (the host could not record its verdict) leaves the card as it was. Nobody else triggers a read. In a group or channel a task nobody asked is
+    `hidden`: it has no card on any client, so the Chat-scoped log above is the way to see why a Bot stayed silent there.
 - Runtime (H `team_process/decline_tool.rs`): bootstrap `mayDecline`, result status `declined`; the choice survives a killed worker.
 - Clients: Web/Desktop publish wizard switch and daily limit, a header dialog per Chat that first says where messages go, a declined
   run shown as "Did not reply"; iOS and Android the same switch per Bot in the conversation details, and the `declined` state text.
 - Tests: `shared-bots.emulator.test.mjs` (Auto-reply), `bot-triage.test.mjs` and `bot-triage.emulator.test.mjs` (the log),
   `apps/electron/test/teams-reply-triage.test.ts`, `teams-host.test.ts` (`auto-reply:`, `auto-reply log:`), `bot-reply-field.test.ts`
   (the tab), `apps/web/test/teams-bots-ui.test.ts` (`Auto-reply:`), vectors in `contracts/execution-vectors.json`, iOS
-  `TeamBotTests`/`TeamsPointerParserTests`, Android `TeamBotsTest`.
+  `TeamBotTests`/`TeamsPointerParserTests`, Android `TeamBotsTest`. B5b: `apps/web/test/teams-triage-log-ui.test.ts`, the member read in
+  `teams-host.test.ts`, the vectors in `bot-triage.test.mjs`, iOS `TeamTriageLogTests`, Android `TeamTriageLogTest`.
 
 ## What a Bot may use of its maintainer's Desktop (Bot scope)
 

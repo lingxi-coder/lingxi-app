@@ -19,6 +19,9 @@ struct FriendBotsView: View {
     /// The Bot whose Stop sharing is waiting for its confirmation.
     @State private var stopping: TeamBotCard?
     @State private var listOf: TeamBotCard?
+    /// The Bot whose auto-reply log is open, and the Bots the service said this person does not maintain after all: their entry is not offered again.
+    @State private var triageOf: TeamBotCard?
+    @State private var triageDenied: Set<String> = []
 
     var body: some View {
         content
@@ -34,7 +37,7 @@ struct FriendBotsView: View {
             }
             .hidesTabBarWhenPushed(in: .friends)
             // An account change, or the end of the friendship, drops what the person was about to confirm.
-            .onChange(of: friends.authority) { _, _ in stopping = nil; listOf = nil }
+            .onChange(of: friends.authority) { _, _ in stopping = nil; listOf = nil; triageOf = nil; triageDenied = [] }
             .accessibilityIdentifier("friends.bots")
     }
 
@@ -76,7 +79,8 @@ struct FriendBotsView: View {
                         showsAudience: false,
                         onMessage: { Task { if let id = await workspace.openBotDM(bot) { onOpenBot(id) } } },
                         onStopSharing: { stopping = bot },
-                        onList: TeamSharedListRules.canOpen(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: chat.generation)) && !offline ? { listOf = bot } : nil)
+                        onList: TeamSharedListRules.canOpen(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: chat.generation)) && !offline ? { listOf = bot } : nil,
+                        onTriageLog: TeamTriageRules.maintains(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: chat.generation)) && bot.autoReply != nil && !triageDenied.contains(bot.sharedBotId) && !offline ? { triageOf = bot } : nil)
                 }
                 if empty {
                     // What is empty, and what to do about it (U9): the hint is the body here, so it is not repeated below.
@@ -112,6 +116,9 @@ struct FriendBotsView: View {
         }
         .sheet(item: $listOf) { bot in
             if let model = workspace.messaging { TeamSharedListSheet(bot: bot, model: model, members: workspace.directory) { listOf = nil } }
+        }
+        .sheet(item: $triageOf) { bot in
+            if let model = workspace.messaging { TeamTriageLogSheet(bot: bot, model: model, onDenied: { triageDenied.insert($0) }) { triageOf = nil } }
         }
         .confirmationDialog(
             stopping.map { Text("teams_bot_stop_title \($0.name)") } ?? Text(verbatim: ""),

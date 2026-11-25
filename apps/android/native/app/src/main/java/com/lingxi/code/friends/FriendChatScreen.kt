@@ -128,6 +128,10 @@ private fun FriendChat(
     // The shared list of one of the chat's Bots; it closes with the friendship's generation.
     var listOf by remember(friendUid, pair.generation) { mutableStateOf<TeamBotCard?>(null) }
     listOf?.let { bot -> TeamSharedListDialog(bot, chat.messagingModel, teams.detail?.members.orEmpty()) { listOf = null } }
+    // The auto-reply log of one of the person's own Bots, and the Bots the service said they do not maintain after all; it closes with the friendship's generation.
+    var triageOf by remember(friendUid, pair.generation) { mutableStateOf<TeamBotCard?>(null) }
+    var triageDenied by remember(friendUid, pair.generation) { mutableStateOf(emptySet<String>()) }
+    triageOf?.let { bot -> com.lingxi.code.teams.TeamTriageLogDialog(bot, null, chat.messagingModel, onDenied = { triageDenied = triageDenied + it }) { triageOf = null } }
     LaunchedEffect(dialog) { if (dialog == "profile") workspace.refreshName(friendUid) }
 
     if (messaging.revoked) {
@@ -139,6 +143,7 @@ private fun FriendChat(
             messaging = messaging, members = teams.detail?.members.orEmpty(), uid = uid, generation = pair.generation, showBack = showBack, onBack = { view = "" },
             onMessage = { sharedBotId -> messageBot(chat, messaging, uid, sharedBotId) { view = "dm:$it" } },
             onStop = { bot -> chat.messagingModel.pause(bot) }, onReconnect = chat::reconnect, modifier = modifier, onList = { listOf = it },
+            onTriageLog = { triageOf = it }, triageDenied = triageDenied,
         )
         view.startsWith("dm:") -> TeamConversationScreen(
             workspace = chat, uid = uid, team = summary, teams = teams, messaging = messaging,

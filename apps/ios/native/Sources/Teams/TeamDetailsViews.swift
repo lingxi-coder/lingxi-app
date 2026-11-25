@@ -8,6 +8,8 @@ struct TeamConversationDetailsSheet: View {
     /// The Chat and auto-reply revision a change was sent from: the switches wait until the listener brings the next
     /// revision, since another toggle before then would send the old one and conflict.
     @State private var autoReplySent: String?
+    /// The Bots the service said this person does not maintain after all: their log is not offered again.
+    @State private var triageDenied: Set<String> = []
     let conversationID: String
     /// In the wide layout the details are a side pane: Close replaces Done and calls this instead of dismissing a sheet.
     var onClose: (() -> Void)?
@@ -138,6 +140,23 @@ struct TeamConversationDetailsSheet: View {
                     Text("teams_auto_reply_title")
                 } footer: {
                     Text("teams_auto_reply_note")
+                }
+            }
+            // Next to the auto-reply control: what the Bots this person maintains decided about this Chat's messages, and why. A maintainer need not be in the Chat for it.
+            let logBots = context.triageBots.filter { !triageDenied.contains($0.sharedBotId) }
+            if !logBots.isEmpty {
+                Section {
+                    ForEach(logBots) { bot in
+                        NavigationLink {
+                            TeamTriageLogView(bot: bot, conversation: TeamTriageChat(id: conversation.id, title: context.label), model: model) { triageDenied.insert($0) }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Label("teams_triage_title", systemImage: "clock.arrow.circlepath")
+                                if logBots.count > 1 { Spacer(minLength: 8); Text(verbatim: bot.name).foregroundStyle(.secondary).lineLimit(1) }
+                            }
+                        }
+                        .accessibilityIdentifier("teams.conversation.details.triage.\(bot.sharedBotId)")
+                    }
                 }
             }
             // Next to the auto-reply control: what the Bots of this Chat may use of their maintainers' computers, here. Only for a Bot that shares something.

@@ -506,6 +506,29 @@ export type TeamsKey =
   | 'teams_task_waiting_you_fmt'
   | 'teams_team_details'
   | 'teams_title'
+  | 'teams_triage_action_decline'
+  | 'teams_triage_action_maybe'
+  | 'teams_triage_action_run'
+  | 'teams_triage_chat_untitled'
+  | 'teams_triage_empty'
+  | 'teams_triage_intro'
+  | 'teams_triage_loading'
+  | 'teams_triage_more'
+  | 'teams_triage_probability_fmt'
+  | 'teams_triage_reason_above_threshold'
+  | 'teams_triage_reason_addressed'
+  | 'teams_triage_reason_below_threshold'
+  | 'teams_triage_reason_between_thresholds'
+  | 'teams_triage_reason_cooldown'
+  | 'teams_triage_reason_decision_unavailable'
+  | 'teams_triage_reason_keyword'
+  | 'teams_triage_reason_message_unavailable'
+  | 'teams_triage_reason_quiet_hours'
+  | 'teams_triage_state_failed'
+  | 'teams_triage_state_replied'
+  | 'teams_triage_state_silent'
+  | 'teams_triage_state_waiting'
+  | 'teams_triage_title'
   | 'teams_usage_cost_unknown'
   | 'teams_usage_currency_unknown'
   | 'teams_usage_missing'
@@ -1412,6 +1435,29 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_task_waiting_you_fmt: { en: 'Waiting for you · expires %1$s', 'zh-Hans': '等待你回复 · %1$s过期', 'zh-Hant': '等待你回覆 · %1$s過期', ja: 'あなたの返信待ち · %1$sに期限切れ', ko: '내 답장 대기 중 · %1$s 만료' },
   teams_team_details: { en: 'Team details', 'zh-Hans': '团队详情', 'zh-Hant': '團隊詳情', ja: 'チームの詳細', ko: '팀 세부정보' },
   teams_title: { en: 'Teams', 'zh-Hans': '团队', 'zh-Hant': '團隊', ja: 'チーム', ko: '팀' },
+  teams_triage_action_decline: { en: 'No reply', 'zh-Hans': '不回复', 'zh-Hant': '不回覆', ja: '返信しない', ko: '답장 안 함' },
+  teams_triage_action_maybe: { en: 'Left to the Bot', 'zh-Hans': '交给 Bot 决定', 'zh-Hant': '交給 Bot 決定', ja: 'Bot に任せた', ko: 'Bot에 맡김' },
+  teams_triage_action_run: { en: 'Reply', 'zh-Hans': '回复', 'zh-Hant': '回覆', ja: '返信', ko: '답장' },
+  teams_triage_chat_untitled: { en: 'Chat', 'zh-Hans': '会话', 'zh-Hant': '對話', ja: 'チャット', ko: '채팅' },
+  teams_triage_empty: { en: 'Nothing yet. A line appears here for every message the Bot judges.', 'zh-Hans': '还没有记录。Bot 每判断一条消息，这里就会出现一行。', 'zh-Hant': '還沒有紀錄。Bot 每判斷一則訊息，這裡就會出現一行。', ja: 'まだ記録はありません。Bot が判断したメッセージごとに、ここに 1 行表示されます。', ko: '아직 기록이 없습니다. Bot이 메시지를 판단할 때마다 여기에 한 줄이 나타납니다.' },
+  teams_triage_intro: { en: 'What the Bot decided about messages nobody asked it about, newest first. Only the decision and the reason are kept, never what the model said.', 'zh-Hans': 'Bot 对没有人点名的消息所做的决定，最新的在前。只保留决定和原因，不保留模型说的内容。', 'zh-Hant': 'Bot 對沒有人點名的訊息所做的決定，最新的在前。只保留決定和原因，不保留模型說的內容。', ja: '誰にも呼ばれていないメッセージに対する Bot の判断を新しい順に表示します。保存されるのは判断とその理由だけで、モデルの発言は保存されません。', ko: '아무도 요청하지 않은 메시지에 대한 Bot의 판단을 최신순으로 표시합니다. 판단과 이유만 보관되며 모델이 한 말은 보관되지 않습니다.' },
+  teams_triage_loading: { en: 'Reading the log…', 'zh-Hans': '正在读取记录…', 'zh-Hant': '正在讀取紀錄…', ja: '記録を読み込み中…', ko: '기록 불러오는 중…' },
+  teams_triage_more: { en: 'Load more', 'zh-Hans': '加载更多', 'zh-Hant': '載入更多', ja: 'さらに読み込む', ko: '더 불러오기' },
+  teams_triage_probability_fmt: { en: '%1$d%% likely', 'zh-Hans': '概率 %1$d%%', 'zh-Hant': '機率 %1$d%%', ja: '確率 %1$d%%', ko: '확률 %1$d%%' },
+  teams_triage_reason_above_threshold: { en: 'A reply seemed likely to be wanted', 'zh-Hans': '看起来需要回复', 'zh-Hant': '看起來需要回覆', ja: '返信が必要と判断', ko: '답장이 필요하다고 판단' },
+  teams_triage_reason_addressed: { en: 'The Bot was spoken to', 'zh-Hans': '有人在对 Bot 说话', 'zh-Hant': '有人在對 Bot 說話', ja: 'Bot に向けたメッセージ', ko: 'Bot에게 한 말' },
+  teams_triage_reason_below_threshold: { en: 'A reply seemed unlikely to be wanted', 'zh-Hans': '看起来不需要回复', 'zh-Hant': '看起來不需要回覆', ja: '返信は不要と判断', ko: '답장이 필요 없다고 판단' },
+  teams_triage_reason_between_thresholds: { en: 'Not sure a reply was wanted', 'zh-Hans': '不确定是否需要回复', 'zh-Hant': '不確定是否需要回覆', ja: '返信が必要か不明', ko: '답장이 필요한지 불확실' },
+  teams_triage_reason_cooldown: { en: 'Still cooling down', 'zh-Hans': '仍在冷却中', 'zh-Hant': '仍在冷卻中', ja: 'クールダウン中', ko: '쿨다운 중' },
+  teams_triage_reason_decision_unavailable: { en: 'The Decision service gave no answer', 'zh-Hans': '判断服务没有给出结果', 'zh-Hant': '判斷服務沒有給出結果', ja: 'Decision サービスから結果なし', ko: 'Decision 서비스가 답하지 않음' },
+  teams_triage_reason_keyword: { en: 'A keyword matched', 'zh-Hans': '命中关键词', 'zh-Hant': '符合關鍵字', ja: 'キーワードに一致', ko: '키워드 일치' },
+  teams_triage_reason_message_unavailable: { en: 'The message could not be read', 'zh-Hans': '无法读取这条消息', 'zh-Hant': '無法讀取這則訊息', ja: 'メッセージを読み取れなかった', ko: '메시지를 읽을 수 없음' },
+  teams_triage_reason_quiet_hours: { en: 'In quiet hours', 'zh-Hans': '处于安静时段', 'zh-Hant': '處於安靜時段', ja: '静かな時間帯', ko: '방해 금지 시간 중' },
+  teams_triage_state_failed: { en: 'Failed', 'zh-Hans': '失败', 'zh-Hant': '失敗', ja: '失敗', ko: '실패' },
+  teams_triage_state_replied: { en: 'Replied', 'zh-Hans': '已回复', 'zh-Hant': '已回覆', ja: '返信した', ko: '답장함' },
+  teams_triage_state_silent: { en: 'Stayed silent', 'zh-Hans': '未回复', 'zh-Hant': '未回覆', ja: '返信せず', ko: '조용히 있음' },
+  teams_triage_state_waiting: { en: 'In progress', 'zh-Hans': '进行中', 'zh-Hant': '進行中', ja: '処理中', ko: '진행 중' },
+  teams_triage_title: { en: 'Auto-reply log', 'zh-Hans': '自主回复记录', 'zh-Hant': '自主回覆紀錄', ja: '自動返信の記録', ko: '자동 답장 기록' },
   teams_usage_cost_unknown: { en: 'cost unknown', 'zh-Hans': '费用未知', 'zh-Hant': '費用未知', ja: '費用不明', ko: '비용 알 수 없음' },
   teams_usage_currency_unknown: { en: 'currency unknown', 'zh-Hans': '币种未知', 'zh-Hant': '幣別未知', ja: '通貨不明', ko: '통화 알 수 없음' },
   teams_usage_missing: { en: 'Usage unavailable', 'zh-Hans': '用量不可用', 'zh-Hant': '用量無法取得', ja: '使用量を取得できません', ko: '사용량을 확인할 수 없음' },

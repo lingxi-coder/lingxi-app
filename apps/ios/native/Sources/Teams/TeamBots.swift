@@ -267,6 +267,8 @@ enum TeamExecutionContract {
     static let documentBytes = 256 * 1024
     /// The longest text of one shared-list item, in UTF-8 bytes, and the most changes one write carries.
     static let listItemBytes = 500, listChanges = 20
+    /// The most rows one page of a Bot's auto-reply log has.
+    static let triageLimit = 50
     /// One change of a shared-list write exactly as the service accepts it.
     private static func listChange(_ change: [String: Any]) -> Bool {
         func text(_ value: Any?) -> Bool {
@@ -337,6 +339,11 @@ enum TeamExecutionContract {
         case "listTasks":
             try shape([], ["conversationId", "after"])
             for key in payload.keys { try id(key) }
+        case "listTriage":
+            // The maintainer's read of a Bot's auto-reply log: newest first, optionally of one Chat, from a cursor, at most one page of rows.
+            try shape(["sharedBotId"], ["conversationId", "cursor", "limit"]); try id("sharedBotId")
+            for key in ["conversationId", "cursor"] where payload[key] != nil { try id(key) }
+            if payload["limit"] != nil { guard let limit = integer(payload["limit"], minimum: 1), limit <= Double(triageLimit) else { try fail() } }
         case "pauseSharedBot":
             try shape(["sharedBotId", "expectedRevision"]); try id("sharedBotId")
             guard integer(payload["expectedRevision"], minimum: 1) != nil else { try fail() }

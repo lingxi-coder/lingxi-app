@@ -43,6 +43,17 @@ test('the log of a Bot is asked for by its id, optionally one Chat, a cursor and
   }
 });
 
+test('the maintainer\'s read is one of the member commands: the vectors say the same to the service as to the clients', () => {
+  // `listTriage` is in `execution-vectors.json` with every other member command, which the web, iOS and Android validators check as well.
+  // `recordTriage` is not: it is the host's command, and the clients' validators refuse it (`reject-recordTriage-member`).
+  const { commands } = JSON.parse(readFileSync(new URL('../../../packages/teams/contracts/execution-vectors.json', import.meta.url), 'utf8'));
+  const rows = commands.filter(vector => vector.input.action === 'listTriage');
+  assert.ok(rows.length >= 12);
+  assert.ok(rows.some(vector => vector.valid) && rows.some(vector => !vector.valid));
+  for (const vector of rows) assert.equal(sharedBotCommand.safeParse(vector.input).success, vector.valid, vector.name);
+  assert.equal(commands.find(vector => vector.name === 'reject-recordTriage-member')?.valid, false);
+});
+
 test('a hosted Bot service lists neither command: its gate refuses what it does not list', () => {
   // The schema is shared with the service scope, whose gate (`hosted-bot-service.mjs`) names the commands a service takes.
   assert.doesNotMatch(readFileSync(new URL('../src/hosted-bot-service.mjs', import.meta.url), 'utf8'), /recordTriage|listTriage/u);

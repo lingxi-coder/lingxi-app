@@ -1668,6 +1668,261 @@
           "taskId": "task_0001"
         }
       }
+    },
+    {
+      "name": "valid-listTriage",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listTriage",
+        "payload": {
+          "sharedBotId": "sharedbot_01"
+        }
+      }
+    },
+    {
+      "name": "valid-listTriage-chat",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listTriage",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "conversationId": "chat_0001"
+        }
+      }
+    },
+    {
+      "name": "valid-listTriage-page",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listTriage",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "conversationId": "chat_0001",
+          "cursor": "task_0001",
+          "limit": 20
+        }
+      }
+    },
+    {
+      "name": "valid-listTriage-limit-min",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listTriage",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "limit": 1
+        }
+      }
+    },
+    {
+      "name": "valid-listTriage-limit-max",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listTriage",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "limit": 50
+        }
+      }
+    },
+    {
+      "name": "reject-listTriage-no-bot",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listTriage",
+        "payload": {
+          "conversationId": "chat_0001"
+        }
+      }
+    },
+    {
+      "name": "reject-listTriage-short-bot",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listTriage",
+        "payload": {
+          "sharedBotId": "x"
+        }
+      }
+    },
+    {
+      "name": "reject-listTriage-short-chat",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listTriage",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "conversationId": "x"
+        }
+      }
+    },
+    {
+      "name": "reject-listTriage-short-cursor",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listTriage",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "cursor": "x"
+        }
+      }
+    },
+    {
+      "name": "reject-listTriage-limit-zero",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listTriage",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "limit": 0
+        }
+      }
+    },
+    {
+      "name": "reject-listTriage-limit-too-many",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listTriage",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "limit": 51
+        }
+      }
+    },
+    {
+      "name": "reject-listTriage-limit-fraction",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listTriage",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "limit": 1.5
+        }
+      }
+    },
+    {
+      "name": "reject-listTriage-limit-text",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listTriage",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "limit": "5"
+        }
+      }
+    },
+    {
+      "name": "reject-listTriage-team-id",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listTriage",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "teamId": "team_0001"
+        }
+      }
+    },
+    {
+      "name": "reject-listTriage-host-field",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listTriage",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "deploymentId": "deployment_01"
+        }
+      }
+    },
+    {
+      "name": "reject-listTriage-unknown-payload",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "listTriage",
+        "payload": {
+          "sharedBotId": "sharedbot_01",
+          "includeHidden": true
+        }
+      }
+    },
+    {
+      "name": "reject-recordTriage-member",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "recordTriage",
+        "payload": {
+          "taskId": "task_0001",
+          "action": "decline",
+          "source": "decision"
+        }
+      }
     }
   ],
   "batches": [

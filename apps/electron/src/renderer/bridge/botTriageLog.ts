@@ -4,13 +4,14 @@
  * time. The window never holds a token: Desktop's main process reads the pages and the window gets them as they are.
  */
 
-import type { TaskState, TriageLogItem, TriageLogPage, TriageLogRequest, TriageTarget } from '../../../../../packages/teams/execution';
+import type { TriageLogItem, TriageLogPage, TriageLogRequest, TriageTarget } from '../../../../../packages/teams/execution';
+import { TRIAGE_LOG_PAGE } from '../../../../../packages/teams/triage-log';
 import type { LingxiApi } from './lingxi';
 import { ipcErrorMessage } from './botForm';
 import { ObservableState } from './observableState';
 
-/** How many rows a page of the log has: the service gives at most 50. */
-export const TRIAGE_LOG_PAGE = 20;
+// What a judged message is called, and the percent a probability is shown as, are the Teams views' too: one definition of each, in packages/teams.
+export { TRIAGE_LOG_PAGE, triageOutcome, triagePercent, type TriageOutcome } from '../../../../../packages/teams/triage-log';
 
 /** Where the page learns what the Bot decided. */
 export interface TriageLogSources {
@@ -105,21 +106,4 @@ export class BotTriageLogController extends ObservableState<TriageLogState> {
       sections: this.getSnapshot().sections.map((section) => sectionKey(section.target) === key ? { ...section, ...(typeof change === 'function' ? change(section) : change) } : section),
     });
   }
-}
-
-/** Where a judged message ended up, in the words of the log: it was answered, the Bot stayed silent (it declined, or the task was canceled before it spoke), it failed, or it is still going on. */
-export type TriageOutcome = 'replied' | 'silent' | 'failed' | 'waiting';
-
-export function triageOutcome(state: TaskState): TriageOutcome {
-  switch (state) {
-    case 'completed': return 'replied';
-    case 'declined': case 'cancelled': return 'silent';
-    case 'queued': case 'running': case 'waiting': return 'waiting';
-    case 'failed': case 'expired': case 'interrupted': case 'authorization_required': case 'revoked': case 'needs_reconciliation': return 'failed';
-  }
-}
-
-/** A probability the Decision service gave, or a threshold of the Bot's on the same scale, as the whole percent it is shown as. */
-export function triagePercent(probability: number): number {
-  return Math.round(probability * 100);
 }

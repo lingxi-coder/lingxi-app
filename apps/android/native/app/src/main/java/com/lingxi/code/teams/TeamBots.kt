@@ -145,6 +145,8 @@ internal object TeamExecutionContract {
     /** The longest text of one shared-list item, in UTF-8 bytes, and the most changes one write carries. */
     const val LIST_ITEM_BYTES = 500
     const val LIST_CHANGES = 20
+    /** The most rows one page of a Bot's auto-reply log has. */
+    const val TRIAGE_LIMIT = 50
     fun validate(v: JSONObject) {
         fun fail(): Nothing = throw TeamMessageFailure("INVALID_INPUT")
         fun JSONObject.keysSet() = keys().asSequence().toSet()
@@ -211,6 +213,12 @@ internal object TeamExecutionContract {
                 if ((p.opt("decision") as? String) !in setOf("approve", "deny")) fail()
             }
             "listTasks" -> { shape(emptySet(), setOf("conversationId", "after")); p.keysSet().forEach(::requireId) }
+            // The maintainer's read of a Bot's auto-reply log: newest first, optionally of one Chat, from a cursor, at most one page of rows.
+            "listTriage" -> {
+                shape(setOf("sharedBotId"), setOf("conversationId", "cursor", "limit")); requireId("sharedBotId")
+                listOf("conversationId", "cursor").filter(p::has).forEach(::requireId)
+                if (p.has("limit") && (!integer(p.opt("limit"), 1) || (p.opt("limit") as Number).toLong() > TRIAGE_LIMIT)) fail()
+            }
             "pauseSharedBot" -> { shape(setOf("sharedBotId", "expectedRevision")); requireId("sharedBotId"); if (!integer(p.opt("expectedRevision"), 1)) fail() }
             "setConversationPolicy", "setConversationAutoReply" -> { shape(setOf("conversationId", "expectedRevision", "targets")); requireId("conversationId"); ids("targets", 0); if (!integer(p.opt("expectedRevision"), 0)) fail() }
             // The scope is the whole narrowing or null; a key that is left out is not a lifted narrowing.

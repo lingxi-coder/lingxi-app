@@ -91,6 +91,11 @@ internal fun TeamDetailsScreen(
     // The shared list of one Bot of this team; a change of account, team or membership closes it.
     var listOf by remember(uid, team.id, current.generation) { mutableStateOf<TeamBotCard?>(null) }
     listOf?.let { bot -> TeamSharedListDialog(bot, workspace.messagingModel, detail?.members.orEmpty()) { listOf = null } }
+    // The auto-reply log of one Bot of this team, and the Bots the service said this person does not maintain after all: their entry is not offered again.
+    // A change of account, team or membership closes it.
+    var triageOf by remember(uid, team.id, current.generation) { mutableStateOf<TeamBotCard?>(null) }
+    var triageDenied by remember(uid, team.id, current.generation) { mutableStateOf(emptySet<String>()) }
+    triageOf?.let { bot -> TeamTriageLogDialog(bot, null, workspace.messagingModel, onDenied = { triageDenied = triageDenied + it }) { triageOf = null } }
     val model = workspace.teamsModel
     val busy = teams.busy
 
@@ -119,7 +124,7 @@ internal fun TeamDetailsScreen(
             when (segments[selected]) {
                 R.string.teams_members -> membersSection(detail, current, uid, busy, friendUids, onAddFriend) { confirmation = it }
                 R.string.teams_invites -> invitesSection(detail, current, teams, busy, model, onInviteFriends) { confirmation = it }
-                else -> botsSection(messaging, detail, uid, onMessageBot, workspace, onBotExample) { listOf = it }
+                else -> botsSection(messaging, detail, uid, onMessageBot, workspace, onBotExample, triageDenied, { triageOf = it }) { listOf = it }
             }
             item {
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
@@ -257,7 +262,10 @@ private fun androidx.compose.foundation.lazy.LazyListScope.invitesSection(
     }
 }
 
-private fun androidx.compose.foundation.lazy.LazyListScope.botsSection(messaging: TeamMessagingState, detail: TeamDetail?, uid: String, onMessageBot: (String) -> Unit, workspace: TeamsWorkspace, onBotExample: (String, String) -> Unit, onOpenList: (TeamBotCard) -> Unit) {
+private fun androidx.compose.foundation.lazy.LazyListScope.botsSection(
+    messaging: TeamMessagingState, detail: TeamDetail?, uid: String, onMessageBot: (String) -> Unit, workspace: TeamsWorkspace, onBotExample: (String, String) -> Unit,
+    triageDenied: Set<String>, onOpenTriage: (TeamBotCard) -> Unit, onOpenList: (TeamBotCard) -> Unit,
+) {
     item { Text(stringResource(R.string.teams_bots_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     when {
         // Loading or unverified: one line of status. Loaded and empty (U9): what is empty, then how a Bot gets here.
@@ -279,6 +287,8 @@ private fun androidx.compose.foundation.lazy.LazyListScope.botsSection(messaging
                     onMessage = { onMessageBot(bot.sharedBotId) }, onStopSharing = { workspace.messagingModel.pause(bot) },
                     onExample = { onBotExample(bot.sharedBotId, it) },
                     onList = if (TeamSharedListRules.canOpen(bot, uid, messaging.cache?.generation ?: 0)) ({ onOpenList(bot) }) else null,
+                    // The maintainer's log of what the Bot decided about the messages nobody asked it about: only for a Bot that answers on its own.
+                    onTriageLog = if (TeamTriageRules.maintains(bot, TeamMemberRef(uid, messaging.cache?.generation ?: 0)) && bot.autoReply != null && bot.sharedBotId !in triageDenied) ({ onOpenTriage(bot) }) else null,
                 )
             }
         }
@@ -294,6 +304,8 @@ internal fun ConversationDetailsSheet(
     onAutoReply: (List<String>) -> Unit = {}, busy: Boolean = false,
     /** Opens what the Bots of this Chat may use here; null where the Chat has no such control (a friend chat). */
     onBotScope: (() -> Unit)? = null,
+    /** The Bots of this Chat whose auto-reply log this person reads here (the ones they maintain that answer on their own in it), and what opens one of them; null where the Chat has none. */
+    triageBots: List<TeamBotCard> = emptyList(), onTriageLog: ((TeamBotCard) -> Unit)? = null,
 ) {
     TeamsSheet(stringResource(R.string.teams_conversation_details), onDismiss) {
         DetailIdentity(label, conversationSubtitle(conversation, bots)) {
@@ -338,6 +350,16 @@ internal fun ConversationDetailsSheet(
                 val owner = if (card.maintainer.uid == uid) strings.you else members.firstOrNull { it.uid == card.maintainer.uid }?.displayName ?: card.maintainer.uid
                 Text(if (limit != null && TeamAutoReply.available(card)) stringResource(R.string.teams_auto_reply_disclosure_fmt, owner, card.name, limit.daily)
                     else stringResource(R.string.teams_auto_reply_unavailable_fmt, card.name), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        // Next to the auto-reply control: what the Bots this person maintains decided about this Chat's messages, and why. A maintainer need not be in the Chat for it.
+        if (onTriageLog != null) triageBots.forEach { card ->
+            val named = triageBots.size > 1
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (named) Text(card.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                OutlinedButton(onClick = { onTriageLog(card) }, modifier = (if (named) Modifier else Modifier.weight(1f)).testTag("teams.conversation.details.triage.${card.sharedBotId}")) {
+                    Text(stringResource(R.string.teams_triage_title))
+                }
             }
         }
         // Next to the auto-reply control: what the Bots of this Chat may use of their maintainers' computers, here. Only for a Bot that shares something.

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { executionCommand, operationUnverified, type ExecutionScope, type OperationResolved, type TaskOperation, type TaskOperations, type TeamArtifact, type TeamTaskView, type TaskUsage } from './execution.js';
+import { executionCommand, operationUnverified, type ExecutionScope, type OperationResolved, type TaskOperation, type TaskOperations, type TeamArtifact, type TeamTaskView, type TaskUsage, type TriageLogItem } from './execution.js';
 import { pendingPayload } from './messages.js';
 import type { TeamsApi } from './index.js';
 import { messageErrorText } from './errors.js';
@@ -7,6 +7,7 @@ import { DocumentDialog, type DocumentPeople } from './DocumentDialog';
 import { Dialog, Icon, type IconName, type RenderMarkdown } from './ui';
 import type { TeamsSnapshot } from './workspace.js';
 import { intlTag, teamsText, tk, type TeamsKey, useTeamsText } from './i18n.js';
+import { triageProbabilityText, triageReasonText } from './triage-log.js';
 
 /** Only Completed is `ok` and only Failed `danger` (U4); every other state is `muted`. */
 type RunTone = 'ok' | 'danger' | 'muted';
@@ -136,8 +137,10 @@ export function OperationsDialog({ api, scope, task, locale, canResolve, people,
 }
 const CANCELLABLE: TeamTaskView['state'][] = ['queued', 'running', 'waiting'];
 type RunViewer = Pick<TeamsSnapshot, 'uid' | 'bots' | 'directory' | 'pending'>;
-export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, onReply, onChanged }: {
+export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, reason, onReply, onChanged }: {
   task: TeamTaskView; api: TeamsApi; scope: ExecutionScope; locale: string; renderMarkdown?: RenderMarkdown; snapshot: RunViewer;
+  /** What the Bot decided about the message and why, from its auto-reply log. Given only where this person maintains the Bot; it says why a Bot that did not reply stayed silent. */
+  reason?: TriageLogItem;
   /** Start answering the Bot's question; absent where the composer is not at hand. */
   onReply?(task: TeamTaskView): void;
   /** A command changed the task: fetch it again. */
@@ -157,8 +160,12 @@ export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, onR
   const canReply = !!wait && wait.kind === 'human_input' && !!onReply && isMember(wait.recipient)
     && !snapshot.pending.some(item => { const payload = pendingPayload(item); return 'waitId' in payload && payload.waitId === wait.waitId; });
   // A Bot that chose not to answer: one quiet line, nothing to act on. A run that used something still says so: a cost is never hidden (U5).
-  if (task.state === 'declined') return <p className="teams-hint team-bot-run-declined" role="status" title={tokenSplit(task.usage, locale) || undefined}>
-    {[t('teams_task_declined'), task.usage ? usageText(task.usage, locale) : ''].filter(Boolean).join(' · ')}</p>;
+  if (task.state === 'declined') {
+    // Why, for the maintainer only: the reason the Bot's host gave and, when the Decision service judged, how likely it thought a reply was wanted.
+    const why = maintains && reason ? [triageReasonText(t, reason.triage.reason), reason.triage.probability === undefined ? '' : triageProbabilityText(t, reason.triage.probability)] : [];
+    return <p className="teams-hint team-bot-run-declined" role="status" title={tokenSplit(task.usage, locale) || undefined}>
+      {[t('teams_task_declined'), ...why, task.usage ? usageText(task.usage, locale) : ''].filter(Boolean).join(' · ')}</p>;
+  }
   const cancel = async () => {
     if (cancelling) return; setCancelling(true); setError('');
     try { await api.messages(executionCommand(scope, 'cancelTask', { taskId: task.taskId })); }

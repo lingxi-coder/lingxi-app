@@ -105,6 +105,18 @@ internal fun teamWaitExpiryText(expiresAt: Long): String {
 private class RunDetail(val text: String, val tag: String)
 
 /**
+ * Why the Bot stayed silent, for its maintainer: the reason the Bot's host gave and, when the Decision service judged, how likely it thought a reply was wanted.
+ * Null for anyone else (the log is read for the maintainer only, and this is the second check) and for a task with no row.
+ */
+@Composable
+private fun declinedReasonLine(task: TeamTask, viewer: TeamMemberRef?, maintainer: TeamMemberRef?, reason: TeamTriageItem?): String? {
+    if (task.state != "declined" || viewer == null || maintainer != viewer) return null
+    val (words, percent) = TeamTriageRules.reasonParts(reason)
+    val parts = listOfNotNull(words?.let { stringResource(it) }, percent?.let { stringResource(R.string.teams_triage_probability_fmt, it) })
+    return parts.joinToString(" \u00b7 ").ifEmpty { null }
+}
+
+/**
  * What one Bot request looks like in a conversation (U4): the state as a glyph and a word, the Bot's name, one line of detail and the actions. The line is the
  * usage once the run is over (a run cancelled before any model call has nothing to report), who a waiting task waits for, what a task that needs checking needs,
  * and for every other state what to do or what is going on. The text block is one accessibility element, "state, Bot, detail", with the token split as its
@@ -113,13 +125,15 @@ private class RunDetail(val text: String, val tag: String)
  * Actions: Refresh status while the run is going and Open document once it has completed with one, as before; and the member's own: [onReply] answers the
  * Bot's question (set only on the question itself, while the viewer can still answer it), [onCancel] stops a task that has not ended, [onReview] opens the
  * review of an action of unknown outcome. [viewer] is the signed-in member and [maintainer] the Bot's maintainer when its card is known: they decide who may
- * cancel and review. [recipientName] names the member a waiting task waits for (not needed when that is the viewer).
+ * cancel and review. [recipientName] names the member a waiting task waits for (not needed when that is the viewer). [reason] is the Bot's auto-reply log row of
+ * this task, read for the Bot's maintainer only: under "Did not reply" it says why the Bot stayed silent. Nobody else is ever shown it.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun TeamTaskCard(
     task: TeamTask, botName: String, onArtifact: (String) -> Unit, onRefresh: (String) -> Unit = {}, viewer: TeamMemberRef? = null, maintainer: TeamMemberRef? = null,
     recipientName: String = "", onCancel: (String) -> Unit = {}, onReply: (() -> Unit)? = null, onReview: ((String) -> Unit)? = null, modifier: Modifier = Modifier,
+    reason: TeamTriageItem? = null,
 ) {
     var cancelAsked by remember(task.taskId, task.state, task.cancelRequestedAt) { mutableStateOf(false) }
     val run = TeamsBotText.runState(task.state)
@@ -143,6 +157,8 @@ internal fun TeamTaskCard(
         // An outside action of unknown outcome: the maintainer confirms it where the review screen is.
         task.state == "needs_reconciliation" ->
             RunDetail(stringResource(if (resolves) R.string.teams_task_needs_checking_maintainer else R.string.teams_task_needs_checking_hint), "teams.task.checking.${task.taskId}")
+        // A Bot that chose not to answer: why, when this person maintains the Bot and its log has a row for the task; otherwise nothing more than "Did not reply".
+        task.state == "declined" -> declinedReasonLine(task, viewer, maintainer, reason)?.let { RunDetail(it, "teams.task.reason.${task.taskId}") }
         else -> run.detail?.let { RunDetail(stringResource(it), "teams.task.usage.${task.taskId}") }
     }
     val split = if (usageShown) TeamsBotText.tokenSplit(task.usage, words) else null
@@ -263,14 +279,15 @@ internal fun TeamApprovalCard(approval: TeamListApproval, waitId: String, state:
 }
 
 /**
- * [onStopSharing] is the maintainer's Stop sharing (confirmed first); [onList], when set, opens the Bot's shared list; [onExample], when set, starts a chat
- * with one of the Bot's example requests (see [TeamBotMemberInfo]).
+ * [onStopSharing] is the maintainer's Stop sharing (confirmed first); [onList], when set, opens the Bot's shared list; [onTriageLog], when set, opens the Bot's
+ * auto-reply log (set only for its maintainer, and only for a Bot that answers on its own); [onExample], when set, starts a chat with one of the Bot's example
+ * requests (see [TeamBotMemberInfo]).
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun TeamBotCardView(
     bot: TeamBotCard, ownerName: String, uid: String, generation: Long, enabled: Boolean, onMessage: () -> Unit, onStopSharing: () -> Unit,
-    modifier: Modifier = Modifier, onList: (() -> Unit)? = null, onExample: ((String) -> Unit)? = null,
+    modifier: Modifier = Modifier, onList: (() -> Unit)? = null, onExample: ((String) -> Unit)? = null, onTriageLog: (() -> Unit)? = null,
 ) {
     var confirm by remember(bot.sharedBotId, bot.revision, bot.state) { mutableStateOf(false) }
     Column(modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -282,10 +299,11 @@ internal fun TeamBotCardView(
                 Text("${botAvailabilityText(bot)} · ${stringResource(R.string.teams_bot_owner_fmt, ownerName)}", style = MaterialTheme.typography.bodySmall)
                 Text(stringResource(if (bot.usePolicy.getString("mode") == "all") R.string.teams_bot_use_all else R.string.teams_bot_use_listed), style = MaterialTheme.typography.bodySmall)
                 TeamBotMemberInfo(bot, enabled, onExample)
-                // Up to three actions: they wrap under each other rather than run out of the card at a large font size.
+                // Up to four actions: they wrap under each other rather than run out of the card at a large font size.
                 FlowRow {
                     TextButton(enabled = enabled && bot.selectable, onClick = onMessage) { Text(stringResource(R.string.teams_bot_message)) }
                     if (onList != null) TextButton(enabled = enabled, onClick = onList, modifier = Modifier.testTag("teams.bot.list.${bot.sharedBotId}")) { Text(stringResource(R.string.teams_list_open)) }
+                    if (onTriageLog != null) TextButton(enabled = enabled, onClick = onTriageLog, modifier = Modifier.testTag("teams.bot.triage.${bot.sharedBotId}")) { Text(stringResource(R.string.teams_triage_title)) }
                     if (bot.canPause(uid, generation)) TextButton(enabled = enabled, onClick = { confirm = true }) { Text(stringResource(R.string.friends_share_bot_stop)) }
                 }
             }

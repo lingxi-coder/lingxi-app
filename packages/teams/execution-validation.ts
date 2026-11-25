@@ -19,6 +19,8 @@ function shape(fields: Record<string, Check>): Check {
 export const DOCUMENT_BYTES = 256 * 1024;
 /** The longest text of one shared-list item, in UTF-8 bytes, and the most changes one write carries. */
 export const LIST_ITEM_BYTES = 500, LIST_CHANGES = 20;
+/** The most rows one page of a Bot's auto-reply log has. */
+export const TRIAGE_LOG_LIMIT = 50;
 const itemText: Check = v => typeof v === 'string' && v.trim().length > 0 && bytes(v) <= LIST_ITEM_BYTES && !v.includes('\0');
 const listChange: Check = v => record(v) && (v.op === 'add' ? shape({ op: oneOf('add'), text: itemText })(v)
   : v.op === 'update' ? shape({ op: oneOf('update'), itemId: id, text: optional(itemText), done: optional(d => typeof d === 'boolean') })(v) && (v.text !== undefined || v.done !== undefined)
@@ -62,6 +64,7 @@ const payloads: Record<string, Check> = {
   cancelTask: shape({ taskId: id }),
   getTask: shape({ taskId: id }),
   listTasks: shape({ conversationId: optional(id), after: optional(id) }),
+  listTriage: shape({ sharedBotId: id, conversationId: optional(id), cursor: optional(id), limit: optional(v => integer(v) && (v as number) >= 1 && (v as number) <= TRIAGE_LOG_LIMIT) }),
   readArtifact: shape({ artifactId: id, revision: optional(positive) }),
   listArtifactRevisions: shape({ artifactId: id }),
   reviseArtifact: shape({ artifactId: id, expectedRevision: positive, operationId: id, document: shape({

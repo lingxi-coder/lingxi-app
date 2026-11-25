@@ -35,7 +35,9 @@ import java.util.UUID
 internal data class TeamMessagingState(val cache: TeamMessageCache? = null, val selected: String = "", val offline: Boolean = true, val error: String = "", val revoked: Boolean = false, val submitting: Boolean = false, val bots: List<TeamBotCard> = emptyList(), val tasks: List<TeamTask> = emptyList(), val artifact: TeamArtifact? = null,
     val directoryCached: Boolean = true, val directoryReady: Boolean = false, val readsReady: Boolean = false, val botsLoaded: Boolean = false, val botsFailed: Boolean = false,
     /** Counts the service's Bot change signals (a Bot, its tasks or its shared list changed). An open list reads itself again on each. */
-    val botSignals: Long = 0, val loadingHistory: Boolean = false)
+    val botSignals: Long = 0, val loadingHistory: Boolean = false,
+    /** Why the Bot of a Bot DM stayed silent, by task: the rows of the Bot's auto-reply log, read for the person who maintains the Bot and for nobody else ([TeamMessagingModel.loadTriageReasons]). */
+    val triageReasons: Map<String, TeamTriageItem> = emptyMap())
 /**
  * The selected team's full messaging: directory, reads, signals, the open thread, the HTTP command journal and the Bot
  * cards and runs. Owned by [TeamsWorkspace], which starts and stops it; [scope] runs on the main thread.
@@ -70,10 +72,12 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
     private var directoryCached = true
     private var messagesCached = true
     private var botsDirty = true
+    /** The tasks whose reason was already looked for, found or not: a task is looked for once. */
+    private val triageLooked = mutableSetOf<String>()
     private val authListener = FirebaseAuth.AuthStateListener { if (active && it.currentUser?.uid != uid) invalidate() }
     fun start(uid: String, team: TeamSummary) {
         stop(); active = true; lifecycle++; this.uid = uid; teamId = team.id; generation = team.generation
-        botsDirty = true; directoryCached = true; messagesCached = true
+        botsDirty = true; directoryCached = true; messagesCached = true; triageLooked.clear()
         mutable.value = TeamMessagingState()
         auth.addAuthStateListener(authListener)
         val life = lifecycle
@@ -129,7 +133,7 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
     private fun sdkOffline(selected: String = mutable.value.selected): Boolean = directoryCached || (selected.isNotEmpty() && messagesCached)
     /** A stored document broke the contract: show nothing half-parsed, say so, and stop this team's listeners (Desktop `INVALID_DATA`). */
     private fun invalidData() {
-        mutable.update { it.copy(cache = it.cache?.copy(conversations = emptyList(), threads = emptyMap()), selected = "", error = "INVALID_DATA", offline = true, bots = emptyList(), tasks = emptyList(), artifact = null, readsReady = false) }
+        mutable.update { it.copy(cache = it.cache?.copy(conversations = emptyList(), threads = emptyMap()), selected = "", error = "INVALID_DATA", offline = true, bots = emptyList(), tasks = emptyList(), artifact = null, readsReady = false, triageReasons = emptyMap()) }
         stop()
     }
     /** The banner's Reconnect: ask the server again (Bot cards and runs included); the SDK listeners reconnect on their own. */
@@ -144,7 +148,7 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         active = false; lifecycle++; job?.cancel(); retry?.cancel(); deadline?.cancel(); deadline = null; job = null; retry = null
         listener?.remove(); readListener?.remove(); memberListener?.remove(); signalListener?.remove()
         listener = null; readListener = null; memberListener = null; signalListener = null
-        historyJob?.cancel(); syncJob?.cancel(); membershipReady = false; selectionEpoch++
+        historyJob?.cancel(); syncJob?.cancel(); membershipReady = false; selectionEpoch++; triageLooked.clear()
         auth.removeAuthStateListener(authListener); running = false; again = false
     }
     /** Sign-out or account change: stop everything and forget the team. */
@@ -454,6 +458,33 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
     suspend fun listHistory(sharedBotId: String, beforeRevision: Long? = null): TeamSharedListHistory = onModel {
         val payload = JSONObject().put("sharedBotId", sharedBotId); if (beforeRevision != null) payload.put("beforeRevision", beforeRevision)
         TeamSharedListHistory.parse(execute("listHistory", payload, lifecycle))
+    }
+    /**
+     * A page of a Bot's auto-reply log, newest verdict first, for the person who maintains the Bot (anyone else is refused: `MAINTAINER_REQUIRED`). [conversationId] asks
+     * for one Chat; [cursor] is the `nextCursor` of the page before; the service gives at most [TeamExecutionContract.TRIAGE_LIMIT] rows.
+     */
+    suspend fun listTriage(sharedBotId: String, conversationId: String? = null, cursor: String? = null, limit: Int = TeamTriageRules.PAGE): TeamTriagePage = onModel {
+        val payload = JSONObject().put("sharedBotId", sharedBotId).put("limit", limit)
+        if (conversationId != null) payload.put("conversationId", conversationId)
+        if (cursor != null) payload.put("cursor", cursor)
+        TeamTriagePage.parse(execute("listTriage", payload, lifecycle))
+    }
+    /**
+     * Looks the verdicts of these tasks of a Bot DM up in the Bot's log, once each, for [TeamMessagingState.triageReasons]. The reason of a silence is a courtesy: a log
+     * that cannot be read, or a task with no row in it, leaves the line that says the Bot did not reply as it was. Only ever asked for by the Bot's maintainer.
+     */
+    suspend fun loadTriageReasons(sharedBotId: String, conversationId: String, taskIds: List<String>) {
+        onModel {
+            val fresh = taskIds.filter { it !in triageLooked && it !in mutable.value.triageReasons }
+            if (!active || fresh.isEmpty()) return@onModel
+            triageLooked += fresh
+            val life = lifecycle
+            val found = try { TeamTriageSearch.find(fresh) { cursor, limit -> listTriage(sharedBotId, conversationId, cursor, limit) } }
+                // A search that was cut short by the screen asking again is not a look: the next one looks for these.
+                catch (cancelled: CancellationException) { triageLooked -= fresh.toSet(); throw cancelled }
+            if (!active || life != lifecycle || found.isEmpty()) return@onModel
+            mutable.update { it.copy(triageReasons = it.triageReasons + found) }
+        }
     }
     suspend fun writeList(sharedBotId: String, operationId: String, expectedDataRevision: Long, changes: List<TeamSharedListChange>) {
         onModel { execute("writeList", JSONObject().put("sharedBotId", sharedBotId).put("operationId", operationId).put("expectedDataRevision", expectedDataRevision).put("changes", changes.json()), lifecycle) }

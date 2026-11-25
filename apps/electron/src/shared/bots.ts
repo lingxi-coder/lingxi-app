@@ -183,6 +183,24 @@ export interface BotReachUi {
 
 export type BotReplyApprovalUi = 'never' | 'uncertain' | 'always';
 
+/** What an automatic-reply setting may hold: the store checks these on disk, the editor before it sends. */
+export const BOT_REPLY_KEYWORDS_MAX = 32;
+export const BOT_REPLY_KEYWORD_CHARS_MAX = 64;
+export const BOT_REPLY_POLICY_CHARS_MAX = 4000;
+/** How much of the policy the Decision service is shown: the rest is the maintainer's to cut. */
+export const BOT_REPLY_POLICY_USED_CHARS = 1000;
+export const BOT_REPLY_COOLDOWN_SEC_MAX = 24 * 60 * 60;
+/** `HH:MM`, 24-hour. */
+export const BOT_CLOCK_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+/** Whether `value` names a time zone this runtime knows: a short line of text that `Intl` accepts. */
+export function validTimeZone(value: unknown): value is string {
+  // eslint-disable-next-line no-control-regex
+  if (typeof value !== 'string' || value.length === 0 || value.length > 64 || /[\u0000-\u001f\u007f]/.test(value)) return false;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: value }); return true; } catch { return false; }
+}
+/** The thresholds a Bot starts with: below the first it stays silent, from the second it answers. */
+export const BOT_REPLY_THRESHOLDS_DEFAULT: Readonly<{ decline: number; run: number }> = { decline: 0.3, run: 0.75 };
+
 export interface BotQuietHoursUi {
   /** `HH:MM`, 24-hour. */
   start: string;
@@ -199,7 +217,6 @@ export interface BotAutoReplyUi {
   cooldownSec: number;
   thresholds: { decline: number; run: number };
   approval: BotReplyApprovalUi;
-  decisionProviderId?: string;
 }
 
 export interface BotUi {

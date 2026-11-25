@@ -221,7 +221,7 @@ test('all Bots read the service data session, including current ACL and account 
 test('public message boundary rejects retired execution and private host commands',async()=>{
  const service=new TeamsService({snapshot:()=>({user:{uid:'owner'}}),getIdToken:async()=>'',onChanged:()=>()=>{}},{});
  for(const action of ['bindBot','claimBot','startBot','finishBot','botQueue','publishSharedBot','prepareTask','validateTask','startTask','completeTask','pauseTask','continueTask','heartbeatDeployment','activateDeployment','listHostTasks',
-  'readTaskList','recordOperation','writeTaskList','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer'])await assert.rejects(service.messages({schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload:{}} as any,'owner'),/INVALID_INPUT/);service.close();
+  'readTaskList','recordOperation','writeTaskList','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer','declineTask','recordTriage','listTriage'])await assert.rejects(service.messages({schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload:{}} as any,'owner'),/INVALID_INPUT/);service.close();
 });
 test('the real private TeamsService forwards every connector command while rejecting unknown actions and stale accounts',async t=>{
  let uid='owner',epoch=0,notify=()=>{},requests=0;const service=new TeamsService({snapshot:()=>({user:{uid}}),sessionEpoch:()=>epoch,getIdToken:async()=>'synthetic-token',onChanged:cb=>{notify=cb;return()=>{};}},{});t.after(()=>service.close());
@@ -229,7 +229,7 @@ test('the real private TeamsService forwards every connector command while rejec
  const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});let sent:any,moveAccount=false;
  globalThis.fetch=(async(_url,init)=>{requests++;sent=JSON.parse(String(init?.body));if(moveAccount){uid='other';epoch++;notify();}return new Response(JSON.stringify({forwarded:true}),{status:200});}) as typeof fetch;
  const context=service.hostContext()!,actions=['listSharedBots','publishSharedBot','heartbeatDeployment','activateDeployment','listHostTasks','prepareTask','validateTask','startTask','completeTask','pauseTask','continueTask','getTask',
-  'readTaskList','recordOperation','writeTaskList','readAttachmentPart','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer'];
+  'readTaskList','recordOperation','writeTaskList','readAttachmentPart','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer','declineTask','recordTriage','listTriage'];
  for(const action of actions){const command={schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload:{synthetic:'preserved'}};assert.deepEqual(await service.hostMessages(context,command),{forwarded:true},action);assert.deepEqual(sent,command);}
  assert.equal(requests,actions.length);for(const action of ['submit','answerWait','decideWait','cancelTask','writeList','setCustomClaim','unknown'])await assert.rejects(service.hostMessages(context,{schemaVersion:1,action}),/INVALID_INPUT/);
  await assert.rejects(service.hostMessages(context,{schemaVersion:2,action:'readTaskList'}),/INVALID_INPUT/);assert.equal(requests,actions.length);
@@ -1530,9 +1530,9 @@ async function waitFor(check:()=>boolean,ms=8000){const end=Date.now()+ms;while(
 const decisionOf=(probability:number|undefined,configured=true,seen:unknown[]=[])=>({isConfigured:async()=>configured,evaluateTool:async(input:unknown)=>{seen.push(input);if(probability===undefined)throw new Error('Decision service is busy');return {state_revision:0,answers:{reply:{type:'binary' as const,probability}},usage:{input_tokens:1,output_tokens:1},actual_model:null,elapsed_ms:1};}});
 /** A fixture whose service knows the Chat kind, settles a declined task and, as the server does, ends the earlier unasked tasks of the Chat
  * when a later one starts or is declined on a verdict. */
-function autoFixture(t:any,{decision,kind='group',result}:{decision?:ReturnType<typeof decisionOf>;kind?:string;result?:(o:TeamHostProcessOptions)=>TeamHostResult}={}){
+function autoFixture(t:any,{decision,kind='group',result,more={}}:{decision?:ReturnType<typeof decisionOf>;kind?:string;result?:(o:TeamHostProcessOptions)=>TeamHostResult;more?:Partial<ConstructorParameters<typeof TeamConnector>[0]>}={}){
  const bootstraps:any[]=[];
- const f=fixture(t,async o=>{bootstraps.push(o.bootstrap);return o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor}:result?.(o)??{status:'completed',cursor,text:'Done',finishedAt:Date.now()};},decision?{decision}:{});
+ const f=fixture(t,async o=>{bootstraps.push(o.bootstrap);return o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor}:result?.(o)??{status:'completed',cursor,text:'Done',finishedAt:Date.now()};},{...(decision?{decision}:{}),...more});
  const original=f.mock.service.hostMessages.bind(f.mock.service);
  f.mock.service.hostMessages=async(c,command)=>{
   const supersede=(task:any)=>{for(const v of f.mock.tasks)if(v.conversationId===task.conversationId&&v.state==='queued'&&(v as any).optional&&!(v as any).resume&&v.messageSeq<task.messageSeq)v.state='declined';};
@@ -1605,7 +1605,7 @@ test('auto-reply: a verdict is kept while the Bot×Chat lock holds the start bac
  const inner=f.mock.service.hostMessages;let starts=0;
  f.mock.service.hostMessages=async(c,command)=>{if(command.action==='startTask'&&++starts===1){f.mock.commands.push(command);return {execute:false,taskId:'task00001'} as any;}return inner(c,command);};
  f.mock.tasks.push(f.task(1));f.mock.wake();await waitFor(()=>f.sent('completeTask').length===1);
- assert.equal(starts,2);assert.equal(seen.length,1);
+ assert.equal(starts,2);assert.equal(seen.length,1);assert.equal(f.sent('recordTriage').length,1,'judged once, so recorded once');
 });
 test('auto-reply: a run nobody asked is offered no list whose changes wait for the requester; an asked one is',async t=>{
  const list={...groceries,approval:'requester' as const};
@@ -1634,6 +1634,134 @@ test('auto-reply: a Bot is published to answer unasked only from a Desktop with 
  assert.deepEqual(f.sent('publishSharedBot').at(-1).payload.autoReply,{daily:20});
  assert.equal((await f.connector.status('owner')).decisionConfigured,true);
  assert.equal((await none.connector.status('owner')).decisionConfigured,false);
+});
+
+// ---- Auto-reply: the Bot's own settings, and the verdicts told to the service ----
+/** The Bot's own auto-reply settings, as its owner saves them in `bot.json`. */
+const setReply=(f:ReturnType<typeof autoFixture>,change:Record<string,unknown>)=>{const bot=f.store.get(f.bot.bot_id);f.store.update(bot.bot_id,bot.revision,{autoReply:{...bot.autoReply,...change}} as any);};
+const hostPayload=(f:ReturnType<typeof autoFixture>,taskId='task00001')=>{const sent=f.sent('recordTriage')[0].payload;return {deploymentId:sent.deploymentId,hostId:f.privateStore.hostId,accountEpoch:sent.accountEpoch,taskId};};
+/** Every request for Chat messages the host makes, as the service gets it. */
+const watchReads=(f:ReturnType<typeof autoFixture>)=>{const requests:any[]=[],read=f.mock.service.hostReadChat;f.mock.service.hostReadChat=async(c,request)=>{requests.push(request);return read(c,request);};return requests;};
+test('auto-reply: every verdict is told to the service in codes before the host acts on it, and a task is recorded once',async t=>{
+ for(const [probability,action,reason] of [[0.1,'decline','below_threshold'],[0.5,'run_may_decline','between_thresholds'],[0.9,'run','above_threshold']] as const){
+  const f=autoFixture(t,{decision:decisionOf(probability)});await f.connector.publishLocalBot('owner',f.input);
+  const acted=action==='decline'?'declineTask':'startTask';
+  f.mock.tasks.push(f.task(1));f.mock.wake();await waitFor(()=>f.sent(acted).length===1&&(action==='decline'||f.sent('completeTask').length===1));
+  assert.equal(f.sent('recordTriage').length,1);
+  assert.deepEqual(f.sent('recordTriage')[0].payload,{...hostPayload(f),action,source:'decision',reason,probability},action);
+  const order=f.mock.commands.map(c=>c.action);assert.ok(order.indexOf('recordTriage')<order.indexOf(acted),`recorded before it is acted on: ${order.join()}`);
+  assert.doesNotMatch(JSON.stringify(f.sent('recordTriage')[0].payload),/decision service|assistant/iu,'codes only');
+ }
+});
+test('auto-reply: a call to the Bot, a keyword and no verdict are recorded as what they are, with no probability',async t=>{
+ const named=(f:ReturnType<typeof autoFixture>,text:string)=>{const read=f.mock.service.hostReadChat;f.mock.service.hostReadChat=async(c,request)=>{const result=await read(c,request);
+  return {...result,messages:result.messages.map(message=>message.seq===1?{...message,text}:message)};};};
+ const verdict=async(f:ReturnType<typeof autoFixture>,acted:string)=>{await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(f.task(1));f.mock.wake();await waitFor(()=>f.sent(acted).length===1);
+  assert.equal(f.sent('recordTriage').length,1);const {taskId:_t,deploymentId:_d,hostId:_h,accountEpoch:_a,...rest}=f.sent('recordTriage')[0].payload;return rest;};
+ const seen:unknown[]=[];
+ const called=autoFixture(t,{decision:decisionOf(0,true,seen)});named(called,'Personal, which hotel is quietest?');
+ assert.deepEqual(await verdict(called,'startTask'),{action:'run',source:'rule',reason:'addressed'});
+ const keyword=autoFixture(t,{decision:decisionOf(0,true,seen)});setReply(keyword,{keywords:['Hotel']});named(keyword,'which HOTEL is quietest?');
+ assert.deepEqual(await verdict(keyword,'startTask'),{action:'run',source:'rule',reason:'keyword'});
+ assert.equal(seen.length,0,'neither asked the Decision service');
+ const quiet=autoFixture(t);assert.deepEqual(await verdict(quiet,'declineTask'),{action:'decline',source:'fallback',reason:'decision_unavailable'});
+ const dm=autoFixture(t,{kind:'bot_dm'});assert.deepEqual(await verdict(dm,'startTask'),{action:'run',source:'fallback',reason:'decision_unavailable'});
+});
+test('auto-reply: a verdict that cannot be recorded is logged and the task goes on: the decline is still sent, the run still runs',async t=>{
+ for(const [probability,acted] of [[0.1,'declineTask'],[0.9,'startTask']] as const){
+  const logs:Array<[string,Record<string,unknown>]>=[];
+  const f=autoFixture(t,{decision:decisionOf(probability),more:{diagnostics:(event,details)=>{logs.push([event,details]);}}});await f.connector.publishLocalBot('owner',f.input);
+  const inner=f.mock.service.hostMessages;f.mock.service.hostMessages=async(c,command)=>{if(command.action==='recordTriage'){f.mock.commands.push(command);throw new TeamsApiError('SERVICE_UNAVAILABLE',503);}return inner(c,command);};
+  f.mock.tasks.push(f.task(1));f.mock.wake();await waitFor(()=>f.sent(acted).length===1&&(acted==='declineTask'||f.sent('completeTask').length===1));
+  assert.equal(f.sent('recordTriage').length,1,'not asked again for the same verdict');
+  assert.deepEqual(logs.filter(([event])=>event==='team_triage_not_recorded').map(([,details])=>details),[{taskId:'task00001',code:'SERVICE_UNAVAILABLE'}]);
+  if(acted==='declineTask')assert.equal(f.runs().length,0);else assert.equal(f.sent('completeTask')[0].payload.outcome,'completed');
+ }
+});
+test('auto-reply: the Bot\'s own thresholds and policy are what the Decision service is judged by',async t=>{
+ const seen:any[]=[],f=autoFixture(t,{decision:decisionOf(0.1,true,seen)});
+ setReply(f,{policy:'Answer questions about billing. Leave scheduling talk alone.',thresholds:{decline:0.05,run:0.2}});
+ await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(f.task(1));f.mock.wake();await waitFor(()=>f.sent('completeTask').length===1);
+ assert.deepEqual({...f.sent('recordTriage')[0].payload,...hostPayload(f)},{...hostPayload(f),action:'run_may_decline',source:'decision',reason:'between_thresholds',probability:0.1},'0.1 declines by the default thresholds, and not by these');
+ assert.equal(f.runs()[0].mayDecline,true);
+ assert.equal(seen[0].state.assistant.maintainerInstructions,'Answer questions about billing. Leave scheduling talk alone.');
+ assert.match(seen[0].questions.reply.instructions,/maintainerInstructions[^.]*: that is the criterion/u);
+ // Another Bot of the same computer, with the defaults: the same answer declines.
+ const other=autoFixture(t,{decision:decisionOf(0.1)});await other.connector.publishLocalBot('owner',other.input);
+ other.mock.tasks.push(other.task(1));other.mock.wake();await waitFor(()=>other.sent('declineTask').length===1);
+ assert.equal(other.sent('recordTriage')[0].payload.reason,'below_threshold');
+});
+test('auto-reply: quiet hours are read in the maintainer\'s zone at the time the service gave the message, not this computer\'s',async t=>{
+ // The messages of this fixture are stamped 2023-11-14 22:13 UTC by the service.
+ const outcome=async(quietHours:Record<string,string>|undefined)=>{
+  const seen:unknown[]=[],f=autoFixture(t,{decision:decisionOf(0.9,true,seen)});setReply(f,{quietHours});await f.connector.publishLocalBot('owner',f.input);
+  f.mock.tasks.push(f.task(1));f.mock.wake();await waitFor(()=>f.sent('recordTriage').length===1);
+  const {action,source,reason}=f.sent('recordTriage')[0].payload;await waitFor(()=>f.sent('declineTask').length+f.sent('startTask').length===1);return {action,source,reason,asked:seen.length};};
+ assert.deepEqual(await outcome({start:'22:00',end:'23:00',timeZone:'UTC'}),{action:'decline',source:'quiet',reason:'quiet_hours',asked:0});
+ assert.deepEqual(await outcome({start:'21:00',end:'06:00',timeZone:'UTC'}),{action:'decline',source:'quiet',reason:'quiet_hours',asked:0},'past midnight');
+ assert.deepEqual(await outcome({start:'06:00',end:'22:00',timeZone:'UTC'}),{action:'run',source:'decision',reason:'above_threshold',asked:1});
+ assert.deepEqual(await outcome({start:'06:00',end:'08:00',timeZone:'Asia/Shanghai'}),{action:'decline',source:'quiet',reason:'quiet_hours',asked:0},'06:13 the next morning in Shanghai');
+ assert.deepEqual(await outcome({start:'22:00',end:'23:00',timeZone:'Asia/Shanghai'}),{action:'run',source:'decision',reason:'above_threshold',asked:1});
+ assert.deepEqual(await outcome(undefined),{action:'run',source:'decision',reason:'above_threshold',asked:1});
+});
+test('auto-reply: the cooldown counts from the Bot\'s last message by the service\'s time, and reads further back only when the window needs it',async t=>{
+ const spoke=(seq:number,createdAt:number)=>({messageId:`message${String(seq).padStart(6,'0')}`,seq,changeSeq:seq,changeId:`change${String(seq).padStart(6,'0')}`,author:{kind:'shared_bot' as const,sharedBotId,displayName:'Personal'},createdAt,text:'Here you go.'});
+ // Task 30 comes after 29 earlier messages; the host first reads the 13 before it (18 to 30) and then at most the 200 before those.
+ const cooled=async(cooldownSec:number,{inRecent,further}:{inRecent?:boolean;further?:boolean}={})=>{
+  const seen:unknown[]=[],f=autoFixture(t,{decision:decisionOf(0.9,true,seen)});setReply(f,{cooldownSec});await f.connector.publishLocalBot('owner',f.input);
+  const requests=watchReads(f),read=f.mock.service.hostReadChat;
+  f.mock.service.hostReadChat=async(c,request:any)=>{const result=await read(c,request);
+   if(request.mode!=='before')return result;
+   const mine=request.limit===200?further?spoke(10,1700000000000+5):undefined:inRecent?spoke(25,1700000000000+2):undefined;
+   return mine?{...result,messages:result.messages.map(message=>message.seq===mine.seq?mine:message)}:result;};
+  f.mock.tasks.push({...f.task(30),messageId:'message000030'});f.mock.wake();await waitFor(()=>f.sent('recordTriage').length===1);
+  const {action,source,reason}=f.sent('recordTriage')[0].payload;return {action,source,reason,asked:seen.length,limits:requests.filter(r=>r.mode==='before').map(r=>r.limit)};};
+ const cooldown={action:'decline',source:'cooldown',reason:'cooldown'},judged={action:'run',source:'decision',reason:'above_threshold'};
+ // The Bot spoke 10 ms before the message, among the 13 read: no more is read.
+ assert.deepEqual(await cooled(60,{inRecent:true}),{...cooldown,asked:0,limits:[13]});
+ // Nothing of the Bot's in the 13, which begin inside the window: the 200 before them are read, and its message is among them.
+ assert.deepEqual(await cooled(60,{further:true}),{...cooldown,asked:0,limits:[13,200]});
+ // Nothing of the Bot's anywhere in them: it did not speak lately, and the Decision service judges.
+ assert.deepEqual(await cooled(60),{...judged,asked:1,limits:[13,200]});
+ // A cooldown of 0 is none: the Bot's own message just before changes nothing, and nothing more is read.
+ assert.deepEqual(await cooled(0,{inRecent:true}),{...judged,asked:1,limits:[13]});
+});
+test('auto-reply: a Bot DM has neither quiet hours nor a cooldown to keep',async t=>{
+ const seen:unknown[]=[],f=autoFixture(t,{kind:'bot_dm',decision:decisionOf(0.9,true,seen)});setReply(f,{cooldownSec:3600,quietHours:{start:'00:00',end:'23:59',timeZone:'UTC'}});
+ await f.connector.publishLocalBot('owner',f.input);const requests=watchReads(f);f.mock.tasks.push({...f.task(30),messageId:'message000030'});f.mock.wake();await waitFor(()=>f.sent('completeTask').length===1);
+ const {action,source,reason}=f.sent('recordTriage')[0].payload;assert.deepEqual({action,source,reason},{action:'run',source:'decision',reason:'above_threshold'});
+ assert.deepEqual(requests.filter(r=>r.mode==='before').map(r=>r.limit),[13]);
+});
+test('auto-reply log: the Teams a local Bot is published to are the ones its account is still in',async t=>{
+ const f=autoFixture(t,{decision:decisionOf(0.5)});
+ assert.deepEqual(await f.connector.triageTargets('owner',f.bot.bot_id),[],'not published yet');
+ await f.connector.publishLocalBot('owner',f.input);
+ assert.deepEqual(await f.connector.triageTargets('owner',f.bot.bot_id),[{teamId,teamName:'Team',sharedBotId}]);
+ assert.deepEqual(await f.connector.triageTargets('owner','Bot9999999999999999999'),[],'a Bot that was never published');
+ const another=f.store.create({name:'Another'});assert.deepEqual(await f.connector.triageTargets('owner',another.bot_id),[]);
+ await assert.rejects(f.connector.triageTargets('owner','x'),/INVALID_INPUT/);
+ await assert.rejects(f.connector.triageTargets('other',f.bot.bot_id),/INVALID_SESSION/);
+ const list=f.mock.service.list;f.mock.service.list=async()=>({teams:[]});assert.deepEqual(await f.connector.triageTargets('owner',f.bot.bot_id),[],'a Team that was left');f.mock.service.list=list;
+ f.mock.switch();await assert.rejects(f.connector.triageTargets('owner',f.bot.bot_id));
+});
+test('auto-reply log: a page is read as the Bot\'s maintainer through its own binding, and only for a Bot this Desktop publishes',async t=>{
+ const f=autoFixture(t,{decision:decisionOf(0.5)});await f.connector.publishLocalBot('owner',f.input);
+ const page={items:[{taskId:'task00001',conversationId,messageId:'message000001',createdAt:1700000000000,triage:{action:'decline',source:'cooldown',reason:'cooldown',at:1700000001000},state:'declined',conversationTitle:'Trip'}],nextCursor:'task00001'};
+ const inner=f.mock.service.hostMessages;f.mock.service.hostMessages=async(c,command)=>{if(command.action==='listTriage'){f.mock.commands.push(command);return page as any;}return inner(c,command);};
+ assert.deepEqual(await f.connector.triageLog('owner',{teamId,sharedBotId}),page);
+ assert.deepEqual(await f.connector.triageLog('owner',{teamId,sharedBotId,conversationId,cursor:'task00001',limit:20}),page);
+ const [first,second]=f.sent('listTriage');
+ assert.deepEqual([first.teamId,first.generation,first.payload],[teamId,1,{sharedBotId}],'a read of the maintainer\'s: no host or deployment in it');
+ assert.deepEqual(second.payload,{sharedBotId,conversationId,cursor:'task00001',limit:20});
+ const before=f.sent('listTriage').length;
+ for(const bad of [{teamId:'x',sharedBotId},{teamId,sharedBotId:'x'},{teamId,sharedBotId,conversationId:'x'},{teamId,sharedBotId,cursor:'x'},{teamId,sharedBotId,limit:0},{teamId,sharedBotId,limit:51},{teamId,sharedBotId,limit:1.5},undefined])
+  await assert.rejects(f.connector.triageLog('owner',bad as any),/INVALID_INPUT/,JSON.stringify(bad));
+ await assert.rejects(f.connector.triageLog('owner',{teamId:'team00002',sharedBotId}),/SHARED_BOT_REQUIRED/,'not published to that Team from here');
+ await assert.rejects(f.connector.triageLog('owner',{teamId,sharedBotId:'sharedbot002'}),/SHARED_BOT_REQUIRED/);
+ await assert.rejects(f.connector.triageLog('other',{teamId,sharedBotId}),/INVALID_SESSION/);
+ assert.equal(f.sent('listTriage').length,before,'nothing of that was sent');
+ f.mock.service.hostMessages=async()=>{throw new TeamsApiError('MAINTAINER_REQUIRED',403);};
+ await assert.rejects(f.connector.triageLog('owner',{teamId,sharedBotId}),{code:'MAINTAINER_REQUIRED'});
 });
 
 test('Dataset v2 normal Team Bot preparation stops when its Team task is cancelled', async t => {

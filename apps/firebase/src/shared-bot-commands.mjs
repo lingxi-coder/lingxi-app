@@ -58,6 +58,15 @@ export const listChanges = z.array(z.discriminatedUnion('op', [
   z.object({ op: z.literal('remove'), itemId: executionId }).strict(),
 ])).min(1).max(20);
 const listWrite = { expectedDataRevision: cursor, changes: listChanges };
+/**
+ * What a host decided about an unasked task, which step of its judgement decided it, and why: the codes of `packages/teams/execution.ts`
+ * (`TRIAGE_ACTIONS`, `TRIAGE_SOURCES`, `TRIAGE_REASONS`), which `test/bot-triage.test.mjs` checks against. Codes only, never model text.
+ */
+export const triageActions = ['decline', 'run', 'run_may_decline'];
+export const triageSources = ['quiet', 'cooldown', 'rule', 'decision', 'fallback'];
+export const triageReasons = ['quiet_hours', 'cooldown', 'keyword', 'addressed', 'below_threshold', 'between_thresholds', 'above_threshold', 'decision_unavailable', 'message_unavailable'];
+/** The most rows of the auto-reply log one page carries. */
+export const triageLogPage = 50;
 const pause = { ...host, ...task, permitId: executionId, waitId: executionId, requestDigest: digest, checkpointDigest: digest,
   pausedAt: cursor, expiresInMs: z.number().int().min(60000).max(86400000), dispatchedRequests: cursor,
   inputGrantIds: grantIds, outputAudience };
@@ -141,6 +150,12 @@ const payloads = {
   // The host leaves an optional task unanswered before any model runs: its triage said no, or a later message of the
   // same Chat superseded it.
   declineTask: z.object({ ...host, ...task, reason: z.enum(['triage', 'superseded', 'revoked']) }).strict(),
+  // The host says what it decided about an optional task, before it acts on it: the maintainer reads these in the auto-reply log.
+  recordTriage: z.object({ ...host, ...task, action: z.enum(triageActions), source: z.enum(triageSources), reason: z.enum(triageReasons).optional(),
+    probability: z.number().min(0).max(1).optional() }).strict(),
+  // The maintainer reads that log for one of their Bots, newest verdict first, optionally for one Chat. `cursor` is the `nextCursor` of the page before.
+  listTriage: z.object({ sharedBotId: executionId, conversationId: executionId.optional(), cursor: executionId.optional(),
+    limit: z.number().int().min(1).max(triageLogPage).optional() }).strict(),
   // A question for the requester, or (M2 Q05) one exact list write the requester is asked to approve.
   pauseTask: z.discriminatedUnion('kind', [
     z.object({ ...pause, kind: z.literal('human_input'),

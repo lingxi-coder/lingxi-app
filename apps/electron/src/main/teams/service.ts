@@ -4,7 +4,7 @@ import type { FirebaseOptions } from 'firebase/app';
 import type { Firestore } from 'firebase/firestore';
 import { TeamsApiError, teamsTransport, type TeamCommand, type TeamDetail, type TeamResult, type TeamSummary } from '../../../../../packages/teams';
 import type { MessageSignal, MessageSnapshot, MessageCommand, MessageScope, TeamMessage } from '../../../../../packages/teams/messages';
-import type { AcceptSharedBotInput, LocalPublishableBot, OfferSharedBotInput, PublishLocalBotInput, PublishedKnowledge, SharedHostStatus, SelectedSharedFile } from '../../../../../packages/teams/execution';
+import type { AcceptSharedBotInput, LocalPublishableBot, OfferSharedBotInput, PublishLocalBotInput, PublishedKnowledge, SharedHostStatus, SelectedSharedFile, TriageLogPage, TriageLogRequest, TriageTarget } from '../../../../../packages/teams/execution';
 import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source';
 import { createServiceChatReader, isServiceId, isServiceMessageCommand, servicesTransport, type ServiceCommand } from '../../../../../packages/teams/hosted-service';
 import { readPrivateDataPage, validPreviewLease, type PrivatePreviewLease, type PrivatePreviewPage, type PrivatePreviewProof } from './dataPreview.js';
@@ -25,6 +25,8 @@ export interface LocalTeamHost {
   localBots(uid: string): Promise<LocalPublishableBot[]>;
   selectSharedFiles(uid: string, instanceId: string): Promise<SelectedSharedFile[]>;
   publishedKnowledge(uid: string, teamId: string, sharedBotId: string): Promise<PublishedKnowledge>;
+  triageTargets(uid: string, instanceId: string): Promise<TriageTarget[]>;
+  triageLog(uid: string, request: TriageLogRequest): Promise<TriageLogPage>;
   datasetBotProgram?(uid: string, scope: DatasetBotScope): Promise<DatasetTaskProgram>;
   publishLocalBot(uid: string, input: PublishLocalBotInput): Promise<{ sharedBotId: string; revision: number }>;
   offerSharedBot(uid: string, input: OfferSharedBotInput): Promise<void>;
@@ -267,6 +269,8 @@ export class TeamsService {
   selectSharedFiles(uid: string, instanceId: string): Promise<SelectedSharedFile[]> { this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE'); return this.host.selectSharedFiles(uid, instanceId); }
   hostStatus(uid: string): Promise<SharedHostStatus> { this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE'); return this.host.status(uid); }
   publishedKnowledge(uid: string, teamId: string, sharedBotId: string): Promise<PublishedKnowledge> { this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE'); return this.host.publishedKnowledge(uid, teamId, sharedBotId); }
+  triageTargets(uid: string, instanceId: string): Promise<TriageTarget[]> { this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE'); return this.host.triageTargets(uid, instanceId); }
+  triageLog(uid: string, request: TriageLogRequest): Promise<TriageLogPage> { this.assertHostContext({ uid, epoch: this.epoch }); if (!this.host) throw new Error('TEAM_HOST_UNAVAILABLE'); return this.host.triageLog(uid, request); }
   datasetBotProgram(uid: string, scope: DatasetBotScope): Promise<DatasetTaskProgram> {
     this.assertHostContext({ uid, epoch: this.epoch });
     if (!this.host?.datasetBotProgram) throw new Error('TEAM_HOST_UNAVAILABLE');
@@ -346,7 +350,7 @@ export class TeamsService {
       'listSharedBots', 'publishSharedBot', 'heartbeatDeployment', 'activateDeployment', 'listHostTasks',
       'prepareTask', 'validateTask', 'startTask', 'completeTask', 'pauseTask', 'continueTask', 'getTask',
       'readTaskList', 'recordOperation', 'writeTaskList', 'readAttachmentPart',
-      'putTransferPart', 'offerTransfer', 'acceptTransfer', 'readTransferPart', 'completeTransfer', 'declineTask',
+      'putTransferPart', 'offerTransfer', 'acceptTransfer', 'readTransferPart', 'completeTransfer', 'declineTask', 'recordTriage', 'listTriage',
     ].includes(command.action as string)) throw new Error('INVALID_INPUT');
     const session = await this.connect(context.uid); this.assertHostContext(context);
     const { collection, onSnapshot } = this.sdk!;

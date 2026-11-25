@@ -1,7 +1,7 @@
 import type { DatasetBindingDraft, DatasetBotScope } from './dataset-run.js';
 import type { DataRequest, LocalDataSourceAnswer, LocalDataSourceCommand } from './lingxi-data.js';
 import type { MessageApi, MessageCommand, MessageScope, TeamMessage } from './messages';
-import type { LocalPublishableBot, SelectedSharedFile, PublishLocalBotInput, PublishedKnowledge, SharedHostStatus, OfferSharedBotInput, AcceptSharedBotInput } from './execution';
+import type { LocalPublishableBot, SelectedSharedFile, PublishLocalBotInput, PublishedKnowledge, SharedHostStatus, OfferSharedBotInput, AcceptSharedBotInput, TriageLogPage, TriageLogRequest, TriageTarget } from './execution';
 export * from './execution';
 export type TeamRole = 'owner' | 'admin' | 'member';
 export interface TeamSummary { id: string; name: string; memberCount: number; role: TeamRole; generation: number }
@@ -63,6 +63,9 @@ export interface DesktopTeamsApi {
   localBots(uid: string): Promise<LocalPublishableBot[]>;
   selectSharedFiles(uid: string, instanceId: string): Promise<SelectedSharedFile[]>;
   publishedKnowledge(uid: string, teamId: string, sharedBotId: string): Promise<PublishedKnowledge>;
+  /** The Teams a local Bot of this Desktop is published to, and one page of the auto-reply log of one of them. */
+  triageTargets(uid: string, instanceId: string): Promise<TriageTarget[]>;
+  triageLog(uid: string, request: TriageLogRequest): Promise<TriageLogPage>;
   publishLocalBot(uid: string, input: PublishLocalBotInput): Promise<{ sharedBotId: string; revision: number }>;
   hostStatus(uid: string): Promise<SharedHostStatus>;
   offerSharedBot(uid: string, input: OfferSharedBotInput): Promise<void>;

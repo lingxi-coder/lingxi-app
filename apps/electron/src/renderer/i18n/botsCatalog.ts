@@ -1695,5 +1695,397 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "en": "No matching Bots or chats.",
     "ja": "一致する Bot やチャットはありません。",
     "ko": "일치하는 Bot 또는 채팅이 없습니다."
+  },
+  "bots_tab_autoreply": {
+    "zh-Hans": "自主回复",
+    "zh-Hant": "自主回覆",
+    "en": "Auto-reply",
+    "ja": "自動返信",
+    "ko": "자동 답장"
+  },
+  "bots_reply_intro": {
+    "zh-Hans": "在成员开启的会话中，这个 Bot 会在判断需要时自主回复。下面的设置决定它何时回复。",
+    "zh-Hant": "在成員開啟的對話中，這個 Bot 會在判斷需要時自主回覆。以下設定決定它何時回覆。",
+    "en": "In chats where a member turns it on, this Bot answers on its own when it judges a reply is wanted. These settings decide when.",
+    "ja": "メンバーがオンにしたチャットでは、この Bot は返信が必要と判断したときに自分から返信します。以下の設定で、そのタイミングを決めます。",
+    "ko": "멤버가 켠 채팅에서 이 Bot은 답장이 필요하다고 판단하면 스스로 답장합니다. 아래 설정으로 그 시점을 정합니다."
+  },
+  "bots_reply_policy_title": {
+    "zh-Hans": "这个 Bot 什么时候该自主回复？",
+    "zh-Hant": "這個 Bot 什麼時候該自主回覆？",
+    "en": "When should this Bot reply on its own?",
+    "ja": "この Bot はどんなときに自分から返信しますか？",
+    "ko": "이 Bot은 언제 스스로 답장해야 하나요?"
+  },
+  "bots_reply_policy_hint": {
+    "zh-Hans": "用你自己的话描述，例如“回答账单相关的问题；日程安排的讨论留给人来处理。”留空则由 Bot 自行判断是否需要回复。只会使用前 %1$d 个字符。",
+    "zh-Hant": "用你自己的話描述，例如「回答帳單相關的問題；行程安排的討論留給人來處理。」留空則由 Bot 自行判斷是否需要回覆。只會使用前 %1$d 個字元。",
+    "en": "Describe it in your own words, for example “Answer questions about billing; leave scheduling talk to people.” Leave it empty and the Bot judges for itself whether a reply is wanted. Only the first %1$d characters are used.",
+    "ja": "自分の言葉で書いてください。例：「請求に関する質問には答える。日程の相談は人に任せる。」空欄のままにすると、返信が必要かどうかは Bot 自身が判断します。使われるのは先頭の %1$d 文字だけです。",
+    "ko": "직접 쓴 말로 설명해 주세요. 예: “결제 관련 질문에는 답하고, 일정 논의는 사람에게 맡긴다.” 비워 두면 답장이 필요한지는 Bot이 스스로 판단합니다. 앞의 %1$d자만 사용됩니다."
+  },
+  "bots_problem_reply_policy_too_long": {
+    "zh-Hans": "说明最多 %1$d 个字符。",
+    "zh-Hant": "說明最多 %1$d 個字元。",
+    "en": "The description can be at most %1$d characters.",
+    "ja": "説明は最大 %1$d 文字までです。",
+    "ko": "설명은 최대 %1$d자까지 입력할 수 있습니다."
+  },
+  "bots_reply_keywords_title": {
+    "zh-Hans": "关键词",
+    "zh-Hant": "關鍵字",
+    "en": "Keywords",
+    "ja": "キーワード",
+    "ko": "키워드"
+  },
+  "bots_reply_keywords_hint": {
+    "zh-Hans": "包含其中任一词的消息会直接得到回复，不再询问判断服务。不区分大小写和全角半角。",
+    "zh-Hant": "包含其中任一詞的訊息會直接得到回覆，不再詢問判斷服務。不區分大小寫和全形半形。",
+    "en": "A message that contains one of these words is answered without asking the Decision service. Letter case and width are ignored.",
+    "ja": "このいずれかの語を含むメッセージには、Decision サービスに確認せずに返信します。大文字と小文字、全角と半角は区別しません。",
+    "ko": "이 단어 중 하나가 들어 있는 메시지에는 Decision 서비스에 묻지 않고 답장합니다. 대소문자와 전각·반각은 구분하지 않습니다."
+  },
+  "bots_reply_keywords_empty": {
+    "zh-Hans": "没有关键词。每条消息都由判断服务来判断。",
+    "zh-Hant": "沒有關鍵字。每則訊息都由判斷服務來判斷。",
+    "en": "No keywords. The Decision service judges every message.",
+    "ja": "キーワードはありません。すべてのメッセージを Decision サービスが判断します。",
+    "ko": "키워드가 없습니다. 모든 메시지를 Decision 서비스가 판단합니다."
+  },
+  "bots_reply_keyword_placeholder": {
+    "zh-Hans": "添加关键词",
+    "zh-Hant": "新增關鍵字",
+    "en": "Add a keyword",
+    "ja": "キーワードを追加",
+    "ko": "키워드 추가"
+  },
+  "bots_reply_keyword_add": {
+    "zh-Hans": "添加",
+    "zh-Hant": "新增",
+    "en": "Add",
+    "ja": "追加",
+    "ko": "추가"
+  },
+  "bots_reply_keyword_remove": {
+    "zh-Hans": "移除关键词 %1$s",
+    "zh-Hant": "移除關鍵字 %1$s",
+    "en": "Remove keyword %1$s",
+    "ja": "キーワード %1$s を削除",
+    "ko": "키워드 %1$s 제거"
+  },
+  "bots_reply_keyword_invalid": {
+    "zh-Hans": "关键词只能是一行文字，最多 %1$d 个字符。",
+    "zh-Hant": "關鍵字只能是一行文字，最多 %1$d 個字元。",
+    "en": "A keyword is one line of text, at most %1$d characters.",
+    "ja": "キーワードは 1 行のテキストで、最大 %1$d 文字です。",
+    "ko": "키워드는 한 줄 텍스트이며 최대 %1$d자입니다."
+  },
+  "bots_reply_keyword_duplicate": {
+    "zh-Hans": "这个关键词已在列表中。",
+    "zh-Hant": "這個關鍵字已在清單中。",
+    "en": "That keyword is already in the list.",
+    "ja": "そのキーワードはすでにあります。",
+    "ko": "이미 목록에 있는 키워드입니다."
+  },
+  "bots_problem_reply_keywords_too_many": {
+    "zh-Hans": "关键词最多 %1$d 个。",
+    "zh-Hant": "關鍵字最多 %1$d 個。",
+    "en": "At most %1$d keywords.",
+    "ja": "キーワードは最大 %1$d 個です。",
+    "ko": "키워드는 최대 %1$d개입니다."
+  },
+  "bots_reply_quiet_title": {
+    "zh-Hans": "安静时段",
+    "zh-Hant": "安靜時段",
+    "en": "Quiet hours",
+    "ja": "静かな時間帯",
+    "ko": "방해 금지 시간"
+  },
+  "bots_reply_quiet_hint": {
+    "zh-Hans": "在这段时间内，Bot 不会自主回复。",
+    "zh-Hant": "在這段時間內，Bot 不會自主回覆。",
+    "en": "The Bot does not answer on its own between these times.",
+    "ja": "この時間帯、Bot は自分からは返信しません。",
+    "ko": "이 시간 동안 Bot은 스스로 답장하지 않습니다."
+  },
+  "bots_reply_quiet_from": {
+    "zh-Hans": "开始",
+    "zh-Hant": "開始",
+    "en": "From",
+    "ja": "開始",
+    "ko": "시작"
+  },
+  "bots_reply_quiet_until": {
+    "zh-Hans": "结束",
+    "zh-Hant": "結束",
+    "en": "Until",
+    "ja": "終了",
+    "ko": "종료"
+  },
+  "bots_reply_quiet_zone": {
+    "zh-Hans": "时间按 %1$s 时区计算，即开启安静时段时设定的时区。",
+    "zh-Hant": "時間以 %1$s 時區計算，即開啟安靜時段時設定的時區。",
+    "en": "Times are in the %1$s time zone, as set when quiet hours were turned on.",
+    "ja": "時刻は、静かな時間帯をオンにしたときに設定した %1$s のタイムゾーンで扱われます。",
+    "ko": "시간은 방해 금지 시간을 켤 때 설정한 %1$s 시간대 기준입니다."
+  },
+  "bots_problem_reply_quiet_invalid": {
+    "zh-Hans": "请选择不同的开始时间和结束时间。",
+    "zh-Hant": "請選擇不同的開始時間與結束時間。",
+    "en": "Choose a start time and an end time that differ.",
+    "ja": "開始時刻と終了時刻は異なる時刻にしてください。",
+    "ko": "시작 시간과 종료 시간을 서로 다르게 선택하세요."
+  },
+  "bots_reply_cooldown_title": {
+    "zh-Hans": "冷却时间（秒）",
+    "zh-Hant": "冷卻時間（秒）",
+    "en": "Cooldown (seconds)",
+    "ja": "クールダウン（秒）",
+    "ko": "쿨다운(초)"
+  },
+  "bots_reply_cooldown_hint": {
+    "zh-Hans": "Bot 在某个会话中发言后，这段时间内不会在该会话中再次自主回复。填 0 表示不设冷却。",
+    "zh-Hant": "Bot 在某個對話中發言後，這段時間內不會在該對話中再次自主回覆。填 0 表示不設冷卻。",
+    "en": "After the Bot has posted in a chat, it does not answer on its own there again for this long. 0 turns the cooldown off.",
+    "ja": "Bot がチャットで発言したあと、この時間はそのチャットで自分からは返信しません。0 にするとクールダウンなしです。",
+    "ko": "Bot이 채팅에서 발언한 뒤 이 시간 동안은 그 채팅에서 스스로 답장하지 않습니다. 0이면 쿨다운이 없습니다."
+  },
+  "bots_problem_reply_cooldown_invalid": {
+    "zh-Hans": "请输入 0 到 %1$d 之间的整数秒数。",
+    "zh-Hant": "請輸入 0 到 %1$d 之間的整數秒數。",
+    "en": "Enter a whole number of seconds from 0 to %1$d.",
+    "ja": "0 から %1$d までの整数の秒数を入力してください。",
+    "ko": "0에서 %1$d 사이의 정수(초)를 입력하세요."
+  },
+  "bots_reply_thresholds_title": {
+    "zh-Hans": "判断服务需要多确定",
+    "zh-Hant": "判斷服務需要多確定",
+    "en": "How sure the Decision service must be",
+    "ja": "Decision サービスの確信度",
+    "ko": "Decision 서비스의 확신 정도"
+  },
+  "bots_reply_thresholds_hint": {
+    "zh-Hans": "低于第一个值时 Bot 保持沉默；达到第二个值时 Bot 直接回复；介于两者之间时，由 Bot 自己再判断是否需要回复。",
+    "zh-Hant": "低於第一個值時 Bot 保持沉默；達到第二個值時 Bot 直接回覆；介於兩者之間時，由 Bot 自行再判斷是否需要回覆。",
+    "en": "Below the first value the Bot stays silent; from the second it answers; in between it answers only if it still finds a reply is wanted.",
+    "ja": "1 つ目の値を下回ると Bot は黙ったまま、2 つ目の値以上なら返信し、その間は Bot 自身が改めて返信の要否を判断します。",
+    "ko": "첫 번째 값 미만이면 Bot은 조용히 있고, 두 번째 값 이상이면 답장하며, 그 사이에서는 Bot이 답장이 필요한지 다시 스스로 판단합니다."
+  },
+  "bots_reply_decline_label": {
+    "zh-Hans": "低于此值保持沉默",
+    "zh-Hant": "低於此值保持沉默",
+    "en": "Stay silent below",
+    "ja": "これ未満なら返信しない",
+    "ko": "이 값 미만이면 조용히"
+  },
+  "bots_reply_run_label": {
+    "zh-Hans": "达到此值就回复",
+    "zh-Hant": "達到此值就回覆",
+    "en": "Answer from",
+    "ja": "これ以上なら返信する",
+    "ko": "이 값 이상이면 답장"
+  },
+  "bots_problem_reply_thresholds_invalid": {
+    "zh-Hans": "保持沉默的值不能高于直接回复的值。",
+    "zh-Hant": "保持沉默的值不能高於直接回覆的值。",
+    "en": "The value to stay silent below cannot be higher than the value to answer from.",
+    "ja": "返信しない基準値は、返信する基準値より高くできません。",
+    "ko": "조용히 있는 기준값은 답장하는 기준값보다 높을 수 없습니다."
+  },
+  "bots_reply_mention_note": {
+    "zh-Hans": "被 @ 提及、被回复或被叫到名字时，Bot 一定会回复，不受安静时段和冷却时间影响。",
+    "zh-Hant": "被 @ 提及、被回覆或被叫到名字時，Bot 一定會回覆，不受安靜時段和冷卻時間影響。",
+    "en": "A Bot that is @mentioned, replied to or called by name always answers, whatever the quiet hours and cooldown say.",
+    "ja": "@メンションされた、返信された、名前を呼ばれた Bot は、静かな時間帯やクールダウンに関係なく必ず返信します。",
+    "ko": "@멘션되거나, 답장을 받거나, 이름이 불린 Bot은 방해 금지 시간과 쿨다운에 관계없이 항상 답장합니다."
+  },
+  "bots_triage_title": {
+    "zh-Hans": "自主回复记录",
+    "zh-Hant": "自主回覆紀錄",
+    "en": "Auto-reply log",
+    "ja": "自動返信の記録",
+    "ko": "자동 답장 기록"
+  },
+  "bots_triage_intro": {
+    "zh-Hans": "Bot 对没有人点名的消息所做的决定，最新的在前。只保留决定和原因，不保留模型说的内容。",
+    "zh-Hant": "Bot 對沒有人點名的訊息所做的決定，最新的在前。只保留決定和原因，不保留模型說的內容。",
+    "en": "What the Bot decided about messages nobody asked it about, newest first. Only the decision and the reason are kept, never what the model said.",
+    "ja": "誰にも呼ばれていないメッセージに対する Bot の判断を新しい順に表示します。保存されるのは判断とその理由だけで、モデルの発言は保存されません。",
+    "ko": "아무도 요청하지 않은 메시지에 대한 Bot의 판단을 최신순으로 표시합니다. 판단과 이유만 보관되며 모델이 한 말은 보관되지 않습니다."
+  },
+  "bots_triage_signed_out": {
+    "zh-Hans": "登录后才能查看自主回复记录。",
+    "zh-Hant": "登入後才能查看自主回覆紀錄。",
+    "en": "Sign in to read the auto-reply log.",
+    "ja": "自動返信の記録を見るにはサインインしてください。",
+    "ko": "자동 답장 기록을 보려면 로그인하세요."
+  },
+  "bots_triage_not_published": {
+    "zh-Hans": "这个 Bot 还没有发布到团队，所以没有记录。",
+    "zh-Hant": "這個 Bot 還沒有發布到團隊，所以沒有紀錄。",
+    "en": "This Bot is not published to a Team yet, so there is no log.",
+    "ja": "この Bot はまだチームに公開されていないため、記録はありません。",
+    "ko": "이 Bot은 아직 팀에 게시되지 않아 기록이 없습니다."
+  },
+  "bots_triage_loading": {
+    "zh-Hans": "正在读取记录…",
+    "zh-Hant": "正在讀取紀錄…",
+    "en": "Reading the log…",
+    "ja": "記録を読み込み中…",
+    "ko": "기록 불러오는 중…"
+  },
+  "bots_triage_failed": {
+    "zh-Hans": "无法读取记录：%1$s",
+    "zh-Hant": "無法讀取紀錄：%1$s",
+    "en": "The log could not be read: %1$s",
+    "ja": "記録を読み込めませんでした：%1$s",
+    "ko": "기록을 불러올 수 없습니다: %1$s"
+  },
+  "bots_triage_empty": {
+    "zh-Hans": "还没有记录。Bot 每判断一条消息，这里就会出现一行。",
+    "zh-Hant": "還沒有紀錄。Bot 每判斷一則訊息，這裡就會出現一行。",
+    "en": "Nothing yet. A line appears here for every message the Bot judges.",
+    "ja": "まだ記録はありません。Bot が判断したメッセージごとに、ここに 1 行表示されます。",
+    "ko": "아직 기록이 없습니다. Bot이 메시지를 판단할 때마다 여기에 한 줄이 나타납니다."
+  },
+  "bots_triage_more": {
+    "zh-Hans": "加载更多",
+    "zh-Hant": "載入更多",
+    "en": "Load more",
+    "ja": "さらに読み込む",
+    "ko": "더 불러오기"
+  },
+  "bots_triage_refresh": {
+    "zh-Hans": "刷新",
+    "zh-Hant": "重新整理",
+    "en": "Refresh",
+    "ja": "更新",
+    "ko": "새로고침"
+  },
+  "bots_triage_chat_untitled": {
+    "zh-Hans": "会话",
+    "zh-Hant": "對話",
+    "en": "Chat",
+    "ja": "チャット",
+    "ko": "채팅"
+  },
+  "bots_triage_action_decline": {
+    "zh-Hans": "不回复",
+    "zh-Hant": "不回覆",
+    "en": "No reply",
+    "ja": "返信しない",
+    "ko": "답장 안 함"
+  },
+  "bots_triage_action_run": {
+    "zh-Hans": "回复",
+    "zh-Hant": "回覆",
+    "en": "Reply",
+    "ja": "返信",
+    "ko": "답장"
+  },
+  "bots_triage_action_maybe": {
+    "zh-Hans": "交给 Bot 决定",
+    "zh-Hant": "交給 Bot 決定",
+    "en": "Left to the Bot",
+    "ja": "Bot に任せた",
+    "ko": "Bot에 맡김"
+  },
+  "bots_triage_reason_quiet_hours": {
+    "zh-Hans": "处于安静时段",
+    "zh-Hant": "處於安靜時段",
+    "en": "In quiet hours",
+    "ja": "静かな時間帯",
+    "ko": "방해 금지 시간 중"
+  },
+  "bots_triage_reason_cooldown": {
+    "zh-Hans": "仍在冷却中",
+    "zh-Hant": "仍在冷卻中",
+    "en": "Still cooling down",
+    "ja": "クールダウン中",
+    "ko": "쿨다운 중"
+  },
+  "bots_triage_reason_keyword": {
+    "zh-Hans": "命中关键词",
+    "zh-Hant": "符合關鍵字",
+    "en": "A keyword matched",
+    "ja": "キーワードに一致",
+    "ko": "키워드 일치"
+  },
+  "bots_triage_reason_addressed": {
+    "zh-Hans": "有人在对 Bot 说话",
+    "zh-Hant": "有人在對 Bot 說話",
+    "en": "The Bot was spoken to",
+    "ja": "Bot に向けたメッセージ",
+    "ko": "Bot에게 한 말"
+  },
+  "bots_triage_reason_below_threshold": {
+    "zh-Hans": "看起来不需要回复",
+    "zh-Hant": "看起來不需要回覆",
+    "en": "A reply seemed unlikely to be wanted",
+    "ja": "返信は不要と判断",
+    "ko": "답장이 필요 없다고 판단"
+  },
+  "bots_triage_reason_between_thresholds": {
+    "zh-Hans": "不确定是否需要回复",
+    "zh-Hant": "不確定是否需要回覆",
+    "en": "Not sure a reply was wanted",
+    "ja": "返信が必要か不明",
+    "ko": "답장이 필요한지 불확실"
+  },
+  "bots_triage_reason_above_threshold": {
+    "zh-Hans": "看起来需要回复",
+    "zh-Hant": "看起來需要回覆",
+    "en": "A reply seemed likely to be wanted",
+    "ja": "返信が必要と判断",
+    "ko": "답장이 필요하다고 판단"
+  },
+  "bots_triage_reason_decision_unavailable": {
+    "zh-Hans": "判断服务没有给出结果",
+    "zh-Hant": "判斷服務沒有給出結果",
+    "en": "The Decision service gave no answer",
+    "ja": "Decision サービスから結果なし",
+    "ko": "Decision 서비스가 답하지 않음"
+  },
+  "bots_triage_reason_message_unavailable": {
+    "zh-Hans": "无法读取这条消息",
+    "zh-Hant": "無法讀取這則訊息",
+    "en": "The message could not be read",
+    "ja": "メッセージを読み取れなかった",
+    "ko": "메시지를 읽을 수 없음"
+  },
+  "bots_triage_state_replied": {
+    "zh-Hans": "已回复",
+    "zh-Hant": "已回覆",
+    "en": "Replied",
+    "ja": "返信した",
+    "ko": "답장함"
+  },
+  "bots_triage_state_silent": {
+    "zh-Hans": "未回复",
+    "zh-Hant": "未回覆",
+    "en": "Stayed silent",
+    "ja": "返信せず",
+    "ko": "조용히 있음"
+  },
+  "bots_triage_state_failed": {
+    "zh-Hans": "失败",
+    "zh-Hant": "失敗",
+    "en": "Failed",
+    "ja": "失敗",
+    "ko": "실패"
+  },
+  "bots_triage_state_waiting": {
+    "zh-Hans": "进行中",
+    "zh-Hant": "進行中",
+    "en": "In progress",
+    "ja": "処理中",
+    "ko": "진행 중"
+  },
+  "bots_triage_probability": {
+    "zh-Hans": "概率 %1$d%%",
+    "zh-Hant": "機率 %1$d%%",
+    "en": "%1$d%% likely",
+    "ja": "確率 %1$d%%",
+    "ko": "확률 %1$d%%"
   }
 };

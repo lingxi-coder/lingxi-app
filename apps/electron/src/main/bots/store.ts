@@ -20,7 +20,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSy
 import { basename, dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import type { PermissionModeId } from '@lingxi/bridge-client';
 
-import { BOT_ALLOWED_DOMAINS_MAX, BOT_CONFLICT_MESSAGE, allowedDomain } from '../../shared/bots.js';
+import { BOT_ALLOWED_DOMAINS_MAX, BOT_CLOCK_TIME, BOT_CONFLICT_MESSAGE, BOT_REPLY_COOLDOWN_SEC_MAX, BOT_REPLY_KEYWORDS_MAX, BOT_REPLY_KEYWORD_CHARS_MAX, BOT_REPLY_POLICY_CHARS_MAX, BOT_REPLY_THRESHOLDS_DEFAULT, allowedDomain, validTimeZone } from '../../shared/bots.js';
 import { isPermissionModeId } from '../host-utils.js';
 import { isSessionId } from '../sessionIdentity.js';
 import { isInside, writeFileAtomic } from './files.js';
@@ -34,9 +34,6 @@ export const MAX_BOT_WORKSPACES = 16;
 export const MAX_ACCEPT_FROM = 64;
 export const MAX_PERSONA_BYTES = 64 * 1024;
 export const MAX_SCOPE_ENTRIES = 64;
-export const MAX_REPLY_KEYWORDS = 32;
-export const MAX_REPLY_POLICY_CHARS = 4000;
-export const MAX_COOLDOWN_SEC = 24 * 60 * 60;
 const MAX_RECORD_BYTES = 64 * 1024;
 const MAX_NAME_CHARS = 80;
 const MAX_LABEL_CHARS = 80;
@@ -47,7 +44,6 @@ const MAX_REFERENCE_CHARS = 128;
 const BOT_ID = /^[A-Za-z0-9_-]{22}$/;
 const WORKSPACE_ID = /^[A-Za-z0-9_-]{1,32}$/;
 const LOCAL_APP_ID = /^[A-Za-z0-9._:-]{1,128}$/;
-const CLOCK_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 const ROUTINE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const ROUTINE_FOLDERS_FILE = 'routine-folders.json';
 const MAX_ROUTINE_FOLDERS = 256;
@@ -116,7 +112,6 @@ export interface BotAutoReply {
   /** Below `decline` the Bot stays silent; from `run` it answers; in between it is uncertain. */
   thresholds: { decline: number; run: number };
   approval: BotReplyApproval;
-  decisionProviderId?: string;
 }
 
 /** `bot.json`, version 2. */
@@ -155,7 +150,7 @@ export function defaultScope(): BotScope {
 }
 
 export function defaultAutoReply(): BotAutoReply {
-  return { policy: '', keywords: [], cooldownSec: 0, thresholds: { decline: 0.3, run: 0.75 }, approval: 'never' };
+  return { policy: '', keywords: [], cooldownSec: 0, thresholds: { ...BOT_REPLY_THRESHOLDS_DEFAULT }, approval: 'never' };
 }
 
 export interface BotCreateInput {
@@ -388,16 +383,11 @@ export function parseScope(value: unknown): BotScope {
   return { localApps: [...apps] as string[], datasets: parsed };
 }
 
-function validTimeZone(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > 64 || CONTROL.test(value)) return false;
-  try { new Intl.DateTimeFormat('en-US', { timeZone: value }); return true; } catch { return false; }
-}
-
 function parseQuietHours(value: unknown): BotQuietHours {
   const input = plainObject(value, 'quiet hours');
   exactKeys(input, ['start', 'end', 'timeZone'], [], 'quiet hours');
   const { start, end, timeZone } = input;
-  if (typeof start !== 'string' || typeof end !== 'string' || !CLOCK_TIME.test(start) || !CLOCK_TIME.test(end) || start === end || !validTimeZone(timeZone)) {
+  if (typeof start !== 'string' || typeof end !== 'string' || !BOT_CLOCK_TIME.test(start) || !BOT_CLOCK_TIME.test(end) || start === end || !validTimeZone(timeZone)) {
     throw new Error('invalid quiet hours');
   }
   return { start, end, timeZone };
@@ -405,15 +395,15 @@ function parseQuietHours(value: unknown): BotQuietHours {
 
 export function parseAutoReply(value: unknown): BotAutoReply {
   const input = plainObject(value, 'autoReply');
-  exactKeys(input, ['policy', 'keywords', 'cooldownSec', 'thresholds', 'approval'], ['quietHours', 'decisionProviderId'], 'autoReply');
+  exactKeys(input, ['policy', 'keywords', 'cooldownSec', 'thresholds', 'approval'], ['quietHours'], 'autoReply');
   const policy = input['policy'];
-  if (typeof policy !== 'string' || policy.length > MAX_REPLY_POLICY_CHARS || policy.includes('\0')) throw new Error('invalid reply policy');
+  if (typeof policy !== 'string' || policy.length > BOT_REPLY_POLICY_CHARS_MAX || policy.includes('\0')) throw new Error('invalid reply policy');
   const keywords = input['keywords'];
-  if (!Array.isArray(keywords) || keywords.length > MAX_REPLY_KEYWORDS) throw new Error('invalid reply keywords');
-  const listed = keywords.map((keyword: unknown) => singleLine(keyword, 'reply keyword', 64));
+  if (!Array.isArray(keywords) || keywords.length > BOT_REPLY_KEYWORDS_MAX) throw new Error('invalid reply keywords');
+  const listed = keywords.map((keyword: unknown) => singleLine(keyword, 'reply keyword', BOT_REPLY_KEYWORD_CHARS_MAX));
   if (new Set(listed.map((keyword) => keyword.toLowerCase())).size !== listed.length) throw new Error('invalid reply keywords');
   const cooldown = input['cooldownSec'];
-  if (!Number.isSafeInteger(cooldown) || (cooldown as number) < 0 || (cooldown as number) > MAX_COOLDOWN_SEC) throw new Error('invalid reply cooldown');
+  if (!Number.isSafeInteger(cooldown) || (cooldown as number) < 0 || (cooldown as number) > BOT_REPLY_COOLDOWN_SEC_MAX) throw new Error('invalid reply cooldown');
   const thresholds = plainObject(input['thresholds'], 'reply thresholds');
   exactKeys(thresholds, ['decline', 'run'], [], 'reply thresholds');
   const { decline, run } = thresholds;
@@ -428,7 +418,6 @@ export function parseAutoReply(value: unknown): BotAutoReply {
     cooldownSec: cooldown as number,
     thresholds: { decline, run },
     approval,
-    ...(input['decisionProviderId'] !== undefined ? { decisionProviderId: singleLine(input['decisionProviderId'], 'decision provider', MAX_REFERENCE_CHARS) } : {}),
   };
 }
 

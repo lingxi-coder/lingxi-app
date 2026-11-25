@@ -32,12 +32,13 @@ import {
   type ModelChoices,
 } from './BotFields';
 import { BotScopeTab } from './BotScopeField';
+import { BotAutoReplyTab } from './BotAutoReplyField';
 
-export type BotTab = 'routines' | 'tasks' | 'general' | 'persona' | 'memory' | 'skills' | 'folders' | 'permissions' | 'sandbox' | 'scope' | 'market';
+export type BotTab = 'routines' | 'tasks' | 'general' | 'persona' | 'memory' | 'skills' | 'folders' | 'permissions' | 'sandbox' | 'scope' | 'autoreply' | 'market';
 
-const TABS: readonly BotTab[] = ['routines', 'tasks', 'general', 'persona', 'memory', 'skills', 'folders', 'permissions', 'sandbox', 'scope', 'market'];
+const TABS: readonly BotTab[] = ['routines', 'tasks', 'general', 'persona', 'memory', 'skills', 'folders', 'permissions', 'sandbox', 'scope', 'autoreply', 'market'];
 /** The tabs whose fields are one draft, saved together. */
-const DRAFT_TABS: ReadonlySet<BotTab> = new Set<BotTab>(['general', 'persona', 'folders', 'permissions', 'sandbox', 'scope']);
+const DRAFT_TABS: ReadonlySet<BotTab> = new Set<BotTab>(['general', 'persona', 'folders', 'permissions', 'sandbox', 'scope', 'autoreply']);
 
 function tabLabel(tab: BotTab): string {
   switch (tab) {
@@ -51,6 +52,7 @@ function tabLabel(tab: BotTab): string {
     case 'permissions': return tr('bots_tab_permissions');
     case 'sandbox': return tr('bots_tab_sandbox');
     case 'scope': return tr('bots_tab_scope');
+    case 'autoreply': return tr('bots_tab_autoreply');
     case 'market': return 'Package & Market';
   }
 }
@@ -260,6 +262,7 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
       </> : null}
       {tab === 'sandbox' && sandbox ? <BotSandboxField draft={state.draft} problems={problems} availability={sandbox} disabled={state.save.kind === 'saving'} onChange={(change) => editor.setDraft(change)} /> : null}
       {tab === 'scope' ? <BotScopeTab draft={state.draft} problems={problems} disabled={state.save.kind === 'saving'} onChange={(change) => editor.setDraft(change)} /> : null}
+      {tab === 'autoreply' ? <BotAutoReplyTab botId={botId} draft={state.draft} problems={problems} disabled={state.save.kind === 'saving'} onChange={(change) => editor.setDraft(change)} /> : null}
       <BotSaveBar state={state} dirty={dirty} problems={hasBotDraftProblems(problems)} onSave={() => void editor.save()} onReload={() => void editor.load()} />
     </> : null}
     </div>

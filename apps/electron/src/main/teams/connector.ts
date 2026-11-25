@@ -5,13 +5,13 @@ import { constants } from 'node:fs';
 import { open, lstat } from 'node:fs/promises';
 import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { providerAccountEnvelope, type ProviderAccountLaunch } from '../provider-accounts.js';
-import type { AcceptSharedBotInput, LocalPublishableBot, OfferSharedBotInput, PublishLocalBotInput, PublishedBotScope, PublishedKnowledge, SelectedSharedFile, SharedBotCard, SharedHostBot, SharedHostStatus, SharedListItem, TaskUsage, TeamTaskView } from '../../../../../packages/teams/execution.js';
+import type { AcceptSharedBotInput, LocalPublishableBot, OfferSharedBotInput, PublishLocalBotInput, PublishedBotScope, PublishedKnowledge, SelectedSharedFile, SharedBotCard, SharedHostBot, SharedHostStatus, SharedListItem, TaskUsage, TeamTaskView, TriageLogPage, TriageLogRequest, TriageTarget, TriageVerdict } from '../../../../../packages/teams/execution.js';
 import { isPublishedBotScope, isSharedListWrite } from '../../../../../packages/teams/execution-validation.js';
 import { TeamsApiError, type TeamSummary } from '../../../../../packages/teams/index.js';
 import type { ChatReadRequest, ChatReadResult, ChatSourceMessage } from '../../../../../packages/teams/chat-source.js';
 import { isServiceId } from '../../../../../packages/teams/hosted-service.js';
 import { ATTACHMENT_MESSAGE_BYTES, ATTACHMENT_MESSAGE_FILES, downloadAttachment, type MessageAttachment } from '../../../../../packages/teams/attachments.js';
-import type { BotScope, BotStore } from '../bots/store.js';
+import { defaultAutoReply, type BotScope, type BotStore } from '../bots/store.js';
 import { sandboxAvailability } from '../bots/sandboxAvailability.js';
 import type { BotSandboxAvailability } from '../../shared/bots.js';
 import { validateBotManifest } from '../bots/package.js';
@@ -20,7 +20,7 @@ import { runTeamHost, runResult, LOCAL_APPS_OFFERED, OPERATION_BYTES, TeamHostFa
 import type { TeamDataProof, TeamDatasetOffer } from './process.js';
 import type { LocalTeamHost, TeamAccountContext } from './service.js';
 import type { PrivatePreviewLease, PrivatePreviewPage, PrivatePreviewProof } from './dataPreview.js';
-import { triageReply, type ReplyDecision, type TriageVerdict } from './replyTriage.js';
+import { cooldownUnseen, triageReply, type ReplyDecision, type TriageSettings } from './replyTriage.js';
 
 export interface TeamHostApi {
   hostContext(): TeamAccountContext | undefined;
@@ -1017,8 +1017,13 @@ export class TeamConnector implements LocalTeamHost {
     // The verdict is kept until the task starts or is declined: a start the Bot×Chat lock refuses is tried again every few seconds, and judged once.
     let mayDecline = false;
     if (task.optional === true) {
-      const verdict = this.verdicts.get(task.taskId) ?? await this.triage(c,sourceScope,b,prepared,bot,kind,earlier,signal); assert();
-      this.verdicts.set(task.taskId, verdict);
+      let verdict = this.verdicts.get(task.taskId);
+      if (!verdict) {
+        verdict = await this.triage(c,sourceScope,b,prepared,bot,kind,earlier,signal); assert();
+        this.verdicts.set(task.taskId, verdict);
+        // Every verdict is told to the service before it is acted on, for the maintainer's auto-reply log: judged once, so recorded once.
+        await this.recordTriage(c,b,task.taskId,verdict); assert();
+      }
       if (verdict.action === 'decline') { await this.decline(c,b,task.taskId,'triage'); return; }
       mayDecline = verdict.action === 'run_may_decline';
     }
@@ -1458,20 +1463,58 @@ export class TeamConnector implements LocalTeamHost {
     this.deferred.delete(taskId); this.deferredCodes.delete(taskId); this.verdicts.delete(taskId);
     this.log('team_task_declined', { taskId, reason });
   }
+  /** What the Bot's own `bot.json` says about answering on its own; a Bot that is gone judges as a new one does, and is not served anyway. */
+  private replySettings(b: SharedBotBinding): TriageSettings {
+    try { return this.options.store.get(b.instanceId).autoReply; } catch { return defaultAutoReply(); }
+  }
   /** Whether an unasked task's Bot answers. The messages of earlier unasked tasks of the Chat count as asking it too, and a reply to a message older than
-   * the window is matched by reading that message. */
+   * the window is matched by reading that message. The Bot's cooldown reaches back to its last message, which may be older than the window too: then, once, more is read. */
   private async triage(c: TeamAccountContext, scope: { teamId: string; generation: number; conversationId: string }, b: SharedBotBinding, prepared: TaskContext, bot: { name: string; description: string }, kind: string, passed: number[], signal: AbortSignal) {
-    const read = (request: ChatReadRequest) => this.options.service.hostReadChat(c, request).then(result => { this.assert(c); signal.throwIfAborted(); return result.messages; });
-    const messages = await read({...scope,mode:'before',beforeSeq:prepared.messageSeq+1,limit:13});
+    const read = (request: ChatReadRequest) => this.options.service.hostReadChat(c, request).then(result => { this.assert(c); signal.throwIfAborted(); return result; });
+    const recent = await read({...scope,mode:'before',beforeSeq:prepared.messageSeq+1,limit:13}), messages = recent.messages;
+    const settings = this.replySettings(b), who = { sharedBotId: b.sharedBotId, ...bot };
+    if (cooldownUnseen({ bot: who, settings, conversation: { kind }, messages, messageId: prepared.messageId }, recent.hasMore)) {
+      messages.unshift(...(await read({...scope,mode:'before',beforeSeq:messages[0]!.seq,limit:200})).messages);
+    }
     const earlier = passed.map(seq => messages.find(message => message.seq === seq)?.messageId).filter((id): id is string => !!id);
     for (const id of [prepared.messageId, ...earlier]) {
       const replyTo = messages.find(message => message.messageId === id)?.replyTo;
-      if (replyTo && !messages.some(message => message.messageId === replyTo)) messages.push(...await read({...scope,mode:'byId',messageId:replyTo}));
+      if (replyTo && !messages.some(message => message.messageId === replyTo)) messages.push(...(await read({...scope,mode:'byId',messageId:replyTo})).messages);
     }
     messages.sort((x, y) => x.seq - y.seq);
-    const verdict = await triageReply({ bot: { sharedBotId: b.sharedBotId, ...bot }, conversation: { kind }, messages, messageId: prepared.messageId, earlier, decision: this.options.decision, signal });
-    this.log('team_reply_triage', { taskId: prepared.task.taskId, action: verdict.action, source: verdict.source });
+    const verdict = await triageReply({ bot: who, settings, conversation: { kind }, messages, messageId: prepared.messageId, earlier, decision: this.options.decision, signal });
+    this.log('team_reply_triage', { taskId: prepared.task.taskId, action: verdict.action, source: verdict.source, ...(verdict.reason ? { reason: verdict.reason } : {}) });
     return verdict;
+  }
+  /**
+   * Tell the service what this host decided about an unasked task, for its maintainer's auto-reply log. Never in the way: a service that cannot be reached
+   * leaves the log without this verdict and the task is acted on all the same. The command id has the verdict in it, so a host that judges a queued task
+   * again after a restart and comes to another verdict is not mistaken for repeating itself; the service keeps the later one until the task starts.
+   */
+  private async recordTriage(c: TeamAccountContext, b: SharedBotBinding, taskId: string, verdict: TriageVerdict) {
+    const { action, source, reason, probability } = verdict;
+    try {
+      await this.command(c,b,'recordTriage',{...this.hostFields(b),taskId,action,source,...(reason ? { reason } : {}),...(probability !== undefined ? { probability } : {})},
+        digest(JSON.stringify(['recordTriage',taskId,b.accountEpoch,action,source,reason ?? null,probability ?? null])));
+    } catch (error) { this.log('team_triage_not_recorded', { taskId, code: errorCode(error) }); }
+  }
+  /** The Teams one of this Desktop's Bots is published to: where its maintainer reads the auto-reply log. A Team the account has left is not one. */
+  async triageTargets(uid: string, instanceId: string): Promise<TriageTarget[]> {
+    const context = this.context(uid); if (!id(instanceId)) throw new Error('INVALID_INPUT');
+    const bindings = (await this.options.privateStore.bindings(uid)).filter(b => b.instanceId === instanceId && !isServiceId(b.teamId)); this.assert(context);
+    if (!bindings.length) return [];
+    const { teams } = await this.options.service.list(uid); this.assert(context);
+    return bindings.flatMap(b => { const team = teams.find(t => t.id === b.teamId); return team ? [{ teamId: b.teamId, teamName: team.name, sharedBotId: b.sharedBotId }] : []; });
+  }
+  /** One page of the auto-reply log of a Bot this Desktop publishes, newest verdict first. The service answers the Bot's maintainer only. */
+  async triageLog(uid: string, request: TriageLogRequest): Promise<TriageLogPage> {
+    const context = this.context(uid), { teamId, sharedBotId, conversationId, cursor, limit } = request ?? {} as Partial<TriageLogRequest>;
+    if (![teamId, sharedBotId].every(id) || (conversationId !== undefined && !id(conversationId)) || (cursor !== undefined && !id(cursor))
+      || (limit !== undefined && !(Number.isSafeInteger(limit) && limit >= 1 && limit <= 50))) throw new Error('INVALID_INPUT');
+    const binding = (await this.options.privateStore.bindings(uid)).find(b => b.teamId === teamId && b.sharedBotId === sharedBotId && !isServiceId(b.teamId)); this.assert(context);
+    if (!binding) throw new Error('SHARED_BOT_REQUIRED');
+    const page = await this.command<TriageLogPage>(context,binding,'listTriage',{ sharedBotId, ...(conversationId ? { conversationId } : {}), ...(cursor ? { cursor } : {}), ...(limit ? { limit } : {}) });
+    this.assert(context); return page;
   }
   close() { this.closed=true; clearTimeout(this.timer); this.keepServing(); for(const stop of this.stops)stop(); for(const a of this.active.values())this.abort(a,'CLOSED'); this.selections.clear(); }
 }

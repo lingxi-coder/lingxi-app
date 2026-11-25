@@ -51,7 +51,7 @@ function render(element: React.ReactElement): string {
 const avatarsOf = (html: string) => [...html.matchAll(/data-agent-avatar="(\d+)"/g)].map((match) => Number(match[1]));
 
 function bot(overrides: Partial<BotUi> = {}): BotUi {
-  return { botId: 'b1', name: 'Scribe', description: 'Writes things down', createdAt: Date.now() - 60 * MINUTES, updatedAt: Date.now(), revision: 1, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, scope: { localApps: [], datasets: [] }, ...overrides };
+  return { botId: 'b1', name: 'Scribe', description: 'Writes things down', createdAt: Date.now() - 60 * MINUTES, updatedAt: Date.now(), revision: 1, workspaces: [], sandbox: { enabled: true, allowedDomains: [] }, scope: { localApps: [], datasets: [] }, autoReply: { policy: '', keywords: [], cooldownSec: 0, thresholds: { decline: 0.3, run: 0.75 }, approval: 'never' }, ...overrides };
 }
 
 /** What a computer that can give a Bot a sandbox says, and one that cannot. */
@@ -565,7 +565,7 @@ test('the sections of a Bot are a tab list: one tab selected and in the tab orde
   assert.match(html, /<div class="bots-tabs" role="tablist" aria-label="Bot settings">/);
   const tabs = [...html.matchAll(/<button type="button" role="tab" id="([^"]+)" aria-selected="(true|false)" aria-controls="([^"]+)" tabindex="(-?\d+)">([^<]+)<\/button>/g)]
     .map((match) => ({ id: match[1]!, selected: match[2], controls: match[3]!, tabindex: match[4], label: match[5] }));
-  assert.deepEqual(tabs.map((tab) => tab.label), ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions', 'Sandbox', 'Scope', 'Package &amp; Market']);
+  assert.deepEqual(tabs.map((tab) => tab.label), ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions', 'Sandbox', 'Scope', 'Auto-reply', 'Package &amp; Market']);
   assert.deepEqual(tabs.filter((tab) => tab.selected === 'true').map((tab) => tab.label), ['General'], 'one is selected');
   assert.deepEqual(tabs.filter((tab) => tab.tabindex === '0').map((tab) => tab.label), ['General'], 'and it is the one Tab reaches: the arrow keys go to the others');
   assert.ok(tabs.every((tab) => tab.selected === 'true' || tab.tabindex === '-1'));

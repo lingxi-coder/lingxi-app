@@ -25,7 +25,7 @@ const grantPermit = (command, targetEpoch) => command.payload.permitNonce === un
     command.payload.deploymentId, command.payload.taskId, targetEpoch, command.payload.permitNonce);
 const nowDay = now => new Date(now).toISOString().slice(0, 10);
 const memberIdentity = (uid, member) => ({ uid, generation: member.generation });
-const readActions = new Set(['getTask', 'listTasks', 'readArtifact', 'listArtifactRevisions', 'listSharedBots', 'listHostTasks', 'prepareTask', 'validateTask', 'listOperations', 'readTaskList', 'readList', 'listHistory', 'getTransfer', 'readTransferPart', 'readAttachmentPart']);
+const readActions = new Set(['getTask', 'listTasks', 'listTriage', 'readArtifact', 'listArtifactRevisions', 'listSharedBots', 'listHostTasks', 'prepareTask', 'validateTask', 'listOperations', 'readTaskList', 'readList', 'listHistory', 'getTransfer', 'readTransferPart', 'readAttachmentPart']);
 /** An offer to hand a Bot over is open for seven days. */
 const transferMs = 7 * 24 * 60 * 60 * 1000, openTransfer = state => state === 'offered' || state === 'accepted';
 const revisionLimit = 200;
@@ -203,6 +203,8 @@ export class SharedBotsStore {
       else if (action === 'setConversationAutoReply') response = await this.conversationAutoReply(context);
       else if (action === 'setConversationBotScope') response = await this.conversationBotScope(context);
       else if (action === 'declineTask') response = await this.decline(context);
+      else if (action === 'recordTriage') response = await this.recordTriage(context);
+      else if (action === 'listTriage') response = await this.triageLog(context);
       else if (action === 'createUpload') response = await createUpload(this, context);
       else if (action === 'putUploadPart') response = await putUploadPart(this, context);
       else if (action === 'finalizeUpload') response = await finalizeUpload(this, context);
@@ -1355,6 +1357,47 @@ export class SharedBotsStore {
     this.supersede(tx, superseded, now);
     tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
     return { taskId: p.taskId, state: 'declined' };
+  }
+  /**
+   * The host says what it decided about an optional task, before it acts on it, for its maintainer's log. The verdict stays with the task: until the task has
+   * started a later one replaces it (a restarted host judges again), and after that the same one again is answered and a different one is refused.
+   */
+  async recordTriage({ tx, team, identity, command: { payload: p }, now }) {
+    await this.checkHost(tx, team, identity, p);
+    const ref = team.collection('tasks').doc(p.taskId), task = (await tx.get(ref)).data();
+    if (!task || task.deploymentId !== p.deploymentId) deny(404, 'TASK_REQUIRED');
+    if (!task.optional) deny(409, 'TASK_NOT_OPTIONAL');
+    const triage = { action: p.action, source: p.source, ...(p.reason ? { reason: p.reason } : {}),
+      ...(p.probability !== undefined ? { probability: Math.round(p.probability * 1000) / 1000 } : {}) };
+    if (task.triage) { const { at: _at, ...kept } = task.triage; if (same(kept, triage)) return { taskId: p.taskId }; }
+    if (task.state !== 'queued' || task.epoch !== 0) deny(409, task.triage ? 'TRIAGE_CONFLICT' : 'TASK_ALREADY_STARTED');
+    tx.update(ref, { triage: { ...triage, at: now } });
+    return { taskId: p.taskId };
+  }
+  /**
+   * What the maintainer's host decided about the unasked messages of one of their Bots, newest verdict first. Tasks nobody was shown are in it,
+   * since the log is for the maintainer alone; a Chat the maintainer does not read is not.
+   */
+  async triageLog({ tx, team, identity, command: { payload: p }, now }) {
+    const bot = (await tx.get(team.collection('sharedBots').doc(p.sharedBotId))).data();
+    if (!bot || !ownerOf(bot, identity)) deny(403, 'MAINTAINER_REQUIRED');
+    const limit = p.limit ?? 20;
+    let query = team.collection('tasks').where('sharedBotId', '==', p.sharedBotId);
+    if (p.conversationId) query = query.where('conversationId', '==', p.conversationId);
+    query = query.orderBy('triage.at', 'desc').orderBy('__name__').limit(limit + 1);
+    if (p.cursor) {
+      const cursor = (await tx.get(team.collection('tasks').doc(p.cursor))).data();
+      if (!cursor || cursor.sharedBotId !== p.sharedBotId || cursor.triage?.at === undefined || (p.conversationId && cursor.conversationId !== p.conversationId)) deny(400, 'INVALID_TRIAGE_CURSOR');
+      query = query.startAfter(cursor.triage.at, p.cursor);
+    }
+    const page = await tx.get(query), docs = page.docs.slice(0, limit);
+    const chats = docs.length ? await tx.getAll(...docs.map(doc => team.collection('conversations').doc(doc.data().conversationId))) : [];
+    const items = docs.flatMap((doc, i) => {
+      const t = doc.data(), chat = chats[i].data();
+      return chat?.memberUids?.includes(identity.uid) ? [{ taskId: t.taskId, conversationId: t.conversationId, messageId: t.messageId, createdAt: t.createdAt,
+        triage: t.triage, state: taskView(t, now).state, ...(chat.title ? { conversationTitle: chat.title } : {}) }] : [];
+    });
+    return { items, ...(page.size > limit ? { nextCursor: docs.at(-1).id } : {}) };
   }
   /** Any member taking part in the Chat chooses which of its Bots may answer unasked; each Bot must allow it itself. */
   async conversationAutoReply({ tx, team, identity, command: { payload: p } }) {

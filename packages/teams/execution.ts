@@ -47,6 +47,35 @@ export interface TeamTaskView {
   /** Nobody asked the Bot: it was given the message because auto-reply is on, and may leave it unanswered. */
   optional?: true;
 }
+/**
+ * What a Bot's host decided about a message nobody asked the Bot about, which step of its judgement decided it, and why. Codes only: the
+ * Bot's maintainer reads them in the auto-reply log, and nothing the model said is kept. `quiet` and `cooldown` are the maintainer's quiet
+ * hours and cooldown, `rule` a keyword or a call to the Bot, `decision` the Decision service against the Bot's thresholds, `fallback` no verdict.
+ */
+export const TRIAGE_ACTIONS = ['decline', 'run', 'run_may_decline'] as const;
+export const TRIAGE_SOURCES = ['quiet', 'cooldown', 'rule', 'decision', 'fallback'] as const;
+export const TRIAGE_REASONS = ['quiet_hours', 'cooldown', 'keyword', 'addressed', 'below_threshold', 'between_thresholds', 'above_threshold', 'decision_unavailable', 'message_unavailable'] as const;
+export type TriageAction = typeof TRIAGE_ACTIONS[number];
+export type TriageSource = typeof TRIAGE_SOURCES[number];
+export type TriageReason = typeof TRIAGE_REASONS[number];
+export interface TriageVerdict {
+  action: TriageAction; source: TriageSource; reason?: TriageReason;
+  /** What the Decision service gave, from 0 to 1 and rounded to three decimals; only with `source: 'decision'`. */
+  probability?: number;
+}
+/** A verdict as the service keeps it on the task; `at` is the service's clock. */
+export interface TaskTriage extends TriageVerdict { at: number }
+/** One message the Bot's host judged, as its maintainer reads the log. `state` is where the task stands now: it settles after the verdict. */
+export interface TriageLogItem {
+  taskId: string; conversationId: string; messageId: string; createdAt: number; triage: TaskTriage; state: TaskState;
+  conversationTitle?: string;
+}
+/** A page of the log, newest verdict first; pass `nextCursor` back for the page after. */
+export interface TriageLogPage { items: TriageLogItem[]; nextCursor?: string }
+/** The log of one Bot published to one Team, optionally of one Chat. At most 50 rows a page. */
+export interface TriageLogRequest { teamId: string; sharedBotId: string; conversationId?: string; cursor?: string; limit?: number }
+/** A Team one of this Desktop's Bots is published to: where its auto-reply log is read. */
+export interface TriageTarget { teamId: string; teamName: string; sharedBotId: string }
 export interface TeamDocument { title: string; body: string }
 /** One revision of a shared document. `currentRevision` is the newest one, so `revision < currentRevision` is history. */
 export interface TeamArtifact { artifactId: string; revision: number; digest: string; document: TeamDocument; currentRevision: number }

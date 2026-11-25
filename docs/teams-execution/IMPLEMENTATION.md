@@ -589,15 +589,43 @@ for that Chat with the member command `setConversationAutoReply { conversationId
   'superseded' }` (queued optional tasks only); `completeTask` takes `outcome: 'declined'` (optional tasks only, empty text, nothing
   posted). An unasked task that fails or is refused posts nothing, and members' `listTasks` hides unasked tasks without a reply.
 - Desktop host (`teams/replyTriage.ts`, `teams/connector.ts`): an optional task waits 2.5 s so a burst is judged once; earlier queued
-  optional tasks of the same Bot and Chat are declined as `superseded`. Before `startTask`: a reply to the Bot or its name means run;
-  otherwise the Decision service answers one binary question from the Bot's name and description and the last 12 messages (never its
-  role). p < 0.3 → `declineTask`, 0.3–0.75 → run with `mayDecline` (the runtime offers `TeamNoReply`), ≥ 0.75 → run. No verdict →
-  decline in a group or channel, run in a Bot DM. The Bot does not ask the requester questions in an unasked group task.
+  optional tasks of the same Bot and Chat are declined as `superseded`. Before `startTask` each Bot is judged by its own settings
+  (`autoReply` of its `bot.json`: `policy`, `keywords`, `quietHours`, `cooldownSec`, `thresholds`; `approval` is stored and not read yet),
+  and the first step that fits decides:
+  1. a reply to the Bot or its name (case and width folded, whole words where the script has words) → run, source `rule`, reason
+     `addressed`: a person talking to the Bot is answered even in quiet hours or the cooldown;
+  2. quiet hours: the window is read in the zone the maintainer stored, at the message's service time → `declineTask`, source `quiet`;
+  3. cooldown: the Bot posted in the Chat less than `cooldownSec` before the message, both times the service's `createdAt` and never this
+     computer's clock (`0` turns it off; the 13 messages read are widened once, by at most 200, when they begin inside the window) →
+     `declineTask`, source `cooldown`; then one of its keywords (folded the same way) → run, source `rule`, reason `keyword`;
+  4. the Decision service answers one binary question from the Bot's name and description, the maintainer's `policy` as the criterion (the first
+     1000 characters, as `maintainerInstructions`; the state still counts as evidence only) and the last 12 messages (never its role). The
+     probability, rounded to three decimals, below the Bot's `decline` → `declineTask`; below its `run` → run with `mayDecline` (the runtime
+     offers `TeamNoReply`); from `run` on → run. Source `decision`. Defaults are 0.3 and 0.75.
+
+  No verdict → decline in a group or channel, run in a Bot DM, source `fallback`. A Bot DM has neither quiet hours nor a cooldown: every
+  message there asks the Bot. The verdict is `{ action, source, reason?, probability? }` with codes only (`TRIAGE_*` in
+  `packages/teams/execution.ts`); nothing a model said is kept. The Bot does not ask the requester questions in an unasked group task.
+- Log (B5a). The host tells the service every verdict before it acts on it: host command `recordTriage { taskId, action, source,
+  reason?, probability? }`, authenticated as `declineTask` is (`checkHost`), which stores `triage: { …, at }` on the task with the service's
+  clock. Until the task has started a later verdict replaces the first (a restarted Desktop judges again); after that the same verdict is
+  answered and a different one is refused (`TRIAGE_CONFLICT`, or `TASK_ALREADY_STARTED` for a task with none). Only optional tasks take one
+  (`TASK_NOT_OPTIONAL`). A failure to record is logged (`team_triage_not_recorded`) and the task goes on. The maintainer reads the log with
+  `listTriage { sharedBotId, conversationId?, cursor?, limit ≤ 50 }` → `{ items: [{ taskId, conversationId, messageId, createdAt, triage,
+  state, conversationTitle? }], nextCursor? }`, newest first, hidden tasks included, only for Chats the maintainer is in (a page can be
+  short), refused with `MAINTAINER_REQUIRED` to anyone else. Both are host commands: not in the member contract, the vectors or the native
+  validators, and refused to hosted services. Indexes (`firestore.teams.indexes.json`, to be deployed): `tasks` on `sharedBotId, triage.at
+  desc, __name__` and on `sharedBotId, conversationId, triage.at desc, __name__`.
+- Desktop screen (B5a): Bot detail → Auto-reply tab (`BotAutoReplyField.tsx`; `bots_reply_*` and `bots_triage_*` in `botsCatalog.ts`). It
+  edits the settings above with the rest of the Bot (one draft, one Save; problems from `botDraftProblems`), and below them shows the log
+  of each Team the Bot is published to, a page at a time (`bridge/botTriageLog.ts`). The window never holds a token: the main process
+  reads the Teams (`triageTargets`) and the pages (`triageLog`) through `TeamsService`. Web, iOS, Android and Remote Control do not show it.
 - Runtime (H `team_process/decline_tool.rs`): bootstrap `mayDecline`, result status `declined`; the choice survives a killed worker.
 - Clients: Web/Desktop publish wizard switch and daily limit, a header dialog per Chat that first says where messages go, a declined
   run shown as "Did not reply"; iOS and Android the same switch per Bot in the conversation details, and the `declined` state text.
-- Tests: `shared-bots.emulator.test.mjs` (Auto-reply), `apps/electron/test/teams-reply-triage.test.ts`, `teams-host.test.ts`
-  (`auto-reply:`), `apps/web/test/teams-bots-ui.test.ts` (`Auto-reply:`), vectors in `contracts/execution-vectors.json`, iOS
+- Tests: `shared-bots.emulator.test.mjs` (Auto-reply), `bot-triage.test.mjs` and `bot-triage.emulator.test.mjs` (the log),
+  `apps/electron/test/teams-reply-triage.test.ts`, `teams-host.test.ts` (`auto-reply:`, `auto-reply log:`), `bot-reply-field.test.ts`
+  (the tab), `apps/web/test/teams-bots-ui.test.ts` (`Auto-reply:`), vectors in `contracts/execution-vectors.json`, iOS
   `TeamBotTests`/`TeamsPointerParserTests`, Android `TeamBotsTest`.
 
 ## What a Bot may use of its maintainer's Desktop (Bot scope)

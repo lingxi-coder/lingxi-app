@@ -7,11 +7,21 @@
 import type { PermissionModeId } from '@lingxi/bridge-client';
 import {
   BOT_ALLOWED_DOMAINS_MAX,
+  BOT_CLOCK_TIME,
   BOT_CONFLICT_MESSAGE,
+  BOT_REPLY_COOLDOWN_SEC_MAX,
+  BOT_REPLY_KEYWORDS_MAX,
+  BOT_REPLY_KEYWORD_CHARS_MAX,
+  BOT_REPLY_POLICY_CHARS_MAX,
+  BOT_REPLY_THRESHOLDS_DEFAULT,
   BOT_SANDBOX_UNAVAILABLE_MESSAGE,
   allowedDomain,
+  validTimeZone,
+  type BotAutoReplyUi,
   type BotCreateRequest,
   type BotDatasetScopeUi,
+  type BotQuietHoursUi,
+  type BotReplyApprovalUi,
   type BotSandboxUi,
   type BotScopeUi,
   type BotUi,
@@ -50,6 +60,27 @@ export interface BotDraft {
   sandbox: BotSandboxUi;
   /** The Local Apps and datasets of the owner's that the Bot may be given, at the most. A new Bot is made with none. */
   scope: BotScopeUi;
+  /** When the Bot answers on its own in the chats of the Teams it is published to. */
+  autoReply: BotReplyDraft;
+}
+
+/**
+ * What the owner edits of how the Bot answers on its own. The cooldown stays the text that was typed until it is sent, so that a
+ * half-typed number is no number; the times of the quiet hours are what the time fields hold, empty while cleared.
+ */
+export interface BotReplyDraft {
+  /** In the owner's words; blank: the Bot judges by itself whether a reply is wanted. */
+  policy: string;
+  /** One word or phrase each, in the order they were added. */
+  keywords: string[];
+  /** Absent: the Bot may answer at any hour. */
+  quietHours?: BotQuietHoursUi;
+  /** Seconds, as typed. */
+  cooldown: string;
+  /** Below `decline` the Bot stays silent; from `run` it answers; in between it answers if it still finds a reply is wanted. */
+  thresholds: { decline: number; run: number };
+  /** Not edited here (a later version asks before an answer is sent); kept as it is saved. */
+  approval: BotReplyApprovalUi;
 }
 
 export type BotDraftProblem =
@@ -59,9 +90,11 @@ export type BotDraftProblem =
   | 'folders_too_many' | 'folders_duplicate' | 'folders_label_too_long'
   | 'accept_too_many'
   | 'sandbox_too_many'
-  | 'scope_too_many';
+  | 'scope_too_many'
+  | 'reply_policy_too_long' | 'reply_keywords_too_many' | 'reply_quiet_invalid' | 'reply_cooldown_invalid' | 'reply_thresholds_invalid';
 
-export type BotDraftProblems = Partial<Record<'name' | 'description' | 'persona' | 'folders' | 'accept' | 'sandbox' | 'scope', BotDraftProblem>>;
+export type BotDraftProblems = Partial<Record<'name' | 'description' | 'persona' | 'folders' | 'accept' | 'sandbox' | 'scope'
+  | 'replyPolicy' | 'replyKeywords' | 'replyQuiet' | 'replyCooldown' | 'replyThresholds', BotDraftProblem>>;
 
 /**
  * The ids of the owner's other Bots, which the accept list is chosen among.
@@ -92,7 +125,10 @@ export function permissionModeNeedsConfirmation(mode: PermissionModeId | ''): bo
 }
 
 export function emptyBotDraft(): BotDraft {
-  return { name: '', description: '', persona: '', model: '', permissionMode: 'default', workspaces: [], acceptFrom: [], remote: false, sandbox: { enabled: true, allowedDomains: [] }, scope: { localApps: [], datasets: [] } };
+  return {
+    name: '', description: '', persona: '', model: '', permissionMode: 'default', workspaces: [], acceptFrom: [], remote: false,
+    sandbox: { enabled: true, allowedDomains: [] }, scope: { localApps: [], datasets: [] }, autoReply: emptyReplyDraft(),
+  };
 }
 
 export function draftFromBot(bot: BotUi, persona: string): BotDraft {
@@ -107,6 +143,7 @@ export function draftFromBot(bot: BotUi, persona: string): BotDraft {
     remote: bot.remote === true,
     sandbox: { enabled: bot.sandbox.enabled, allowedDomains: [...bot.sandbox.allowedDomains] },
     scope: scopeInput(bot.scope),
+    autoReply: replyDraft(bot.autoReply),
   };
 }
 
@@ -135,7 +172,107 @@ export function botDraftProblems(draft: BotDraft, peers?: BotPeers): BotDraftPro
   if (present(draft.acceptFrom, peers).length > BOT_ACCEPT_MAX) problems.accept = 'accept_too_many';
   if (draft.sandbox.allowedDomains.length > BOT_ALLOWED_DOMAINS_MAX) problems.sandbox = 'sandbox_too_many';
   if (draft.scope.localApps.length > BOT_SCOPE_MAX || draft.scope.datasets.length > BOT_SCOPE_MAX) problems.scope = 'scope_too_many';
+  const { autoReply } = draft;
+  if (autoReply.policy.trim().length > BOT_REPLY_POLICY_CHARS_MAX) problems.replyPolicy = 'reply_policy_too_long';
+  if (autoReply.keywords.length > BOT_REPLY_KEYWORDS_MAX) problems.replyKeywords = 'reply_keywords_too_many';
+  if (autoReply.quietHours !== undefined && !validQuietHours(autoReply.quietHours)) problems.replyQuiet = 'reply_quiet_invalid';
+  if (cooldownSeconds(autoReply.cooldown) === undefined) problems.replyCooldown = 'reply_cooldown_invalid';
+  const { decline, run } = autoReply.thresholds;
+  if (!Number.isFinite(decline) || !Number.isFinite(run) || decline < 0 || run > 1 || decline > run) problems.replyThresholds = 'reply_thresholds_invalid';
   return problems;
+}
+
+/** The times of quiet hours are two different times of day in a time zone that is known here; they may run past midnight. */
+function validQuietHours(quiet: BotQuietHoursUi): boolean {
+  return BOT_CLOCK_TIME.test(quiet.start) && BOT_CLOCK_TIME.test(quiet.end) && quiet.start !== quiet.end && validTimeZone(quiet.timeZone);
+}
+
+/** What the cooldown text says, in seconds: a whole number from 0 to a day. Absent when it says anything else. */
+export function cooldownSeconds(text: string): number | undefined {
+  const typed = text.trim();
+  if (!/^\d{1,6}$/.test(typed)) return undefined;
+  const seconds = Number(typed);
+  return seconds <= BOT_REPLY_COOLDOWN_SEC_MAX ? seconds : undefined;
+}
+
+export function emptyReplyDraft(): BotReplyDraft {
+  return { policy: '', keywords: [], cooldown: '0', thresholds: { ...BOT_REPLY_THRESHOLDS_DEFAULT }, approval: 'never' };
+}
+
+function replyDraft(reply: BotAutoReplyUi): BotReplyDraft {
+  return {
+    policy: reply.policy,
+    keywords: [...reply.keywords],
+    ...(reply.quietHours ? { quietHours: { ...reply.quietHours } } : {}),
+    cooldown: String(reply.cooldownSec),
+    thresholds: { ...reply.thresholds },
+    approval: reply.approval,
+  };
+}
+
+/** The settings as they are sent: the policy without the blanks around it, and the cooldown as the number it says (none is sent while it says none). */
+function replyInput(reply: BotReplyDraft): BotAutoReplyUi {
+  return {
+    policy: reply.policy.trim(),
+    keywords: [...reply.keywords],
+    ...(reply.quietHours ? { quietHours: { start: reply.quietHours.start, end: reply.quietHours.end, timeZone: reply.quietHours.timeZone } } : {}),
+    cooldownSec: cooldownSeconds(reply.cooldown) ?? 0,
+    thresholds: { decline: reply.thresholds.decline, run: reply.thresholds.run },
+    approval: reply.approval,
+  };
+}
+
+/** The same settings, as far as saving them is concerned: blanks around the policy and a cooldown written as 030 or 30 are no change. */
+export function sameReply(left: BotReplyDraft, right: BotReplyDraft): boolean {
+  const cooldown = (reply: BotReplyDraft) => cooldownSeconds(reply.cooldown) ?? reply.cooldown.trim();
+  const quiet = (reply: BotReplyDraft) => reply.quietHours === undefined ? '' : `${reply.quietHours.start}\u0000${reply.quietHours.end}\u0000${reply.quietHours.timeZone}`;
+  return left.policy.trim() === right.policy.trim() && left.keywords.length === right.keywords.length && left.keywords.every((keyword, index) => keyword === right.keywords[index])
+    && quiet(left) === quiet(right) && cooldown(left) === cooldown(right)
+    && left.thresholds.decline === right.thresholds.decline && left.thresholds.run === right.thresholds.run && left.approval === right.approval;
+}
+
+/** What adding a keyword to the ones that make the Bot answer came to: the list with it, or why it was not added. */
+export type BotKeywordAdd = { ok: true; keywords: string[] } | { ok: false; problem: 'invalid' | 'duplicate' | 'too_many' };
+
+/** Add what the owner typed to the keywords. It is kept the way the main process keeps it: one trimmed line, and no two that differ only in case. */
+export function withReplyKeyword(keywords: readonly string[], text: string): BotKeywordAdd {
+  const keyword = text.trim();
+  if (keyword.length === 0 || keyword.length > BOT_REPLY_KEYWORD_CHARS_MAX || CONTROL.test(keyword)) return { ok: false, problem: 'invalid' };
+  if (keywords.some((known) => known.toLowerCase() === keyword.toLowerCase())) return { ok: false, problem: 'duplicate' };
+  if (keywords.length >= BOT_REPLY_KEYWORDS_MAX) return { ok: false, problem: 'too_many' };
+  return { ok: true, keywords: [...keywords, keyword] };
+}
+
+/** The time zone this computer is in, which is the one quiet hours are set in. */
+export function computerTimeZone(): string {
+  try {
+    const zone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (validTimeZone(zone)) return zone;
+  } catch { /* the zone is unknown: UTC says so */ }
+  return 'UTC';
+}
+
+/** Quiet hours as they start when the owner turns them on: the night, in the zone of this computer. */
+export function startingQuietHours(timeZone: string = computerTimeZone()): BotQuietHoursUi {
+  return { start: '22:00', end: '07:00', timeZone };
+}
+
+/** The settings with quiet hours off or, with `quiet`, on as given. */
+export function withQuietHours(reply: BotReplyDraft, quiet: BotQuietHoursUi | undefined): BotReplyDraft {
+  const { quietHours: _off, ...rest } = reply;
+  return quiet === undefined ? rest : { ...rest, quietHours: quiet };
+}
+
+const roundedToHundredths = (value: number) => Math.round(Math.min(1, Math.max(0, value)) * 100) / 100;
+
+/** Move the value below which the Bot stays silent. It does not pass the one from which it answers. */
+export function withDeclineThreshold(reply: BotReplyDraft, value: number): BotReplyDraft {
+  return { ...reply, thresholds: { ...reply.thresholds, decline: Math.min(roundedToHundredths(value), reply.thresholds.run) } };
+}
+
+/** Move the value from which the Bot answers. It does not go under the one below which the Bot stays silent. */
+export function withRunThreshold(reply: BotReplyDraft, value: number): BotReplyDraft {
+  return { ...reply, thresholds: { ...reply.thresholds, run: Math.max(roundedToHundredths(value), reply.thresholds.decline) } };
 }
 
 /** What adding a host to the list that the sandbox allows came to: the list with it, or why it was not added. */
@@ -186,6 +323,7 @@ export function botCreateRequest(draft: BotDraft): BotCreateRequest {
     ...(draft.permissionMode ? { permissionMode: draft.permissionMode } : {}),
     ...(draft.workspaces.length > 0 ? { workspaces: draft.workspaces.map(folderInput) } : {}),
     ...(sameSandbox(draft.sandbox, emptyBotDraft().sandbox) ? {} : { sandbox: sandboxInput(draft.sandbox) }),
+    ...(sameReply(draft.autoReply, emptyReplyDraft()) ? {} : { autoReply: replyInput(draft.autoReply) }),
   };
 }
 
@@ -217,6 +355,7 @@ export function botChanges(bot: BotUi, persona: string, draft: BotDraft, peers?:
   if (draft.remote !== (bot.remote === true)) patch.remote = draft.remote;
   if (!sameSandbox(draft.sandbox, bot.sandbox)) patch.sandbox = sandboxInput(draft.sandbox);
   if (!sameScope(draft.scope, bot.scope)) patch.scope = scopeInput(draft.scope);
+  if (!sameReply(draft.autoReply, replyDraft(bot.autoReply))) patch.autoReply = replyInput(draft.autoReply);
   if (peers !== undefined) {
     const accepted = present(draft.acceptFrom, peers);
     if (!sameIds(accepted, present(bot.acceptFrom ?? [], peers))) patch.acceptFrom = accepted;

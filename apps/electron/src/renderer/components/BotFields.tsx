@@ -3,7 +3,7 @@ import type { PermissionModeId } from '@lingxi/bridge-client';
 import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
 import { groupModelReferences, modelBillingGroups, modelDisplayLabel, type ModelCatalogDetail } from '../bridge/modelCatalog';
-import type { BotSandboxAvailability, BotUi, BotWorkspaceUi } from '../../shared/bots';
+import { BOT_REPLY_COOLDOWN_SEC_MAX, BOT_REPLY_KEYWORDS_MAX, BOT_REPLY_POLICY_CHARS_MAX, type BotSandboxAvailability, type BotUi, type BotWorkspaceUi } from '../../shared/bots';
 import { BOT_FOLDER_LABEL_MAX, folderBaseName, ownFolderTitle } from '../bridge/botFolders';
 import { BOT_DESCRIPTION_MAX, BOT_FOLDERS_MAX, ipcErrorMessage, permissionModeNeedsConfirmation, withAllowedHost, withFolder, type BotDraft, type BotDraftProblem, type BotDraftProblems, type BotHostAdd } from '../bridge/botForm';
 import type { BotMemoryProblem } from '../bridge/botMemory';
@@ -38,6 +38,11 @@ export function problemText(problem: BotDraftProblem | BotMemoryProblem): string
     case 'accept_too_many': return tr('bots_problem_accept_too_many');
     case 'sandbox_too_many': return tr('bots_sandbox_host_too_many');
     case 'scope_too_many': return tr('bots_problem_scope_too_many');
+    case 'reply_policy_too_long': return tr('bots_problem_reply_policy_too_long', BOT_REPLY_POLICY_CHARS_MAX);
+    case 'reply_keywords_too_many': return tr('bots_problem_reply_keywords_too_many', BOT_REPLY_KEYWORDS_MAX);
+    case 'reply_quiet_invalid': return tr('bots_problem_reply_quiet_invalid');
+    case 'reply_cooldown_invalid': return tr('bots_problem_reply_cooldown_invalid', BOT_REPLY_COOLDOWN_SEC_MAX);
+    case 'reply_thresholds_invalid': return tr('bots_problem_reply_thresholds_invalid');
     case 'too_large': return tr('bots_problem_memory_too_large');
     case 'invalid': return tr('bots_problem_memory_invalid');
   }
@@ -105,7 +110,8 @@ export function BotConfirm({ title, icon = 'trash', danger = true, confirmLabel,
   </BotDialog>;
 }
 
-function Field({ label, hint, problem, children }: {
+/** A labelled control with its hint and its problem, which the control points to. */
+export function Field({ label, hint, problem, children }: {
   label: string;
   hint?: string;
   problem?: string | undefined;

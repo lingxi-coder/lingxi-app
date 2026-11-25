@@ -77,6 +77,14 @@ export function installTeamsIpc(service: TeamsService, windows: () => readonly B
           if (typeof command.teamId !== 'string' || typeof command.sharedBotId !== 'string') throw new Error('INVALID_INPUT');
           value = await service.publishedKnowledge(command.uid, command.teamId, command.sharedBotId);
           break;
+        case 'triageTargets':
+          if (typeof command.instanceId !== 'string') throw new Error('INVALID_INPUT');
+          value = await service.triageTargets(command.uid, command.instanceId);
+          break;
+        case 'triageLog':
+          if (!command.request || typeof command.request !== 'object' || Array.isArray(command.request)) throw new Error('INVALID_INPUT');
+          value = await service.triageLog(command.uid, command.request as Parameters<TeamsService['triageLog']>[1]);
+          break;
         case 'detail':
           if (typeof command.teamId !== 'string') throw new Error('INVALID_INPUT');
           value = await service.detail(command.teamId, command.uid);

@@ -695,7 +695,6 @@ test('the sandbox, scope and automatic replies are kept as given, checked, and c
   const autoReply = {
     policy: 'Answer questions about billing.', keywords: ['refund', 'invoice'], cooldownSec: 60,
     quietHours: { start: '22:00', end: '07:30', timeZone: 'Asia/Shanghai' }, thresholds: { decline: 0.2, run: 0.8 }, approval: 'uncertain' as const,
-    decisionProviderId: 'provider-1',
   };
   const scope = { localApps: ['app.one', 'app:two'], datasets: [{ source: 'warehouse', dataset: 'orders', write: false, reportReview: true }] };
   const bot = f.store.create({ name: 'Configured', sandbox: { enabled: false, allowedDomains: ['Example.com', '*.docs.example.com'] }, scope, autoReply });
@@ -735,6 +734,7 @@ test('the sandbox, scope and automatic replies are checked before anything is ma
     [{ autoReply: reply({ thresholds: { decline: -0.1, run: 0.4 } }) }, /invalid reply thresholds/],
     [{ autoReply: reply({ thresholds: { decline: 0.1, run: 1.1 } }) }, /invalid reply thresholds/],
     [{ autoReply: reply({ approval: 'maybe' }) }, /invalid reply approval/],
+    [{ autoReply: reply({ decisionProviderId: 'provider-1' }) }, /unsupported fields/],
     [{ autoReply: reply({ quietHours: { start: '25:00', end: '07:00', timeZone: 'Asia/Shanghai' } }) }, /invalid quiet hours/],
     [{ autoReply: reply({ quietHours: { start: '22:00', end: '22:00', timeZone: 'Asia/Shanghai' } }) }, /invalid quiet hours/],
     [{ autoReply: reply({ quietHours: { start: '22:00', end: '07:00', timeZone: 'Mars/Olympus' } }) }, /invalid quiet hours/],

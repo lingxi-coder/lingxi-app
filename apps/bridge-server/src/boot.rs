@@ -1340,7 +1340,7 @@ pub(crate) fn validate_captured_transcript(
     content: &str,
     loaded: &session::jsonl::LoadedTranscript,
     allow_unanchored_draft: bool,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if !content.ends_with('\n') {
         return Err("selected transcript has an incomplete final record".into());
     }
@@ -1348,21 +1348,31 @@ pub(crate) fn validate_captured_transcript(
         return Err("selected transcript contains malformed records".into());
     }
     let id_text = id.to_string();
-    let (messages, _) = session::jsonl::build_conversation_chain(loaded, &id_text);
-    if !messages.is_empty() {
-        return Ok(());
+    if session::jsonl::find_tip(loaded, &id_text).is_some() {
+        return Ok(true);
     }
+    validate_empty_transcript(path, &id_text, content, loaded, allow_unanchored_draft)?;
+    Ok(false)
+}
+
+fn validate_empty_transcript(
+    path: &Path,
+    id: &str,
+    content: &str,
+    loaded: &session::jsonl::LoadedTranscript,
+    allow_unanchored_draft: bool,
+) -> Result<(), String> {
     let has_anchor_field = content.lines().any(|line| {
         lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line)
             .is_ok_and(|row| row.contains_property("mobileEmptySession"))
     });
     if allow_unanchored_draft
         && !has_anchor_field
-        && session::jsonl::is_mode_only_draft(content, &id_text)
+        && session::jsonl::is_mode_only_draft(content, id)
     {
         return Ok(());
     }
-    let cwd = session::jsonl::validated_empty_draft_cwd(content, &id_text)
+    let cwd = session::jsonl::validated_empty_draft_cwd(content, id)
         .ok_or("empty session has no valid workspace anchor")?;
     if session::jsonl::loader::transcript_workspace_path(path, loaded)
         .map(PathBuf::from)
@@ -1428,7 +1438,7 @@ async fn prepare_selected_boot_session_after_capture(
     let (authority, preflight) = capture_selected_transcript_source(&cfg.lingxi_home, &path, uuid)?;
     validate_selected_session_mode(&preflight, uuid, expected)?;
     let preview = session::jsonl::route_lines(&preflight);
-    validate_captured_transcript(
+    let has_conversation = validate_captured_transcript(
         &authority.path(),
         uuid,
         &preflight,
@@ -1470,23 +1480,17 @@ async fn prepare_selected_boot_session_after_capture(
         session::jsonl::loader::validate_captured_session_source(&path, uuid, &content, &loaded)
             .map_err(|error| format!("selected transcript is not resumable: {error}"))?;
     }
-    validate_captured_transcript(&path, uuid, &content, &loaded, cfg.restore_draft)?;
-    // The source can change between the preflight and the writer claim.
-    validate_selected_session_mode(&content, uuid, expected)?;
-    let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &uuid.to_string());
-    if cfg.restore_draft
-        && !harness_runtime::desktop::session_state::is_mode_only_draft(&content, &uuid.to_string())
-    {
-        return Err("draft transcript is not valid mode-only metadata".into());
+    let id_text = uuid.to_string();
+    // Byte equality preserves the preflight mode and chain tip. An empty
+    // transcript's workspace anchor can still disappear while claiming it.
+    if !has_conversation {
+        validate_empty_transcript(&path, &id_text, &content, &loaded, cfg.restore_draft)?;
     }
-    if messages.is_empty()
-        && !loaded.mobile_empty_sessions.contains(&uuid.to_string())
-        && !(cfg.restore_draft
-            && harness_runtime::desktop::session_state::is_mode_only_draft(
-                &content,
-                &uuid.to_string(),
-            ))
-    {
+    if cfg.restore_draft {
+        if !harness_runtime::desktop::session_state::is_mode_only_draft(&content, &id_text) {
+            return Err("draft transcript is not valid mode-only metadata".into());
+        }
+    } else if !has_conversation && !loaded.mobile_empty_sessions.contains(&id_text) {
         return Err("selected transcript has no resumable conversation".into());
     }
     if let Some(workspace) = session::jsonl::loader::transcript_workspace_path(&path, &loaded)
@@ -1510,7 +1514,7 @@ async fn prepare_selected_boot_session_after_capture(
     .await?;
     cfg.session_resume_cost = resume_cost;
     cfg.session_resume_snapshot = Some(harness_runtime::desktop::DesktopSessionResumeSnapshot {
-        source_session_id: uuid.to_string(),
+        source_session_id: id_text,
         content: content.into(),
     });
     cfg.session_resume_loaded = Some(harness_runtime::desktop::DesktopSessionResumeLoaded::new(
@@ -2171,12 +2175,15 @@ pub async fn assemble_with_account_credentials(
     let media_handoffs =
         Arc::new(harness_runtime::desktop::DesktopMediaAgentHandoffQueue::default());
     cfg.media_agent_handoffs = Some(media_handoffs.clone());
-    prepare_draft_boot_session(&mut cfg).await?;
-    prepare_selected_boot_session(&mut cfg).await?;
+    if cfg.restore_draft {
+        prepare_draft_boot_session(&mut cfg).await?;
+    } else {
+        prepare_selected_boot_session(&mut cfg).await?;
+    }
     let cold_resume = if cfg.restore_draft {
         None
     } else {
-        crate::workspace_commands::ColdBootResume::capture(&cfg)?
+        crate::workspace_commands::ColdBootResume::from_prepared_config(&cfg)?
     };
     let provider_credentials_ephemeral = matches!(
         cfg.credential_storage_policy,
@@ -3715,7 +3722,7 @@ mod tests {
             .prepared_session_resume()
             .expect("boot retains its validated parse");
         let prepared_address = prepared as *const session::jsonl::LoadedTranscript;
-        let proof = crate::workspace_commands::ColdBootResume::capture(&cfg).unwrap();
+        let proof = crate::workspace_commands::ColdBootResume::from_prepared_config(&cfg).unwrap();
         assert!(proof.is_some());
         assert_eq!(
             cfg.prepared_session_resume().unwrap() as *const _,
@@ -3912,7 +3919,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selected_empty_session_accepts_matching_durable_workspace_anchor() {
+    async fn selected_empty_session_rechecks_durable_workspace_anchor_after_claim() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         let cwd = root.path().join("workspace");
@@ -3927,11 +3934,23 @@ mod tests {
         );
         std::fs::write(&path, &content).unwrap();
         let mut cfg = DesktopConfig::default();
-        cfg.cwd = cwd;
+        cfg.cwd = cwd.clone();
         cfg.lingxi_home = home;
         cfg.session_id_override = Some(id.into());
         cfg.session_transcript_path = Some(path.clone());
         cfg.initial_conversation_mode = Some(ConversationMode::Code);
+        let error = prepare_selected_boot_session_after_capture(&mut cfg, || {
+            std::fs::remove_dir(&cwd).unwrap();
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "empty session workspace does not match its transcript"
+        );
+        assert!(cfg.session_writer_lease.is_none());
+
+        std::fs::create_dir(&cwd).unwrap();
         prepare_selected_boot_session(&mut cfg).await.unwrap();
         assert!(cfg.session_transcript_authority.is_some());
         assert!(cfg.session_writer_lease.is_some());

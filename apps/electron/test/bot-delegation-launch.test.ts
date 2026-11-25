@@ -279,7 +279,7 @@ test('the engine that is started is given the router\'s address and a token that
   const ref = { projectPath: f.store.workspaceDir(caller.bot_id), sessionId: SESSION };
   const runtime = await manager.ensure(ref, false);
   const internal = runtime as any;
-  internal.waitForLockfile = async () => '/unused-test-handshake';
+  internal.waitForLockfile = async () => ({ path: '/unused-test-handshake' });
   internal.connectBridgeClient = async () => internal.setState({ status: 'connected' });
   await runtime.start();
   const path = join(internal.launchDir, 'launch.json');

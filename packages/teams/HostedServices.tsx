@@ -33,17 +33,28 @@ export interface HostedServicesProps {
 }
 const code = (error: unknown) => error instanceof Error ? error.message : 'SERVICE_UNAVAILABLE';
 const LIVE = ['queued', 'running', 'waiting'];
+const ACCESS_LOSS = new Set(['NOT_FOUND', 'INVALID_SESSION', 'SIGN_IN_REQUIRED', 'CONVERSATION_REQUIRED', 'SERVICE_ENTRY_REQUIRED', 'SERVICE_ACCESS_REQUIRED', 'STALE_MEMBERSHIP', 'SERVICE_WITHDRAWN']);
+type SessionCheck = 'entitled' | 'conversation' | 'tasks';
 
-export function HostedServices({ notificationTarget,api, uid, locale, renderMarkdown, initialServiceId, initialSessionId, link, people, onBackToTeams, refreshMs = { answering: 2000, idle: 10000 } }: HostedServicesProps): ReactElement {
+export function HostedServices(props: HostedServicesProps): ReactElement {
+  return <HostedServicesForAccount key={JSON.stringify([props.uid, props.initialServiceId])} {...props} />;
+}
+
+function HostedServicesForAccount({ notificationTarget,api, uid, locale, renderMarkdown, initialServiceId, initialSessionId, link, people, onBackToTeams, refreshMs = { answering: 2000, idle: 10000 } }: HostedServicesProps): ReactElement {
   const t = useTeamsText(locale);
   const hasTopbar = useContext(ChatTopbarTarget) !== undefined;
   const [list, setList] = useState<ServiceList>(), [status, setStatus] = useState(''), [busy, setBusy] = useState(false);
   const [lookup, setLookup] = useState(''), [candidate, setCandidate] = useState<ServiceView>(), [open, setOpen] = useState<ServiceView>();
+  const listRequest = useRef(0);
   const attempt = useCallback(async (action: () => Promise<unknown>) => {
     setBusy(true); setStatus('');
     try { await action(); } catch (error) { setStatus(serviceErrorText(code(error), locale)); } finally { setBusy(false); }
   }, [locale]);
-  const refresh = useCallback(async () => setList(await api.services<ServiceList>({ action: 'listServices' })), [api]);
+  const refresh = useCallback(async () => {
+    const request = ++listRequest.current;
+    const result = await api.services<ServiceList>({ action: 'listServices' });
+    if (request === listRequest.current) setList(result);
+  }, [api]);
   const find = useCallback(async (serviceId: string) => {
     const view = await api.services<ServiceView | PublishedService>({ action: 'getService', serviceId });
     // The publisher is told what they set, not a caller's terms: they do not use their own service as a caller.
@@ -52,12 +63,15 @@ export function HostedServices({ notificationTarget,api, uid, locale, renderMark
     // Looking a service up shows what it is. Nothing is entered and nothing is sent to its Bot.
     if (view.entered) { setCandidate(undefined); setOpen(view); } else { setOpen(undefined); setCandidate(view); }
   }, [api, locale]);
-  useEffect(() => { void attempt(async () => { await refresh(); if (initialServiceId) await find(initialServiceId); }); }, [attempt, refresh, find, initialServiceId]);
+  useEffect(() => { void attempt(async () => {
+    await Promise.all([refresh(), initialServiceId ? find(initialServiceId) : undefined]);
+  }); }, [attempt, refresh, find, initialServiceId]);
   const [dismissed,setDismissed]=useState('');
   const token=notificationTarget?JSON.stringify([notificationTarget.key,notificationTarget.generation,notificationTarget.through,notificationTarget.messageId,notificationTarget.taskId]):'';
   if(open && initialSessionId && open.serviceId===initialServiceId && notificationTarget && token!==dismissed)return <SourceNoticePreview api={api} kind="service" sourceId={open.serviceId} generation={open.generation??1} conversationId={initialSessionId} locale={locale} target={notificationTarget} onReturn={()=>setDismissed(token)}/>;
-  if (open) return <ServiceSessions key={open.serviceId} api={api} uid={uid} locale={locale} service={open} initialSessionId={initialServiceId === open.serviceId ? initialSessionId : undefined} renderMarkdown={renderMarkdown} refreshMs={refreshMs}
-    onBack={() => { setOpen(undefined); void attempt(refresh); }} onLeft={() => { setOpen(undefined); void attempt(refresh); }} />;
+  if (open) return <ServiceSessions key={JSON.stringify([open.serviceId, open.generation, initialSessionId])} api={api} uid={uid} locale={locale} service={open} initialSessionId={initialServiceId === open.serviceId ? initialSessionId : undefined} renderMarkdown={renderMarkdown} refreshMs={refreshMs}
+    onBack={() => { setOpen(undefined); void attempt(refresh); }} onLeft={() => { setOpen(undefined); void attempt(refresh); }}
+    onAccessLost={reason => { setOpen(undefined); setList(undefined); setStatus(serviceErrorText(reason, locale)); void refresh().catch(() => undefined); }} />;
   return <section className="tw-scope tw-embed hosted-services" aria-label={t('services_title')}>
     {onBackToTeams ? <ChatTopbarHeader><header className="tw-conv-head">
       <button type="button" className="tw-icon-btn" aria-label={t('tw_back_team')} title={t('tw_back_team')} onClick={onBackToTeams}><Icon name="chevronLeft" /></button>
@@ -105,30 +119,75 @@ function ServiceTerms({ service, locale, busy, onEnter, onCancel }: { service: S
 }
 
 /** A caller's sessions with a service's Bot. Everything is read through the API on a timer: a service's records cannot be watched. */
-function ServiceSessions({ api, uid, locale, service, initialSessionId, renderMarkdown, refreshMs, onBack, onLeft }: {
-  api: HostedServicesApi; uid: string; locale: string; service: ServiceView; initialSessionId?:string; renderMarkdown?: RenderMarkdown; refreshMs: { answering: number; idle: number }; onBack(): void; onLeft(): void;
+function ServiceSessions({ api, uid, locale, service, initialSessionId, renderMarkdown, refreshMs, onBack, onLeft, onAccessLost }: {
+  api: HostedServicesApi; uid: string; locale: string; service: ServiceView; initialSessionId?:string; renderMarkdown?: RenderMarkdown; refreshMs: { answering: number; idle: number }; onBack(): void; onLeft(): void; onAccessLost(reason: string): void;
 }): ReactElement {
   const t = useTeamsText(locale);
   const scope: ServiceScope = { serviceId: service.serviceId, generation: service.generation ?? 1 }, scopeKey = `${scope.serviceId}:${scope.generation}`;
-  const [view, setView] = useState(service), [sessions, setSessions] = useState<ServiceSession[]>(), [sessionId, setSessionId] = useState<string|undefined>(initialSessionId);
+  const [view, setView] = useState(service), [sessions, setSessions] = useState<ServiceSession[]>();
+  const [selection, setSelection] = useState({ id: initialSessionId });
+  const sessionId = selection.id;
   const [messages, setMessages] = useState<ServiceMessage[]>([]), [tasks, setTasks] = useState<TeamTaskView[]>([]);
   const [text, setText] = useState(''), [status, setStatus] = useState(''), [busy, setBusy] = useState(false);
-  const [syncError, setSyncError] = useState('');
+  const [syncErrors, setSyncErrors] = useState<Partial<Record<SessionCheck, string>>>({});
+  const syncError = syncErrors.entitled ?? syncErrors.conversation ?? syncErrors.tasks;
+  const [checks, setChecks] = useState({ entitled: false, conversation: false, tasks: false });
+  const [transcriptReady, setTranscriptReady] = useState(false);
+  const selected = useRef(selection), readiness = useRef(checks), acting = useRef(false), accessLost = useRef(false), mounted = useRef(false);
+  const refreshCurrent = useRef<() => void>();
   const [reporting, setReporting] = useState(false), [leaving, setLeaving] = useState(false), [tick, setTick] = useState(0);
   const [menu, setMenu] = useState(false), menuRef = useRef<HTMLButtonElement>(null);
   const scroller=useRef<HTMLDivElement>(null);
   const [older,setOlder]=useState<number|null>(null);
   const cursor = useRef({ historical:false, initialized:false,verifiedAt:0,key: '', after: 0, byId: new Map<string, ServiceMessage>() }), end = useRef<HTMLLIElement>(null);
-  const attempt = async (action: () => Promise<unknown>) => {
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const isCurrent = (owner = selection) => mounted.current && !accessLost.current && selected.current === owner;
+  const updateChecks = (patch: Partial<typeof checks>) => {
+    const previous = readiness.current;
+    const next = { ...previous, ...patch };
+    if (next.entitled === previous.entitled && next.conversation === previous.conversation && next.tasks === previous.tasks) return;
+    readiness.current = next;
+    setChecks(next);
+  };
+  const selectSession = (id: string | undefined) => {
+    if (selected.current.id === id) return selected.current;
+    const next = { id };
+    selected.current = next;
+    cursor.current.key = '';
+    updateChecks({ conversation: false, tasks: false });
+    setSelection(next);
+    setMessages([]);
+    setTranscriptReady(false);
+    setTasks([]);
+    setOlder(null);
+    setStatus('');
+    setSyncErrors({});
+    return next;
+  };
+  const loseAccess = (reason: string) => {
+    if (!ACCESS_LOSS.has(reason)) return false;
+    accessLost.current = true;
+    updateChecks({ entitled: false, conversation: false, tasks: false });
+    onAccessLost(reason);
+    return true;
+  };
+  const attempt = async (action: () => Promise<unknown>, actionSelection = () => selection) => {
+    if (acting.current || accessLost.current) return false;
+    acting.current = true;
     setBusy(true); setStatus('');
-    try { await action(); return true; } catch (error) { setStatus(serviceErrorText(code(error), locale)); return false; } finally { setBusy(false); }
+    try { await action(); return true; }
+    catch (error) { if (isCurrent(actionSelection()) && !loseAccess(code(error))) setStatus(serviceErrorText(code(error), locale)); return false; }
+    finally { acting.current = false; if (mounted.current) setBusy(false); }
   };
   async function loadOlder(){
     const at=cursor.current;
     if(!sessionId || !older || busy)return;
     await attempt(async()=>{
       const page=await api.serviceMessages<{messages:ServiceMessage[];next:number|null}>({action:'history',...scope,conversationId:sessionId,before:older});
-      if(cursor.current!==at)return;
+      if(!isCurrent() || cursor.current!==at)return;
       const byId=new Map([...page.messages,...at.byId.values()].map(m=>[m.id,m]));
       const values=[...byId.values()].sort((a,b)=>a.seq-b.seq);
       if(values.length>200)at.historical=true;
@@ -137,105 +196,222 @@ function ServiceSessions({ api, uid, locale, service, initialSessionId, renderMa
     });
   }
   const currentRead=sessions?.find(s=>s.id===sessionId)?.lastReadSeq;
+  const canMarkRead = checks.entitled && checks.conversation && transcriptReady;
   useEffect(()=>{
-    if(!sessionId || currentRead===undefined || !scroller.current)return;
+    if(!canMarkRead || !sessionId || currentRead===undefined || !scroller.current)return;
     const frontier=new VisibleReadFrontier(currentRead,0,(through,revision)=>{
+      if(!isCurrent() || !readiness.current.entitled || !readiness.current.conversation)return;
       const read=api.readVisible?.(scope,sessionId,through,revision) ?? api.serviceMessages({action:'read',...scope,conversationId:sessionId,lastReadSeq:through});
-      void read.catch(e=>setStatus(serviceErrorText(code(e),locale)));
+      void read.catch(e=>{ if (isCurrent() && !loseAccess(code(e))) setStatus(serviceErrorText(code(e),locale)); });
     });
     return observeTranscript(scroller.current,frontier);
-  },[api,scopeKey,sessionId,currentRead]);
-  const loadSessions = useCallback(async () => {
-    const found = (await api.serviceMessages<{ conversations: ServiceSession[] }>({ action: 'list', ...scope })).conversations;
-    setSessions(found); return found;
+  },[api,scopeKey,selection,currentRead,canMarkRead]);
+  useEffect(() => {
+    let closed = false;
+    void api.serviceMessages<{ conversations: ServiceSession[] }>({ action: 'list', ...scope }).then(({ conversations }) => {
+      if (closed || accessLost.current) return;
+      const ids = new Set(conversations.map(item => item.id));
+      setSessions(previous => [...conversations, ...(previous ?? []).filter(local => !ids.has(local.id))]);
+    }).catch(error => {
+      if (!closed && !accessLost.current && !loseAccess(code(error))) setStatus(serviceErrorText(code(error), locale));
+    });
+    return () => { closed = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, scopeKey]);
-  useEffect(() => { void attempt(async () => { const found = await loadSessions(); setSessionId(old => old ?? found.at(-1)?.id); }); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [loadSessions]);
-  // The open session: its messages by the change log, its tasks, and whether the service can answer.
-  const live = tasks.some(task => LIVE.includes(task.state));
   useEffect(() => {
-    if (!sessionId) { setMessages([]); setTasks([]); setSyncError(''); return; }
-    let closed = false, running = false;
-    const key = `${scopeKey}:${sessionId}`;
-    if (cursor.current.key !== key) { cursor.current = { key, historical:false, initialized:false,verifiedAt:0,after: 0, byId: new Map() };setOlder(null); setMessages([]); setTasks([]); setSyncError(''); }
-    const pass = async () => {
-      if (closed || running || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) return;
-      running = true;
-      try {
-        const at = cursor.current;
-        async function history() {
-          const previous=[...at.byId.values()].sort((a,b)=>a.seq-b.seq);
-          const recent=at.historical && previous.length ? previous[previous.length-1]!.seq+1 : undefined;
-          let before=recent,remaining=Math.max(1,Math.ceil(previous.length/50)), high:number|undefined;
-          const rebased=new Map<string,ServiceMessage>();
-          do {
-            const page=await api.serviceMessages<{messages:ServiceMessage[];next:number|null;lastChangeSeq:number}>({action:'history',...scope,conversationId:sessionId,...(before?{before}:{})});
-            if(closed || at!==cursor.current)return;
-            high??=page.lastChangeSeq;
-            for(const m of page.messages)rebased.set(m.id,m);
-            before=page.next??undefined;
-          }while(before && --remaining>0);
-          at.byId=rebased;at.after=high??0;at.initialized=true;at.verifiedAt=Date.now();setOlder(before??null);
-        }
-        if(!at.initialized || Date.now()-at.verifiedAt>30*86400000) await history();
-        for (;;) {
-          if(closed || cursor.current!==at)return;
-          const page = await api.serviceMessages<ServiceSync>({ action: 'sync', ...scope, conversationId: sessionId, after: at.after,limit:50 });
-          if (closed || cursor.current !== at) return;
-          if(page.conversation.lastChangeSeq-at.after>1000 || page.changes.some((c,i)=>c.seq!==at.after+i+1)) {await history();break;}
-          const tail=Math.max(0,...[...at.byId.values()].map(m=>m.seq));
-          for (const message of page.messages) if(!at.historical || at.byId.has(message.id) || message.seq<=tail && message.seq>=(messages[0]?.seq??0)) at.byId.set(message.id, message);
-          const sorted=[...at.byId.values()].sort((a,b)=>a.seq-b.seq);
-          if(sorted.length>200){at.byId=new Map(sorted.slice(-200).map(m=>[m.id,m]));setOlder(sorted.at(-200)!.seq);}
-          at.after += page.changes.length;at.verifiedAt=Date.now();
-          if (!page.hasMore || !page.changes.length) break;
-        }
-        const listed = await api.serviceMessages<{ tasks: TeamTaskView[] }>(serviceCommand(scope, 'listTasks', { conversationId: sessionId }));
-        const now = await api.services<ServiceView>({ action: 'getService', serviceId: scope.serviceId });
-        if (closed || cursor.current !== at) return;
-        setMessages([...at.byId.values()].sort((a, b) => a.seq - b.seq)); setTasks(listed.tasks.sort((a, b) => a.createdAt - b.createdAt)); setView(now);
-        setSyncError('');
-      } catch (error) { if (!closed) setSyncError(serviceErrorText(code(error), locale)); } finally { running = false; }
-    };
-    void pass();
-    // Quick while the Bot is answering, slow otherwise.
-    const timer = setInterval(() => void pass(), live ? refreshMs.answering : refreshMs.idle);
-    return () => { closed = true; clearInterval(timer); };
+    // A pending explicit creation owns selection once it is acknowledged.
+    if (!busy && selected.current.id === undefined) selectSession(sessions?.at(-1)?.id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, scopeKey, sessionId, live, locale, tick, refreshMs.answering, refreshMs.idle]);
-  useEffect(() => { end.current?.scrollIntoView?.({ block: 'end' }); }, [messages.length, tasks.length]);
-  const waiting = tasks.find(task => task.state === 'waiting' && task.wait?.recipient.uid === uid);
-  const newSession = () => attempt(async () => {
-    const conversationId = crypto.randomUUID();
-    await api.serviceMessages(serviceCommand(scope, 'createConversation', { conversationId, kind: 'bot_dm', title: new Date().toLocaleString(intlTag(locale)), participantUids: [uid], sharedBotIds: [service.sharedBotId] }));
-    await loadSessions(); setSessionId(conversationId);
-  });
-  const send = () => attempt(async () => {
-    const body = text.trim(); if (!body || busy || view.availability === 'withdrawn') return;
-    let conversationId = sessionId;
-    if (!conversationId) {
-      conversationId = crypto.randomUUID();
-      await api.serviceMessages(serviceCommand(scope, 'createConversation', { conversationId, kind: 'bot_dm', title: body.slice(0, 60), participantUids: [uid], sharedBotIds: [service.sharedBotId] }));
-      // The session exists from here on, whatever becomes of the request: a refused request is sent again into it, not into another.
-      await loadSessions(); setSessionId(conversationId);
+  }, [sessions, busy]);
+  // The open session: its messages by the change log, its tasks, and whether the service can answer.
+  useEffect(() => {
+    let closed = false;
+    let nextDelay = refreshMs.idle;
+    const key = `${scopeKey}:${sessionId}`;
+    if (cursor.current.key !== key) cursor.current = { key, historical:false, initialized:false,verifiedAt:0,after: 0, byId: new Map() };
+    const at = cursor.current;
+    const current = () => !closed && isCurrent() && cursor.current === at && at.key === key;
+    const publishMessages = () => {
+      setMessages([...at.byId.values()].sort((a, b) => a.seq - b.seq));
+      setTranscriptReady(true);
+    };
+    async function readTranscript(id: string) {
+      async function history() {
+        const previous = [...at.byId.values()].sort((a, b) => a.seq - b.seq);
+        const recent = at.historical && previous.length ? previous.at(-1)!.seq + 1 : undefined;
+        let before = recent, remaining = Math.max(1, Math.ceil(previous.length / 50)), high: number | undefined;
+        const rebased = new Map<string, ServiceMessage>();
+        do {
+          const page = await api.serviceMessages<{ messages: ServiceMessage[]; next: number | null; lastChangeSeq: number }>({ action: 'history', ...scope, conversationId: id, ...(before ? { before } : {}) });
+          if (!current()) return;
+          updateChecks({ conversation: true });
+          high ??= page.lastChangeSeq;
+          for (const message of page.messages) rebased.set(message.id, message);
+          before = page.next ?? undefined;
+        } while (before && --remaining > 0);
+        at.byId = rebased;
+        at.after = high ?? 0;
+        at.initialized = true;
+        at.verifiedAt = Date.now();
+        setOlder(before ?? null);
+        publishMessages();
+      }
+      if (!at.initialized || Date.now() - at.verifiedAt > 30 * 86_400_000) await history();
+      while (current()) {
+        const page = await api.serviceMessages<ServiceSync>({ action: 'sync', ...scope, conversationId: id, after: at.after, limit: 50 });
+        if (!current()) return;
+        if (page.conversation.lastChangeSeq - at.after > 1000 || page.changes.some((change, index) => change.seq !== at.after + index + 1)) {
+          await history();
+          break;
+        }
+        if (page.messages.length) {
+          const window = [...at.byId.values()].map(message => message.seq);
+          const tail = Math.max(0, ...window), head = window.length ? Math.min(...window) : 0;
+          for (const message of page.messages) {
+            if (!at.historical || at.byId.has(message.id) || (message.seq <= tail && message.seq >= head)) at.byId.set(message.id, message);
+          }
+          const sorted = [...at.byId.values()].sort((a, b) => a.seq - b.seq);
+          const visible = sorted.length > 200 ? sorted.slice(-200) : sorted;
+          if (visible.length < sorted.length) {
+            at.byId = new Map(visible.map(message => [message.id, message]));
+            setOlder(visible[0]!.seq);
+          }
+          setMessages(visible);
+        }
+        at.after += page.changes.length;
+        at.verifiedAt = Date.now();
+        updateChecks({ conversation: true });
+        if (!page.hasMore || !page.changes.length) break;
+      }
     }
-    const ids = { conversationId, messageId: crypto.randomUUID(), changeId: crypto.randomUUID(), text: body };
-    // An answer to the Bot's question continues the waiting request; anything else is a new request.
-    if (waiting?.wait?.kind === 'human_input' && conversationId === sessionId) await api.serviceMessages(serviceCommand(scope, 'answerWait', { ...ids, waitId: waiting.wait.waitId }));
-    else await api.serviceMessages(serviceCommand(scope, 'submit', { ...ids, targets: [service.sharedBotId] }));
-    setText('');
-    // The request exists now: read it at once rather than at the next tick.
-    setTick(value => value + 1);
-  });
-  const decide = (decision: 'approve' | 'deny') => attempt(async () => {
-    if (!waiting?.wait || !sessionId) return;
-    await api.serviceMessages(serviceCommand(scope, 'decideWait', { conversationId: sessionId, waitId: waiting.wait.waitId, messageId: crypto.randomUUID(), changeId: crypto.randomUUID(), decision }));
-    setTick(value => value + 1);
-  });
+    const reportError = (kind: SessionCheck, detail?: string) => {
+      setSyncErrors(previous => previous[kind] === detail ? previous : { ...previous, [kind]: detail });
+    };
+    const poll = (kind: SessionCheck, read: (accepts: () => boolean) => Promise<void>) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let inFlight = false, requested = 0;
+      async function run() {
+        if (!current()) return;
+        const request = requested;
+        const accepts = () => current() && (kind === 'conversation' || request === requested);
+        inFlight = true;
+        if (typeof document === 'undefined' || document.visibilityState !== 'hidden') {
+          try {
+            await read(accepts);
+            if (accepts()) reportError(kind);
+          } catch (error) {
+            const reason = code(error);
+            if (current() && !loseAccess(reason) && accepts()) {
+              updateChecks({ [kind]: false });
+              if (kind === 'conversation' && (reason === 'CHANGE_GAP' || reason === 'INVALID_DATA')) at.initialized = false;
+              reportError(kind, serviceErrorText(reason, locale));
+            }
+          }
+        }
+        inFlight = false;
+        if (current()) timer = setTimeout(() => void run(), request === requested ? nextDelay : 0);
+      }
+      void run();
+      return {
+        refresh() {
+          requested += 1;
+          if (!inFlight) { clearTimeout(timer); void run(); }
+        },
+        stop() { clearTimeout(timer); },
+      };
+    };
+    const reads = [poll('entitled', async accepts => {
+      const now = await api.services<ServiceView>({ action: 'getService', serviceId: scope.serviceId });
+      if (!current()) return;
+      if (now.availability === 'withdrawn') throw new Error('SERVICE_WITHDRAWN');
+      if (!now.entered) throw new Error('SERVICE_ENTRY_REQUIRED');
+      if (now.generation !== scope.generation || now.serviceId !== scope.serviceId) throw new Error('STALE_MEMBERSHIP');
+      if (!accepts()) return;
+      setView(now);
+      updateChecks({ entitled: true });
+    })];
+    if (sessionId) {
+      reads.push(poll('conversation', () => readTranscript(sessionId)));
+      reads.push(poll('tasks', async accepts => {
+        const { tasks } = await api.serviceMessages<{ tasks: TeamTaskView[] }>(serviceCommand(scope, 'listTasks', { conversationId: sessionId }));
+        if (!accepts()) return;
+        if (tasks.some(task => task.conversationId !== sessionId)) throw new Error('INVALID_DATA');
+        setTasks([...tasks].sort((a, b) => a.createdAt - b.createdAt));
+        updateChecks({ tasks: true });
+        nextDelay = tasks.some(task => LIVE.includes(task.state)) ? refreshMs.answering : refreshMs.idle;
+      }));
+    }
+    refreshCurrent.current = () => { for (const read of reads) read.refresh(); };
+    return () => {
+      closed = true;
+      refreshCurrent.current = undefined;
+      for (const read of reads) read.stop();
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, scopeKey, selection, locale, tick, refreshMs.answering, refreshMs.idle]);
+  useEffect(() => { end.current?.scrollIntoView?.({ block: 'end' }); }, [messages.length, tasks.length]);
+  const waiting = tasks.find(task => task.state === 'waiting' && task.wait?.recipient.uid === uid && task.wait.recipient.generation === scope.generation);
+  const answering = waiting?.wait?.kind === 'human_input';
+  const sessionReady = checks.entitled && checks.conversation && checks.tasks;
+  const canCreate = checks.entitled && !busy;
+  const canAct = sessionReady && !busy;
+  const canSend = (sessionId ? canAct : canCreate && sessions?.length === 0) && (answering || view.availability === 'available');
+  const mayCreate = () => isCurrent() && readiness.current.entitled && !acting.current;
+  const mayAct = () => mayCreate() && readiness.current.conversation && readiness.current.tasks;
+  const recheckActions = () => { updateChecks({ tasks: false }); refreshCurrent.current?.(); };
+  async function createSession(title: string) {
+    const conversationId = crypto.randomUUID();
+    await api.serviceMessages(serviceCommand(scope, 'createConversation', { conversationId, kind: 'bot_dm', title, participantUids: [uid], sharedBotIds: [service.sharedBotId] }));
+    if (!isCurrent()) return undefined;
+    setSessions(found => [...(found ?? []), { id: conversationId, title, kind: 'bot_dm', lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0 }]);
+    return selectSession(conversationId);
+  }
+  const newSession = () => {
+    if (!mayCreate()) return;
+    return attempt(() => createSession(new Date().toLocaleString(intlTag(locale))));
+  };
+  const send = () => {
+    const body = text.trim();
+    const maySend = sessionId ? mayAct() : mayCreate() && sessions?.length === 0;
+    if (!body || !maySend || (!answering && view.availability !== 'available')) return;
+    let owner = selection;
+    return attempt(async () => {
+      if (!owner.id) {
+        const created = await createSession(body.slice(0, 60));
+        if (!created) return;
+        owner = created;
+      }
+      const conversationId = owner.id;
+      if (!conversationId || !isCurrent(owner) || !readiness.current.entitled) return;
+      const ids = { conversationId, messageId: crypto.randomUUID(), changeId: crypto.randomUUID(), text: body };
+      if (waiting?.wait?.kind === 'human_input') await api.serviceMessages(serviceCommand(scope, 'answerWait', { ...ids, waitId: waiting.wait.waitId }));
+      else await api.serviceMessages(serviceCommand(scope, 'submit', { ...ids, targets: [service.sharedBotId] }));
+      if (isCurrent(owner)) {
+        setText('');
+        recheckActions();
+      }
+    }, () => owner);
+  };
+  const decide = (task: TeamTaskView, decision: 'approve' | 'deny') => {
+    const wait = task.wait;
+    if (!sessionId || !mayAct() || task.state !== 'waiting' || wait?.kind !== 'tool_approval' || wait.recipient.uid !== uid || wait.recipient.generation !== scope.generation) return;
+    return attempt(async () => {
+      await api.serviceMessages(serviceCommand(scope, 'decideWait', { conversationId: sessionId, waitId: wait.waitId, messageId: crypto.randomUUID(), changeId: crypto.randomUUID(), decision }));
+      if (isCurrent()) recheckActions();
+    });
+  };
+  const cancel = (task: TeamTaskView) => {
+    if (!mayAct() || !LIVE.includes(task.state) || task.cancelRequestedAt) return;
+    return attempt(async () => {
+      await api.serviceMessages(serviceCommand(scope, 'cancelTask', { taskId: task.taskId }));
+      if (isCurrent()) recheckActions();
+    });
+  };
   const ended = (task: TeamTaskView) => ({ failed: t('services_task_failed'), expired: t('services_task_expired'),
     interrupted: t('services_task_interrupted'), revoked: t('services_task_revoked'),
     cancelled: t('services_task_cancelled'), authorization_required: t('services_task_authorization_required'),
     needs_reconciliation: t('services_task_needs_reconciliation') } as Record<string, string>)[task.state];
+  const ready = sessionId ? sessionReady : checks.entitled;
   const off = view.availability !== 'available';
   const availability = availabilityText(view.availability, locale);
   return <section className="tw-scope tw-conv hosted-service" aria-label={view.name}>
@@ -246,14 +422,14 @@ function ServiceSessions({ api, uid, locale, service, initialSessionId, renderMa
         <div className="tw-conv-title"><h2>{view.name}</h2><p>{t('tw_service_offered_by')} {view.publisherName}</p></div>
       </div>
       <div className="tw-head-actions">
-        <ChatConnectionStatus kind={syncError ? 'error' : off ? 'offline' : 'ok'}
-          label={syncError ? t('teams_load_failed') : availability} detail={syncError || (off && view.availability !== 'withdrawn' ? t('services_cannot_answer') : availability)}
-          recovery={syncError && sessionId ? { label: t('common_retry'), run: () => setTick(value => value + 1) } : undefined} />
-        <select aria-label={t('tw_service_session')} value={sessionId ?? ''} onChange={event => setSessionId(event.target.value || undefined)}>
+        <ChatConnectionStatus kind={syncError ? 'error' : !ready && !off ? 'connecting' : off ? 'offline' : 'ok'}
+          label={syncError ? t('teams_load_failed') : !ready && !off ? t('tw_connecting') : availability} detail={syncError || (off && view.availability !== 'withdrawn' ? t('services_cannot_answer') : availability)}
+          recovery={syncError ? { label: t('common_retry'), run: () => refreshCurrent.current?.() } : undefined} />
+        <select aria-label={t('tw_service_session')} value={sessionId ?? ''} disabled={busy} onChange={event => selectSession(event.target.value || undefined)}>
           {!sessions?.length ? <option value="">{t('services_new_session')}</option> : null}
           {sessions?.map(session => <option key={session.id} value={session.id}>{session.title}</option>)}
         </select>
-        <button type="button" className="tw-icon-btn" aria-label={t('services_new_session')} title={t('services_new_session')} disabled={busy} onClick={() => void newSession()}><Icon name="plus" /></button>
+        <button type="button" className="tw-icon-btn" aria-label={t('services_new_session')} title={t('services_new_session')} disabled={!canCreate} onClick={() => void newSession()}><Icon name="plus" /></button>
         <div className="tw-switcher-wrap tw-friends-more">
           <button ref={menuRef} type="button" className="tw-icon-btn" aria-label={t('tw_more')} title={t('tw_more')} aria-haspopup="menu" aria-expanded={menu} onClick={() => setMenu(open => !open)}><Icon name="more" /></button>
           {menu ? <PopupMenu label={view.name} items={[
@@ -268,7 +444,7 @@ function ServiceSessions({ api, uid, locale, service, initialSessionId, renderMa
     <div className="tw-stream-wrap tw-chat-thread"><div ref={scroller} className="tw-stream" role="log" aria-label={t('tw_messages')} tabIndex={0}>
       {older?<button type="button" disabled={busy} onClick={()=>void loadOlder()}>{t('teams_messages_earlier')}</button>:null}
       {cursor.current.historical?<button type="button" onClick={()=>{cursor.current.key='';setTick(n=>n+1);}}>{t('tw_conv_latest')}</button>:null}
-      {!messages.length && !tasks.length ? <p className="tw-empty-line" role="status">{t('services_empty')}</p> : null}
+      {!messages.length && !tasks.length ? <p className="tw-empty-line" role="status">{t(sessionId && !transcriptReady ? 'teams_loading_messages' : 'services_empty')}</p> : null}
       <ol className="tw-messages">
       {messages.map(message => { const bot = message.author.kind === 'shared_bot';
         return <li key={message.id} className="tw-msg" data-grouped="false" data-mine={!bot} data-kind={bot ? 'bot' : 'user'} data-message-id={message.id} data-message-seq={message.seq}>
@@ -284,8 +460,8 @@ function ServiceSessions({ api, uid, locale, service, initialSessionId, renderMa
         <div className="tw-msg-lead" /><div className="tw-msg-main"><p className="tw-msg-body hosted-service-note">
           {task.state === 'queued' ? t('services_task_queued') : task.state === 'running' ? t('services_task_running')
             : task.state === 'waiting' ? (task.wait?.kind === 'tool_approval' ? t('services_task_approval') : t('services_task_question')) : ended(task)}
-          {task.state === 'waiting' && task.wait?.kind === 'tool_approval' && task.wait.recipient.uid === uid ? <> <button type="button" disabled={busy} onClick={() => void decide('approve')}>{t('teams_approval_approve')}</button> <button type="button" disabled={busy} onClick={() => void decide('deny')}>{t('teams_approval_decline')}</button></> : null}
-          {LIVE.includes(task.state) ? <> <button type="button" disabled={busy || !!task.cancelRequestedAt} onClick={() => void attempt(async () => { await api.serviceMessages(serviceCommand(scope, 'cancelTask', { taskId: task.taskId })); setTick(value => value + 1); })}>{t('common_cancel')}</button></> : null}
+          {task.state === 'waiting' && task.wait?.kind === 'tool_approval' && task.wait.recipient.uid === uid && task.wait.recipient.generation === scope.generation ? <> <button type="button" disabled={!canAct} onClick={() => void decide(task, 'approve')}>{t('teams_approval_approve')}</button> <button type="button" disabled={!canAct} onClick={() => void decide(task, 'deny')}>{t('teams_approval_decline')}</button></> : null}
+          {LIVE.includes(task.state) ? <> <button type="button" disabled={!canAct || !!task.cancelRequestedAt} onClick={() => void cancel(task)}>{t('common_cancel')}</button></> : null}
         </p></div></li>)}
       <li ref={end} aria-hidden="true" />
       </ol></div></div>
@@ -297,7 +473,7 @@ function ServiceSessions({ api, uid, locale, service, initialSessionId, renderMa
             if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || event.keyCode === 229) return;
             event.preventDefault(); void send();
           }} /></ComposerEditor>
-        <ComposerToolbar><button className="tw-primary tw-send" type="submit" aria-label={t('teams_message_send')} disabled={busy || !text.trim() || view.availability === 'withdrawn'}><Icon name="arrowUp" /></button></ComposerToolbar>
+        <ComposerToolbar><button className="tw-primary tw-send" type="submit" aria-label={t('teams_message_send')} disabled={!canSend || !text.trim()}><Icon name="arrowUp" /></button></ComposerToolbar>
       </ComposerSurface>
     </form>
     {reporting ? <ServiceReport api={api} locale={locale} serviceId={scope.serviceId} sessionId={sessionId} onClose={() => setReporting(false)} /> : null}

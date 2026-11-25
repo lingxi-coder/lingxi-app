@@ -67,6 +67,7 @@ export class RuntimeEventReplay {
   private compactedThrough = 0;
 
   get length(): number { return (this.base ? 1 : 0) + this.entries + this.tail.length; }
+  get baseEnvelope(): Envelope | undefined { return this.base; }
   /** A cursor inside rewritten frames must receive a snapshot, not a suffix. */
   get compactedThroughSequence(): number { return this.compactedThrough; }
 
@@ -107,7 +108,26 @@ export class RuntimeEventReplay {
   }
 
   snapshot(): Envelope[] {
-    const out = this.base ? [this.base] : [];
+    return this.collectSnapshot(this.base ? [this.base] : []);
+  }
+
+  /** Capture the transcript events, optionally starting after an admitted remote cursor. */
+  snapshotEvents(afterSequence?: number): Envelope[] {
+    const out: Envelope[] = [];
+    if (afterSequence === undefined) return this.collectSnapshot(out);
+
+    for (let offset = this.tail.length - 1; offset >= 0; offset -= 1) {
+      const envelope = this.tail[(this.tailStart + offset) % this.tail.length]!;
+      if (envelope.sequence <= afterSequence) return out.reverse();
+      out.push(envelope);
+    }
+    for (let entry = this.last; entry && entry.envelope.sequence > afterSequence; entry = entry.previous) {
+      out.push(entry.envelope);
+    }
+    return out.reverse();
+  }
+
+  private collectSnapshot(out: Envelope[]): Envelope[] {
     for (let entry = this.first; entry; entry = entry.next) out.push(entry.envelope);
     out.push(...this.tailEvents());
     return out;

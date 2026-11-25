@@ -681,10 +681,25 @@ export class BridgeClient extends EventEmitter {
   }
 
   /** Read a committed recent display baseline; never performs a session resume. */
-  async captureTranscriptCheckpoint(sessionId: string): Promise<Extract<ClientEvent, { type: 'session_resumed' }>> {
+  captureTranscriptCheckpoint(sessionId: string): Promise<Extract<ClientEvent, { type: 'session_resumed' }>> {
+    return this.readTranscriptDisplay('desktop_transcript_checkpoint', sessionId, { session_id: sessionId });
+  }
+
+  /** Read the selected cold resume's display excerpt without completing the resume. */
+  async captureColdResumePreview(sessionId: string, transcriptPath: string, expectedMode: 'chat' | 'code',
+    signal: AbortSignal): Promise<Extract<ClientEvent, { type: 'session_resumed' }>> {
+    const event = await this.readTranscriptDisplay('desktop_cold_resume_preview', sessionId,
+      { session_id: sessionId, transcript_path: transcriptPath, expected_mode: expectedMode }, signal);
+    if (event.mode !== expectedMode) throw new Error('Invalid transcript preview mode.');
+    return event;
+  }
+
+  private async readTranscriptDisplay(method: 'desktop_transcript_checkpoint' | 'desktop_cold_resume_preview', sessionId: string,
+    params: { session_id: string; transcript_path?: string; expected_mode?: 'chat' | 'code' },
+    signal?: AbortSignal): Promise<Extract<ClientEvent, { type: 'session_resumed' }>> {
     const socket = this.ws;
     if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('Transcript checkpoints require a connected owner.');
-    const result = await this.request('desktop_transcript_checkpoint', { session_id: sessionId }, 30_000);
+    const result = await this.request(method, params, 30_000, undefined, signal);
     if (this.ws !== socket || socket.readyState !== WebSocket.OPEN) throw new Error('The transcript checkpoint connection changed.');
     const event = validateClientEvent(result);
     if (event.type !== 'session_resumed' || event.session_id !== sessionId) throw new Error('Invalid transcript checkpoint owner.');

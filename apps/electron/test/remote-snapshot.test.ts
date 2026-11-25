@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import {
   EVENT_MAX_BYTES,
+  INITIAL_HISTORY_MAX_BYTES,
   INITIAL_HISTORY_TAIL_MESSAGES,
   PAGE_MAX_BYTES,
   TOOL_FIELD_MAX_BYTES,
@@ -166,6 +167,13 @@ test('prompt images are refs while the journal holds the bytes, and the ref roun
 test('a conversation above 4 MiB sends its last 200 messages and says where they start; history pages go back', () => {
   const runtime = new FakeRuntime();
   const messages = Array.from({ length: 700 }, (_, i) => text(`${i}:${'x'.repeat(8_000)}`));
+  const oldestBlocks = messages[0].blocks;
+  let oldestReads = 0;
+  Object.defineProperty(messages[0], 'blocks', { enumerable: true, get() {
+    oldestReads += 1;
+    return oldestBlocks;
+  } });
+  messages[500].images = [{ media_type: 'image/png', url: `data:image/png;base64,${PNG_BASE64}` }];
   runtime.resume(messages);
   const all = frames(runtime) as any[];
   const begin = all[0];
@@ -173,13 +181,34 @@ test('a conversation above 4 MiB sends its last 200 messages and says where they
   const sent = all.filter((frame) => frame.phase === 'messages').flatMap((frame) => frame.messages);
   assert.equal(sent.length, INITIAL_HISTORY_TAIL_MESSAGES);
   assert.ok(sent[0].blocks[0].text.startsWith('500:'));
+  assert.equal(sent[0].images[0].url, baseImageRef(SESSION_A, 500, 0));
+  assert.equal(oldestReads, 0, 'initial resume can leave the oldest message unprojected');
   const page = historyPage(runtime.remoteView(), 500, 100);
   assert.equal(page.first_index, 400);
   assert.equal(page.has_more, true);
   assert.equal(page.messages.length, 100);
   assert.ok((page.messages[0] as any).blocks[0].text.startsWith('400:'));
-  assert.equal(historyPage(runtime.remoteView(), 50, 100).has_more, false);
+  const oldest = historyPage(runtime.remoteView(), 50, 100);
+  assert.equal(oldest.has_more, false);
+  assert.deepEqual(oldest.messages[0]?.blocks, oldestBlocks);
+  assert.ok(oldestReads > 0, 'the oldest message is still available on demand');
   assert.equal(historyPage(runtime.remoteView(), 9999, 5).first_index, 695);
+});
+
+test('the initial history cutoff uses exact projected UTF-8 array bytes', () => {
+  const runtime = new FakeRuntime();
+  const messages = Array.from({ length: INITIAL_HISTORY_TAIL_MESSAGES + 1 }, () => text(''));
+  const oldest = messages[0].blocks[0];
+  oldest.text = '雪"';
+  oldest.text += 'x'.repeat(INITIAL_HISTORY_MAX_BYTES - Buffer.byteLength(JSON.stringify(messages)));
+  runtime.resume(messages);
+  const exact = frames(runtime)[0];
+  assert.equal(exact?.phase === 'begin' && exact.first_message_index, 0);
+
+  oldest.text += 'x';
+  runtime.resume(messages);
+  const above = frames(runtime)[0];
+  assert.equal(above?.phase === 'begin' && above.first_message_index, 1);
 });
 
 test('a small conversation is sent whole', () => {

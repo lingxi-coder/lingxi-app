@@ -617,7 +617,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     resolveSessionMode: async (ref) => {
       const owner = settings.conversationSpaces.find(ref);
       if (owner) return owner.mode;
-      if (bots?.ownsWorkspace(ref.projectPath)) return (await bots.resolveSavedTranscript(ref))?.mode;
+      if (bots?.ownsWorkspace(ref.projectPath)) return bots.resolveSavedTranscript(ref);
       return undefined;
     },
     resolveSavedTranscript: (ref) => bots?.ownsWorkspace(ref.projectPath)

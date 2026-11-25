@@ -2,6 +2,7 @@ import { DecisionToolBridge } from './decisionToolBridge.js';
 import { providerAccountRenewFailureCode } from './provider-accounts.js';
 import { SideChatRecovery } from './sideChatRecovery.js';
 import { replayCheckpointState, RuntimeEventReplay } from './runtimeEventReplay.js';
+import { canResume } from './remoteControl/snapshot.js';
 import { recentTranscript } from '../shared/sessionHistory.js';
 import { parseProviderAccountRouting } from '../shared/providerAccounts.js';
 import type { ProviderAccountConfiguration } from './session-catalog.js';
@@ -15,6 +16,7 @@ import {
   buildNativeUiControlCommand,
   parseUiFrameEvent,
   parseUiInvalidateEvent,
+  readLockfile,
   readLockfileAsync,
   validateNativeUiControlResponseJson,
   validateUiClientOperationResponseJson,
@@ -60,23 +62,21 @@ import type {
   SetWorkingDirectoryRequest,
   SetWorkingDirectoryResult,
 } from '@lingxi/bridge-client';
+import type { SessionAttachParams } from '@lingxi/bridge-client/remote';
 import type { WebContents } from 'electron';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { fusionInvocation, pinFusionStrategy } from '../shared/fusionStrategy.js';
 import { REMOTE_STATE_EVENT_TYPES } from '../shared/clientCommands.js';
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, rmSync, watch, type FSWatcher } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import {
-  discoverExternalReusableBridge,
-  discoverReusableBridge,
+  discoverSessionBridge,
   ignorableLockfileError,
-  listProcessCommands,
   lockfiles,
   processIsAlive,
-  readProcessCommand,
   resolveServerBin,
 } from './bridgeDiscovery.js';
 import {
@@ -1410,25 +1410,25 @@ export class SessionRuntime {
   get remoteObserved(): boolean { return this.remoteObservers.size > 0; }
 
   /** Read the state a snapshot is built from. Synchronous, so it can be paired with {@link observeRemote} without a gap. */
-  remoteView(): RemoteRuntimeView {
-    const replay = this.replayEvents.snapshot();
-    const first = replay[0];
-    const base = first && TRANSCRIPT_REPLAY_BASE_EVENTS.has(first.event.type) ? first : undefined;
+  remoteView(resume?: SessionAttachParams['resume']): RemoteRuntimeView {
+    const position = {
+      epoch: `${this.runtimeId}:${this.remoteBaseSequence}`,
+      baseSequence: this.remoteBaseSequence,
+      droppedThroughSequence: Math.max(this.droppedThroughSequence, this.replayEvents.compactedThroughSequence),
+      lastSequence: this.eventSequence,
+    };
     const controlsEvent = this.latestState.get('conversation_controls_changed')?.event;
     return {
       sessionId: this.sessionId,
       ...(!this.draftModeRestorationRequired && !this.ownedSessionResumeRequired && this.sessionMode
         ? { sessionMode: this.sessionMode } : {}),
       runtimeId: this.runtimeId,
-      epoch: `${this.runtimeId}:${this.remoteBaseSequence}`,
-      baseSequence: this.remoteBaseSequence,
-      base,
-      events: replay.slice(base ? 1 : 0),
+      ...position,
+      base: this.replayEvents.baseEnvelope,
+      events: this.replayEvents.snapshotEvents(canResume(position, resume) ? resume.after_seq : undefined),
       state: [...this.latestState.values()],
       prompts: this.promptJournal,
       interactions: this.interactionRecords,
-      droppedThroughSequence: Math.max(this.droppedThroughSequence, this.replayEvents.compactedThroughSequence),
-      lastSequence: this.eventSequence,
       pending: this.remotePending(),
       turn: { running: this.turnActive, ...(this.activeTurnId !== undefined ? { turn_id: this.activeTurnId } : {}) },
       controls: controlsEvent?.type === 'conversation_controls_changed' ? controlsEvent.controls : undefined,
@@ -2237,18 +2237,15 @@ export class SessionRuntime {
     let generation = ++this.generation;
     const startedAt = Date.now();
     this.startupDiagnostic('bridge_start_started', { generation });
+    let audioCapabilitiesReady: Promise<void> | undefined;
     const bridgeRoot = this.opts.bridgeRoot;
     if (bridgeRoot && this.projectPath) {
       const ref = { projectPath: this.projectPath, sessionId: this.sessionId };
       const discoveryStartedAt = Date.now();
-      const reusable = discoverReusableBridge(
-        bridgeRoot,
-        ref,
-        this.opts.readProcessCommand ?? readProcessCommand,
-      ) ?? discoverExternalReusableBridge(
-        ref,
-        (this.opts.listProcessCommands ?? listProcessCommands)(),
-      );
+      const discovery = discoverSessionBridge(bridgeRoot, ref, this.opts);
+      audioCapabilitiesReady = this.prepareAudioCapabilities();
+      const reusable = await discovery;
+      if (this.disposed || generation !== this.generation) throw new Error('bridge launch superseded');
       this.startupDiagnostic('bridge_start_phase', {
         durationMs: Date.now() - discoveryStartedAt,
         generation,
@@ -2269,7 +2266,7 @@ export class SessionRuntime {
           && (!access.workspace || access.workspace === this.projectPath),
         );
         try {
-          await this.connectBridgeClient(reusable.lockfilePath, generation, false, publishConnected);
+          await this.connectBridgeClient(reusable.lockfilePath, generation, false, publishConnected, undefined, audioCapabilitiesReady);
           const telemetryConfig = this.opts.getTelemetryConfig?.() ?? resolveDesktopTelemetry({});
           this.telemetry = new DesktopTelemetry({ ...telemetryConfig, enabled: telemetryConfig.enabled && !this.telemetryRevoked }, this.opts.appVersion);
           if (!telemetryConfig.enabled || this.telemetryRevoked) {
@@ -2353,7 +2350,9 @@ export class SessionRuntime {
 
     try {
       const lockfileStartedAt = Date.now();
-      const lockfilePath = await this.waitForLockfile(bridgeDir, launch, generation);
+      const waitingForLockfile = this.waitForLockfile(bridgeDir, launch, generation);
+      audioCapabilitiesReady ??= this.prepareAudioCapabilities();
+      const lockfile = await waitingForLockfile;
       this.startupDiagnostic('bridge_start_phase', {
         durationMs: Date.now() - lockfileStartedAt,
         generation,
@@ -2361,7 +2360,7 @@ export class SessionRuntime {
       });
       if (this.disposed) throw new Error('SessionRuntime is disposed');
       const connectStartedAt = Date.now();
-      await this.connectBridgeClient(lockfilePath, generation, true, publishConnected);
+      await this.connectBridgeClient(lockfile.path, generation, true, publishConnected, lockfile, audioCapabilitiesReady);
       if (this.freshOwnedSession) this.freshOwnedReplay = { client: this.requireClient(), generation };
       established = true;
       this.startupDiagnostic('bridge_start_completed', {
@@ -2379,17 +2378,22 @@ export class SessionRuntime {
     }
   }
 
-  private async connectBridgeClient(lockfilePath: string, generation: number, restorePermission = true, publishConnected = true, capturedLockfile?: Lockfile): Promise<void> {
+  private async prepareAudioCapabilities(): Promise<void> {
+    try {
+      await this.opts.audioService?.initializeCapabilities();
+    } catch (error) {
+      if (!this.disposed) this.diagnostics.add('warn', 'bridge', `audio capability initialization failed: ${sanitizeDiagnostic(error)}`);
+    }
+  }
+
+  private async connectBridgeClient(lockfilePath: string, generation: number, restorePermission = true, publishConnected = true, capturedLockfile?: Lockfile, audioCapabilitiesReady?: Promise<void>): Promise<void> {
     if (generation !== this.generation || this.disposed) throw new Error('bridge connection superseded');
     this.connectionLockfilePath = lockfilePath;
     this.setState({ status: 'connecting' });
     const startedAt = Date.now();
     this.startupDiagnostic('bridge_connect_started', { generation, restorePermission });
-    try {
-      await this.opts.audioService?.initializeCapabilities();
-    } catch (error) {
-      this.diagnostics.add('warn', 'bridge', `audio capability initialization failed: ${sanitizeDiagnostic(error)}`);
-    }
+    // Keep the initial hello complete while the optional helper starts alongside bridge discovery or boot.
+    await (audioCapabilitiesReady ?? this.prepareAudioCapabilities());
     if (generation !== this.generation || this.disposed) throw new Error('bridge connection superseded');
     const initialAudioCapabilities = this.opts.audioService?.getCapabilities();
     const initialMediaSessionModes = this.opts.audioService?.getMediaSessionModes?.() ?? [];
@@ -2636,13 +2640,25 @@ export class SessionRuntime {
     attach(child.stderr, 'error');
   }
 
-  private waitForLockfile(dir: string, launch: BridgeLaunchConfig, generation: number): Promise<string> {
+  private waitForLockfile(dir: string, launch: BridgeLaunchConfig, generation: number): Promise<Lockfile> {
     const timeoutMs = this.opts.lockfileTimeoutMs ?? 15_000;
     const deadline = Date.now() + timeoutMs;
-    return new Promise<string>((resolve, reject) => {
+    return new Promise<Lockfile>((resolve, reject) => {
+      let watcher: FSWatcher | undefined;
+      let timer: NodeJS.Timeout | undefined;
+      let settled = false;
+      const finish = (result: Lockfile | Error): void => {
+        settled = true;
+        clearTimeout(timer);
+        watcher?.close();
+        if (result instanceof Error) reject(result);
+        else resolve(result);
+      };
       const tick = (): void => {
-        if (this.disposed || generation !== this.generation) return reject(new Error('bridge launch superseded'));
-        if (!this.child) return reject(new Error('bridge-server exited before publishing a lockfile'));
+        if (settled) return;
+        clearTimeout(timer);
+        if (this.disposed || generation !== this.generation) return finish(new Error('bridge launch superseded'));
+        if (!this.child) return finish(new Error('bridge-server exited before publishing a lockfile'));
         for (const name of lockfiles(dir).sort((left, right) => left.localeCompare(right))) {
           const path = join(dir, name);
           try {
@@ -2653,17 +2669,31 @@ export class SessionRuntime {
               throw new Error('bridge lockfile permissions are not owner-only');
             }
             if (process.getuid && metadata.uid !== process.getuid()) throw new Error('bridge lockfile owner mismatch');
-            validateBridgeLockfile(JSON.parse(readFileSync(path, 'utf8')), this.child.pid!, launch.workspace);
-            return resolve(path);
+            const lockfile = readLockfile(path);
+            if (!lockfile.port) throw new Error('bridge lockfile port is invalid');
+            validateBridgeLockfile(lockfile.body, this.child.pid!, launch.workspace);
+            return finish(lockfile);
           } catch (error) {
             const failure = error instanceof Error ? error : new Error(String(error));
-            if (!ignorableLockfileError(failure)) return reject(failure);
+            if (!ignorableLockfileError(failure)) return finish(failure);
             this.diagnostics.add('warn', 'host', diagnosticEvent('lockfile_ignored', { file: path, reason: failure.message }));
           }
         }
-        if (Date.now() >= deadline) return reject(new Error(`timed out waiting for bridge lockfile`));
-        setTimeout(tick, 50);
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) return finish(new Error('timed out waiting for bridge lockfile'));
+        timer = setTimeout(tick, Math.min(50, remainingMs));
       };
+      // Watch before scanning so creation cannot land between the two. Polling still
+      // covers missing notifications, incomplete writes and unsupported watchers.
+      try {
+        watcher = watch(dir, { persistent: false }, (_event, name) => {
+          if (name === null || name.endsWith('.lock')) tick();
+        });
+        watcher.on('error', () => {
+          watcher?.close();
+          watcher = undefined;
+        });
+      } catch { /* The bounded polling fallback handles unavailable file watching. */ }
       tick();
     });
   }
@@ -4047,7 +4077,7 @@ export class SessionRuntime {
   }
 
   /** Resume the one session owned by this runtime and wait for engine proof. */
-  resumeOwnedSession(transcriptPath?: string): Promise<void> {
+  resumeOwnedSession(transcriptPath?: string, onPreview?: (event: Extract<ClientEvent, { type: 'session_resumed' }>) => void): Promise<void> {
     if (this.resumeOperationInProgress) return Promise.reject(new Error('session resume is already pending'));
     this.ownedSessionResumeRequired = true;
     const client = this.requireClient();
@@ -4082,6 +4112,15 @@ export class SessionRuntime {
       try {
         if (selectedPath) {
           if (!this.sessionMode) throw new Error('The session mode is unavailable.');
+          if (onPreview && typeof client.captureColdResumePreview === 'function') {
+            // The private read is sent first so it can borrow the cold capture.
+            // Neither its result nor its failure delays the selected resume.
+            void client.captureColdResumePreview(this.sessionId, selectedPath, this.sessionMode, pending.controller.signal)
+              .then(event => {
+                if (this.currentResumeOwner() === pending && !pending.sessionResumed
+                  && event.session_id === pending.sessionId && event.mode === this.sessionMode) onPreview(event);
+              }).catch(() => undefined);
+          }
           selectedResponse = client.resumeSessionFromTranscript(this.sessionId, selectedPath, this.sessionMode, pending.controller.signal);
           void selectedResponse.then(() => {
             if (this.currentResumeOwner() !== pending) return;

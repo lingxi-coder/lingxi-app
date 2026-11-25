@@ -1,12 +1,14 @@
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import type { BridgeManagerOptions, SessionRef } from './bridgeTypes.js';
 import { isSessionId } from './sessionIdentity.js';
 import { validateBridgeLockfile } from './validation.js';
 
 const SERVER_BIN_NAME = process.platform === 'win32' ? 'bridge-server.exe' : 'bridge-server';
+const execFileAsync = promisify(execFile);
 
 function moduleDir(): string {
   try {
@@ -83,28 +85,29 @@ export function processCommandOwnsSession(command: string, sessionId: string): b
   return new RegExp(`(?:^|\\s)--session-id(?:=|\\s+)${escaped}(?=\\s|$)`).test(command);
 }
 
-export function readProcessCommand(pid: number): string | undefined {
+async function readProcessCommand(pid: number): Promise<string | undefined> {
   if (process.platform === 'win32') return undefined;
   try {
-    const command = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'command='], {
+    const { stdout } = await execFileAsync('/bin/ps', ['-p', String(pid), '-o', 'command='], {
       encoding: 'utf8',
       maxBuffer: 64 * 1024,
       timeout: 1_000,
-    }).trim();
-    return command || undefined;
+    });
+    return stdout.trim() || undefined;
   } catch {
     return undefined;
   }
 }
 
-export function listProcessCommands(): ProcessCommand[] {
+async function listProcessCommands(): Promise<ProcessCommand[]> {
   if (process.platform === 'win32') return [];
   try {
-    return execFileSync('/bin/ps', ['-axww', '-o', 'pid=,ppid=,command='], {
+    const { stdout } = await execFileAsync('/bin/ps', ['-axww', '-o', 'pid=,ppid=,command='], {
       encoding: 'utf8',
       maxBuffer: 4 * 1024 * 1024,
       timeout: 2_000,
-    }).split('\n').flatMap((line) => {
+    });
+    return stdout.split('\n').flatMap((line) => {
       const processInfo = parseProcessCommand(line);
       return processInfo ? [processInfo] : [];
     });
@@ -155,12 +158,12 @@ function reusableBridgeInLaunchDirectory(
  * the process command supplies the missing session-id binding in the legacy
  * lockfile schema without weakening its Claude-compatible wire format.
  */
-export function discoverReusableBridge(
+export async function discoverReusableBridge(
   bridgeRoot: string,
   ref: SessionRef,
-  processCommand: (pid: number) => string | undefined = readProcessCommand,
+  processCommand: NonNullable<BridgeManagerOptions['readProcessCommand']> = readProcessCommand,
   isAlive: (pid: number) => boolean = processIsAlive,
-): ReusableBridge | undefined {
+): Promise<ReusableBridge | undefined> {
   if (!privateOwnedPath(bridgeRoot, 'directory')) return undefined;
   let entries: string[];
   try {
@@ -183,7 +186,7 @@ export function discoverReusableBridge(
         // Crashed or force-quit runtimes leave their launch directories
         // behind; skip their pids without spawning `ps` for each one.
         if (!isAlive(pid)) continue;
-        const command = processCommand(pid);
+        const command = await processCommand(pid);
         if (!command || !processCommandOwnsSession(command, ref.sessionId)) continue;
         const reusable = reusableBridgeInLaunchDirectory(launchDir, ref, pid, true);
         if (reusable) return reusable;
@@ -207,7 +210,7 @@ function argumentBetween(command: string, start: string, end: string): string | 
 
 export function discoverExternalReusableBridge(
   ref: SessionRef,
-  processes: readonly ProcessCommand[] = listProcessCommands(),
+  processes: readonly ProcessCommand[],
 ): ReusableBridge | undefined {
   for (const processInfo of processes) {
     if (!processCommandOwnsSession(processInfo.command, ref.sessionId)) continue;
@@ -225,6 +228,26 @@ export function discoverExternalReusableBridge(
   return undefined;
 }
 
+/** Inspect the process table once for both private and external candidates. */
+export async function discoverSessionBridge(
+  bridgeRoot: string,
+  ref: SessionRef,
+  options: Pick<BridgeManagerOptions, 'listProcessCommands' | 'readProcessCommand'>,
+): Promise<ReusableBridge | undefined> {
+  let snapshot: Promise<readonly ProcessCommand[]> | undefined;
+  const getProcesses = () => snapshot ??= Promise.resolve((options.listProcessCommands ?? listProcessCommands)());
+  let commandsByPid: Map<number, string> | undefined;
+  const readCapturedCommand = async (pid: number): Promise<string | undefined> => {
+    commandsByPid ??= new Map((await getProcesses()).map(entry => [entry.pid, entry.command]));
+    // The table may exceed its size budget, or a candidate may have started after capture.
+    return commandsByPid.get(pid) ?? readProcessCommand(pid);
+  };
+  // Keep the external process-list override independent of private PID inspection.
+  const readCommand = options.readProcessCommand ?? (options.listProcessCommands ? readProcessCommand : readCapturedCommand);
+  const local = await discoverReusableBridge(bridgeRoot, ref, readCommand);
+  return local ?? discoverExternalReusableBridge(ref, await getProcesses());
+}
+
 export function processIsAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -238,5 +261,5 @@ export function ignorableLockfileError(input: unknown): boolean {
   if (!(input instanceof Error)) return false;
   return (input as NodeJS.ErrnoException).code === 'ENOENT'
     || input instanceof SyntaxError
-    || /bridge lockfile|JSON/.test(input.message);
+    || /bridge lockfile|^lockfile (?:name not|missing authToken)|JSON/.test(input.message);
 }

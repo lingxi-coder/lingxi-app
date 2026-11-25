@@ -887,7 +887,24 @@ for(const code of ['SOURCE_CHANGED','TASK_REVOKED','TASK_CANCELLED'])test(`lost 
 });
 
 test('a Bot question pauses the task and frees its slot; the answer continues it from the checkpoint with the same input',async t=>{
- const f=durable(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint({wait:theWait}):o.bootstrap.type==='run'?asked():done());
+ let checkpointStarted=false,answerStarted=false,releaseReads!:()=>void;
+ const pendingReads=new Promise<void>(resolve=>{releaseReads=resolve;});
+ const f=durable(t,async o=>{
+  if(o.bootstrap.type==='inspect_task'){
+   checkpointStarted=true;
+   await pendingReads;
+   return checkpoint({wait:theWait});
+  }
+  return o.bootstrap.type==='run'?asked():done();
+ });
+ const read=f.mock.service.hostReadChat.bind(f.mock.service);
+ f.mock.service.hostReadChat=async(c,request)=>{
+  if(request.mode==='byId'&&request.messageId==='answer000001'){
+   answerStarted=true;
+   await pendingReads;
+  }
+  return read(c,request);
+ };
  await f.connector.publishLocalBot('owner',f.input);assert.equal(f.sent('publishSharedBot')[0].payload.deployment.capabilities.durableWait,true);
  f.mock.tasks.push(queued());f.mock.wake();await settle(()=>f.sent('pauseTask').length===1);await f.connector.idle();
  const b=(await f.privateStore.bindings('owner'))[0]!,pause=f.sent('pauseTask')[0].payload,first=f.launches[0]!.bootstrap;
@@ -897,7 +914,12 @@ test('a Bot question pauses the task and frees its slot; the answer continues it
  // Waiting holds no worker and no slot, and nothing treats it as a lost run.
  await quiet(f);assert.equal((f.connector as any).active.size,0);assert.equal(f.launches.length,1);assert.equal(f.sent('pauseTask').length,1);assert.equal(completions(f).length,0);assert.equal(f.sent('continueTask').length,0);
  const waiting=(await f.privateStore.executions('owner'))[0]!;assert.equal(waiting.wait?.waitId,waitId);assert.equal(waiting.pause,undefined);assert.ok(existsSync(waiting.batch.path));
- f.answer();await finished(f);
+ f.answer();
+ try{
+  await settle(()=>checkpointStarted&&answerStarted);
+  assert.equal(f.sent('continueTask').length,0);
+ }finally{releaseReads();}
+ await finished(f);
  assert.deepEqual(f.sent('continueTask').map(c=>({...c.payload,permitNonce:undefined})),[{deploymentId:b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',expectedEpoch:1,checkpointDigest,reason:'answer',dispatchedRequests:1,permitNonce:undefined}]);
  const second=f.launches[1]!.bootstrap;assert.equal(f.launches.length,2);assert.equal(second.type,'continue');assert.equal(second.askRequester,true);
  assert.deepEqual(second.continuation,{epoch:2,expected_checkpoint_digest:checkpointDigest,answer:{wait_id:waitId,message_id:'answer000001',text:'Lisbon'}});

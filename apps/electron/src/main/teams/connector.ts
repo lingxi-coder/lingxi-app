@@ -885,10 +885,15 @@ export class TeamConnector implements LocalTeamHost {
     // Only the host that asked holds the session and the wait. Without them the task is left to expire.
     if (!record?.wait || record.wait.waitId !== resume.waitId) throw new Error('WAIT_STATE_MISSING');
     const environment = { paths: await this.options.privateStore.owner(c.uid), bins: this.options.binaries() }; assert();
-    const checkpoint = await this.checkpoint(record,snapshot,environment,assert);
+    const [inspection, answer] = await Promise.allSettled([
+      this.checkpoint(record,snapshot,environment,assert),
+      this.options.service.hostReadChat(c,{teamId:b.teamId,generation:b.generation,conversationId:task.conversationId,mode:'byId',messageId:resume.answerMessageId}),
+    ]); assert();
+    if (inspection.status === 'rejected') throw inspection.reason;
+    const checkpoint = inspection.value;
     if (!checkpoint.continuable || checkpoint.wait?.waitId !== resume.waitId) throw new Error('NOT_CONTINUABLE');
-    const read = await this.options.service.hostReadChat(c,{teamId:b.teamId,generation:b.generation,conversationId:task.conversationId,mode:'byId',messageId:resume.answerMessageId}); assert();
-    const message = read.messages.find(candidate => candidate.messageId === resume.answerMessageId);
+    if (answer.status === 'rejected') throw answer.reason;
+    const message = answer.value.messages.find(candidate => candidate.messageId === resume.answerMessageId);
     if (!message || message.seq !== resume.answerSeq || message.waitId !== resume.waitId || message.recalled || !message.text.trim() || Buffer.byteLength(message.text) > 8192) throw new Error('SOURCE_CHANGED');
     // An approval is continued only with a decision, a question only with an answer in words.
     const approval = checkpoint.wait.kind === 'tool_approval';
@@ -900,10 +905,19 @@ export class TeamConnector implements LocalTeamHost {
   /** One more attempt of a task this host already ran: after its worker was interrupted (`recovery`) or its question was answered (`answer`). The server grants each at most once. */
   private async resume(c: TeamAccountContext, b: SharedBotBinding, record: SavedExecution, snapshot: TeamPersonaSnapshot, checkpoint: TeamTaskCheckpoint, reason: 'answer' | 'recovery', environment: HostEnvironment, signal: AbortSignal) {
     const assert = () => { this.assert(c); signal.throwIfAborted(); };
-    const accounts = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
-    const payload = {...this.hostFields(b),taskId:record.taskId,expectedEpoch:record.epoch,checkpointDigest:checkpoint.checkpointDigest,reason,dispatchedRequests:Math.max(record.dispatched,checkpoint.dispatchesObserved)};
-    const context=await this.command<TaskContext>(c,b,reason==='answer'?'prepareTask':'validateTask',{...this.hostFields(b),taskId:record.taskId,
-      ...(reason==='recovery'?{permitId:record.payload.permitId,expectedLastChangeSeq:record.lastChangeSeq}:{})});assert();
+    assert();
+    const fields = {...this.hostFields(b),taskId:record.taskId};
+    const [accountRead, taskRead] = await Promise.allSettled([
+      this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles),
+      this.command<TaskContext>(c,b,reason==='answer'?'prepareTask':'validateTask',{...fields,
+        ...(reason==='recovery'?{permitId:record.payload.permitId,expectedLastChangeSeq:record.lastChangeSeq}:{})}),
+    ]); assert();
+    if (accountRead.status === 'rejected') throw accountRead.reason;
+    const accounts = accountRead.value;
+    if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
+    if (taskRead.status === 'rejected') throw taskRead.reason;
+    const context = taskRead.value;
+    const payload = {...fields,expectedEpoch:record.epoch,checkpointDigest:checkpoint.checkpointDigest,reason,dispatchedRequests:Math.max(record.dispatched,checkpoint.dispatchesObserved)};
     const pending=this.grantIntent(b,record,context,'continueTask',payload,checkpoint);
     if(!await this.options.privateStore.compareExecution(c.uid,record,pending))return;
     const next=await this.sendGrant(c,b,pending);if(!next){this.deferred.set(record.taskId,this.now()+(this.options.retryMs??5000));return;}
@@ -914,13 +928,22 @@ export class TeamConnector implements LocalTeamHost {
   }
   private async execute(c: TeamAccountContext, b: SharedBotBinding, task: HostTask, snapshot: TeamPersonaSnapshot, bot: { name: string; description: string }, earlier: number[], signal: AbortSignal) {
     const assert = () => { this.assert(c); signal.throwIfAborted(); };
-    const fields = {...this.hostFields(b),taskId:task.taskId}, environment = { paths: await this.options.privateStore.owner(c.uid), bins: this.options.binaries() }, { paths, bins } = environment; assert();
-    const prepared = await this.command<TaskContext>(c,b,'prepareTask',fields).catch(async error => {
+    assert();
+    const fields = {...this.hostFields(b),taskId:task.taskId};
+    const [owner, taskRead] = await Promise.allSettled([
+      this.options.privateStore.owner(c.uid).then(paths => ({ paths, bins: this.options.binaries() })),
+      this.command<TaskContext>(c,b,'prepareTask',fields),
+    ]); assert();
+    if (owner.status === 'rejected') throw owner.reason;
+    if (taskRead.status === 'rejected') {
       // An unasked task whose message was edited or recalled leaves the queue, so the earlier ones it would have superseded are judged themselves.
+      const error = taskRead.reason;
       if (task.optional !== true || !(error instanceof TeamsApiError && error.code === 'TASK_REVOKED')) throw error;
-      await this.decline(c,b,task.taskId,'revoked'); return undefined;
-    }); assert();
-    if (!prepared) return;
+      await this.decline(c,b,task.taskId,'revoked');
+      return;
+    }
+    const prepared = taskRead.value;
+    const environment = owner.value, { paths, bins } = environment;
     if (prepared.privateDataSource) return this.admitPrivatePreview(c,b,task,snapshot,prepared,environment,signal);
     const scope: BotChatScope = { teamId:b.teamId, sharedBotId:b.sharedBotId, conversationId:task.conversationId, sessionEpoch:b.sessionEpoch };
     const sourceScope = {teamId:b.teamId,generation:b.generation,conversationId:task.conversationId}, kind = prepared.conversationKind ?? 'group';

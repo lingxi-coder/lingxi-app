@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { SettingsStore } from '../src/main/settings';
-import { HostController, CH_SESSION_ARCHIVE, CH_SESSION_METADATA_CAPTURE, CH_SESSION_NEW } from '../src/main/host';
+import { HostController, CH_SESSION_ARCHIVE, CH_SESSION_METADATA_CAPTURE, CH_SESSION_NEW, CH_SESSION_OPEN } from '../src/main/host';
+import type { ResumePreviewListener } from '../src/main/sessionRuntimeManager.js';
+import { CH_SESSION_RESUME_PREVIEW } from '../src/shared/sessionHistory.js';
 import { CH_CONVERSATION_SPACE } from '../src/shared/conversationSpaces';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 
@@ -44,10 +46,11 @@ async function fixture(t: TestContext) {
   (host as any).bootstrap = () => ({ settings: settings.getPublic() });
   host.attachScheduled({ manage: async () => [], isControllerSession: () => false, dispose() {} } as any);
   const frame = { url: 'http://127.0.0.1:4242' };
-  const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, send() {} };
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const sender = { mainFrame: frame, isDestroyed: () => false, once() {}, send(channel: string, payload: unknown) { sent.push({ channel, payload }); } };
   host.registerWindow(sender as any, frame.url); host.registerIpc();
   t.after(() => { host.dispose(); rmSync(directory, { recursive: true, force: true }); });
-  return { host, settings, ref, path, catalog, bridge, handlers, event: { sender, senderFrame: frame },
+  return { host, settings, ref, path, catalog, bridge, handlers, sent, event: { sender, senderFrame: frame },
     setRuntime: (value: any) => { runtime = value; } };
 }
 
@@ -73,6 +76,123 @@ test('archive revokes already admitted cold opens without reopening the archived
   assert.equal(f.settings.getPublic().activeSession?.sessionId, sessionId);
 });
 
+test('an exact picker open previews only to its initiating document before committing navigation', async t => {
+  const f = await fixture(t);
+  const entered = gate(), finish = gate();
+  const selection = { scope: 'current', transcriptPath: f.path } as const;
+  const open = f.bridge.openSession;
+  let preview: ResumePreviewListener | undefined;
+  f.bridge.openSession = async (...args: unknown[]) => {
+    const runtime = await open();
+    preview = args[7] as ResumePreviewListener;
+    entered.resolve();
+    await finish.promise;
+    return runtime;
+  };
+  const otherMessages: unknown[] = [];
+  const otherSender = { ...f.event.sender, send(_channel: string, payload: unknown) { otherMessages.push(payload); } };
+  f.host.registerWindow(otherSender as any, f.event.senderFrame.url);
+  const handler = f.handlers.get(CH_SESSION_OPEN)!;
+  await assert.rejects(handler(f.event, f.ref.projectPath, sessionId, selection, undefined, undefined, undefined, 'invalid request'), /invalid session preview request/);
+  const requestId = 'picker-attempt-1';
+  const opening = handler(f.event, f.ref.projectPath, sessionId, selection, undefined, undefined, undefined, requestId);
+  try {
+    await entered.promise;
+    assert.equal(f.settings.getPublic().activeSession?.sessionId, otherId);
+    preview?.({ type: 'session_resumed', session_id: sessionId, mode: 'code', messages: [] });
+    assert.deepEqual(f.sent, [{ channel: CH_SESSION_RESUME_PREVIEW,
+      payload: { requestId, session: { ...f.ref, mode: 'code' }, messages: [] } }]);
+    assert.deepEqual(otherMessages, []);
+    assert.equal(f.settings.getPublic().activeSession?.sessionId, otherId);
+  } finally { finish.resolve(); await opening; }
+  assert.equal(f.settings.getPublic().activeSession?.sessionId, sessionId);
+});
+
+test('a plain cold open previews its remembered exact transcript and original catalog scope', async t => {
+  const f = await fixture(t);
+  const catalogProjectPath = join(f.ref.projectPath, 'settings');
+  f.settings.rememberSessionTranscriptSelection(f.ref, { catalogProjectPath, scope: 'all', transcriptPath: f.path });
+  const select = f.catalog.select;
+  const reads: unknown[][] = [];
+  f.catalog.select = async (...args: unknown[]) => { reads.push(args); return select(); };
+  const open = f.bridge.openSession;
+  f.bridge.openSession = async (...args: unknown[]) => {
+    assert.equal(args[4], f.path);
+    const runtime = await open();
+    const preview = args[7] as ResumePreviewListener | undefined;
+    assert.ok(preview);
+    preview({ type: 'session_resumed', session_id: sessionId, mode: 'code', messages: [] });
+    assert.equal(f.settings.getPublic().activeSession?.sessionId, otherId);
+    return runtime;
+  };
+
+  await f.handlers.get(CH_SESSION_OPEN)!(f.event, f.ref.projectPath, sessionId,
+    undefined, undefined, undefined, undefined, 'saved-source-open');
+
+  assert.deepEqual(reads, [[catalogProjectPath, sessionId, { scope: 'all', transcriptPath: f.path }]]);
+  assert.deepEqual(f.sent, [{ channel: CH_SESSION_RESUME_PREVIEW,
+    payload: { requestId: 'saved-source-open', session: { ...f.ref, mode: 'code' }, messages: [] } }]);
+  assert.equal(f.settings.getPublic().activeSession?.sessionId, sessionId);
+});
+
+for (const timing of ['before capture', 'before delivery']) {
+  test(`a plain cold open fences changed remembered scope ${timing}`, async t => {
+    const f = await fixture(t);
+    const remembered = { catalogProjectPath: f.ref.projectPath, scope: 'all', transcriptPath: f.path } as const;
+    f.settings.rememberSessionTranscriptSelection(f.ref, remembered);
+    const changeScope = () => {
+      f.settings.commitSessionRelocation(f.ref, f.ref.projectPath, { ...remembered, scope: 'repository' });
+      f.settings.setActiveSession({ ...f.ref, sessionId: otherId });
+    };
+    if (timing === 'before capture') {
+      const select = f.catalog.select;
+      f.catalog.select = async () => { changeScope(); return select(); };
+    } else {
+      const open = f.bridge.openSession;
+      f.bridge.openSession = async (...args: unknown[]) => {
+        const runtime = await open();
+        const preview = args[7] as ResumePreviewListener | undefined;
+        assert.ok(preview);
+        changeScope();
+        preview({ type: 'session_resumed', session_id: sessionId, mode: 'code', messages: [] });
+        return runtime;
+      };
+    }
+
+    const opening = f.handlers.get(CH_SESSION_OPEN)!(f.event, f.ref.projectPath, sessionId,
+      undefined, undefined, undefined, undefined, 'changed-saved-scope');
+    if (timing === 'before capture') {
+      await assert.rejects(opening, /saved session selection changed/);
+      assert.equal(f.bridge.get(), undefined);
+    } else await opening;
+    assert.equal(f.sent.some(({ channel }) => channel === CH_SESSION_RESUME_PREVIEW), false);
+  });
+}
+
+test('a picker preview from a superseded navigation is dropped', async t => {
+  const f = await fixture(t);
+  const entered = gate(), finish = gate();
+  const open = f.bridge.openSession;
+  let preview: ResumePreviewListener | undefined;
+  f.bridge.openSession = async (...args: unknown[]) => {
+    const runtime = await open();
+    preview = args[7] as ResumePreviewListener;
+    entered.resolve();
+    await finish.promise;
+    return runtime;
+  };
+  const opening = f.handlers.get(CH_SESSION_OPEN)!(f.event, f.ref.projectPath, sessionId,
+    { scope: 'current', transcriptPath: f.path }, undefined, undefined, undefined, 'superseded-picker');
+  try {
+    await entered.promise;
+    await f.handlers.get(CH_SESSION_NEW)!(f.event, f.ref.projectPath);
+    assert.ok(preview, 'the exact open requested a preview from its runtime');
+    preview({ type: 'session_resumed', session_id: sessionId, mode: 'code', messages: [] });
+    assert.equal(f.sent.some(({ channel }) => channel === CH_SESSION_RESUME_PREVIEW), false);
+  } finally { finish.resolve(); await opening; }
+  assert.equal(f.settings.getPublic().activeSession?.sessionId, otherId);
+});
+
 test('a notified resume waiting for its engine does not block New Chat', async t => {
   const f = await fixture(t);
   const entered = gate(), release = gate();
@@ -89,6 +209,62 @@ test('a notified resume waiting for its engine does not block New Chat', async t
   release.resolve();
   await Promise.all([notified, creation]);
   assert.equal(f.settings.getPublic().activeSession?.sessionId, otherId);
+});
+
+test('a cold notification validates its saved picker source once before switching space', async t => {
+  const f = await fixture(t);
+  await f.settings.conversationSpaces.setMode('chat');
+  const catalogProjectPath = join(f.ref.projectPath, 'settings');
+  f.settings.rememberSessionTranscriptSelection(f.ref, { catalogProjectPath, scope: 'all', transcriptPath: f.path });
+  const select = f.catalog.select;
+  const reads: unknown[][] = [];
+  f.catalog.select = async (...args: unknown[]) => {
+    reads.push(args);
+    assert.equal(f.settings.conversationSpaces.snapshot().activeMode, 'chat');
+    return select();
+  };
+
+  await f.host.showNotifiedSession(f.ref);
+
+  assert.deepEqual(reads, [[catalogProjectPath, sessionId, { scope: 'all', transcriptPath: f.path }]]);
+  assert.equal(f.settings.conversationSpaces.snapshot().activeMode, 'code');
+  assert.equal(f.settings.getPublic().activeSession?.sessionId, sessionId);
+});
+
+test('a cold notification rolls back when its saved picker source changes during validation', async t => {
+  const f = await fixture(t);
+  await f.settings.conversationSpaces.setMode('chat');
+  const source = { catalogProjectPath: f.ref.projectPath, scope: 'all', transcriptPath: f.path } as const;
+  f.settings.rememberSessionTranscriptSelection(f.ref, source);
+  const select = f.catalog.select;
+  f.catalog.select = async () => {
+    f.settings.commitSessionRelocation(f.ref, f.ref.projectPath, { ...source, scope: 'repository' });
+    f.settings.setActiveSession({ ...f.ref, sessionId: otherId });
+    return select();
+  };
+
+  await assert.rejects(f.host.showNotifiedSession(f.ref), /saved session selection changed/);
+  assert.equal(f.settings.conversationSpaces.snapshot().activeMode, 'chat');
+  assert.equal(f.settings.getPublic().activeSession?.sessionId, otherId);
+  assert.equal(f.bridge.get(), undefined);
+});
+
+test('a notification rejects a changed workspace owner while switching space', async t => {
+  const f = await fixture(t);
+  const spaces = f.settings.conversationSpaces;
+  await spaces.setMode('chat');
+  const saved = { catalogProjectPath: f.ref.projectPath, scope: 'current', transcriptPath: f.path } as const;
+  f.settings.rememberSessionTranscriptSelection(f.ref, saved);
+  const setMode = spaces.setMode.bind(spaces);
+  spaces.setMode = async mode => {
+    if (mode === 'code') await spaces.relocate(f.ref, join(f.ref.projectPath, 'settings'));
+    await setMode(mode);
+  };
+
+  await assert.rejects(f.host.showNotifiedSession(f.ref), /notification session owner changed/);
+  assert.equal(f.settings.getSessionTranscriptSelection(f.ref)?.transcriptPath, f.path);
+  assert.equal(spaces.snapshot().activeMode, 'chat');
+  assert.equal(f.bridge.get(), undefined);
 });
 
 test('archive revokes an engine preparation before metadata commit and a later open waits for archival', async t => {

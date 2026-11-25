@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { LIVE_BATCH_MS, SessionAttachment, canResume } from '../src/main/remoteControl/sessionAttachment.js';
+import { LIVE_BATCH_MS, SessionAttachment } from '../src/main/remoteControl/sessionAttachment.js';
+import { canResume } from '../src/main/remoteControl/snapshot.js';
 import { FakeRuntime, RecordingChannel, newClock, permissionRequest, questionRequest } from './remote-session-helpers.js';
 
 function setup() {

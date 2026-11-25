@@ -1,5 +1,5 @@
 import type { SessionMetadataSelection } from '../../shared/sessionWorkspace.js';
-import { EMPTY_TRANSCRIPT_HISTORY, initialHistory, recentTranscript } from '../../shared/sessionHistory.js';
+import { EMPTY_TRANSCRIPT_HISTORY, initialHistory, recentTranscript, type SessionResumePreview } from '../../shared/sessionHistory.js';
 import { prependHistory } from './conversation.js';
 import { prependRuntimeHistory } from './runtimeCenterState.js';
 import type { ProviderAccountsApi } from '../../shared/providerAccounts';
@@ -107,6 +107,7 @@ import {
   beginCompaction,
   beginLocalSlashCommand,
   beginSlashCommand,
+  conversationFromMessages,
   emptyConversation,
   failSlashCommand,
   isPendingFusionSessionRestore,
@@ -241,6 +242,7 @@ export function useBridge(): UseBridge {
   // host may still be finishing bootstrap metadata in parallel, so keep that
   // separate from the navigation target itself.
   const [sessionReady, setSessionReady] = useState(false);
+  const [resumePreview, setResumePreview] = useState<({ requestId: string } & NonNullable<UseBridge['sessionResumePreview']>) | null>(null);
   const [{ states: runtimeStates, submitted: submittedSessions }, setRuntimeSnapshot] = useState<RuntimeSnapshot>(() => ({
     states: new Map(), submitted: new Map(),
   }));
@@ -295,6 +297,13 @@ export function useBridge(): UseBridge {
   const cancellationTasks = useRef(new Map<string, { current: Promise<void> | null }>());
   const bootstrapRef = useRef<BootstrapState | null>(null);
   const pendingSessionRef = useRef<SessionRef | null>(null);
+  const resumePreviewRequest = useRef<{
+    requestId: string;
+    sessionId: string;
+    mode: SessionResumePreview['session']['mode'];
+    pickerRequestId?: number;
+    published?: boolean;
+  } | null>(null);
   const sessionLoadingRef = useRef(false);
   const latestBootstrapRevisionRef = useRef<number | null>(null);
   const latestBootstrapProjectPathsRef = useRef(new Set<string>());
@@ -673,15 +682,33 @@ export function useBridge(): UseBridge {
     }
   }, [completeTrackedSpeech, host]);
 
+  const clearResumePreview = useCallback(() => {
+    resumePreviewRequest.current = null;
+    setResumePreview(null);
+  }, []);
+
+  const acceptResumePreview = useCallback(({ requestId, session, messages }: SessionResumePreview) => {
+    const request = resumePreviewRequest.current;
+    if (!request || request.published || request.requestId !== requestId
+      || request.sessionId !== session.sessionId || request.mode !== session.mode) return;
+    request.published = true;
+    // The preview belongs only to the transcript display. Normal lifecycle
+    // events still own permissions, runtime state and final replay.
+    setResumePreview({ requestId, pickerRequestId: request.pickerRequestId, conversation: {
+      ...conversationFromMessages(recentTranscript(messages)), sessionKey: session.sessionId,
+    } });
+  }, []);
+
   const beginNavigationOperation = useCallback((): number => {
     pendingSessionRef.current = null;
+    clearResumePreview();
     setSessionReady(false);
     sessionLoadingRef.current = false;
     setPendingSession(null);
     const operationId = nextOperationId(navigationOperationRef.current);
     navigationOperationRef.current = operationId;
     return operationId;
-  }, []);
+  }, [clearResumePreview]);
 
   const isCurrentNavigationOperation = useCallback((operationId: number): boolean => (
     isLatestOperation(operationId, navigationOperationRef.current)
@@ -1304,11 +1331,13 @@ export function useBridge(): UseBridge {
     const offConversationShown = host.onConversationShown?.((snapshot) => {
       navigationOperationRef.current = nextOperationId(navigationOperationRef.current);
       pendingSessionRef.current = null;
+      clearResumePreview();
       sessionLoadingRef.current = false;
       setPendingSession(null);
       setSessionReady(false);
       applyBootstrap(snapshot);
     });
+    const offSessionResumePreview = host.onSessionResumePreview?.(acceptResumePreview);
     const offComputerAccess = host.onComputerAccess((envelope) => {
       if (removedRuntimeIds.current.has(envelope.sessionId)) return;
       updateRuntime(envelope.sessionId, (state) => {
@@ -1354,8 +1383,9 @@ export function useBridge(): UseBridge {
       offPermission();
       offComputerAccess();
       offConversationShown?.();
+      offSessionResumePreview?.();
     };
-  }, [accountSnapshotRefresh, applyBootstrap, capture, completeTrackedSpeech, host, scheduleProjectCatalogRefresh, updateRuntime]);
+  }, [acceptResumePreview, accountSnapshotRefresh, applyBootstrap, capture, clearResumePreview, completeTrackedSpeech, host, scheduleProjectCatalogRefresh, updateRuntime]);
 
   useEffect(() => {
     if (sessionLoading || !host || !activeSessionId || connection.status !== 'connected') return;
@@ -1994,19 +2024,26 @@ export function useBridge(): UseBridge {
   }, [capture, host, mutateSessionCatalog]);
 
   const openSession = useCallback(async (projectPath: string, sessionId: string, selection?: SessionOpenSelection,
-    linkedMode?: import('../../shared/conversationSpaces').ConversationSpace, authoringAppId?: string, authoringVersion?: number) => {
+    linkedMode?: import('../../shared/conversationSpaces').ConversationSpace, authoringAppId?: string, authoringVersion?: number,
+    pickerRequestId?: number) => {
     if (!host) throw new Error('Desktop host unavailable.');
     const operationId = beginNavigationOperation();
     // Keep the displayed owner while the host verifies an app's source/cwd.
     const target = authoringAppId === undefined ? { projectPath, sessionId } satisfies SessionRef
       : bootstrapRef.current?.activeSession ?? bootstrapRef.current?.settings.activeSession ?? { projectPath, sessionId };
+    const previewSupported = authoringAppId === undefined && host.openSessionWithPreview && host.onSessionResumePreview;
+    const mode = previewSupported ? linkedMode ?? bootstrapRef.current?.conversationSpaces.activeMode : undefined;
+    const previewRequest = mode ? { requestId: crypto.randomUUID(), sessionId: sessionId.toLowerCase(), mode, pickerRequestId } : null;
+    if (previewRequest) resumePreviewRequest.current = previewRequest;
     pendingSessionRef.current = target;
     setSessionReady(false);
     sessionLoadingRef.current = true;
     setPendingSession(target);
     if (authoringAppId === undefined) removedRuntimeIds.current.delete(sessionId);
     try {
-      const snapshot = authoringAppId !== undefined
+      const snapshot = previewRequest && host.openSessionWithPreview
+        ? await host.openSessionWithPreview(projectPath, sessionId, selection, linkedMode, previewRequest.requestId)
+        : authoringAppId !== undefined
         ? await host.openSession(projectPath, sessionId, selection, linkedMode, authoringAppId, authoringVersion)
         : linkedMode !== undefined
         ? await host.openSession(projectPath, sessionId, selection, linkedMode)
@@ -2016,6 +2053,7 @@ export function useBridge(): UseBridge {
       if (isCurrentNavigationOperation(operationId)) {
         removedRuntimeIds.current.delete(sessionId);
         pendingSessionRef.current = null;
+        clearResumePreview();
         setSessionReady(false);
         sessionLoadingRef.current = false;
         setPendingSession(null);
@@ -2029,6 +2067,7 @@ export function useBridge(): UseBridge {
     catch (cause) {
       if (!isCurrentNavigationOperation(operationId)) return false;
       pendingSessionRef.current = null;
+      clearResumePreview();
       setSessionReady(false);
       sessionLoadingRef.current = false;
       setPendingSession(null);
@@ -2046,7 +2085,7 @@ export function useBridge(): UseBridge {
       if (isCurrentNavigationOperation(operationId)) capture(cause);
       return false;
     }
-  }, [applyBootstrap, beginNavigationOperation, capture, host, isCurrentNavigationOperation]);
+  }, [applyBootstrap, beginNavigationOperation, capture, clearResumePreview, host, isCurrentNavigationOperation]);
 
   /**
    * Show a chat of a Bot in the chat view once `open` has had the host start it
@@ -2961,6 +3000,8 @@ export function useBridge(): UseBridge {
     activeSession,
     activeBotId,
     sessionLoading,
+    sessionResumePreview: sessionLoading && resumePreview?.requestId === resumePreviewRequest.current?.requestId
+      ? resumePreview ?? undefined : undefined,
     connection,
     connected: !sessionLoading && connection.status === 'connected',
     conversation,

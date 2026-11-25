@@ -112,11 +112,11 @@ export const serviceScope = {
     // Concurrency: the tasks last counted for this caller and for the service, less those that have ended since.
     const mine = root.collection('active').doc(identity.uid), all = root.collection('active').doc('_service');
     const [mineDoc, allDoc] = await tx.getAll(mine, all);
-    const stillLive = async ids => {
-      const docs = ids.length ? await tx.getAll(...ids.map(taskId => root.collection('tasks').doc(taskId))) : [];
-      return ids.filter((_, index) => docs[index].exists && live.has(liveState(docs[index].data())));
-    };
-    const [own, everyone] = [await stillLive(mineDoc.data()?.taskIds ?? []), await stillLive(allDoc.data()?.taskIds ?? [])];
+    const ownIds = mineDoc.data()?.taskIds ?? [], serviceIds = allDoc.data()?.taskIds ?? [];
+    const taskIds = [...new Set([...ownIds, ...serviceIds])];
+    const tasks = taskIds.length ? await tx.getAll(...taskIds.map(taskId => root.collection('tasks').doc(taskId))) : [];
+    const liveIds = new Set(tasks.filter(doc => doc.exists && live.has(liveState(doc.data()))).map(doc => doc.id));
+    const own = ownIds.filter(id => liveIds.has(id)), everyone = serviceIds.filter(id => liveIds.has(id));
     return response => {
       const added = response.tasks.map(task => task.taskId);
       if (own.length + added.length > service.limits.userConcurrent) deny(429, 'SERVICE_USER_BUSY');

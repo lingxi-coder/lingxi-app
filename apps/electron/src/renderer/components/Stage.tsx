@@ -370,8 +370,10 @@ interface StageProps {
  */
 const BOTTOM_SLACK = 24;
 const EMPTY_SUBMITTED_PLANS: readonly SubmittedPlan[] = [];
+const EMPTY_RUN_ITEMS: RunItem[] = [];
+const EMPTY_FOLDED_ITEM_IDS: readonly string[] = [];
 
-export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, messageTarget, onMessageLocated, onReadingPosition, readingPreview, readingOwner, activityView = false, onReviewFiles, submittedPlans = EMPTY_SUBMITTED_PLANS, onOpenPlan, liveItems = [], running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = [], visualizationSessionId, onVisualizationFollowup }: StageProps) {
+export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, messageTarget, onMessageLocated, onReadingPosition, readingPreview, readingOwner, activityView = false, onReviewFiles, submittedPlans = EMPTY_SUBMITTED_PLANS, onOpenPlan, liveItems = EMPTY_RUN_ITEMS, running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = EMPTY_FOLDED_ITEM_IDS, visualizationSessionId, onVisualizationFollowup }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
   useEffect(() => setLocalPlan(null), [sessionKey]);

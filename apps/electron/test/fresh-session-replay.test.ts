@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { BridgeClient, type ClientEvent } from '@lingxi/bridge-client';
+import { BridgeClient, type ClientEvent, type Lockfile } from '@lingxi/bridge-client';
 import { SessionRuntime } from '../src/main/bridge';
 import { SessionRuntimeManager } from '../src/main/sessionRuntimeManager';
 import { emptyConversation, reduceEvent } from '../src/renderer/bridge/conversation';
@@ -20,7 +20,12 @@ function transport(t: TestContext, options: { failHello?: boolean; wrongId?: boo
   const commands: Array<{ type: string }> = [];
   const state = { spawns: 0, prompts: 0, hellos: 0, runtime: undefined as SessionRuntime | undefined, confirmManifest: undefined as (() => void) | undefined };
   t.mock.method(SessionRuntime.prototype as any, 'createLaunchDirectory', () => root);
-  t.mock.method(SessionRuntime.prototype as any, 'waitForLockfile', async () => join(root, 'synthetic.lock'));
+  const lockfile: Lockfile = {
+    path: join(root, '43127.lock'),
+    port: 43127,
+    body: { pid: 77777777, workspaceFolders: [], ideName: 'LingXi-Bridge', transport: 'ws', runningInWindows: false, authToken: 'synthetic' },
+  };
+  t.mock.method(SessionRuntime.prototype as any, 'waitForLockfile', async () => lockfile);
   t.mock.method(SessionRuntime.prototype as any, 'spawnServer', function (this: SessionRuntime) {
     state.runtime = this; state.spawns++;
     return Object.assign(new EventEmitter(), { pid: 77777777, stdout: null, stderr: null });
@@ -28,7 +33,8 @@ function transport(t: TestContext, options: { failHello?: boolean; wrongId?: boo
   t.mock.method(SessionRuntime.prototype as any, 'stopBridge', async function (this: any) {
     this.client?.removeAllListeners(); this.client = undefined; this.child = undefined;
   });
-  t.mock.method(BridgeClient.prototype, 'connect', async function (this: BridgeClient) {
+  t.mock.method(BridgeClient.prototype, 'connect', async function (this: BridgeClient, capturedLockfile?: Lockfile) {
+    if (state.hellos === 0) assert.strictEqual(capturedLockfile, lockfile);
     state.hellos++;
     if (options.failHello) throw new Error('handshake refused');
     const runtime = state.runtime!;

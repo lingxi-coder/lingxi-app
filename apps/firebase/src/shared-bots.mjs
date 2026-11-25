@@ -759,16 +759,24 @@ export class SharedBotsStore {
   }
   /** Everything a model permit (first start or continue) needs: current deployment,
    * requester authority, source watermark, Bot×Chat lock ownership and message order. */
-  async admitRun(tx, team, task, bot, deployment, watermark, now, first = false) {
+  async admitRun(tx, team, task, bot, deployment, watermark, now, { first = false, answerMessageId } = {}) {
     if (!deployment.ready || deployment.onlineUntil <= now || !this.requesterAuthorized(bot, task)) deny(403, 'TASK_REVOKED');
     const conversation = await this.validateTask(tx, team, task);
     if (!await this.sourceWatermarkCurrent(tx, conversation, task, watermark)) deny(409, 'SOURCE_CHANGED');
     const lockRef = team.collection('chatExecutionLocks').doc(hash([task.sharedBotId, task.conversationId]));
-    const lock = (await tx.get(lockRef)).data();
     // A first start passes over earlier optional tasks of the Chat (`superseded`): it sees their messages too. Anything else queued earlier goes first.
-    const { superseded, blocked } = await this.earlierQueued(tx, team, task, now, first);
+    const [lockRead, queueRead, answerRead] = await Promise.allSettled([
+      tx.get(lockRef), this.earlierQueued(tx, team, task, now, first),
+      answerMessageId === undefined ? undefined : Promise.resolve().then(() =>
+        tx.get(conversation.ref.collection('messages').doc(answerMessageId))),
+    ]);
+    // Settle the transaction reads and keep the lock, queue, and answer error order.
+    if (lockRead.status === 'rejected') throw lockRead.reason;
+    if (queueRead.status === 'rejected') throw queueRead.reason;
+    if (answerRead.status === 'rejected') throw answerRead.reason;
+    const lock = lockRead.value.data(), { superseded, blocked } = queueRead.value;
     const free = !(lock && lock.until > now && lock.taskId !== task.taskId) && !blocked;
-    return { lockRef, lock, free, conversation, superseded };
+    return { lockRef, lock, free, conversation, superseded, answerMessage: answerRead.value?.data() };
   }
   /**
    * The tasks of a Bot and Chat queued before `task`. An optional one that has not started (`superseded`) is ended by the task that starts or is
@@ -794,7 +802,7 @@ export class SharedBotsStore {
     if (task.state !== 'queued' || task.epoch >= 1) return { execute: false, taskId: p.taskId };
     if (task.deadline <= now) { tx.update(ref, { state: 'expired' }); return { execute: false, taskId: p.taskId }; }
     if (task.botRevision !== bot.identity.revision) deny(403, 'TASK_REVOKED');
-    const { lockRef, free, conversation, superseded } = await this.admitRun(tx, team, task, bot, deployment, p.expectedLastChangeSeq, now, true);
+    const { lockRef, free, conversation, superseded } = await this.admitRun(tx, team, task, bot, deployment, p.expectedLastChangeSeq, now, { first: true });
     if (!free) return { execute: false, taskId: p.taskId };
     // Unasked runs in groups and channels count against the Bot's own daily limit, not anyone's request quota.
     if (unasked(task, conversation.data())) {
@@ -848,12 +856,9 @@ export class SharedBotsStore {
       return { ...refused, state: 'needs_reconciliation' };
     }
     if (task.botRevision !== bot.identity.revision) deny(403, 'TASK_REVOKED');
-    const { lockRef, lock, free } = await this.admitRun(tx, team, task, bot, deployment, task.inputLastChangeSeq, now);
-    if (answer) {
-      const message = (await tx.get(team.collection('conversations').doc(task.conversationId)
-        .collection('messages').doc(task.resume.answerMessageId))).data();
-      if (!message || message.recalled || message.editedAt || message.seq !== task.resume.answerSeq) deny(409, 'SOURCE_CHANGED');
-    }
+    const { lockRef, lock, free, answerMessage } = await this.admitRun(tx, team, task, bot, deployment, task.inputLastChangeSeq, now,
+      answer ? { answerMessageId: task.resume.answerMessageId } : undefined);
+    if (answer && (!answerMessage || answerMessage.recalled || answerMessage.editedAt || answerMessage.seq !== task.resume.answerSeq)) deny(409, 'SOURCE_CHANGED');
     if (!free) return refused;
     // Waiting is free; a recovered attempt is charged up to now, so the absolute deadline never moves.
     const spent = Math.max(0, Math.min(task.activeBudgetMs, task.activeSpentMs + (answer ? 0 : now - task.attemptStartedAt)));

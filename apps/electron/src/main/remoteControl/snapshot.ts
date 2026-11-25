@@ -18,6 +18,7 @@ import type {
   RemoteImageRef,
   RemoteRecord,
   RemoteSeqRecord,
+  SessionAttachParams,
   SessionHistoryResult,
   SessionActivityPreviewResult,
   SessionSnapshotParams,
@@ -140,14 +141,6 @@ function mapMessage(message: Message, refFor: (index: number) => string, cuts: {
   return mapped;
 }
 
-/** The base conversation of a view, as viewers receive it. */
-function baseMessages(view: RemoteRuntimeView): Message[] {
-  const base = view.base?.event;
-  if (base?.type !== 'session_resumed') return [];
-  const cuts = { any: false };
-  return base.messages.map((message, i) => mapMessage(message, (index) => baseImageRef(view.sessionId, i, index), cuts));
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Records
 // ─────────────────────────────────────────────────────────────────────────────
@@ -253,12 +246,28 @@ export function coalesceRecords(records: readonly RemoteSeqRecord[]): RemoteSeqR
 }
 
 /**
+ * A delta requires the current base and a cursor inside the retained sequence range.
+ */
+export function canResume(
+  view: Pick<RemoteRuntimeView, 'epoch' | 'baseSequence' | 'lastSequence' | 'droppedThroughSequence'>,
+  resume: SessionAttachParams['resume'],
+): resume is NonNullable<SessionAttachParams['resume']> {
+  return resume !== undefined
+    && resume.epoch === view.epoch
+    && Number.isSafeInteger(resume.after_seq)
+    && resume.after_seq >= view.baseSequence
+    && resume.after_seq <= view.lastSequence
+    && resume.after_seq >= view.droppedThroughSequence;
+}
+
+/**
  * The records after `afterSeq`: what a viewer that holds everything up to it
  * is missing. For a snapshot `afterSeq` is the base's sequence, and the
  * latest state is sent whatever its sequence (`allState`): a model chosen
  * before the base is still the model.
  */
 export function recordsAfter(view: RemoteRuntimeView, afterSeq: number, allState = false, botAware = false): RemoteSeqRecord[] {
+  if (!allState && afterSeq === view.lastSequence) return [];
   const items: RemoteSeqRecord[] = [];
   const seen = new Set<number>();
   const add = (item: RemoteSeqRecord | undefined, any = false): void => {
@@ -277,12 +286,13 @@ export function recordsAfter(view: RemoteRuntimeView, afterSeq: number, allState
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Items grouped into pages of at most `limit` bytes of JSON; an item larger than that gets a page of its own. */
-export function pageBySize<T>(items: readonly T[], limit = PAGE_MAX_BYTES): T[][] {
+export function pageBySize<T>(items: readonly T[], limit = PAGE_MAX_BYTES, itemBytes: (item: T, index: number) => number = jsonBytes): T[][] {
   const pages: T[][] = [];
   let page: T[] = [];
   let size = 0;
-  for (const item of items) {
-    const bytes = jsonBytes(item);
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]!;
+    const bytes = itemBytes(item, index);
     if (page.length > 0 && size + bytes > limit) { pages.push(page); page = []; size = 0; }
     page.push(item);
     size += bytes;
@@ -291,14 +301,38 @@ export function pageBySize<T>(items: readonly T[], limit = PAGE_MAX_BYTES): T[][
   return pages;
 }
 
+function snapshotMessages(view: RemoteRuntimeView): { first: number; pages: Message[][] } {
+  const base = view.base?.event;
+  if (base?.type !== 'session_resumed') return { first: 0, pages: [] };
+
+  const firstTail = base.messages.length - INITIAL_HISTORY_TAIL_MESSAGES;
+  const messages: Message[] = [];
+  const sizes: number[] = [];
+  const cuts = { any: false };
+  let first = 0;
+  let arrayBytes = 2; // Opening and closing brackets.
+  // When the projected JSON crosses the limit, older messages can wait for historyPage.
+  for (let index = base.messages.length - 1; index >= 0; index -= 1) {
+    const message = mapMessage(base.messages[index]!, image => baseImageRef(view.sessionId, index, image), cuts);
+    const bytes = jsonBytes(message);
+    arrayBytes += bytes + (messages.length > 0 ? 1 : 0); // Include the comma between items.
+    messages.push(message);
+    sizes.push(bytes);
+    if (firstTail > 0 && index <= firstTail && arrayBytes > INITIAL_HISTORY_MAX_BYTES) {
+      first = firstTail;
+      messages.length = INITIAL_HISTORY_TAIL_MESSAGES;
+      sizes.length = INITIAL_HISTORY_TAIL_MESSAGES;
+      break;
+    }
+  }
+  sizes.reverse();
+  return { first, pages: pageBySize(messages.reverse(), PAGE_MAX_BYTES, (_message, index) => sizes[index]!) };
+}
+
 /** A snapshot as the frames it is sent in, in order: `begin`, the `messages` pages, the `records` pages, `end`. */
 export function buildSnapshot(view: RemoteRuntimeView, botAware = false): SessionSnapshotParams[] {
   const sessionId = view.sessionId;
-  const all = baseMessages(view);
-  let first = 0;
-  if (all.length > INITIAL_HISTORY_TAIL_MESSAGES && jsonBytes(all) > INITIAL_HISTORY_MAX_BYTES) {
-    first = all.length - INITIAL_HISTORY_TAIL_MESSAGES;
-  }
+  const { first, pages } = snapshotMessages(view);
   const mode = view.base?.event.type === 'session_started' || view.base?.event.type === 'session_resumed'
     ? view.base.event.mode : view.sessionMode;
   const frames: SessionSnapshotParams[] = [{
@@ -308,7 +342,7 @@ export function buildSnapshot(view: RemoteRuntimeView, botAware = false): Sessio
     ...(mode !== undefined ? { session_mode: mode } : {}),
     first_message_index: first,
   }];
-  for (const messages of pageBySize(all.slice(first))) frames.push({ phase: 'messages', session_id: sessionId, messages });
+  for (const messages of pages) frames.push({ phase: 'messages', session_id: sessionId, messages });
   for (const records of pageBySize(recordsAfter(view, view.baseSequence, true, botAware))) frames.push({ phase: 'records', session_id: sessionId, records });
   frames.push({
     phase: 'end',

@@ -15,7 +15,7 @@ import type {
 } from '@lingxi/bridge-client';
 import type { RemotePending, RemotePromptOrigin, RemoteRecord, RemoteTurnState } from '@lingxi/bridge-client/remote';
 import type { SessionRuntime } from './bridge.js';
-import type { ProcessCommand, listProcessCommands, readProcessCommand } from './bridgeDiscovery.js';
+import type { ProcessCommand } from './bridgeDiscovery.js';
 import { DiagnosticBuffer } from './host-utils.js';
 import type { HostNotifier } from './notifications.js';
 
@@ -136,9 +136,9 @@ export interface BridgeManagerOptions {
   /** Bare persisted AudioConfigurationV4 JSON snapshot for the shared media router. */
   getMediaAudioConfigurationJson?: () => string;
   /** Internal process-inspection seam used to recover detached Desktop runtimes after a main-process restart. */
-  readProcessCommand?: (pid: number) => string | undefined;
+  readProcessCommand?: (pid: number) => string | undefined | Promise<string | undefined>;
   /** Internal process-table seam used to attach sessions still owned by another local Desktop/test host. */
-  listProcessCommands?: () => readonly ProcessCommand[];
+  listProcessCommands?: () => readonly ProcessCommand[] | Promise<readonly ProcessCommand[]>;
   onCronRunRequested?: (runtime: SessionRuntime, event: Extract<ClientEvent, { type: 'cron_run_requested' }>) => Promise<{ sessionId: string; summary: string }>;
   onModelChanged?: (model: string) => void;
   /** Persist only an explicitly requested, engine-confirmed model selection. */
@@ -206,6 +206,8 @@ export interface SessionRuntimeSummary {
   runtimeVersions?: BridgeRuntimeVersions;
 }
 
+type SavedSessionTranscript = { path: string; mode: RuntimeSessionMode };
+
 export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'getSavedPermissionMode' | 'onPermissionModeSelected' | 'getSavedFastMode' | 'onFastModeSelected' | 'onFirstPromptSent' | 'onPromptAdmitted' | 'onDurableSessionActivity' | 'onActivityChanged' | 'onInboxActivity' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
   onInboxActivity?: (ref: SessionRef) => void;
   /** What a session of a working directory is launched with; it is told which session, for settings that belong to the one. */
@@ -220,9 +222,10 @@ export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions,
   onPermissionModeSelected?: (ref: SessionRef, mode: PermissionModeId) => void;
   getSavedFastMode?: (ref: SessionRef) => boolean | undefined;
   onFastModeSelected?: (ref: SessionRef, enabled: boolean) => void;
-  resolveSessionMode?: (ref: SessionRef) => Promise<RuntimeSessionMode | undefined>;
+  /** A mode resolved from the saved transcript may also return that validated source. */
+  resolveSessionMode?: (ref: SessionRef) => Promise<RuntimeSessionMode | SavedSessionTranscript | undefined>;
   /** Revalidate a previously selected transcript before a cold runtime opens it. */
-  resolveSavedTranscript?: (ref: SessionRef) => Promise<{ path: string; mode: RuntimeSessionMode } | undefined>;
+  resolveSavedTranscript?: (ref: SessionRef) => Promise<SavedSessionTranscript | undefined>;
   captureSessionSource?: (ref: SessionRef, runtime: SessionRuntime, scheduled: boolean) => Promise<string | undefined>;
   onFirstPromptSent?: (ref: SessionRef, isActive: boolean) => boolean | void;
   onPromptAdmitted?: (ref: SessionRef) => void;

@@ -1,6 +1,13 @@
 import type { MessageDto } from '@lingxi/bridge-client';
 
 export const CH_SESSION_HISTORY = 'lingxi:session:history';
+export const CH_SESSION_RESUME_PREVIEW = 'lingxi:session:resume-preview';
+
+export interface SessionResumePreview {
+  requestId: string;
+  session: { projectPath: string; sessionId: string; mode: 'chat' | 'code' };
+  messages: MessageDto[];
+}
 export interface TranscriptHistoryCursor { uuid: string; offset?: number | null; identity?: string | null }
 export interface TranscriptHistoryPage { messages: MessageDto[]; before: TranscriptHistoryCursor | null }
 export interface TranscriptHistoryState { before: TranscriptHistoryCursor | null; loading: boolean; error?: string }

@@ -133,6 +133,41 @@ test('held history for A cannot block exact selection for B across projects, and
   assert.equal(process.peak, 2);
 });
 
+test('concurrent exact selection shares one read for the same scope and transcript', async t => {
+  const cwd = project(t), process = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: process.spawnProcess });
+  t.after(() => catalog.dispose());
+  const selection = { scope: 'current', transcriptPath: row().path } as const;
+  const otherPath = `/other/${uuid}.jsonl`;
+  const first = catalog.select(cwd, uuid, selection);
+  const same = catalog.select(cwd, uuid, selection);
+  const otherScope = catalog.select(cwd, uuid, { ...selection, scope: 'all' });
+  const otherSource = catalog.select(cwd, uuid, { ...selection, transcriptPath: otherPath });
+
+  await nextTurn();
+  const worker = process.calls[0];
+  worker.reply(output(uuid, 'current'));
+  await nextTurn();
+  assert.equal(worker.queries[1].scope, 'all');
+  const [firstRow, sameRow] = await Promise.all([first, same]);
+  assert.equal(firstRow?.title, 'current');
+  assert.deepEqual(firstRow, sameRow);
+  assert.notEqual(firstRow, sameRow);
+  worker.reply(output(uuid, 'all'));
+  assert.equal((await otherScope)?.title, 'all');
+
+  await nextTurn();
+  assert.equal(worker.queries[2].transcriptPath, otherPath);
+  worker.reply(JSON.stringify({ version: 1, sessions: [{ ...row(), path: otherPath }] }));
+  assert.equal((await otherSource)?.path, otherPath);
+
+  const fresh = catalog.select(cwd, uuid, selection);
+  await nextTurn();
+  assert.equal(worker.queries.length, 4);
+  worker.reply(output(uuid, 'updated'));
+  assert.equal((await fresh)?.title, 'updated');
+});
+
 test('history and foreground lanes keep one active request each and share the bounded operation budget', async t => {
   const cwd = project(t), process = processes();
   const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: process.spawnProcess });

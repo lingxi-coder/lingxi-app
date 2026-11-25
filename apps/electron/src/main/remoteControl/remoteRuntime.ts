@@ -18,6 +18,7 @@ import type {
   MediaResultDto,
   MediaSessionModeDto,
 } from '@lingxi/bridge-client';
+import type { SessionAttachParams } from '@lingxi/bridge-client/remote';
 
 import type {
   ConnectionState,
@@ -37,7 +38,8 @@ export interface RemoteRuntime {
   readonly turnActive: boolean;
   readonly remoteModel: string | undefined;
   observeRemote(observer: RemoteObserver): () => void;
-  remoteView(): RemoteRuntimeView;
+  /** A valid resume cursor may omit retained transcript events it already covers. */
+  remoteView(resume?: SessionAttachParams['resume']): RemoteRuntimeView;
   remotePending(): RemoteRuntimeView['pending'];
   pendingPermission(requestId: number): HostPermissionRequest | undefined;
   pendingQuestion(requestId: number): AskUserQuestionRequestDto | undefined;

@@ -87,7 +87,7 @@ import './components/TerminalPanel.css';
 import { TerminalPanel, useTerminalPanel } from './components/TerminalPanel';
 import { restoreSessionPickerFocus, SessionPicker } from './components/SessionPicker';
 import './components/SessionPicker.css';
-import { SESSION_PICKER_EVENT } from '../shared/sessionWorkspace';
+import { SESSION_PICKER_EVENT, type SessionOpenSelection } from '../shared/sessionWorkspace';
 import { CreateProjectDialog } from './components/CreateProjectDialog';
 import { AccountGate } from './components/AccountGate';
 
@@ -547,6 +547,9 @@ export function App() {
     setActivityView(false);
     setSettingsRoute(null);
   }, [cancelLocalAppNavigation]);
+  const openPickerSession = useCallback((projectPath: string, sessionId: string, selection?: SessionOpenSelection) => (
+    bridge.openSession(projectPath, sessionId, selection, undefined, undefined, undefined, sessionPickerRequest.current?.id)
+  ), [bridge.openSession]);
   useEffect(() => {
     const openPicker = (event: Event) => {
       if (sessionNavigationBlocked()) return;
@@ -783,6 +786,7 @@ export function App() {
     }
   }
 
+  const displayedTranscript = bridge.sessionLoading ? bridge.sessionResumePreview?.conversation : bridge.conversation;
   const emptyMessage = bridge.sessionLoading
     ? tr('desktop_shell_loading_session')
     : !workspace?.path
@@ -791,8 +795,11 @@ export function App() {
       ? tr('desktop_shell_empty_session')
       : tr('desktop_shell_create_session');
   const askQuestion = bridge.pendingAskUserQuestion;
+  const pickerPreview = Boolean(sessionPicker && !settingsRoute && bridge.sessionLoading
+    && bridge.sessionResumePreview?.pickerRequestId === sessionPicker.id);
   const sessionPickerSuspended = Boolean(sessionPicker && bridge.sessionLoading
-    && (bridge.pendingPermission || bridge.pendingAskUserQuestion || bridge.pendingComputerAccess));
+    && (pickerPreview || bridge.pendingPermission || bridge.pendingAskUserQuestion || bridge.pendingComputerAccess));
+  const showTranscript = pickerPreview || (page === 'chat' && !assistantNoticeTarget);
 
   return (
     <Theme.Provider value={palette}>
@@ -893,9 +900,10 @@ export function App() {
           <div className="desktop-content" style={{ background: palette.stageBg }}>
           <div className="desktop-workspace-upper">
           <main className="desktop-main" style={{ position: 'relative', flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: palette.stageBg }}>
-          {page === 'apps' && localAppInstallStatus && <p role="status" className="local-app-update">{localAppInstallStatus}</p>}
+          {!pickerPreview && page === 'apps' && localAppInstallStatus && <p role="status" className="local-app-update">{localAppInstallStatus}</p>}
           <ErrorBanner bridge={{ error: localAppNavigationError, clearError: clearLocalAppNavigationError }} presentation={localAppNavigationPresentation} />
           <ErrorBanner bridge={bridge} />
+          <div style={{ display: pickerPreview ? 'none' : 'contents' }}>
           {page === 'messages' && <p style={{ margin: 'auto', color: palette.text3 }}>
             {locale.startsWith('zh') ? '选择一条会话以查看消息' : 'Select a conversation to view messages'}
           </p>}
@@ -926,38 +934,40 @@ export function App() {
           {page === 'chat' && !assistantNoticeTarget && inboxReading.error ? <p className="desktop-inbox-read-status" role="status">
             {locale.startsWith('zh') ? '阅读位置暂未同步，可稍后重试或在会话菜单中手动标记。' : 'Your reading position has not synced. Try again later or mark the conversation read from its menu.'}
           </p> : null}
-          <div style={{ display: page === 'chat' && !assistantNoticeTarget ? 'contents' : 'none' }}>
+          </div>
+          <div style={{ display: showTranscript ? 'contents' : 'none' }}>
           <div className="desktop-chat-layout" data-runtime-inspector-open={bridge.runtimeCenter.inspectorOpen ? 'true' : undefined}>
             <div className="desktop-message-list-view">
                 {/* The transcript keeps all remaining height; Todos live in Summary. */}
-                <BotProposalAction.Provider value={botsAvailable ? reviewBotProposal : undefined}><Stage
+                {bridge.sessionLoading && bridge.sessionResumePreview && <p role="status" style={{ margin: 0, padding: '6px 16px', color: palette.text3, fontSize: 12 }}>{tr('desktop_shell_loading_session')}</p>}
+                <BotProposalAction.Provider value={botsAvailable && !bridge.sessionLoading ? reviewBotProposal : undefined}><Stage
                   history={bridge.sessionLoading ? undefined : bridge.history}
-                  onLoadMoreHistory={bridge.loadMoreHistory}
+                  onLoadMoreHistory={bridge.sessionLoading ? undefined : bridge.loadMoreHistory}
                   messageTarget={!bridge.sessionLoading && (!messageRequest || bridge.conversation.sessionKey === messageRequest.sessionId) ? messageTarget ?? inboxReading.firstUnreadUuid : null}
                   readingPreview={notificationPreview || Boolean(messageTarget)}
                   readingOwner={inbox.uid}
-                  onReadingPosition={inboxReading.onReadingPosition}
+                  onReadingPosition={bridge.sessionLoading ? undefined : inboxReading.onReadingPosition}
                   onMessageLocated={onMessageLocated}
-                  activityView={activityView}
-                  onReviewFiles={(id, files, path) => bridge.openRuntimeItem({ kind: 'turn-review', id, files, path })}
+                  activityView={activityView && !pickerPreview}
+                  onReviewFiles={bridge.sessionLoading ? undefined : (id, files, path) => bridge.openRuntimeItem({ kind: 'turn-review', id, files, path })}
                   submittedPlans={bridge.sessionLoading ? [] : planCalls}
-                  onOpenPlan={(id) => bridge.openRuntimeItem({ kind: 'plan-document', id })}
-                  liveItems={bridge.sessionLoading ? [] : bridge.conversation.items}
+                  onOpenPlan={bridge.sessionLoading ? undefined : (id) => bridge.openRuntimeItem({ kind: 'plan-document', id })}
+                  liveItems={displayedTranscript?.items}
                   running={!bridge.sessionLoading && bridge.running}
                   apiRetry={bridge.sessionLoading ? null : bridge.desktop.apiRetry}
                   agents={stageAgents}
                   activeAgentId={bridge.runtimeCenter.inspectorOpen && bridge.runtimeCenter.activeItem?.kind === 'agent'
                     ? bridge.runtimeCenter.activeItem.id : undefined}
-                  onOpenAgent={(agentId) => bridge.openRuntimeItem({ kind: 'agent', id: agentId })}
+                  onOpenAgent={bridge.sessionLoading ? undefined : (agentId) => bridge.openRuntimeItem({ kind: 'agent', id: agentId })}
                   collapseThoughtsByDefault={bridge.bootstrap?.settings.collapseThoughtsByDefault ?? true}
                   emptyMessage={emptyMessage}
                   welcomeProject={botChat ? activeBot?.name ?? '' : bridge.activeSession?.projectId?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''}
                   // Item ids restart at `i1` in every session; the Stage's
                   // collapse map is scoped by this and dropped when it changes.
-                  sessionKey={bridge.conversation.sessionKey}
-                  modUiSessionId={settledSession?.sessionId ?? ''}
-                  foldedItemIds={bridge.sessionLoading ? [] : bridge.conversation.foldedItemIds}
-                  onVisualizationFollowup={bridge.offerVisualizationFollowup}
+                  sessionKey={displayedTranscript?.sessionKey}
+                  modUiSessionId={bridge.sessionLoading ? '' : settledSession?.sessionId ?? ''}
+                  foldedItemIds={displayedTranscript?.foldedItemIds}
+                  onVisualizationFollowup={bridge.sessionLoading ? undefined : bridge.offerVisualizationFollowup}
                 /></BotProposalAction.Provider>
                 {/* Approval surfaces belong above the composer, never below the input. */}
                 <ComputerAccessPrompt
@@ -1070,7 +1080,7 @@ export function App() {
           onCreate={bridge.confirmProjectCreation} onClose={bridge.cancelProjectCreation} />}
         {sessionPicker && <SessionPicker key={sessionPicker.id} projectPath={sessionPicker.projectPath} mode={bridge.bootstrap?.conversationSpaces.activeMode ?? 'chat'} initialQuery={sessionPicker.query}
           suspended={sessionPickerSuspended}
-          activeSessionId={bridge.activeSession?.sessionId} listProjectSessions={bridge.listProjectSessions} openSession={bridge.openSession}
+          activeSessionId={bridge.activeSession?.sessionId} listProjectSessions={bridge.listProjectSessions} openSession={openPickerSession}
           onOpened={openedPickerSession} onClose={closeSessionPicker} />}
       </div>
       </GitWorkspaceProvider>

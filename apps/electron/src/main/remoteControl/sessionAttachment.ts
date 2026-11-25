@@ -15,6 +15,7 @@ import type { RemoteViewerChannel } from './gateway.js';
 import type { RemoteRuntime } from './remoteRuntime.js';
 import {
   buildSnapshot,
+  canResume,
   coalesceRecords,
   recordForEvent,
   recordForInteraction,
@@ -36,20 +37,6 @@ export interface SessionAttachmentDeps {
 }
 
 type Resume = SessionAttachParams['resume'];
-
-/**
- * Whether a viewer that holds everything up to `resume` can be given just what
- * came after: it is the same base, the position is one the runtime has really
- * reached, and nothing after it has been forgotten.
- */
-export function canResume(view: RemoteRuntimeView, resume: Resume): resume is NonNullable<Resume> {
-  return resume !== undefined
-    && resume.epoch === view.epoch
-    && Number.isSafeInteger(resume.after_seq)
-    && resume.after_seq >= view.baseSequence
-    && resume.after_seq <= view.lastSequence
-    && resume.after_seq >= view.droppedThroughSequence;
-}
 
 const pendingSignature = (pending: RemotePending): string => JSON.stringify(pending);
 
@@ -91,7 +78,7 @@ export class SessionAttachment {
    */
   attach(resume: Resume): SessionAttachResult {
     this.unobserve?.();
-    const view = this.runtime.remoteView();
+    const view = this.runtime.remoteView(resume);
     this.unobserve = this.runtime.observeRemote((observation) => this.observe(observation));
     this.lastPending = pendingSignature(view.pending);
     if (canResume(view, resume)) {

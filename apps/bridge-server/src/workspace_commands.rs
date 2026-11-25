@@ -1,16 +1,20 @@
 //! User-owned workspace commands. These handlers are registered only on the
 //! host slash surface; no model tool can call the relocation primitive.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 
+use client::protocol::message::MessageDto;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use command_api::workspace_directory::{self, AddDirValidation};
 use harness_runtime::desktop::DesktopRuntime;
+use lingxi_core::host::session_context::ConversationMode;
 use lingxi_core::host::OrchestratorHandle;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 
 use crate::settings_bridge::SettingsContext;
 
@@ -50,16 +54,70 @@ pub(crate) struct ColdBootResume {
     session_id: uuid::Uuid,
     transcript_path: PathBuf,
     replayed: Option<orchestrator::ReplayedSession>,
-    mode: lingxi_core::host::session_context::ConversationMode,
+    mode: ConversationMode,
+    preview: OnceLock<Arc<ColdResumePreview>>,
+}
+
+/// A bounded copy of the admitted display rows. It can be lowered on the
+/// blocking pool even after the ordered resume consumes the replay proof.
+#[derive(Default)]
+pub struct ColdResumePreview {
+    history: Vec<ConversationMessage>,
+    tool_results: HashMap<String, Utf16JsonProjection>,
+    timestamps: HashMap<String, i64>,
+}
+
+impl ColdResumePreview {
+    fn capture(replayed: &orchestrator::ReplayedSession) -> Self {
+        const MAX_PREVIEW_ROWS: usize = 64;
+        let all = &replayed.display_history;
+        let history = recent_display_history(&all[all.len().saturating_sub(MAX_PREVIEW_ROWS)..]);
+        let tool_results = history
+            .iter()
+            .filter_map(|row| match row {
+                ConversationMessage::User { content, .. }
+                | ConversationMessage::Assistant { content, .. } => Some(content),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|block| {
+                let ContentBlock::ToolResult { tool_use_id, .. } = block else {
+                    return None;
+                };
+                let id = tool_use_id.as_str();
+                replayed
+                    .client_state_tool_results
+                    .get(id)
+                    .map(|row| (id.to_owned(), row.clone()))
+            })
+            .collect();
+        let timestamps = history
+            .iter()
+            .filter_map(|row| {
+                let id = row.id().as_uuid().to_string();
+                replayed.display_timestamps.get(&id).map(|&time| (id, time))
+            })
+            .collect();
+        Self {
+            history: history.to_vec(),
+            tool_results,
+            timestamps,
+        }
+    }
+
+    pub(crate) fn messages(&self) -> Vec<MessageDto> {
+        lower_display_rows(&self.history, &self.tool_results, &self.timestamps)
+    }
 }
 
 pub(crate) struct ColdResumeProof {
-    pub(crate) messages: Vec<client::protocol::message::MessageDto>,
+    pub(crate) messages: Vec<MessageDto>,
     pub(crate) current_usage: Option<lingxi_core::host::CurrentUsageSnapshot>,
 }
 
 impl ColdBootResume {
-    pub(crate) fn capture(
+    /// Build the proof after boot has checked the captured source's fixed mode.
+    pub(crate) fn from_prepared_config(
         cfg: &harness_runtime::desktop::DesktopConfig,
     ) -> Result<Option<Self>, String> {
         if cfg.defer_session_start {
@@ -76,6 +134,9 @@ impl ColdBootResume {
         if uuid::Uuid::parse_str(&snapshot.source_session_id).ok() != Some(session_id) {
             return Err("cold resume snapshot does not match the active session".into());
         }
+        let mode = cfg
+            .initial_conversation_mode
+            .ok_or("selected transcript requires an expected conversation mode")?;
         let fallback;
         let loaded = if let Some(loaded) = cfg.prepared_session_resume() {
             loaded
@@ -83,18 +144,11 @@ impl ColdBootResume {
             fallback = session::jsonl::route_lines(&snapshot.content);
             &fallback
         };
-        let mode = session::JsonlWriter::fixed_session_mode_from_source(
-            &snapshot.content,
-            &session_id.to_string(),
-        )?;
-        let (messages, _) =
-            session::jsonl::build_conversation_chain(loaded, &session_id.to_string());
+        let id_text = session_id.to_string();
         // Explicit mobile draft anchors are allowed by the cold loader and
         // have no display baseline or deferred tool calls to replay.
-        let replayed = if messages.is_empty()
-            && loaded
-                .mobile_empty_sessions
-                .contains(&session_id.to_string())
+        let replayed = if loaded.mobile_empty_sessions.contains(&id_text)
+            && session::jsonl::find_tip(loaded, &id_text).is_none()
         {
             None
         } else {
@@ -113,6 +167,7 @@ impl ColdBootResume {
             transcript_path: path.clone(),
             replayed,
             mode,
+            preview: OnceLock::new(),
         }))
     }
 }
@@ -136,107 +191,108 @@ fn recent_display_history(
 /// the pinned SDK still restores a full display history. Model state is separate.
 pub(crate) fn lower_initial_transcript(
     replayed: &orchestrator::ReplayedSession,
-) -> Vec<client::protocol::message::MessageDto> {
-    client::adapter::lowering::lower_transcript_with_identities(
+) -> Vec<MessageDto> {
+    lower_display_rows(
         recent_display_history(&replayed.display_history),
         &replayed.client_state_tool_results,
+        &replayed.display_timestamps,
     )
-    .into_iter()
-    .map(|(id, mut message)| {
-        let uuid = id.as_uuid().to_string();
-        message.sent_at_ms = replayed.display_timestamps.get(&uuid).copied();
-        message.transcript_uuid = Some(uuid);
-        message
-    })
-    .collect()
+}
+
+fn lower_display_rows(
+    history: &[ConversationMessage],
+    tool_results: &HashMap<String, Utf16JsonProjection>,
+    timestamps: &HashMap<String, i64>,
+) -> Vec<MessageDto> {
+    client::adapter::lowering::lower_transcript_with_identities(history, tool_results)
+        .into_iter()
+        .map(|(id, mut message)| {
+            let uuid = id.as_uuid().to_string();
+            message.sent_at_ms = timestamps.get(&uuid).copied();
+            message.transcript_uuid = Some(uuid);
+            message
+        })
+        .collect()
 }
 
 fn merge_live_display_history(
-    display: &mut Vec<lingxi_core::types::ConversationMessage>,
-    live: Vec<lingxi_core::types::ConversationMessage>,
+    display: &mut Vec<ConversationMessage>,
+    live: &[ConversationMessage],
+    mut captured_ids: HashSet<MessageId>,
 ) {
-    let mut seen = display
-        .iter()
-        .map(lingxi_core::types::ConversationMessage::id)
-        .collect::<std::collections::HashSet<_>>();
-    for message in live {
-        // Captured display rows retain the complete pre-compact form. Model
-        // history may have normalized that same ID for provider context.
-        if seen.insert(message.id()) {
-            display.push(message);
-        }
-    }
+    // The live model may retain pre-compact or normalized rows. Keep the
+    // captured display and clone only the first live addition for each new ID.
+    display.extend(
+        live.iter()
+            .filter(|row| captured_ids.insert(row.id()))
+            .cloned(),
+    );
 }
 
 fn merge_live_resume_projection(
     replayed: &mut orchestrator::ReplayedSession,
-    live: &[lingxi_core::types::ConversationMessage],
-    envelopes: &std::collections::HashMap<
-        lingxi_core::types::MessageId,
-        lingxi_core::host::TaskDeliveryHistoryEnvelope,
-    >,
+    live: &[ConversationMessage],
+    envelopes: &HashMap<MessageId, lingxi_core::host::TaskDeliveryHistoryEnvelope>,
 ) {
-    use lingxi_core::types::{ContentBlock, ConversationMessage};
     let mut captured_ids = replayed
         .display_history
         .iter()
         .map(ConversationMessage::id)
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<HashSet<_>>();
     captured_ids.extend(replayed.messages.iter().filter_map(|row| {
         uuid::Uuid::parse_str(&row.uuid)
             .ok()
-            .map(lingxi_core::types::MessageId::from_uuid)
+            .map(MessageId::from_uuid)
     }));
-    let tool_names = replayed
-        .display_history
-        .iter()
-        .chain(live)
-        .filter_map(|message| match message {
-            ConversationMessage::Assistant { content, .. }
-            | ConversationMessage::User { content, .. } => Some(content),
-            _ => None,
-        })
-        .flatten()
-        .filter_map(|block| match block {
-            ContentBlock::ToolUse { id, name, .. } => Some((id.to_string(), name.as_str())),
-            _ => None,
-        })
-        .collect::<std::collections::HashMap<_, _>>();
+    let mut tool_names = None;
     for message in live {
-        if captured_ids.contains(&message.id()) {
+        let id = message.id();
+        let Some(raw) = envelopes
+            .get(&id)
+            .and_then(|envelope| envelope.tool_use_result.as_ref())
+            .filter(|_| !captured_ids.contains(&id))
+        else {
             continue;
-        }
+        };
         let ConversationMessage::User { content, .. } = message else {
             continue;
         };
         let mut result_ids = content.iter().filter_map(|block| match block {
-            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.to_string()),
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
             _ => None,
         });
         let (Some(id), None) = (result_ids.next(), result_ids.next()) else {
             continue;
         };
-        if !tool_names
-            .get(&id)
+        // Only a newly recovered structured result needs this index. Most
+        // resumes can reuse the structured results already in the replay.
+        let tool_names = tool_names.get_or_insert_with(|| {
+            replayed
+                .display_history
+                .iter()
+                .chain(live)
+                .filter_map(|message| match message {
+                    ConversationMessage::Assistant { content, .. }
+                    | ConversationMessage::User { content, .. } => Some(content),
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|block| match block {
+                    ContentBlock::ToolUse { id, name, .. } => Some((id.as_str(), name.as_str())),
+                    _ => None,
+                })
+                .collect::<HashMap<_, _>>()
+        });
+        if tool_names
+            .get(id)
             .is_some_and(|name| orchestrator::CLIENT_STATE_TOOLS.contains(name))
         {
-            continue;
-        }
-        if let Some(raw) = envelopes
-            .get(&message.id())
-            .and_then(|envelope| envelope.tool_use_result.as_ref())
-        {
-            replayed.client_state_tool_results.insert(id, raw.clone());
+            replayed
+                .client_state_tool_results
+                .insert(id.to_owned(), raw.clone());
         }
     }
-    // The live model chain can retain pre-compact rows that the initial display
-    // deliberately omitted. Only post-capture additions belong in this merge.
-    let additions = live
-        .iter()
-        .filter(|message| !captured_ids.contains(&message.id()))
-        .cloned()
-        .collect();
-    merge_live_display_history(&mut replayed.display_history, additions);
+    merge_live_display_history(&mut replayed.display_history, live, captured_ids);
 }
 
 #[derive(Default)]
@@ -294,6 +350,51 @@ impl WorkspaceCommands {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .take();
+    }
+
+    pub(crate) async fn prepare_cold_resume_preview(
+        &self,
+        session_id: uuid::Uuid,
+        path: &Path,
+        mode: ConversationMode,
+    ) -> Result<Arc<ColdResumePreview>, String> {
+        let runtime = self.host.runtime()?;
+        let active = &runtime.orchestrator;
+        if active.current_session_id().await.as_uuid() != session_id
+            || active.conversation_mode().await.mode != mode
+            || active
+                .session_transcript_writer()
+                .map(|writer| writer.active_path())
+                .as_deref()
+                != Some(path)
+            || self.facts.request_dequeued.load(Ordering::SeqCst)
+        {
+            return Err("cold resume preview requires the admitted session owner".into());
+        }
+        let captured = self
+            .cold_resume
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let captured = captured
+            .as_ref()
+            .filter(|captured| {
+                captured.session_id == session_id
+                    && captured.transcript_path == path
+                    && captured.mode == mode
+            })
+            .ok_or("cold resume preview is unavailable for this selection")?;
+        Ok(captured
+            .preview
+            .get_or_init(|| {
+                Arc::new(
+                    captured
+                        .replayed
+                        .as_ref()
+                        .map(ColdResumePreview::capture)
+                        .unwrap_or_default(),
+                )
+            })
+            .clone())
     }
 
     pub(crate) async fn merge_live_resume_display(
@@ -1337,11 +1438,12 @@ mod tests {
         ];
         merge_live_display_history(
             &mut display,
-            vec![
+            &[
                 ConversationMessage::user(shared_id, "normalized model content".into()),
                 ConversationMessage::user(added_id, "SessionStart or deferred result".into()),
                 ConversationMessage::user(added_id, "duplicate live projection".into()),
             ],
+            HashSet::from([historical_id, shared_id]),
         );
         assert_eq!(
             display

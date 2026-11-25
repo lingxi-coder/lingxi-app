@@ -638,7 +638,7 @@ export class ProjectSessionCatalog {
       throw new Error('invalid selected transcript path');
     }
     const canonical = realpathSync.native(projectPath);
-    const result = await this.run(canonical, sessionId, sessionCatalogScope(selection.scope), selection.transcriptPath);
+    const result = await this.loadSession(canonical, sessionId, sessionCatalogScope(selection.scope), selection.transcriptPath);
     const row = result.sessions.find((candidate) => candidate.uuid === sessionId);
     if (row && selection.transcriptPath !== undefined && row.path !== selection.transcriptPath) {
       throw new Error('This session selection has changed. Refresh the session list and try again.');
@@ -723,11 +723,11 @@ export class ProjectSessionCatalog {
     return operation;
   }
 
-  private loadSession(canonical: string, sessionId: string): Promise<ProjectSessionCatalogResult> {
-    const key = `${canonical}\0${sessionId}`;
+  private loadSession(canonical: string, sessionId: string, scope?: SessionCatalogScope, transcriptPath?: string): Promise<ProjectSessionCatalogResult> {
+    const key = JSON.stringify([canonical, sessionId, scope, transcriptPath]);
     const existing = this.pendingSessions.get(key);
     if (existing) return existing;
-    const operation = this.run(canonical, sessionId).finally(() => {
+    const operation = this.run(canonical, sessionId, scope, transcriptPath).finally(() => {
       if (this.pendingSessions.get(key) === operation) this.pendingSessions.delete(key);
     });
     this.pendingSessions.set(key, operation);

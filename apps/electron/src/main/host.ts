@@ -1,7 +1,7 @@
 import { CH_DECISION } from '../shared/decision.js';
 import type { DecisionHost } from './decision.js';
 import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
-import { CH_SESSION_HISTORY, historyCursor } from '../shared/sessionHistory.js';
+import { CH_SESSION_HISTORY, CH_SESSION_RESUME_PREVIEW, historyCursor, type SessionResumePreview } from '../shared/sessionHistory.js';
 import { CH_PROVIDER_ACCOUNTS, CH_PROVIDER_ACCOUNTS_CANCEL, type ProviderAccountCommand } from '../shared/providerAccounts.js';
 import type { DesktopProviderAccounts } from './provider-accounts.js';
 import { ProviderVaultClient, ProviderVaultError, vaultIdForAccount, vaultInstallPlan, vaultUpsertFor } from './provider-vault.js';
@@ -65,7 +65,7 @@ import type {
   SessionRef,
   SessionRuntimeSummary,
 } from './bridgeTypes.js';
-import type { SessionRuntimeManager } from './sessionRuntimeManager.js';
+import type { ResumePreviewListener, SessionRuntimeManager } from './sessionRuntimeManager.js';
 import { validateNewAuthoringIntent, type AuthoringSessionIntent, type AuthoringSessionSource } from './local-apps/authoringSessionIntents.js';
 import type { LocalAppNewSessionIntent } from '../shared/localApps.js';
 import type { SessionRuntime } from './bridge.js';
@@ -1348,9 +1348,12 @@ export class HostController {
         } finally { release?.(); }
       });
     });
-    this.ipc.handle(CH_SESSION_OPEN, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown, selection?: unknown, linkedMode?: unknown, authoringAppId?: unknown, authoringVersion?: unknown) => {
+    this.ipc.handle(CH_SESSION_OPEN, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown, selection?: unknown,
+      linkedMode?: unknown, authoringAppId?: unknown, authoringVersion?: unknown, previewRequestId?: unknown) => {
       this.assertSender(event);
       if (linkedMode !== undefined && linkedMode !== 'chat' && linkedMode !== 'code') throw new Error('invalid linked session mode');
+      if (previewRequestId !== undefined && (typeof previewRequestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(previewRequestId)
+        || authoringAppId !== undefined || authoringVersion !== undefined)) throw new Error('invalid session preview request');
       if ((authoringAppId === undefined) !== (authoringVersion === undefined)
         || (authoringAppId !== undefined && (typeof authoringAppId !== 'string' || !/^a[a-f0-9]{32}$/.test(authoringAppId)
           || linkedMode !== 'code' || selection !== undefined || typeof authoringVersion !== 'number'
@@ -1365,6 +1368,12 @@ export class HostController {
       this.draftAdmissionGenerations.delete(expectedMode);
       const project = this.requireProject(projectPath);
       if (!isSessionId(sessionId)) throw new Error('invalid session id');
+      const publishPreview = previewRequestId === undefined ? undefined : (preview: Omit<SessionResumePreview, 'requestId'>) => {
+        try {
+          this.assertSender(event);
+          if (!event.sender.isDestroyed()) event.sender.send(CH_SESSION_RESUME_PREVIEW, { ...preview, requestId: previewRequestId } satisfies SessionResumePreview);
+        } catch { /* The initiating renderer navigated away before the preview arrived. */ }
+      };
       return this.enqueueSessionOpen(sessionId, async (publicationCurrent) => {
         const ref = { projectPath: project, sessionId } satisfies SessionRef;
         const authoring = authoringAppId === undefined ? undefined : await this.captureLocalAppAuthoring?.(authoringAppId as string, ref, authoringVersion as number);
@@ -1380,7 +1389,8 @@ export class HostController {
           }
           selected = { scope: sessionCatalogScope(input.scope), ...(typeof input.transcriptPath === 'string' ? { transcriptPath: input.transcriptPath } : {}) };
         }
-        if (linkedMode === undefined) return this.openSessionAndActivateInternal(ref, selected, generation, expectedMode, undefined, publicationCurrent);
+        if (linkedMode === undefined) return this.openSessionAndActivateInternal(ref, selected, generation, expectedMode, undefined,
+          publicationCurrent, undefined, publishPreview);
         const known = this.settings.conversationSpaces.findBySessionId(sessionId);
         if (!known) throw new Error('The session has no authenticated conversation scope.');
         if (known.mode !== linkedMode) throw new Error('The session belongs to a different conversation space.');
@@ -1389,7 +1399,8 @@ export class HostController {
         await this.enqueueNavigation(async () => {
           if (generation === this.navigationGeneration && publicationCurrent()) await this.settings.conversationSpaces.setMode(linkedMode);
         });
-        try { return await this.openSessionAndActivateInternal(ref, selected, generation, linkedMode, authoring, publicationCurrent); }
+        try { return await this.openSessionAndActivateInternal(ref, selected, generation, linkedMode, authoring,
+          publicationCurrent, undefined, publishPreview); }
         catch (error) {
           if (generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === linkedMode) {
             await this.settings.conversationSpaces.setMode(previousMode);
@@ -3179,17 +3190,20 @@ export class HostController {
   }
 
   private async openSessionAndActivateInternal(ref: SessionRef, selection?: SessionOpenSelection, generation?: number, expectedMode?: ConversationSpace,
-    authoring?: CapturedLocalAppAuthoring, publicationCurrent?: () => boolean): Promise<BootstrapState> {
+    authoring?: CapturedLocalAppAuthoring, publicationCurrent?: () => boolean, selectMode?: (owner: OwnedConversation) => Promise<boolean>,
+    publishPreview?: (preview: Omit<SessionResumePreview, 'requestId'>) => void): Promise<BootstrapState> {
     if (!isSessionId(ref.sessionId)) throw new Error('invalid session id');
     const admitted = publicationCurrent ?? this.captureSessionOpen(ref.sessionId);
     if (!admitted() || (generation !== undefined && (generation !== this.navigationGeneration
-      || (expectedMode !== undefined && this.settings.conversationSpaces.snapshot().activeMode !== expectedMode)))) return this.bootstrap();
+      || (!selectMode && expectedMode !== undefined && this.settings.conversationSpaces.snapshot().activeMode !== expectedMode)))) return this.bootstrap();
     const project = this.requireProject(ref.projectPath);
     ref = { projectPath: project, sessionId: ref.sessionId.toLowerCase() };
     if (this.isProjectClosing(project)) throw new Error('project is closing');
-    const draft = !selection && this.bridge.hasOwnedDraft?.(ref) ? this.settings.conversationSpaces.find(ref) : undefined;
+    const existing = this.bridge.get(ref.sessionId);
+    const draft = !selection && (!selectMode || existing) && this.bridge.hasOwnedDraft?.(ref) ? this.settings.conversationSpaces.find(ref) : undefined;
     if (draft) {
       if (expectedMode && draft.mode !== expectedMode) throw new Error('The session belongs to a different conversation space.');
+      if (selectMode && !await selectMode(draft)) return this.bootstrap();
       const current = () => admitted() && (generation === undefined || (generation === this.navigationGeneration
         && (expectedMode === undefined || this.settings.conversationSpaces.snapshot().activeMode === expectedMode)));
       if (authoring && draft.projectPath !== authoring.sourceDirectory) throw new Error('The Local App authoring workspace changed');
@@ -3209,8 +3223,13 @@ export class HostController {
       } else if (!authoring) activate();
       return this.bootstrap();
     }
-    const existing = this.bridge.get(ref.sessionId);
     const remembered = !selection && !existing ? this.settings.getSessionTranscriptSelection(ref) : undefined;
+    const rememberedSelectionCurrent = () => {
+      if (!remembered) return true;
+      const latest = this.settings.getSessionTranscriptSelection(ref);
+      return latest?.catalogProjectPath === remembered.catalogProjectPath && latest.scope === remembered.scope
+        && latest.transcriptPath === remembered.transcriptPath;
+    };
     const catalogProject = remembered?.catalogProjectPath ?? project;
     // Current aliases and scoped picker copies deliberately differ from UUID
     // resolution. A cold engine must use the last acknowledged exact source.
@@ -3248,7 +3267,15 @@ export class HostController {
     if ((session && session.mode !== ownerMode) || (expectedMode && expectedMode !== ownerMode)) {
       throw new Error('The session belongs to a different conversation space.');
     }
+    if (selectMode) {
+      if (!await selectMode(known)) return this.bootstrap();
+      if (!rememberedSelectionCurrent()) {
+        throw new Error('The saved session selection changed while opening it. Refresh the session list and try again.');
+      }
+    }
     const projectId = known.projectId;
+    const current = () => admitted() && !this.isProjectClosing(source) && (generation === undefined || (generation === this.navigationGeneration
+      && (expectedMode === undefined || this.settings.conversationSpaces.snapshot().activeMode === expectedMode)));
     let releaseCopy: (() => void) | undefined;
     let releasePublication: (() => void) | undefined;
     if (selection && existing) {
@@ -3267,8 +3294,27 @@ export class HostController {
       }
       const canonical: OwnedConversation = { projectPath: source, sessionId: ref.sessionId, mode: ownerMode, projectId };
       releasePublication = this.bridge.retainBackgroundSession?.(canonical);
-      await this.bridge.openSession(canonical, session?.empty_session === true, session?.resume_model,
-        false, selection ? session?.path : undefined);
+      let onPreview: ResumePreviewListener | undefined;
+      if (publishPreview && selection && session && !session.empty_session && current()) {
+        const sourceIsCurrent = () => {
+          if (remembered && (known.projectPath !== source || !rememberedSelectionCurrent())) return false;
+          const owner = this.settings.conversationSpaces.find(known);
+          return owner?.mode === ownerMode && owner.projectId === projectId;
+        };
+        const archived = () => this.settings.isSessionArchived(known) || this.settings.isSessionArchived(canonical);
+        const sourceWasCurrent = sourceIsCurrent();
+        if (remembered && !sourceWasCurrent) {
+          throw new Error('The saved session selection changed while opening it. Refresh the session list and try again.');
+        }
+        if (sourceWasCurrent && !archived()) onPreview = event => {
+          if (!current() || archived() || !sourceIsCurrent() || event.session_id !== canonical.sessionId || event.mode !== canonical.mode
+            || this.bridge.get(canonical.sessionId)?.projectPath !== canonical.projectPath) return;
+          publishPreview({ session: { projectPath: canonical.projectPath, sessionId: canonical.sessionId, mode: canonical.mode }, messages: event.messages });
+        };
+      }
+      const openArgs = [canonical, session?.empty_session === true, session?.resume_model, false, selection ? session?.path : undefined] as const;
+      if (onPreview) await this.bridge.openSession(...openArgs, undefined, undefined, onPreview);
+      else await this.bridge.openSession(...openArgs);
       if (!admitted()) {
         if (!existing || releaseCopy || this.settings.isSessionArchived(canonical)) await this.bridge.closeSession(canonical);
         return this.bootstrap();
@@ -3281,8 +3327,6 @@ export class HostController {
           throw new Error('The Local App authoring workspace changed');
         }
       }
-      const current = () => admitted() && !this.isProjectClosing(source) && (generation === undefined || (generation === this.navigationGeneration
-        && (expectedMode === undefined || this.settings.conversationSpaces.snapshot().activeMode === expectedMode)));
       const result = await this.settings.conversationSpaces.select(known, source, (recorded) => {
         // Capture volatile/runtime state in the same final fence as settings.
         // Target preparation does not select it or evict the previous owner.
@@ -3508,24 +3552,39 @@ export class HostController {
         if ((owner && owner.projectPath !== projectPath) || (runtime && runtime.projectPath !== projectPath)) {
           throw new Error('The notification session owner does not match this workspace.');
         }
-        const live = runtime;
-        const saved = live ? undefined : await resolveSavedConversationTranscript(this.settings, this.sessionCatalog, requested);
-        if (!live && !saved) throw new Error('The session source is unavailable. Choose an exact transcript before opening it.');
-        const mode = owner?.mode ?? live?.sessionMode ?? saved?.mode;
+        if (!runtime && !this.settings.getSessionTranscriptSelection(owner ?? requested)) {
+          throw new Error('The session source is unavailable. Choose an exact transcript before opening it.');
+        }
+        if (!runtime && (!owner || (requested.projectId !== undefined && owner.projectId !== requested.projectId))) {
+          throw new Error('The saved session owner does not match this conversation.');
+        }
+        const mode = owner?.mode ?? runtime?.sessionMode;
         if (!mode) throw new Error('The notification session mode is unavailable.');
-        if ((live?.sessionMode && live.sessionMode !== mode) || (requested.mode && requested.mode !== mode)) {
+        if ((runtime?.sessionMode && runtime.sessionMode !== mode) || (requested.mode && requested.mode !== mode)) {
           throw new Error('The notification session belongs to a different conversation space.');
         }
-        if (generation !== this.navigationGeneration) return;
-        const previousMode = this.settings.conversationSpaces.snapshot().activeMode;
-        await this.enqueueNavigation(async () => {
-          if (generation === this.navigationGeneration && publicationCurrent()) await this.settings.conversationSpaces.setMode(mode);
-        });
+        const current = () => generation === this.navigationGeneration && publicationCurrent();
+        if (!current()) return;
+        let previousMode: ConversationSpace | undefined;
+        // Resolve and validate the exact source inside the open before changing navigation.
+        const selectMode = async (openingOwner: OwnedConversation) => {
+          await this.enqueueNavigation(async () => {
+            if (!current()) return;
+            previousMode = this.settings.conversationSpaces.snapshot().activeMode;
+            await this.settings.conversationSpaces.setMode(mode);
+          });
+          if (!current() || this.settings.conversationSpaces.snapshot().activeMode !== mode) return false;
+          const currentOwner = this.settings.conversationSpaces.find(openingOwner);
+          if (!currentOwner || currentOwner.mode !== openingOwner.mode || currentOwner.projectId !== openingOwner.projectId) {
+            throw new Error('The notification session owner changed while opening it.');
+          }
+          return true;
+        };
         try {
-          const snapshot = await this.openSessionAndActivateInternal(requested, undefined, generation, mode, undefined, publicationCurrent);
-          if (generation === this.navigationGeneration && publicationCurrent()) this.sendToWindows(CH_CONVERSATION_SHOWN, snapshot);
+          const snapshot = await this.openSessionAndActivateInternal(requested, undefined, generation, mode, undefined, publicationCurrent, selectMode);
+          if (current()) this.sendToWindows(CH_CONVERSATION_SHOWN, snapshot);
         } catch (error) {
-          if (generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === mode) {
+          if (previousMode !== undefined && generation === this.navigationGeneration && this.settings.conversationSpaces.snapshot().activeMode === mode) {
             await this.settings.conversationSpaces.setMode(previousMode);
           }
           throw error;

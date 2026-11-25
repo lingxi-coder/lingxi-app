@@ -140,7 +140,17 @@ struct TeamConversationDetailsSheet: View {
                     Text("teams_auto_reply_note")
                 }
             }
-
+            // Next to the auto-reply control: what the Bots of this Chat may use of their maintainers' computers, here. Only for a Bot that shares something.
+            if !context.limitableBots.isEmpty {
+                Section {
+                    NavigationLink {
+                        TeamBotScopeEditor(conversationID: conversation.id)
+                    } label: {
+                        Label("teams_bot_scope_title", systemImage: "slider.horizontal.3")
+                    }
+                    .accessibilityIdentifier("teams.conversation.details.botscope")
+                }
+            }
         }
     }
 
@@ -162,6 +172,8 @@ struct TeamConversationDetailsSheet: View {
                 if let card = person.card {
                     Text("teams_bot_owner \(context.userName(card.maintainer.uid))").font(.caption).foregroundStyle(.secondary)
                     Text(context.presenceText(card)).font(.caption).foregroundStyle(.secondary)
+                    // What this Chat leaves of what the Bot's maintainer shared.
+                    TeamBotScopeSummary(bot: card, in: context.conversation).font(.caption).foregroundStyle(.secondary)
                 } else if let role = person.role {
                     Text(verbatim: TeamsStreamLogic.joinedLine([identity.isSelf ? context.strings.you : nil, TeamsText.roleName(role)]))
                         .font(.caption).foregroundStyle(.secondary)

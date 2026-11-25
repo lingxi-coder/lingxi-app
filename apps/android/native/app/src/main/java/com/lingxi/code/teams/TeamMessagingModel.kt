@@ -400,6 +400,17 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         try { execute("setConversationAutoReply", JSONObject().put("conversationId", conversationId).put("expectedRevision", expectedRevision).put("targets", JSONArray(targets)), lifecycle) }
         catch (error: Exception) { if (error !is CancellationException) onFailed(); throw error }
     }
+    /**
+     * Sets what one Bot of a Chat may use here, within what it published: [narrowing] is the whole narrowing, null lifts it. [expectedRevision] is the revision of
+     * that Bot's entry in the Chat (0 when it has none), so a change someone else made meanwhile is not written over. Returns the revision of the Bot's entry that
+     * the write made: the Chat's listener has brought the new setting once its entry has reached it. Fails with a [TeamMessageFailure].
+     */
+    suspend fun setConversationBotScope(conversationId: String, sharedBotId: String, expectedRevision: Long, narrowing: TeamBotScopeNarrowing?): Long = onModel {
+        execute("setConversationBotScope", JSONObject().put("conversationId", conversationId).put("sharedBotId", sharedBotId).put("expectedRevision", expectedRevision)
+            .put("scope", narrowing?.json() ?: JSONObject.NULL), lifecycle).getLong("revision")
+    }
+    /** Reads the Bot cards again: what a Bot shares may have changed under the person looking at it. */
+    fun refreshBots() { botsDirty = true; refresh() }
     /** Stops a task: at once while it is queued or waiting, at the worker's next check while the Bot is working. A task that has already ended stays as it is. */
     fun cancelTask(taskId: String) = launchOperation {
         try { execute("cancelTask", JSONObject().put("taskId", taskId), lifecycle) }

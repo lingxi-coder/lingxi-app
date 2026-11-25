@@ -3528,4 +3528,6 @@
     <string name="teams_bot_scope_limited">このチャットで制限中</string>
     <string name="teams_bot_scope_reset">共有されたものをすべて許可</string>
     <string name="teams_bot_scope_saved">保存しました</string>
+    <string name="teams_error_scope_conflict">直前に誰かがこの設定を変更しました。最新の内容を表示しています。確認してからもう一度お試しください。</string>
+    <string name="teams_error_scope_not_published">メンテナーがこの Bot の共有内容を変更しました。最新の内容を表示しています。確認してからもう一度お試しください。</string>
 </resources>

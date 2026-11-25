@@ -3528,4 +3528,6 @@
     <string name="teams_bot_scope_limited">已在此会话中限制</string>
     <string name="teams_bot_scope_reset">允许全部已共享内容</string>
     <string name="teams_bot_scope_saved">已保存</string>
+    <string name="teams_error_scope_conflict">刚有人修改了此设置，已显示最新内容。请检查后重试。</string>
+    <string name="teams_error_scope_not_published">维护者修改了此 Bot 共享的内容，已显示最新内容。请检查后重试。</string>
 </resources>

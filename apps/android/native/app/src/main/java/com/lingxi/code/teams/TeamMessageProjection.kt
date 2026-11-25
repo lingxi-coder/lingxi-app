@@ -20,7 +20,9 @@ internal data class TeamMessageConversation(val id: String, val kind: String, va
     /** Who can read it, as written when it was made: its people and the maintainers its Bots had then. Null when the source does not say. */
     val readers: List<String>? = null,
     /** Null until someone first sets it. */
-    val autoReply: TeamConversationAutoReply? = null) {
+    val autoReply: TeamConversationAutoReply? = null,
+    /** What this Chat narrowed each of its Bots to use here, by shared Bot id, within what the Bot published. A Bot with no entry is not narrowed. */
+    val botScopes: Map<String, TeamBotScopeEntry>? = null) {
     fun merging(old: TeamMessageConversation?) = copy(lastSeq = maxOf(old?.lastSeq ?: 0, lastSeq), lastChangeSeq = maxOf(old?.lastChangeSeq ?: 0, lastChangeSeq), lastReadSeq = maxOf(old?.lastReadSeq ?: 0, lastReadSeq))
     val unread get() = (lastSeq - lastReadSeq).coerceAtLeast(0)
     /** The raw SharedBot ID carried by the Chat's explicit `shared_bot:` participant. */
@@ -41,7 +43,9 @@ internal data class TeamMessageConversation(val id: String, val kind: String, va
                 (data["autoReply"] as? Map<*, *>)?.let { auto ->
                     val revision = (auto["revision"] as? Number)?.toLong(); val targets = (auto["targets"] as? List<*>)?.takeIf { list -> list.all { it is String } }?.map { it as String }
                     if (revision != null && targets != null) TeamConversationAutoReply(revision, targets) else null
-                })
+                },
+                // The same: an entry that cannot be read is no narrowing, and never a reason to hide the conversation.
+                TeamBotScopeRules.decode(data["botScopes"]))
         }
     }
 }

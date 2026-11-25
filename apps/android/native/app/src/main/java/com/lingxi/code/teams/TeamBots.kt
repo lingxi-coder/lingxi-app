@@ -13,7 +13,9 @@ internal data class TeamBotCard(val sharedBotId: String, val name: String, val d
     val examples: List<String> = emptyList(), val capabilities: TeamBotCapabilities? = null,
     val availability: String? = null, val dailyRemaining: Long? = null, val quotaResetsAt: Long? = null, val statusExpiresAt: Long? = null,
     /** Client-only: an expired/failed health projection cannot lift a previously known admission block. */
-    val admissionBlockedPendingRefresh: Boolean = false, val autoReply: TeamBotAutoReply? = null) {
+    val admissionBlockedPendingRefresh: Boolean = false, val autoReply: TeamBotAutoReply? = null,
+    /** What the maintainer published of their computer for the Bot to use in the Team; null when nothing. A Chat can narrow it ([TeamMessageConversation.botScopes]). */
+    val scope: TeamBotScope? = null) {
     val selectable get() = state == "published" && permitted
     val avatarId get() = sharedBotId
     fun canPause(uid: String, generation: Long) = state == "published" && maintainer == TeamMemberRef(uid, generation)
@@ -25,12 +27,14 @@ internal data class TeamBotCard(val sharedBotId: String, val name: String, val d
             (v.opt("availability") as? String)?.takeIf { it in TeamBotEntry.availabilities },
             TeamBotEntry.nonnegativeInteger(v.opt("dailyRemaining")), TeamBotEntry.nonnegativeInteger(v.opt("quotaResetsAt")),
             TeamBotEntry.nonnegativeInteger(v.opt("statusExpiresAt")),
-            autoReply = v.optJSONObject("autoReply")?.let { TeamBotAutoReply(it.getInt("daily")) })
+            autoReply = v.optJSONObject("autoReply")?.let { TeamBotAutoReply(it.getInt("daily")) },
+            scope = v.optJSONObject("scope")?.let(TeamBotScope::parse))
     }
 }
 /** Which Bots of a Chat judge for themselves whether to answer its messages. Any person in a group, channel or Bot DM may change it. */
 internal object TeamAutoReply {
-    private val kinds = setOf("group", "channel", "bot_dm")
+    /** The Chats with Bots that a person in them can set up: whether the Bots answer on their own, and what they may use. */
+    val kinds = setOf("group", "channel", "bot_dm")
     /** `kept`: Bots of the Chat already on that this person cannot see. The setting is the whole list, so a change here leaves them on. */
     data class Choice(val bots: List<TeamBotCard>, val on: List<String>, val kept: List<String> = emptyList())
     /** The Bots that can be switched on (published to answer on their own), and those already on, which can always be switched off. */
@@ -209,6 +213,11 @@ internal object TeamExecutionContract {
             "listTasks" -> { shape(emptySet(), setOf("conversationId", "after")); p.keysSet().forEach(::requireId) }
             "pauseSharedBot" -> { shape(setOf("sharedBotId", "expectedRevision")); requireId("sharedBotId"); if (!integer(p.opt("expectedRevision"), 1)) fail() }
             "setConversationPolicy", "setConversationAutoReply" -> { shape(setOf("conversationId", "expectedRevision", "targets")); requireId("conversationId"); ids("targets", 0); if (!integer(p.opt("expectedRevision"), 0)) fail() }
+            // The scope is the whole narrowing or null; a key that is left out is not a lifted narrowing.
+            "setConversationBotScope" -> {
+                shape(setOf("conversationId", "sharedBotId", "expectedRevision", "scope")); requireId("conversationId"); requireId("sharedBotId")
+                if (!integer(p.opt("expectedRevision"), 0) || !TeamBotScopeRules.validNarrowing(p.opt("scope"))) fail()
+            }
             "submit" -> {
                 // A message that asks Bots, carries files, or both.
                 shape(setOf("conversationId", "messageId", "changeId", "text", "targets"), setOf("replyTo", "attachments"))

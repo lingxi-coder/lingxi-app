@@ -287,6 +287,8 @@ targets:
         buildPhase: resources
       - path: ../../../packages/teams/contracts/execution-vectors.json
         buildPhase: resources
+      - path: ../../../packages/teams/contracts/bot-scope-vectors.json
+        buildPhase: resources
       - path: ../../../packages/teams/fixtures/friends-vectors.json
         buildPhase: resources
       - path: ../../../packages/bridge-client/fixtures/mobile-team-bot-vectors.json

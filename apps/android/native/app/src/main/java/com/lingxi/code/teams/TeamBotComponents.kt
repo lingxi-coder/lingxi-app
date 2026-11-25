@@ -315,12 +315,14 @@ internal fun teamBotLine(items: List<TeamBotItem>): String = items.map { item ->
     }
 }.joinToString(" · ")
 
-/** Member-safe projection only: never render host reasons, credentials or configured quota limits. */
+/** Member-safe projection only: never render host reasons, credentials or configured quota limits. With a [conversation], what the Bot may use is what that Chat leaves of what its maintainer shared. */
 @Composable
-internal fun TeamBotMemberInfo(bot: TeamBotCard, enabled: Boolean, onExample: ((String) -> Unit)? = null, modifier: Modifier = Modifier) {
+internal fun TeamBotMemberInfo(bot: TeamBotCard, enabled: Boolean, onExample: ((String) -> Unit)? = null, modifier: Modifier = Modifier, conversation: TeamMessageConversation? = null) {
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(teamBotLine(TeamBotEntry.capabilities(bot)), style = MaterialTheme.typography.bodySmall)
         Text(teamBotLine(listOf(TeamBotEntry.remaining(bot), TeamBotEntry.resets(bot))), style = MaterialTheme.typography.bodySmall)
+        // With a Chat, what that Chat leaves of what the Bot's maintainer shared; without one, all of it.
+        TeamBotScopeSummary(bot, conversation)
         if (onExample != null && bot.examples.isNotEmpty()) {
             // What a tap on an example does, in the words Desktop and Web use: it fills the draft and never sends.
             Text(stringResource(R.string.teams_bot_examples_hint), style = MaterialTheme.typography.bodySmall)

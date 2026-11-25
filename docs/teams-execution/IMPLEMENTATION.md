@@ -635,9 +635,8 @@ LingXi Data grant. Nothing is shared by default: a Bot published without a scope
   completes it with exactly what the worker is given. The same step again answers the record; one that began and has no end (the app,
   the process or the machine stopped) answers `LOCAL_APP_CALL_UNKNOWN` and is never repeated. The records go with the task's delivery.
 - Clients: `SharedBotCard.scope`, `TeamConversation.botScopes` and `effectiveBotScope()` give a screen what the Bot may use in a Chat
-  (ids and names only; a dataset is named by its id, which is all a scope holds of it). Desktop and Web (`packages/teams`) now show and set it
-  (B4c-1); iOS and Android are the next phase, and the shared `teams_bot_scope_*` strings (with their iOS `%@` key and `_fmt` sibling) are
-  already in the catalog for them.
+  (ids and names only; a dataset is named by its id, which is all a scope holds of it). Desktop and Web (`packages/teams`) show and set it
+  (B4c-1), and so do iOS and Android (B4c-2, below); all of them share the `teams_bot_scope_*` strings (with their iOS `%@` key and `_fmt` sibling).
   - Shown: `BotScopeSummary` lists the Local App names and the dataset ids of a Bot, a dataset it may edit with a "Can edit" badge, or says
     "Uses nothing from its maintainer's computer". `BotMemberDetails` shows it on the Bot cards (the team's Bots, Member home: what the
     maintainer published) and in the Chat's composer (`conversation` given: `effectiveBotScope(published, botScopes[id])`, with "Limited in
@@ -655,13 +654,38 @@ LingXi Data grant. Nothing is shared by default: a Bot published without a scope
     needs edit. Publishing again ticks what is published now, says what the Bot's own scope no longer has ("stops being shared"), and sends
     nothing wider than the Bot's scope as it is when published. The review lists it, the consent and the host hint then say the Bot uses what
     is shared from this computer. Hosted services have no such section (`SCOPE_UNSUPPORTED`; `SCOPE_OUTSIDE_BOT` is told in `errors.ts`).
+  - Mobile (B4c-2): the first two of these natively on iOS and Android, and no publishing (that stays on Desktop). What is checked has one source
+    of truth: the effective-scope cases are `contracts/bot-scope-vectors.json` (`cases`), and the `setConversationBotScope` command rows live in
+    `contracts/execution-vectors.json` with every other member command, which both native validators already run, on every command sent and in
+    their tests (the Web and service tests read the same rows).
+    - Decoded leniently: `scope` on a card is absent or a scope (a list that is there and unreadable breaks the card, as any field of it does);
+      `botScopes` on a Chat keeps an entry only with a safe-integer `revision` of at least 1 and well-formed lists, drops what it has no use for, and
+      an entry it cannot read is no narrowing and never hides the Chat (`TeamBotScopeRules.decode`; iOS `TeamBotScope.swift`, Android
+      `teams/TeamBotScope.kt`, both pure and tested against the vectors).
+    - Shown: `TeamBotScopeSummary` is part of the Bot's member info (`TeamBotMemberInfo`), so the team's Bot cards, the new-chat picker and the list of
+      Bots show what the maintainer published; the Bot DM header and the Bot rows of the conversation details show what the Chat leaves of it, with
+      "Limited in this chat".
+    - Set per Chat: in the conversation details, next to the auto-reply section, "What Bots can use in this chat" opens the editor, for a person who
+      takes part in a group, channel or Bot DM that has a Bot that published something, and never in a friend chat (iOS: pushed in the details'
+      navigation stack, `TeamBotScopeEditor`; Android: a sheet, `TeamBotScopeSheet`, which replaces the details sheet). One section per Bot, a
+      switch (iOS) or checkbox (Android) for each Local App and dataset, with "Can edit" read as part of the dataset's name; Save sends
+      `expectedRevision` and `narrowingOf(published, ticked)` exactly as the Web dialog does, and "Allow everything shared" sends `null`. The ticks start
+      again whenever the Chat's entry, the Bot's published scope or what the Chat allows changes (`TeamBotScopeBasis`), and after a write the Bot's
+      controls wait until the Chat's listener has brought the revision the write made (as the auto-reply switches wait). `BOT_SCOPE_REVISION_CONFLICT`
+      and `SCOPE_NOT_PUBLISHED` read the Bots again and are told under the Bot (`teams_error_scope_conflict`, `teams_error_scope_not_published`; the
+      same words as `tw_error_scope_*`, for the native clients).
+    - Validated like the service: `setConversationBotScope` is a case of `TeamExecutionContract.validate` on both platforms (`scope` must be there,
+      `null` or an object of at most 64 unique Local App ids and 64 datasets, each named by its source and its id and nothing else).
 - Runtime (H): not part of this phase. The host's bootstrap refuses unknown fields, so `localApps` and the two operations need an H change
   and a pin bump before a Bot is published with a Local App.
 - Tests: `apps/firebase/test/bot-scope.test.mjs`, `bot-scope.emulator.test.mjs` (also in `scripts/test-teams.mjs`), `handover` and
-  `hosted-bot-service` emulator tests, `apps/web/test/teams-bot-scope.test.ts` (vectors in `contracts/bot-scope-vectors.json`: the native
-  clients check every command of `execution-vectors.json`, so these join it with their B4c support), `teams-host.test.ts` (`Bot v3 B4a`; the
+  `hosted-bot-service` emulator tests, `apps/web/test/teams-bot-scope.test.ts` (the effective-scope cases in `contracts/bot-scope-vectors.json`, the
+  command rows in `execution-vectors.json`, which the native clients check with every other command), `teams-host.test.ts` (`Bot v3 B4a`; the
   Bots a computer can publish and their scope), `apps/web/test/teams-bot-scope-ui.test.ts` (what is shown, the narrowing dialog with its
-  revisions, conflicts and refusals, the publish section; Desktop and Web share the components).
+  revisions, conflicts and refusals, the publish section; Desktop and Web share the components), and the native clients' own suites:
+  `apps/ios/native/Tests/TeamBotScopeTests.swift` and `apps/android/native/app/src/test/java/com/lingxi/code/teams/TeamBotScopeTest.kt` (the same
+  cases, decoding, ticks, who can limit what, what is sent and refused). The editors and summaries themselves are type-checked on both platforms
+  but have not been run on a simulator or a device.
 
 ## Current integration status, 2026-11-05
 

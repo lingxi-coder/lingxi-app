@@ -4181,6 +4181,8 @@
   "teams_bot_scope_limited": "已在此對話中限制",
   "teams_bot_scope_reset": "允許全部已共享內容",
   "teams_bot_scope_saved": "已儲存",
+  "teams_error_scope_conflict": "剛有人修改了此設定，已顯示最新內容。請檢查後重試。",
+  "teams_error_scope_not_published": "維護者變更了此 Bot 共享的內容，已顯示最新內容。請檢查後重試。",
   "tw_error_scope_conflict": "剛有人修改了此設定，已顯示最新內容。請檢查後重試。",
   "tw_error_scope_not_published": "維護者變更了此 Bot 共享的內容，已顯示最新內容。請檢查後重試。",
   "tw_error_scope_outside_bot": "此 Bot 本身的範圍已不包含你選擇的全部內容。請重新選擇 Bot 並檢查共享內容。",

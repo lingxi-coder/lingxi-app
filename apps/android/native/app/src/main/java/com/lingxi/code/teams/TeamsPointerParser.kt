@@ -48,7 +48,7 @@ internal object TeamsPointerParser {
     }
 
     /** An integer in the JavaScript safe range. A Firestore double with an integral value counts; fractions and strings do not. */
-    private fun safeInteger(value: Any?): Long? = when (value) {
+    fun safeInteger(value: Any?): Long? = when (value) {
         is Long, is Int, is Short, is Byte -> (value as Number).toLong().takeIf { it in -MAX_SAFE_INTEGER..MAX_SAFE_INTEGER }
         is Double, is Float -> {
             val number = (value as Number).toDouble()

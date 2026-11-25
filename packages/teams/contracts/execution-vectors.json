@@ -237,6 +237,183 @@
       }
     },
     {
+      "name": "valid-setConversationBotScope",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationBotScope",
+        "payload": {
+          "conversationId": "chat_0001",
+          "sharedBotId": "sharedbot_01",
+          "expectedRevision": 0,
+          "scope": {
+            "localApps": [
+              "app_calendar"
+            ],
+            "datasets": [
+              {
+                "source": "source_01",
+                "dataset": "dataset_01"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "valid-setConversationBotScope-nothing-allowed",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationBotScope",
+        "payload": {
+          "conversationId": "chat_0001",
+          "sharedBotId": "sharedbot_01",
+          "expectedRevision": 1,
+          "scope": {
+            "localApps": [],
+            "datasets": []
+          }
+        }
+      }
+    },
+    {
+      "name": "valid-setConversationBotScope-lifted",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationBotScope",
+        "payload": {
+          "conversationId": "chat_0001",
+          "sharedBotId": "sharedbot_01",
+          "expectedRevision": 3,
+          "scope": null
+        }
+      }
+    },
+    {
+      "name": "reject-setConversationBotScope-missing-scope",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationBotScope",
+        "payload": {
+          "conversationId": "chat_0001",
+          "sharedBotId": "sharedbot_01",
+          "expectedRevision": 0
+        }
+      }
+    },
+    {
+      "name": "reject-setConversationBotScope-duplicate-app",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationBotScope",
+        "payload": {
+          "conversationId": "chat_0001",
+          "sharedBotId": "sharedbot_01",
+          "expectedRevision": 0,
+          "scope": {
+            "localApps": [
+              "app_calendar",
+              "app_calendar"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "reject-setConversationBotScope-duplicate-dataset",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationBotScope",
+        "payload": {
+          "conversationId": "chat_0001",
+          "sharedBotId": "sharedbot_01",
+          "expectedRevision": 0,
+          "scope": {
+            "datasets": [
+              {
+                "source": "source_01",
+                "dataset": "dataset_01"
+              },
+              {
+                "source": "source_02",
+                "dataset": "dataset_01"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "reject-setConversationBotScope-dataset-flags",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationBotScope",
+        "payload": {
+          "conversationId": "chat_0001",
+          "sharedBotId": "sharedbot_01",
+          "expectedRevision": 0,
+          "scope": {
+            "datasets": [
+              {
+                "source": "source_01",
+                "dataset": "dataset_01",
+                "write": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "reject-setConversationBotScope-unknown-scope-key",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationBotScope",
+        "payload": {
+          "conversationId": "chat_0001",
+          "sharedBotId": "sharedbot_01",
+          "expectedRevision": 0,
+          "scope": {
+            "localApps": [],
+            "paths": [
+              "/tmp"
+            ]
+          }
+        }
+      }
+    },
+    {
       "name": "reject-old-action",
       "valid": false,
       "input": {

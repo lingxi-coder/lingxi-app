@@ -193,7 +193,7 @@ struct TeamConversationView: View {
                 Text("inbox_read_receipt").font(.caption).foregroundStyle(.secondary)
             }
             if conversation.kind == "bot_dm", let bot = context.bots.first(where: { conversation.participants.contains("shared_bot:\($0.sharedBotId)") }) {
-                TeamBotMemberInfo(bot: bot, unverified: model.botsUnverified).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal).padding(.vertical, 6)
+                TeamBotMemberInfo(bot: bot, conversation: conversation, unverified: model.botsUnverified).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal).padding(.vertical, 6)
             }
             stream(context, messages: messages)
             voicePanel

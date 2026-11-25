@@ -111818,6 +111818,74 @@
         }
       }
     },
+    "teams_error_scope_conflict": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刚有人修改了此设置，已显示最新内容。请检查后重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "剛有人修改了此設定，已顯示最新內容。請檢查後重試。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Someone changed this a moment ago. The latest is shown. Check it and try again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "直前に誰かがこの設定を変更しました。最新の内容を表示しています。確認してからもう一度お試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "방금 누군가 이 설정을 변경했습니다. 최신 내용을 표시했습니다. 확인한 후 다시 시도하세요."
+          }
+        }
+      }
+    },
+    "teams_error_scope_not_published": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "维护者修改了此 Bot 共享的内容，已显示最新内容。请检查后重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "維護者變更了此 Bot 共享的內容，已顯示最新內容。請檢查後重試。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The maintainer changed what this Bot shares. The latest is shown. Check it and try again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メンテナーがこの Bot の共有内容を変更しました。最新の内容を表示しています。確認してからもう一度お試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메인테이너가 이 Bot의 공유 내용을 변경했습니다. 최신 내용을 표시했습니다. 확인한 후 다시 시도하세요."
+          }
+        }
+      }
+    },
     "teams_error_sync_failed": {
       "localizations": {
         "zh-Hans": {

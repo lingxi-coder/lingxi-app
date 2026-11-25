@@ -33,6 +33,8 @@ struct TeamBotCard: Decodable, Identifiable, Equatable, Sendable {
     var sharedList: TeamBotListInfo? = nil
     /// Present when the maintainer published the Bot to judge for itself whether to answer: `daily` caps those answers per UTC day.
     var autoReply: TeamBotAutoReply? = nil
+    /// What the maintainer published of their computer for the Bot to use in the Team; `nil` when nothing. A Chat can narrow it (`TeamMessageConversation.botScopes`).
+    var scope: TeamBotScope? = nil
     var examples: [String]? = nil
     var capabilities: TeamBotCapabilities? = nil
     var availability: TeamBotAvailability? = nil
@@ -45,7 +47,7 @@ struct TeamBotCard: Decodable, Identifiable, Equatable, Sendable {
     private var unavailableUntilRevalidated: TeamBotAvailability? = nil
     private enum CodingKeys: String, CodingKey {
         case sharedBotId, name, description, maintainer, revision, state, permitted, ready, onlineUntil, usePolicy, quotas, instanceId
-        case sharedList, examples, capabilities, availability, dailyRemaining, quotaResetsAt, statusExpiresAt, autoReply
+        case sharedList, examples, capabilities, availability, dailyRemaining, quotaResetsAt, statusExpiresAt, autoReply, scope
     }
     var newRequestBlock: TeamBotAvailability? {
         [.paused, .offline, .maintenance, .quota_exhausted].contains(memberAvailability) ? memberAvailability : unavailableUntilRevalidated
@@ -341,6 +343,10 @@ enum TeamExecutionContract {
         case "setConversationPolicy", "setConversationAutoReply":
             try shape(["conversationId", "expectedRevision", "targets"]); try id("conversationId"); try ids("targets", minimum: 0)
             guard integer(payload["expectedRevision"], minimum: 0) != nil else { try fail() }
+        case "setConversationBotScope":
+            // The scope is the whole narrowing or `null`; a key that is left out is not a lifted narrowing.
+            try shape(["conversationId", "sharedBotId", "expectedRevision", "scope"]); try id("conversationId"); try id("sharedBotId")
+            guard integer(payload["expectedRevision"], minimum: 0) != nil, TeamBotScopeRules.validNarrowing(payload["scope"]) else { try fail() }
         case "submit":
             // A message that asks Bots, carries files, or both.
             try shape(["conversationId", "messageId", "changeId", "text", "targets"], ["replyTo", "attachments"])

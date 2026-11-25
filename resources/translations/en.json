@@ -4196,6 +4196,8 @@
   "teams_bot_scope_limited": "Limited in this chat",
   "teams_bot_scope_reset": "Allow everything shared",
   "teams_bot_scope_saved": "Saved",
+  "teams_error_scope_conflict": "Someone changed this a moment ago. The latest is shown. Check it and try again.",
+  "teams_error_scope_not_published": "The maintainer changed what this Bot shares. The latest is shown. Check it and try again.",
   "tw_error_scope_conflict": "Someone changed this a moment ago. The latest is shown. Check it and try again.",
   "tw_error_scope_not_published": "The maintainer changed what this Bot shares. The latest is shown. Check it and try again.",
   "tw_error_scope_outside_bot": "This Bot’s own scope no longer includes everything you chose. Choose the Bot again and review what it shares.",

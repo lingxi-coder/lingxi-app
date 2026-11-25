@@ -3528,4 +3528,6 @@
     <string name="teams_bot_scope_limited">이 채팅에서 제한됨</string>
     <string name="teams_bot_scope_reset">공유된 항목 모두 허용</string>
     <string name="teams_bot_scope_saved">저장됨</string>
+    <string name="teams_error_scope_conflict">방금 누군가 이 설정을 변경했습니다. 최신 내용을 표시했습니다. 확인한 후 다시 시도하세요.</string>
+    <string name="teams_error_scope_not_published">메인테이너가 이 Bot의 공유 내용을 변경했습니다. 최신 내용을 표시했습니다. 확인한 후 다시 시도하세요.</string>
 </resources>

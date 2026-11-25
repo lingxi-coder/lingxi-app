@@ -3528,4 +3528,6 @@
     <string name="teams_bot_scope_limited">Limited in this chat</string>
     <string name="teams_bot_scope_reset">Allow everything shared</string>
     <string name="teams_bot_scope_saved">Saved</string>
+    <string name="teams_error_scope_conflict">Someone changed this a moment ago. The latest is shown. Check it and try again.</string>
+    <string name="teams_error_scope_not_published">The maintainer changed what this Bot shares. The latest is shown. Check it and try again.</string>
 </resources>

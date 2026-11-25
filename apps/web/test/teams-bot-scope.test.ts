@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vectors from '../../../packages/teams/contracts/bot-scope-vectors.json';
+import executionVectors from '../../../packages/teams/contracts/execution-vectors.json';
 import { decodeBotScopes, effectiveBotScope, emptyBotScope, sameBotScopes, BOT_SCOPE_ENTRIES, type BotScopeEntry, type BotScopeNarrowing, type PublishedBotScope } from '../../../packages/teams/bot-scope';
 import { executionCommand } from '../../../packages/teams/execution';
 import { isBotScopeNarrowing, isMemberExecutionCommand, isPublishedBotScope } from '../../../packages/teams/execution-validation';
@@ -62,7 +63,8 @@ test('what is sent: a published scope and a narrowing are checked the way the se
 });
 
 test('setting a Chat narrowing: the web client says what the service says about every shared vector', () => {
-  const rows = vectors.commands as Array<{ name: string; valid: boolean; input: unknown }>;
+  // The vectors are in `execution-vectors.json` with every other member command, which the iOS and Android clients check as well.
+  const rows = (executionVectors.commands as Array<{ name: string; valid: boolean; input: { action: string } }>).filter(row => row.input.action === 'setConversationBotScope');
   assert.ok(rows.length >= 8);
   for (const row of rows) assert.equal(isMemberExecutionCommand(row.input), row.valid, row.name);
 });

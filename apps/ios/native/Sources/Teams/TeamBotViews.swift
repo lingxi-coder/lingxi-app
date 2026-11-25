@@ -16,10 +16,12 @@ extension TeamBotMemberText {
     static func line(_ items: [Item]) -> String { TeamsStreamLogic.joinedLine(items.map(text)) }
 }
 
-/// Member-safe service projection. Missing fields stay explicitly unverified.
+/// Member-safe service projection. Missing fields stay explicitly unverified. With a `conversation`, what the Bot may use of its maintainer's computer
+/// is what that Chat leaves of what the maintainer shared; without one, all of what they shared.
 struct TeamBotMemberInfo: View {
     @Environment(\.locale) private var locale
     let bot: TeamBotCard
+    var conversation: TeamMessageConversation? = nil
     var unverified = false
 
     var body: some View {
@@ -30,6 +32,7 @@ struct TeamBotMemberInfo: View {
             Text(verbatim: TeamBotMemberText.line([TeamBotMemberText.remaining(unverified ? nil : bot.memberRemaining)]))
                 .accessibilityIdentifier("teams.bot.remaining.\(bot.sharedBotId)")
             if !unverified, let reset = TeamBotMemberText.reset(bot.memberQuotaReset) { Text(verbatim: TeamBotMemberText.line([reset])) }
+            TeamBotScopeSummary(bot: bot, in: conversation)
         }
         .font(.caption).foregroundStyle(.secondary)
     }

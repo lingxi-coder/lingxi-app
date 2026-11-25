@@ -292,6 +292,8 @@ internal fun ConversationDetailsSheet(
     unread: Int, online: Boolean, onMarkRead: () -> Unit, onDismiss: () -> Unit,
     /** Sends the Bots of this Chat that answer on their own. */
     onAutoReply: (List<String>) -> Unit = {}, busy: Boolean = false,
+    /** Opens what the Bots of this Chat may use here; null where the Chat has no such control (a friend chat). */
+    onBotScope: (() -> Unit)? = null,
 ) {
     TeamsSheet(stringResource(R.string.teams_conversation_details), onDismiss) {
         DetailIdentity(label, conversationSubtitle(conversation, bots)) {
@@ -312,6 +314,8 @@ internal fun ConversationDetailsSheet(
                         if (card != null) {
                             val owner = members.firstOrNull { it.uid == card.maintainer.uid }?.displayName ?: card.maintainer.uid
                             Text(stringResource(R.string.teams_bot_owner_fmt, owner), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            // What this Chat leaves of what the Bot's maintainer shared.
+                            TeamBotScopeSummary(card, conversation)
                         }
                     }
                 }
@@ -335,6 +339,10 @@ internal fun ConversationDetailsSheet(
                 Text(if (limit != null && TeamAutoReply.available(card)) stringResource(R.string.teams_auto_reply_disclosure_fmt, owner, card.name, limit.daily)
                     else stringResource(R.string.teams_auto_reply_unavailable_fmt, card.name), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+        }
+        // Next to the auto-reply control: what the Bots of this Chat may use of their maintainers' computers, here. Only for a Bot that shares something.
+        if (onBotScope != null && TeamBotScopeRules.limitable(conversation, bots, uid).isNotEmpty()) {
+            OutlinedButton(onClick = onBotScope, Modifier.fillMaxWidth().testTag("teams.conversation.details.botscope")) { Text(stringResource(R.string.teams_bot_scope_title)) }
         }
 
         Spacer(Modifier.height(8.dp))

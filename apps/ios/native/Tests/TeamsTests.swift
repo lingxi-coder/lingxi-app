@@ -44,6 +44,8 @@ final class TeamsTests: XCTestCase {
             (["MESSAGE_RECALLED", "MESSAGE_ID_CONFLICT", "MESSAGE_AUTHOR_REQUIRED", "PARTICIPANT_REQUIRED", "CONVERSATION_REJECTED", "INVALID_INPUT",
               "BOT_REVISION_CONFLICT", "MAINTAINER_REQUIRED", "MESSAGE_IN_FLIGHT", "REPLY_REQUIRED",
               "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "TASK_REVOKED"], "teams_message_failed"),
+            (["BOT_SCOPE_REVISION_CONFLICT"], "teams_error_scope_conflict"),
+            (["SCOPE_NOT_PUBLISHED"], "teams_error_scope_not_published"),
             (["INVITE_UNAVAILABLE"], "teams_invite_error"),
             (["STORAGE_FAILED", "MESSAGE_STORAGE_FULL"], "teams_messages_storage_error"),
             (["SERVICE_UNAVAILABLE", "UNKNOWN", "SOMETHING_NEW", ""], "teams_error"),

@@ -106,10 +106,11 @@ test('publishing takes an optional scope, and setting a Chat narrowing takes the
 });
 
 test('the command vectors say the same to the service as to the web client', () => {
-  // They are not in `execution-vectors.json` yet: the native clients check every vector there, and take this command in their own phase.
-  const { commands } = JSON.parse(readFileSync(new URL('../../../packages/teams/contracts/bot-scope-vectors.json', import.meta.url), 'utf8'));
-  assert.ok(commands.length >= 8 && commands.every(vector => vector.input.action === 'setConversationBotScope'));
-  for (const vector of commands) assert.equal(sharedBotCommand.safeParse(vector.input).success, vector.valid, vector.name);
+  // The vectors are in `execution-vectors.json` with every other member command: the web and native clients check the whole file.
+  const { commands } = JSON.parse(readFileSync(new URL('../../../packages/teams/contracts/execution-vectors.json', import.meta.url), 'utf8'));
+  const rows = commands.filter(vector => vector.input.action === 'setConversationBotScope');
+  assert.ok(rows.length >= 8);
+  for (const vector of rows) assert.equal(sharedBotCommand.safeParse(vector.input).success, vector.valid, vector.name);
 });
 
 test('the effective scope is the same one the clients compute: the shared vectors', () => {

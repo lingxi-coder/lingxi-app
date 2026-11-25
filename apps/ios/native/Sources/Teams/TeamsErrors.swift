@@ -37,6 +37,10 @@ enum TeamsErrors {
              "BOT_REVISION_CONFLICT", "MAINTAINER_REQUIRED", "MESSAGE_IN_FLIGHT", "REPLY_REQUIRED",
              "WAIT_REQUIRED", "WAIT_RECIPIENT_REQUIRED", "WAIT_CLOSED", "WAIT_KIND_MISMATCH", "TASK_REVOKED":
             "teams_message_failed"
+        case "BOT_SCOPE_REVISION_CONFLICT":
+            "teams_error_scope_conflict"
+        case "SCOPE_NOT_PUBLISHED":
+            "teams_error_scope_not_published"
         case "ARTIFACT_REVISION_CONFLICT":
             "teams_error_doc_conflict"
         case "ARTIFACT_UNCHANGED":

@@ -36,6 +36,8 @@ struct TeamMessageConversation: Equatable, Identifiable, Sendable {
     var readers: [String]? = nil
     /// The Bots of this Chat that judge for themselves whether to answer its messages. `nil` until someone first sets it.
     var autoReply: TeamConversationAutoReply? = nil
+    /// What this Chat narrowed each of its Bots to use here, by shared Bot id, within what the Bot published. A Bot with no entry is not narrowed.
+    var botScopes: [String: TeamBotScopeEntry]? = nil
     func merging(_ old: TeamMessageConversation?) -> TeamMessageConversation {
         var value = self; value.lastReadSeq = max(old?.lastReadSeq ?? 0, lastReadSeq); value.lastSeq = max(old?.lastSeq ?? 0, lastSeq); value.lastChangeSeq = max(old?.lastChangeSeq ?? 0, lastChangeSeq); return value
     }

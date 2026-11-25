@@ -207,6 +207,7 @@ internal fun TeamConversationScreen(
 
     // The auto-reply switches wait for their own change: until the listener brings the next revision, another toggle would send the old one and conflict.
     var autoReplySent by remember(conversation?.id) { mutableStateOf<Long?>(null) }
+    var showBotScope by remember(conversation?.id) { mutableStateOf(false) }
     if (showDetails && conversation != null) ConversationDetailsSheet(
         conversation = conversation, label = label, members = members, bots = bots, uid = uid, strings = strings,
         unread = unread, online = online,
@@ -214,6 +215,13 @@ internal fun TeamConversationScreen(
         onAutoReply = { targets -> val revision = conversation.autoReply?.revision ?: 0; autoReplySent = revision
             workspace.messagingModel.setConversationAutoReply(conversation.id, revision, targets, onFailed = { autoReplySent = null }) },
         busy = autoReplySent != null && autoReplySent == (conversation.autoReply?.revision ?: 0),
+        // Not in a friend chat, which has no Bots of its own to limit. The details give way to the editor.
+        onBotScope = if (friend == null) ({ showDetails = false; showBotScope = true }) else null,
+    )
+    if (showBotScope && conversation != null) TeamBotScopeSheet(
+        conversation = conversation, bots = bots, uid = uid, online = online,
+        onSave = { sharedBotId, revision, narrowing -> workspace.messagingModel.setConversationBotScope(conversation.id, sharedBotId, revision, narrowing) },
+        onRefreshBots = workspace.messagingModel::refreshBots, onDismiss = { showBotScope = false },
     )
     recalling?.let { message ->
         ConfirmDialog(
@@ -502,7 +510,7 @@ private fun ConversationBody(
             TeamBotMemberInfo(
                 bot, enabled = editing == null && draft == ComposerDraft() && files.isEmpty() && lock == ComposerLock.None,
                 onExample = { example -> workspace.botEntryContext(uid)?.let { workspace.seedBotExample(it, conversationId, example) } },
-                modifier = Modifier.padding(horizontal = 16.dp),
+                modifier = Modifier.padding(horizontal = 16.dp), conversation = conversation,
             )
         }
         if (!messaging.offline && editing == null && "user:$uid" in conversation.participants) {

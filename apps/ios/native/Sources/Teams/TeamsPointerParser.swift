@@ -94,7 +94,9 @@ enum TeamsPointerParser {
             return TeamConversationAutoReply(revision: revision, targets: targets)
         }
         return TeamMessageConversation(id: id, kind: kind, title: title, participants: participants, lastSeq: lastSeq, lastChangeSeq: lastChangeSeq,
-                                       lastReadSeq: lastReadSeq, sharedBotId: sharedBotId, lastMessage: last, readers: data["memberUids"] as? [String], autoReply: auto)
+                                       lastReadSeq: lastReadSeq, sharedBotId: sharedBotId, lastMessage: last, readers: data["memberUids"] as? [String], autoReply: auto,
+                                       // The same: an entry that cannot be read is no narrowing, and never a reason to hide the conversation.
+                                       botScopes: TeamBotScopeRules.decode(data["botScopes"]))
     }
 
     /// An integer in the JavaScript safe range. A Firestore double with an integral value is accepted; a

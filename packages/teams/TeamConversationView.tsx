@@ -28,6 +28,7 @@ import { executionCommand } from './execution.js';
 import { pendingPayload, type TeamConversation, type TeamMessage } from './messages.js';
 import { ArtifactButton, BotRun } from './BotRunCards';
 import { AutoReplyDialog, autoReplyBots } from './AutoReplyDialog';
+import { BotScopeDialog, scopedBots } from './BotScopeDialog';
 import { buildStreamRows, formatClock, placeTasks, visibleStart, WINDOW_SIZE } from './stream.js';
 import { Avatar, ConversationLead, Dialog, Icon, platformChip, platformNotice, useIsoLayoutEffect, type RenderAvatar, type RenderMarkdown } from './ui';
 import { conversationLabel, unreadCount, type Identity, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';
@@ -139,7 +140,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   const [startId, setStartId] = useState<string>();
   const [editing, setEditing] = useState<TeamMessage>(), [reply, setReply] = useState<TeamMessage>(), [recall, setRecall] = useState<TeamMessage>();
   const [takeBack, setTakeBack] = useState<MessageAttachment>();
-  const [autoReplyOpen, setAutoReplyOpen] = useState(false);
+  const [autoReplyOpen, setAutoReplyOpen] = useState(false), [botScopeOpen, setBotScopeOpen] = useState(false);
   const [answerWait, setAnswerWait] = useState<string>();
   const [focusToken, setFocusToken] = useState(0);
   const [peerRead,setPeerRead]=useState<number|null>(null);
@@ -299,6 +300,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   };
   const subtitle = conversationSubtitle(conversation, snapshot, locale);
   const auto = friend ? { bots: [], on: [] } : autoReplyBots(conversation, snapshot);
+  const limitable = friend ? [] : scopedBots(conversation, snapshot);
   // A friendship's Bot DM (D22) has no link of its own: its pair team is not one the Teams workspace opens.
   // The header offers the conversation's link, which opens it in the app where installed and on the web otherwise; a
   // friendship's Bot DM (reached with Back) has no link of its own.
@@ -345,6 +347,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
           request={offer => workspace.run(() => model.queue('create', 'Private data preview requested.', undefined,
             undefined, [offer.sharedBotId], [], undefined, offer.source))} />}
         {auto.bots.length ? <button type="button" className="tw-icon-btn" aria-pressed={auto.on.length > 0} aria-label={t('teams_auto_reply_title')} title={t('teams_auto_reply_title')} onClick={() => setAutoReplyOpen(true)}><Icon name="bot" /></button> : null}
+        {limitable.length ? <button type="button" className="tw-icon-btn" aria-label={t('teams_bot_scope_title')} title={t('teams_bot_scope_title')} onClick={() => setBotScopeOpen(true)}><Icon name="sliders" /></button> : null}
         {onToggleDetails && !friend ? <button type="button" className="tw-icon-btn" aria-pressed={!!detailsOpen} aria-label={t('teams_team_details')} title={t('teams_team_details')} onClick={onToggleDetails}><Icon name="panel" /></button> : null}
       </div>
     </header></ChatTopbarHeader>
@@ -442,6 +445,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
       onClearEditing={() => setEditing(undefined)} onClearReply={() => setReply(undefined)} onEditLast={() => { if (lastOwn && participant) edit(lastOwn); }} />
 
     {autoReplyOpen ? <AutoReplyDialog workspace={workspace} snapshot={snapshot} conversation={conversation} scope={scope} locale={locale} onClose={() => setAutoReplyOpen(false)} /> : null}
+    {botScopeOpen ? <BotScopeDialog workspace={workspace} snapshot={snapshot} conversation={conversation} scope={scope} locale={locale} onClose={() => setBotScopeOpen(false)} /> : null}
     {takeBack ? <Dialog role="alertdialog" title={t('teams_file_take_back_confirm_fmt', takeBack.name)} onClose={() => setTakeBack(undefined)}
       description={t('teams_file_take_back_detail')}>
       <div className="tw-form">

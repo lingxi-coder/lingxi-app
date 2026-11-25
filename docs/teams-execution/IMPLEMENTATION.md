@@ -635,12 +635,33 @@ LingXi Data grant. Nothing is shared by default: a Bot published without a scope
   completes it with exactly what the worker is given. The same step again answers the record; one that began and has no end (the app,
   the process or the machine stopped) answers `LOCAL_APP_CALL_UNKNOWN` and is never repeated. The records go with the task's delivery.
 - Clients: `SharedBotCard.scope`, `TeamConversation.botScopes` and `effectiveBotScope()` give a screen what the Bot may use in a Chat
-  (ids and names only); no client shows or sets it yet, and nothing publishes a scope until the publish wizard does.
+  (ids and names only; a dataset is named by its id, which is all a scope holds of it). Desktop and Web (`packages/teams`) now show and set it
+  (B4c-1); iOS and Android are the next phase, and the shared `teams_bot_scope_*` strings (with their iOS `%@` key and `_fmt` sibling) are
+  already in the catalog for them.
+  - Shown: `BotScopeSummary` lists the Local App names and the dataset ids of a Bot, a dataset it may edit with a "Can edit" badge, or says
+    "Uses nothing from its maintainer's computer". `BotMemberDetails` shows it on the Bot cards (the team's Bots, Member home: what the
+    maintainer published) and in the Chat's composer (`conversation` given: `effectiveBotScope(published, botScopes[id])`, with "Limited in
+    this chat" when the Chat leaves out something that was published).
+  - Set per Chat: a header button beside the auto-reply one opens `BotScopeDialog` for a person who takes part in a group, channel or Bot DM
+    (the guard `inBotChat` is the one of auto-reply): one section per Bot of the Chat that published something, its Local Apps and datasets as
+    checkboxes ticked where the Chat allows them. Save sends `setConversationBotScope` with the `expectedRevision` the Chat holds (0 with no
+    entry) and `narrowingOf(published, ticked)`: a kind with nothing left out is not narrowed (what is published of it later is allowed too),
+    nothing left out of either is `null`, and only published ids are named. "Allow everything shared" sends `null`. A section starts again from
+    the Chat and the Bot whenever either changes, so the ticks always show what the service holds; `BOT_SCOPE_REVISION_CONFLICT` and
+    `SCOPE_NOT_PUBLISHED` read the Bots again (`refreshBots`) and say so in the dialog, and the Chat's side arrives by its listener.
+  - Published (Desktop only, `BotDirectory`): the wizard offers the Local Apps and datasets of the local Bot's own scope
+    (`LocalPublishableBot.scope`, from `TeamConnector.localBots()`: an app is named as it is installed here and one that is not installed is
+    left out), nothing ticked by default; a dataset offers "Can edit" and "Can open review cases" only where the Bot has them, and review
+    needs edit. Publishing again ticks what is published now, says what the Bot's own scope no longer has ("stops being shared"), and sends
+    nothing wider than the Bot's scope as it is when published. The review lists it, the consent and the host hint then say the Bot uses what
+    is shared from this computer. Hosted services have no such section (`SCOPE_UNSUPPORTED`; `SCOPE_OUTSIDE_BOT` is told in `errors.ts`).
 - Runtime (H): not part of this phase. The host's bootstrap refuses unknown fields, so `localApps` and the two operations need an H change
   and a pin bump before a Bot is published with a Local App.
 - Tests: `apps/firebase/test/bot-scope.test.mjs`, `bot-scope.emulator.test.mjs` (also in `scripts/test-teams.mjs`), `handover` and
   `hosted-bot-service` emulator tests, `apps/web/test/teams-bot-scope.test.ts` (vectors in `contracts/bot-scope-vectors.json`: the native
-  clients check every command of `execution-vectors.json`, so these join it with their B4c support), `teams-host.test.ts` (`Bot v3 B4a`).
+  clients check every command of `execution-vectors.json`, so these join it with their B4c support), `teams-host.test.ts` (`Bot v3 B4a`; the
+  Bots a computer can publish and their scope), `apps/web/test/teams-bot-scope-ui.test.ts` (what is shown, the narrowing dialog with its
+  revisions, conflicts and refusals, the publish section; Desktop and Web share the components).
 
 ## Current integration status, 2026-11-05
 

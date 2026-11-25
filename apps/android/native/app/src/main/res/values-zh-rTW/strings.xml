@@ -3517,4 +3517,15 @@
     <string name="teams_dataset_edit">共同編輯</string>
     <string name="teams_dataset_share">分享資料</string>
     <string name="teams_dataset_continue">繼續分享</string>
+    <string name="teams_bot_scope_title">此對話中 Bot 可使用的內容</string>
+    <string name="teams_bot_scope_note">Bot 只能使用其維護者共享給團隊的內容。不希望 Bot 在此對話中使用的，請取消勾選。</string>
+    <string name="teams_bot_scope_limit_title_fmt">限制 %1$s 在此處可使用的內容</string>
+    <string name="teams_bot_scope_apps">本機應用程式</string>
+    <string name="teams_bot_scope_datasets">資料集</string>
+    <string name="teams_bot_scope_edit">可編輯</string>
+    <string name="teams_bot_scope_uses">可使用其維護者電腦上的內容</string>
+    <string name="teams_bot_scope_none">不使用其維護者電腦上的任何內容</string>
+    <string name="teams_bot_scope_limited">已在此對話中限制</string>
+    <string name="teams_bot_scope_reset">允許全部已共享內容</string>
+    <string name="teams_bot_scope_saved">已儲存</string>
 </resources>

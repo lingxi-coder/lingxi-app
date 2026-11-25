@@ -30,6 +30,27 @@ export function effectiveBotScope(published: PublishedBotScope | undefined, narr
   };
 }
 
+/** Whether a Chat lets a Bot use less of what it published than the Bot published. */
+export const botScopeNarrowed = (published: PublishedBotScope | undefined, effective: PublishedBotScope): boolean =>
+  effective.localApps.length < (published?.localApps.length ?? 0) || effective.datasets.length < (published?.datasets.length ?? 0);
+
+/** What a person ticks in a Chat to say what a Bot may use there: Local App ids, and datasets by their id (a dataset appears once in a scope). */
+export interface BotScopeChoice { localApps: string[]; datasets: string[] }
+/** The choice that allows exactly what is allowed now. */
+export const choiceOf = (allowed: PublishedBotScope): BotScopeChoice => ({ localApps: allowed.localApps.map(app => app.id), datasets: allowed.datasets.map(row => row.dataset) });
+/**
+ * The narrowing that says what `choice` allows of what the Bot published. A kind of which nothing is left out is not narrowed, so what the maintainer
+ * publishes of it later is allowed too; `null` (no narrowing at all) when nothing is left out of either. Only what is published is ever named.
+ */
+export function narrowingOf(published: PublishedBotScope, choice: BotScopeChoice): BotScopeNarrowing | null {
+  const apps = published.localApps.filter(app => choice.localApps.includes(app.id)).map(app => app.id);
+  const rows = published.datasets.filter(row => choice.datasets.includes(row.dataset)).map(({ source, dataset }) => ({ source, dataset }));
+  const narrowApps = apps.length < published.localApps.length, narrowRows = rows.length < published.datasets.length;
+  return narrowApps || narrowRows ? { ...(narrowApps ? { localApps: apps } : {}), ...(narrowRows ? { datasets: rows } : {}) } : null;
+}
+/** Whether a Chat holds a narrowing of a Bot now (an entry that was lifted keeps only its revision). */
+export const botScopeLimits = (entry: BotScopeEntry | undefined): boolean => entry?.localApps !== undefined || entry?.datasets !== undefined;
+
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const text = (value: unknown): value is string => typeof value === 'string';
 /** The narrowings of a Chat's Bots as its document or the service's projection carries them. An entry that is not well formed is left out, as the Chat then has none for that Bot. */

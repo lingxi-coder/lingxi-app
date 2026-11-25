@@ -3517,4 +3517,15 @@
     <string name="teams_dataset_edit">함께 편집</string>
     <string name="teams_dataset_share">데이터 공유</string>
     <string name="teams_dataset_continue">공유 계속</string>
+    <string name="teams_bot_scope_title">이 채팅에서 Bot이 사용할 수 있는 항목</string>
+    <string name="teams_bot_scope_note">Bot은 메인테이너가 팀에 공유한 것만 사용할 수 있습니다. 이 채팅에서 사용하지 않게 할 항목은 선택을 해제하세요.</string>
+    <string name="teams_bot_scope_limit_title_fmt">%1$s이(가) 여기서 사용할 수 있는 항목 제한</string>
+    <string name="teams_bot_scope_apps">로컬 앱</string>
+    <string name="teams_bot_scope_datasets">데이터세트</string>
+    <string name="teams_bot_scope_edit">편집 가능</string>
+    <string name="teams_bot_scope_uses">메인테이너의 컴퓨터에서 사용할 수 있는 항목</string>
+    <string name="teams_bot_scope_none">메인테이너의 컴퓨터에 있는 항목을 사용하지 않습니다</string>
+    <string name="teams_bot_scope_limited">이 채팅에서 제한됨</string>
+    <string name="teams_bot_scope_reset">공유된 항목 모두 허용</string>
+    <string name="teams_bot_scope_saved">저장됨</string>
 </resources>

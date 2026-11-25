@@ -40,6 +40,14 @@ export function messageErrorText(code: string, locale: string): string {
       return t('tw_error_auto_reply_unavailable');
     case 'AUTO_REPLY_UNSUPPORTED':
       return t('tw_error_auto_reply_unsupported');
+    case 'BOT_SCOPE_REVISION_CONFLICT':
+      return t('tw_error_scope_conflict');
+    case 'SCOPE_NOT_PUBLISHED':
+      return t('tw_error_scope_not_published');
+    case 'SCOPE_OUTSIDE_BOT':
+      return t('tw_error_scope_outside_bot');
+    case 'SCOPE_UNSUPPORTED':
+      return t('tw_error_scope_unsupported');
     case 'DECISION_REQUIRED':
       return t('tw_error_decision_required');
     case 'TEAM_MODEL_UNSUPPORTED':

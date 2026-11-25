@@ -101,6 +101,17 @@ const WRITE_REFUSED = ['OPERATION_LIMIT', 'OPERATION_CONFLICT', 'WRITE_OPERATION
 /** A publication shares no more than the local Bot's own scope allows: its Local Apps, and each dataset, with no write or report review the Bot does not have. */
 const withinBotScope = (scope: PublishedBotScope, upper: BotScope): boolean => scope.localApps.every(app => upper.localApps.includes(app.id))
   && scope.datasets.every(row => upper.datasets.some(entry => entry.source === row.source && entry.dataset === row.dataset && (!row.write || entry.write) && (!row.reportReview || entry.reportReview)));
+/** The most of this Desktop a local Bot may be published with: its own scope, each Local App named as it is installed here. An app that is not installed cannot be offered. */
+const publishableScope = (own: BotScope, installed: ReadonlyArray<{ id: string; name: string }>): PublishedBotScope | undefined => {
+  const localApps = own.localApps.flatMap(id => {
+    const name = installed.find(app => app.id === id)?.name.replace(/[\u0000-\u001f\u007f]/gu, ' ').trim().slice(0, 100).trim();
+    return name ? [{ id, name }] : [];
+  });
+  // A dataset is named by its id alone, so it appears once.
+  const datasets = own.datasets.filter((row, at, rows) => rows.findIndex(other => other.dataset === row.dataset) === at)
+    .map(({ source, dataset, write, reportReview }) => ({ source, dataset, write, reportReview }));
+  return localApps.length || datasets.length ? { localApps, datasets } : undefined;
+};
 /** The ids of the Local Apps the service says a task may use now, as `validateTask` answers them: what its Bot published and its Chat has not narrowed away. */
 const scopeApps = (answer: unknown): string[] => {
   const apps = (answer as { scope?: { localApps?: unknown } } | null | undefined)?.scope?.localApps;
@@ -274,7 +285,10 @@ export class TeamConnector implements LocalTeamHost {
   private hostFields(b: SharedBotBinding) { return { deploymentId: b.deploymentId, hostId: this.options.privateStore.hostId, accountEpoch: b.accountEpoch }; }
   async localBots(uid: string): Promise<LocalPublishableBot[]> {
     this.available(); const context = this.context(uid); this.assert(context);
-    const bots = await Promise.all(this.options.store.list().map(async b => {
+    const own = this.options.store.list();
+    // The names a publication of a Local App carries are the ones it has on this computer; none is asked for when no Bot has an app.
+    const installed = this.options.localApps && own.some(b => b.scope.localApps.length) ? await this.options.localApps.list().catch(() => []) : [];
+    const bots = await Promise.all(own.map(async b => {
       const manifest = await this.marketPackage(b.bot_id);
       let capabilities: LocalPublishableBot['capabilities'];
       try {
@@ -285,9 +299,10 @@ export class TeamConnector implements LocalTeamHost {
           capabilities = { durableWait: continues, writeOperations: continues };
         }
       } catch { /* A missing local route leaves this Bot's capabilities unknown; no provider request is made. */ }
+      const scope = publishableScope(b.scope, installed);
       return { instanceId: b.bot_id, name: b.name, description: b.description, ...(b.model ? { model: b.model } : {}),
         requiredResources: manifest?.resources.filter(r => r.required).map(r => r.id) ?? [],
-        ...(capabilities ? { capabilities } : {}),
+        ...(capabilities ? { capabilities } : {}), ...(scope ? { scope } : {}),
         ...(manifest ? { examples: manifest.examples.slice(0, 3).map(example => example.trim()).filter(Boolean) } : {}) };
     })); this.assert(context); return bots;
   }

@@ -146,6 +146,7 @@ const paths = {
   file: 'M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M9 13h6M9 17h6',
   image: 'M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zM9 9.5h.01M20 15l-4.5-4.5L6 20',
   download: 'M12 4v11M7 11l5 5 5-5M5 20h14',
+  sliders: 'M4 7h9M17 7h3M4 17h3M11 17h9M13 7a2 2 0 1 0 4 0 2 2 0 1 0-4 0M7 17a2 2 0 1 0 4 0 2 2 0 1 0-4 0',
 } as const;
 export type IconName = keyof typeof paths;
 export function Icon({ name, size = 16, className }: { name: IconName; size?: number; className?: string }): ReactElement {

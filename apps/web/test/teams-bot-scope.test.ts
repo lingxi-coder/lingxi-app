@@ -39,7 +39,7 @@ test('comparing narrowings: the same entries are the same whatever their order, 
   const a: Record<string, BotScopeEntry> = { one: { revision: 1, localApps: ['notes'] }, two: { revision: 3 } };
   assert.equal(sameBotScopes(undefined, undefined), true);
   assert.equal(sameBotScopes(a, { two: { revision: 3 }, one: { revision: 1, localApps: ['notes'] } }), true);
-  for (const other of [undefined, {}, { one: a.one }, { ...a, two: { revision: 4 } }, { ...a, one: { revision: 1, localApps: ['calendar'] } }, { ...a, one: { revision: 1, localApps: ['notes'], datasets: [] } },
+  for (const other of <(Record<string, BotScopeEntry> | undefined)[]>[undefined, {}, { one: a.one }, { ...a, two: { revision: 4 } }, { ...a, one: { revision: 1, localApps: ['calendar'] } }, { ...a, one: { revision: 1, localApps: ['notes'], datasets: [] } },
     { one: a.one, three: a.two }]) assert.equal(sameBotScopes(a, other), false, JSON.stringify(other));
   assert.equal(sameBotScopes({}, undefined), true, 'a Chat with no entries is a Chat with none');
 });
@@ -85,7 +85,7 @@ test('conversation merge: an unchanged narrowing keeps the row, a changed one re
   const narrowed = { ...base, botScopes: { bot_one: { revision: 1, localApps: ['notes'] } } };
   assert.equal(mergeConversation(narrowed, { ...narrowed, botScopes: { bot_one: { revision: 1, localApps: ['notes'] } } }), narrowed);
   assert.equal(mergeConversation(base, { ...base }), base);
-  for (const next of [{ bot_one: { revision: 2, localApps: ['notes'] } }, { bot_one: { revision: 1, localApps: [] } }, { bot_one: { revision: 1 } }, { bot_one: narrowed.botScopes.bot_one, bot_two: { revision: 1 } }, undefined]) {
+  for (const next of <(Record<string, BotScopeEntry> | undefined)[]>[{ bot_one: { revision: 2, localApps: ['notes'] } }, { bot_one: { revision: 1, localApps: [] } }, { bot_one: { revision: 1 } }, { bot_one: narrowed.botScopes.bot_one, bot_two: { revision: 1 } }, undefined]) {
     const merged = mergeConversation(narrowed, { ...base, ...(next ? { botScopes: next } : {}) });
     assert.notEqual(merged, narrowed, JSON.stringify(next));
     assert.deepEqual(merged.botScopes, next);

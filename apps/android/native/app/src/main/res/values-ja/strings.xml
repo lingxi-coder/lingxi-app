@@ -3517,4 +3517,15 @@
     <string name="teams_dataset_edit">共同編集</string>
     <string name="teams_dataset_share">データを共有</string>
     <string name="teams_dataset_continue">共有を続ける</string>
+    <string name="teams_bot_scope_title">このチャットで Bot が使えるもの</string>
+    <string name="teams_bot_scope_note">Bot が使えるのは、メンテナーがチームに共有したものだけです。このチャットで使わせたくないものは、チェックを外してください。</string>
+    <string name="teams_bot_scope_limit_title_fmt">%1$s がここで使えるものを制限</string>
+    <string name="teams_bot_scope_apps">ローカルアプリ</string>
+    <string name="teams_bot_scope_datasets">データセット</string>
+    <string name="teams_bot_scope_edit">編集可</string>
+    <string name="teams_bot_scope_uses">メンテナーのコンピュータで使えるもの</string>
+    <string name="teams_bot_scope_none">メンテナーのコンピュータにあるものは使いません</string>
+    <string name="teams_bot_scope_limited">このチャットで制限中</string>
+    <string name="teams_bot_scope_reset">共有されたものをすべて許可</string>
+    <string name="teams_bot_scope_saved">保存しました</string>
 </resources>

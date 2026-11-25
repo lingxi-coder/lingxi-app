@@ -245,6 +245,17 @@ export type TeamsKey =
   | 'teams_bot_owner_fmt'
   | 'teams_bot_remaining_today'
   | 'teams_bot_resets'
+  | 'teams_bot_scope_apps'
+  | 'teams_bot_scope_datasets'
+  | 'teams_bot_scope_edit'
+  | 'teams_bot_scope_limit_title_fmt'
+  | 'teams_bot_scope_limited'
+  | 'teams_bot_scope_none'
+  | 'teams_bot_scope_note'
+  | 'teams_bot_scope_reset'
+  | 'teams_bot_scope_saved'
+  | 'teams_bot_scope_title'
+  | 'teams_bot_scope_uses'
   | 'teams_bot_stop_detail'
   | 'teams_bot_stop_title_fmt'
   | 'teams_bot_supported'
@@ -534,12 +545,14 @@ export type TeamsKey =
   | 'tw_botdir_choose_resource'
   | 'tw_botdir_confirm'
   | 'tw_botdir_consent'
+  | 'tw_botdir_consent_scope'
   | 'tw_botdir_empty'
   | 'tw_botdir_example_fmt'
   | 'tw_botdir_examples_hint'
   | 'tw_botdir_examples_legend'
   | 'tw_botdir_examples_title'
   | 'tw_botdir_host_hint'
+  | 'tw_botdir_host_hint_scope'
   | 'tw_botdir_host_this'
   | 'tw_botdir_import_hint'
   | 'tw_botdir_inputs_changed'
@@ -572,6 +585,12 @@ export type TeamsKey =
   | 'tw_botdir_review'
   | 'tw_botdir_revision_fmt'
   | 'tw_botdir_role_hint'
+  | 'tw_botdir_scope_hint'
+  | 'tw_botdir_scope_hint_friend_fmt'
+  | 'tw_botdir_scope_lost_fmt'
+  | 'tw_botdir_scope_review'
+  | 'tw_botdir_scope_title_fmt'
+  | 'tw_botdir_scope_title_friend_fmt'
   | 'tw_botdir_select_files'
   | 'tw_botdir_shared_hint'
   | 'tw_botdir_shared_now'
@@ -689,6 +708,10 @@ export type TeamsKey =
   | 'tw_error_review_publication'
   | 'tw_error_role'
   | 'tw_error_runtime'
+  | 'tw_error_scope_conflict'
+  | 'tw_error_scope_not_published'
+  | 'tw_error_scope_outside_bot'
+  | 'tw_error_scope_unsupported'
   | 'tw_error_settings_changed'
   | 'tw_error_task_authorization'
   | 'tw_error_team_limit'
@@ -1128,6 +1151,17 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_bot_owner_fmt: { en: 'Maintainer: %1$s', 'zh-Hans': '维护者：%1$s', 'zh-Hant': '維護者：%1$s', ja: 'メンテナー: %1$s', ko: '메인테이너: %1$s' },
   teams_bot_remaining_today: { en: 'Your remaining requests today', 'zh-Hans': '本人今日剩余请求', 'zh-Hant': '本人今日剩餘請求', ja: '自分の今日の残りリクエスト数', ko: '오늘 남은 내 요청 수' },
   teams_bot_resets: { en: 'Resets', 'zh-Hans': '重置于', 'zh-Hant': '重置於', ja: 'リセット時刻', ko: '초기화 시각' },
+  teams_bot_scope_apps: { en: 'Local Apps', 'zh-Hans': '本地应用', 'zh-Hant': '本機應用程式', ja: 'ローカルアプリ', ko: '로컬 앱' },
+  teams_bot_scope_datasets: { en: 'Datasets', 'zh-Hans': '数据集', 'zh-Hant': '資料集', ja: 'データセット', ko: '데이터세트' },
+  teams_bot_scope_edit: { en: 'Can edit', 'zh-Hans': '可编辑', 'zh-Hant': '可編輯', ja: '編集可', ko: '편집 가능' },
+  teams_bot_scope_limit_title_fmt: { en: 'Limit what %1$s can use here', 'zh-Hans': '限制 %1$s 在此处可使用的内容', 'zh-Hant': '限制 %1$s 在此處可使用的內容', ja: '%1$s がここで使えるものを制限', ko: '%1$s이(가) 여기서 사용할 수 있는 항목 제한' },
+  teams_bot_scope_limited: { en: 'Limited in this chat', 'zh-Hans': '已在此会话中限制', 'zh-Hant': '已在此對話中限制', ja: 'このチャットで制限中', ko: '이 채팅에서 제한됨' },
+  teams_bot_scope_none: { en: 'Uses nothing from its maintainer’s computer', 'zh-Hans': '不使用其维护者电脑上的任何内容', 'zh-Hant': '不使用其維護者電腦上的任何內容', ja: 'メンテナーのコンピュータにあるものは使いません', ko: '메인테이너의 컴퓨터에 있는 항목을 사용하지 않습니다' },
+  teams_bot_scope_note: { en: 'A Bot can only use what its maintainer shared with the team. Uncheck what a Bot should not use in this chat.', 'zh-Hans': 'Bot 只能使用其维护者共享给团队的内容。不希望 Bot 在此会话中使用的，请取消勾选。', 'zh-Hant': 'Bot 只能使用其維護者共享給團隊的內容。不希望 Bot 在此對話中使用的，請取消勾選。', ja: 'Bot が使えるのは、メンテナーがチームに共有したものだけです。このチャットで使わせたくないものは、チェックを外してください。', ko: 'Bot은 메인테이너가 팀에 공유한 것만 사용할 수 있습니다. 이 채팅에서 사용하지 않게 할 항목은 선택을 해제하세요.' },
+  teams_bot_scope_reset: { en: 'Allow everything shared', 'zh-Hans': '允许全部已共享内容', 'zh-Hant': '允許全部已共享內容', ja: '共有されたものをすべて許可', ko: '공유된 항목 모두 허용' },
+  teams_bot_scope_saved: { en: 'Saved', 'zh-Hans': '已保存', 'zh-Hant': '已儲存', ja: '保存しました', ko: '저장됨' },
+  teams_bot_scope_title: { en: 'What Bots can use in this chat', 'zh-Hans': '此会话中 Bot 可使用的内容', 'zh-Hant': '此對話中 Bot 可使用的內容', ja: 'このチャットで Bot が使えるもの', ko: '이 채팅에서 Bot이 사용할 수 있는 항목' },
+  teams_bot_scope_uses: { en: 'Can use on its maintainer’s computer', 'zh-Hans': '可使用其维护者电脑上的内容', 'zh-Hant': '可使用其維護者電腦上的內容', ja: 'メンテナーのコンピュータで使えるもの', ko: '메인테이너의 컴퓨터에서 사용할 수 있는 항목' },
   teams_bot_stop_detail: { en: 'New requests to this Bot stop. Existing conversations stay. You can share it again from LingXi Desktop.', 'zh-Hans': '将停止向此 Bot 发送新请求，现有会话会保留。你可以在灵犀 Desktop 重新共享。', 'zh-Hant': '將停止向此 Bot 傳送新請求，現有會話會保留。你可以在靈犀 Desktop 重新共享。', ja: 'この Bot への新しいリクエストは停止します。既存の会話は残ります。LingXi Desktop からいつでも再共有できます。', ko: '이 Bot에 대한 새 요청이 중지됩니다. 기존 대화는 그대로 유지됩니다. LingXi Desktop에서 다시 공유할 수 있습니다.' },
   teams_bot_stop_title_fmt: { en: 'Stop sharing “%1$s”?', 'zh-Hans': '停止共享“%1$s”？', 'zh-Hant': '停止共享「%1$s」？', ja: '「%1$s」の共有を停止しますか？', ko: '“%1$s” 공유를 중지할까요?' },
   teams_bot_supported: { en: 'Supported', 'zh-Hans': '支持', 'zh-Hant': '支援', ja: '対応', ko: '지원됨' },
@@ -1417,12 +1451,14 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_botdir_choose_resource: { en: 'Choose an authorized resource', 'zh-Hans': '选择有权共享的资料', 'zh-Hant': '選擇有權共享的資料', ja: '共有する権限のあるリソースを選択', ko: '공유할 권한이 있는 자료 선택' },
   tw_botdir_confirm: { en: 'Confirm publication', 'zh-Hans': '确认发布', 'zh-Hant': '確認發布', ja: '公開を確認', ko: '게시 확인' },
   tw_botdir_consent: { en: 'I have permission to share the role, examples, selected resources and their derived results with this audience, and confirm model costs and quotas.', 'zh-Hans': '我有权向以上受众共享角色、示例、选定资料及其派生结果，并确认模型费用和额度。', 'zh-Hant': '我有權向上述受眾共享角色、範例、選定的資料及其衍生結果，並確認模型費用與額度。', ja: 'このロール、入力例、選択したリソース、およびその派生結果をこの対象と共有する権限があり、モデルの費用と上限を確認しました。', ko: '이 대상과 역할, 예시, 선택한 자료 및 파생 결과를 공유할 권한이 있으며, 모델 비용과 한도를 확인했습니다.' },
+  tw_botdir_consent_scope: { en: 'I have permission to share the role, examples, selected resources and their derived results with this audience, to let the Bot use what is shared from this computer, and to confirm model costs and quotas.', 'zh-Hans': '我有权向以上受众共享角色、示例、选定资料及其派生结果，允许 Bot 使用此电脑上所共享的内容，并确认模型费用和额度。', 'zh-Hant': '我有權向上述受眾共享角色、範例、選定的資料及其衍生結果，允許 Bot 使用這台電腦上所共享的內容，並確認模型費用與額度。', ja: 'このロール、入力例、選択したリソース、およびその派生結果をこの対象と共有し、このコンピュータで共有したものを Bot に使わせる権限があり、モデルの費用と上限を確認しました。', ko: '이 대상과 역할, 예시, 선택한 자료 및 파생 결과를 공유하고, 이 컴퓨터에서 공유한 항목을 Bot이 사용하게 할 권한이 있으며, 모델 비용과 한도를 확인했습니다.' },
   tw_botdir_empty: { en: 'No Bots are published yet.', 'zh-Hans': '尚未发布 Bot。', 'zh-Hant': '尚未發布 Bot。', ja: 'まだ公開されている Bot はありません。', ko: '아직 게시된 Bot이 없습니다.' },
   tw_botdir_example_fmt: { en: 'Example %1$d', 'zh-Hans': '示例 %1$d', 'zh-Hant': '範例 %1$d', ja: '入力例 %1$d', ko: '예시 %1$d' },
   tw_botdir_examples_hint: { en: 'Review the market defaults or write your own prompts. Members choose an example to fill a draft; it is never sent automatically. Each example allows up to 2,000 UTF-8 bytes.', 'zh-Hans': '请确认市场默认示例，或编辑自己的提示。成员点击示例仅填入草稿，不会自动发送。每条示例最多 2,000 UTF-8 字节。', 'zh-Hant': '請確認市場的預設範例，或自行編寫提示。成員點選範例只會填入草稿，不會自動傳送。每則範例最多 2,000 個 UTF-8 位元組。', ja: 'マーケットの既定の入力例を確認するか、独自のプロンプトを書いてください。メンバーが入力例を選ぶと下書きに入力されるだけで、自動では送信されません。入力例は 1 件あたり最大 2,000 バイト（UTF-8）です。', ko: '마켓의 기본 예시를 확인하거나 직접 프롬프트를 작성하세요. 멤버가 예시를 선택하면 초안에 채워질 뿐 자동으로 전송되지 않습니다. 예시는 하나당 최대 2,000 UTF-8 바이트입니다.' },
   tw_botdir_examples_legend: { en: 'Member examples (up to 3)', 'zh-Hans': '成员示例（最多 3 条）', 'zh-Hant': '成員範例（最多 3 則）', ja: 'メンバー向けの入力例（最大 3 件）', ko: '멤버용 예시(최대 3개)' },
   tw_botdir_examples_title: { en: 'Member examples', 'zh-Hans': '成员示例', 'zh-Hant': '成員範例', ja: 'メンバー向けの入力例', ko: '멤버용 예시' },
   tw_botdir_host_hint: { en: 'This Desktop hosts execution and pays its configured model costs. Each request has a five-minute deadline. The Bot changes nothing outside the chat except its shared list, if it has one.', 'zh-Hans': '此 Desktop 承载执行并承担所配置模型的费用。每次请求期限五分钟。除共享清单（如有）外，Bot 不会修改聊天之外的任何内容。', 'zh-Hant': '此 Desktop 負責執行並承擔所設定模型的費用。每次請求的期限為五分鐘。除共享清單（如有）外，Bot 不會修改對話以外的任何內容。', ja: 'この Desktop が実行を担い、設定されたモデルの費用を負担します。各リクエストの期限は5分です。Bot は、共有リスト（ある場合）を除き、チャット以外のものを一切変更しません。', ko: '이 Desktop이 실행을 맡고 설정된 모델의 비용을 부담합니다. 각 요청의 제한 시간은 5분입니다. Bot은 공유 목록(있는 경우)을 제외하고 채팅 밖의 어떤 것도 변경하지 않습니다.' },
+  tw_botdir_host_hint_scope: { en: 'This Desktop hosts execution and pays its configured model costs. Each request has a five-minute deadline. The Bot changes nothing outside the chat except its shared list, if it has one, and what it does with the Local Apps and datasets shared above.', 'zh-Hans': '此 Desktop 承载执行并承担所配置模型的费用。每次请求期限五分钟。除共享清单（如有）以及它使用上方所共享的本地应用和数据集所做的操作外，Bot 不会修改聊天之外的任何内容。', 'zh-Hant': '此 Desktop 負責執行並承擔所設定模型的費用。每次請求的期限為五分鐘。除共享清單（如有）以及它使用上方所共享的本機應用程式和資料集所做的操作外，Bot 不會修改對話以外的任何內容。', ja: 'この Desktop が実行を担い、設定されたモデルの費用を負担します。各リクエストの期限は5分です。Bot は、共有リスト（ある場合）と、上で共有したローカルアプリやデータセットを使った操作を除き、チャット以外のものを一切変更しません。', ko: '이 Desktop이 실행을 맡고 설정된 모델의 비용을 부담합니다. 각 요청의 제한 시간은 5분입니다. Bot은 공유 목록(있는 경우)과 위에서 공유한 로컬 앱 및 데이터세트로 하는 작업을 제외하고 채팅 밖의 어떤 것도 변경하지 않습니다.' },
   tw_botdir_host_this: { en: 'Host: this Desktop', 'zh-Hans': '宿主：此 Desktop', 'zh-Hant': '宿主：此 Desktop', ja: 'ホスト: この Desktop', ko: '호스트: 이 Desktop' },
   tw_botdir_import_hint: { en: 'Imported packages use your own authorized resources. Author resources and grants are excluded.', 'zh-Hans': '导入包使用你自己有权共享的资料，不继承作者的资料和授权。', 'zh-Hant': '匯入的套件使用你自己有權共享的資料，不會沿用作者的資料與授權。', ja: 'インポートしたパッケージでは、共有する権限のあるご自身のリソースを使います。作者のリソースや権限は引き継がれません。', ko: '가져온 패키지는 내가 공유할 권한이 있는 자료를 사용합니다. 작성자의 자료와 권한은 포함되지 않습니다.' },
   tw_botdir_inputs_changed: { en: 'Publication inputs or memberships changed. Review again before publishing.', 'zh-Hans': '发布输入或成员身份已变化，请重新检查后发布。', 'zh-Hant': '發布的輸入內容或成員身分已變更，請重新檢查後再發布。', ja: '公開の入力内容またはメンバーシップが変更されました。公開する前にもう一度確認してください。', ko: '게시 입력값이나 멤버십이 변경되었습니다. 게시하기 전에 다시 검토하세요.' },
@@ -1455,6 +1491,12 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_botdir_review: { en: 'Review publication', 'zh-Hans': '检查发布内容', 'zh-Hant': '檢查發布內容', ja: '公開内容を確認', ko: '게시 내용 검토' },
   tw_botdir_revision_fmt: { en: 'revision %1$s', 'zh-Hans': '版本 %1$s', 'zh-Hant': '版本 %1$s', ja: 'リビジョン %1$s', ko: '리비전 %1$s' },
   tw_botdir_role_hint: { en: 'Only this explicit role is shared. Private memory and conversations are excluded. Only plain-text Skills are supported in this release.', 'zh-Hans': '仅共享此处明确填写的角色；不共享私人记忆和会话。当前仅支持纯文本 Skill。', 'zh-Hant': '僅共享此處明確填寫的角色；不共享私人記憶與對話。目前僅支援純文字 Skill。', ja: 'ここに明記したロールだけが共有されます。個人用のメモリや会話は含まれません。このリリースでは、プレーンテキストの Skill のみ対応しています。', ko: '여기에 명시한 역할만 공유됩니다. 개인 메모리와 대화는 제외됩니다. 이 릴리스에서는 일반 텍스트 Skill만 지원합니다.' },
+  tw_botdir_scope_hint: { en: 'Team members can see the names of what you share here.', 'zh-Hans': '团队成员可以看到你在此共享内容的名称。', 'zh-Hant': '團隊成員可以看到你在此共享內容的名稱。', ja: 'ここで共有したものの名前は、チームのメンバーに表示されます。', ko: '여기서 공유한 항목의 이름은 팀원에게 표시됩니다.' },
+  tw_botdir_scope_hint_friend_fmt: { en: '%1$s can see the names of what you share here.', 'zh-Hans': '%1$s 可以看到你在此共享内容的名称。', 'zh-Hant': '%1$s 可以看到你在此共享內容的名稱。', ja: 'ここで共有したものの名前は、%1$s に表示されます。', ko: '여기서 공유한 항목의 이름은 %1$s에게 표시됩니다.' },
+  tw_botdir_scope_lost_fmt: { en: 'No longer in this Bot’s own scope, so it stops being shared: %1$s', 'zh-Hans': '已不在此 Bot 自身的范围内，将不再共享：%1$s', 'zh-Hant': '已不在此 Bot 本身的範圍內，將不再共享：%1$s', ja: 'この Bot 自身のスコープから外れたため、共有されなくなります: %1$s', ko: '이 Bot 자체의 범위에서 빠졌으므로 더 이상 공유되지 않습니다: %1$s' },
+  tw_botdir_scope_review: { en: 'Can open review cases', 'zh-Hans': '可打开复核单', 'zh-Hant': '可開啟複核單', ja: '確認案件を開ける', ko: '검토 건 열기 가능' },
+  tw_botdir_scope_title_fmt: { en: 'What this Bot may use in %1$s', 'zh-Hans': '此 Bot 可在 %1$s 中使用的内容', 'zh-Hant': '此 Bot 可在 %1$s 中使用的內容', ja: 'この Bot が %1$s で使えるもの', ko: '이 Bot이 %1$s에서 사용할 수 있는 항목' },
+  tw_botdir_scope_title_friend_fmt: { en: 'What this Bot may use for %1$s', 'zh-Hans': '此 Bot 为 %1$s 服务时可使用的内容', 'zh-Hant': '此 Bot 為 %1$s 服務時可使用的內容', ja: 'この Bot が %1$s のために使えるもの', ko: '이 Bot이 %1$s을(를) 위해 사용할 수 있는 항목' },
   tw_botdir_select_files: { en: 'Select read-only files / SKILL.md', 'zh-Hans': '选择只读文件 / SKILL.md', 'zh-Hant': '選擇唯讀檔案 / SKILL.md', ja: '読み取り専用のファイル / SKILL.md を選択', ko: '읽기 전용 파일 / SKILL.md 선택' },
   tw_botdir_shared_hint: { en: 'These files stay shared unless you replace them or stop sharing them. A file you stop sharing is no longer given to the Bot, and requests that started with it are stopped. Answers people already received stay in their chats.', 'zh-Hans': '这些文件会继续共享，除非你替换或停止共享。停止共享的文件不再提供给 Bot，已使用它的请求会被停止；成员已收到的回答仍保留在会话中。', 'zh-Hant': '這些檔案會持續共享，除非你替換或停止共享。停止共享的檔案不再提供給 Bot，已使用該檔案的請求會被停止；成員已收到的回答仍保留在對話中。', ja: 'これらのファイルは、置き換えるか共有を停止しない限り共有され続けます。共有を停止したファイルは Bot に渡されなくなり、そのファイルを使って開始されたリクエストは停止されます。すでに届いた回答は、各チャットに残ります。', ko: '이 파일들은 교체하거나 공유를 중지하지 않는 한 계속 공유됩니다. 공유를 중지한 파일은 더 이상 Bot에 전달되지 않으며, 해당 파일로 시작된 요청은 중지됩니다. 이미 받은 답변은 각 채팅에 그대로 남습니다.' },
   tw_botdir_shared_now: { en: 'Shared now', 'zh-Hans': '当前共享的资料', 'zh-Hant': '目前共享的資料', ja: '現在の共有', ko: '현재 공유 중' },
@@ -1572,6 +1614,10 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_error_review_publication: { en: 'Review and confirm the publication before continuing.', 'zh-Hans': '请检查并确认发布内容后继续。', 'zh-Hant': '請先檢查並確認發布內容後再繼續。', ja: '続ける前に、公開内容を確認して承認してください。', ko: '계속하기 전에 게시 내용을 검토하고 확인하세요.' },
   tw_error_role: { en: 'Your role cannot perform this action.', 'zh-Hans': '当前角色无权执行此操作。', 'zh-Hant': '目前的角色無權執行此操作。', ja: '現在のロールでは、この操作を実行できません。', ko: '현재 역할로는 이 작업을 수행할 수 없습니다.' },
   tw_error_runtime: { en: 'The isolated Teams runtime is unavailable on this Desktop. Install a Desktop build that includes it.', 'zh-Hans': '此 Desktop 缺少团队隔离运行时，请安装包含此运行时的 Desktop 版本。', 'zh-Hant': '此 Desktop 缺少團隊隔離執行環境，請安裝包含該環境的 Desktop 版本。', ja: 'この Desktop では、分離されたチーム用ランタイムを利用できません。ランタイムを含む Desktop のビルドをインストールしてください。', ko: '이 Desktop에서는 격리된 팀 런타임을 사용할 수 없습니다. 런타임이 포함된 Desktop 빌드를 설치하세요.' },
+  tw_error_scope_conflict: { en: 'Someone changed this a moment ago. The latest is shown. Check it and try again.', 'zh-Hans': '刚有人修改了此设置，已显示最新内容。请检查后重试。', 'zh-Hant': '剛有人修改了此設定，已顯示最新內容。請檢查後重試。', ja: '直前に誰かがこの設定を変更しました。最新の内容を表示しています。確認してからもう一度お試しください。', ko: '방금 누군가 이 설정을 변경했습니다. 최신 내용을 표시했습니다. 확인한 후 다시 시도하세요.' },
+  tw_error_scope_not_published: { en: 'The maintainer changed what this Bot shares. The latest is shown. Check it and try again.', 'zh-Hans': '维护者修改了此 Bot 共享的内容，已显示最新内容。请检查后重试。', 'zh-Hant': '維護者變更了此 Bot 共享的內容，已顯示最新內容。請檢查後重試。', ja: 'メンテナーがこの Bot の共有内容を変更しました。最新の内容を表示しています。確認してからもう一度お試しください。', ko: '메인테이너가 이 Bot의 공유 내용을 변경했습니다. 최신 내용을 표시했습니다. 확인한 후 다시 시도하세요.' },
+  tw_error_scope_outside_bot: { en: 'This Bot’s own scope no longer includes everything you chose. Choose the Bot again and review what it shares.', 'zh-Hans': '此 Bot 自身的范围已不包含你选择的全部内容。请重新选择 Bot 并检查共享内容。', 'zh-Hant': '此 Bot 本身的範圍已不包含你選擇的全部內容。請重新選擇 Bot 並檢查共享內容。', ja: 'この Bot 自身のスコープに、選んだものがすべては含まれなくなりました。Bot を選び直して、共有内容を確認してください。', ko: '이 Bot 자체의 범위가 선택한 항목을 모두 포함하지 않게 되었습니다. Bot을 다시 선택하고 공유 내용을 검토하세요.' },
+  tw_error_scope_unsupported: { en: 'This kind of Bot cannot share Local Apps or datasets.', 'zh-Hans': '这类 Bot 无法共享本地应用或数据集。', 'zh-Hant': '這類 Bot 無法共享本機應用程式或資料集。', ja: 'この種類の Bot は、ローカルアプリやデータセットを共有できません。', ko: '이런 종류의 Bot은 로컬 앱이나 데이터세트를 공유할 수 없습니다.' },
   tw_error_settings_changed: { en: 'Bot settings changed. Refresh before saving again.', 'zh-Hans': 'Bot 设置已变化，请刷新后重试。', 'zh-Hant': 'Bot 設定已變更，請重新整理後再試。', ja: 'Bot の設定が変更されました。更新してから、もう一度保存してください。', ko: 'Bot 설정이 변경되었습니다. 새로 고친 뒤 다시 저장하세요.' },
   tw_error_task_authorization: { en: 'The Bot task lost its authorization, so it cannot continue.', 'zh-Hans': '此 Bot 任务的授权已失效，无法继续。', 'zh-Hant': '此 Bot 任務的授權已失效，無法繼續。', ja: 'この Bot のタスクは認可を失ったため、続行できません。', ko: '이 Bot 작업은 권한이 사라져 계속할 수 없습니다.' },
   tw_error_team_limit: { en: 'You can join up to 20 teams.', 'zh-Hans': '最多可加入 20 个团队。', 'zh-Hant': '最多可加入 20 個團隊。', ja: '参加できるチームは最大 20 個です。', ko: '팀은 최대 20개까지 참가할 수 있습니다.' },

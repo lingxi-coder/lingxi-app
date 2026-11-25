@@ -1734,6 +1734,33 @@ test('publishing a scope: only ids, names and flags go to the service, only with
  assert.equal(g.mock.commands.filter(c=>c.action==='publishSharedBot').length,0);
 });
 
+test('the Bots this computer can publish say the most of it each may share: its own scope, each Local App by the name it has here, the apps that are installed and nothing private',async t=>{
+ const installed=[{id:'calendar',name:'Calendar',summary:'Your private events'},{id:'notes',name:'  Notes\n(work)  '},{id:'mail',name:'Mail'}];
+ const apps=appHost(installed,{}),f=fixture(t);Object.assign((f.connector as any).options,{localApps:apps.host});
+ const dataset=(id:string,more:Partial<OwnDataset>={})=>ownData(id,more);
+ f.store.update(f.bot.bot_id,f.bot.revision,{scope:{localApps:['notes','missing','calendar'],datasets:[dataset('d1',{write:true}),dataset('d2',{write:true,reportReview:true}),dataset('d1',{source:'elsewhere'}),dataset('d3')]}});
+ const none=f.store.create({name:'Keeps to itself'});
+ const bots=await f.connector.localBots('owner'),mine=bots.find(bot=>bot.instanceId===f.bot.bot_id)!;
+ // An app that is not installed cannot be offered; a name is what the app calls itself here, with line breaks and padding gone; a dataset appears once.
+ assert.deepEqual(mine.scope,{localApps:[{id:'notes',name:'Notes (work)'},{id:'calendar',name:'Calendar'}],
+  datasets:[dataset('d1',{write:true}),dataset('d2',{write:true,reportReview:true}),dataset('d3')]});
+ assert.equal(JSON.stringify(bots).includes('private events'),false,'the summary of an app is not offered');
+ assert.equal('scope' in bots.find(bot=>bot.instanceId===none.bot_id)!,false,'a Bot with nothing in its own scope offers nothing');
+ assert.equal(apps.state.listed,1,'the installed apps are read once for all Bots');
+ // What is offered is what the connector accepts, and no more: a publication of it is within the Bot's own scope.
+ await f.connector.publishLocalBot('owner',{...f.input,scope:mine.scope});
+ assert.deepEqual(f.mock.commands.find(c=>c.action==='publishSharedBot').payload.scope,mine.scope);
+ // No app host, or none installed: only the datasets are offered, and no app is looked up when no Bot has one.
+ const bare=fixture(t);bare.store.update(bare.bot.bot_id,bare.bot.revision,{scope:{localApps:['calendar'],datasets:[dataset('d1')]}});
+ assert.deepEqual((await bare.connector.localBots('owner')).find(bot=>bot.instanceId===bare.bot.bot_id)!.scope,{localApps:[],datasets:[dataset('d1')]});
+ const idle=appHost(installed,{}),dataOnly=fixture(t);Object.assign((dataOnly.connector as any).options,{localApps:idle.host});
+ dataOnly.store.update(dataOnly.bot.bot_id,dataOnly.bot.revision,{scope:{localApps:[],datasets:[dataset('d1')]}});
+ assert.deepEqual((await dataOnly.connector.localBots('owner')).find(bot=>bot.instanceId===dataOnly.bot.bot_id)!.scope,{localApps:[],datasets:[dataset('d1')]});assert.equal(idle.state.listed,0);
+ const broken=appHost(installed,{});broken.host.list=async()=>{throw Error('LOCAL_APP_HOST_DOWN');};
+ const down=fixture(t);Object.assign((down.connector as any).options,{localApps:broken.host});down.store.update(down.bot.bot_id,down.bot.revision,{scope:{localApps:['calendar'],datasets:[]}});
+ assert.equal('scope' in (await down.connector.localBots('owner')).find(bot=>bot.instanceId===down.bot.bot_id)!,false,'when the apps cannot be listed, the Bot is still listed, with no app to offer');
+});
+
 test('a run is offered the Local Apps its Bot has, the service lets it use and this computer has installed, in order, at most sixteen, and none costs nothing',async t=>{
  const installed=[{id:'calendar',name:'Calendar',summary:'Events'},{id:'mail',name:'Mail'},{id:'notes',name:'Notes'},{id:'zeta',name:'Zeta'}];
  const apps=appHost(installed,{});

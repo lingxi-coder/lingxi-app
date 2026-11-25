@@ -8,10 +8,13 @@ import { useTeamsText } from './i18n.js';
 /** The Chats where a Bot may judge for itself whether to answer: groups, channels and Bot DMs. */
 const KINDS: TeamConversation['kind'][] = ['group', 'channel', 'bot_dm'];
 
+/** Whether this person takes part in a Chat with Bots, and so may set what its Bots do there: whether they answer on their own, and what they use. */
+export const inBotChat = (conversation: TeamConversation, uid: string): boolean => KINDS.includes(conversation.kind) && conversation.participants.includes(`user:${uid}`);
+
 /** The Bots of a Chat that can be switched to answer on their own, and those already on (which can always be switched off). `kept` are
  * Bots of the Chat already on that this person cannot see: the setting is the whole list, so a change here leaves them on. */
 export function autoReplyBots(conversation: TeamConversation, snapshot: Pick<TeamsSnapshot, 'bots' | 'uid'>): { bots: SharedBotCard[]; on: string[]; kept: string[] } {
-  if (!KINDS.includes(conversation.kind) || !conversation.participants.includes(`user:${snapshot.uid}`)) return { bots: [], on: [], kept: [] };
+  if (!inBotChat(conversation, snapshot.uid)) return { bots: [], on: [], kept: [] };
   const on = conversation.autoReply?.targets ?? [];
   const bots = snapshot.bots.filter(bot => conversation.participants.includes(`shared_bot:${bot.sharedBotId}`)
     && (on.includes(bot.sharedBotId) || bot.state === 'published' && !!bot.autoReply));

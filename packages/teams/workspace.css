@@ -579,6 +579,21 @@
 .tw-bot-member-details { min-inline-size: 0; }
 .tw-bot-member-details ul { display: grid; gap: .4rem; padding-inline-start: 1.25rem; }
 .tw-bot-member-details button { white-space: normal; overflow-wrap: anywhere; text-align: start; min-block-size: 2rem; }
+/* Bot scope: what a Bot may use of its maintainer's computer, shown with the Bot and limited per Chat. */
+.tw-bot-scope { min-inline-size: 0; }
+.tw-bot-scope-list { display: grid; gap: .2rem; margin: 0; }
+.tw-bot-scope-list > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 .6rem; min-inline-size: 0; }
+.tw-bot-scope-list dt { font-size: 12px; color: var(--tw-muted); }
+.tw-bot-scope-list dd { margin: 0; min-inline-size: 0; }
+.tw-bot-scope .tw-bot-scope-items { display: flex; flex-wrap: wrap; gap: 0 .4rem; margin: 0; padding: 0; list-style: none; font-size: 13px; }
+.tw-bot-scope .tw-bot-scope-items li { overflow-wrap: anywhere; }
+.tw-bot-scope .tw-bot-scope-items li:not(:last-child)::after { content: ','; }
+.tw-bot-scope .tw-tag, .tw-bot-scope-edit .tw-tag, .tw-bot-scope-flags .tw-tag { margin-inline-start: .35rem; }
+.tw-bot-scope-flags { display: flex; flex-wrap: wrap; gap: 0 .9rem; padding-inline-start: 1.6rem; }
+.tw-bot-scope-edit { display: flex; flex-direction: column; gap: 8px; min-width: 0; margin: 0; padding: 8px 10px 10px; border: 1px solid var(--tw-border); border-radius: 8px; }
+.tw-bot-scope-edit legend, .tw-bot-scope-group legend { padding: 0 4px; font-size: 12px; color: var(--tw-muted); }
+.tw-bot-scope-group { min-width: 0; margin: 0; padding: 0; border: 0; }
+.tw-bot-scope-group legend { padding-inline-start: 0; }
 .tw-task-export { padding-block: .5rem 1rem; }
 .tw-task-export a { display: inline-block; padding-block: .4rem; }
 /* U6: on a touch screen no control is smaller than 44 x 44. Last in the file on purpose: the base rules of the same weight (`.tw-embed button`, `.tw-mention`, `.tw-target`) come before it and so give way. */

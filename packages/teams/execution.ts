@@ -128,7 +128,11 @@ export function executionCommand<A extends MemberExecutionAction>(scope: Executi
   if (!isMemberExecutionCommand(command)) throw new Error('INVALID_INPUT');
   return command as unknown as Extract<MemberExecutionCommand, { action: A }>;
 }
-export interface LocalPublishableBot { instanceId: string; name: string; description: string; model?: string; requiredResources?: string[]; examples?: string[]; capabilities?: { durableWait: boolean; writeOperations: boolean } }
+export interface LocalPublishableBot {
+  instanceId: string; name: string; description: string; model?: string; requiredResources?: string[]; examples?: string[]; capabilities?: { durableWait: boolean; writeOperations: boolean };
+  /** The most of this Desktop the Bot may be published with: its own scope, with the Local Apps that are installed here named. Absent when it has none. */
+  scope?: PublishedBotScope;
+}
 export interface SelectedSharedFile { token: string; kind: 'file' | 'skill'; name: string; sha256: string; bytes: number; mediaType: string }
 /**
  * How one Bot is served from the computer that publishes it. `checking` until a pass has an answer; `not_ready` names what its maintainer

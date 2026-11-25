@@ -3517,4 +3517,15 @@
     <string name="teams_dataset_edit">Edit together</string>
     <string name="teams_dataset_share">Share data</string>
     <string name="teams_dataset_continue">Continue sharing</string>
+    <string name="teams_bot_scope_title">What Bots can use in this chat</string>
+    <string name="teams_bot_scope_note">A Bot can only use what its maintainer shared with the team. Uncheck what a Bot should not use in this chat.</string>
+    <string name="teams_bot_scope_limit_title_fmt">Limit what %1$s can use here</string>
+    <string name="teams_bot_scope_apps">Local Apps</string>
+    <string name="teams_bot_scope_datasets">Datasets</string>
+    <string name="teams_bot_scope_edit">Can edit</string>
+    <string name="teams_bot_scope_uses">Can use on its maintainer’s computer</string>
+    <string name="teams_bot_scope_none">Uses nothing from its maintainer’s computer</string>
+    <string name="teams_bot_scope_limited">Limited in this chat</string>
+    <string name="teams_bot_scope_reset">Allow everything shared</string>
+    <string name="teams_bot_scope_saved">Saved</string>
 </resources>

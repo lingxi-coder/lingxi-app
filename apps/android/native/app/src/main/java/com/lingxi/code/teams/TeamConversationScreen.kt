@@ -506,6 +506,11 @@ private fun ConversationBody(
             )
         }
         if (!messaging.offline && editing == null && "user:$uid" in conversation.participants) {
+            if (conversation.kind == "channel") {
+                TeamVisualizationComposerButton(conversation.id, workspace.messagingModel) { id ->
+                    members.firstOrNull { it.uid == id }?.displayName?.takeIf(String::isNotBlank) ?: id
+                }
+            }
             TeamDatasetShareButton(conversation, workspace.messagingModel) { id ->
                 members.firstOrNull { it.uid == id }?.displayName?.takeIf(String::isNotBlank) ?: id
             }
@@ -693,6 +698,11 @@ private fun MessageCell(
                     }
                     // Attachments and their controls remain reachable independently of the message text.
                     if (message.files.isNotEmpty()) TeamMessageFiles(message, own, workspace, pictures)
+                    if (!message.recalled) message.visualization?.let { visualization ->
+                        val channels = messaging.cache?.conversations.orEmpty().filter { it.kind == "channel" && "user:$uid" in it.participants }
+                        TeamVisualizationCard(visualization, conversation.id, workspace.messagingModel, online = !messaging.offline,
+                            destinations = channels, person = personName)
+                    }
                     if (!message.recalled) (message.resourceRef as? DatasetResourceRef.PageVersion)?.let { reference ->
                         val context = androidx.compose.ui.platform.LocalContext.current
                         val uri = android.net.Uri.parse(com.lingxi.code.apps.LocalAppDatasetAccess.origin ?: "https://lingxios.net")

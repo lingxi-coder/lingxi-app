@@ -1,6 +1,7 @@
 import { createDatasetRender } from '../src/dataset-render.mjs';
 import { getStorage } from 'firebase-admin/storage';
 import { createDatasetPages } from '../src/dataset-pages.mjs';
+import { createTeamVisualizations } from '../src/team-visualizations.mjs';
 import { createDatasetBrowserHttp } from '../src/dataset-browser-bridge.mjs';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
@@ -49,9 +50,13 @@ function next() {
   nextReplica = (nextReplica + 1) % gateways.length;
   return gateway;
 }
-const pages = process.env.LINGXI_DATASET_PAGES_BUCKET ? createDatasetPages({
-  db, bucket: getStorage(app).bucket(process.env.LINGXI_DATASET_PAGES_BUCKET), datasets: (...args) => next().datasets(...args),
+const bucket = process.env.LINGXI_DATASET_PAGES_BUCKET && getStorage(app).bucket(process.env.LINGXI_DATASET_PAGES_BUCKET);
+const pages = bucket ? createDatasetPages({
+  db, bucket, datasets: (...args) => next().datasets(...args),
 }) : undefined;
+const visualizations = createTeamVisualizations({ db, bucket,
+  core: (...args) => next().command(...args), channels: process.env.LINGXI_TEAM_VISUALIZATION_CHANNELS,
+});
 const renderKeyFile = process.env.LINGXI_DATASET_RENDER_KEY_FILE;
 const renderDataset = createDatasetRender({
   origin: process.env.LINGXI_DATASET_RENDER_ORIGIN,
@@ -62,7 +67,7 @@ const origins = [`https://${projectId}.web.app`, `https://${projectId}.firebasea
 const handle = createTeamsHandler({ store: new TeamsStore(db), friends: new FriendsStore(db, Date.now, { auth }),
   verifyToken: verifySession, datasets: (...args) => next().datasets(...args),
   datasetCommand: (...args) => next().command(...args), datasetRuns: (...args) => next().run(...args),
-  datasetPages: pages?.execute, datasetRender: renderDataset,
+  datasetPages: pages?.execute, datasetRender: renderDataset, visualizations,
   createCustomToken: uid => auth.createCustomToken(uid), origins });
 const browser = createDatasetBrowserHttp({
   origin: process.env.LINGXI_DATASET_BROWSER_ORIGIN,

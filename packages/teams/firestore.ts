@@ -1,6 +1,7 @@
 import { parseMentionEntities } from './mentions.js';
 import { isResourceRef } from './dataset-resource.js';
 import { parseDataRef } from './lingxi-data.js';
+import { parseVisualization } from './visualization.js';
 import type { DocumentData, Firestore, FirestoreError } from 'firebase/firestore';
 import { ATTACHMENT_TYPES, type MessageAttachment } from './attachments.js';
 import type { BlockEntry, FriendCard, TeamOffer } from './friends.js';
@@ -80,6 +81,7 @@ export function firestoreMessage(id: string, value: DocumentData): TeamMessage {
   const mentionEntities = value.recalled ? [] : parseMentionEntities(value.text, value.mentionEntities);
   const dataRef = value.recalled ? undefined : parseDataRef(value.dataRef);
   const resourceRef = !value.recalled && isResourceRef(value.resourceRef) ? value.resourceRef : undefined;
+  const visualization = value.kind === 'visualization' && !value.recalled ? parseVisualization(value.visualization, id) : undefined;
   return { id, seq: value.seq, author: pointerAuthor(value.author), kind: value.kind, text: value.text, changeSeq: value.changeSeq, changeId: value.changeId,
     createdAt: timestamp(value.createdAt), editedAt: timestamp(value.editedAt), ...(value.replyTo ? { replyTo: value.replyTo } : {}),
     ...(value.recalled ? { recalled: true } : {}), ...(value.mentions ? { mentions: value.mentions } : {}), ...(mentionEntities.length ? { mentionEntities } : {}),
@@ -90,6 +92,7 @@ export function firestoreMessage(id: string, value: DocumentData): TeamMessage {
     ...(attachmentsOf(value.attachments).length ? { attachments: attachmentsOf(value.attachments) } : {}),
     ...(dataRef ? { dataRef } : {}),
     ...(resourceRef ? { resourceRef, resourceGrant: nonEmpty(value.resourceGrant) } : {}),
+    ...(visualization ? { visualization } : {}),
     ...(readFilesOf(value.readFiles).length ? { readFiles: readFilesOf(value.readFiles) } : {}) };
 }
 function readFilesOf(value: unknown): { attachmentId: string; name: string }[] {

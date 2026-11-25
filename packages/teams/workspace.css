@@ -628,3 +628,14 @@
   margin-inline-start: 0;
   white-space: pre-wrap;
 }
+.tw-scope .tw-visualization {
+  max-width: 100%;
+  min-width: min(24rem, 100%);
+  overflow: hidden;
+  border: 1px solid var(--tw-line, currentColor);
+  border-radius: .65rem;
+  padding: .75rem;
+}
+.tw-scope .tw-visualization-title { display: flex; justify-content: space-between; align-items: baseline; gap: .75rem; }
+.tw-scope .tw-visualization-frame { display: block; width: 100%; border: 0; }
+.tw-scope .tw-data-record form fieldset { display: grid; gap: .5rem; }

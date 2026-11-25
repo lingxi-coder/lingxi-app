@@ -73,6 +73,8 @@ targets:
         buildPhase: resources
       - path: ../../../resources/mermaid/mermaid.html
         buildPhase: resources
+      - path: ../../../resources/team-visualization/assets/team-visualization.html
+        buildPhase: resources
     dependencies:
       - package: ZIPFoundation
       - package: Firebase

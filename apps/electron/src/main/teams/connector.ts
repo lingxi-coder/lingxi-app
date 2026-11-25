@@ -61,6 +61,7 @@ interface Selected { context: TeamAccountContext; instanceId: string; expires: n
 interface HostTask extends TeamTaskView { messageId: string; messageSeq: number; resume?: { waitId: string; answerMessageId: string; answerSeq: number; /** The requester's decision, when the wait was an approval. */ decision?: 'approve' | 'deny' } }
 interface TaskContext { privateDataSource?: string; sourceLastChangeSeq?: number; task: HostTask & { epoch?: number }; physicalDispatchesSpent?: number; messageId: string; messageSeq: number; inputs: Array<{ grantId: string; resourceId: string; digest: string }>;
   /** `prepareTask` only: what kind of Chat the task is in. */ conversationKind?: string;
+  visualizations?: true;
   deployment: { deploymentId: string; definitionDigest: string; accountEpoch: number; capabilities?: { durableWait?: boolean } };
   /** Present when the Bot has a shared list and this deployment records its writes. */ sharedList?: SharedListOffer }
 interface ContinueGrant { execute: boolean; state?: string; permitId?: string; epoch?: number; task?: TeamTaskView; physicalDispatchesSpent?: number; sharedList?: SharedListOffer }
@@ -958,6 +959,7 @@ export class TeamConnector implements LocalTeamHost {
       epoch:1,messageSeq:prepared.messageSeq,lastChangeSeq:source.lastChangeSeq,batch:reference,dispatched:0,recoveries:0,
       ask:prepared.deployment?.capabilities?.durableWait === true && CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) && !unasked,
       ...(unasked ? { unasked: true } : {}), ...(mayDecline ? { mayDecline: true } : {}),
+      ...(prepared.visualizations === true && prepared.conversationKind === 'channel' ? { visualizations: true } : {}),
       ...(files.length ? { files: files.map(({ attachmentId, sha256 }) => ({ attachmentId, sha256 })) } : {}),
       ...(CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) && runList(prepared.sharedList,unasked) ? { list: runList(prepared.sharedList,unasked)! } : {}) };
     const pending=this.grantIntent(b,record,prepared,'startTask',startPayload);
@@ -1131,7 +1133,7 @@ export class TeamConnector implements LocalTeamHost {
               text: JSON.stringify({ resource, data: JSON.parse(content) }) })),
           ],deadlineAt:record.deadlineAt,
           model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),...(continuation ? { continuation } : {}),...(record.ask ? { askRequester: true } : {}),...(record.list ? { sharedList: record.list } : {}),...(record.mayDecline ? { mayDecline: true, ...(record.unasked !== true ? { addressed: true } : {}) } : {}),
-          ...(offers.length ? { sharedData: offers } : {}),
+          ...(offers.length ? { sharedData: offers } : {}), ...(record.visualizations ? { visualizations: true as const } : {}),
           limits:{max_turns:20,context_window_tokens:2000000,output_tokens_per_request:4096,physical_dispatches:Math.max(1,DISPATCH_LIMIT-record.dispatched)}},
         operate:operation => {
           if (operation.tool === 'data_read' || operation.tool === 'data_write' || operation.tool === 'data_handoff') {
@@ -1282,7 +1284,9 @@ export class TeamConnector implements LocalTeamHost {
     const payload = {...record.payload,outcome:declined?'declined':result.status==='completed'?'completed':'failed',text:record.privateData || declined ? '' : result.text || 'The assistant could not complete this request.',finishedAt:result.finishedAt,
       outputAudience:{mode:'published_inputs'},usage:totalUsage(record.usage,result.usage,record.recoveries>0),
       // A finished run was given these files as model input: the worker refuses a batch whose files it cannot show the model.
-      ...(!record.privateData && result.status==='completed' && record.files?.length ? { readFiles: record.files } : {}),...(!record.privateData && result.document && !declined ? {document:{title:result.document.title,body:result.document.markdown}} : {})};
+      ...(!record.privateData && result.status==='completed' && record.files?.length ? { readFiles: record.files } : {}),
+      ...(!record.privateData && record.visualizations && result.status === 'completed' && result.visualization ? { visualization: result.visualization } : {}),
+      ...(!record.privateData && result.document && !declined ? {document:{title:result.document.title,body:result.document.markdown}} : {})};
     const delivery: SavedDelivery = {schemaVersion:1,teamId:record.teamId,generation:record.generation,taskId:record.taskId,deadlineAt:record.deadlineAt,commandId:record.commandId,
       ...(synthesized ? { synthesized: true as const } : {}),payload};
     return await this.options.privateStore.saveDelivery(c.uid,delivery,record)?delivery:undefined;

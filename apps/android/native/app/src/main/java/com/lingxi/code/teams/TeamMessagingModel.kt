@@ -636,10 +636,15 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
     suspend fun dataset(conversationId: String, body: JSONObject): JSONObject =
         call(body, lifecycle, dataConversation = conversationId, dataset = true)
 
+    suspend fun visualization(conversationId: String, body: JSONObject): JSONObject =
+        call(body, lifecycle, seconds = 45, dataConversation = conversationId, visualization = true)
+
     fun datasetShareDestination(conversationId: String): Pair<JSONObject, Long> =
         JSONObject().put("team", teamId).put("conversation", conversationId) to generation
 
-    private suspend fun call(input: JSONObject, life: Long, seconds: Long = 20, dataConversation: String? = null, dataset: Boolean = false): JSONObject {
+    private suspend fun call(input: JSONObject, life: Long, seconds: Long = 20, dataConversation: String? = null,
+        dataset: Boolean = false, visualization: Boolean = false,
+    ): JSONObject {
         val owner = uid
         val user = auth.currentUser
         if (!active || life != lifecycle || user?.uid != owner) throw TeamMessageFailure("INVALID_SESSION")
@@ -647,13 +652,16 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         if (!active || life != lifecycle || auth.currentUser?.uid != owner) throw TeamMessageFailure("INVALID_SESSION")
         if (dataConversation != null && mutable.value.selected != dataConversation) throw TeamMessageFailure("CONVERSATION_REQUIRED")
         val body = JSONObject(input.toString())
-        if (!dataset) {
+        if (visualization) {
+            body.put("teamId", teamId).put("generation", generation).put("conversationId", dataConversation)
+        } else if (!dataset) {
             if (dataConversation == null) body.put("teamId", teamId).put("generation", generation)
             else body.put("scope", JSONObject().put("kind", "team").put("teamId", teamId)
                 .put("generation", generation).put("conversationId", dataConversation))
         }
         if (body.has("schemaVersion")) TeamExecutionContract.validate(body)
         val path = when {
+            visualization -> "visualizations"
             dataset -> "datasets"
             dataConversation != null -> "data"
             else -> "messages"

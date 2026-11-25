@@ -253,7 +253,7 @@ const capturePath = '/v1/teams/dataset-captures';
 const pagesPath = '/v1/teams/dataset-pages';
 
 export function datasetBodyLimit(path) {
-  if (path === capturePath || path === pagesPath) return 3 * 1024 * 1024;
+  if (path === capturePath || path === pagesPath || path === '/v1/teams/visualizations') return 3 * 1024 * 1024;
   if (path === datasetPath || path === '/v2/dataset-runs' || path.startsWith('/v1/dataset-browser/')) return 131072;
   return undefined;
 }
@@ -279,7 +279,7 @@ async function boundedDatasetBody(request, limit) {
   } finally { reader.releaseLock(); }
 }
 
-export function createTeamsHandler({ store, friends, inbox, data, datasets, datasetCommand, datasetRuns, datasetPages, datasetRender, verifyToken, createCustomToken, origins = [] }) {
+export function createTeamsHandler({ store, friends, inbox, data, datasets, datasetCommand, datasetRuns, datasetPages, datasetRender, visualizations, verifyToken, createCustomToken, origins = [] }) {
   return async request => {
     const headers = new Headers({ 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
       'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', Vary: 'Origin' });
@@ -308,6 +308,14 @@ export function createTeamsHandler({ store, friends, inbox, data, datasets, data
         try { user = await verifyToken(bearer[1]); } catch { fail(401, 'INVALID_SESSION'); }
         if (!uid.safeParse(user?.uid).success) fail(401, 'INVALID_SESSION');
         return user;
+      }
+      if (path === '/v1/teams/visualizations' && request.method === 'POST') {
+        if (!visualizations) fail(404, 'VISUALIZATION_UNAVAILABLE');
+        const user = await identity();
+        const raw = await boundedDatasetBody(request, 3 * 1024 * 1024);
+        let body;
+        try { body = JSON.parse(raw); } catch { fail(400, 'INVALID_JSON'); }
+        return reply(await visualizations.execute(user, bearer[1], body));
       }
       // Core authenticates forwarded commands. Product-side operations still
       // require the full verified identity before touching product resources.

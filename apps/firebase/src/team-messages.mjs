@@ -1,4 +1,5 @@
 import { confirmShareDelivery } from './dataset-message-grant.mjs';
+import { confirmVisualizationDelivery } from './team-visualization-contract.mjs';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { mirrorHttpRead } from './inbox-store.mjs';
@@ -51,7 +52,7 @@ function conversation(snapshot, read, generation) {
  * rules-checked; HTTP also binds queued mutations to the membership generation. */
 export class TeamMessagesStore {
   constructor(db, clock = Date.now, readData) { this.db = db; this.clock = clock; this.readData = readData; }
-  async execute(user, raw, share) {
+  async execute(user, raw, share, visualization) {
     if (raw?.schemaVersion !== undefined) return new SharedBotsStore(this.db, this.clock).execute(user, raw);
     // A hosted Bot service's sessions are read with the same commands, addressed by `serviceId`. They are written only
     // through the execution ledger, so nothing but reading is taken here.
@@ -128,19 +129,24 @@ export class TeamMessagesStore {
       const m = existing.data(), old = receipt.data();
       let content = input.text;
       if (share) content = JSON.stringify([input.text, share.reference, share.grant]);
+      else if (visualization) content = JSON.stringify([input.text, visualization]);
       else if (input.dataRef) content = JSON.stringify([input.text, input.dataRef]);
       const textDigest = digest(content);
       const mentionDigest = input.mentionEntities === undefined ? undefined : digest(JSON.stringify(input.mentionEntities));
       if (old) {
         if (old.messageId !== input.messageId || old.operation !== input.operation || old.actorUid !== user.uid
           || old.generation !== input.generation || old.textDigest !== textDigest || old.mentionDigest !== mentionDigest
-          || (input.operation === 'create' && (m?.author.kind !== 'user' || m.author.uid !== user.uid || m.kind !== 'text'
+          || (input.operation === 'create' && (m?.author.kind !== 'user' || m.author.uid !== user.uid || m.kind !== (visualization ? 'visualization' : 'text')
             || (m.replyTo ?? null) !== (input.replyTo ?? null)))) fail(409, 'MESSAGE_ID_CONFLICT');
         return { messageId: input.messageId, changeId: input.changeId, changeSeq: old.seq };
       }
       if (input.operation === 'create' && existing.exists) fail(409, 'MESSAGE_ID_CONFLICT');
       if (input.operation !== 'create' && (!m || m.author.kind !== 'user' || m.author.uid !== user.uid)) fail(403, 'MESSAGE_AUTHOR_REQUIRED');
       if (m?.recalled) fail(409, 'MESSAGE_RECALLED');
+      if (input.operation === 'edit' && m.kind === 'visualization') fail(409, 'MESSAGE_IMMUTABLE');
+      const activateVisualization = visualization
+        ? await confirmVisualizationDelivery(tx, teamRef, c, input, user.uid, visualization)
+        : undefined;
       const priorTargets = new Set(input.operation === 'edit' ? m.mentionEntities?.map(({ userId }) => userId) : []);
       const newMentions = input.mentionEntities?.filter(({ userId }) => !priorTargets.has(userId));
       const memberRefs = mentionMemberRefs(teamRef, c, newMentions, user.uid);
@@ -166,10 +172,12 @@ export class TeamMessagesStore {
         const author = { kind: 'user', uid: user.uid };
         // The conversation list reads this pointer instead of the message; the author mirrors the message doc.
         Object.assign(update, { lastSeq: seq, lastMessage: { id: input.messageId, seq, at: now, author, preview: messagePreview(input.text) } });
-        tx.create(msgRef, { seq, author, kind: 'text', text: input.text,
+        tx.create(msgRef, { seq, author, kind: visualization ? 'visualization' : 'text', text: input.text,
           ...(input.mentionEntities?.length ? mentionFields(input.mentionEntities) : {}),
           ...(share ? { resourceRef: share.reference, resourceGrant: share.grant } : {}),
+          ...(visualization ? { visualization } : {}),
           ...(input.replyTo ? { replyTo: input.replyTo } : {}), ...(input.dataRef ? { dataRef: input.dataRef } : {}), createdAt: now, changeSeq, changeId: input.changeId });
+        activateVisualization?.();
         unasked.write(seq);
       } else {
         const entities = input.operation === 'recall' ? []
@@ -177,7 +185,9 @@ export class TeamMessagesStore {
         // Delivery recipients belong to the original send. Editing only changes the inline ranges.
         tx.update(msgRef, { ...(m.mentionEntities?.length || entities?.length ? { mentionEntities: entities ?? [] } : {}),
           text: input.text, editedAt: now, changeSeq, changeId: input.changeId,
-          ...(input.operation === 'recall' ? { recalled: true, ...(m.dataRef ? { dataRef: null } : {}), ...(m.resourceRef ? { resourceRef: null, resourceGrant: null } : {}) } : {}) });
+          ...(input.operation === 'recall' ? { recalled: true, ...(m.dataRef ? { dataRef: null } : {}),
+            ...(m.resourceRef ? { resourceRef: null, resourceGrant: null } : {}),
+            ...(m.visualization ? { visualization: null } : {}) } : {}) });
         // Only the newest message is mirrored. An older edit/recall leaves the pointer alone; a recall never leaves its text behind.
         if (c.lastMessage?.id === input.messageId) {
           update.lastMessage = { ...c.lastMessage, preview: input.operation === 'recall' ? '' : messagePreview(input.text),

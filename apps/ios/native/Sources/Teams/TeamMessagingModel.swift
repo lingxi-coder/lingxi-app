@@ -17,7 +17,7 @@ final class TeamMessageRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchec
 @MainActor @Observable
 final class TeamMessagingModel {
     static let conversationFields: Set<String> = ["kind", "title", "participants", "lastSeq", "lastChangeSeq", "lastMessage", "sharedBotId", "autoReply"]
-    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "mentionEntities", "targets", "taskId", "taskIds", "artifactId", "waitId", "approval", "decision", "dataRef", "resourceRef", "resourceGrant"]
+    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "mentionEntities", "targets", "taskId", "taskIds", "artifactId", "waitId", "approval", "decision", "dataRef", "resourceRef", "resourceGrant", "visualization"]
     private(set) var cache: TeamMessageProjection?
     private(set) var offline = true
     private(set) var error = ""
@@ -814,19 +814,36 @@ final class TeamMessagingModel {
         try await response(body, life: lifecycle, dataConversation: conversationId, dataset: true)
     }
 
-    private func response(_ body: [String: Any], life: Int, timeout: TimeInterval = 20, dataConversation: String? = nil, dataset: Bool = false) async throws -> Data {
+    func visualization(conversationId: String, body: [String: Any]) async throws -> [String: Any] {
+        let bytes = try await response(body, life: lifecycle, timeout: 45, dataConversation: conversationId, visualization: true)
+        guard let value = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else {
+            throw TeamMessageFailure(code: "INVALID_DATA")
+        }
+        return value
+    }
+
+    func datasetDestination(conversationId: String) -> [String: String] {
+        ["team": teamId, "conversation": conversationId]
+    }
+
+    private func response(_ body: [String: Any], life: Int, timeout: TimeInterval = 20, dataConversation: String? = nil, dataset: Bool = false, visualization: Bool = false) async throws -> Data {
         guard active, life == lifecycle, let user = auth.currentUser, user.uid == uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
         let token = try await user.getIDToken()
         guard active, life == lifecycle, auth.currentUser?.uid == uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
         var body = body
         if let dataConversation {
             guard dataConversation == selected else { throw TeamMessageFailure(code: "CONVERSATION_REQUIRED") }
-            if !dataset { body["scope"] = ["kind": "team", "teamId": teamId, "generation": generation, "conversationId": dataConversation] }
+            if visualization {
+                body["teamId"] = teamId; body["generation"] = generation; body["conversationId"] = dataConversation
+            } else if !dataset {
+                body["scope"] = ["kind": "team", "teamId": teamId, "generation": generation, "conversationId": dataConversation]
+            }
         } else {
             body["teamId"] = teamId; body["generation"] = generation
         }
         if body["schemaVersion"] != nil { try TeamExecutionContract.validate(body) }
-        let endpoint = dataConversation == nil ? apiRoot : apiRoot.deletingLastPathComponent().appendingPathComponent(dataset ? "datasets" : "data")
+        let endpoint = dataConversation == nil ? apiRoot : apiRoot.deletingLastPathComponent().appendingPathComponent(
+            visualization ? "visualizations" : dataset ? "datasets" : "data")
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"; request.timeoutInterval = timeout; request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")

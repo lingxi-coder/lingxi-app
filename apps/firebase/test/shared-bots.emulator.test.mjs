@@ -7,6 +7,7 @@ import { TeamsStore, createTeamsHandler } from '../src/teams.mjs';
 import { SharedBotsStore, deriveGrantPermit } from '../src/shared-bots.mjs';
 import { onTeamMessageCreated } from '../src/team-message-push.mjs';
 import { TeamMessagesStore } from '../src/team-messages.mjs';
+import { createTeamVisualizations } from '../src/team-visualizations.mjs';
 import { admissionId } from '../src/team-execution-contract.mjs';
 
 const options = { skip: !process.env.FIRESTORE_EMULATOR_HOST, timeout: 60000 };
@@ -56,6 +57,48 @@ beforeEach(async () => {
     participantUids: [member.uid], sharedBotIds: ['sharedbot_01'] }, member);
 });
 after(async () => { await db?.terminate(); if (app) await deleteApp(app); });
+
+test('channel visualization Bot publishes a typed artifact through its completion permit', options, async () => {
+  const channel = 'bot_visuals';
+  await execute('createConversation', { conversationId: channel, kind: 'channel', title: 'Bot charts',
+    participantUids: [owner.uid, member.uid], sharedBotIds: ['sharedbot_01'] }, member);
+  const channelRef = db.doc(`teams/${teamId}/conversations/${channel}`);
+  const files = new Map();
+  const bucket = { file(key) { return {
+    async save(bytes) { files.set(key, Buffer.from(bytes)); },
+    async download() { return [files.get(key)]; },
+  }; } };
+  const service = createTeamVisualizations({ db, bucket, channels: `${teamId}/${channel}`, clock: () => now });
+  async function admit() {
+    const receipt = await execute('submit', { ...submit(), conversationId: channel }, member);
+    return execute('startTask', { ...host, taskId: receipt.tasks[0].taskId,
+      expectedLastChangeSeq: (await channelRef.get()).data().lastChangeSeq });
+  }
+  function output(started, bindings = []) {
+    const title = 'Packing chart';
+    const completion = command('completeTask', result(started, { document: undefined }));
+    delete completion.payload.document;
+    return { action: 'completeBot', completion, artifact: { artifactId: completion.payload.taskId, name: title,
+      parts: [{ mediaType: 'application/json', data: { version: 1, bundle: { title, html: '<p>Passport</p>' }, bindings } }] } };
+  }
+  const first = output(await admit());
+  await assert.rejects(service.execute(member, 'fixture', first));
+  const published = await service.execute(owner, 'fixture', first);
+  assert.match(published.replyId, /^viz_/u);
+  assert.deepEqual(await service.execute(owner, 'fixture', first), published);
+  const stored = (await channelRef.collection('messages').doc(published.replyId).get()).data();
+  assert.equal(stored.author.kind, 'shared_bot');
+  assert.equal(stored.kind, 'visualization');
+  const read = await service.execute(member, 'fixture', { action: 'open', teamId, conversationId: channel,
+    generation: 1, message: published.replyId, version: stored.visualization.reference.version });
+  assert.equal(read.bundle.html, '<p>Passport</p>');
+  const second = output(await admit(), [{ alias: 'orders', messageId: 'no_such_message' }]);
+  const fallback = await service.execute(owner, 'fixture', second);
+  assert.equal(fallback.state, 'completed');
+  assert.deepEqual(await service.execute(owner, 'fixture', second), fallback);
+  assert.equal((await channelRef.collection('messages').doc(fallback.replyId).get()).data().visualization, undefined);
+  assert.equal(files.size, 1);
+});
 
 test('execution 2: simultaneous duplicate submissions create one message, admission and quota charge', options, async () => {
   const payload = submit(), values = await Promise.all(Array.from({ length: 8 }, () => execute('submit', payload, member)));

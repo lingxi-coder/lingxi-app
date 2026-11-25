@@ -1,6 +1,7 @@
 import type { MentionEntity } from './mentions.js';
 import type { ResourceRef } from './dataset-resource.js';
 import { parseDataRef, type DataRef } from './lingxi-data.js';
+import type { TeamVisualization } from './visualization.js';
 import { isMemberExecutionCommand } from './execution-validation.js';
 import { executionCommand, type MemberExecutionCommand } from './execution.js';
 import { ATTACHMENT_MESSAGE_FILES, type MessageAttachment } from './attachments.js';
@@ -48,6 +49,7 @@ export interface TeamMessage {
   dataRef?: DataRef;
   resourceRef?: ResourceRef;
   resourceGrant?: string;
+  visualization?: TeamVisualization;
   /** On a Bot's reply: the files of this conversation its model was given, as the service checked them. */
   readFiles?: { attachmentId: string; name: string }[];
 }

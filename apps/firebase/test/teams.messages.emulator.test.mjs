@@ -7,6 +7,7 @@ import { initializeTestEnvironment, assertFails } from '@firebase/rules-unit-tes
 import { doc, setDoc } from 'firebase/firestore';
 import { TeamsStore, createTeamsHandler } from '../src/teams.mjs';
 import { TeamMessagesStore } from '../src/team-messages.mjs';
+import { createTeamVisualizations } from '../src/team-visualizations.mjs';
 import { InboxStore } from '../src/inbox-store.mjs';
 import { onTeamMessageCreated } from '../src/team-message-push.mjs';
 
@@ -37,6 +38,76 @@ beforeEach(async () => {
   await execute({ action: 'create', ...scope, kind: 'dm', title: 'Owner and Alice', participantUids: ['owner', 'alice'] });
 });
 after(async () => { await environment?.cleanup(); await db?.terminate(); if (app) await deleteApp(app); });
+
+test('channel visualization publishes once with all grants, isolates viewer state and revokes on recall', options, async () => {
+  const channel = { ...scope, conversationId: 'visualization-chat' };
+  const destination = { team: teamId, conversation: channel.conversationId };
+  await execute({ action: 'create', ...channel, kind: 'channel', title: 'Orders', participantUids: [owner.uid, alice.uid] });
+  const path = `teams/${teamId}/conversations/${channel.conversationId}`;
+  const blobs = new Map();
+  const bucket = { file(key) { return {
+    async save(bytes, args) {
+      assert.equal(args.preconditionOpts.ifGenerationMatch, 0);
+      if (blobs.has(key)) throw Object.assign(new Error('Exists'), { code: 412 });
+      blobs.set(key, Buffer.from(bytes));
+    },
+    async download() { return [blobs.get(key)]; },
+  }; } };
+  let missing = true;
+  const core = async (_token, data) => {
+    const { command, dataset } = data;
+    if (command.action === 'visualization') return { alias: command.alias, operation: data.operation };
+    assert.equal(command.action, 'prepareShare');
+    const { share } = command;
+    const grant = `grant_${share.visualization.binding}`;
+    const reference = share.reference ?? { kind: 'dataset', dataset };
+    if (!missing || share.mode !== 'pinned') {
+      await db.doc(`datasetV2/${dataset}/grants/${grant}`).set({
+        status: 'pending', destination, audience: { alice: 1, owner: 1 }, issuer: owner.uid,
+        mode: share.mode, reference, message: share.visualization.message,
+        visualization: share.visualization, textDigest: share.textDigest,
+      });
+    }
+    return { grant, reference, messageId: share.visualization.message };
+  };
+  const service = createTeamVisualizations({ db, bucket, core, channels: `${teamId}/${channel.conversationId}` });
+  const call = (value, actor = owner) => service.execute(actor, 'test-token', { ...channel, ...value });
+  await assert.rejects(call({ action: 'audience' }, hidden), { code: 'DATA_ACCESS_REQUIRED' });
+  const { audienceDigest } = await call({ action: 'audience' });
+  const publication = { action: 'publish', operation: 'share_orders', audienceDigest,
+    bundle: { title: 'Sales chart', html: '<p>Orders</p>' },
+    bindings: [
+      { kind: 'share', dataset: 'orders', alias: 'live', mode: 'edit' },
+      { kind: 'share', dataset: 'orders', alias: 'pinned', mode: 'pinned',
+        reference: { kind: 'snapshot', dataset: 'orders', snapshot: 'month-end' } },
+    ],
+  };
+  await assert.rejects(call(publication), { code: 'DATA_SHARE_CHANGED' });
+  assert.equal((await db.collection(path + '/messages').get()).size, 0);
+  assert.equal(blobs.size, 0);
+  missing = false;
+  const delivered = await call(publication);
+  assert.deepEqual(await call(publication), delivered);
+  assert.equal(blobs.size, 1);
+  const { messageId: message, reference: { version } } = delivered;
+  const stored = (await db.doc(`${path}/messages/${message}`).get()).data();
+  assert.equal(stored.kind, 'visualization');
+  assert.equal(stored.visualization.bindings.length, 2);
+  assert.equal((await db.doc(`datasetPages/${message}/versions/${version}`).get()).data().status, 'active');
+  const locator = { message, version };
+  const opened = await call({ ...locator, action: 'open' }, alice);
+  assert.equal(opened.bundle.html, publication.bundle.html);
+  const state = { modelContent: 'filter', privateContent: 42 };
+  await call({ ...locator, action: 'state', expected: 0, state }, alice);
+  assert.deepEqual((await call({ ...locator, action: 'open' }, alice)).state, { version: 1, ...state });
+  assert.equal((await call({ ...locator, action: 'open' })).state.version, 0);
+  await assert.rejects(call({ ...locator, action: 'state', expected: 0, state }, alice), { code: 'DATA_CONFLICT' });
+  await assert.rejects(call({ ...locator, action: 'open' }, hidden), { code: 'DATA_ACCESS_REQUIRED' });
+  await execute(command({ ...channel, messageId: message, changeId: 'recall-orders', operation: 'recall', text: '' }));
+  await assert.rejects(call({ ...locator, action: 'open' }, alice), { code: 'DATA_ACCESS_REQUIRED' });
+  await assert.rejects(call({ ...locator, action: 'data', alias: 'live', request: { action: 'read' } }, alice), { code: 'DATA_ACCESS_REQUIRED' });
+  assert.deepEqual(await call(publication), delivered);
+});
 
 test('T2: concurrent duplicate sends have one identity, seq and immutable receipt', options, async () => {
   const values = await Promise.all(Array.from({ length: 8 }, () => execute(command())));

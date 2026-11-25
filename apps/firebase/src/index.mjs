@@ -1,6 +1,7 @@
 import { createDatasetRender } from './dataset-render.mjs';
 import { getStorage } from 'firebase-admin/storage';
 import { createDatasetPages } from './dataset-pages.mjs';
+import { createTeamVisualizations } from './team-visualizations.mjs';
 import { createDatasetBrowserHttp } from './dataset-browser-bridge.mjs';
 import { readFileSync } from 'node:fs';
 import { initializeApp } from 'firebase-admin/app';
@@ -104,12 +105,17 @@ const datasetBrowserHandler = createDatasetBrowserHttp({
 const datasetPages = process.env.LINGXI_DATASET_PAGES_BUCKET ? createDatasetPages({
   db: teamsDb, bucket: getStorage(app).bucket(process.env.LINGXI_DATASET_PAGES_BUCKET), datasets: datasetGateway?.datasets,
 }) : undefined;
+const teamVisualizations = process.env.LINGXI_DATASET_PAGES_BUCKET ? createTeamVisualizations({
+  db: teamsDb, bucket: getStorage(app).bucket(process.env.LINGXI_DATASET_PAGES_BUCKET),
+  core: datasetGateway?.command, channels: process.env.LINGXI_TEAM_VISUALIZATION_CHANNELS,
+}) : undefined;
 const renderOrigin = process.env.LINGXI_DATASET_RENDER_ORIGIN;
 const useRenderSecret = datasetStaging || !!renderOrigin;
 const renderKey = defineSecret('LINGXI_DATASET_RENDER_KEY');
 let renderDataset;
 const teamsHandler = createTeamsHandler({ store: new TeamsStore(teamsDb), friends: friendsStore,
   datasets: datasetGateway?.datasets, datasetCommand: datasetGateway?.command, datasetRuns: datasetGateway?.run, datasetPages: datasetPages?.execute,
+  visualizations: teamVisualizations,
   datasetRender: renderOrigin && datasetPages ? (...args) => (renderDataset ??= createDatasetRender({
     origin: renderOrigin, secret: renderKey.value(), pages: datasetPages, db: teamsDb,
   }))(...args) : undefined,

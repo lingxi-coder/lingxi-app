@@ -145,6 +145,7 @@ struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
     var dataRef: TeamDataRef? = nil
     var resourceRef: DatasetResourceRef? = nil
     var resourceGrant: String? = nil
+    var visualization: TeamVisualizationReference? = nil
     /// The files to show: none on a recalled message.
     var files: [TeamMessageAttachment] { recalled == true ? [] : attachments ?? [] }
     /// The request to show under this message, if it is one a Bot made and it can be read.

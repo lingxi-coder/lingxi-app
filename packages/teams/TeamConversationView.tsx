@@ -27,6 +27,8 @@ import type { MessageAttachment } from './attachments.js';
 import { executionCommand } from './execution.js';
 import { pendingPayload, type TeamConversation, type TeamMessage } from './messages.js';
 import { ArtifactButton, BotRun } from './BotRunCards';
+import { VisualizationComposer } from './VisualizationComposer.js';
+import { VisualizationMessage } from './VisualizationMessage.js';
 import { AutoReplyDialog, autoReplyBots } from './AutoReplyDialog';
 import { buildStreamRows, formatClock, placeTasks, visibleStart, WINDOW_SIZE } from './stream.js';
 import { Avatar, ConversationLead, Dialog, Icon, platformChip, platformNotice, useIsoLayoutEffect, type RenderAvatar, type RenderMarkdown } from './ui';
@@ -326,6 +328,9 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
           disabled={snapshot.messageBusy || snapshot.offline} onClick={() => void workspace.markRead()}><Icon name="check" /><span>{t('tw_mark_as_read')}</span></button> : null}
         {link ? <ShareLinkButton link={link} title={label} locale={locale} note={conversation.kind === 'bot_dm' ? t('teams_share_bot_note') : undefined} /> : null}
         {friend?.actions}
+        {participant && !lock && !snapshot.offline && conversation.kind === 'channel' &&
+          <VisualizationComposer api={workspace.api} scope={{ ...scope, conversationId: conversation.id }} locale={locale}
+            participantName={uid => snapshot.directory.find(member => member.uid === uid)?.displayName ?? uid} />}
         {participant && !lock && !snapshot.offline && <DatasetConversationPicker
           api={workspace.api} destination={{ team: team.id, conversation: conversation.id }} generation={team.generation}
           sharedBot={conversationBot}
@@ -390,6 +395,11 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
                 ? <SharedDatasetCard api={workspace.api} reference={message.resourceRef} via={message.resourceGrant} locale={locale} /> : null}
               {message.resourceRef?.kind === 'pageVersion' && !message.recalled &&
                 <DatasetPageCard api={workspace.api} reference={message.resourceRef} locale={locale} />}
+              {!message.recalled && message.visualization && <VisualizationMessage key={message.visualization.reference.version} api={workspace.api}
+                scope={{ ...scope, conversationId: conversation.id }} visualization={message.visualization}
+                online={!snapshot.offline} locale={locale}
+                forwardTargets={participant && !lock ? snapshot.conversations.filter(item => item.kind === 'channel' && item.participants.includes('user:' + snapshot.uid)) : undefined}
+                participantName={uid => snapshot.directory.find(member => member.uid === uid)?.displayName ?? uid} />}
               {(mine || (message.author.kind === 'task' && message.resourceRef?.kind === 'reportRelease')) &&
                 participant && !lock && !snapshot.offline && conversation.kind !== 'bot_dm' &&
                 message.resourceRef && message.resourceRef.kind !== 'pageVersion' &&
@@ -487,7 +497,7 @@ function MessageItem({ message, grouped, author, mine, owner, quote, question, a
   // Only a shared Bot writes Markdown; what a person types is shown exactly as typed.
   const markdown = message.author.kind === 'shared_bot' && !message.recalled && renderMarkdown !== undefined;
   const filesOnly = !message.text && !message.recalled && !!message.attachments?.length;
-  const body = markdown ? <div className="tw-msg-body tw-md" data-markdown="true">
+  const body = message.visualization?.title === message.text ? null : markdown ? <div className="tw-msg-body tw-md" data-markdown="true">
     {renderMarkdown(message.text)}
   </div> : filesOnly ? null : <p className="tw-msg-body">
     {message.recalled ? <em>{t('teams_message_recalled')}</em> : message.mentionEntities?.length ? mentionTextParts(message.text, message.mentionEntities).map((part, index) =>

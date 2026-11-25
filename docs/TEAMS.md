@@ -20,6 +20,44 @@ merging or pushing main. The SDK cache revision does not publish either branch. 
 This contract refines the approved 2026-10-29 Team plan; each phase requires its
 stated four-client checks.
 
+## Channel visualizations
+
+A channel message can contain an immutable `pageVersion` resource and up to four
+named Data bindings. The text preview stays in the normal message stream. The
+HTML package lives in private object storage and is retrieved through the Teams
+API by the recipient. A channel member can import standalone HTML, or forward a
+card and select the Data bindings for the destination. The audience confirmation
+applies to the publication as a whole. Desktop can publish the visualization
+from a personal session to a selected channel.
+
+The card executes self-contained HTML and JavaScript on the recipient device.
+The shared renderer runs author code in an offline QuickJS worker and projects
+the resulting elements onto a local surface. It supports SVG, D3, bounded Canvas
+operations, form controls and packaged assets. Card code reads its Data
+bindings through `lingxi.data.read` and subscribes through `lingxi.data.watch`.
+`lingxi.data.patch` proposes a field-level edit for the recipient to confirm.
+Viewer state is scoped to the viewer and the immutable page version.
+
+A Bot can return a visualization in the completion of an admitted channel task.
+The LingXi host uses an A2A-shaped `Artifact` with a structured JSON part.
+The result can refer to earlier channel messages with authorized Data shares.
+The Teams completion applies its usual permit and output audience checks.
+AG-UI continues to carry model execution and run state. The viewer and resource
+separation follows A2UI and MCP Apps. [A2A specification](https://a2a-protocol.org/latest/specification/),
+[AG-UI state](https://docs.ag-ui.com/concepts/state),
+[A2UI data bindings](https://a2ui.org/concepts/data-binding/),
+[MCP Apps](https://modelcontextprotocol.io/extensions/apps/overview).
+
+Keep publication disabled by default. For a pilot, deploy the matching
+LingXi Data Core and Teams gateway with `LINGXI_DATASET_ORIGIN` configured and
+`LINGXI_DATASET_PAGES_BUCKET` pointing to a private bucket. Set
+`LINGXI_TEAM_VISUALIZATION_CHANNELS` to the intended comma-separated
+`teamId/conversationId` entries. The allowlist gates new cards. Existing cards
+continue to use membership and message authorization. Before shifting
+production traffic, verify member and Bot publication, authorized reads,
+snapshot immutability, concurrent edits, recall and removal across the four
+clients with the same pilot channel.
+
 ## Product boundaries
 
 - Team member messaging and shared Bot communication use Firestore `(default)`.

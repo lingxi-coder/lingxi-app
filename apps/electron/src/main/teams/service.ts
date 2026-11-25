@@ -181,6 +181,7 @@ export class TeamsService {
     return result;
   }
   async datasets<T>(expectedUid: string, request: Record<string, unknown>): Promise<T> {
+    if (request.action === 'teamVisualization') return this.checked<T>(expectedUid, '/visualizations', request.request);
     return request.action === 'page' ? this.checked<T>(expectedUid, '/dataset-pages', request.request) : this.checked<T>(expectedUid, '/datasets', request);
   }
   async data<T>(input: DataRequest, expectedUid: string): Promise<T> {
@@ -366,6 +367,12 @@ export class TeamsService {
     // still hand the permit to the connector, which saves it under the sending account and ends the task. Every other answer is discarded once the account moved on.
     // The context was asserted just above with no await since, so the request is sent under it.
     if (command.action === 'startTask' || command.action === 'continueTask') return this.request<T>('/messages', command, true);
+    if (command.action === 'completeTask' && command.payload && typeof command.payload === 'object' && 'visualization' in command.payload) {
+      const { visualization, ...payload } = command.payload;
+      const result = await this.checked<T>(context.uid, '/visualizations', { action: 'completeBot', artifact: visualization, completion: { ...command, payload } });
+      this.assertHostContext(context);
+      return result;
+    }
     const result = await this.checked<T>(context.uid, '/messages', command); this.assertHostContext(context); return result;
   }
   /** UI and every Bot read through the same UID/project message service and SDK cache. */

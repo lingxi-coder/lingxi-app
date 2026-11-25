@@ -3,7 +3,7 @@ import Foundation
 
 enum DatasetResourceRef: Codable, Equatable, Sendable {
     static let protocolVersion = 2
-    static let contractSHA256 = "b8c48b561b817dc203e0bed096ecd60314d0aab7cc5b9ab08facd45e1cc3ba73"
+    static let contractSHA256 = "6cd49a190a7186495ff12756d050110b3c983eb09104a9708df30f163810b9fc"
 
     case dataset(dataset: String)
     case record(dataset: String, record: String, revision: Int64, schemaVersion: Int64)

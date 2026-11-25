@@ -30,6 +30,7 @@ export interface SavedGrantIntent {
 export interface SavedExecution { schemaVersion: 2; scope: BotChatScope; teamId: string; generation: number; taskId: string;
   grant?: SavedGrantIntent;
   privateData?: { source: string; requesterUid: string };
+  visualizations?: true;
   /** End of the current attempt's active budget. */ deadlineAt: number; commandId: string;
   /** Host fields, the current permit and the input grants: the base of every host command for the task. */ payload: Record<string, unknown>;
   /** Attempt number of the current permit: 1 after startTask, then one more per granted continueTask. */ epoch: number;

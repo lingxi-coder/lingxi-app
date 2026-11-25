@@ -223,6 +223,7 @@ android {
         getByName("test").resources.srcDir(rootProject.file("../../../packages/bridge-client/fixtures"))
         getByName("main").assets.srcDir(rootProject.file("../../../resources/extensions"))
         getByName("main").assets.srcDir(rootProject.file("../../../resources/mermaid"))
+        getByName("main").assets.srcDir(rootProject.file("../../../resources/team-visualization/assets"))
         // Native libraries are built independently so the Play artifact never
         // links the Direct-only android_use implementation.
         getByName("main").jniLibs.setSrcDirs(emptyList<String>())

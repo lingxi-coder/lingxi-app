@@ -93,6 +93,69 @@ test('workspace launch settings reuse only an idle reader started in the request
   assert.equal((await different).configHome, other);
 });
 
+test('plain account listings share queued reads, keep a slot for session startup and return independent snapshots', async t => {
+  const cwd = project(t), children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const list = () => catalog.providerAccountCommand({ action: 'list', expectedRevision: 0 });
+  const snapshot = (configRevision: number) => ({ storeScope: 'owner', configRevision, accounts: [], health: [] });
+  const first = list(), sameBatch = list();
+  await nextTurn();
+  assert.equal(children.calls.length, 1);
+
+  // These calls arrived after dispatch. Even an external registry mutation
+  // between the two batches must be visible to the second group.
+  const later = list(), sameLaterBatch = list();
+  const settings = catalog.workspaceSettings(cwd);
+  await nextTurn();
+  assert.equal(children.calls.length, 2);
+  assert.ok(children.calls[1].args.includes('--workspace-environment-json'));
+  children.calls[1].finish({ version: 1, config_home: cwd, environment: {} });
+  await settings;
+  children.calls[0].finish(snapshot(1));
+  const [a, b] = await Promise.all([first, sameBatch]);
+  assert.equal(a.configRevision, 1);
+  assert.notStrictEqual(a.accounts, b.accounts);
+  await nextTurn();
+  assert.equal(children.calls.length, 3);
+  children.calls[2].finish(snapshot(2));
+  assert.deepEqual((await Promise.all([later, sameLaterBatch])).map(row => row.configRevision), [2, 2]);
+
+  const retry = list();
+  await nextTurn();
+  children.calls[3].finish(snapshot(3));
+  assert.equal((await retry).configRevision, 3);
+  assert.equal(children.peak, 2);
+});
+
+test('credential presence, revision checks and mutations bypass queued metadata listings', async t => {
+  const children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const plain = { action: 'list', expectedRevision: 0 } as const;
+  const read = catalog.providerAccountCommand(plain);
+  await nextTurn();
+  const after = catalog.providerAccountCommand(plain);
+  const presence = catalog.providerAccountCommand(plain, undefined, []);
+  const pinned = catalog.providerAccountCommand({ ...plain, expectedRevision: 8 });
+  const mutation = catalog.providerAccountCommand({ action: 'enable', accountId: uuid, enabled: false, expectedRevision: 8 });
+  const snapshot = (configRevision: number) => ({ storeScope: 'owner', configRevision, accounts: [], health: [] });
+  await nextTurn();
+  children.calls[1].finish(snapshot(7));
+  assert.equal((await presence).configRevision, 7);
+  await nextTurn();
+  children.calls[2].finish(snapshot(8));
+  assert.equal((await pinned).configRevision, 8);
+  await nextTurn();
+  children.calls[3].finish(snapshot(9));
+  assert.equal((await mutation).configRevision, 9);
+  children.calls[0].finish({ error: 'failed' });
+  await assert.rejects(read, /Provider account operation failed/);
+  await nextTurn();
+  children.calls[4].finish(snapshot(9));
+  assert.equal((await after).configRevision, 9);
+});
+
 test('real warm worker reads current workspace settings and preserves native merge errors',
   { skip: !process.env.LINGXI_SESSION_CATALOG_TEST_BIN, timeout: 60_000 }, async t => {
     const cwd = project(t), home = join(cwd, 'config');

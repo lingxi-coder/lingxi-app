@@ -431,6 +431,8 @@ export class ProjectSessionCatalog {
   private readonly pending = new Map<string, Promise<ProjectSessionCatalogResult>>();
   private readonly pendingSessions = new Map<string, Promise<ProjectSessionCatalogResult>>();
   private readonly pendingHistory = new Map<string, Promise<TranscriptHistoryPage>>();
+  private providerListTail: Promise<void> = Promise.resolve();
+  private queuedProviderList?: { key: string; output: Promise<string> };
   private nativeProductPaths?: Promise<ProductPaths>;
   private generation = 0;
   private readonly foregroundLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
@@ -484,7 +486,7 @@ export class ProjectSessionCatalog {
   private async metadataRequest(projectPath: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
     const args = ['--session-metadata-json', ...(this.options.configHome ? ['--session-config-home', this.options.configHome] : [])];
     const output = await this.runOutput(realpathSync.native(projectPath), args, `${JSON.stringify(input)}\n`,
-      input.action !== 'rename' && input.action !== 'touch');
+      input.action === 'rename' || input.action === 'touch' ? 'durable-write' : 'default');
     const result: unknown = JSON.parse(boundedOutput(output));
     if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('Invalid session metadata response.');
     return result as Record<string, unknown>;
@@ -513,14 +515,31 @@ export class ProjectSessionCatalog {
       : action === 'reorder' ? { action, expectedRevision, providerId, accountIds }
       : action === 'enable' ? { action: 'set_enabled', expectedRevision, accountId, enabled }
       : { action, expectedRevision, accountId };
-    const output = await this.runOutput(realpathSync.native(homedir()), ['--provider-account-command'],
-      JSON.stringify({ ...(credentialPresence ? { credential_presence: credentialPresence } : {}), ...(this.options.appVersion !== undefined ? { app_version: this.options.appVersion } : {}), request_json: JSON.stringify(command), metadata_only: true, backend: 'desktop-broker', credential_channel: this.options.providerAccountChannel ?? 'development', ...(credential ? { credential } : {}) }));
+    const cwd = realpathSync.native(homedir());
+    const input = JSON.stringify({ ...(credentialPresence ? { credential_presence: credentialPresence } : {}), ...(this.options.appVersion !== undefined ? { app_version: this.options.appVersion } : {}), request_json: JSON.stringify(command), metadata_only: true, backend: 'desktop-broker', credential_channel: this.options.providerAccountChannel ?? 'development', ...(credential ? { credential } : {}) });
+    const plainList = action === 'list' && expectedRevision === 0 && credentialPresence === undefined;
+    const output = await this.runOutput(cwd, ['--provider-account-command'], input, plainList ? 'provider-list' : 'default');
     const result = JSON.parse(boundedOutput(output));
     if (result.error) throw new Error('Provider account operation failed.');
     const snapshot = typeof result.snapshot_json === 'string' ? JSON.parse(result.snapshot_json) : result;
     if (!snapshot || typeof snapshot.storeScope !== 'string' || !Number.isSafeInteger(snapshot.configRevision)
       || !Array.isArray(snapshot.accounts) || !Array.isArray(snapshot.health)) throw new Error('Invalid provider account snapshot.');
     return snapshot as ProviderAccountSnapshot;
+  }
+
+  private readProviderList(key: string, read: () => Promise<string>): Promise<string> {
+    if (this.queuedProviderList?.key === key) return this.queuedProviderList.output;
+    if (this.queuedProviderList) return read(); // A different configuration has its own authority.
+    // Audio, the renderer and runtime recovery all need the same metadata. Keep
+    // one helper slot available for session work. Only requests received before
+    // dispatch share bytes, so a later caller always observes a fresh native read.
+    const output = this.providerListTail.then(() => {
+      this.queuedProviderList = undefined;
+      return read();
+    });
+    this.queuedProviderList = { key, output };
+    this.providerListTail = output.then(() => undefined, () => undefined);
+    return output;
   }
 
   /** Private authority commit: never exposed as an account-management command. */
@@ -793,7 +812,7 @@ export class ProjectSessionCatalog {
     if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
     const bin = resolveServerBin({ serverBin: this.options.serverBin, isPackaged: this.options.isPackaged,
       resourcesPath: this.options.resourcesPath } as Omit<BridgeManagerOptions, 'launchConfig'>);
-    const env = { ...buildBridgeEnvironment(process.env), ...(this.options.configHome ? { LINGXI_CONFIG_DIR: this.options.configHome } : {}) };
+    const env = this.childEnvironment();
     const key = JSON.stringify([bin, Object.entries(env).sort(([left], [right]) => left.localeCompare(right))]);
     if (lane.worker?.available && lane.key === key) return Promise.resolve(lane.worker);
     if (lane.pending) return lane.pending;
@@ -821,19 +840,25 @@ export class ProjectSessionCatalog {
     return operation;
   }
 
-  private runOutput(canonical: string, args: string[], input?: string, killOnTimeout = true): Promise<string> {
+  private childEnvironment(): NodeJS.ProcessEnv {
+    return { ...buildBridgeEnvironment(process.env), ...(this.options.configHome ? { LINGXI_CONFIG_DIR: this.options.configHome } : {}) };
+  }
+
+  private runOutput(canonical: string, args: string[], input?: string, kind: 'default' | 'durable-write' | 'provider-list' = 'default'): Promise<string> {
     const bin = resolveServerBin({
       serverBin: this.options.serverBin,
       isPackaged: this.options.isPackaged,
       resourcesPath: this.options.resourcesPath,
     } as Omit<BridgeManagerOptions, 'launchConfig'>);
-    return catalogChildren.start((release) => new Promise<string>((resolve, reject) => {
+    const env = this.childEnvironment();
+    const killOnTimeout = kind !== 'durable-write';
+    const launch = () => catalogChildren.start((release) => new Promise<string>((resolve, reject) => {
       if (this.disposed) { release(); reject(new Error('session catalog is disposed')); return; }
       let child: ReturnType<typeof spawn>;
       try {
         child = (this.options.spawnProcess ?? spawn)(bin, args, {
           cwd: canonical,
-          env: { ...buildBridgeEnvironment(process.env), ...(this.options.configHome ? { LINGXI_CONFIG_DIR: this.options.configHome } : {}) },
+          env,
           stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
           windowsHide: true,
           detached: !killOnTimeout,
@@ -915,5 +940,6 @@ export class ProjectSessionCatalog {
         }
       });
     }), this.options.timeoutMs);
+    return kind === 'provider-list' ? this.readProviderList(JSON.stringify([bin, canonical, env, input]), launch) : launch();
   }
 }

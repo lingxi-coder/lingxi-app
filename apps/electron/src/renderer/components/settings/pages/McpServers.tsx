@@ -523,7 +523,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
       {closePrompt}
       {removalDialog}
       {linkRequest?.payload && selection.kind === 'create' && <p role="status">{tr('desktop_extension_mcp_import')}</p>}
-        <ExtensionHubHeader title={tr('settings_mcp_servers')} description={tr('desktop_extension_mcp_description')} search={search} onSearch={setSearch} actions={<>
+        <ExtensionHubHeader title={tr('settings_mcp_servers')} search={search} onSearch={setSearch} actions={<>
           <button type="button" aria-label={tr('desktop_extension_refresh_mcp')} onClick={() => void (adminAvailable ? callMcpAdmin(bridge, adminRecordCommand('get_snapshot')) : bridge.refreshMcpServers()).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_refresh_tools_failed')))} className="extension-hub-icon-button"><ExtensionGlyph name="refresh" size={16} /></button>
           <button type="button" onClick={() => requestSelection({ kind: 'create', scope: newServerScope })} className="extension-hub-primary"><ExtensionGlyph name="plus" size={14} />{tr('extension_directory_add_mcp')}</button>
         </>} />

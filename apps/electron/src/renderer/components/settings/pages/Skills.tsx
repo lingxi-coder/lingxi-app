@@ -618,7 +618,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
     <ExtensionHubLayout>
       {closePrompt}
       {linkRequest?.payload && selection.kind === 'create' && <p role="status">{tr('desktop_extension_skill_import')}</p>}
-      <ExtensionHubHeader title={tr('settings_title_skills')} description={tr('desktop_extension_skill_description')} search={search} onSearch={setSearch} actions={<>
+      <ExtensionHubHeader title={tr('settings_title_skills')} search={search} onSearch={setSearch} actions={<>
         <button type="button" onClick={handleReload} disabled={reloading} className="extension-hub-icon-button" aria-label={reloading ? tr('desktop_extension_reloading_skills') : tr('desktop_extension_reload_skills')}><ExtensionGlyph name="refresh" size={16} /></button>
         <button type="button" onClick={() => setShowSettings(!showSettings)} className="extension-hub-icon-button" aria-label={tr('desktop_extension_skill_settings')} aria-expanded={showSettings}><ExtensionGlyph name="cog" size={16} /></button>
         <button type="button" onClick={() => requestSelection({ kind: 'create' })} className="extension-hub-primary"><ExtensionGlyph name="plus" size={14} />{tr('desktop_extension_new_skill')}</button>

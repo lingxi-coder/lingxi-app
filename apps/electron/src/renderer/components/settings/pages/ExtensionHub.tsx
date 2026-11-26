@@ -134,12 +134,18 @@ export function ExtensionHubLayout({ children }: { children: ReactNode }) {
   return <div className="extension-hub-main" style={extensionHubStyle(t)}><div className="extension-hub-page">{children}</div></div>;
 }
 
-export function ExtensionHubHeader({ title, description, search, onSearch, actions }: {
-  title: string; description: string; search: string; onSearch: (value: string) => void; actions: ReactNode;
+export function ExtensionHubHeader({ title, search, onSearch, actions }: {
+  title: string; search: string; onSearch: (value: string) => void; actions: ReactNode;
 }) {
+  const searchLabel = tr('desktop_shell_search_named', title);
   return <header className="extension-hub-header">
-    <div className="extension-hub-heading"><p>{description}</p></div>
-    <div className="extension-hub-toolbar"><label className="extension-search-field"><ExtensionGlyph name="search" size={16} /><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder={tr('desktop_shell_search_named', title)} aria-label={tr('desktop_shell_search_named', title)} /></label><div className="extension-hub-toolbar-actions">{actions}</div></div>
+    <div className="extension-hub-toolbar">
+      <label className="extension-search-field">
+        <ExtensionGlyph name="search" size={16} />
+        <input value={search} onChange={(event) => onSearch(event.target.value)} placeholder={searchLabel} aria-label={searchLabel} />
+      </label>
+      <div className="extension-hub-toolbar-actions">{actions}</div>
+    </div>
   </header>;
 }
 

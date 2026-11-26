@@ -325,7 +325,11 @@ async function runWindowChromeScenario(window, webContents) {
         const target = document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
         return { hit: button.contains(target), mode: getComputedStyle(button).webkitAppRegion };
       });
-      return { top: rect.top, controls };
+      const searchTop = document.querySelector('.extension-search-field').getBoundingClientRect().top;
+      return {
+        top: rect.top, controls, toolbarGap: searchTop - rect.bottom,
+        hasIntro: Boolean(document.querySelector('.extension-hub-heading, [data-testid="layer-description"]')),
+      };
     })()`);
     extensionHeaders.push({ id, ...header });
   }

@@ -177,6 +177,8 @@ test('settings preserves content and scroll track insets while scrolling and swi
     assert.deepEqual(result.dragRegionEdges, [0, 88, 0]);
     for (const page of result.extensionHeaders) {
       assert.equal(page.top, 10, page.id);
+      assert.equal(page.hasIntro, false, page.id);
+      assert.ok(page.toolbarGap >= 0 && page.toolbarGap <= 12, `${page.id}: toolbar gap ${page.toolbarGap}px`);
       assert.ok(page.controls.every((control) => control.hit && control.mode === 'no-drag'), page.id);
     }
     if (process.platform === 'darwin') assert.ok(result.backLeft >= 88);

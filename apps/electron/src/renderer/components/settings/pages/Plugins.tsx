@@ -578,7 +578,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
       </div>}
       {linkRequest?.payload && <p role="status">{tr('desktop_extension_plugin_import')}</p>}
       {!isPluginDetail && <>
-        <ExtensionHubHeader title={tr('desktop_extension_plugins')} description={tr('desktop_extension_plugin_description')} search={search} onSearch={setSearch} actions={<>
+        <ExtensionHubHeader title={tr('desktop_extension_plugins')} search={search} onSearch={setSearch} actions={<>
           <button type="button" onClick={refreshCatalog} disabled={busy} className="extension-hub-icon-button" aria-label={tr('desktop_extension_refresh_plugins')}><ExtensionGlyph name="refresh" size={16} /></button>
           <button type="button" onClick={() => requestSelection({ kind: 'policies' })} className="extension-hub-icon-button" aria-label={tr('desktop_extension_plugin_settings')}><ExtensionGlyph name="cog" size={16} /></button>
           <details className="extension-hub-menu" open={addMenuOpen} onToggle={(event) => setAddMenuOpen(event.currentTarget.open)}>

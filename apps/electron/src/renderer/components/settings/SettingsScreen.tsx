@@ -383,11 +383,12 @@ function LayerSwitcher({ value, onChange, hasProject, locked = false }: {
  * （`projectDirFromSnapshot`），不取渲染端的「当前项目」状态 —— 后者可以已经指向
  * 别处，那正是下面 `handleSwitch` 要处理的问题。
  */
-function LayerContext({ bridge, layer, projectDir, locked }: {
+function LayerContext({ bridge, layer, projectDir, locked, showDescription }: {
   bridge: UseBridge;
   layer: EditableLayer;
   projectDir: string | null;
   locked: boolean;
+  showDescription: boolean;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
@@ -451,11 +452,14 @@ function LayerContext({ bridge, layer, projectDir, locked }: {
     }
   };
 
+  if (!showDescription && !needsProject) return null;
   return (
     <div data-testid="layer-context" style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
-      <div data-testid="layer-description" style={{ fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
-        {provenanceDescription(layer)}
-      </div>
+      {showDescription && (
+        <div data-testid="layer-description" style={{ fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
+          {provenanceDescription(layer)}
+        </div>
+      )}
 
       {needsProject && projectDir && (
         <div data-testid="layer-project" style={{
@@ -748,6 +752,7 @@ export function SettingsScreen({
       : <PagePlaceholder page={activePage} kind="not-wired" />;
   }
   const showLayerSwitcher = activePage.layered && canWriteHere;
+  const isExtensionPage = page === 'skills' || page === 'plugins' || page === 'mcp';
   const pageTitle = navPageLabel(activePage);
 
   return (
@@ -844,7 +849,7 @@ export function SettingsScreen({
         <div className="settings-content-viewport">
           <div ref={contentScrollRef} className="settings-content-scroll settings-scroll-area">
             <div className={page === 'computer-use' ? 'settings-content-inner settings-computer-use-content' : 'settings-content-inner'}>
-              {page !== 'computer-use' && page !== 'provider-credentials' && <div className="settings-page-header" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
+              {page !== 'computer-use' && page !== 'provider-credentials' && <div className="settings-page-header" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: isExtensionPage ? 10 : 18 }}>
                 <div>
                   <div className="settings-page-title" style={{ fontSize: 20, fontWeight: 550, letterSpacing: '-0.025em' }}>{pageTitle}</div>
                 </div>
@@ -853,7 +858,7 @@ export function SettingsScreen({
                 )}
               </div>}
               {showLayerSwitcher && (
-                <LayerContext bridge={bridge} layer={editingLayer} projectDir={projectDir} locked={layerLocked} />
+                <LayerContext bridge={bridge} layer={editingLayer} projectDir={projectDir} locked={layerLocked} showDescription={!isExtensionPage} />
               )}
               {settingsReadError && (
                 <div data-testid="settings-snapshot-error" role="alert" style={{

@@ -39,13 +39,16 @@ test('extension management screens render the selected language and preserve cat
   };
   for (const locale of DESKTOP_LOCALES) {
     const mcp = renderInLocale(locale, React.createElement(McpServers, props));
-    assert.ok(mcp.includes(translate('desktop_extension_mcp_description', locale)), locale);
+    assert.ok(!mcp.includes(translate('desktop_extension_mcp_description', locale)), locale);
+    assert.ok(mcp.includes(translate('desktop_shell_search_named', locale, translate('settings_mcp_servers', locale))), locale);
     assert.ok(!mcp.includes(translate('mcp_scope_vs_layers_note', locale)), locale);
     const skills = renderInLocale(locale, React.createElement(Skills, props));
-    assert.ok(skills.includes(translate('desktop_extension_skill_description', locale)), locale);
+    assert.ok(!skills.includes(translate('desktop_extension_skill_description', locale)), locale);
+    assert.ok(skills.includes(translate('desktop_shell_search_named', locale, translate('settings_title_skills', locale))), locale);
     assert.ok(skills.includes('User skill name'));
     const plugins = renderInLocale(locale, React.createElement(Plugins, props));
-    assert.ok(plugins.includes(translate('desktop_extension_plugin_description', locale)), locale);
+    assert.ok(!plugins.includes(translate('desktop_extension_plugin_description', locale)), locale);
+    assert.ok(plugins.includes(translate('desktop_shell_search_named', locale, translate('desktop_extension_plugins', locale))), locale);
     // Installed plugins are on the personal tab; an explicitly selected
     // plugin still renders its catalog name in its details.
     const pluginDetails = renderInLocale(locale, React.createElement(Plugins, { ...props, initialPluginId: 'user-plugin' }));

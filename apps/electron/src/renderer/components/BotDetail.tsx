@@ -212,7 +212,7 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
         <button type="button" data-variant="danger" onClick={() => setDeleting({ busy: false, error: '' })}>{tr('bots_delete')}</button>
       </div>
     </header></ChatTopbarHeader>
-    {description ? <p className="bots-muted">{description}</p> : null}
+    {description && tab !== 'general' ? <p className="bots-detail-description">{description}</p> : null}
     {openError ? <p role="alert" className="bots-problem">{openError}</p> : null}
     {state.phase === 'failed' ? <p role="alert" className="bots-problem">{tr('bots_detail_failed', state.loadError ?? '')} <button type="button" onClick={() => void editor.load()}>{tr('common_retry')}</button></p> : null}
     {state.phase === 'loading' ? <p role="status" className="bots-muted">{tr('bots_detail_loading')}</p> : null}
@@ -227,7 +227,10 @@ export function BotDetail({ botId, listed, api, bots, guard, activity, models, p
     {tab === 'market' && state.bot ? <BotMarketPanel api={api} bot={state.bot} onInstalled={bot=>bots.put(bot)} /> : null}
     {tab === 'skills' ? <BotSkillsPanel controller={skills} /> : null}
     {DRAFT_TABS.has(tab) && state.phase === 'ready' ? <>
-      {tab === 'general' ? <BotGeneralFields draft={state.draft} problems={problems} models={models} disabled={state.save.kind === 'saving'} onChange={(change) => editor.setDraft(change)} /> : null}
+      {tab === 'general' ? <>
+        <h2 className="bots-detail-section-title">{tabLabel('general')}</h2>
+        <BotGeneralFields draft={state.draft} problems={problems} models={models} disabled={state.save.kind === 'saving'} onChange={(change) => editor.setDraft(change)} />
+      </> : null}
       {tab === 'persona' ? <BotPersonaField draft={state.draft} problems={problems} disabled={state.save.kind === 'saving'} onChange={(change) => editor.setDraft(change)} /> : null}
       {tab === 'folders' ? <BotFoldersField draft={state.draft} problems={problems} disabled={state.save.kind === 'saving'} pickFolder={pickFolder} onChange={(change) => editor.setDraft(change)} /> : null}
       {tab === 'permissions' ? <>

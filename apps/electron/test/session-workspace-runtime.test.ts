@@ -931,7 +931,7 @@ test('a wrong-session reconnect roster cannot release an admitted slash lease', 
   const lockfile = join(directory, '32123.lock');
   writeFileSync(lockfile, JSON.stringify({ pid: process.pid, workspaceFolders: ['/project'],
     ideName: 'LingXi-Bridge', transport: 'ws', runningInWindows: false,
-    authToken: '0123456789abcdef0123456789abcdef' }));
+    authToken: '0123456789abcdef0123456789abcdef' }), { mode: 0o600 });
   const source = { projectPath: '/project', sessionId }, target = { projectPath: '/next', sessionId: secondId };
   const runtime = await manager.ensure(source, false);
   const internal = runtime as any;
@@ -1405,7 +1405,7 @@ test('shutdown reconnects for metadata drain without restoring a live Side Chat'
   const lockfile = join(directory, '32123.lock');
   writeFileSync(lockfile, JSON.stringify({ pid: process.pid, workspaceFolders: ['/project'],
     ideName: 'LingXi-Bridge', transport: 'ws', runningInWindows: false,
-    authToken: '0123456789abcdef0123456789abcdef' }));
+    authToken: '0123456789abcdef0123456789abcdef' }), { mode: 0o600 });
   const originalConnect = BridgeClient.prototype.connect, originalSend = BridgeClient.prototype.sendCommand;
   const hello = deferred<any>(), entered = deferred<void>(), write = deferred<void>();
   const sent: string[] = [];

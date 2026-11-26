@@ -26,7 +26,7 @@ function transportFixture(t: TestContext, external = false) {
   const lockfile = join(directory, '32123.lock');
   writeFileSync(lockfile, JSON.stringify({ pid: process.pid, workspaceFolders: ['/workspace'],
     ideName: 'LingXi-Bridge', transport: 'ws', runningInWindows: false,
-    authToken: '0123456789abcdef0123456789abcdef' }));
+    authToken: '0123456789abcdef0123456789abcdef' }), { mode: 0o600 });
   const sent: string[] = [];
   const previousClient = Object.assign(new EventEmitter(), { sendCommand() {}, close() {} });
   const recoveredClient = Object.assign(new EventEmitter(), {

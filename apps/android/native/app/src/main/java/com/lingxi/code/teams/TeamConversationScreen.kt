@@ -214,6 +214,7 @@ internal fun TeamConversationScreen(
         onAutoReply = { targets -> val revision = conversation.autoReply?.revision ?: 0; autoReplySent = revision
             workspace.messagingModel.setConversationAutoReply(conversation.id, revision, targets, onFailed = { autoReplySent = null }) },
         busy = autoReplySent != null && autoReplySent == (conversation.autoReply?.revision ?: 0),
+        visualization = { workspace.messagingModel.visualization(conversation.id, it) },
     )
     recalling?.let { message ->
         ConfirmDialog(

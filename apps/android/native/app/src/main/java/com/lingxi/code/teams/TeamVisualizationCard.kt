@@ -1,6 +1,7 @@
 package com.lingxi.code.teams
 
 import android.content.Context
+import android.util.Base64
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.WebResourceRequest
@@ -44,10 +45,13 @@ import kotlin.random.Random
 import kotlin.time.TimeSource
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import org.json.JSONObject
 
 internal data class TeamVisualizationReference(val page: String, val version: String, val title: String, val bindings: Map<String, String>) {
@@ -105,6 +109,7 @@ private fun webView(context: Context) = WebView(context).apply {
 internal fun TeamVisualizationSurface(load: JSONObject, height: Int, connected: ((JSONObject) -> Unit) -> Unit, handle: (JSONObject) -> Unit) {
     val currentHandle by rememberUpdatedState(handle)
     val currentConnect by rememberUpdatedState(connected)
+    val scope = rememberCoroutineScope()
     if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
         Text(stringResource(R.string.teams_data_unavailable))
         return
@@ -121,8 +126,12 @@ internal fun TeamVisualizationSurface(load: JSONObject, height: Int, connected: 
                     val frame = runCatching { JSONObject(input) }.getOrNull() ?: return@addWebMessageListener
                     if (!ready && frame.optString("type") == "ready") {
                         ready = true
-                        send(reply, surfacePacket("initialize", load))
-                        currentConnect { send(reply, it) }
+                        scope.launch {
+                            try {
+                                sendInitialization(reply, load) { currentConnect { send(reply, it) } }
+                            } catch (error: CancellationException) { throw error }
+                            catch (_: Exception) { currentHandle(objectOf("type" to "error", "code" to "VISUALIZATION_SCRIPT_FAILED")) }
+                        }
                     } else if (ready) {
                         currentHandle(frame)
                     }
@@ -137,6 +146,30 @@ internal fun TeamVisualizationSurface(load: JSONObject, height: Int, connected: 
             view.destroy()
         },
     )
+}
+
+private suspend fun sendInitialization(reply: JavaScriptReplyProxy, load: JSONObject, connect: () -> Unit) {
+    val bundle = load.getJSONObject("bundle")
+    val assets = bundle.getJSONObject("assets")
+    val manifest = JSONObject()
+    for (key in assets.keys()) manifest.put(key, objectOf("mime" to assets.getJSONObject(key).getString("mime")))
+    val metadata = JSONObject()
+    for (key in load.keys()) if (key != "bundle") metadata.put(key, load.get(key))
+    metadata.put("bundle", objectOf("title" to bundle.getString("title"), "assets" to manifest))
+    reply.postMessage(surfacePacket("initializeStart", metadata).toString())
+    suspend fun sendText(asset: String?, text: String) {
+        val bytes = withContext(Dispatchers.Default) { text.toByteArray() }
+        val capacity = 256 * 1024
+        for (start in bytes.indices step capacity) {
+            val data = Base64.encodeToString(bytes, start, minOf(capacity, bytes.size - start), Base64.NO_WRAP)
+            reply.postMessage(surfacePacket("initializePart", objectOf("asset" to asset, "data" to data)).toString())
+            yield()
+        }
+    }
+    sendText(null, bundle.getString("html"))
+    for (key in assets.keys()) sendText(key, assets.getJSONObject(key).getString("data"))
+    connect()
+    reply.postMessage(surfacePacket("initializeEnd").toString())
 }
 
 private fun send(reply: JavaScriptReplyProxy, packet: JSONObject) {
@@ -254,7 +287,9 @@ internal fun TeamVisualizationCard(reference: TeamVisualizationReference, conver
         if (!online || !foreground) { opened = null; approve(false); return@LaunchedEffect }
         var detach: (() -> Unit)? = null
         try {
-            val mounted = request("open")
+            val mounted = TeamVisualizationTransfer.open { fields ->
+                request(fields.getString("action"), fields)
+            }
             opened = mounted
             detach = model.observeVisualization(conversation, reference.page, reference.version)
             val clock = TimeSource.Monotonic.markNow()

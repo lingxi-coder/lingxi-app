@@ -4180,6 +4180,8 @@
   "teams_dataset_audience %@": "分享到 %@",
   "teams_visualization_access": "访问权限",
   "teams_visualization_add": "添加可视化",
+  "teams_visualization_limit": "可视化大小上限（MiB）",
+  "teams_visualization_too_large": "此可视化超过了频道的大小上限。",
   "teams_visualization_alias": "绑定名称",
   "teams_visualization_apply": "提交更改",
   "teams_visualization_building": "正在生成固定快照…",

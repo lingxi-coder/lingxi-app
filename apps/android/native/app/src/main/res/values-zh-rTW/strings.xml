@@ -3528,6 +3528,8 @@
     <string name="teams_dataset_continue">繼續分享</string>
     <string name="teams_visualization_access">存取權限</string>
     <string name="teams_visualization_add">新增視覺化</string>
+    <string name="teams_visualization_limit">視覺化大小上限（MiB）</string>
+    <string name="teams_visualization_too_large">此視覺化超過了頻道的大小上限。</string>
     <string name="teams_visualization_alias">繫結名稱</string>
     <string name="teams_visualization_apply">套用變更</string>
     <string name="teams_visualization_building">正在產生固定快照…</string>

@@ -1,6 +1,7 @@
 package com.lingxi.code.teams
 
 import android.content.Intent
+import org.json.JSONObject
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -292,11 +293,13 @@ internal fun ConversationDetailsSheet(
     unread: Int, online: Boolean, onMarkRead: () -> Unit, onDismiss: () -> Unit,
     /** Sends the Bots of this Chat that answer on their own. */
     onAutoReply: (List<String>) -> Unit = {}, busy: Boolean = false,
+    visualization: (suspend (JSONObject) -> JSONObject)? = null,
 ) {
     TeamsSheet(stringResource(R.string.teams_conversation_details), onDismiss) {
         DetailIdentity(label, conversationSubtitle(conversation, bots)) {
             ConversationLead(conversation, members, bots, uid, strings, 56.dp, label)
         }
+        if (conversation.kind == "channel" && online && visualization != null) TeamVisualizationSettings(conversation.id, visualization)
         if (unread > 0 && online) TextButton(onClick = { onMarkRead(); onDismiss() }) { Text(stringResource(R.string.teams_mark_read)) }
         val participants = TeamsListLogic.conversationParticipants(conversation, members, bots, uid, strings)
         if (participants.isNotEmpty()) Text(

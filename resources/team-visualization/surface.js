@@ -39,6 +39,42 @@ function imageSource(value, budget) {
 let frameSeen = false;
 let lastHeight = 0;
 let budgetedCanvases = new Map();
+let initialization;
+const nativeChunkBytes = 256 * 1024;
+const packageBytes = 50 * 1024 * 1024;
+
+function decode64(data) {
+  if (typeof Uint8Array.fromBase64 === 'function') return Uint8Array.fromBase64(data);
+  const binary = atob(data), bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < bytes.length; index++) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+function nativeInitialization(message) {
+  const value = message.value;
+  if (message.type === 'initializeStart') {
+    const assets = Object.entries(value.bundle.assets ?? {});
+    if (assets.length > 32) throw new Error('Invalid initialization');
+    const source = () => ({ decoder: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }), chunks: [] });
+    initialization = { load: value, size: 0, html: source(), parts: new Map(assets.map(([name]) => [name, source()])) };
+  } else if (initialization && message.type === 'initializePart') {
+    const target = value.asset === undefined ? initialization.html : initialization.parts.get(value.asset);
+    if (!target || typeof value.data !== 'string' || value.data.length > Math.ceil(nativeChunkBytes / 3) * 4) {
+      throw new Error('Invalid initialization');
+    }
+    const bytes = decode64(value.data);
+    initialization.size += bytes.length;
+    if (bytes.length > nativeChunkBytes || initialization.size > packageBytes) throw new Error('Invalid initialization');
+    target.chunks.push(target.decoder.decode(bytes, { stream: true }));
+  } else if (initialization && message.type === 'initializeEnd') {
+    const { load, html, parts } = initialization;
+    initialization = undefined;
+    const text = source => { source.chunks.push(source.decoder.decode()); return source.chunks.join(''); };
+    load.bundle.html = text(html);
+    for (const [name, source] of parts) load.bundle.assets[name].data = text(source);
+    receive({ type: 'initialize', value: load });
+  }
+}
 
 function styleSafe(text) {
   return !/@import|@font-face|\\|url\(\s*['"]?\s*(?!#)/iu.test(text);
@@ -187,6 +223,10 @@ function measure() {
 
 function receive(message) {
   if (!message || typeof message !== 'object') return;
+  if (!worker && ['initializeStart', 'initializePart', 'initializeEnd'].includes(message.type)) {
+    nativeInitialization(message);
+    return;
+  }
   if (message.type === 'initialize' && !worker) {
     const { bundle, aliases, state, theme, locale, expanded } = message.value;
     const assets = Object.entries(bundle.assets ?? {});
@@ -231,9 +271,7 @@ function receive(message) {
   }
 }
 
-function textAsset(asset) {
-  return new TextDecoder().decode(Uint8Array.from(atob(asset.data), char => char.charCodeAt(0)));
-}
+function textAsset(asset) { return new TextDecoder().decode(decode64(asset.data)); }
 
 for (const kind of ['click', 'input', 'change', 'submit', 'keydown', 'keyup', 'pointerdown', 'pointerup', 'pointermove']) {
   root.addEventListener(kind, event => {

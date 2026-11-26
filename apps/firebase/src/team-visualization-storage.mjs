@@ -4,7 +4,7 @@ const entryId = (message, version) => `${message}_${version}`;
 const cleanupRef = (db, message, version) => db.collection(cleanupQueue).doc(entryId(message, version));
 const inventoryRef = team => team.collection('visualizationVersions');
 export const rowRef = (db, message, version) => db.doc(`teamVisualizations/${message}/versions/${version}`);
-export const visualizationFile = (bucket, page, version) => bucket.file(`team-visualizations/${page}/${version}.json`);
+export const visualizationPart = (bucket, page, version, index) => bucket.file(`team-visualizations/${page}/${version}/${index}`);
 export const visualizationQuota = team => team.collection('privateSettings').doc('visualizations');
 
 export function trackVisualization(tx, team, { page: message, version }) {
@@ -75,10 +75,12 @@ async function reclaimVisualization(db, bucket, team, item, now) {
     }
     if (!Number.isSafeInteger(row.bytes) || row.bytes < 0) throw new Error('Invalid visualization reservation size');
     tx.update(ref, { status: 'deleting', recalled: row.recalled === true || status === 'recalled' || status === 'active' });
-    return true;
+    return row.package.parts.length;
   });
   if (!reclaim) return;
-  await visualizationFile(bucket, message, version).delete({ ignoreNotFound: true });
+  for (let index = 0; index < reclaim; index++) {
+    await visualizationPart(bucket, message, version, index).delete({ ignoreNotFound: true });
+  }
   await db.runTransaction(async tx => {
     const [publication, usage] = await tx.getAll(ref, quota);
     const row = publication.data();

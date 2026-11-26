@@ -3528,6 +3528,8 @@
     <string name="teams_dataset_continue">공유 계속</string>
     <string name="teams_visualization_access">접근 권한</string>
     <string name="teams_visualization_add">시각화 추가</string>
+    <string name="teams_visualization_limit">시각화 크기 한도(MiB)</string>
+    <string name="teams_visualization_too_large">시각화가 채널의 크기 한도를 초과했습니다.</string>
     <string name="teams_visualization_alias">바인딩 이름</string>
     <string name="teams_visualization_apply">변경 적용</string>
     <string name="teams_visualization_building">고정 스냅샷 준비 중…</string>

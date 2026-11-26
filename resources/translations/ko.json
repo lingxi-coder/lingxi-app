@@ -4180,6 +4180,8 @@
   "teams_dataset_audience %@": "%@ 님에게 공유",
   "teams_visualization_access": "접근 권한",
   "teams_visualization_add": "시각화 추가",
+  "teams_visualization_limit": "시각화 크기 한도(MiB)",
+  "teams_visualization_too_large": "시각화가 채널의 크기 한도를 초과했습니다.",
   "teams_visualization_alias": "바인딩 이름",
   "teams_visualization_apply": "변경 적용",
   "teams_visualization_building": "고정 스냅샷 준비 중…",

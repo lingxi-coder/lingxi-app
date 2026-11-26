@@ -17,6 +17,7 @@ import { TeamPrivateStore, digest, validateTeamModelRoute, type TeamModelSelecti
 import { runTeamHost, runResult, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult, type TeamRunResult, type TeamTaskCheckpoint, type TeamTaskWait, type TeamContinuation, type BotChatScope, type TeamOperation, type TeamOperationOutcome } from './process.js';
 import type { TeamDataProof, TeamDatasetOffer } from './process.js';
 import type { LocalTeamHost, TeamAccountContext } from './service.js';
+import type { OpenBotVisualization } from './privateStore.js';
 import type { PrivatePreviewLease, PrivatePreviewPage, PrivatePreviewProof } from './dataPreview.js';
 import { triageReply, type ReplyDecision, type TriageVerdict } from './replyTriage.js';
 
@@ -28,7 +29,7 @@ export interface TeamHostApi {
   hostDataOffers?(context: TeamAccountContext, proof: TeamDataProof): Promise<TeamDatasetOffer[]>;
   hostDataOperation?(context: TeamAccountContext, proof: TeamDataProof, accessVersion: number,
     operation: Record<string, unknown>, stepId?: string): Promise<Record<string, unknown>>;
-  hostMessages<T>(context: TeamAccountContext, command: Record<string, unknown>): Promise<T>;
+  hostMessages<T>(context: TeamAccountContext, command: Record<string, unknown>, openVisualization?: OpenBotVisualization): Promise<T>;
   hostReadChat(context: TeamAccountContext, request: ChatReadRequest): Promise<ChatReadResult>;
   list(uid: string): Promise<{ teams: TeamSummary[] }>;
   onChanged(callback: (event: { invalidated?: boolean }) => void): () => void;
@@ -197,7 +198,9 @@ export class TeamConnector implements LocalTeamHost {
     const revision = this.revision;
     // A Bot offered as a hosted service is published in the service's own scope: the same commands, named with `serviceId`. `binding.teamId` is then the service's id.
     const scope = isServiceId(binding.teamId) ? { serviceId: binding.teamId } : { teamId: binding.teamId };
-    try { return await this.options.service.hostMessages<T>(c, { schemaVersion: 1, commandId, ...scope, generation: binding.generation, action, payload }); }
+    const openVisualization = action === 'completeTask' && payload.visualization
+      ? (artifact: Parameters<OpenBotVisualization>[0]) => this.options.privateStore.openBotVisualization(c.uid, artifact) : undefined;
+    try { return await this.options.service.hostMessages<T>(c, { schemaVersion: 1, commandId, ...scope, generation: binding.generation, action, payload }, openVisualization); }
     catch (error) {
       // Only a friendship's team: an ordinary team the person left is skipped by the `list()` check in `discover()`. A reset since the call began owns the set.
       if (revision === this.revision && binding.teamId.startsWith(PAIR_PREFIX) && error instanceof TeamsApiError && error.status === 403 && error.code === 'MEMBERSHIP_REQUIRED') this.ended.add(binding.teamId);

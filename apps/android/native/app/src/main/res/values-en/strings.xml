@@ -3528,6 +3528,8 @@
     <string name="teams_dataset_continue">Continue sharing</string>
     <string name="teams_visualization_access">Access</string>
     <string name="teams_visualization_add">Add visualization</string>
+    <string name="teams_visualization_limit">Visualization size limit (MiB)</string>
+    <string name="teams_visualization_too_large">This visualization exceeds the channel’s size limit.</string>
     <string name="teams_visualization_alias">Binding name</string>
     <string name="teams_visualization_apply">Apply changes</string>
     <string name="teams_visualization_building">Preparing a fixed snapshot…</string>

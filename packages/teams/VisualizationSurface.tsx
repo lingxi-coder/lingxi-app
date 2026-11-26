@@ -32,7 +32,9 @@ export function VisualizationSurface({ bundle, aliases, locale, expanded = false
     const updateTheme = () => connection.current?.postMessage({ type: 'layout', value: {
       width: iframe.current?.clientWidth ?? 0, theme: theme(), expanded: latest.current.expanded,
     } });
-    const timeout = window.setTimeout(() => latest.current.onFailure('VISUALIZATION_SCRIPT_FAILED'), 10_000);
+    const sourceSize = Object.values(bundle.assets ?? {}).reduce((size, asset) => size + asset.data.length, bundle.html.length);
+    const timeout = window.setTimeout(() => latest.current.onFailure('VISUALIZATION_SCRIPT_FAILED'),
+      sourceSize > 2 * 1024 * 1024 ? 50_000 : 10_000);
     const connect = (event: MessageEvent) => {
       const viewer = iframe.current?.contentWindow;
       if (!viewer || event.source !== viewer || event.origin !== 'null' || event.data?.type !== 'teamVisualizationReady' || connection.current) return;

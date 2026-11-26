@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TeamsApi } from './index.js';
 import { type SurfaceRequest, type SurfaceValue, VisualizationSurface } from './VisualizationSurface.js';
 import { VisualizationComposer } from './VisualizationComposer.js';
+import { openVisualization } from './visualization-transfer.js';
 import { type TeamVisualization, type VisualizationBundle, type VisualizationScope, observeVisualization, visualizationAccessLost, visualizationLabels, visualizationRequest } from './visualization.js';
 
 interface PageData {
@@ -56,10 +57,12 @@ export function VisualizationMessage({ api, scope, visualization, online, locale
     const mounted = Symbol();
     viewer.current = mounted;
     setError('');
-    void call<{ bundle: VisualizationBundle; state: unknown }>({ action: 'open' }).then(value => {
+    const transfer = new AbortController();
+    void openVisualization(call, transfer.signal).then(value => {
       if (viewer.current === mounted) setOpen(value);
     }, failure => { if (viewer.current === mounted) setError(code(failure)); });
     return () => {
+      transfer.abort();
       viewer.current = undefined;
       watches.current.clear();
       proposal.current?.resolve(false);

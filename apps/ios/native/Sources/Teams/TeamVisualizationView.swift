@@ -140,7 +140,11 @@ struct TeamVisualizationView: View {
         let mounted = mountID
         error = nil
         do {
-            let opened = try await request("open")
+            let opened = try await TeamVisualizationTransfer.open { input in
+                var body = input
+                body["message"] = page.id; body["version"] = page.version
+                return try await model.visualization(conversationId: conversation, body: body)
+            }
             try Task.checkCancellation()
             guard mountID == mounted else { return }
             guard let bundle = opened["bundle"], let state = opened["state"] else {
@@ -393,11 +397,49 @@ struct TeamVisualizationWebSurface: UIViewRepresentable {
                   let value = try? JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any] else { return }
             if value["type"] as? String == "ready", !didStart {
                 didStart = true
-                send(["type": "initialize", "value": load])
-                connected? { [weak self] packet in self?.send(packet) }
+                Task { [weak self] in await self?.initialize() }
             } else if didStart {
                 receive?(value)
             }
+        }
+
+        private func initialize() async {
+            guard let webView, var bundle = load["bundle"] as? [String: Any],
+                  let html = bundle.removeValue(forKey: "html") as? String else { return }
+            let assets = bundle["assets"] as? [String: [String: String]] ?? [:]
+            bundle["assets"] = assets.mapValues { ["mime": $0["mime"] ?? ""] }
+            var metadata = load
+            metadata["bundle"] = bundle
+            load = [:]
+            do {
+                try await deliver(["type": "initializeStart", "value": metadata], to: webView)
+                try await sendText(html, asset: nil, to: webView)
+                for (name, asset) in assets {
+                    try await sendText(asset["data"] ?? "", asset: name, to: webView)
+                }
+                connected? { [weak self] packet in self?.send(packet) }
+                try await deliver(["type": "initializeEnd"], to: webView)
+            } catch {
+                if self.webView != nil { receive?(["type": "error", "code": "VISUALIZATION_SCRIPT_FAILED"]) }
+            }
+        }
+
+        private func sendText(_ text: String, asset: String?, to view: WKWebView) async throws {
+            let bytes = Data(text.utf8)
+            let capacity = 256 * 1024
+            for start in stride(from: 0, to: bytes.count, by: capacity) {
+                guard webView === view else { throw CancellationError() }
+                let part = bytes[start..<min(start + capacity, bytes.count)]
+                var value = ["data": part.base64EncodedString()]
+                value["asset"] = asset
+                try await deliver(["type": "initializePart", "value": value], to: view)
+            }
+        }
+
+        private func deliver(_ value: [String: Any], to view: WKWebView) async throws {
+            let data = try JSONSerialization.data(withJSONObject: value)
+            _ = try await view.callAsyncJavaScript("receiveTeamVisualization(payload)",
+                arguments: ["payload": String(decoding: data, as: UTF8.self)], in: nil, contentWorld: .page)
         }
 
         private func send(_ value: [String: Any]) {

@@ -4180,6 +4180,8 @@
   "teams_dataset_audience %@": "分享給 %@",
   "teams_visualization_access": "存取權限",
   "teams_visualization_add": "新增視覺化",
+  "teams_visualization_limit": "視覺化大小上限（MiB）",
+  "teams_visualization_too_large": "此視覺化超過了頻道的大小上限。",
   "teams_visualization_alias": "繫結名稱",
   "teams_visualization_apply": "套用變更",
   "teams_visualization_building": "正在產生固定快照…",

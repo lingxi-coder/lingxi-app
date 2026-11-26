@@ -1,6 +1,7 @@
 import { isResourceRef, type ResourceRef } from './dataset-resource.js';
 import type { TeamsApi } from './index.js';
 import { teamsText } from './i18n.js';
+import { visualizationPackageBytes, visualizationPartBytes } from './visualization-transfer.js';
 
 type Page = Extract<ResourceRef, { kind: 'pageVersion' }>;
 export type VisualizationDataRef = Exclude<ResourceRef, Page>;
@@ -61,7 +62,9 @@ export function visualizationRequest<T>(api: Pick<TeamsApi, 'datasets'>, scope: 
 export type VisualizationArtifact = {
   artifactId: string;
   name: string;
-  parts: [{ mediaType: 'application/json'; data: { version: 1; bundle: VisualizationBundle;
+  parts: [{ mediaType: 'application/json'; data: { version: 2; bundle: {
+    title: string; html: { path: string; bytes: number; sha256: string; parts: string[] };
+  };
     bindings: { alias: string; messageId: string; sourceAlias?: string }[] } }];
 };
 
@@ -72,20 +75,16 @@ export function parseVisualizationArtifact(value: unknown, taskId?: string): Vis
       || !fields(value, 'artifactId', 'name', 'parts') || !Array.isArray(value.parts) || value.parts.length !== 1) return undefined;
   const part = value.parts[0];
   if (!object(part) || part.mediaType !== 'application/json' || !fields(part, 'mediaType', 'data')
-      || !object(part.data) || part.data.version !== 1 || !fields(part.data, 'version', 'bundle', 'bindings')) return undefined;
+      || !object(part.data) || part.data.version !== 2 || !fields(part.data, 'version', 'bundle', 'bindings')) return undefined;
   const { bundle, bindings } = part.data;
-  const encoder = new TextEncoder();
-  if (!object(bundle) || value.name !== bundle.title || typeof bundle.html !== 'string' || !bundle.html.trim()
-      || encoder.encode(bundle.html).byteLength > 48 * 1024 || !fields(bundle, 'title', 'html', 'assets')
+  const sha256 = /^[a-f0-9]{64}$/u;
+  if (!object(bundle) || value.name !== bundle.title || !fields(bundle, 'title', 'html') || !object(bundle.html)
+      || !fields(bundle.html, 'path', 'bytes', 'sha256', 'parts') || typeof bundle.html.path !== 'string'
+      || !bundle.html.path || bundle.html.path.length > 4096 || typeof bundle.html.sha256 !== 'string' || !sha256.test(bundle.html.sha256)
+      || typeof bundle.html.bytes !== 'number' || !Number.isSafeInteger(bundle.html.bytes) || bundle.html.bytes < 1 || bundle.html.bytes > visualizationPackageBytes
+      || !Array.isArray(bundle.html.parts) || bundle.html.parts.length !== Math.ceil(bundle.html.bytes / visualizationPartBytes)
+      || !bundle.html.parts.every(digest => typeof digest === 'string' && sha256.test(digest))
       || !Array.isArray(bindings) || bindings.length > 4) return undefined;
-  if (bundle.assets !== undefined) {
-    const mimes = ['image/png', 'image/jpeg', 'image/webp', 'text/css', 'text/javascript'];
-    if (!object(bundle.assets) || Object.keys(bundle.assets).length > 32
-        || Object.entries(bundle.assets).some(([key, asset]) => !/^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63}$/u.test(key)
-          || !object(asset) || typeof asset.mime !== 'string' || !mimes.includes(asset.mime)
-          || typeof asset.data !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/u.test(asset.data) || !fields(asset, 'mime', 'data'))
-        || encoder.encode(JSON.stringify(bundle)).byteLength > 2 * 1024 * 1024) return undefined;
-  }
   if (bindings.some(entry => !object(entry) || typeof entry.alias !== 'string' || !id.test(entry.alias)
       || typeof entry.messageId !== 'string' || !id.test(entry.messageId)
       || !fields(entry, 'alias', 'messageId', 'sourceAlias')
@@ -109,6 +108,7 @@ export function visualizationLabels(locale: string) {
     shared: t('teams_visualization_shared'), fields: t('teams_visualization_fields'), partitions: t('teams_visualization_partitions'),
     pinned: t('tw_dataset_fixed'), live: t('tw_dataset_live'), edit: t('teams_visualization_edit'),
     remove: t('teams_visualization_remove'), building: t('teams_visualization_building'), more: t('tw_dataset_more'),
+    tooLarge: t('teams_visualization_too_large'),
   };
 }
 

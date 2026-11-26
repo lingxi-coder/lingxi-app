@@ -518,6 +518,7 @@ export type TeamsKey =
   | 'teams_visualization_fields'
   | 'teams_visualization_forward'
   | 'teams_visualization_import'
+  | 'teams_visualization_limit'
   | 'teams_visualization_partitions'
   | 'teams_visualization_personal'
   | 'teams_visualization_preview'
@@ -528,6 +529,7 @@ export type TeamsKey =
   | 'teams_visualization_source'
   | 'teams_visualization_team'
   | 'teams_visualization_title'
+  | 'teams_visualization_too_large'
   | 'teams_week'
   | 'teams_you'
   | 'tw_approval_approving'
@@ -1432,6 +1434,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_visualization_fields: { en: 'Visible fields', 'zh-Hans': '可见字段', 'zh-Hant': '可見欄位', ja: '表示フィールド', ko: '표시 필드' },
   teams_visualization_forward: { en: 'Forward visualization', 'zh-Hans': '转发可视化', 'zh-Hant': '轉發視覺化', ja: '可視化を転送', ko: '시각화 전달' },
   teams_visualization_import: { en: 'Import HTML', 'zh-Hans': '导入 HTML', 'zh-Hant': '匯入 HTML', ja: 'HTML を読み込む', ko: 'HTML 가져오기' },
+  teams_visualization_limit: { en: 'Visualization size limit (MiB)', 'zh-Hans': '可视化大小上限（MiB）', 'zh-Hant': '視覺化大小上限（MiB）', ja: 'ビジュアライゼーションの上限（MiB）', ko: '시각화 크기 한도(MiB)' },
   teams_visualization_partitions: { en: 'Visible partitions', 'zh-Hans': '可见分区', 'zh-Hant': '可見分割區', ja: '表示パーティション', ko: '표시 파티션' },
   teams_visualization_personal: { en: 'Personal data', 'zh-Hans': '个人数据', 'zh-Hant': '個人資料', ja: '個人データ', ko: '개인 데이터' },
   teams_visualization_preview: { en: 'Preview', 'zh-Hans': '预览', 'zh-Hant': '預覽', ja: 'プレビュー', ko: '미리보기' },
@@ -1442,6 +1445,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_visualization_source: { en: 'Data source', 'zh-Hans': '数据来源', 'zh-Hant': '資料來源', ja: 'データソース', ko: '데이터 소스' },
   teams_visualization_team: { en: 'Team data', 'zh-Hans': '团队数据', 'zh-Hant': '團隊資料', ja: 'チームデータ', ko: '팀 데이터' },
   teams_visualization_title: { en: 'Title', 'zh-Hans': '标题', 'zh-Hant': '標題', ja: 'タイトル', ko: '제목' },
+  teams_visualization_too_large: { en: 'This visualization exceeds the channel’s size limit.', 'zh-Hans': '此可视化超过了频道的大小上限。', 'zh-Hant': '此視覺化超過了頻道的大小上限。', ja: 'ビジュアライゼーションがチャンネルのサイズ上限を超えています。', ko: '시각화가 채널의 크기 한도를 초과했습니다.' },
   teams_week: { en: '7 days', 'zh-Hans': '7 天', 'zh-Hant': '7 天', ja: '7 日間', ko: '7일' },
   teams_you: { en: 'You', 'zh-Hans': '你', 'zh-Hant': '你', ja: 'あなた', ko: '나' },
   tw_approval_approving: { en: 'Approving…', 'zh-Hans': '正在批准…', 'zh-Hant': '正在核准…', ja: '承認中…', ko: '승인하는 중…' },

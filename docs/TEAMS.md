@@ -24,11 +24,17 @@ stated four-client checks.
 
 A channel message can contain an immutable `pageVersion` resource and up to four
 named Data bindings. The text preview stays in the normal message stream. The
-HTML package lives in private object storage and is retrieved through the Teams
-API by the recipient. A channel member can import standalone HTML, or forward a
-card and select the Data bindings for the destination. The audience confirmation
-applies to the publication as a whole. Desktop can publish the visualization
-from a personal session to a selected channel.
+HTML and packaged assets live in private Cloud Storage. Firestore stores the
+card reference, access metadata and the size and digest of each part. The Teams
+API authorizes each upload and download part, with a maximum of 2 MiB per part.
+A channel starts with a 1 MiB package limit. A team owner or admin with channel
+access can set a limit from 1 to 50 MiB in the channel settings. The limit
+includes UTF-8 HTML and Base64 asset data and applies to manual and Bot
+publication. A change applies to future deliveries. A channel member can import
+standalone HTML or forward a card and select the Data bindings for the
+destination. The audience confirmation applies to the publication as a whole.
+Desktop can publish the visualization from a personal session to a selected
+channel.
 
 The card executes self-contained HTML and JavaScript on the recipient device.
 The shared renderer runs author code in an offline QuickJS worker and projects

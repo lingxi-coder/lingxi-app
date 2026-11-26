@@ -8,6 +8,7 @@ import { SharedBotsStore, deriveGrantPermit } from '../src/shared-bots.mjs';
 import { onTeamMessageCreated } from '../src/team-message-push.mjs';
 import { TeamMessagesStore } from '../src/team-messages.mjs';
 import { createTeamVisualizations } from '../src/team-visualizations.mjs';
+import { markupPackage, putFixtureParts } from './visualization-fixture.mjs';
 import { admissionId } from '../src/team-execution-contract.mjs';
 
 const options = { skip: !process.env.FIRESTORE_EMULATOR_HOST, timeout: 60000 };
@@ -74,28 +75,44 @@ test('channel visualization Bot publishes a typed artifact through its completio
     return execute('startTask', { ...host, taskId: receipt.tasks[0].taskId,
       expectedLastChangeSeq: (await channelRef.get()).data().lastChangeSeq });
   }
-  function output(started, bindings = []) {
+  const sample = markupPackage('Packing chart', '<p>Passport</p>');
+  function output(started, bindings = [], prepared = sample) {
     const title = 'Packing chart';
     const completion = command('completeTask', result(started, { document: undefined }));
     delete completion.payload.document;
-    return { action: 'completeBot', completion, artifact: { artifactId: completion.payload.taskId, name: title,
-      parts: [{ mediaType: 'application/json', data: { version: 1, bundle: { title, html: '<p>Passport</p>' }, bindings } }] } };
+    return { action: 'completeBot', stage: 'prepare', completion, artifact: { artifactId: completion.payload.taskId, name: title,
+      parts: [{ mediaType: 'application/json', data: { version: 2, package: prepared.package, bindings } }] } };
+  }
+  async function publish(input, prepared = sample) {
+    const call = payload => service.execute(owner, 'fixture', payload);
+    const plan = await call(input);
+    if (plan.status === 'completed') return plan.result;
+    await putFixtureParts(plan, prepared.chunks, call);
+    return (await call({ ...input, stage: 'commit' })).result;
   }
   const first = output(await admit());
   await assert.rejects(service.execute(member, 'fixture', first));
-  const published = await service.execute(owner, 'fixture', first);
+  const published = await publish(first);
   assert.match(published.replyId, /^viz_/u);
-  assert.deepEqual(await service.execute(owner, 'fixture', first), published);
+  assert.deepEqual(await publish(first), published);
   const stored = (await channelRef.collection('messages').doc(published.replyId).get()).data();
   assert.equal(stored.author.kind, 'shared_bot');
   assert.equal(stored.kind, 'visualization');
   const read = await service.execute(member, 'fixture', { action: 'open', teamId, conversationId: channel,
     generation: 1, message: published.replyId, version: stored.visualization.reference.version });
-  assert.equal(read.bundle.html, '<p>Passport</p>');
+  assert.deepEqual(read.package, sample.package);
+  const content = await service.execute(member, 'fixture', { action: 'readPart', teamId, conversationId: channel,
+    generation: 1, message: published.replyId, version: stored.visualization.reference.version, index: 0 });
+  assert.equal(Buffer.from(content.data, 'base64').toString(), '<p>Passport</p>');
+  const large = markupPackage('Packing chart', '<p>Passport</p>' + ' '.repeat(2 * 1024 * 1024));
+  const overBudget = await publish(output(await admit(), [], large), large);
+  assert.equal((await channelRef.collection('messages').doc(overBudget.replyId).get()).data().visualization, undefined);
+  await service.execute(owner, 'fixture', { action: 'setLimit', teamId, generation: 1, conversationId: channel,
+    limitMiB: 3, expectedRevision: 0 });
   const second = output(await admit(), [{ alias: 'orders', messageId: 'no_such_message' }]);
-  const fallback = await service.execute(owner, 'fixture', second);
+  const fallback = await publish(second);
   assert.equal(fallback.state, 'completed');
-  assert.deepEqual(await service.execute(owner, 'fixture', second), fallback);
+  assert.deepEqual(await publish(second), fallback);
   assert.equal((await channelRef.collection('messages').doc(fallback.replyId).get()).data().visualization, undefined);
   const task = { taskKey: 'orders_task', permit: 'orders_permit', task: 'orders', logicalRun: 'run-orders' };
   const reference = { kind: 'dataset', dataset: 'orders' };
@@ -114,14 +131,14 @@ test('channel visualization Bot publishes a typed artifact through its completio
   const sourceTask = await execute('startTask', { ...host, taskId: source.tasks[0].taskId,
     expectedLastChangeSeq: (await channelRef.get()).data().lastChangeSeq });
   await execute('completeTask', result(sourceTask, { document: undefined }));
-  const third = output(await admit(), [{ alias: 'orders', messageId: sourceId }]);
-  const reused = await service.execute(owner, 'fixture', third);
+  const third = output(await admit(), [{ alias: 'orders', messageId: sourceId }], large);
+  const reused = await publish(third, large);
   assert.match(reused.replyId, /^viz_/u);
   assert.equal((await channelRef.collection('messages').doc(reused.replyId).get()).data().visualization.bindings[0].grant, 'orders_grant');
-  assert.equal(files.size, 2);
+  assert.equal(files.size, 3);
   const changed = structuredClone(third);
   changed.artifact.parts[0].data.bindings[0].alias = 'different';
-  await assert.rejects(service.execute(owner, 'fixture', changed), { code: 'COMMAND_ID_CONFLICT' });
+  await assert.rejects(publish(changed), { code: 'COMMAND_ID_CONFLICT' });
 
   await publishAutoReply({ daily: 5 });
   await execute('setConversationAutoReply', { conversationId: channel, expectedRevision: 0, targets: ['sharedbot_01'] }, member);
@@ -133,11 +150,11 @@ test('channel visualization Bot publishes a typed artifact through its completio
   assert.equal(optional.task.optional, true);
   await execute('setConversationAutoReply', { conversationId: channel, expectedRevision: 1, targets: [] }, member);
   const revoked = output(optional);
-  const settled = await service.execute(owner, 'fixture', revoked);
+  const settled = await publish(revoked);
   assert.equal(settled.state, 'declined');
   assert.equal(settled.replyId, null);
-  assert.deepEqual(await service.execute(owner, 'fixture', revoked), settled);
-  assert.equal(files.size, 2);
+  assert.deepEqual(await publish(revoked), settled);
+  assert.equal(files.size, 3);
 });
 
 test('execution 2: simultaneous duplicate submissions create one message, admission and quota charge', options, async () => {

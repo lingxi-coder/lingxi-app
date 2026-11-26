@@ -26,6 +26,7 @@ const elementIds = new WeakMap(), elements = new Map(), canvases = new WeakMap()
 let next = 0, renderWidth = 400, theme = { mode: 'light', tokens: {} }, locale = 'en', expanded = false;
 let state = { version: 0, modelContent: null, privateContent: null };
 let aliases = [];
+let initialScripts;
 
 function request(action, payload) {
   if (callbacks.size >= 16) return Promise.reject(new Error('Too many pending requests'));
@@ -367,10 +368,16 @@ function initialize(input) {
     style.textContent = input.css;
     document.body.prepend(style);
   }
+  initialScripts = input.scripts;
+}
+
+function start() {
+  const packages = initialScripts;
+  initialScripts = undefined;
   const scripts = Array.from(document.querySelectorAll('script'));
   for (const script of scripts) {
     const source = script.getAttribute('src');
-    const text = source ? input.scripts[source] : script.textContent;
+    const text = source ? packages[source] : script.textContent;
     script.remove();
     if (text && (!script.type || ['text/javascript', 'application/javascript'].includes(script.type))) (0, eval)(text);
   }
@@ -387,6 +394,7 @@ function initialize(input) {
 
 Object.defineProperty(globalThis, '__lingxiSurface', { value: Object.freeze({
   initialize,
+  start,
   snapshot,
   timer(id) {
     const timer = timers.get(id);

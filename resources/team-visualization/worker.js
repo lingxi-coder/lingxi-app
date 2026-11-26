@@ -53,7 +53,10 @@ async function initialize(input) {
   if (vm || stopped) return;
   const module = await ready;
   vm = module.newContext();
-  vm.runtime.setMemoryLimit(48 * 1024 * 1024);
+  const { html, css, scripts, ...settings } = input;
+  const characters = html.length + css.length + Object.values(scripts).reduce((sum, text) => sum + text.length, 0);
+  const mib = 1024 * 1024;
+  vm.runtime.setMemoryLimit(Math.min(224 * mib, 48 * mib + 4 * characters));
   vm.runtime.setMaxStackSize(512 * 1024);
   vm.runtime.setInterruptHandler(() => performance.now() > deadline);
   expose('atob', value => vm.newString(atob(vm.getString(value))));
@@ -95,7 +98,29 @@ async function initialize(input) {
   });
   expose('__lingxiCancel', handle => removeTimer(vm.getNumber(handle)));
   evaluate(LINGXI_GUEST, 500).dispose();
-  invoke('initialize', input);
+  // Pass the large strings as VM values instead of compiling them as JS source.
+  const fields = vm.newObject();
+  const scriptSources = vm.newObject();
+  const setString = (target, key, text) => {
+    const handle = vm.newString(text);
+    try { vm.setProp(target, key, handle); } finally { handle.dispose(); }
+  };
+  try {
+    setString(fields, 'html', html);
+    setString(fields, 'css', css);
+    for (const [name, text] of Object.entries(scripts)) setString(scriptSources, name, text);
+    vm.setProp(fields, 'scripts', scriptSources);
+    vm.setProp(vm.global, '__lingxiInitialFields', fields);
+    evaluate(`(() => {
+      const fields = globalThis.__lingxiInitialFields;
+      delete globalThis.__lingxiInitialFields;
+      __lingxiSurface.initialize(Object.assign(${JSON.stringify(settings)}, fields));
+    })()`, Math.min(40_000, 120 + 800 * characters / mib)).dispose();
+  } finally {
+    fields.dispose();
+    scriptSources.dispose();
+  }
+  invoke('start');
   if (frame === null) emitFrame();
 }
 

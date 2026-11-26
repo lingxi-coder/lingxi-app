@@ -105,10 +105,10 @@ const datasetBrowserHandler = createDatasetBrowserHttp({
 const datasetPages = process.env.LINGXI_DATASET_PAGES_BUCKET ? createDatasetPages({
   db: teamsDb, bucket: getStorage(app).bucket(process.env.LINGXI_DATASET_PAGES_BUCKET), datasets: datasetGateway?.datasets,
 }) : undefined;
-const teamVisualizations = process.env.LINGXI_DATASET_PAGES_BUCKET ? createTeamVisualizations({
-  db: teamsDb, bucket: getStorage(app).bucket(process.env.LINGXI_DATASET_PAGES_BUCKET),
+const teamVisualizations = createTeamVisualizations({
+  db: teamsDb, bucket: process.env.LINGXI_DATASET_PAGES_BUCKET ? getStorage(app).bucket(process.env.LINGXI_DATASET_PAGES_BUCKET) : undefined,
   core: datasetGateway?.command, channels: process.env.LINGXI_TEAM_VISUALIZATION_CHANNELS,
-}) : undefined;
+});
 export const pruneTeamVisualizations = onSchedule({ schedule: 'every 5 minutes', timeZone: 'Etc/UTC',
   region: 'us-central1', memory: '256MiB', timeoutSeconds: 240, maxInstances: 1,
   serviceAccount: pushServiceAccount }, async () => { await teamVisualizations?.sweep(); });

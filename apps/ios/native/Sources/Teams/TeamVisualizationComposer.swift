@@ -55,9 +55,13 @@ struct TeamVisualizationComposer: View {
                 }
                 TextField("teams_visualization_title", text: $title)
                 Button("teams_visualization_import") { importing = true }
-                TextEditor(text: $html)
-                    .font(.body.monospaced()).frame(minHeight: 110)
-                    .accessibilityLabel("HTML")
+                if html.utf8.count > TeamVisualizationTransfer.editableChars {
+                    LabeledContent("HTML", value: ByteCountFormatter.string(fromByteCount: Int64(html.utf8.count), countStyle: .binary))
+                } else {
+                    TextEditor(text: $html)
+                        .font(.body.monospaced()).frame(minHeight: 110)
+                        .accessibilityLabel("HTML")
+                }
                 Button("teams_visualization_preview") { preview.toggle() }.disabled(!valid)
                 if preview {
                     let aliases = bindings.compactMap { $0["alias"] as? String }
@@ -76,7 +80,9 @@ struct TeamVisualizationComposer: View {
                 if let members = audience["audience"] as? [String: Int] {
                     LabeledContent("teams_visualization_audience", value: members.keys.sorted().map(person).joined(separator: " · "))
                 }
-                if let error { Text(error).foregroundStyle(.red) }
+                if let error {
+                    Text(error == "VISUALIZATION_TOO_LARGE" ? String(localized: "teams_visualization_too_large") : error).foregroundStyle(.red)
+                }
                 if building { Text("teams_visualization_building") }
             }
             .navigationTitle(destinations.isEmpty ? "teams_visualization_add" : "teams_visualization_forward")
@@ -100,10 +106,14 @@ struct TeamVisualizationComposer: View {
                     let url = try response.get()
                     let accessible = url.startAccessingSecurityScopedResource()
                     defer { if accessible { url.stopAccessingSecurityScopedResource() } }
-                    guard let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 2_097_152 else {
+                    let file = try FileHandle(forReadingFrom: url)
+                    defer { try? file.close() }
+                    let maximum = TeamVisualizationTransfer.maximumBytes
+                    guard let bytes = try file.read(upToCount: maximum + 1), bytes.count <= maximum else {
                         throw TeamMessageFailure(code: "VISUALIZATION_TOO_LARGE")
                     }
-                    html = try String(contentsOf: url, encoding: .utf8)
+                    guard let markup = String(data: bytes, encoding: .utf8) else { throw TeamMessageFailure(code: "INVALID_DATA") }
+                    html = markup
                     if title.isEmpty { title = String(url.deletingPathExtension().lastPathComponent.prefix(80)) }
                 } catch { self.error = (error as? TeamMessageFailure)?.code ?? "INVALID_DATA" }
             }
@@ -242,12 +252,22 @@ struct TeamVisualizationComposer: View {
         busy = true; error = nil
         defer { busy = false }
         do {
-            var body: [String: Any] = ["action": "publish", "bundle": bundle, "bindings": bindings, "audienceDigest": digest]
+            let transfer = try TeamVisualizationTransfer.prepare(bundle)
+            var body: [String: Any] = ["action": "publish", "package": transfer.manifest, "bindings": bindings, "audienceDigest": digest]
             let encoded = try JSONSerialization.data(withJSONObject: body, options: .sortedKeys)
-            guard encoded.count <= 2_105_344 else { throw TeamMessageFailure(code: "VISUALIZATION_TOO_LARGE") }
             if intent?.0 != encoded { intent = (encoded, UUID().uuidString) }
             body["operation"] = intent?.1
-            let result = try await model.visualization(conversationId: destination, body: body, from: conversation)
+            let target = destination
+            let request: TeamVisualizationTransfer.Request = { packet in
+                try await model.visualization(conversationId: target, body: packet, from: conversation)
+            }
+            body["stage"] = "prepare"
+            var result = try await request(body)
+            if result["status"] as? String == "uploading" {
+                try await TeamVisualizationTransfer.upload(transfer, plan: result, request: request)
+                body["stage"] = "commit"
+                result = try await request(body)
+            }
             if result["status"] as? String == "building" { building = true } else { dismiss() }
         } catch {
             self.error = (error as? TeamMessageFailure)?.code ?? "DATA_UNAVAILABLE"

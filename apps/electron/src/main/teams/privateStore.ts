@@ -1,10 +1,11 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, writeFileSync } from 'node:fs';
-import { link, lstat, mkdir, open, readdir, rename, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, open, readdir, realpath, rename, unlink } from 'node:fs/promises';
 import type { TeamRunResult, BotChatScope, TeamTaskCheckpoint } from './process.js';
 import type { TaskUsage } from '../../../../../packages/teams/execution.js';
-import { parseVisualizationArtifact } from '../../../../../packages/teams/visualization.js';
-import { dirname, join } from 'node:path';
+import { parseVisualizationArtifact, type VisualizationArtifact } from '../../../../../packages/teams/visualization.js';
+import { visualizationPartBytes, type PreparedVisualization } from '../../../../../packages/teams/visualization-transfer.js';
+import { dirname, join, relative, sep } from 'node:path';
 import { withProviderAccountLock } from '../provider-accounts.js';
 
 export interface TeamModelRoute {
@@ -15,6 +16,10 @@ export interface PublishedDocument { resourceId: string; revision: number; kind:
 export interface TeamPersonaSnapshot extends TeamModelRoute { instructions: string; provider_account_profiles: Record<string, unknown>[]; documents: PublishedDocument[] }
 export interface SharedBotBinding { schemaVersion: 1; ownerUid: string; teamId: string; generation: number; sharedBotId: string; deploymentId: string; instanceId: string; revision: number; snapshot: string; accountEpoch: number; publicationId: string; grantIds: string[]; sessionEpoch: number }
 export interface TeamDataRef { path: string; sha256: string; bytes: number }
+export type OpenBotVisualization = (artifact: VisualizationArtifact) => Promise<{
+  transfer: PreparedVisualization;
+  close(): Promise<void>;
+}>;
 /** A publication, or (`action`) the take-over of an offered Bot, saved before it is sent so that a lost answer is asked for again with the same command. */
 export interface SavedPublication { schemaVersion: 1; requestDigest: string; binding: SharedBotBinding; payload: Record<string, unknown>; action?: 'completeTransfer' }
 /** A grant candidate is not authority. Keep the original RPC and SDK baseline until the task is delivered. */
@@ -342,6 +347,51 @@ export class TeamPrivateStore {
       return { ...delivery, ...(visualization ? { visualization } : {}) } as TeamRunResult;
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
   }
+  private async visualizationPath(root: string, artifact: VisualizationArtifact): Promise<string> {
+    const html = artifact.parts[0].data.bundle.html;
+    const [scopes, session, home, file, ...rest] = relative(root, html.path).split(sep);
+    if (scopes !== 'scopes' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(session ?? '')
+        || home !== 'home' || file !== `visualization-${artifact.artifactId}.${html.sha256}.html` || rest.length
+        || html.path !== join(root, scopes, session, home, file)) throw new Error('UNSAFE_TEAM_STORAGE');
+    for (const directory of [join(root, scopes, session), dirname(html.path)]) {
+      const info = await lstat(directory);
+      if (!info.isDirectory() || (info.mode & 0o077) !== 0 || process.getuid && info.uid !== process.getuid()) {
+        throw new Error('UNSAFE_TEAM_STORAGE');
+      }
+    }
+    if (await realpath(html.path) !== html.path) throw new Error('UNSAFE_TEAM_STORAGE');
+    return html.path;
+  }
+
+  async openBotVisualization(uid: string, artifact: VisualizationArtifact): ReturnType<OpenBotVisualization> {
+    const { title, html } = artifact.parts[0].data.bundle;
+    const path = await this.visualizationPath((await this.owner(uid)).runtime, artifact);
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const info = await file.stat();
+      if (!info.isFile() || info.nlink !== 1 || info.size !== html.bytes || (info.mode & 0o077) !== 0
+          || process.getuid && info.uid !== process.getuid()) throw new Error('UNSAFE_TEAM_STORAGE');
+      return {
+        close: () => file.close(),
+        transfer: {
+          package: { title, htmlBytes: html.bytes, assets: [], parts: html.parts },
+          async readPart(index) {
+            if (!Number.isSafeInteger(index) || index < 0 || index >= html.parts.length) throw new Error('INVALID_DATA');
+            const start = index * visualizationPartBytes;
+            const bytes = new Uint8Array(Math.min(visualizationPartBytes, html.bytes - start));
+            let length = 0;
+            while (length < bytes.length) {
+              const { bytesRead } = await file.read(bytes, length, bytes.length - length, start + length);
+              if (!bytesRead) throw new Error('UNSAFE_TEAM_STORAGE');
+              length += bytesRead;
+            }
+            return bytes.buffer;
+          },
+        },
+      };
+    } catch (error) { await file.close(); throw error; }
+  }
+
   saveDelivery(uid: string, value: SavedDelivery, expected?: SavedExecution): Promise<boolean> { return this.executionSerial(uid,value.taskId,async () => {
     const path = join((await this.owner(uid)).outbox, value.taskId), text = JSON.stringify(value);
     if(expected){let current:SavedExecution;try{current=JSON.parse(await read(join((await this.owner(uid)).executions,value.taskId),64*1024));}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return false;throw error;}
@@ -366,7 +416,13 @@ export class TeamPrivateStore {
     const paths = await this.owner(uid), root = paths.outbox;
     if(expected){let current:SavedExecution;try{current=JSON.parse(await read(join(paths.executions,taskId),64*1024));}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return false;throw error;}
       if(current.epoch!==expected.epoch||current.payload.permitId!==expected.payload.permitId||JSON.stringify(current.grant)!==JSON.stringify(expected.grant))return false;}
+    const artifact = await read(join(root, taskId), 512 * 1024).then(value =>
+      parseVisualizationArtifact((JSON.parse(value) as SavedDelivery).payload?.visualization, taskId)).catch(() => undefined);
     await unlink(join(root, taskId)).catch(error => { if (error.code !== 'ENOENT') throw error; }); await syncDirectory(root);
+    if (artifact) {
+      const path = await this.visualizationPath(paths.runtime, artifact).catch(() => undefined);
+      if (path) await unlink(path).catch(() => undefined);
+    }
     let batch: TeamDataRef | undefined;
     try { batch = (JSON.parse(await read(join(paths.executions, taskId), 64 * 1024)) as SavedExecution).batch; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     await unlink(join(paths.executions, taskId)).catch(error => { if (error.code !== 'ENOENT') throw error; }); await syncDirectory(paths.executions);

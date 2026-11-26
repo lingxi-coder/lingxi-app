@@ -4180,6 +4180,8 @@
   "teams_dataset_audience %@": "%@ に共有",
   "teams_visualization_access": "アクセス権",
   "teams_visualization_add": "可視化を追加",
+  "teams_visualization_limit": "ビジュアライゼーションの上限（MiB）",
+  "teams_visualization_too_large": "ビジュアライゼーションがチャンネルのサイズ上限を超えています。",
   "teams_visualization_alias": "バインディング名",
   "teams_visualization_apply": "変更を適用",
   "teams_visualization_building": "固定スナップショットを作成中…",

@@ -9,6 +9,8 @@ import { TeamsStore, createTeamsHandler } from '../src/teams.mjs';
 import { TeamMessagesStore } from '../src/team-messages.mjs';
 import { createTeamVisualizations } from '../src/team-visualizations.mjs';
 import { reservationMs } from '../src/team-visualization-storage.mjs';
+import { maxPackageBytes } from '../src/team-visualization-contract.mjs';
+import { markupPackage, putFixtureParts } from './visualization-fixture.mjs';
 import { InboxStore } from '../src/inbox-store.mjs';
 import { onTeamMessageCreated } from '../src/team-message-push.mjs';
 
@@ -81,23 +83,30 @@ test('channel visualization publishes once with all grants, isolates viewer stat
   const service = createTeamVisualizations({ db, bucket, core, channels: `${teamId}/${channel.conversationId}`, clock: () => now });
   const usage = async () => (await db.doc(`teams/${teamId}/privateSettings/visualizations`).get()).data().bytes;
   const call = (value, actor = owner) => service.execute(actor, 'test-token', { ...channel, ...value });
+  const sample = markupPackage('Sales chart', '<p>Orders</p>');
+  const publish = async input => {
+    const plan = await call({ ...input, stage: 'prepare' });
+    if (plan.status !== 'uploading') return plan;
+    await putFixtureParts(plan, sample.chunks, call);
+    return call({ ...input, stage: 'commit' });
+  };
   await assert.rejects(call({ action: 'audience' }, hidden), { code: 'DATA_ACCESS_REQUIRED' });
   const { audienceDigest } = await call({ action: 'audience' });
   const publication = { action: 'publish', operation: 'share_orders', audienceDigest,
-    bundle: { title: 'Sales chart', html: '<p>Orders</p>' },
+    package: sample.package,
     bindings: [
       { kind: 'share', dataset: 'orders', alias: 'live', mode: 'edit' },
       { kind: 'share', dataset: 'orders', alias: 'pinned', mode: 'pinned',
         reference: { kind: 'snapshot', dataset: 'orders', snapshot: 'month-end' } },
     ],
   };
-  await assert.rejects(call(publication), { code: 'DATA_SHARE_CHANGED' });
+  await assert.rejects(publish(publication), { code: 'DATA_SHARE_CHANGED' });
   assert.equal((await db.collection(path + '/messages').get()).size, 0);
   assert.equal(blobs.size, 0);
   missing = false;
-  const [delivered, duplicate] = await Promise.all([call(publication), call(publication)]);
+  const [delivered, duplicate] = await Promise.all([publish(publication), publish(publication)]);
   assert.deepEqual(duplicate, delivered);
-  assert.deepEqual(await call(publication), delivered);
+  assert.deepEqual(await publish(publication), delivered);
   assert.equal((await db.collection(path + '/messages').get()).size, 1);
   assert.ok(await usage() > 0);
   assert.equal(blobs.size, 1);
@@ -110,7 +119,8 @@ test('channel visualization publishes once with all grants, isolates viewer stat
   const verify = cards => call({ action: 'checkBatch', cards }, alice);
   assert.deepEqual(await verify([locator, { ...locator, message: 'viz_missing' }, locator]), { active: [true, false, true] });
   const opened = await call({ ...locator, action: 'open' }, alice);
-  assert.equal(opened.bundle.html, publication.bundle.html);
+  assert.deepEqual(opened.package, sample.package);
+  assert.deepEqual(Buffer.from((await call({ ...locator, action: 'readPart', index: 0 }, alice)).data, 'base64'), sample.chunks[0]);
   const state = { modelContent: { scale: 2 }, privateContent: [[1, 2], [3, 4]] };
   await call({ ...locator, action: 'state', expected: 0, state }, alice);
   assert.deepEqual((await call({ ...locator, action: 'open' }, alice)).state, { version: 1, ...state });
@@ -118,16 +128,17 @@ test('channel visualization publishes once with all grants, isolates viewer stat
   await assert.rejects(call({ ...locator, action: 'state', expected: 0, state }, alice), { code: 'DATA_CONFLICT' });
   await assert.rejects(call({ ...locator, action: 'open' }, hidden), { code: 'DATA_ACCESS_REQUIRED' });
   await orders.update({ deleted: true });
-  await assert.rejects(call({ ...publication, operation: 'deleted-data', bindings: [
+  await assert.rejects(publish({ ...publication, operation: 'deleted-data', bindings: [
     { kind: 'reuse', ...stored.visualization.bindings[0] },
   ] }), { code: 'DATA_SHARE_CHANGED' });
   await orders.update({ deleted: false });
   await db.doc(path).update({ memberUids: [owner.uid, alice.uid, hidden.uid] });
   assert.notEqual((await call({ action: 'audience' })).audienceDigest, audienceDigest);
-  assert.deepEqual(await call(publication), delivered);
+  assert.deepEqual(await publish(publication), delivered);
   assert.equal((await db.collection(path + '/messages').get()).size, 1);
   await execute(command({ ...channel, messageId: message, changeId: 'recall-orders', operation: 'recall', text: '' }));
   await assert.rejects(call({ ...locator, action: 'open' }, alice), { code: 'DATA_ACCESS_REQUIRED' });
+  await assert.rejects(call({ ...locator, action: 'readPart', index: 0 }, alice), { code: 'DATA_ACCESS_REQUIRED' });
   await assert.rejects(call({ ...locator, action: 'data', alias: 'live', request: { action: 'read' } }, alice), { code: 'DATA_ACCESS_REQUIRED' });
   assert.deepEqual(await verify([locator]), { active: [false] });
   await service.sweep();
@@ -135,20 +146,20 @@ test('channel visualization publishes once with all grants, isolates viewer stat
   assert.equal((await db.doc(`teamVisualizations/${message}/versions/${version}`).collection('viewerState').get()).size, 0);
   assert.equal(blobs.size, 0);
   assert.equal(await usage(), 0);
-  assert.deepEqual(await call(publication), delivered);
+  assert.deepEqual(await publish(publication), delivered);
 
   await teams.execute(hidden, { action: 'leave', teamId, generation: 1 });
   assert.deepEqual((await call({ action: 'audience' })).audience, { alice: 1, owner: 1 });
   const pending = { ...publication, bindings: [], operation: 'abandoned-upload',
     audienceDigest: (await call({ action: 'audience' })).audienceDigest };
   blockUpload = true;
-  await assert.rejects(call(pending), /Temporary storage outage/);
+  await assert.rejects(publish(pending), /Temporary storage outage/);
   assert.ok(await usage() > 0);
   now += reservationMs;
   await service.sweep();
   assert.equal(await usage(), 0);
   blockUpload = false;
-  await assert.rejects(call(pending), { code: 'DATA_SHARE_CHANGED' });
+  await assert.rejects(publish(pending), { code: 'DATA_SHARE_CHANGED' });
 
   const sharedOrders = db.doc('datasetV2/shared-orders');
   const parent = sharedOrders.collection('grants').doc('parent-orders');
@@ -159,7 +170,7 @@ test('channel visualization publishes once with all grants, isolates viewer stat
   await db.doc(path + '/messages/received-orders').set({ author: { kind: 'user', uid: alice.uid },
     resourceGrant: parent.id, resourceRef: parentReference });
   onUpload = () => parent.update({ status: 'revoked' });
-  await assert.rejects(call({ ...pending, operation: 'ancestor-revoked', bindings: [
+  await assert.rejects(publish({ ...pending, operation: 'ancestor-revoked', bindings: [
     { kind: 'share', dataset: sharedOrders.id, via: parent.id, mode: 'live', alias: 'orders' },
   ] }), { code: 'DATA_SHARE_CHANGED' });
   onUpload = undefined;
@@ -169,7 +180,7 @@ test('channel visualization publishes once with all grants, isolates viewer stat
   await service.sweep();
   assert.equal(blobs.size, 0);
 
-  const final = await call({ ...pending, operation: 'fresh-upload' });
+  const final = await publish({ ...pending, operation: 'fresh-upload' });
   assert.equal(final.status, 'published');
   const finalCard = { message: final.messageId, version: final.reference.version };
   await call({ ...finalCard, action: 'state', expected: 0, state }, alice);
@@ -178,6 +189,65 @@ test('channel visualization publishes once with all grants, isolates viewer stat
   await service.sweep();
   assert.equal(blobs.size, 0);
   assert.equal((await db.doc(`teamVisualizations/${finalCard.message}/versions/${finalCard.version}`).collection('viewerState').get()).size, 0);
+});
+
+test('channel visualization settings default to 1 MiB and permit a complete 50 MiB package only in the configured channel', options, async () => {
+  const channel = { ...scope, conversationId: 'large-visualization' };
+  const other = { ...scope, conversationId: 'small-visualization' };
+  for (const target of [channel, other]) await execute({ ...target, action: 'create', kind: 'channel',
+    title: target.conversationId, participantUids: [owner.uid, alice.uid] });
+  const files = new Map();
+  const bucket = { file(key) { return {
+    async save(bytes) { files.set(key, bytes); },
+    async download() { return [files.get(key)]; },
+    async delete() { files.delete(key); },
+  }; } };
+  const visualizations = createTeamVisualizations({ db, bucket, channels: '*', clock: () => now });
+  const handler = createTeamsHandler({ store: teams, visualizations, verifyToken: async token => token === alice.uid ? alice : owner });
+  const http = (body, actor = owner, target = channel) => handler(new Request('https://fixture.test/v1/teams/visualizations', {
+    method: 'POST', headers: { authorization: 'Bearer ' + actor.uid }, body: JSON.stringify({ ...target, ...body }),
+  }));
+  async function call(body, actor, target) {
+    const response = await http(body, actor, target);
+    const result = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(result));
+    return result;
+  }
+  assert.deepEqual(await call({ action: 'settings' }), { limitMiB: 1, revision: 0, canEdit: true });
+  assert.deepEqual(await call({ action: 'settings' }, alice), { limitMiB: 1, revision: 0, canEdit: false });
+  assert.equal((await http({ action: 'setLimit', limitMiB: 50, expectedRevision: 0 }, alice)).status, 403);
+  assert.equal((await http({ action: 'setLimit', limitMiB: 51, expectedRevision: 0 })).status, 400);
+  const markup = Buffer.alloc(maxPackageBytes, 0x20);
+  markup.write('<p>Orders at the limit</p>');
+  const content = markupPackage('Large visualization', markup);
+  const { audienceDigest } = await call({ action: 'audience' });
+  const send = { action: 'publish', stage: 'prepare', operation: 'fifty-mib', audienceDigest, package: content.package };
+  assert.equal((await http(send)).status, 413);
+  assert.deepEqual(await call({ action: 'setLimit', limitMiB: 50, expectedRevision: 0 }), { limitMiB: 50, revision: 1, canEdit: true });
+  assert.deepEqual(await call({ action: 'settings' }, owner, other), { limitMiB: 1, revision: 0, canEdit: true });
+  assert.equal((await http({ ...send, package: { ...content.package, htmlBytes: maxPackageBytes + 1 } })).status, 400);
+  const plan = await call(send);
+  assert.equal(plan.missing.length, 25);
+  assert.equal((await http({ ...send, stage: 'commit' })).status, 409);
+  await putFixtureParts({ ...plan, missing: [0] }, content.chunks, call);
+  const resumed = await call(send);
+  assert.deepEqual(resumed.missing, plan.missing.slice(1));
+  await putFixtureParts(resumed, content.chunks, call);
+  assert.deepEqual((await call(send)).missing, []);
+  const published = await call({ ...send, stage: 'commit' });
+  const card = { message: published.messageId, version: published.reference.version };
+  assert.deepEqual((await call({ action: 'open', ...card }, alice)).package, content.package);
+  for (const index of plan.missing) {
+    const part = await call({ action: 'readPart', ...card, index }, alice);
+    assert.deepEqual(Buffer.from(part.data, 'base64'), content.chunks[index]);
+  }
+  assert.equal(files.size, 25);
+  assert.equal((await http({ action: 'setLimit', limitMiB: 5, expectedRevision: 0 })).status, 409);
+  const pending = { ...send, operation: 'pending-before-limit-change' };
+  await call(pending);
+  await call({ action: 'setLimit', limitMiB: 1, expectedRevision: 1 });
+  assert.equal((await http({ ...pending, stage: 'commit' })).status, 413);
+  assert.equal((await call({ action: 'open', ...card }, alice)).package.htmlBytes, maxPackageBytes);
 });
 
 test('T2: concurrent duplicate sends have one identity, seq and immutable receipt', options, async () => {

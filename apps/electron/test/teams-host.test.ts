@@ -1017,9 +1017,11 @@ function frames(lines:unknown[]){const child=new EventEmitter() as ChildProcessW
  child.stdin.once('data',()=>{setImmediate(()=>{for(const line of lines)child.stdout.emit('data',Buffer.from(JSON.stringify(line)+'\n'));child.emit('close',0);});});return ()=>child;}
 test('an invalid visualization binding leaves a completed Bot reply deliverable as text', async () => {
  const taskId = 'task00001', scope = { teamId, sharedBotId, conversationId, sessionEpoch: 1 };
+ const sha256 = createHash('sha256').update('<p>Orders</p>').digest('hex');
+ const html = { path: '/private/visualization-task00001.' + sha256 + '.html', bytes: 13, sha256, parts: [sha256] };
  for (const alias of ['order_rows', 'order rows']) {
   const visualization = { artifactId: taskId, name: 'Orders', parts: [{ mediaType: 'application/json',
-   data: { version: 1, bundle: { title: 'Orders', html: '<p>Orders</p>' }, bindings: [{ alias, messageId: 'orders-msg' }] },
+   data: { version: 2, bundle: { title: 'Orders', html }, bindings: [{ alias, messageId: 'orders-msg' }] },
   }] };
   const result = await runTeamHost({ executable: '/mock', home: '/private-home', tmp: '/private-tmp',
    signal: new AbortController().signal, assertCurrent: () => {},

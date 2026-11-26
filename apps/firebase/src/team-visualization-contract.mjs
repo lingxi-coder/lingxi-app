@@ -9,7 +9,11 @@ export const messageId = id.refine(value => value.startsWith('viz_'));
 export const versionId = z.string().regex(/^[a-f0-9]{64}$/u);
 export const scope = { teamId: id, conversationId: id, generation: z.number().int().positive() };
 export const mode = z.enum(['pinned', 'live', 'edit']);
-export const maxPackageBytes = 2 * 1024 * 1024;
+export const mib = 1024 * 1024;
+export const maxPackageMiB = 50;
+export const maxPackageBytes = maxPackageMiB * mib;
+export const packagePartBytes = 2 * mib;
+export const maxPackageParts = Math.ceil(maxPackageBytes / packagePartBytes);
 export const visualizationRef = z.custom(value => isResourceRef(value) && value.kind === 'pageVersion');
 export const dataRef = z.custom(value => isResourceRef(value) && value.kind !== 'pageVersion');
 export const fail = (status, code) => { throw new LingxiDataError(status, code); };
@@ -27,15 +31,33 @@ export function visualizationChannelEnabled(channels, team, conversation) {
   return (channels ?? '').split(',').some(value => value.trim() === '*' || value.trim() === team + '/' + conversation);
 }
 
-export const bundle = z.object({
+export const visualizationPackage = z.object({
   title,
-  html: z.string().min(1).max(maxPackageBytes).refine(value => Boolean(value.trim())),
-  assets: z.record(z.string().regex(/^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63}$/u), z.object({
+  htmlBytes: z.number().int().min(1).max(maxPackageBytes),
+  assets: z.array(z.object({
+    name: z.string().regex(/^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63}$/u),
     mime: z.enum(['image/png', 'image/jpeg', 'image/webp', 'text/css', 'text/javascript']),
-    data: z.string().regex(/^[A-Za-z0-9+/]*={0,2}$/u).max(maxPackageBytes),
-  }).strict()).default({}),
-}).strict().refine(value => Object.keys(value.assets).length <= 32
-  && Buffer.byteLength(JSON.stringify(value)) <= maxPackageBytes);
+    bytes: z.number().int().min(0).max(maxPackageBytes),
+  }).strict()).max(32),
+  parts: z.array(versionId).min(1).max(maxPackageParts),
+}).strict().refine(value => {
+  const size = packageBytes(value);
+  return size <= maxPackageBytes && value.parts.length === Math.ceil(size / packagePartBytes)
+    && new Set(value.assets.map(asset => asset.name)).size === value.assets.length;
+});
+
+export const packageBytes = value => value.htmlBytes + value.assets.reduce((total, asset) => total + asset.bytes, 0);
+export const partSize = (value, index) => Math.min(packagePartBytes, packageBytes(value) - index * packagePartBytes);
+export const completeUpload = row => row.package?.parts.every((_, index) => row.uploaded?.includes(index)) === true;
+export function visualizationLimit(thread) {
+  const saved = thread.visualizationLimit;
+  return Number.isInteger(saved?.limitMiB) && saved.limitMiB >= 1 && saved.limitMiB <= maxPackageMiB
+    && Number.isSafeInteger(saved.revision) && saved.revision > 0 ? saved : { limitMiB: 1, revision: 0 };
+}
+
+export function checkVisualizationSize(thread, size) {
+  if (size > visualizationLimit(thread).limitMiB * mib) fail(413, 'VISUALIZATION_TOO_LARGE');
+}
 
 export const binding = z.object({ alias: id, reference: dataRef, grant: id, mode }).strict();
 export const descriptors = z.array(binding).max(4).refine(items => new Set(items.map(item => item.alias)).size === items.length);
@@ -63,7 +85,7 @@ export async function threadAccess(tx, db, location, uid, write = false) {
   const generation = m.data().generation;
   if (generation !== location.generation) fail(409, 'STALE_MEMBERSHIP');
   if (write && !thread.participants.includes('user:' + uid)) fail(403, 'DATA_ACCESS_REQUIRED');
-  return { ref, team, thread, generation };
+  return { ref, team, thread, generation, member: m.data() };
 }
 
 export async function channelAudience(tx, team, thread) {
@@ -179,10 +201,11 @@ export async function confirmVisualizationDelivery(tx, team, thread, input, uid,
   if (thread.kind !== 'channel' || !row || row.uid !== uid || row.message !== input.messageId
       || row.destination.team !== input.teamId || row.destination.conversation !== input.conversationId
       || row.version !== spec.reference.version || row.title !== spec.title || row.taskId !== task
-      || row.status !== 'pending' || !(row.expiresAt > now)
+      || row.status !== 'pending' || !(row.expiresAt > now) || !completeUpload(row)
       || key(row.bindings) !== key(spec.bindings)) {
     fail(409, 'DATA_SHARE_CHANGED');
   }
+  checkVisualizationSize(thread, row.bytes);
   if (!sameAudience(row.audience, await channelAudience(tx, team, thread))) fail(409, 'DATA_SHARE_CHANGED');
   await confirmVisualizationBindings(tx, conversationRef(team.firestore, input), row.audience, uid, input.messageId,
     spec.reference.version, spec.title, spec.bindings);

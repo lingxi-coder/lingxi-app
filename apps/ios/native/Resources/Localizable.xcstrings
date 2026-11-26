@@ -120500,6 +120500,40 @@
         }
       }
     },
+    "teams_visualization_limit": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可视化大小上限（MiB）"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "視覺化大小上限（MiB）"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Visualization size limit (MiB)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ビジュアライゼーションの上限（MiB）"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "시각화 크기 한도(MiB)"
+          }
+        }
+      }
+    },
     "teams_visualization_more": {
       "localizations": {
         "zh-Hans": {
@@ -120870,6 +120904,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "제목"
+          }
+        }
+      }
+    },
+    "teams_visualization_too_large": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此可视化超过了频道的大小上限。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此視覺化超過了頻道的大小上限。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This visualization exceeds the channel’s size limit."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ビジュアライゼーションがチャンネルのサイズ上限を超えています。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "시각화가 채널의 크기 한도를 초과했습니다."
           }
         }
       }

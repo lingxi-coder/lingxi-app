@@ -39,7 +39,6 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
-private const val packageLimit = 2 * 1024 * 1024
 private val wireAlias = Regex("[A-Za-z0-9_-]{1,64}")
 
 @Composable
@@ -98,7 +97,7 @@ internal fun TeamVisualizationComposer(conversation: String, model: TeamMessagin
                         while (true) {
                             val count = stream.read(buffer)
                             if (count < 0) break
-                            if (contents.size() + count > packageLimit) throw TeamMessageFailure("VISUALIZATION_TOO_LARGE")
+                            if (contents.size() + count > TeamVisualizationTransfer.maximumBytes) throw TeamMessageFailure("VISUALIZATION_TOO_LARGE")
                             contents.write(buffer, 0, count)
                         }
                         contents.toString(Charsets.UTF_8.name())
@@ -160,18 +159,22 @@ internal fun TeamVisualizationComposer(conversation: String, model: TeamMessagin
     }
     fun publish() {
         if (busy || !valid || selected != null) return
-        val content = bundle()
-        if (content.toString().toByteArray().size > packageLimit) { error = "VISUALIZATION_TOO_LARGE"; return }
-        val body = objectOf("action" to "publish", "bundle" to content, "bindings" to JSONArray(bindings),
-            "audienceDigest" to audience.getString("audienceDigest"))
-        val draft = body.toString()
-        if (intent?.first != draft) intent = draft to UUID.randomUUID().toString()
-        body.put("operation", intent?.second)
         busy = true
         scope.launch {
             error = null
             try {
-                val result = model.visualization(conversation, body, from = from)
+                val transfer = TeamVisualizationTransfer.prepare(bundle())
+                val body = objectOf("action" to "publish", "package" to transfer.manifest, "bindings" to JSONArray(bindings),
+                    "audienceDigest" to audience.getString("audienceDigest"))
+                val draft = body.toString()
+                if (intent?.first != draft) intent = draft to UUID.randomUUID().toString()
+                body.put("operation", intent?.second)
+                val request: suspend (JSONObject) -> JSONObject = { model.visualization(conversation, it, from = from) }
+                var result = request(body.put("stage", "prepare"))
+                if (result.optString("status") == "uploading") {
+                    TeamVisualizationTransfer.upload(transfer, result, request)
+                    result = request(body.put("stage", "commit"))
+                }
                 if (result.optString("status") == "building") building = true else close()
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
@@ -197,7 +200,12 @@ internal fun TeamVisualizationComposer(conversation: String, model: TeamMessagin
                 TextButton(onClick = { openFile.launch(arrayOf("text/html", "text/plain")) }) {
                     Text(stringResource(R.string.teams_visualization_import))
                 }
-                OutlinedTextField(html, { html = it; preview = null }, label = { Text("HTML") }, minLines = 4)
+                if (html.length > TeamVisualizationTransfer.editableChars) {
+                    val bytes = remember(html) { html.toByteArray().size.toLong() }
+                    Text("HTML · " + android.text.format.Formatter.formatShortFileSize(context, bytes))
+                } else {
+                    OutlinedTextField(html, { html = it; preview = null }, label = { Text("HTML") }, minLines = 4)
+                }
                 TextButton(enabled = valid, onClick = { preview = bundle() }) {
                     Text(stringResource(R.string.teams_visualization_preview))
                 }
@@ -255,7 +263,7 @@ internal fun TeamVisualizationComposer(conversation: String, model: TeamMessagin
                 Text(stringResource(R.string.teams_visualization_audience_fmt,
                     audience.getJSONObject("audience").keys().asSequence().map(person).joinToString(" · ")))
                 if (building) Text(stringResource(R.string.teams_visualization_building))
-                error?.let { Text(it) }
+                error?.let { Text(if (it == "VISUALIZATION_TOO_LARGE") stringResource(R.string.teams_visualization_too_large) else it) }
             }
         },
         confirmButton = {

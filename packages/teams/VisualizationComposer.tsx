@@ -2,12 +2,12 @@ import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'rea
 import { DATA_PROTOCOL_VERSION } from './dataset-resource.js';
 import type { TeamsApi } from './index.js';
 import { VisualizationSurface } from './VisualizationSurface.js';
+import { editableVisualizationChars, prepareVisualizationPackage, uploadVisualizationParts, visualizationPackageBytes, type VisualizationUpload } from './visualization-transfer.js';
 import { type VisualizationAudience, type VisualizationBundle, type VisualizationDataRef, type VisualizationMode,
   type VisualizationScope, type VisualizationSource, visualizationLabels, visualizationRequest } from './visualization.js';
 
 type Source = { reference: VisualizationDataRef; via?: string | null; access: VisualizationMode; canShare: boolean };
 type Location = 'mine' | 'team' | 'shared';
-const bytes = 2 * 1024 * 1024;
 const safeAlias = /^[A-Za-z0-9_-]{1,64}$/u;
 const list = (input: string) => [...new Set(input.split(',').map(value => value.trim()).filter(Boolean))];
 const errorCode = (error: unknown) => error instanceof Error ? error.message : 'VISUALIZATION_UNAVAILABLE';
@@ -41,6 +41,9 @@ export function VisualizationComposer({ api, scope, locale, source, participantN
   const { teamId, generation } = scope;
   const [conversationId, setConversationId] = useState(scope.conversationId);
   const previewAliases = useMemo(() => bindings.map(item => item.alias), [bindings]);
+  const largeHtmlSize = useMemo(() => html.length > editableVisualizationChars
+    ? (new Blob([html]).size / (1024 * 1024)).toFixed(2)
+    : undefined, [html]);
   const forwarding = forward !== undefined;
 
   useEffect(() => {
@@ -96,7 +99,7 @@ export function VisualizationComposer({ api, scope, locale, source, participantN
   }
   async function importFile(file?: File) {
     if (!file) return;
-    if (file.size > bytes) { setError('VISUALIZATION_TOO_LARGE'); return; }
+    if (file.size > visualizationPackageBytes) { setError('VISUALIZATION_TOO_LARGE'); return; }
     try {
       setHtml(await file.text());
       if (!name) setName(file.name.replace(/\.html?$/iu, '').slice(0, 80));
@@ -106,15 +109,18 @@ export function VisualizationComposer({ api, scope, locale, source, participantN
   async function publish(event: FormEvent) {
     event.preventDefault();
     if (!audience || busy) return;
-    const bundle = currentBundle();
-    if (new TextEncoder().encode(JSON.stringify(bundle)).byteLength > bytes) { setError('VISUALIZATION_TOO_LARGE'); return; }
-    const body = { action: 'publish', bundle, bindings, audienceDigest: audience.audienceDigest };
-    const digest = JSON.stringify(body);
-    if (intent.current?.digest !== digest) intent.current = { digest, id: crypto.randomUUID() };
     setBusy(true); setError('');
     try {
-      const result = await visualizationRequest<{ status: 'published' | 'building' }>(api, { teamId, conversationId, generation },
-        { ...body, operation: intent.current.id });
+      const transfer = await prepareVisualizationPackage(currentBundle());
+      const body = { action: 'publish', package: transfer.package, bindings, audienceDigest: audience.audienceDigest };
+      const digest = JSON.stringify(body);
+      if (intent.current?.digest !== digest) intent.current = { digest, id: crypto.randomUUID() };
+      const request = <T,>(body: Record<string, unknown>) => visualizationRequest<T>(api, { teamId, conversationId, generation }, body);
+      const command = { ...body, operation: intent.current.id };
+      const prepared = await request<VisualizationUpload | { status: 'published' | 'building' }>({ ...command, stage: 'prepare' });
+      if (prepared.status === 'uploading') await uploadVisualizationParts(request, transfer, prepared);
+      const result = prepared.status === 'uploading'
+        ? await request<{ status: 'published' | 'building' }>({ ...command, stage: 'commit' }) : prepared;
       if (result.status === 'building') { setBuilding(true); return; }
       intent.current = undefined;
       dialog.current?.close();
@@ -149,7 +155,9 @@ export function VisualizationComposer({ api, scope, locale, source, participantN
           }}>{forward.targets.map(target => <option key={target.id} value={target.id}>{target.title}</option>)}</select></label>}
           <label>{labels.title}<input required maxLength={80} value={name} onChange={event => setName(event.target.value)} /></label>
           <label>{labels.import}<input type="file" accept=".html,.htm,text/html" onChange={event => void importFile(event.target.files?.[0])} /></label>
-          <label>{labels.source}<textarea required rows={8} value={html} onChange={event => { setHtml(event.target.value); setPreview(undefined); }} /></label>
+          {largeHtmlSize
+            ? <p>{labels.source} · {largeHtmlSize} MiB</p>
+            : <label>{labels.source}<textarea required rows={8} value={html} onChange={event => { setHtml(event.target.value); setPreview(undefined); }} /></label>}
           <button type="button" className="tw-btn" disabled={!name.trim() || !html.trim()} onClick={() => setPreview(currentBundle())}>{labels.preview}</button>
           {preview && <VisualizationSurface bundle={preview} aliases={previewAliases} locale={locale}
             request={async request => {
@@ -191,7 +199,7 @@ export function VisualizationComposer({ api, scope, locale, source, participantN
               className="tw-link" onClick={() => setBindings(previous => previous.filter(binding => binding.alias !== item.alias))}>{labels.remove}</button></li>)}</ul>}
           </fieldset>
           {audience && <p>{labels.audience(Object.keys(audience.audience).map(participantName).join(' · '))}</p>}
-          {error && <p role="alert">{error}</p>}
+          {error && <p role="alert">{error === 'VISUALIZATION_TOO_LARGE' ? labels.tooLarge : error}</p>}
           {building && <p role="status">{labels.building}</p>}
           <button className="tw-btn" type="button" disabled={busy} onClick={() => dialog.current?.close()}>{labels.close}</button>
           <button className="tw-primary" type="submit" disabled={!audience || busy || !name.trim() || !html.trim() || !!selected}>

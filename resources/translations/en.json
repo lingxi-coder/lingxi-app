@@ -4195,6 +4195,8 @@
   "teams_dataset_audience %@": "Share with %@",
   "teams_visualization_access": "Access",
   "teams_visualization_add": "Add visualization",
+  "teams_visualization_limit": "Visualization size limit (MiB)",
+  "teams_visualization_too_large": "This visualization exceeds the channel’s size limit.",
   "teams_visualization_alias": "Binding name",
   "teams_visualization_apply": "Apply changes",
   "teams_visualization_building": "Preparing a fixed snapshot…",

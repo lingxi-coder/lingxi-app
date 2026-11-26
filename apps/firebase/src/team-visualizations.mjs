@@ -4,15 +4,18 @@ import { TeamMessagesStore } from './team-messages.mjs';
 import { SharedBotsStore } from './shared-bots.mjs';
 import { sharedBotCommand } from './shared-bot-commands.mjs';
 import { LingxiDataError } from './lingxi-data.mjs';
-import { reservationMs, rowRef, scheduleVisualizationCleanup, sweepVisualizations, trackVisualization, visualizationFile, visualizationQuota } from './team-visualization-storage.mjs';
+import { reservationMs, rowRef, scheduleVisualizationCleanup, sweepVisualizations, trackVisualization, visualizationPart, visualizationQuota } from './team-visualization-storage.mjs';
 import {
-  bundle, canonical, channelAudience, confirmVisualizationBindings, dataRef, fail, hash, id, key, maxPackageBytes, messageId,
-  mode, projection, sameAudience, scope, threadAccess, versionId, visualizationChannelEnabled,
+  canonical, channelAudience, checkVisualizationSize, completeUpload, confirmVisualizationBindings, dataRef, fail, hash, id, key,
+  maxPackageMiB, maxPackageParts, messageId, mode, packageBytes, packagePartBytes, partSize, projection, sameAudience, scope, threadAccess,
+  versionId, visualizationChannelEnabled, visualizationLimit, visualizationPackage,
 } from './team-visualization-contract.mjs';
 
 const cardLocator = { message: messageId, version: versionId };
 const locator = { ...scope, ...cardLocator };
 const alias = { alias: id };
+const stage = z.enum(['prepare', 'commit']);
+const index = z.number().int().min(0).max(maxPackageParts - 1);
 const bindings = z.array(z.discriminatedUnion('kind', [
   z.object({ ...alias, kind: z.literal('reuse'), reference: dataRef, grant: id, mode }).strict(),
   z.object({ ...alias, kind: z.literal('share'), dataset: id, via: id.optional(),
@@ -20,15 +23,21 @@ const bindings = z.array(z.discriminatedUnion('kind', [
 ])).max(4).refine(items => new Set(items.map(item => item.alias)).size === items.length);
 const a2aArtifact = z.object({ artifactId: id, name: z.string(),
   parts: z.tuple([z.object({ mediaType: z.literal('application/json'), data: z.object({
-    version: z.literal(1), bundle, bindings: z.array(z.object({ alias: id, messageId: id, sourceAlias: id.optional() }).strict())
+    version: z.literal(2), package: visualizationPackage, bindings: z.array(z.object({ alias: id, messageId: id, sourceAlias: id.optional() }).strict())
       .max(4).refine(items => new Set(items.map(item => item.alias)).size === items.length),
   }).strict() }).strict()]),
-}).strict().refine(value => value.name === value.parts[0].data.bundle.title);
+}).strict().refine(value => value.name === value.parts[0].data.package.title);
 const request = z.discriminatedUnion('action', [
   z.object({ action: z.literal('audience'), ...scope }).strict(),
-  z.object({ action: z.literal('publish'), ...scope, operation: id, audienceDigest: id,
-    bundle, bindings: bindings.default([]) }).strict(),
-  z.object({ action: z.literal('completeBot'), completion: sharedBotCommand, artifact: a2aArtifact }).strict(),
+  z.object({ action: z.literal('settings'), ...scope }).strict(),
+  z.object({ action: z.literal('setLimit'), ...scope, limitMiB: z.number().int().min(1).max(maxPackageMiB),
+    expectedRevision: z.number().int().nonnegative() }).strict(),
+  z.object({ action: z.literal('publish'), ...scope, stage, operation: id, audienceDigest: id,
+    package: visualizationPackage, bindings: bindings.default([]) }).strict(),
+  z.object({ action: z.literal('completeBot'), stage, completion: sharedBotCommand, artifact: a2aArtifact }).strict(),
+  z.object({ action: z.literal('putPart'), ...locator, index,
+    data: z.string().min(4).max(Math.ceil(packagePartBytes / 3) * 4).regex(/^[A-Za-z0-9+/]+={0,2}$/u) }).strict(),
+  z.object({ action: z.literal('readPart'), ...locator, index }).strict(),
   z.object({ action: z.literal('open'), ...locator }).strict(),
   z.object({ action: z.literal('checkBatch'), ...scope, cards: z.array(z.object(cardLocator).strict()).min(1).max(40) }).strict(),
   z.object({ action: z.literal('state'), ...locator, expected: z.number().int().nonnegative(),
@@ -48,9 +57,12 @@ const target = input => ({ team: input.teamId, conversation: input.conversationI
 const artifact = (page, version) => ({ kind: 'pageVersion', page, version });
 const committed = row => row && (['active', 'recalled'].includes(row.status) || row.recalled === true);
 const descriptor = (row, page, version) => ({ reference: artifact(page, version), title: row.title, bindings: row.bindings });
+const uploadPlan = (location, message, version, row) => ({
+  status: 'uploading', teamId: location.teamId, conversationId: location.conversationId, generation: location.generation,
+  message, version, missing: row.package.parts.flatMap((_, index) => row.uploaded.includes(index) ? [] : [index]),
+});
 
 export function createTeamVisualizations({ db, bucket, core, channels = '', clock = Date.now }) {
-  if (!bucket) return undefined;
   const canPublish = input => visualizationChannelEnabled(channels, input.teamId, input.conversationId);
   const stateRef = (input, uid) => rowRef(db, input.message, input.version).collection('viewerState')
     .doc(key([uid, input.generation]));
@@ -62,7 +74,7 @@ export function createTeamVisualizations({ db, bucket, core, channels = '', cloc
     if (row?.status === 'active' && Object.hasOwn(row.audience, user.uid) && row.audience[user.uid] === input.generation
         && row.destination.team === input.teamId && row.destination.conversation === input.conversationId
         && message && !message.recalled && message.visualization?.reference?.page === input.message
-        && message.visualization.reference.version === input.version) return message.visualization;
+        && message.visualization.reference.version === input.version) return { row, descriptor: message.visualization };
   }
 
   async function authority(tx, input, user) {
@@ -107,7 +119,7 @@ export function createTeamVisualizations({ db, bucket, core, channels = '', cloc
       }
       const prepared = await call('prepareShare', { share: {
         destination: target(input), mode: spec.mode, projection: spec.projection, reference,
-        audienceDigest: key([target(input), audience]), textDigest: hash(input.bundle.title, 'base64url'),
+        audienceDigest: key([target(input), audience]), textDigest: hash(input.package.title, 'base64url'),
         visualization: { message: page, version, binding: spec.alias },
       } });
       if (prepared.messageId !== page || !dataRef.safeParse(prepared.reference).success || !id.safeParse(prepared.grant).success) {
@@ -118,10 +130,9 @@ export function createTeamVisualizations({ db, bucket, core, channels = '', cloc
     return results;
   }
 
-  async function reserveAndUpload(input, user, audience, prepared, page, version, bytes, taskId) {
-    const intentDigest = key([input, taskId ?? null]);
+  async function reserve(input, user, audience, prepared, page, version, intentDigest, taskId) {
     const ref = rowRef(db, page, version);
-    const row = await db.runTransaction(async tx => {
+    return db.runTransaction(async tx => {
       const { team, thread, ref: channel } = await threadAccess(tx, db, input, user.uid);
       const operation = channel.collection('visualizationOperations').doc(page);
       const quota = visualizationQuota(team);
@@ -130,6 +141,8 @@ export function createTeamVisualizations({ db, bucket, core, channels = '', cloc
       const existing = previous.data();
       if (existing && existing.intentDigest !== intentDigest) fail(409, 'MESSAGE_ID_CONFLICT');
       if (committed(existing)) return existing;
+      const size = packageBytes(input.package);
+      checkVisualizationSize(thread, size);
       if (!taskId && !thread.participants.includes(`user:${user.uid}`)) fail(403, 'DATA_ACCESS_REQUIRED');
       if (!sameAudience(audience, await channelAudience(tx, team, thread))) fail(409, 'DATA_SHARE_CHANGED');
       if (existing && (existing.status !== 'pending' || !(existing.expiresAt > clock()))) {
@@ -141,12 +154,12 @@ export function createTeamVisualizations({ db, bucket, core, channels = '', cloc
         scheduleVisualizationCleanup(tx, db, team, artifact(page, version), expiresAt);
         return existing;
       }
-      await confirmVisualizationBindings(tx, channel, audience, user.uid, page, version, input.bundle.title, prepared);
+      await confirmVisualizationBindings(tx, channel, audience, user.uid, page, version, input.package.title, prepared);
       const consumed = usage.data()?.bytes ?? 0;
-      if (!Number.isSafeInteger(consumed) || consumed < 0 || consumed + Buffer.byteLength(bytes) > budget) fail(429, 'DATA_QUOTA');
-      const size = Buffer.byteLength(bytes), expiresAt = clock() + reservationMs;
+      const expiresAt = clock() + reservationMs;
+      if (!Number.isSafeInteger(consumed) || consumed < 0 || consumed + size > budget) fail(429, 'DATA_QUOTA');
       const value = { uid: user.uid, destination: target(input), message: page, version, status: 'pending', audience, bytes: size, expiresAt,
-        title: input.bundle.title, bindings: prepared, ...(taskId ? { taskId } : {}), intentDigest };
+        title: input.package.title, package: input.package, uploaded: [], bindings: prepared, ...(taskId ? { taskId } : {}), intentDigest };
       tx.create(ref, value);
       trackVisualization(tx, team, artifact(page, version));
       tx.create(operation, { intentDigest });
@@ -154,24 +167,78 @@ export function createTeamVisualizations({ db, bucket, core, channels = '', cloc
       scheduleVisualizationCleanup(tx, db, team, artifact(page, version), expiresAt);
       return value;
     });
-    if (committed(row)) return undefined;
-    const blob = visualizationFile(bucket, page, version);
+  }
+
+  async function putPart(input, user) {
+    const ref = rowRef(db, input.message, input.version);
+    const row = await db.runTransaction(async tx => {
+      const { team, thread } = await threadAccess(tx, db, input, user.uid);
+      const row = (await tx.get(ref)).data();
+      if (!row || row.uid !== user.uid || row.destination.team !== input.teamId || row.destination.conversation !== input.conversationId) {
+        fail(403, 'DATA_ACCESS_REQUIRED');
+      }
+      if (row.status === 'active' && row.uploaded?.includes(input.index)) return row;
+      if (row.status !== 'pending' || !(row.expiresAt > clock())) fail(409, 'DATA_SHARE_CHANGED');
+      checkVisualizationSize(thread, row.bytes);
+      if (!row.package.parts[input.index]) fail(400, 'INVALID_DATA_REQUEST');
+      if (row.expiresAt - clock() < reservationMs / 2) {
+        const expiresAt = clock() + reservationMs;
+        tx.update(ref, { expiresAt });
+        scheduleVisualizationCleanup(tx, db, team, artifact(input.message, input.version), expiresAt);
+      }
+      return row;
+    });
+    const bytes = Buffer.from(input.data, 'base64');
+    const expected = row.package.parts[input.index];
+    if (bytes.length !== partSize(row.package, input.index) || hash(bytes) !== expected) fail(400, 'INVALID_DATA_REQUEST');
+    if (row.uploaded.includes(input.index)) return { ok: true };
+    const blob = visualizationPart(bucket, input.message, input.version, input.index);
     try {
       await blob.save(bytes, { resumable: false, preconditionOpts: { ifGenerationMatch: 0 },
-        metadata: { contentType: 'application/json', cacheControl: 'no-store' } });
+        metadata: { contentType: 'application/octet-stream', cacheControl: 'no-store' } });
     } catch (error) {
       if (Number(error.code) !== 412) throw error;
       const [existing] = await blob.download({ validation: 'crc32c' });
-      if (existing.length > maxPackageBytes || hash(existing) !== version) fail(503, 'DATA_UNAVAILABLE');
+      if (existing.length !== bytes.length || hash(existing) !== expected) fail(503, 'DATA_UNAVAILABLE');
     }
-    return descriptor(row, page, version);
+    const kept = await db.runTransaction(async tx => {
+      const current = (await tx.get(ref)).data();
+      if (current?.status === 'active') return current.uploaded.includes(input.index);
+      if (current?.status !== 'pending' || !(current.expiresAt > clock())) return false;
+      if (!current.uploaded.includes(input.index)) tx.update(ref, { uploaded: [...current.uploaded, input.index] });
+      return true;
+    });
+    if (!kept) {
+      await blob.delete({ ignoreNotFound: true });
+      fail(409, 'DATA_SHARE_CHANGED');
+    }
+    return { ok: true };
   }
 
   async function audienceFor(input, user) {
     if (!canPublish(input)) fail(404, 'VISUALIZATION_UNAVAILABLE');
     return db.runTransaction(async tx => {
       const { team, thread } = await threadAccess(tx, db, input, user.uid, true);
-      return channelAudience(tx, team, thread);
+      const audience = await channelAudience(tx, team, thread);
+      return { audience, audienceDigest: key([target(input), audience]) };
+    });
+  }
+
+  function settings(input, user) {
+    return db.runTransaction(async tx => {
+      const { thread, ref, member } = await threadAccess(tx, db, input, user.uid);
+      const current = visualizationLimit(thread);
+      const canEdit = ['owner', 'admin'].includes(member.role);
+      if (input.action === 'settings') return { ...current, canEdit };
+      if (!canEdit) fail(403, 'MANAGER_REQUIRED');
+      if (current.revision !== input.expectedRevision) {
+        if (current.limitMiB === input.limitMiB) return { ...current, canEdit };
+        fail(409, 'VISUALIZATION_LIMIT_CONFLICT');
+      }
+      if (current.limitMiB === input.limitMiB) return { ...current, canEdit };
+      const next = { limitMiB: input.limitMiB, revision: current.revision + 1 };
+      tx.update(ref, { visualizationLimit: next });
+      return { ...next, canEdit };
     });
   }
 
@@ -182,10 +249,10 @@ export function createTeamVisualizations({ db, bucket, core, channels = '', cloc
     if (task.taskId !== input.artifact.artifactId) fail(403, 'EXECUTION_PERMIT_REQUIRED');
     const location = { teamId: command.teamId, conversationId: task.conversationId, generation: command.generation };
     const contents = input.artifact.parts[0].data;
-    const bytes = canonical(contents.bundle), version = hash(bytes);
+    const version = hash(canonical(contents.package));
     const page = 'viz_' + key([target(location), task.taskId]);
     const intent = key(input.artifact);
-    const finish = descriptor => bot.execute(user, command, undefined, undefined, { intent, descriptor });
+    const finish = async descriptor => ({ status: 'completed', result: await bot.execute(user, command, undefined, undefined, { intent, descriptor }) });
     if (replay || !publish || !canPublish(location)) return finish();
     try {
       const { audience, prepared } = await db.runTransaction(async tx => {
@@ -204,27 +271,31 @@ export function createTeamVisualizations({ db, bucket, core, channels = '', cloc
         });
         return { audience: await channelAudience(tx, team, thread), prepared };
       });
-      const visualization = await reserveAndUpload({ ...location, ...contents }, user, audience, prepared, page, version, bytes, task.taskId);
-      return await finish(visualization);
+      const row = await reserve({ ...location, ...contents }, user, audience, prepared, page, version, intent, task.taskId);
+      if (committed(row)) return finish();
+      if (input.stage === 'prepare') return uploadPlan(location, page, version, row);
+      if (!completeUpload(row)) fail(409, 'VISUALIZATION_UPLOAD_INCOMPLETE');
+      return await finish(descriptor(row, page, version));
     } catch (error) {
-      if (!(error instanceof LingxiDataError) || !['DATA_ACCESS_REQUIRED', 'DATA_SHARE_CHANGED', 'DATA_QUOTA'].includes(error.code)) throw error;
+      if (!(error instanceof LingxiDataError) || !['DATA_ACCESS_REQUIRED', 'DATA_SHARE_CHANGED', 'DATA_QUOTA', 'VISUALIZATION_TOO_LARGE'].includes(error.code)) throw error;
       return finish();
     }
   }
 
   async function execute(user, token, raw) {
     const input = request.parse(raw);
+    if (input.action === 'settings' || input.action === 'setLimit') return settings(input, user);
+    if (!bucket) fail(404, 'VISUALIZATION_UNAVAILABLE');
     if (input.action === 'completeBot') return completeBot(user, input);
+    if (input.action === 'putPart') return putPart(input, user);
     if (input.action === 'checkBatch') return db.runTransaction(tx => checkBatch(tx, input, user));
-    if (input.action === 'audience') {
-      const audience = await audienceFor(input, user);
-      return { audience, audienceDigest: key([target(input), audience]) };
-    }
+    if (input.action === 'audience') return audienceFor(input, user);
     if (input.action === 'publish') {
-      const bytes = canonical(input.bundle), version = hash(bytes);
+      const version = hash(canonical(input.package));
       const page = 'viz_' + key([user.uid, target(input), input.operation]);
       const result = { status: 'published', messageId: page, reference: artifact(page, version) };
-      const intentDigest = key([input, null]);
+      const { stage, ...intent } = input;
+      const intentDigest = key(intent);
       function receipt(row) {
         if (!committed(row)) return false;
         if (row.uid !== user.uid || row.destination.team !== input.teamId || row.destination.conversation !== input.conversationId
@@ -238,14 +309,18 @@ export function createTeamVisualizations({ db, bucket, core, channels = '', cloc
           if (receipt(row)) return null;
           if (!canPublish(input)) fail(404, 'VISUALIZATION_UNAVAILABLE');
           if (!thread.participants.includes(`user:${user.uid}`)) fail(403, 'DATA_ACCESS_REQUIRED');
+          checkVisualizationSize(thread, packageBytes(input.package));
           return channelAudience(tx, team, thread);
         });
         if (!audience) return result;
         if (input.audienceDigest !== key([target(input), audience])) fail(409, 'DATA_SHARE_CHANGED');
         const prepared = await prepareBindings(input, token, page, version, audience);
         if (!prepared) return { status: 'building' };
-        const delivered = await reserveAndUpload(input, user, audience, prepared, page, version, bytes);
-        if (!delivered) return result;
+        const row = await reserve(input, user, audience, prepared, page, version, intentDigest);
+        if (committed(row)) return result;
+        if (stage === 'prepare') return uploadPlan(input, page, version, row);
+        if (!completeUpload(row)) fail(409, 'VISUALIZATION_UPLOAD_INCOMPLETE');
+        const delivered = descriptor(row, page, version);
         await new TeamMessagesStore(db, clock).execute(user, { action: 'mutate', operation: 'create', teamId: input.teamId,
           generation: input.generation, conversationId: input.conversationId, changeId: page, messageId: page,
           text: delivered.title }, undefined, delivered);
@@ -271,7 +346,13 @@ export function createTeamVisualizations({ db, bucket, core, channels = '', cloc
         return next;
       });
     }
-    const verified = await db.runTransaction(tx => authority(tx, input, user));
+    if (input.action === 'open') return db.runTransaction(async tx => {
+      const { row, descriptor } = await authority(tx, input, user);
+      if (!completeUpload(row)) fail(403, 'DATA_ACCESS_REQUIRED');
+      const state = viewerState((await tx.get(stateRef(input, user.uid))).data());
+      return { package: row.package, bindings: descriptor.bindings, state };
+    });
+    const { row } = await db.runTransaction(tx => authority(tx, input, user));
     if (input.action === 'data') {
       if (!core) fail(503, 'DATA_UNAVAILABLE');
       return core(token, { protocol: DATA_PROTOCOL_VERSION, operation: input.operation, command: {
@@ -279,14 +360,13 @@ export function createTeamVisualizations({ db, bucket, core, channels = '', cloc
         alias: input.alias, request: input.request,
       } });
     }
-    const [bytes] = await visualizationFile(bucket, input.message, input.version).download({ validation: 'crc32c' });
-    if (bytes.length > maxPackageBytes || hash(bytes) !== input.version) fail(503, 'DATA_UNAVAILABLE');
-    const state = await db.runTransaction(async tx => {
-      await authority(tx, input, user);
-      return viewerState((await tx.get(stateRef(input, user.uid))).data());
-    });
-    return { bundle: bundle.parse(JSON.parse(bytes)), bindings: verified.bindings, state };
+    const expected = row.package?.parts[input.index];
+    if (!expected) fail(400, 'INVALID_DATA_REQUEST');
+    const [bytes] = await visualizationPart(bucket, input.message, input.version, input.index).download({ validation: 'crc32c' });
+    if (bytes.length !== partSize(row.package, input.index) || hash(bytes) !== expected) fail(503, 'DATA_UNAVAILABLE');
+    await db.runTransaction(tx => authority(tx, input, user));
+    return { data: bytes.toString('base64') };
   }
 
-  return { execute, audienceFor, reserveAndUpload, canPublish, sweep: () => sweepVisualizations(db, bucket, clock()) };
+  return { execute, sweep: async () => { if (bucket) await sweepVisualizations(db, bucket, clock()); } };
 }

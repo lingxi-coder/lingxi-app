@@ -2501,6 +2501,20 @@ impl RemoteControlCore {
         image_from_data_url(&url)
     }
 
+    /// A thumbnail for inline display, or the original bytes for the viewer.
+    pub async fn fetch_image_variant(
+        &self,
+        session_id: String,
+        image_ref: String,
+        thumbnail: bool,
+    ) -> Result<RemoteImageFfi, RemoteFfiError> {
+        use remote_control_client::messages::SessionImageSize;
+        let size = if thumbnail { SessionImageSize::Thumbnail } else { SessionImageSize::Original };
+        let url = self.controller(&session_id)?.fetch_image_with_size(&image_ref, Some(size))
+            .await.map_err(rpc_error)?;
+        image_from_data_url(&url)
+    }
+
     /// Send a prompt. It shows up in `outgoing` until its own record comes back;
     /// a failure shows there too (see `retry_prompt`). While a turn runs only text is accepted.
     pub async fn send_prompt(

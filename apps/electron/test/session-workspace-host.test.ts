@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import type { SessionWorkspaceState, SetWorkingDirectoryRequest, SetWorkingDirectoryResult } from '@lingxi/bridge-client';
 
-import { HostController, resolveSavedConversationTranscript, type WorkspaceDialogs } from '../src/main/host';
+import { CH_SESSION_OPEN, HostController, resolveSavedConversationTranscript, type WorkspaceDialogs } from '../src/main/host';
 import { SessionRuntime } from '../src/main/bridge';
 import { SessionRuntimeManager } from '../src/main/sessionRuntimeManager';
 import { DiagnosticBuffer } from '../src/main/host-utils';
@@ -17,7 +17,7 @@ import type { SessionCatalogScope, SessionOpenSelection } from '../src/shared/se
 import { CH_NATIVE_AUDIO_FLOW_LEASE } from '../src/shared/nativeAudio';
 import { CH_REALTIME_AUDIO_COMMAND } from '../src/shared/realtimeAudio';
 import { audioConfigurationDefaults } from '../src/shared/generatedAudioConfiguration';
-import { CH_SESSION_HISTORY } from '../src/shared/sessionHistory';
+import { CH_SESSION_HISTORY, CH_SESSION_IMAGE, CH_SESSION_RESUME_PREVIEW, type TranscriptHistoryPage } from '../src/shared/sessionHistory';
 
 const sessionId = '11111111-2222-4333-8444-555555555555';
 const otherId = '22222222-3333-4444-8555-666666666666';
@@ -193,6 +193,47 @@ async function hostFixture(t: TestContext, options: { registered?: boolean } = {
   t.after(async () => { host.dispose(); await terminals.dispose(); rmSync(root, { recursive: true, force: true }); });
   return { root, source, target, userData, ref, settings, original, runtimes, grants, projectRoots, promptDirectories, calls, bridge, row, catalog, dialogs, host, handlers };
 }
+
+test('cold open starts the engine while the first page is pending and reads its thumbnail before activation', { timeout: 5_000 }, async t => {
+  const f = await hostFixture(t);
+  f.runtimes.clear();
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sent: Array<{ channel: string; body: unknown }> = [];
+  const sender = { id: 1, mainFrame: frame, isDestroyed: () => false, once() {},
+    send(channel: string, body: unknown) { sent.push({ channel, body }); } };
+  const event = { sender, senderFrame: frame };
+  f.host.registerWindow(sender as any, frame.url);
+  f.host.registerIpc();
+  const asset = { mediaType: 'image/png', base64: 'AQID' };
+  const page = Promise.withResolvers<TranscriptHistoryPage>();
+  const engineStarted = Promise.withResolvers<void>();
+  const engineReady = Promise.withResolvers<void>();
+  const row = f.row(f.source);
+  Object.assign(f.catalog, { selectForOpen: async () => ({ session: row, preview: page.promise }), readImage: async () => asset });
+  const open = f.bridge.openSession;
+  f.bridge.openSession = async (...args) => {
+    engineStarted.resolve();
+    await engineReady.promise;
+    return open(...args);
+  };
+  const reference = `lingxi-history-image:${otherId}:0:png`;
+  const opening = f.handlers.get(CH_SESSION_OPEN)!(event, f.source, sessionId,
+    { scope: 'current', transcriptPath: row.path }, undefined, undefined, undefined, 'request-1');
+  try {
+    await engineStarted.promise;
+    assert.equal(sent.some(item => item.channel === CH_SESSION_RESUME_PREVIEW), false);
+    page.resolve({ before: null, messages: [
+      { role: 'user', transcript_uuid: otherId, blocks: [], images: [{ media_type: 'image/png', url: reference }] },
+    ] });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sent.filter(item => item.channel === CH_SESSION_RESUME_PREVIEW).length, 1);
+    assert.equal(f.runtimes.has(sessionId), false);
+    assert.deepEqual(await f.handlers.get(CH_SESSION_IMAGE)!(event, sessionId, reference, 'thumbnail'), asset);
+  } finally {
+    engineReady.resolve();
+    await opening;
+  }
+});
 
 test('history reads the active runtime exact source while work continues and fences late pages', async t => {
   const f = await hostFixture(t);

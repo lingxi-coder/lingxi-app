@@ -327,10 +327,14 @@ export interface SessionActivityResult {
 /** `image.get` (request): fetch an image by the ref a record carries. */
 export interface ImageGetParams {
   ref: string;
+  size?: 'thumbnail' | 'original';
+  /** Offset in base64 characters for an original image. */
+  offset?: number;
 }
 export interface ImageGetResult {
   media_type: string;
   base64: string;
+  next_offset?: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

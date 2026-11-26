@@ -25,6 +25,7 @@ import type {
 } from '@lingxi/bridge-client/remote';
 
 import { CLIENT_EVENT_REMOTE_DISPOSITIONS, type RemoteEventDisposition } from '../../shared/clientCommands.js';
+import { isHistoryImageReference } from '../../shared/sessionHistory.js';
 import type { InteractionRecord, PromptJournalEntry, RemoteRuntimeView, SequencedRuntimeEventEnvelope } from '../bridgeTypes.js';
 
 /** One page of messages or records. */
@@ -128,13 +129,13 @@ function mapBlock(block: MessageBlockDto, cuts: { any: boolean }): MessageBlockD
 
 /**
  * A message as a viewer receives it: thinking without its signature, tool
- * fields cut, images as references (an image that is not a `data:` URL is
- * left out; only the desktop knows what such a URL points at).
+ * fields cut, and locally resolvable images represented as remote references.
  */
 function mapMessage(message: Message, refFor: (index: number) => string, cuts: { any: boolean }): Message {
   const mapped: Message = { ...message, blocks: message.blocks.map((block) => mapBlock(block, cuts)) };
   if (message.images !== undefined) {
-    const images = message.images.flatMap((image, index) => (parseDataUrl(image.url) ? [{ media_type: image.media_type, url: refFor(index) }] : []));
+    const images = message.images.flatMap((image, index) => (isHistoryImageReference(image.url) || parseDataUrl(image.url)
+      ? [{ media_type: image.media_type, url: refFor(index) }] : []));
     if (images.length > 0) mapped.images = images;
     else delete mapped.images;
   }
@@ -392,12 +393,17 @@ export function activityPreview(view: RemoteRuntimeView, uuids: readonly string[
   return { available: true, messages };
 }
 
-/** The image a reference stands for, while the runtime still holds its bytes. */
+function localImage(url: string | undefined) {
+  if (url === undefined) return undefined;
+  return isHistoryImageReference(url) ? { historyReference: url } : parseDataUrl(url);
+}
+
+/** Resolve a remote reference against the runtime's retained messages. */
 export function resolveImage(
   view: RemoteRuntimeView,
   ref: string,
   promptImage: (sequence: number, index: number) => { media_type: string; base64: string } | undefined,
-): { media_type: string; base64: string } | undefined {
+): { media_type: string; base64: string } | { historyReference: string } | undefined {
   const parsed = parseImageRef(ref);
   if (parsed === undefined || parsed.sessionId !== view.sessionId) return undefined;
   switch (parsed.kind) {
@@ -406,13 +412,13 @@ export function resolveImage(
     case 'base': {
       const base = view.base?.event;
       const url = base?.type === 'session_resumed' ? base.messages[parsed.message]?.images?.[parsed.index]?.url : undefined;
-      return url === undefined ? undefined : parseDataUrl(url);
+      return localImage(url);
     }
     case 'event': {
       const envelope = view.events.find((candidate) => candidate.sequence === parsed.sequence);
       const event = envelope?.event;
       const url = event?.type === 'message_complete' ? event.message?.images?.[parsed.index]?.url : undefined;
-      return url === undefined ? undefined : parseDataUrl(url);
+      return localImage(url);
     }
   }
 }

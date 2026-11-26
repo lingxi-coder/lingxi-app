@@ -10,7 +10,7 @@ import type {
   SessionAgentSummaryDto,
   TaskRowDto,
 } from '@lingxi/bridge-client';
-import { fileMentionsFromPrompt } from './fileMentions';
+import { fileMentionsFromPrompt } from '../../shared/fileMentions';
 import { emptySubmittedPlanState, latestSubmittedPlan, prependSubmittedPlanMessages, reduceSubmittedPlanEvent, reduceSubmittedPlanPermission, type SubmittedPlan, type SubmittedPlanState } from './submittedPlan';
 
 export type RuntimeCenterSection = 'tasks' | 'agents' | 'todos' | 'resources' | 'plan' | 'review';

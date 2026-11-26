@@ -56,6 +56,7 @@ internal sealed interface ImagePreviewSource {
     val mediaType: String
     data class Encoded(val base64: String, override val mediaType: String) : ImagePreviewSource
     data class LocalFile(val file: File, override val mediaType: String) : ImagePreviewSource
+    data class Remote(val reference: String, override val mediaType: String, val load: suspend () -> ByteArray) : ImagePreviewSource
 }
 
 private data class PreviewAsset(val bitmap: ImageBitmap, val bytes: ByteArray, val width: Int, val height: Int)
@@ -72,6 +73,7 @@ internal fun ImagePreviewDialog(source: ImagePreviewSource, onDismiss: () -> Uni
                 val bytes = when (source) {
                     is ImagePreviewSource.Encoded -> Base64.decode(source.base64, Base64.DEFAULT)
                     is ImagePreviewSource.LocalFile -> source.file.readBytes()
+                    is ImagePreviewSource.Remote -> source.load()
                 }
                 var width = 0
                 var height = 0

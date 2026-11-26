@@ -1,4 +1,5 @@
 import { DESKTOP_BRIDGE_GLOBAL } from '../../shared/desktopBridge';
+import { isHistoryImageReference, type SessionImageSize } from '../../shared/sessionHistory';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { ComposerImageThumbnail } from '../../../../../packages/chat-ui/ComposerSurface';
@@ -8,13 +9,55 @@ import { Icon } from './Icon';
 interface ImagePreviewProps {
   src: string;
   alt: string;
+  sessionId?: string;
   style?: CSSProperties;
   imageStyle?: CSSProperties;
   composerAttachment?: boolean;
 }
 
+function useImageSource(src: string, sessionId: string | undefined, size: SessionImageSize, enabled: boolean) {
+  const [result, setResult] = useState<{ key: string; url: string | null }>();
+  const historical = isHistoryImageReference(src);
+  const key = historical ? JSON.stringify([sessionId, src, size]) : '';
+  useEffect(() => {
+    if (!historical || !sessionId || !enabled) return;
+    const bridge = window[DESKTOP_BRIDGE_GLOBAL];
+    if (!bridge) return;
+    let cancelled = false;
+    void bridge.loadSessionImage(sessionId, src, size).then(
+      ({ mediaType, base64 }) => {
+        if (!cancelled) setResult({ key, url: `data:${mediaType};base64,${base64}` });
+      },
+      () => { if (!cancelled) setResult({ key, url: null }); },
+    );
+    return () => { cancelled = true; };
+  }, [enabled, historical, key, sessionId, size, src]);
+  return historical ? (result?.key === key ? result.url : undefined) : src;
+}
+
+export function SessionImageThumbnail({ src, alt, sessionId, style }: Pick<ImagePreviewProps, 'src' | 'alt' | 'sessionId' | 'style'>) {
+  const { tr } = useI18n();
+  const placeholder = useRef<HTMLSpanElement>(null);
+  const [nearViewport, setNearViewport] = useState(false);
+  const url = useImageSource(src, sessionId, 'thumbnail', nearViewport);
+  useEffect(() => {
+    const target = placeholder.current;
+    if (!target || nearViewport) return;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry?.isIntersecting) setNearViewport(true);
+    }, { rootMargin: '120px' });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [nearViewport]);
+
+  return url
+    ? <img src={url} alt={alt} style={style} loading="lazy" decoding="async" draggable={false} />
+    : <span ref={placeholder} aria-hidden="true" title={tr(url === null ? 'desktop_image_failed' : 'desktop_image_loading')}
+        style={{ ...style, display: 'grid', minWidth: 23, minHeight: 23, placeItems: 'center' }}><Icon name="image" size={16} /></span>;
+}
+
 /** Mount the modal only while viewing; transcript thumbnails stay inexpensive. */
-export function ImagePreview({ src, alt, style, imageStyle, composerAttachment }: ImagePreviewProps) {
+export function ImagePreview({ src, alt, sessionId, style, imageStyle, composerAttachment }: ImagePreviewProps) {
   const { tr } = useI18n();
   const [open, setOpen] = useState(false);
   const close = useCallback(() => setOpen(false), []);
@@ -23,9 +66,9 @@ export function ImagePreview({ src, alt, style, imageStyle, composerAttachment }
       aria-label={tr('desktop_image_open', alt)} aria-haspopup="dialog" onClick={() => setOpen(true)}>
       {composerAttachment
         ? <ComposerImageThumbnail key={src} src={src} />
-        : <img src={src} alt={alt} style={imageStyle} draggable={false} />}
+        : <SessionImageThumbnail src={src} alt={alt} sessionId={sessionId} style={imageStyle} />}
     </button>
-    {open && createPortal(<ImageViewer key={src} src={src} alt={alt} onClose={close} />, document.body)}
+    {open && createPortal(<ImageViewer key={src} source={src} sessionId={sessionId} alt={alt} onClose={close} />, document.body)}
   </>;
 }
 
@@ -39,8 +82,9 @@ function downloadName(src: string, alt: string): string {
   return `${alt || 'image'}${extension ? `.${extension === 'svg+xml' ? 'svg' : extension === 'jpeg' ? 'jpg' : extension}` : ''}`;
 }
 
-function ImageViewer({ src, alt, onClose }: { src: string; alt: string; onClose(): void }) {
+function ImageViewer({ source, sessionId, alt, onClose }: { source: string; sessionId?: string; alt: string; onClose(): void }) {
   const { tr } = useI18n();
+  const src = useImageSource(source, sessionId, 'original', true);
   const dialog = useRef<HTMLDialogElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const viewport = useRef<HTMLDivElement>(null);
@@ -152,7 +196,7 @@ function ImageViewer({ src, alt, onClose }: { src: string; alt: string; onClose(
     }}>
     <div className="image-viewer-actions">
       <button type="button" className="image-viewer-control" disabled={saving || !ready} aria-busy={saving}
-        onClick={async () => { setSaving(true); setSaveFailed(false); try { await window[DESKTOP_BRIDGE_GLOBAL]!.saveImage({ dataUrl: src, suggestedName: downloadName(src, alt) }); } catch { setSaveFailed(true); } finally { setSaving(false); } }}
+        onClick={async () => { if (!src) return; setSaving(true); setSaveFailed(false); try { await window[DESKTOP_BRIDGE_GLOBAL]!.saveImage({ dataUrl: src, suggestedName: downloadName(src, alt) }); } catch { setSaveFailed(true); } finally { setSaving(false); } }}
         aria-label={tr('desktop_image_download')} title={tr('desktop_image_download')}>
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" /></svg>
       </button>
@@ -187,11 +231,11 @@ function ImageViewer({ src, alt, onClose }: { src: string; alt: string; onClose(
           zoom(fit < 1 ? 1 : 2, { x: event.clientX - rect.left - rect.width / 2, y: event.clientY - rect.top - rect.height / 2 });
         }
       }}>
-      {!ready && <div className="image-viewer-status" role={failed ? 'alert' : 'status'}>{tr(failed ? 'desktop_image_failed' : 'desktop_image_loading')}</div>}
-      <img className="image-viewer-image" src={src} alt={alt} draggable={false}
+      {!ready && <div className="image-viewer-status" role={failed || src === null ? 'alert' : 'status'}>{tr(failed || src === null ? 'desktop_image_failed' : 'desktop_image_loading')}</div>}
+      {src && <img className="image-viewer-image" src={src} alt={alt} decoding="async" draggable={false}
         onLoad={(event) => { setNatural({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight }); }}
         onError={() => setFailed(true)}
-        style={{ width: natural.width || undefined, height: natural.height || undefined, visibility: ready ? 'visible' : 'hidden', transform: `translate(${x}px, ${y}px) scale(${scale})` }} />
+        style={{ width: natural.width || undefined, height: natural.height || undefined, visibility: ready ? 'visible' : 'hidden', transform: `translate(${x}px, ${y}px) scale(${scale})` }} />}
     </div>
     {saveFailed && <div className="image-viewer-status" role="alert">{tr('image_preview_save_failed')}</div>}
     <div className="image-viewer-zoom" role="group" aria-label={tr('desktop_image_zoom')}>

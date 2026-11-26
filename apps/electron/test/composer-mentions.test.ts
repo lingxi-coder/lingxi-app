@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { MarkdownContent } from '../src/renderer/components/MarkdownContent';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
-import { activeFileMention } from '../src/renderer/bridge/fileMentions';
+import { activeFileMention } from '../src/shared/fileMentions';
 import { contextMentionHref, contextMentionMarkdown, mentionCatalog, mentionMenuEntries, parseContextMentionHref, promptWithMentionLinks } from '../src/renderer/bridge/composerMentions';
 
 Object.assign(globalThis, { React });

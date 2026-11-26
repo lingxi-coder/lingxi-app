@@ -469,6 +469,8 @@ data class Message(
     val transcriptAliases: Set<String> = emptySet(),
     /** Images attached to this user turn, kept in the same order as SendPrompt. */
     val images: List<ImageRefDto> = emptyList(),
+    /** Display references supplied by a followed Host. */
+    val remoteImages: List<com.lingxi.code.bindings.client.MessageImageDto> = emptyList(),
     /**
      * The message's ORDERED content, when the engine supplied structure.
      *

@@ -49,9 +49,10 @@ import {
 } from './nativeUiSiteProps';
 
 // ─── RUN ITEMS ───────────────────────────────────────────────
-const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
+const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen, sessionId }: {
   item: Extract<RunItem, { type: 'narration' }>;
   open: boolean;
+  sessionId?: string;
   onSetOpen(id: string, next: boolean): void;
 }) {
   const t = useT();
@@ -94,6 +95,7 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
             <div key={`${image.media_type}-${index}`} style={{ overflow: 'hidden', minWidth: 0, borderRadius: 11, background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 12%, transparent)` }}>
               <ImagePreview
                 src={image.url}
+                sessionId={sessionId}
                 alt={tr('desktop_stage_image', index + 1)}
                 imageStyle={{ display: 'block', width: '100%', maxHeight: 260, aspectRatio: images.length > 1 ? '4 / 3' : 'auto', objectFit: 'contain', background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 8%, transparent)`, outlineOffset: -1 }}
               />
@@ -154,23 +156,25 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
 
 const NativeNarrationRow = memo(function NativeNarrationRow({
   sessionId,
+  historyImageSessionId,
   item,
   open,
   isFirstOfReply,
   onSetOpen,
 }: {
   sessionId: string;
+  historyImageSessionId: string;
   item: Extract<RunItem, { type: 'narration' }> & { role: 'user' | 'assistant' };
   open: boolean;
   isFirstOfReply: boolean;
   onSetOpen(id: string, next: boolean): void;
 }) {
   const requestProps = useMemo(() => nativeNarrationProps(item, isFirstOfReply), [item, isFirstOfReply]);
-  const defaultRow = <NarrationLine item={item} open={open} onSetOpen={onSetOpen} />;
+  const defaultRow = <NarrationLine item={item} open={open} onSetOpen={onSetOpen} sessionId={historyImageSessionId} />;
   const engineFallback = ({ responseProps }: { responseProps: Record<string, UiJsonValue> }) => {
     const text = responseProps.text;
     const engineItem = typeof text === 'string' && text !== item.text ? { ...item, text } : item;
-    return <NarrationLine item={engineItem} open={open} onSetOpen={onSetOpen} />;
+    return <NarrationLine item={engineItem} open={open} onSetOpen={onSetOpen} sessionId={historyImageSessionId} />;
   };
   return <ModUiParentSite
     sessionId={sessionId}
@@ -345,6 +349,7 @@ interface StageProps {
   sessionKey?: string;
   /** Actual host session id used for per-row Native Parent UI controls. */
   modUiSessionId?: string;
+  historyImageSessionId?: string;
   /**
    * Rows collapsed behind a `/loop` no-op fold
    * (`ConversationState.foldedItemIds`). Hidden until their fold row is opened,
@@ -373,7 +378,7 @@ const EMPTY_SUBMITTED_PLANS: readonly SubmittedPlan[] = [];
 const EMPTY_RUN_ITEMS: RunItem[] = [];
 const EMPTY_FOLDED_ITEM_IDS: readonly string[] = [];
 
-export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, messageTarget, onMessageLocated, onReadingPosition, readingPreview, readingOwner, activityView = false, onReviewFiles, submittedPlans = EMPTY_SUBMITTED_PLANS, onOpenPlan, liveItems = EMPTY_RUN_ITEMS, running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = EMPTY_FOLDED_ITEM_IDS, visualizationSessionId, onVisualizationFollowup }: StageProps) {
+export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, messageTarget, onMessageLocated, onReadingPosition, readingPreview, readingOwner, activityView = false, onReviewFiles, submittedPlans = EMPTY_SUBMITTED_PLANS, onOpenPlan, liveItems = EMPTY_RUN_ITEMS, running = false, pendingActivity, apiRetry, emptyMessage = 'Start a new conversation when the engine is ready.', sessionKey = '', modUiSessionId = '', historyImageSessionId = modUiSessionId, welcomeProject, agents, onOpenAgent, activeAgentId, foldedItemIds = EMPTY_FOLDED_ITEM_IDS, visualizationSessionId, onVisualizationFollowup }: StageProps) {
   const t = useT();
   const [localPlan, setLocalPlan] = useState<SubmittedPlan | null>(null);
   useEffect(() => setLocalPlan(null), [sessionKey]);
@@ -931,12 +936,13 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
             const narration = item.role === 'user' || item.role === 'assistant'
               ? <NativeNarrationRow
                 sessionId={modUiSessionId}
+                historyImageSessionId={historyImageSessionId}
                 item={displayItem as Extract<RunItem, { type: 'narration' }> & { role: 'user' | 'assistant' }}
                 open={narrationOpen}
                 isFirstOfReply={item.role === 'assistant' ? firstAssistantById.get(item.id) ?? false : false}
                 onSetOpen={setOpen}
               />
-              : <NarrationLine item={displayItem} open={narrationOpen} onSetOpen={setOpen} />;
+              : <NarrationLine item={displayItem} open={narrationOpen} onSetOpen={setOpen} sessionId={historyImageSessionId} />;
             // A user row is a COLUMN so the actions sit under the bubble and
             // share its right edge; an assistant row stays a single line.
             return (

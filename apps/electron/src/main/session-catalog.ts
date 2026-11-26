@@ -5,9 +5,13 @@ import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, isAbsolute } from 'node:path';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 import type { SessionRowDto } from '@lingxi/bridge-client';
 import { validateClientEvent } from '@lingxi/bridge-client';
-import { historyCursor, type TranscriptHistoryCursor, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
+import { historyCursor, isHistoryImageReference, type SessionImagePayload, type SessionImageSize, type TranscriptHistoryCursor, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
+import { lstat } from 'node:fs/promises';
+import { LRUCache } from 'lru-cache';
+import { isSupportedImageMediaType } from '../shared/imageInput.js';
 
 import { buildBridgeArguments, buildBridgeEnvironment } from './host-utils.js';
 import { resolveServerBin } from './bridgeDiscovery.js';
@@ -16,6 +20,7 @@ import { isSessionId } from './sessionIdentity.js';
 import { sessionCatalogScope, type SessionCatalogScope, type SessionOpenSelection } from '../shared/sessionWorkspace.js';
 
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+const MAX_IMAGE_OUTPUT_BYTES = 28 * 1024 * 1024;
 const MAX_SESSIONS = 200;
 const DEFAULT_CACHE_TTL_MS = 15_000;
 const MAX_CATALOG_CHILDREN = 2;
@@ -207,14 +212,15 @@ interface CatalogWorkerQuery {
   scope?: SessionCatalogScope;
   transcriptPath?: string;
   historyBefore?: TranscriptHistoryCursor;
+  historyLatest?: true;
+  historyImage?: { reference: string; size: SessionImageSize };
   activityAfter?: number;
-  prepareOpen?: true;
 }
 
 /** One request at a time bounds worker IO; catalog callers retain their own deduplication. */
 class CatalogWorker {
   private nextId = 0;
-  private current?: { id: number; resolve(output: string): void; reject(error: Error): void; timeout: ReturnType<typeof setTimeout> };
+  private current?: { id: number; limit: number; resolve(output: string): void; reject(error: Error): void; timeout: ReturnType<typeof setTimeout> };
   private readonly header = Buffer.alloc(MAX_WORKER_HEADER_BYTES);
   private headerBytes = 0;
   private response?: { body: Buffer; bytes: number; kind: 'output' | 'error' };
@@ -262,7 +268,7 @@ class CatalogWorker {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => this.fail(new Error('session catalog timed out')), this.timeoutMs);
       timeout.unref();
-      this.current = { id, resolve, reject, timeout };
+      this.current = { id, limit: query.historyImage ? MAX_IMAGE_OUTPUT_BYTES : MAX_OUTPUT_BYTES, resolve, reject, timeout };
       const frame = `${JSON.stringify({ version: 2, id, ...query })}\n`;
       if (Buffer.byteLength(frame, 'utf8') > MAX_WORKER_REQUEST_BYTES) { this.fail(new Error('session catalog request is too large')); return; }
       try { this.child.stdin!.write(frame); }
@@ -313,7 +319,7 @@ class CatalogWorker {
           || Object.keys(value).some(key => !['version', 'id', 'bytes', 'kind'].includes(key))
           || value.version !== 2 || !Number.isSafeInteger(value.id) || value.id !== this.current.id
           || typeof value.bytes !== 'number' || !Number.isSafeInteger(value.bytes) || value.bytes < 1
-          || value.bytes > MAX_OUTPUT_BYTES || (value.kind !== 'output' && value.kind !== 'error')) {
+          || value.bytes > this.current.limit || (value.kind !== 'output' && value.kind !== 'error')) {
           this.fail(new Error('session catalog returned an invalid worker response')); return;
         }
         // The bounded length is known before allocation. A single destination
@@ -444,7 +450,7 @@ export class ProjectSessionCatalog {
   private readonly cache = new Map<string, CatalogCacheEntry>();
   private readonly pending = new Map<string, Promise<ProjectSessionCatalogResult>>();
   private readonly pendingSessions = new Map<string, Promise<ProjectSessionCatalogResult>>();
-  private readonly pendingOpen = new Map<string, Promise<{ session?: ProjectSessionCatalogRow; preview?: TranscriptHistoryPage }>>();
+  private readonly pendingOpen = new Map<string, Promise<{ session?: ProjectSessionCatalogRow; preview?: Promise<TranscriptHistoryPage | undefined> }>>();
   private readonly pendingHistory = new Map<string, Promise<TranscriptHistoryPage>>();
   private providerListTail: Promise<void> = Promise.resolve();
   private queuedProviderList?: { key: string; output: Promise<string> };
@@ -453,6 +459,21 @@ export class ProjectSessionCatalog {
   private readonly foregroundLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
   private readonly overlappingCatalogLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
   private readonly historyLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
+  private readonly imageLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
+  private readonly images = new LRUCache<string, SessionImagePayload, CatalogWorkerQuery>({
+    max: 128,
+    maxSize: 64 * 1024 * 1024,
+    sizeCalculation: image => image.base64.length * 2,
+    ttl: 10 * 60_000,
+    fetchMethod: async (_key, _previous, { context }) => {
+      const output = await this.runWorker(context, this.imageLane);
+      const image = JSON.parse(output) as SessionImagePayload;
+      if (!isSupportedImageMediaType(image.mediaType) || typeof image.base64 !== 'string' || !image.base64.length) {
+        throw new Error('Invalid history image response');
+      }
+      return image;
+    },
+  });
   private foregroundKind: 'directory' | 'session' = 'directory';
   private catalogQueued = 0;
   private disposed = false;
@@ -692,10 +713,10 @@ export class ProjectSessionCatalog {
     return this.selectedRow(result, query);
   }
 
-  /** Read the selected row and its first display page without starting an engine. */
+  /** Resolve the exact owner once, and read its visible tail independently of startup. */
   selectForOpen(projectPath: string, sessionId: string, selection: SessionOpenSelection): Promise<{
     session?: ProjectSessionCatalogRow;
-    preview?: TranscriptHistoryPage;
+    preview?: Promise<TranscriptHistoryPage | undefined>;
   }> {
     if (!selection.transcriptPath || this.options.catalogWorker === false) {
       return this.select(projectPath, sessionId, selection).then(session => ({ session }));
@@ -704,24 +725,32 @@ export class ProjectSessionCatalog {
     const key = JSON.stringify(query);
     const existing = this.pendingOpen.get(key);
     if (existing) return existing;
-    const operation = this.runCatalogWorker({ ...query, prepareOpen: true }).then(output => {
-      const result = JSON.parse(output) as { catalog?: unknown; preview?: unknown };
-      const session = this.selectedRow(result.catalog ? parseCatalogValue(result.catalog) : parseCatalogValue(result), query);
-      if (!session || result.preview == null) return { session };
-      try {
-        const page = result.preview as Partial<TranscriptHistoryPage>;
+    const generation = this.generation;
+    const operation = this.loadSession(query.cwd, query.sessionId, query.scope, query.transcriptPath).then(result => {
+      const session = this.selectedRow(result, query);
+      if (!session || session.empty_session || generation !== this.generation) return { session };
+      // Let startup claim the now-idle settings reader before a preview
+      // worker can reclaim its process slot.
+      const preview = nextTurn().then(async () => {
+        if (generation !== this.generation) return undefined;
+        const output = await this.runWorker({
+          cwd: query.cwd, sessionId: session.uuid, transcriptPath: session.path, historyLatest: true,
+        }, this.historyLane);
+        if (generation !== this.generation) return undefined;
+        const page = JSON.parse(output) as Partial<TranscriptHistoryPage>;
         const event = validateClientEvent({ type: 'session_resumed', mode: session.mode, session_id: session.uuid, messages: page.messages });
         if (event.type === 'session_resumed' && event.messages.length && event.messages.every(message =>
           message && typeof message.role === 'string' && Array.isArray(message.blocks)
             && message.blocks.every(block => block && typeof block.type === 'string'))) {
-          return { session, preview: { messages: event.messages, before: page.before == null ? null : historyCursor(page.before) } };
+          return { messages: event.messages, before: page.before == null ? null : historyCursor(page.before) };
         }
-      } catch { /* An optional page can fail independently of opening its source. */ }
-      return { session };
-    }).finally(() => {
-      if (this.pendingOpen.get(key) === operation) this.pendingOpen.delete(key);
+        return undefined;
+      }).catch(() => undefined);
+      return { session, preview };
     });
     this.pendingOpen.set(key, operation);
+    const cleanup = () => { if (this.pendingOpen.get(key) === operation) this.pendingOpen.delete(key); };
+    void operation.then(result => result.preview).then(cleanup, cleanup);
     return operation;
   }
 
@@ -757,6 +786,22 @@ export class ProjectSessionCatalog {
     return operation;
   }
 
+  async readImage(projectPath: string, sessionId: string, transcriptPath: string, reference: string, size: SessionImageSize): Promise<SessionImagePayload> {
+    if (!isSessionId(sessionId) || !isAbsolute(transcriptPath) || transcriptPath.includes('\0')
+      || basename(transcriptPath).toLowerCase() !== `${sessionId.toLowerCase()}.jsonl`
+      || !isHistoryImageReference(reference) || (size !== 'thumbnail' && size !== 'original')) {
+      throw new Error('Invalid history image request');
+    }
+    const source = await lstat(transcriptPath);
+    if (!source.isFile()) throw new Error('History image source is unavailable');
+    const query = { cwd: realpathSync.native(projectPath), sessionId: sessionId.toLowerCase(), transcriptPath,
+      historyImage: { reference, size } };
+    const key = JSON.stringify([query, source.dev, source.ino, source.mtimeMs, source.size]);
+    const image = await this.images.fetch(key, { context: query });
+    if (!image) throw new Error('History image is unavailable');
+    return image;
+  }
+
   private async loadHistory(query: CatalogWorkerQuery & { sessionId: string; historyBefore: TranscriptHistoryCursor }): Promise<TranscriptHistoryPage> {
     const output = await this.runWorker(query, this.historyLane);
     const page = JSON.parse(output) as TranscriptHistoryPage;
@@ -785,7 +830,8 @@ export class ProjectSessionCatalog {
     this.pendingHistory.clear();
     // Retire after the current captured response; a mutation must never reuse
     // projections from before its durable revision/generation boundary.
-    for (const lane of [this.foregroundLane, this.overlappingCatalogLane, this.historyLane]) {
+    this.images.clear();
+    for (const lane of [this.foregroundLane, this.overlappingCatalogLane, this.historyLane, this.imageLane]) {
       lane.worker?.retire();
       lane.worker = undefined;
       lane.key = undefined;
@@ -871,7 +917,10 @@ export class ProjectSessionCatalog {
     lane.queued++;
     const operation = lane.tail.then(async () => {
       if (this.disposed) throw new Error('session catalog is disposed');
-      const worker = await this.getWorker(query.cwd, lane, query);
+      const candidate = this.getWorker(query.cwd, lane, query);
+      // Start a reused worker in this turn, before another lane can reclaim
+      // its idle process slot while the request is waiting in a microtask.
+      const worker = candidate instanceof CatalogWorker ? candidate : await candidate;
       try {
         return await worker.request(query);
       } catch (error) {
@@ -884,13 +933,13 @@ export class ProjectSessionCatalog {
     return operation.finally(() => { this.catalogQueued--; lane.queued--; });
   }
 
-  private getWorker(canonical: string, lane: CatalogWorkerLane, query: CatalogWorkerQuery): Promise<CatalogWorker> {
+  private getWorker(canonical: string, lane: CatalogWorkerLane, query: CatalogWorkerQuery): CatalogWorker | Promise<CatalogWorker> {
     if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
     const bin = resolveServerBin({ serverBin: this.options.serverBin, isPackaged: this.options.isPackaged,
       resourcesPath: this.options.resourcesPath } as Omit<BridgeManagerOptions, 'launchConfig'>);
     const env = this.childEnvironment();
     const key = JSON.stringify([bin, Object.entries(env).sort(([left], [right]) => left.localeCompare(right))]);
-    if (lane.worker?.available && lane.key === key && (!query.prepareOpen || lane.worker.cwd === canonical)) return Promise.resolve(lane.worker);
+    if (lane.worker?.available && lane.key === key) return lane.worker;
     if (lane.pending) return lane.pending;
     lane.worker?.retire();
     lane.worker = undefined;
@@ -902,7 +951,7 @@ export class ProjectSessionCatalog {
         cwd: canonical, env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
       });
       return new CatalogWorker(child, canonical, release, this.options.timeoutMs ?? 15_000, this.options.workerIdleMs ?? DEFAULT_WORKER_IDLE_MS);
-    }, this.options.timeoutMs, (query.sessionId && !query.historyBefore && query.activityAfter === undefined) || query.workspaceEnvironment
+    }, this.options.timeoutMs, (query.sessionId && !query.historyLatest && !query.historyBefore && !query.historyImage && query.activityAfter === undefined) || query.workspaceEnvironment
       ? 'selection' : 'default').then((worker) => {
       if (generation !== this.generation) {
         worker.retire();

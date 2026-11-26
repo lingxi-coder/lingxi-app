@@ -1036,7 +1036,10 @@ export function useBridge(): UseBridge {
         completeTrackedSpeech(sessionId, event.type === 'turn_ended' ? 'turn_ended' : 'stale');
       }
       updateRuntime(sessionId, (state) => {
-        let next: RuntimeState = { ...state, conversation: reduceEventWithPendingFusion(state.conversation, event, sessionId, restoringFusion ? pendingFusion?.raw : undefined), desktop: reduceDesktopEvent(state.desktop, event), runtimeCenter: reduceRuntimeCenterEvent(state.runtimeCenter, event, sessionId) };
+        const overviewEvent = event.type === 'session_resumed' && envelope.historyOverview
+          ? { ...event, messages: [...envelope.historyOverview, ...event.messages] }
+          : event;
+        let next: RuntimeState = { ...state, conversation: reduceEventWithPendingFusion(state.conversation, event, sessionId, restoringFusion ? pendingFusion?.raw : undefined), desktop: reduceDesktopEvent(state.desktop, event), runtimeCenter: reduceRuntimeCenterEvent(state.runtimeCenter, overviewEvent, sessionId) };
         if (event.type === 'session_started' || event.type === 'session_ended') next.history = undefined;
         if (event.type === 'session_resumed') {
           next = {
@@ -1044,7 +1047,7 @@ export function useBridge(): UseBridge {
             history: envelope.historyBefore ? { before: envelope.historyBefore, loading: false } : initialHistory(event.messages),
             runtimeCenter: addRuntimeResources(
               next.runtimeCenter,
-              resourcesFromRestoredMessages(sessionId, event.messages),
+              resourcesFromRestoredMessages(sessionId, overviewEvent.type === 'session_resumed' ? overviewEvent.messages : event.messages),
             ),
           };
         }

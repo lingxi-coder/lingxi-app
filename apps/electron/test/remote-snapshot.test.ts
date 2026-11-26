@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { ManualClock } from '@lingxi/bridge-client/remote';
 
 import {
   EVENT_MAX_BYTES,
@@ -18,6 +19,7 @@ import {
   resolveImage,
 } from '../src/main/remoteControl/snapshot.js';
 import { FakeRuntime, PNG_BASE64, SESSION_A, permissionRequest } from './remote-session-helpers.js';
+import { RemoteCommands } from '../src/main/remoteControl/remoteCommands.js';
 
 const header = { verb: 'run', label: 'Run' } as any;
 const text = (value: string) => ({ role: 'assistant', blocks: [{ type: 'text', text: value }] }) as any;
@@ -26,6 +28,35 @@ const userText = (value: string) => ({ role: 'user', blocks: [{ type: 'text', te
 function frames(runtime: FakeRuntime) {
   return buildSnapshot(runtime.remoteView());
 }
+
+test('remote history exposes a reference and sends an original only in requested ranges', async () => {
+  const runtime = new FakeRuntime();
+  const reference = `lingxi-history-image:${SESSION_A}:0:png`;
+  runtime.resume([{ ...userText('attached'), images: [{ media_type: 'image/png', url: reference }] }]);
+  const remoteRef = baseImageRef(runtime.sessionId, 0, 0);
+  const frame = frames(runtime).find(frame => frame.phase === 'messages');
+  assert.equal(frame?.messages[0]?.images?.[0]?.url, remoteRef);
+  const calls: string[] = [];
+  const original = 'A'.repeat(1024 * 1024) + 'QUJD';
+  const commands = new RemoteCommands({
+    clock: new ManualClock(), allowAlwaysAllow: () => false, echo: () => {},
+    readHistoryImage: async (_runtime, requested, size) => {
+      assert.equal(requested, reference);
+      calls.push(size);
+      return { mediaType: 'image/png', base64: size === 'thumbnail' ? PNG_BASE64 : original };
+    },
+  });
+  assert.deepEqual(calls, []);
+  const preview = await commands.imageGet(runtime, { ref: remoteRef, size: 'thumbnail' });
+  assert.equal(preview.base64, PNG_BASE64);
+  const first = await commands.imageGet(runtime, { ref: remoteRef, size: 'original' });
+  const rest = await commands.imageGet(runtime, { ref: remoteRef, size: 'original', offset: first.next_offset });
+  assert.equal(first.next_offset, 1024 * 1024);
+  assert.equal(rest.next_offset, undefined);
+  assert.equal(first.base64 + rest.base64, original);
+  assert.deepEqual(calls, ['thumbnail', 'original', 'original']);
+  assert.throws(() => commands.imageGet(runtime, { ref: remoteRef, size: 'original', offset: 3 }), /invalid image offset/);
+});
 
 test('a snapshot is begin, every messages page, every records page, then end', () => {
   const runtime = new FakeRuntime();

@@ -1048,6 +1048,7 @@ export class SessionRuntimeManager {
   private runtimeOptions(ref: SessionRef): BridgeManagerOptions {
     const {
       launchConfig,
+      loadPluginSecrets,
       accessState,
       onModelChanged,
       onModelSelected,
@@ -1097,6 +1098,7 @@ export class SessionRuntimeManager {
       envelopeEvents: true,
       prepareLaunchConfig,
       launchConfig: async () => (await prepareLaunchConfig())(),
+      ...(loadPluginSecrets ? { loadPluginSecrets: () => loadPluginSecrets(ref) } : {}),
       ...(onModelSelected ? { onModelSelected: (model: string) => onModelSelected(ref, model) } : {}),
       ...(getSavedModel ? { getSavedModel: () => getSavedModel(ref) } : {}),
       ...(getSavedPermissionMode ? { getSavedPermissionMode: () => getSavedPermissionMode(ref) } : {}),

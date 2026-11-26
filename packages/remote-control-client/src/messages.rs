@@ -886,6 +886,22 @@ pub struct ImageGetParams {
     /// The ref a record carries.
     #[serde(rename = "ref")]
     pub image_ref: String,
+    /// The variant the viewer needs. Omitted by legacy clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<SessionImageSize>,
+    /// Starting offset in base64 characters for an original.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+}
+
+/// A display thumbnail or an original image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionImageSize {
+    /// A smaller image for the transcript.
+    Thumbnail,
+    /// The original bytes for viewing and export.
+    Original,
 }
 
 /// `image.get` result.
@@ -895,6 +911,9 @@ pub struct ImageGetResult {
     pub media_type: String,
     /// The bytes, base64.
     pub base64: String,
+    /// Next base64 offset when returning an original in several frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------

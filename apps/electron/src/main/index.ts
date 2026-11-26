@@ -707,37 +707,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         ? resumeModel ?? bots?.modelFor(workspace) ?? configured.model
         : settings.getSessionModel(ref) ?? resumeModel ?? configured.model;
       const startedAt = Date.now();
-      // History does not need account credentials. The connected runtime
-      // hydrates them in parallel with replay; prompts await that hydration.
-      const phase = async <T>(name: string, load: () => Promise<T>, fallback: T): Promise<T> => {
-        const phaseStartedAt = Date.now();
-        try {
-          const value = await load();
-          diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_phase', {
-            durationMs: Date.now() - phaseStartedAt,
-            parallel: true,
-            phase: name,
-            projectPath: workspace,
-            sessionId: ref.sessionId,
-          }));
-          return value;
-        } catch (error) {
-          diagnostics.add('warn', 'host', diagnosticEvent('session_launch_config_phase_failed', {
-            durationMs: Date.now() - phaseStartedAt,
-            error: sanitizeDiagnostic(error),
-            phase: name,
-            projectPath: workspace,
-            sessionId: ref.sessionId,
-          }));
-          return fallback;
-        }
-      };
-      const pluginSecrets = await phase('plugin_secrets', () => resolveSessionLaunchPluginSecrets(credentialBroker), {});
       diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_ready', {
         durationMs: Date.now() - startedAt,
         parallel: true,
         model,
-        pluginSecretCount: Object.values(pluginSecrets).reduce((count, values) => count + Object.keys(values).length, 0),
         projectPath: workspace,
         providerAccountCount: providerAccounts?.latestSnapshot?.accounts.length ?? 0,
         providerAccountsDeferred: true,
@@ -763,11 +736,33 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
         providerAccountHome: productPaths.brandHome,
         providerAccountBackend: `desktop-broker:${credentialBroker?.credentialChannel ?? 'development'}`,
-        pluginSecrets,
         model,
         apiBaseUrl: configured.apiBaseUrl,
       };
     },
+    loadPluginSecrets: credentialBroker ? async (ref) => {
+      const startedAt = Date.now();
+      try {
+        const secrets = await resolveSessionLaunchPluginSecrets(credentialBroker);
+        diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_phase', {
+          durationMs: Date.now() - startedAt,
+          parallel: true,
+          phase: 'plugin_secrets',
+          projectPath: ref.projectPath,
+          sessionId: ref.sessionId,
+        }));
+        return secrets;
+      } catch (error) {
+        diagnostics.add('warn', 'host', diagnosticEvent('session_launch_config_phase_failed', {
+          durationMs: Date.now() - startedAt,
+          error: sanitizeDiagnostic(error),
+          phase: 'plugin_secrets',
+          projectPath: ref.projectPath,
+          sessionId: ref.sessionId,
+        }));
+        return {};
+      }
+    } : undefined,
   });
   host = new HostController(
     settings,
@@ -932,6 +927,13 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       allowAlwaysAllow: () => policy.allowAlwaysAllow(),
       echo: (echo) => remoteUi?.echo(echo),
       codec: nativeImageCodec,
+      readHistoryImage: async (runtime, reference, size) => {
+        const owner = runtimes.get(runtime.sessionId);
+        if (!owner || owner !== runtime) throw new Error('The image session is unavailable');
+        const workspace = await owner.getWorkspaceState();
+        if (!workspace.transcript_path) throw new Error('History image source is unavailable');
+        return sessionCatalog.readImage(owner.projectPath, owner.sessionId, workspace.transcript_path, reference, size);
+      },
       clock: systemClock,
     }),
     titleOf: async (ref) => (await sessionCatalog.find(ref.projectPath, ref.sessionId))?.title,

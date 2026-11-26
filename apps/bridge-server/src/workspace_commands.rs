@@ -210,6 +210,7 @@ fn lower_display_rows(
             let uuid = id.as_uuid().to_string();
             message.sent_at_ms = timestamps.get(&uuid).copied();
             message.transcript_uuid = Some(uuid);
+            crate::boot::history_image::reference_images(&mut message);
             message
         })
         .collect()

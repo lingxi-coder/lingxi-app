@@ -413,6 +413,7 @@ struct RemoteSessionView: View {
                         inbox.dismissNotificationPreview()
                         if let ref = activeRef, let row = inbox.row(ref) { inbox.markRead([row]) }
                     })
+                    .environment(\.sessionImageLoader, source.sessionImageLoader)
                     .disabled(source.phase != .live || !source.hasReadyConnection)
                     .background {
                         if source.phase == .live && source.hasReadyConnection {

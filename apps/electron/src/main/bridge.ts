@@ -3,7 +3,7 @@ import { providerAccountRenewFailureCode } from './provider-accounts.js';
 import { SideChatRecovery } from './sideChatRecovery.js';
 import { replayCheckpointState, RuntimeEventReplay } from './runtimeEventReplay.js';
 import { canResume } from './remoteControl/snapshot.js';
-import { initialDisplayPage, recentTranscript } from '../shared/sessionHistory.js';
+import { historyOverview, initialDisplayPage, recentTranscript } from '../shared/sessionHistory.js';
 import { parseProviderAccountRouting } from '../shared/providerAccounts.js';
 import type { ProviderAccountConfiguration } from './session-catalog.js';
 import { DesktopTelemetry } from './telemetry.js';
@@ -16,7 +16,6 @@ import {
   buildNativeUiControlCommand,
   parseUiFrameEvent,
   parseUiInvalidateEvent,
-  readLockfile,
   readLockfileAsync,
   validateNativeUiControlResponseJson,
   validateUiClientOperationResponseJson,
@@ -69,7 +68,8 @@ import type { ChildProcess } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { fusionInvocation, pinFusionStrategy } from '../shared/fusionStrategy.js';
 import { REMOTE_STATE_EVENT_TYPES } from '../shared/clientCommands.js';
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, rmSync, watch, type FSWatcher } from 'node:fs';
+import { watch, type FSWatcher } from 'node:fs';
+import { chmod, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import {
@@ -1392,7 +1392,10 @@ export class SessionRuntime {
     if (envelope.event.type !== 'session_resumed' || !this.ownedTranscriptPath) return envelope;
     const { messages, before } = initialDisplayPage(envelope.event.messages);
     if (messages.length === envelope.event.messages.length) return envelope;
-    return { ...envelope, event: { ...envelope.event, messages }, ...(before ? { historyBefore: before } : {}) };
+    const recent = recentTranscript(envelope.event.messages);
+    const overview = historyOverview(recent.slice(0, recent.length - messages.length));
+    return { ...envelope, event: { ...envelope.event, messages }, ...(before ? { historyBefore: before } : {}),
+      ...(overview.length ? { historyOverview: overview } : {}) };
   }
 
   // ── Remote Control ──────────────────────────────────────────────────────────
@@ -1929,7 +1932,7 @@ export class SessionRuntime {
     const lockfilePath = this.connectionLockfilePath;
     if (!lockfilePath) throw new Error('The running bridge has no known connection endpoint; no replacement was started.');
     const connectingGeneration = this.generation;
-    const lockfile = await readLockfileAsync(lockfilePath);
+    const lockfile = await readLockfileAsync(lockfilePath, { ownerOnly: true });
     if (this.disposed || connectingGeneration !== this.generation) throw new Error('bridge connection superseded');
     validateBridgeLockfile(lockfile.body, pid, this.projectPath || this.activeWorkspace || '');
     const client = this.client;
@@ -2275,7 +2278,9 @@ export class SessionRuntime {
           && (!access.workspace || access.workspace === this.projectPath),
         );
         try {
-          await this.connectBridgeClient(reusable.lockfilePath, generation, false, publishConnected, undefined, audioCapabilitiesReady);
+          const lockfile = await readLockfileAsync(reusable.lockfilePath, { ownerOnly: true });
+          validateBridgeLockfile(lockfile.body, reusable.pid, this.projectPath);
+          await this.connectBridgeClient(lockfile.path, generation, false, publishConnected, lockfile, audioCapabilitiesReady);
           const telemetryConfig = this.opts.getTelemetryConfig?.() ?? resolveDesktopTelemetry({});
           this.telemetry = new DesktopTelemetry({ ...telemetryConfig, enabled: telemetryConfig.enabled && !this.telemetryRevoked }, this.opts.appVersion);
           if (!telemetryConfig.enabled || this.telemetryRevoked) {
@@ -2305,10 +2310,15 @@ export class SessionRuntime {
 
     const launchConfigWaitStartedAt = Date.now();
     if (!preparedLaunch) launchConfigStartedAt = launchConfigWaitStartedAt;
-    const applyPrepared = await preparedLaunch;
     if (this.disposed || generation !== this.generation) throw new Error('bridge launch superseded');
-    const launch = applyPrepared ? applyPrepared() : await this.opts.launchConfig();
-    await this.telemetry?.shutdown();
+    const [settings, pluginSecrets] = await Promise.all([
+      preparedLaunch ?? this.opts.launchConfig(),
+      this.opts.loadPluginSecrets?.(),
+      this.telemetry?.shutdown(),
+    ]);
+    if (this.disposed || generation !== this.generation) throw new Error('bridge launch superseded');
+    const config = typeof settings === 'function' ? settings() : settings;
+    const launch = pluginSecrets === undefined ? config : { ...config, pluginSecrets };
     const telemetryConfig = launch.telemetry ?? resolveDesktopTelemetry({});
     this.telemetry = new DesktopTelemetry({ ...telemetryConfig, enabled: telemetryConfig.enabled && !this.telemetryRevoked
       && !telemetryPrivacyDisabled(launch.settingsEnvironment ?? {}) }, this.opts.appVersion);
@@ -2327,7 +2337,11 @@ export class SessionRuntime {
       throw new Error('bridge launch session id does not match the runtime');
     }
     this.activeWorkspaceTrusted = launch.trusted;
-    const bridgeDir = this.createLaunchDirectory();
+    const bridgeDir = await this.createLaunchDirectory();
+    if (this.disposed || generation !== this.generation) {
+      await this.removeLaunchDirectory();
+      throw new Error('bridge launch superseded');
+    }
 
     this.setState({ status: 'spawning' });
     let child: ChildProcess;
@@ -2335,7 +2349,7 @@ export class SessionRuntime {
       child = this.spawnServer(launch, bridgeDir);
     } catch (error) {
       this.fail(error);
-      this.removeLaunchDirectory();
+      await this.removeLaunchDirectory();
       throw error;
     }
     this.child = child;
@@ -2508,12 +2522,12 @@ export class SessionRuntime {
     });
   }
 
-  private createLaunchDirectory(): string {
+  private async createLaunchDirectory(): Promise<string> {
     const root = this.opts.bridgeRoot ?? join(tmpdir(), 'lingxi-electron-bridge');
-    mkdirSync(root, { recursive: true, mode: 0o700 });
-    chmodSync(root, 0o700);
-    const directory = mkdtempSync(join(root, 'launch-'));
-    chmodSync(directory, 0o700);
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    await chmod(root, 0o700);
+    const directory = await mkdtemp(join(root, 'launch-'));
+    await chmod(directory, 0o700);
     this.launchDir = directory;
     return directory;
   }
@@ -2656,46 +2670,64 @@ export class SessionRuntime {
 
   private waitForLockfile(dir: string, launch: BridgeLaunchConfig, generation: number): Promise<Lockfile> {
     const timeoutMs = this.opts.lockfileTimeoutMs ?? 15_000;
-    const deadline = Date.now() + timeoutMs;
+    const child = this.child;
+    const invalidLaunch = (): Error | undefined => {
+      if (this.disposed || generation !== this.generation) return new Error('bridge launch superseded');
+      if (!child || child !== this.child) return new Error('bridge-server exited before publishing a lockfile');
+      return undefined;
+    };
     return new Promise<Lockfile>((resolve, reject) => {
       let watcher: FSWatcher | undefined;
-      let timer: NodeJS.Timeout | undefined;
+      let poll: NodeJS.Timeout | undefined;
+      let timeout: NodeJS.Timeout | undefined;
       let settled = false;
+      let scanning = false;
+      let changed = false;
       const finish = (result: Lockfile | Error): void => {
+        if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        clearTimeout(poll);
+        clearTimeout(timeout);
         watcher?.close();
         if (result instanceof Error) reject(result);
         else resolve(result);
       };
-      const tick = (): void => {
-        if (settled) return;
-        clearTimeout(timer);
-        if (this.disposed || generation !== this.generation) return finish(new Error('bridge launch superseded'));
-        if (!this.child) return finish(new Error('bridge-server exited before publishing a lockfile'));
-        for (const name of lockfiles(dir).sort((left, right) => left.localeCompare(right))) {
+      const scan = async (): Promise<Lockfile | undefined> => {
+        for (const name of (await lockfiles(dir)).sort((left, right) => left.localeCompare(right))) {
+          if (settled) return undefined;
           const path = join(dir, name);
           try {
-            const metadata = lstatSync(path);
-            if (!metadata.isFile()) throw new Error('bridge lockfile is not a regular file');
-            if (metadata.size > 64 * 1024) throw new Error('bridge lockfile is too large');
-            if (process.platform !== 'win32' && (metadata.mode & 0o077) !== 0) {
-              throw new Error('bridge lockfile permissions are not owner-only');
-            }
-            if (process.getuid && metadata.uid !== process.getuid()) throw new Error('bridge lockfile owner mismatch');
-            const lockfile = readLockfile(path);
-            if (!lockfile.port) throw new Error('bridge lockfile port is invalid');
-            validateBridgeLockfile(lockfile.body, this.child.pid!, launch.workspace);
-            return finish(lockfile);
+            const lockfile = await readLockfileAsync(path, { ownerOnly: true });
+            validateBridgeLockfile(lockfile.body, child!.pid!, launch.workspace);
+            return lockfile;
           } catch (error) {
+            if (settled) return undefined;
             const failure = error instanceof Error ? error : new Error(String(error));
-            if (!ignorableLockfileError(failure)) return finish(failure);
+            if (!ignorableLockfileError(failure)) throw failure;
             this.diagnostics.add('warn', 'host', diagnosticEvent('lockfile_ignored', { file: path, reason: failure.message }));
           }
         }
-        const remainingMs = deadline - Date.now();
-        if (remainingMs <= 0) return finish(new Error('timed out waiting for bridge lockfile'));
-        timer = setTimeout(tick, Math.min(50, remainingMs));
+        return undefined;
+      };
+      const tick = (): void => {
+        if (settled) return;
+        const invalid = invalidLaunch();
+        if (invalid) return finish(invalid);
+        // A watch event during a read requests one more scan. Polling and
+        // watch bursts share the same in-flight read for this launch.
+        if (scanning) { changed = true; return; }
+        clearTimeout(poll);
+        scanning = true;
+        changed = false;
+        void scan().then(lockfile => {
+          scanning = false;
+          if (settled) return;
+          const stale = invalidLaunch();
+          if (stale) return finish(stale);
+          if (lockfile) return finish(lockfile);
+          if (changed) tick();
+          else poll = setTimeout(tick, 50);
+        }, error => finish(error instanceof Error ? error : new Error(String(error))));
       };
       // Watch before scanning so creation cannot land between the two. Polling still
       // covers missing notifications, incomplete writes and unsupported watchers.
@@ -2708,6 +2740,7 @@ export class SessionRuntime {
           watcher = undefined;
         });
       } catch { /* The bounded polling fallback handles unavailable file watching. */ }
+      timeout = setTimeout(() => finish(invalidLaunch() ?? new Error('timed out waiting for bridge lockfile')), timeoutMs);
       tick();
     });
   }
@@ -4516,7 +4549,7 @@ export class SessionRuntime {
     this.adoptedProcessOwned = false;
     if (adoptedPid && adoptedProcessOwned) await this.stopAdoptedBridge(adoptedPid, requestedExit);
     if (requestedExit) closeClient();
-    if (!adoptedPid || adoptedProcessOwned) this.removeLaunchDirectory();
+    if (!adoptedPid || adoptedProcessOwned) await this.removeLaunchDirectory();
     else this.launchDir = null;
     this.clearPendingSlashCommands();
   }
@@ -4551,11 +4584,11 @@ export class SessionRuntime {
     else child.kill(signal);
   }
 
-  private removeLaunchDirectory(): void {
+  private async removeLaunchDirectory(): Promise<void> {
     const launchDir = this.launchDir;
     this.launchDir = null;
     if (launchDir) {
-      try { rmSync(launchDir, { recursive: true, force: true }); } catch (error) { this.diagnostics.add('warn', 'host', error); }
+      try { await rm(launchDir, { recursive: true, force: true }); } catch (error) { this.diagnostics.add('warn', 'host', error); }
     }
   }
 

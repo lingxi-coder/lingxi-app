@@ -136,6 +136,8 @@ import kotlinx.coroutines.flow.collectLatest
 @Composable
 fun ChatScreen(
     state: ChatState,
+    remoteImageCacheKey: String = "",
+    loadRemoteImage: (suspend (String, Boolean) -> ByteArray)? = null,
     onSend: (String) -> Unit,
     onSendWithAttachment: (String, ComposerAttachment?) -> Unit = { text, _ -> onSend(text) },
     onSendPreflight: (String, ComposerAttachment?) -> Boolean = { _, _ -> true },
@@ -873,6 +875,8 @@ private fun MessageList(
                             expandedToolCalls = state.expandedToolCalls,
                             onToggleToolCall = stableOnToggleToolCall,
                             agents = state.sessionAgents,
+                            remoteImageCacheKey = remoteImageCacheKey,
+                            loadRemoteImage = loadRemoteImage,
                         )
                     }
                     is ChatRenderItem.AgentRun -> AgentRunTimeline(

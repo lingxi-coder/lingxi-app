@@ -29,6 +29,7 @@ import {
 } from '@lingxi/bridge-client/remote';
 
 import { REMOTE_SLASH_COMMANDS } from '../../shared/clientCommands.js';
+import type { SessionImagePayload, SessionImageSize } from '../../shared/sessionHistory.js';
 import { slashRequestEchoes } from '../bridgeEvents.js';
 import { isPermissionModeId, sanitizeDiagnostic } from '../host-utils.js';
 import { validateImageRefs, validatePrompt } from '../validation.js';
@@ -65,6 +66,7 @@ export interface RemoteCommandsDeps {
   /** Told after a viewer's prompt has been sent, so the renderer can show it. */
   echo(echo: RemotePromptEcho): void;
   codec?: ImageCodec;
+  readHistoryImage?: (runtime: RemoteRuntime, reference: string, size: SessionImageSize) => Promise<SessionImagePayload>;
   clock: Clock;
   /** A random integer in 1…2^53−1. */
   randomTurnId?: () => number;
@@ -73,6 +75,8 @@ export interface RemoteCommandsDeps {
 export const MAX_PROMPT_IMAGES = 4;
 export const IMAGE_GET_MAX_SIDE = 1568;
 export const IMAGE_GET_MAX_BYTES = 2 * 1024 * 1024;
+const ORIGINAL_IMAGE_CHUNK = 1024 * 1024;
+const MAX_ORIGINAL_BASE64 = 28 * 1024 * 1024;
 /** A retry of a prompt with the same `client_request_id` within this long gets the first answer. */
 export const IDEMPOTENCY_WINDOW_MS = 5 * 60_000;
 export const IDEMPOTENCY_MAX_ENTRIES = 512;
@@ -123,13 +127,14 @@ function randomTurnIdFromCrypto(): number {
 export function fitImage(
   codec: ImageCodec | undefined,
   image: { media_type: string; base64: string },
+  maxSide = IMAGE_GET_MAX_SIDE,
 ): { media_type: string; base64: string } {
   const bytes = Buffer.from(image.base64, 'base64');
   const size = codec?.size(bytes);
   const longest = size === undefined ? 0 : Math.max(size.width, size.height);
-  if (bytes.length <= IMAGE_GET_MAX_BYTES && (size === undefined || longest <= IMAGE_GET_MAX_SIDE)) return image;
+  if (bytes.length <= IMAGE_GET_MAX_BYTES && (size === undefined || longest <= maxSide)) return image;
   if (codec === undefined || size === undefined) throw new RemoteRpcError('internal', 'the image is too large to send');
-  const factor = longest > IMAGE_GET_MAX_SIDE ? IMAGE_GET_MAX_SIDE / longest : 1;
+  const factor = longest > maxSide ? maxSide / longest : 1;
   const width = Math.max(1, Math.round(size.width * factor));
   const height = Math.max(1, Math.round(size.height * factor));
   const attempts: Array<{ type: 'png' } | { type: 'jpeg'; quality: number }> = [
@@ -448,14 +453,31 @@ export class RemoteCommands {
   }
 
   /** `image.get`, for a reference the session's records carried. */
-  imageGet(runtime: RemoteRuntime | undefined, value: unknown): ImageGetResult {
+  imageGet(runtime: RemoteRuntime | undefined, value: unknown): ImageGetResult | Promise<ImageGetResult> {
     const input = params(value);
     const ref = boundedString(input['ref'], 'ref', 128);
+    const size = input['size'];
+    const offset = input['offset'] ?? 0;
+    if (size !== undefined && size !== 'thumbnail' && size !== 'original') throw invalid('invalid image size');
+    if (typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0
+      || offset >= MAX_ORIGINAL_BASE64 || offset % ORIGINAL_IMAGE_CHUNK !== 0
+      || (size !== 'original' && offset !== 0)) throw invalid('invalid image offset');
     if (runtime === undefined) throw invalid('that image is no longer available');
     const image = resolveImage(runtime.remoteView(), ref, (sequence, index) => runtime.promptImage(sequence, index));
     if (image === undefined) throw invalid('that image is no longer available');
-    const fitted = fitImage(this.deps.codec, image);
-    return { media_type: fitted.media_type, base64: fitted.base64 };
+    const result = (data: { media_type: string; base64: string }, alreadyThumbnail = false): ImageGetResult => {
+      if (size !== 'original') return alreadyThumbnail ? data : fitImage(this.deps.codec, data, size === 'thumbnail' ? 320 : undefined);
+      if (data.base64.length > MAX_ORIGINAL_BASE64 || offset >= data.base64.length) throw invalid('invalid original image range');
+      const end = offset + ORIGINAL_IMAGE_CHUNK;
+      return { media_type: data.media_type, base64: data.base64.slice(offset, end),
+        ...(end < data.base64.length ? { next_offset: end } : {}) };
+    };
+    if ('historyReference' in image) {
+      if (!this.deps.readHistoryImage) throw invalid('that image is no longer available');
+      return this.deps.readHistoryImage(runtime, image.historyReference, size ?? 'original')
+        .then(({ mediaType, base64 }) => result({ media_type: mediaType, base64 }, size === 'thumbnail'), (error: unknown) => { throw refused(error); });
+    }
+    return result(image);
   }
 
   private requireConnected(runtime: RemoteRuntime): void {

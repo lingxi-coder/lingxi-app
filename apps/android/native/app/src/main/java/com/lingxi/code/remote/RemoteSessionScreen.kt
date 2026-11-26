@@ -386,6 +386,8 @@ internal fun RemoteSessionScreen(
             ChatScreen(
                 modifier = Modifier.weight(1f),
                 state = state,
+                remoteImageCacheKey = "${remote.source.imageCacheScope}:${meta.imageRevision}",
+                loadRemoteImage = { ref, thumbnail -> remote.source.readImage(ref, thumbnail).bytes },
                 inboxActivityCursor = inboxRow?.sourceCursor ?: 0,
                 onInboxVisibleMessages = if (inboxRow != null && !state.streaming) { rendered ->
                     val current = maxOf(inboxRow.baselineCursor, inboxRow.readThrough, assistantActivity?.baseline ?: 0)

@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 
 const CHUNK: u64 = 64 * 1024;
 const MAX_PAGE_BYTES: usize = 6 * 1024 * 1024;
+// Legacy rows may carry four inline 20 MiB attachments before projection.
+const MAX_RAW_ROW_BYTES: usize = 112 * 1024 * 1024;
+const MAX_PREVIEW_SCAN_BYTES: u64 = 128 * 1024 * 1024;
 const PAGE_ROWS: usize = 60;
 pub(super) const MAX_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
 
@@ -102,7 +105,7 @@ impl ReverseLines {
                 return Ok(Some((0, line)));
             }
             bytes += self.end;
-            if bytes > MAX_PAGE_BYTES + CHUNK as usize {
+            if bytes > MAX_RAW_ROW_BYTES {
                 return Err("One history message exceeds the page size limit".into());
             }
             self.chunk.truncate(self.end);
@@ -118,7 +121,7 @@ impl ReverseLines {
         fragments: Vec<Vec<u8>>,
     ) -> Result<String, String> {
         let length = bytes + self.end - from;
-        if length > MAX_PAGE_BYTES + CHUNK as usize {
+        if length > MAX_RAW_ROW_BYTES {
             return Err("One history message exceeds the page size limit".into());
         }
         let mut line = Vec::with_capacity(length);
@@ -248,6 +251,29 @@ impl LatestSource {
         }
         Ok(page)
     }
+
+    pub(super) fn read_message(self, id: uuid::Uuid) -> Result<session::jsonl::JsonlMessage, String> {
+        use lingxi_core::host::rooted_fs::opened_file_identity;
+        let id = id.to_string();
+        let mut reader = ReverseLines::new(self.file.try_clone().map_err(|error| error.to_string())?, self.revision.len);
+        while let Some((_, line)) = reader.next()? {
+            if !line.contains(&id) {
+                continue;
+            }
+            if let Some(row) = session::jsonl::route_lines(&line).messages_in_order.into_iter()
+                .find(|row| row.uuid == id && row.message_type == "user" && !row.is_sidechain)
+            {
+                let current = Self::open_file(&self.home, &self.relative)?;
+                if opened_file_identity(&current).map_err(|error| error.to_string())?
+                    != opened_file_identity(&self.file).map_err(|error| error.to_string())?
+                {
+                    return Err("History image source changed".into());
+                }
+                return Ok(row);
+            }
+        }
+        Err("History image is unavailable".into())
+    }
 }
 
 fn read_page(
@@ -271,7 +297,7 @@ fn read_page(
             .map_err(|e| e.to_string())?;
         let mut line = Vec::new();
         BufReader::new(&mut file)
-            .take((MAX_PAGE_BYTES + 1) as u64)
+            .take((MAX_RAW_ROW_BYTES + 1) as u64)
             .read_until(b'\n', &mut line)
             .map_err(|error| error.to_string())?;
         let source = String::from_utf8(line).map_err(|_| "Invalid history cursor".to_string())?;
@@ -299,11 +325,11 @@ fn read_page(
     let mut bytes = 0;
     let mut before = None;
     while let Some((offset, line)) = reader.next()? {
-        if cursor.is_none() && opened.len().saturating_sub(offset) > MAX_PREVIEW_BYTES as u64 {
+        if cursor.is_none() && opened.len().saturating_sub(offset) > MAX_PREVIEW_SCAN_BYTES {
             return Err("Recent history exceeds the preview scan limit".into());
         }
         let loaded = session::jsonl::route_lines(&line);
-        let Some(row) = loaded
+        let Some(mut row) = loaded
             .messages_in_order
             .into_iter()
             .find(|row| !row.is_sidechain)
@@ -321,13 +347,29 @@ fn read_page(
             }
             continue;
         }
-        if bytes + line.len() > MAX_PAGE_BYTES {
+        let projected_image = super::history_image::project_images(&mut row)?;
+        if line.len() > MAX_PAGE_BYTES {
+            // Full pre-edit files and raw image tool results are omitted by the
+            // canonical display lowerer. Avoid spending the page budget on them.
+            if let Some(result) = row.tool_use_result_projection.as_mut() {
+                let _ = result.remove_field("originalFile");
+                if result.string_at("/type") == Some("image") {
+                    let _ = result.remove_field("file");
+                }
+            }
+        }
+        let weight = if projected_image || line.len() > MAX_PAGE_BYTES {
+            serde_json::to_vec(&row).map_err(|error| error.to_string())?.len()
+        } else {
+            line.len()
+        };
+        if bytes + weight > MAX_PAGE_BYTES {
             if !truncate_complete_page(&mut rows, &safe_offsets, &pending_siblings) {
                 return Err("One history activity exceeds the page size limit".into());
             }
             break;
         }
-        bytes += line.len();
+        bytes += weight;
         let group = assistant_group(&row);
         let owned = uuid::Uuid::parse_str(
             row.session_id
@@ -411,6 +453,7 @@ fn read_page(
                     .and_then(|at| at.parse::<jiff::Timestamp>().ok())
                     .map(|at| at.as_millisecond());
                 message.transcript_uuid = Some(uuid);
+                super::history_image::reference_images(&mut message);
                 message
             })
             .collect();
@@ -881,8 +924,9 @@ mod tests {
     #[test]
     fn reverse_reader_rejects_an_oversized_row_and_invalid_utf8() {
         let (_root, path, _id, _) = transcript(0);
-        let length = MAX_PAGE_BYTES + CHUNK as usize + 1;
-        std::fs::write(&path, "x".repeat(length)).unwrap();
+        let length = MAX_RAW_ROW_BYTES + 1;
+        // A sparse oversized row exercises the raw limit without storing 112 MiB.
+        File::create(&path).unwrap().set_len(length as u64).unwrap();
         let mut reader = ReverseLines::new(File::open(&path).unwrap(), length as u64);
         assert!(reader.next().unwrap_err().contains("page size limit"));
         assert_eq!(

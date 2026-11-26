@@ -16,7 +16,7 @@ import com.lingxi.code.bindings.client.ClientCommand
 import com.lingxi.code.bindings.client.ClientEvent
 import com.lingxi.code.bindings.client.ConversationControlsDto
 import com.lingxi.code.bindings.client.ImageRefDto
-import com.lingxi.code.bindings.client.MessageDto
+import com.lingxi.code.bindings.client.MessageImageDto
 import com.lingxi.code.bindings.client.PermissionKindDto
 import com.lingxi.code.bindings.client.PermissionResponseDto
 import com.lingxi.code.bindings.client.ReasoningSelectionDto
@@ -25,8 +25,6 @@ import com.lingxi.code.model.toUi
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.ReasoningControl
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -38,7 +36,6 @@ import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Base64
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** The calls a followed session makes on the Remote Control client; tests substitute it. */
@@ -50,6 +47,7 @@ interface RemoteSessionPort {
     suspend fun sessionActivityPage(after: ULong): String = error("remote activity unavailable")
     suspend fun sessionActivityPreview(through: ULong): String = error("remote activity preview unavailable")
     suspend fun fetchImage(imageRef: String): RemoteImageFfi
+    suspend fun fetchImageVariant(imageRef: String, thumbnail: Boolean) = fetchImage(imageRef)
     suspend fun sendPrompt(text: String, images: List<RemotePromptImageFfi>)
     suspend fun retryPrompt(promptId: String)
     suspend fun dismissPrompt(promptId: String)
@@ -79,6 +77,7 @@ data class RemoteSessionMeta(
     val loadingOlder: Boolean = false,
     val controls: ConversationControlsDto? = null,
     val sessionMode: SessionMode? = null,
+    val imageRevision: Long = 0,
 )
 
 /** Largest picture and most pictures the desktop accepts in a prompt. */
@@ -117,10 +116,7 @@ class RemoteConversationSource(
     private val accountAdmissionLock = Any()
     private var accountGeneration = 0L
 
-    /** Images already fetched, by reference: a new snapshot re-lists the prompts that carry them. */
-    private val fetchedImages = ConcurrentHashMap<String, ImageRefDto>()
-    private val imageLock = Any()
-    private var imageGeneration = 0L
+    internal val imageCacheScope = java.util.UUID.randomUUID().toString()
 
     /** Phase, error, paging and controls of the session, current as of the last update. */
     val meta: StateFlow<RemoteSessionMeta> = mutableMeta.asStateFlow()
@@ -129,56 +125,14 @@ class RemoteConversationSource(
     override val modelState: StateFlow<EngineModelState> = mutableModels.asStateFlow()
 
     override val externalFeed: Flow<ExternalFeedItem> = channelFlow {
-        val feedScope = this
         val mapper = RemoteFeedMapper(strings, thisDeviceName, expectedSessionId = sessionId) { port.promptOriginBotName(it) }
         var modelsRequested = false
-        val projectionLock = Any()
-        val pendingProjections = mutableMapOf<Job, ULong>()
-        var pendingProjectionBytes = 0uL
-        var projectionTail: Job? = null
-        fun cancelProjections() {
-            val jobs = synchronized(projectionLock) {
-                pendingProjections.keys.toList().also {
-                    pendingProjections.clear()
-                    pendingProjectionBytes = 0uL
-                    projectionTail = null
-                }
-            }
-            jobs.forEach { it.cancel() }
-        }
         port.follow().collect { incoming ->
             if (incoming.sessionId != sessionId) return@collect
-            if (incoming.phase != RemoteSessionPhaseFfi.LIVE) {
-                invalidateImages()
-                cancelProjections()
-            }
-            // Establish the owner before requesting any of the update's image refs.
-            // Otherwise an unconfirmed or conflicting snapshot can trigger I/O.
-            var projected = mapper.map(incoming, project = approvalOnly || incoming.phase != RemoteSessionPhaseFfi.LIVE)
-            var accepted = mapper.takeAcceptedUpdates()
-            var projectionBytes = 0uL
-            if (!approvalOnly && incoming.phase == RemoteSessionPhaseFfi.LIVE && accepted.isNotEmpty()) {
-                val sizes = runCatching {
-                    accepted.map { com.lingxi.code.bindings.android.FfiConverterTypeRemoteSessionUpdateFfi.allocationSize(it) }
-                }.getOrNull()
-                val fits = sizes != null && sizes.all { size ->
-                    if (size > MAX_PENDING_PROJECTION_BYTES - projectionBytes) false
-                    else { projectionBytes += size; true }
-                } && synchronized(projectionLock) {
-                    pendingProjections.size < MAX_PENDING_PROJECTIONS &&
-                        projectionBytes <= MAX_PENDING_PROJECTION_BYTES - pendingProjectionBytes
-                }
-                if (!fits) {
-                    projected = mapper.rejectProjectionOverflow()
-                    accepted = emptyList()
-                }
-            }
+            val projected = mapper.map(incoming)
+            val accepted = mapper.takeAcceptedUpdates()
             val lastAccepted = accepted.lastOrNull()
             val failure = mapper.failure
-            if (failure != null) {
-                invalidateImages()
-                cancelProjections()
-            }
             synchronized(accountAdmissionLock) {
                 val previous = mutableMeta.value
                 val next = if (failure != null) {
@@ -211,7 +165,8 @@ class RemoteConversationSource(
                 if (previous.phase == RemoteSessionPhaseFfi.LIVE && next.phase != RemoteSessionPhaseFfi.LIVE) {
                     accountGeneration++
                 }
-                mutableMeta.value = next
+                val imagesChanged = failure != null || accepted.any { it.replace } || previous.phase != next.phase
+                mutableMeta.value = next.copy(imageRevision = previous.imageRevision + if (imagesChanged) 1 else 0)
             }
             accepted.forEach { acceptedUpdate ->
                 mutablePermission.value = if (acceptedUpdate.phase == RemoteSessionPhaseFfi.LIVE && (!approvalOnly || !approvalDelivered)) {
@@ -220,43 +175,7 @@ class RemoteConversationSource(
                 if (!approvalOnly) applyModelEvents(acceptedUpdate)
             }
             if (failure != null || (approvalOnly && accepted.isEmpty())) mutablePermission.value = null
-            if (approvalOnly || accepted.isEmpty() || incoming.phase != RemoteSessionPhaseFfi.LIVE) {
-                projected.forEach { send(it) }
-            } else {
-                val generation = synchronized(imageLock) { imageGeneration }
-                val predecessor = synchronized(projectionLock) { projectionTail }
-                val updates = accepted
-                val task = launch(start = CoroutineStart.LAZY) {
-                    predecessor?.join()
-                    val items = updates.flatMap { update ->
-                        mapper.projectAccepted(if (update.phase == RemoteSessionPhaseFfi.LIVE) hydrateMessageImages(update) else update)
-                    }
-                    for (item in items) {
-                        if (synchronized(imageLock) { generation != imageGeneration }) return@launch
-                        send(item)
-                    }
-                    for ((turnId, images) in updates.filter { it.phase == RemoteSessionPhaseFfi.LIVE }.flatMap(mapper::imageRefs)) {
-                        feedScope.launch {
-                            val fetched = images.mapNotNull { ref -> fetchImage(ref) }
-                            if (fetched.isNotEmpty() && synchronized(imageLock) { generation == imageGeneration }) {
-                                send(ExternalFeedItem.PromptImages(turnId, fetched))
-                            }
-                        }
-                    }
-                }
-                synchronized(projectionLock) {
-                    pendingProjections[task] = projectionBytes
-                    pendingProjectionBytes += projectionBytes
-                    projectionTail = task
-                }
-                task.invokeOnCompletion {
-                    synchronized(projectionLock) {
-                        pendingProjections.remove(task)?.let { pendingProjectionBytes -= it }
-                        if (projectionTail === task) projectionTail = null
-                    }
-                }
-                task.start()
-            }
+            projected.forEach { send(it) }
             if (!approvalOnly && lastAccepted?.phase == RemoteSessionPhaseFfi.LIVE && !modelsRequested) {
                 modelsRequested = true
                 launch { runCatching { port.listModels() }.getOrNull()?.let(::applyModelList) }
@@ -264,47 +183,16 @@ class RemoteConversationSource(
         }
     }
 
-    private fun invalidateImages() = synchronized(imageLock) {
-        imageGeneration++
-        fetchedImages.clear()
-    }
-
-    /** Snapshot/history/message-complete URLs are opaque image.get references, not data URLs. */
-    private suspend fun hydrateMessageImages(update: RemoteSessionUpdateFfi): RemoteSessionUpdateFfi = update.copy(
-        messages = update.messages.map { hydrateMessage(it) },
-        olderMessages = update.olderMessages.map { hydrateMessage(it) },
-        records = update.records.map { item ->
-            val record = item.record as? RemoteRecordFfi.Event
-            val event = record?.event as? ClientEvent.MessageComplete
-            if (event?.message == null) item else item.copy(
-                record = record.copy(event = event.copy(message = hydrateMessage(event.message))),
-            )
-        },
-    )
-
-    private suspend fun hydrateMessage(message: MessageDto): MessageDto = message.copy(
-        images = message.images.mapNotNull { image ->
-            if (image.url.startsWith("data:")) image else fetchImage(image.url)?.let {
-                image.copy(mediaType = it.mediaType, url = "data:${it.mediaType};base64,${it.base64}")
-            }
-        },
-    )
-
-    private suspend fun fetchImage(ref: String): ImageRefDto? {
-        val generation = synchronized(imageLock) {
-            fetchedImages[ref]?.let { return it }
-            imageGeneration
-        }
-        val image = try {
-            port.fetchImage(ref).let { ImageRefDto(it.mediaType, Base64.getEncoder().encodeToString(it.bytes)) }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            return null
-        }
-        return synchronized(imageLock) {
-            if (generation != imageGeneration) null else image.also { fetchedImages[ref] = it }
-        }
+    /** Only a visible thumbnail, an open viewer, or an explicit resend requests bytes. */
+    internal suspend fun readImage(ref: String, thumbnail: Boolean?): RemoteImageFfi {
+        requireConversation()
+        check(ref.startsWith("$sessionId:")) { "Image belongs to another chat" }
+        val revision = mutableMeta.value.imageRevision
+        val image = if (thumbnail == null) port.fetchImage(ref) else port.fetchImageVariant(ref, thumbnail)
+        currentCoroutineContext().ensureActive()
+        requireConversation()
+        check(revision == mutableMeta.value.imageRevision) { "Chat changed while loading its image" }
+        return image
     }
 
     /** Controls are always current; the model list and model changes arrive as records. */
@@ -412,7 +300,8 @@ class RemoteConversationSource(
         mutablePermission.value = null
         synchronized(accountAdmissionLock) {
             accountGeneration++
-            mutableMeta.value = mutableMeta.value.copy(phase = RemoteSessionPhaseFfi.LOADING, error = null)
+            val previous = mutableMeta.value
+            mutableMeta.value = previous.copy(phase = RemoteSessionPhaseFfi.LOADING, error = null, imageRevision = previous.imageRevision + 1)
         }
     }
 
@@ -467,10 +356,6 @@ class RemoteConversationSource(
         }
     }
 
-    private companion object {
-        const val MAX_PENDING_PROJECTIONS = 128
-        const val MAX_PENDING_PROJECTION_BYTES = 16_777_216uL
-    }
 }
 
 /** The permission modes a remote device may select; bypass is never one of them. */
@@ -508,10 +393,7 @@ class RemoteFeedMapper(
 
     fun takeAcceptedUpdates(): List<RemoteSessionUpdateFfi> = accepted.toList().also { accepted.clear() }
 
-    internal fun rejectProjectionOverflow(): List<ExternalFeedItem> =
-        fail("SESSION_PROJECTION_OVERFLOW", "Remote session updates exceeded the pending image limit.")
-
-    fun map(update: RemoteSessionUpdateFfi, project: Boolean = true): List<ExternalFeedItem> {
+    fun map(update: RemoteSessionUpdateFfi): List<ExternalFeedItem> {
         failure?.let { return failed(it) }
         if (expectedSessionId != null && update.sessionId != expectedSessionId) return waitingForOwner()
         val sessionId = com.lingxi.code.model.canonicalSessionId(update.sessionId)
@@ -568,7 +450,7 @@ class RemoteFeedMapper(
         waitingForMode.clear()
         waitingBytes = 0uL
         accepted += ready
-        return if (project) ready.flatMap(::projectAccepted) else emptyList()
+        return ready.flatMap(::projectAccepted)
     }
 
     private fun waitingForOwner(): List<ExternalFeedItem> = listOf(
@@ -620,6 +502,7 @@ class RemoteFeedMapper(
                     turnId = record.turnId.toLong(),
                     text = record.text,
                     imageCount = record.images.size,
+                    images = record.images.map { MessageImageDto(it.mediaType, it.imageRef) },
                     originLabel = originLabel(record.origin, record.deviceName, record.turnId),
                 )
                 is RemoteRecordFfi.Omitted -> omitted += record.eventType.orEmpty()
@@ -646,13 +529,6 @@ class RemoteFeedMapper(
         }
         return items
     }
-
-    /** Images of prompts newly seen in [update], to fetch: turn id to image refs. */
-    fun imageRefs(update: RemoteSessionUpdateFfi): List<Pair<Long, List<String>>> =
-        update.records.mapNotNull { item ->
-            val prompt = item.record as? RemoteRecordFfi.Prompt ?: return@mapNotNull null
-            if (prompt.images.isEmpty()) null else prompt.turnId.toLong() to prompt.images.map { it.imageRef }
-        }
 
     /**
      * The head permission request as a prompt that offers allow once and deny only.

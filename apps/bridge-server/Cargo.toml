@@ -69,6 +69,7 @@ jiff = "1.0.1"
 # convention as `ImageRefDto`); `audio_bridge` decodes it back to the `Vec<u8>`
 # the `platform_api::{VoiceRecording, TtsAudio}` structs hold.
 base64 = "0.22"
+image = { version = "=0.25.6", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # Input message queue (spec §27). The connection's SendPrompt path enqueues a
 # prompt that arrives while a turn is in flight and the spawned run loop drains
 # it as a follow-up turn — the parity twin of print.ts run()'s `running` guard +

@@ -29,7 +29,7 @@ fun messageDtoToMessage(
     dto: MessageDto,
     strings: ConversationStrings = DefaultConversationStrings,
 ): Message {
-    val build = MessageBuild(dto.role, messageImages(dto.images), dto.loopWakeup, dto.visualizationContext, dto.transcriptUuid, dto.sentAtMs, dto.skillName)
+    val build = MessageBuild(dto.role, dto.images, dto.loopWakeup, dto.visualizationContext, dto.transcriptUuid, dto.sentAtMs, dto.skillName)
     val index = mutableMapOf<String, ToolBlockRef>()
     dto.blocks.forEach { block ->
         // One DTO in isolation has no preceding turn to hand an orphan result
@@ -60,7 +60,7 @@ fun transcriptFromDtos(
     val builds = mutableListOf<MessageBuild>()
     val index = mutableMapOf<String, ToolBlockRef>()
     dtos.forEach { dto ->
-        val build = MessageBuild(dto.role, messageImages(dto.images), dto.loopWakeup, dto.visualizationContext, dto.transcriptUuid, dto.sentAtMs, dto.skillName)
+        val build = MessageBuild(dto.role, dto.images, dto.loopWakeup, dto.visualizationContext, dto.transcriptUuid, dto.sentAtMs, dto.skillName)
         builds.add(build)
         dto.blocks.forEach { block ->
             build.fold(block, strings, index) { orphanHostFor(builds, build) }
@@ -137,7 +137,7 @@ private class ToolBlockRef(val build: MessageBuild, val blockIndex: Int)
 /** Mutable accumulator for one message's prose + ordered content blocks. */
 private class MessageBuild(
     wireRole: String,
-    val images: List<ImageRefDto> = emptyList(),
+    val images: List<MessageImageDto> = emptyList(),
     val loopWakeup: com.lingxi.code.bindings.client.LoopWakeupDto? = null,
     val visualizationContext: com.lingxi.code.bindings.client.VisualizationContextDto? = null,
     val transcriptUuid: String? = null,
@@ -171,7 +171,8 @@ private class MessageBuild(
         skillName = skillName?.takeIf { role == Role.User },
         role = role,
         text = textParts.filter { it.isNotBlank() }.joinToString("\n\n"),
-        images = images,
+        images = messageImages(images),
+        remoteImages = images.filter { it.url.isNotBlank() && !it.url.startsWith("data:") },
         blocks = blocks.toList(),
         loopWakeupStreak = loopWakeup?.streak,
         visualizationContext = visualizationContext

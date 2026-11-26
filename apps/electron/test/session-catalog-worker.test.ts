@@ -74,18 +74,84 @@ test('an exact cold selection shares its in-flight read and validates the page s
   assert.equal(catalog.selectForOpen(cwd, uuid, selection), first);
   await nextTurn();
   const child = children.calls[0];
-  assert.equal(child.queries[0].prepareOpen, true);
   assert.equal(child.queries[0].transcriptPath, selection.transcriptPath);
+  assert.equal(child.queries[0].scope, selection.scope);
   const messages = [{ role: 'user', transcript_uuid: uuid, blocks: [{ type: 'text', text: 'recent' }] }];
-  child.reply(JSON.stringify({ catalog: JSON.parse(output()), preview: { messages, before: null } }));
-  assert.deepEqual((await first).preview?.messages, messages);
+  child.reply();
+  const firstResult = await first;
+  assert.equal(firstResult.session?.path, selection.transcriptPath);
+  assert.equal(catalog.selectForOpen(cwd, uuid, selection), first);
+  await nextTurn();
+  const history = children.calls[1];
+  assert.deepEqual(history.queries[0], { version: 2, id: 1, cwd, sessionId: uuid, transcriptPath: selection.transcriptPath, historyLatest: true });
+  history.reply(JSON.stringify({ messages, before: null }));
+  assert.deepEqual((await firstResult.preview)?.messages, messages);
 
+  await nextTurn();
   const changed = catalog.selectForOpen(cwd, uuid, selection);
   await nextTurn();
-  child.reply(JSON.stringify({ catalog: JSON.parse(output()), preview: { messages, before: { uuid: 'invalid' } } }));
+  child.reply();
   const next = await changed;
+  await nextTurn();
+  history.reply(JSON.stringify({ messages, before: { uuid: 'invalid' } }));
   assert.equal(next.session?.path, selection.transcriptPath);
-  assert.equal(next.preview, undefined);
+  assert.equal(await next.preview, undefined);
+});
+
+test('history images share an in-flight thumbnail and cache each variant separately', { timeout: 5_000 }, async t => {
+  const cwd = project(t), children = processes();
+  const transcript = join(cwd, `${uuid}.jsonl`);
+  writeFileSync(transcript, '{}\n');
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const reference = `lingxi-history-image:${uuid}:0:png`;
+  const thumbnail = { mediaType: 'image/png', base64: 'AQID' };
+  const original = { mediaType: 'image/png', base64: 'BAUG' };
+  const first = catalog.readImage(cwd, uuid, transcript, reference, 'thumbnail');
+  const second = catalog.readImage(cwd, uuid, transcript, reference, 'thumbnail');
+  for (let i = 0; i < 100 && !children.calls[0]?.queries.length; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  const child = children.calls[0];
+  assert.deepEqual(child.queries[0].historyImage, { reference, size: 'thumbnail' });
+  child.reply(JSON.stringify(thumbnail));
+  assert.deepEqual(await Promise.all([first, second]), [thumbnail, thumbnail]);
+  assert.deepEqual(await catalog.readImage(cwd, uuid, transcript, reference, 'thumbnail'), thumbnail);
+  assert.equal(child.queries.length, 1);
+
+  const requested = catalog.readImage(cwd, uuid, transcript, reference, 'original');
+  for (let i = 0; i < 100 && child.queries.length < 2; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.deepEqual(child.queries[1].historyImage, { reference, size: 'original' });
+  child.reply(JSON.stringify(original));
+  assert.deepEqual(await requested, original);
+});
+
+test('a reused selection worker claims its slot before a parallel reader can reclaim it', async t => {
+  const cwd = project(t), children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const selection = { scope: 'current' as const, transcriptPath: row().path };
+  const warm = catalog.select(cwd, uuid, selection);
+  await nextTurn();
+  const reader = children.calls[0];
+  reader.reply();
+  await warm;
+
+  const history = catalog.readHistory(cwd, uuid, selection.transcriptPath, { uuid });
+  await nextTurn();
+  const historyWorker = children.calls[1];
+  const selected = catalog.select(cwd, uuid, selection);
+  const listing = catalog.listComplete(cwd);
+  await nextTurn();
+  assert.equal(reader.queries.length, 2);
+  assert.equal(reader.kills, 0);
+  reader.reply();
+  assert.equal((await selected)?.uuid, uuid);
+  await nextTurn();
+  assert.equal(children.calls.length, 3);
+  children.calls[2].reply();
+  assert.equal((await listing).sessions.length, 1);
+  historyWorker.reply(JSON.stringify({ messages: [], before: null }));
+  await history;
+  assert.equal(children.peak, 2);
 });
 
 test('workspace launch settings reuse only an idle reader started in the requested cwd', async t => {
@@ -753,8 +819,9 @@ test('real exact-open worker previews the newest page only within the selected s
     const selection = { scope: 'current', transcriptPath: path } as const;
     const result = await catalog.selectForOpen(cwd, uuid, selection);
     assert.equal(result.session?.path, path);
-    assert.deepEqual(result.preview?.messages.map(row => row.transcript_uuid), ids.slice(-60));
-    assert.equal(result.preview?.before?.uuid, ids[540]);
+    const preview = await result.preview;
+    assert.deepEqual(preview?.messages.map(row => row.transcript_uuid), ids.slice(-60));
+    assert.equal(preview?.before?.uuid, ids[540]);
     assert.deepEqual(await catalog.selectForOpen(foreign, uuid, selection), { session: undefined });
   });
 

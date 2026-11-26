@@ -4,7 +4,7 @@ import { runInNewContext } from 'node:vm';
 import { test } from 'node:test';
 import ts from 'typescript';
 import type { MessageDto } from '@lingxi/bridge-client';
-import { historyCursor, initialDisplayPage, initialHistory, recentTranscript } from '../src/shared/sessionHistory';
+import { historyCursor, historyOverview, initialDisplayPage, initialHistory, recentTranscript } from '../src/shared/sessionHistory';
 import { conversationFromMessages, emptyConversation, prependHistory, reduceEvent } from '../src/renderer/bridge/conversation';
 import { addRuntimeResources, emptyRuntimeCenterState, prependRuntimeHistory, resourcesFromRestoredMessages, reduceRuntimeCenterEvent } from '../src/renderer/bridge/runtimeCenterState';
 import { conversationPlans } from '../src/renderer/bridge/planDocuments';
@@ -41,10 +41,48 @@ test('the visual cursor preserves deferred tool pairs and the compact marker', (
   rows[42] = { ...message(42), blocks: [
     { type: 'tool_result', id: 'call', tool: 'Read', result_json: '{}', is_error: false, display: { body_lines: 1, body: 'done' } },
   ] };
-  assert.deepEqual(initialDisplayPage(rows), { messages: rows.slice(34), before: { uuid: uuid(34) } });
+  assert.deepEqual(initialDisplayPage(rows), { messages: rows.slice(35), before: { uuid: uuid(35) } });
   rows[33] = boundary(33);
   const page = initialDisplayPage(rows.slice(0, 91));
   assert.deepEqual(page, { messages: rows.slice(33, 91), before: { uuid: uuid(33) } });
+});
+
+test('a 600-row single turn loads only the tail, even with no user anchor in the tail', () => {
+  const rows = Array.from({ length: 600 }, (_, index) => ({ ...message(index), role: index ? 'assistant' : 'user' }));
+  assert.deepEqual(initialDisplayPage(rows), { messages: rows.slice(-60), before: { uuid: uuid(540) } });
+});
+
+test('approved plans and resources stay available before older transcript pages are read', () => {
+  const photo = `lingxi-history-image:${uuid(4)}:0:png`;
+  const rows: MessageDto[] = [
+    { role: 'assistant', blocks: [{ type: 'tool_use', id: 'write', tool: 'Write',
+      input_json: '{"file_path":"/home/.lingxi/plans/old.md","content":"Historical plan body"}',
+      header: { verb: 'create', label: 'Write', title: 'Write plan' } }] },
+    { role: 'user', blocks: [{ type: 'tool_result', id: 'write', tool: 'Write', result_json: '{"large_ignored_field":"example"}',
+      is_error: false, display: { body_lines: 1, body: 'written' } }] },
+    { role: 'assistant', blocks: [{ type: 'tool_use', id: 'approved', tool: 'ExitPlanMode',
+      input_json: '{}', header: { verb: 'plan', label: 'Plan', title: 'Submit plan' } }] },
+    { role: 'user', blocks: [{ type: 'tool_result', id: 'approved', tool: 'ExitPlanMode',
+      result_json: '{"model_content":"User has approved your plan."}', is_error: false, display: { body_lines: 1, body: 'approved' } }] },
+    { role: 'user', transcript_uuid: uuid(4), images: [{ media_type: 'image/png', url: photo }],
+      blocks: [{ type: 'text', text: '@"src/plan notes.md"\n\nOther history text' }] },
+    ...Array.from({ length: 100 }, (_, index) => message(9 + index)),
+  ];
+  const tail = initialDisplayPage(rows).messages;
+  const overview = historyOverview(rows.slice(0, -tail.length));
+  assert.ok(JSON.stringify(overview).length < 1500);
+  assert.ok(!JSON.stringify(overview).includes('Other history text'));
+  const restored = [...overview, ...tail];
+  const sessionId = uuid(800);
+  const center = reduceRuntimeCenterEvent(emptyRuntimeCenterState(), {
+    type: 'session_resumed', session_id: sessionId, mode: 'code', messages: restored,
+  }, sessionId);
+  const plan = conversationPlans(conversationFromMessages(tail).items, center.submittedPlanState.calls).find(plan => plan.id === 'approved');
+  assert.equal(plan?.content, 'Historical plan body');
+  assert.equal(plan?.status, 'approved');
+  const resources = resourcesFromRestoredMessages(sessionId, restored);
+  assert.ok(resources.some(resource => resource.url === photo));
+  assert.ok(resources.some(resource => resource.path === 'src/plan notes.md'));
 });
 
 test('older pages preserve current item identities, streaming state and latest plan', () => {

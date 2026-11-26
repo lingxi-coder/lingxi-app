@@ -1,5 +1,5 @@
 import type { SkillDto } from '@lingxi/bridge-client';
-import { fileMentionsFromPrompt } from './fileMentions';
+import { fileMentionsFromPrompt } from '../../shared/fileMentions';
 
 export type ContextMention = { kind: 'skill' | 'plugin' | 'file' | 'folder'; name: string; target: string };
 export type MentionAction = 'files' | 'attach' | 'goal' | 'plan';

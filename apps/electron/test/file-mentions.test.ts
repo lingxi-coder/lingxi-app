@@ -6,7 +6,7 @@ import {
   fileMentionsFromPrompt,
   fileMentionToken,
   promptWithFileMentions,
-} from '../src/renderer/bridge/fileMentions';
+} from '../src/shared/fileMentions';
 
 test('active file mention follows the whitespace-delimited TUI semantics', () => {
   assert.deepEqual(activeFileMention('inspect @src/ma please', 15), {

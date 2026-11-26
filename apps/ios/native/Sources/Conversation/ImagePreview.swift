@@ -1,4 +1,5 @@
 import SwiftUI
+import Nuke
 import UIKit
 import UniformTypeIdentifiers
 
@@ -10,6 +11,7 @@ struct NativeImagePreview: View {
     var mediaType: String = "image/png"
     var fallbackImage: UIImage? = nil
     var closeIdentifier = "image-preview.close"
+    var originalRequest: Nuke.ImageRequest? = nil
     @State private var asset: PreviewImageAsset?
     @State private var failed = false
     @State private var exporting = false
@@ -80,11 +82,11 @@ struct NativeImagePreview: View {
         .preferredColorScheme(.dark)
         .toolbar(.hidden, for: .navigationBar)
         .accessibilityAction(.escape) { dismiss() }
-        .task(id: source) {
+        .task(id: originalRequest?.imageId ?? source) {
             asset = nil
             failed = false
             do {
-                let loaded = try await PreviewImageAsset.load(source: source, mediaType: mediaType, fallbackImage: fallbackImage)
+                let loaded = try await PreviewImageAsset.load(source: source, mediaType: mediaType, fallbackImage: fallbackImage, originalRequest: originalRequest)
                 try Task.checkCancellation()
                 asset = loaded
             } catch is CancellationError { }
@@ -125,10 +127,12 @@ private struct PreviewImageAsset {
     let data: Data
     let contentType: UTType
 
-    static func load(source: String, mediaType: String, fallbackImage: UIImage?) async throws -> PreviewImageAsset {
+    static func load(source: String, mediaType: String, fallbackImage: UIImage?, originalRequest: Nuke.ImageRequest?) async throws -> PreviewImageAsset {
         let data: Data
         var type = UTType(mimeType: mediaType) ?? .image
-        if source.hasPrefix("data:"), let comma = source.firstIndex(of: ",") {
+        if let originalRequest {
+            (data, _) = try await ImagePipeline.shared.data(for: originalRequest)
+        } else if source.hasPrefix("data:"), let comma = source.firstIndex(of: ",") {
             let embeddedType = String(source.dropFirst(5).prefix { $0 != ";" && $0 != "," })
             type = UTType(mimeType: embeddedType) ?? type
             let encoded = String(source[source.index(after: comma)...])

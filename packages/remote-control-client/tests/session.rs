@@ -1682,6 +1682,31 @@ async fn images_are_fetched_once_and_validated() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn thumbnail_and_original_are_requested_separately() {
+    use remote_control_client::messages::SessionImageSize;
+    const CHUNK: usize = 1024 * 1024;
+    let io = FakeIo::new(|method, params| {
+        assert_eq!(method, "image.get");
+        assert_eq!(params["ref"], "s1:m:0:0");
+        match (params["size"].as_str(), params["offset"].as_u64()) {
+            (Some("thumbnail"), None) => Ok(json!({ "media_type": "image/png", "base64": "AQID" })),
+            (Some("original"), None) => Ok(json!({ "media_type": "image/png", "base64": "A".repeat(CHUNK), "next_offset": CHUNK })),
+            (Some("original"), Some(offset)) if offset == CHUNK as u64 =>
+                Ok(json!({ "media_type": "image/png", "base64": "QUJD" })),
+            _ => panic!("unexpected image range"),
+        }
+    });
+    let controller = SessionController::new("s1", io.clone());
+    feed(&controller, full_snapshot("e1", 0, 2));
+    let reference = "s1:m:0:0";
+    let thumbnail = controller.fetch_image_with_size(reference, Some(SessionImageSize::Thumbnail)).await.unwrap();
+    assert_eq!(thumbnail, "data:image/png;base64,AQID");
+    let original = controller.fetch_image_with_size(reference, Some(SessionImageSize::Original)).await.unwrap();
+    assert_eq!(original, format!("data:image/png;base64,{}QUJD", "A".repeat(CHUNK)));
+    assert_eq!(io.calls("image.get").len(), 3);
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_client_routes_notifications_and_lists_sessions() {
     let io = FakeIo::new(|method, _| match method {
         "sessions.watch" => Ok(json!({ "sessions": [{

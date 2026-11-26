@@ -5,7 +5,7 @@ import { CH_DECISION, CH_DECISION_CHANGED, type DecisionApi } from '../shared/de
 import { DESKTOP_BRIDGE_GLOBAL } from '../shared/desktopBridge.js';
 import { CH_SESSION_RECOVERY, type SessionRecoveryDiagnostic } from '../shared/sessionRecovery.js';
 import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
-import { CH_SESSION_HISTORY, CH_SESSION_RESUME_PREVIEW, type SessionResumePreview, type TranscriptHistoryCursor, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
+import { CH_SESSION_HISTORY, CH_SESSION_IMAGE, CH_SESSION_RESUME_PREVIEW, type SessionImagePayload, type SessionImageSize, type SessionResumePreview, type TranscriptHistoryCursor, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
 import type { ProviderAccountsApi } from '../shared/providerAccounts.js';
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, type LocalAppsApi, type LocalAppEditRequest } from '../shared/localApps.js';
 import { CH_IMAGE_SAVE, type ImageSaveRequest } from '../shared/imageSave.js';
@@ -345,6 +345,7 @@ export interface LingxiApi {
   openSessionWithPreview?(projectPath: string, sessionId: string, selection: SessionOpenSelection | undefined, linkedMode: ConversationSpace | undefined, requestId: string): Promise<BootstrapState>;
   onSessionResumePreview?(callback: (preview: SessionResumePreview) => void): Unsubscribe;
   loadSessionHistory(sessionId: string, before: TranscriptHistoryCursor): Promise<TranscriptHistoryPage>;
+  loadSessionImage(sessionId: string, reference: string, size: SessionImageSize): Promise<SessionImagePayload>;
   prepareSessionMetadata(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionMetadataSelection>;
   releaseSessionMetadata(selection: SessionMetadataSelection): Promise<void>;
   preflightSessionArchive(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<CronJobDto[]>;
@@ -695,6 +696,7 @@ const api: LingxiApi = {
   onConversationShown: (callback) => subscribe(CH_CONVERSATION_SHOWN, callback),
   onSessionResumePreview: (callback) => subscribe(CH_SESSION_RESUME_PREVIEW, callback),
   loadSessionHistory: (sessionId, before) => ipcRenderer.invoke(CH_SESSION_HISTORY, sessionId, before),
+  loadSessionImage: (sessionId, reference, size) => ipcRenderer.invoke(CH_SESSION_IMAGE, sessionId, reference, size),
   openSession: (projectPath, sessionId, selection, linkedMode, authoringAppId, authoringVersion) => (authoringAppId !== undefined
     ? ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId, selection, linkedMode, authoringAppId, authoringVersion)
     : linkedMode !== undefined

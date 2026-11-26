@@ -1,4 +1,5 @@
 import { uploadFile, downloadFile } from './fileTransfer';
+import { LRUCache } from 'lru-cache';
 import { validateFileOffer, type FileReceipt, type FileProgress } from '@lingxi/bridge-client/remote';
 import type {
   AskUserQuestionRequestDto,
@@ -16,6 +17,7 @@ import {
   systemClock,
   type BotThreadCreateResult,
   type Clock,
+  type ImageGetParams,
   type ModelsListResult,
   type RemoteBotSummary,
   type RemoteCursor,
@@ -197,7 +199,12 @@ export class SessionController {
   private awaitingAttach = false;
   private resetTimer: unknown;
   private readonly seenTurns = new Set<number>();
-  private readonly images = new Map<string, Promise<string>>();
+  private readonly images = new LRUCache<string, string, ImageGetParams>({
+    max: 128,
+    maxSize: 32 * 1024 * 1024,
+    sizeCalculation: (url) => url.length,
+    fetchMethod: (_key, _previous, { context, signal }) => this.readImage(context, signal),
+  });
 
   constructor(
     readonly sessionId: string,
@@ -208,6 +215,7 @@ export class SessionController {
   }
 
   getState = (): SessionState => this.current;
+  get imageEpoch(): string | undefined { return this.cursor?.epoch; }
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -749,25 +757,36 @@ export class SessionController {
     if (this.current.loadingOlder) this.commit({ loadingOlder: false });
   }
 
-  /** The bytes of an image the desktop keeps, as a `data:` URL; fetched once. */
-  fetchImage(ref: string): Promise<string> {
-    try { this.requireConversation(); } catch (error) { return Promise.reject(error); }
+  /** Fetch key includes the variant so a preview cannot serve as an original. */
+  fetchImage = async (ref: string, size?: ImageGetParams['size']): Promise<string> => {
+    this.requireConversation();
     if (!ref.startsWith(`${this.sessionId}:`)) {
-      return Promise.reject(new RemoteRpcError('forbidden', 'The image belongs to a different remote session.'));
+      throw new RemoteRpcError('forbidden', 'The image belongs to a different remote session.');
     }
-    let image = this.images.get(ref);
-    if (image === undefined) {
-      const epoch = this.cursor?.epoch;
-      image = this.io.request('image.get', { ref }).then((result) => {
-        this.requireConversation();
-        if (this.cursor?.epoch !== epoch) throw new RemoteRpcError('closed', 'The remote session changed.');
-        if (!isSupportedImageMediaType(result.media_type) || !/^[A-Za-z0-9+/]+={0,2}$/u.test(result.base64)) throw new Error('unsupported image');
-        return `data:${result.media_type};base64,${result.base64}`;
-      });
-      image.catch(() => { if (this.images.get(ref) === image) this.images.delete(ref); });
-      this.images.set(ref, image);
+    const result = await this.images.fetch(JSON.stringify([ref, size]), { context: { ref, size } });
+    if (!result) throw new Error('image is unavailable');
+    return result;
+  };
+
+  private async readImage(params: ImageGetParams, signal: AbortSignal): Promise<string> {
+    const epoch = this.cursor?.epoch;
+    const chunks: string[] = [];
+    let mediaType: string | undefined;
+    let offset = 0;
+    for (;;) {
+      const result = await this.io.request('image.get', offset ? { ...params, offset } : params);
+      this.requireConversation();
+      if (signal.aborted || this.cursor?.epoch !== epoch) throw new RemoteRpcError('closed', 'The remote session changed.');
+      if (!isSupportedImageMediaType(result.media_type) || (mediaType && mediaType !== result.media_type)
+        || !/^[A-Za-z0-9+/]+={0,2}$/u.test(result.base64)
+        || offset + result.base64.length > 28 * 1024 * 1024) throw new Error('unsupported image');
+      mediaType = result.media_type;
+      chunks.push(result.base64);
+      if (result.next_offset === undefined) return `data:${mediaType};base64,${chunks.join('')}`;
+      if (params.size !== 'original' || result.base64.length !== 1024 * 1024
+        || result.base64.endsWith('=') || result.next_offset !== offset + result.base64.length) throw new Error('invalid image range');
+      offset = result.next_offset;
     }
-    return image;
   }
 }
 

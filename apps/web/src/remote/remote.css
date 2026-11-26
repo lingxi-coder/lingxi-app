@@ -144,6 +144,7 @@
 .rc-images { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .rc-image { max-width: 100%; max-height: 260px; border-radius: 8px; }
 .rc-image-ref { padding: 6px 10px; border: 1px dashed var(--line-strong); border-radius: 8px; background: none; color: var(--ink-2); font: inherit; font-size: 12px; cursor: pointer; }
+.rc-image-ref > .rc-image { display: block; }
 
 /* Prompts */
 .rc-pending { display: grid; gap: 8px; }

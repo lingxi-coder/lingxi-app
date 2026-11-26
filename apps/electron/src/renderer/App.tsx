@@ -966,6 +966,7 @@ export function App() {
                   // collapse map is scoped by this and dropped when it changes.
                   sessionKey={displayedTranscript?.sessionKey}
                   modUiSessionId={bridge.sessionLoading ? '' : settledSession?.sessionId ?? ''}
+                  historyImageSessionId={bridge.sessionLoading ? bridge.sessionResumePreview?.conversation.sessionKey : settledSession?.sessionId}
                   foldedItemIds={displayedTranscript?.foldedItemIds}
                   onVisualizationFollowup={bridge.sessionLoading ? undefined : bridge.offerVisualizationFollowup}
                 /></BotProposalAction.Provider>

@@ -29,7 +29,7 @@ import {
 } from '../bridge/runtimeCenterState';
 import { statusLabel } from '../bridge/agentStatus';
 import { tr } from '../i18n/locale';
-import { ImagePreview } from './ImagePreview';
+import { ImagePreview, SessionImageThumbnail } from './ImagePreview';
 import { useT } from '../theme/ThemeContext';
 import { Icon } from './Icon';
 import { DesktopIcon } from './DesktopIcon';
@@ -178,6 +178,7 @@ function OverviewRow({
   title,
   subtitle,
   thumbnail,
+  sessionId,
   agentId,
   status,
   statusText,
@@ -189,6 +190,7 @@ function OverviewRow({
   trailing?: string;
   subtitle?: string;
   thumbnail?: string;
+  sessionId?: string;
   agentId?: string;
   /** MACHINE status — drives the colour and the running shimmer. */
   status?: string;
@@ -212,7 +214,7 @@ function OverviewRow({
       onMouseLeave={(event) => { event.currentTarget.style.background = 'transparent'; }}
     >
       <span style={{ width: 23, height: 23, display: 'grid', placeItems: 'center', flexShrink: 0, color: icon === 'subagent' ? t.accent : t.text3 }}>
-        <>{agentId !== undefined ? <AgentAvatar agentId={agentId} size={23} /> : thumbnail ? <img src={thumbnail} alt="" style={{ width: 23, height: 23, objectFit: 'cover', borderRadius: 4 }} /> : <Icon name={icon} size={16} stroke={1.8} />}</>
+        <>{agentId !== undefined ? <AgentAvatar agentId={agentId} size={23} /> : thumbnail ? <SessionImageThumbnail src={thumbnail} alt="" sessionId={sessionId} style={{ width: 23, height: 23, objectFit: 'cover', borderRadius: 4 }} /> : <Icon name={icon} size={16} stroke={1.8} />}</>
       </span>
       <span style={{ minWidth: 0, flex: 1 }}>
         <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 14, fontWeight: 400 }}>{title}</span>
@@ -402,7 +404,7 @@ export function RuntimeCenterOverview({ bridge, sideChats, onManageSources }: { 
       {(center.resources.length > 0 || bridge.mcpServersEvent?.servers.length || onManageSources) && <SummarySection label={tr('desktop_runtime_sources')}
         action={onManageSources && <button type="button" className="runtime-summary-add" aria-label={tr('desktop_runtime_manage_sources')} onClick={onManageSources}><Icon name="plus" size={18} /></button>}>
         {(bridge.mcpServersEvent?.servers ?? []).slice(0, 3).map(server => <OverviewRow key={server.name} icon="mcp" title={server.name} onClick={() => onManageSources ? onManageSources() : open({ kind: 'section', id: 'resources' })} />)}
-        {center.resources.slice(0, 3).map((resource) => <OverviewRow key={resource.id} icon={resource.kind === 'image' ? 'image' : resource.kind === 'file' ? 'file' : 'resources'} title={resource.name} thumbnail={resource.kind === 'image' ? resource.url : undefined} onClick={() => open({ kind: 'resource', id: resource.id })} />)}
+        {center.resources.slice(0, 3).map((resource) => <OverviewRow key={resource.id} icon={resource.kind === 'image' ? 'image' : resource.kind === 'file' ? 'file' : 'resources'} title={resource.name} thumbnail={resource.kind === 'image' ? resource.url : undefined} sessionId={bridge.activeSession?.sessionId} onClick={() => open({ kind: 'resource', id: resource.id })} />)}
         {(center.resources.length > 0 || (bridge.mcpServersEvent?.servers.length ?? 0) > 3) && <OverviewRow icon="resources" title={tr('desktop_runtime_view_all')} onClick={() => center.resources.length > 0 ? open({ kind: 'section', id: 'resources' }) : onManageSources?.()} />}
       </SummarySection>}
     </div>
@@ -548,7 +550,7 @@ function ResourceDetail({ resource, bridge }: { resource: RuntimeResource | unde
   }, [bridge.previewWorkspaceFile, resource?.id, resource?.path]);
   if (!resource) return <EmptyRow>{tr('desktop_runtime_resource_missing')}</EmptyRow>;
   if (resource.kind === 'image' && resource.url) {
-    return <div style={{ padding: 15 }}><ImagePreview src={resource.url} alt={resource.name} imageStyle={{ display: 'block', maxWidth: '100%', maxHeight: 500, margin: '0 auto', objectFit: 'contain', borderRadius: 10, background: t.windowBg }} /><div style={{ marginTop: 10, color: t.text3, fontSize: 11 }}>{resource.name}</div></div>;
+    return <div style={{ padding: 15 }}><ImagePreview src={resource.url} alt={resource.name} sessionId={bridge.activeSession?.sessionId} imageStyle={{ display: 'block', maxWidth: '100%', maxHeight: 500, margin: '0 auto', objectFit: 'contain', borderRadius: 10, background: t.windowBg }} /><div style={{ marginTop: 10, color: t.text3, fontSize: 11 }}>{resource.name}</div></div>;
   }
   if (resource.kind === 'file') {
     if (error) return <div role="alert" style={{ padding: 15, color: t.danger, fontSize: 11 }}>{error === 'desktop_runtime_preview_failed' ? tr(error) : error}</div>;

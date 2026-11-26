@@ -65,7 +65,7 @@ import { useT } from '../theme/ThemeContext';
 import {
   activeFileMention,
   promptWithFileMentions,
-} from '../bridge/fileMentions';
+} from '../../shared/fileMentions';
 import { imageFileToAttachment, type ImageAttachment } from '../bridge/imageInput';
 import {
   activeSlashCommand,

@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde::Deserialize;
 
@@ -122,6 +123,8 @@ mod workspace_resume_tests;
 mod catalog_worker;
 #[path = "history_page.rs"]
 mod history_page;
+#[path = "history_image.rs"]
+pub(crate) mod history_image;
 
 /// Serve bounded metadata requests without resolving providers or building an engine.
 pub async fn run_session_catalog_worker() -> Result<(), String> {
@@ -2176,6 +2179,9 @@ pub async fn assemble_with_account_credentials(
     provider_account_home: Option<PathBuf>,
     provider_account_backend: Option<String>,
 ) -> Result<BoundServer, String> {
+    let cold_start =
+        !cfg.restore_draft && !cfg.defer_session_start && cfg.session_transcript_path.is_some();
+    let before_prepare = cold_start.then(Instant::now);
     if cfg.team_invocation.is_none() {
         crate::provider_settings::apply_managed(&mut cfg).await?;
     }
@@ -2198,12 +2204,27 @@ pub async fn assemble_with_account_credentials(
     } else {
         prepare_selected_boot_session(&mut cfg).await?;
     }
+    if let Some(started) = before_prepare {
+        tracing::info!(
+            phase = "selected_transcript",
+            duration_ms = started.elapsed().as_millis() as u64,
+            "bridge boot phase"
+        );
+    }
     let cold_resume =
         (!cfg.restore_draft && !cfg.defer_session_start && cfg.session_resume_snapshot.is_some())
             .then(|| {
                 let capture = cfg.clone();
                 tokio::task::spawn_blocking(move || {
-                    crate::workspace_commands::ColdBootResume::from_prepared_config(&capture)
+                    let started = Instant::now();
+                    let result =
+                        crate::workspace_commands::ColdBootResume::from_prepared_config(&capture);
+                    tracing::info!(
+                        phase = "resume_display_projection",
+                        duration_ms = started.elapsed().as_millis() as u64,
+                        "bridge boot phase"
+                    );
+                    result
                 })
             });
     let provider_credentials_ephemeral = matches!(
@@ -2512,11 +2533,11 @@ pub async fn assemble_with_account_credentials(
             ));
     }
     let initial_account_snapshot = shared.provider_accounts.clone();
-    let assembly_started_at = std::time::Instant::now();
+    let assembly_started_at = Instant::now();
     let assembly = async {
         // Do not nest the SDK's large assembly future in every transport wrapper.
         // This also keeps cold resume within ordinary worker-thread stack limits.
-        Box::pin(harness_runtime::desktop::build_with_host_automation(
+        let result = Box::pin(harness_runtime::desktop::build_with_host_automation(
             cfg,
             output,
             permission_sink,
@@ -2524,7 +2545,15 @@ pub async fn assemble_with_account_credentials(
         ))
         .await
         .map(Arc::new)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+        if cold_start {
+            tracing::info!(
+                phase = "runtime_assembly",
+                duration_ms = assembly_started_at.elapsed().as_millis() as u64,
+                "bridge boot phase"
+            );
+        }
+        result
     };
     let proof = async {
         match cold_resume {

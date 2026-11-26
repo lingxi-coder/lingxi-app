@@ -3,8 +3,8 @@ import {TranscriptBuilder,type Transcript} from './sessionModel';
 import { Files } from './Files';
 import { SendFailureNotice } from '../../../../packages/chat-ui/SendFailureNotice';
 import { ChatTopbarControl } from '../../../../packages/teams/ChatTopbar';
-import type { FileReceipt } from '@lingxi/bridge-client/remote';
-import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { FileReceipt, ImageGetParams } from '@lingxi/bridge-client/remote';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Locale } from '../utils/locale';
 import { Composer } from './Composer';
 import { Controls } from './Controls';
@@ -36,6 +36,11 @@ function errorText(locale: Locale, state: SessionState): string {
 export function SessionView({ locale, client, sessionId, hostId, connection, deviceName, onBack }: SessionViewProps) {
   const controller = useMemo(() => client.session(sessionId), [client, sessionId]);
   const state = useStore(controller)!;
+  const imageEpoch = state.status === 'live' ? controller.imageEpoch : undefined;
+  const fetchImage = useCallback((ref: string, size?: ImageGetParams['size']) => {
+    if (imageEpoch === undefined) return Promise.reject(new Error('image session unavailable'));
+    return controller.fetchImage(ref, size);
+  }, [controller, imageEpoch]);
   const list = useStore(client)!;
   // A Bot's chat is in its Bot's list, not in the sessions': the page that opened it said which Bot that is.
   const botId = client.botOfThread(sessionId);
@@ -147,7 +152,7 @@ export function SessionView({ locale, client, sessionId, hostId, connection, dev
             {state.loadingOlder ? t(locale, 'loadingOlder') : t(locale, 'loadOlder')}
           </button>
         ) : null}
-        {!approval ? <TranscriptView locale={locale} transcript={state.transcript} running={running} deviceName={deviceName} fetchImage={(ref) => controller.fetchImage(ref)} /> : null}
+        {!approval ? <TranscriptView locale={locale} transcript={state.transcript} running={running} deviceName={deviceName} fetchImage={fetchImage} /> : null}
         {state.outgoing.map((prompt) => (
           <div key={prompt.id} className="rc-user">
             <div className={`rc-bubble rc-outgoing${prompt.status === 'failed' ? ' rc-failed' : ''}`}>
@@ -232,7 +237,7 @@ function RemoteNoticePreview({client,sessionId,target,hostId,live,locale,deviceN
     return ()=>{mounted=false;};
   },[client,sessionId,target.through,target.key,target.generation,hostId,live]);
   return <section className="rc-session"><header className="rc-session-head"><h1>{locale==='zh'?'通知预览':'Notification preview'}</h1></header>
-    {body?<TranscriptView locale={locale} transcript={body} running={false} deviceName={deviceName} fetchImage={ref=>client.session(sessionId).fetchImage(ref)}/>:
+    {body?<TranscriptView locale={locale} transcript={body} running={false} deviceName={deviceName} fetchImage={client.session(sessionId).fetchImage}/>:
      body===null?<p role="status">{locale==='zh'?'此通知的内容已不可用。':'The content of this notification is no longer available.'}</p>:null}
     <button type="button" onClick={onReturn}>{locale==='zh'?'返回会话':'Return to conversation'}</button>
   </section>;

@@ -1,7 +1,16 @@
 import type { MessageDto } from '@lingxi/bridge-client';
+import { fileMentionsFromPrompt, fileMentionToken } from './fileMentions.js';
 
 export const CH_SESSION_HISTORY = 'lingxi:session:history';
+export const CH_SESSION_IMAGE = 'lingxi:session:history-image';
 export const CH_SESSION_RESUME_PREVIEW = 'lingxi:session:resume-preview';
+
+export type SessionImageSize = 'thumbnail' | 'original';
+export interface SessionImagePayload { mediaType: string; base64: string }
+
+export function isHistoryImageReference(value: unknown): value is string {
+  return typeof value === 'string' && /^lingxi-history-image:[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}:\d{1,2}:(?:png|jpeg|gif|webp)$/u.test(value);
+}
 
 export interface SessionResumePreview {
   requestId: string;
@@ -41,7 +50,7 @@ export function initialHistory(messages: readonly MessageDto[]): TranscriptHisto
     ? { uuid: first.transcript_uuid } : null };
 }
 
-/** Page the Desktop view at a persisted user turn, keeping its associated tool activity together. */
+/** Page at a persisted message, keeping any tool activity that spans the cut. */
 export function initialDisplayPage(messages: readonly MessageDto[]): TranscriptHistoryPage {
   const recent = recentTranscript(messages);
   let start = Math.max(0, recent.length - INITIAL_HISTORY_ROWS);
@@ -55,9 +64,41 @@ export function initialDisplayPage(messages: readonly MessageDto[]): TranscriptH
       if (block.type === 'tool_result' && !results.has(block.id)) results.set(block.id, index);
       if (block.type === 'tool_use' && (results.get(block.id) ?? -1) >= start && index < start) start = index;
     }
-    if (index === start && index > 0 && (row.role !== 'user' || !row.transcript_uuid
-      || !row.blocks.some(block => block.type === 'text') || row.blocks.some(block => block.type === 'tool_result'))) start--;
+    if (index === start && index > 0 && !row.transcript_uuid) start--;
   }
   if (start > 0) return { messages: recent.slice(start), before: { uuid: recent[start]!.transcript_uuid! } };
   return { messages: [...recent], before: initialHistory(recent).before };
+}
+
+/** Reduce rows outside the transcript window to the inputs of the overview reducers. */
+export function historyOverview(messages: readonly MessageDto[]): MessageDto[] {
+  return messages.flatMap(message => {
+    const blocks = message.blocks.flatMap((block): MessageDto['blocks'] => {
+      if (block.type === 'tool_use') {
+        if (block.tool === 'ExitPlanMode' || block.tool === 'EnterPlanMode'
+          || (block.tool === 'Write' && planFileContent(block.input_json))) return [block];
+      }
+      if (block.type === 'tool_result') {
+        if (block.tool === 'ExitPlanMode') return [block];
+        if (block.tool === 'Write') return [{ ...block, result_json: '', display: { body_lines: 0 } }];
+      }
+      if (message.role === 'user' && block.type === 'text') {
+        const mentions = fileMentionsFromPrompt(block.text);
+        if (mentions.length) return [{ type: 'text', text: mentions.map(fileMentionToken).join(' ') }];
+      }
+      return [];
+    });
+    if (!blocks.length && !message.images?.length) return [];
+    return [{ role: message.role, transcript_uuid: message.transcript_uuid, blocks, images: message.images }];
+  });
+}
+
+export function planFileContent(json: string): string | undefined {
+  try {
+    const input = JSON.parse(json);
+    const path = typeof input?.file_path === 'string' ? input.file_path.replace(/\\/g, '/') : '';
+    if (/(?:^|\/)(?:\.lingxi|\.claude)\/plans\/[^\n]+\.md$/i.test(path)
+      && typeof input?.content === 'string' && input.content.trim()) return input.content;
+  } catch { /* Malformed tool input does not produce a plan draft. */ }
+  return undefined;
 }

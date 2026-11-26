@@ -4,7 +4,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, utimesSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -114,6 +114,24 @@ test('asynchronous lockfile capture and bounded discovery preserve synchronous s
   assert.equal(discoverLatestLockfile(dir), null);
   assert.equal(await discoverLatestLockfileAsync(dir), null, 'do not silently adopt a different older endpoint after the newest lockfile fails validation');
   assert.equal(await discoverLatestLockfileAsync(join(dir, 'missing')), null);
+});
+
+test('owner-only discovery reads a private lockfile and refuses unsafe file metadata', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'bridge-owner-lock-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = writeLock(dir, 54321, 'private-token');
+  chmodSync(path, 0o600);
+  assert.equal((await readLockfileAsync(path, { ownerOnly: true })).body.authToken, 'private-token');
+  if (process.platform !== 'win32') {
+    chmodSync(path, 0o644);
+    await assert.rejects(readLockfileAsync(path, { ownerOnly: true }), /permissions are not owner-only/);
+    chmodSync(path, 0o600);
+  }
+  writeFileSync(path, Buffer.alloc(64 * 1024 + 1));
+  await assert.rejects(readLockfileAsync(path, { ownerOnly: true }), /too large/);
+  const directory = join(dir, '54322.lock');
+  mkdirSync(directory, { mode: 0o700 });
+  await assert.rejects(readLockfileAsync(directory, { ownerOnly: true }), /not a regular file/);
 });
 
 test('client DTO protocol version tracks the source contract major', () => {

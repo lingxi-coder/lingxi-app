@@ -11,6 +11,7 @@ import type {
   MediaDeviceResponseDto,
   MediaSessionModeDto,
   ClientEvent,
+  MessageDto,
   ConversationControlsDto,
   PermissionModeId,
 } from '@lingxi/bridge-client';
@@ -120,6 +121,8 @@ export interface BridgeManagerOptions {
   resourcesPath?: string;
   launchConfig: () => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
   prepareLaunchConfig?: () => Promise<() => BridgeLaunchConfig>;
+  /** Resolve credentials only after discovery establishes that an engine must spawn. */
+  loadPluginSecrets?: () => Promise<NonNullable<BridgeLaunchConfig['pluginSecrets']>>;
   /** Provider ids whose shared secure-store status is cached after connect. */
   providerIds?: readonly string[];
   /** Synchronous trust snapshot used by privileged IPC checks. */
@@ -193,6 +196,7 @@ export interface RuntimeEventEnvelope<T = unknown> {
 export interface SequencedRuntimeEventEnvelope<T = unknown> extends RuntimeEventEnvelope<T> {
   sequence: number;
   historyBefore?: TranscriptHistoryCursor;
+  historyOverview?: MessageDto[];
   /** Replay-only equivalent span, inclusive through `sequence`. Live frames have no span. */
   replayFromSequence?: number;
 }
@@ -211,11 +215,12 @@ export interface SessionRuntimeSummary {
 
 type SavedSessionTranscript = { path: string; mode: RuntimeSessionMode };
 
-export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'getSavedPermissionMode' | 'onPermissionModeSelected' | 'getSavedFastMode' | 'onFastModeSelected' | 'onFirstPromptSent' | 'onPromptAdmitted' | 'onDurableSessionActivity' | 'onActivityChanged' | 'onInboxActivity' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
+export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'loadPluginSecrets' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'getSavedPermissionMode' | 'onPermissionModeSelected' | 'getSavedFastMode' | 'onFastModeSelected' | 'onFirstPromptSent' | 'onPromptAdmitted' | 'onDurableSessionActivity' | 'onActivityChanged' | 'onInboxActivity' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
   onInboxActivity?: (ref: SessionRef) => void;
   /** What a session of a working directory is launched with; it is told which session, for settings that belong to the one. */
   workspaceSettings?: (projectPath: string, ref: SessionRef) => Promise<WorkspaceLaunchSettings>;
   launchConfig: (ref: SessionRef, resumeModel?: string) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
+  loadPluginSecrets?: (ref: SessionRef) => Promise<NonNullable<BridgeLaunchConfig['pluginSecrets']>>;
   accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };
   onModelChanged?: (ref: SessionRef, model: string) => void;
   onModelSelected?: (ref: SessionRef, model: string) => void;

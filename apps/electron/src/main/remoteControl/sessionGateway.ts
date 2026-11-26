@@ -216,8 +216,14 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
         const entry = result.items.find(item => item.cursor === through);
         return activityPreview(runtime.remoteView(), entry?.resultUuids ?? []);
       }
-      case 'image.get':
-        return this.deps.commands.imageGet(this.imageRuntime(viewer, params), params);
+      case 'image.get': {
+        const runtime = this.imageRuntime(viewer, params);
+        const epoch = runtime?.remoteView().epoch;
+        const result = await this.deps.commands.imageGet(runtime, params);
+        if (this.disposed || state.closed || this.imageRuntime(viewer, params) !== runtime || runtime?.remoteView().epoch !== epoch)
+          throw new RemoteRpcError('not_approved', 'session authorization changed');
+        return result;
+      }
       case 'file.offer':
       case 'file.commit':
       case 'file.cancel':

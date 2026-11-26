@@ -1,4 +1,5 @@
 import type { TranscriptHistoryCursor } from '../shared/sessionHistory.js';
+import type { MessageDto } from '@lingxi/bridge-client';
 
 export interface SequencedRuntimeEventEnvelope<T = unknown> {
   sessionId: string;
@@ -6,6 +7,7 @@ export interface SequencedRuntimeEventEnvelope<T = unknown> {
   /** The cached event replaces all stream frames in this inclusive span. */
   replayFromSequence?: number;
   historyBefore?: TranscriptHistoryCursor;
+  historyOverview?: MessageDto[];
   event: T;
 }
 

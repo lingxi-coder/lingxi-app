@@ -48,10 +48,8 @@ sealed interface ExternalFeedItem {
         val text: String,
         val imageCount: Int,
         val originLabel: String?,
+        val images: List<com.lingxi.code.bindings.client.MessageImageDto> = emptyList(),
     ) : ExternalFeedItem
-
-    /** Images of the prompt of [turnId], once fetched from the desktop. */
-    data class PromptImages(val turnId: Long, val images: List<ImageRefDto>) : ExternalFeedItem
 
     /** An engine event of the session. */
     data class Event(val event: ClientEvent) : ExternalFeedItem

@@ -1,8 +1,10 @@
 import { execFile } from 'node:child_process';
-import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
+import { lstat, readdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { readLockfileAsync } from '@lingxi/bridge-client';
 import type { BridgeManagerOptions, SessionRef } from './bridgeTypes.js';
 import { isSessionId } from './sessionIdentity.js';
 import { validateBridgeLockfile } from './validation.js';
@@ -46,9 +48,9 @@ export function resolveServerBin(opts: Omit<BridgeManagerOptions, 'launchConfig'
   throw new Error('bridge-server binary not found; build it or set LINGXI_BRIDGE_SERVER_BIN in development');
 }
 
-export function lockfiles(dir: string): string[] {
+export async function lockfiles(dir: string): Promise<string[]> {
   try {
-    return readdirSync(dir).filter((name) => name.endsWith('.lock') && !name.startsWith('.'));
+    return (await readdir(dir)).filter((name) => name.endsWith('.lock') && !name.startsWith('.'));
   } catch {
     return [];
   }
@@ -67,10 +69,10 @@ export interface ProcessCommand {
   command: string;
 }
 
-function privateOwnedPath(path: string, kind: 'directory' | 'file'): boolean {
+async function isPrivateBridgeDirectory(path: string): Promise<boolean> {
   try {
-    const metadata = lstatSync(path);
-    if (kind === 'directory' ? !metadata.isDirectory() : !metadata.isFile()) return false;
+    const metadata = await lstat(path);
+    if (!metadata.isDirectory()) return false;
     if (process.platform !== 'win32' && (metadata.mode & 0o077) !== 0) return false;
     if (process.getuid && metadata.uid !== process.getuid()) return false;
     return true;
@@ -121,28 +123,17 @@ function parseProcessCommand(line: string): ProcessCommand | undefined {
   return match ? { pid: Number(match[1]), ppid: Number(match[2]), command: match[3] } : undefined;
 }
 
-function lockfilePort(name: string): number | undefined {
-  if (!name.endsWith('.lock') || name.startsWith('.')) return undefined;
-  const raw = name.slice(0, -'.lock'.length);
-  const port = Number(raw);
-  return Number.isInteger(port) && port >= 1 && port <= 65_535 && String(port) === raw
-    ? port
-    : undefined;
-}
-
-function reusableBridgeInLaunchDirectory(
+async function reusableBridgeInLaunchDirectory(
   launchDir: string,
   ref: SessionRef,
   pid: number,
   ownedProcess: boolean,
-): ReusableBridge | undefined {
-  if (!privateOwnedPath(launchDir, 'directory')) return undefined;
-  for (const name of lockfiles(launchDir)) {
-    if (lockfilePort(name) === undefined) continue;
+): Promise<ReusableBridge | undefined> {
+  if (!await isPrivateBridgeDirectory(launchDir)) return undefined;
+  for (const name of await lockfiles(launchDir)) {
     const lockfilePath = join(launchDir, name);
-    if (!privateOwnedPath(lockfilePath, 'file')) continue;
     try {
-      const body = JSON.parse(readFileSync(lockfilePath, 'utf8')) as { pid?: unknown };
+      const { body } = await readLockfileAsync(lockfilePath, { ownerOnly: true });
       validateBridgeLockfile(body, pid, ref.projectPath);
       return { launchDir, lockfilePath, pid, ownedProcess };
     } catch {
@@ -164,31 +155,29 @@ export async function discoverReusableBridge(
   processCommand: NonNullable<BridgeManagerOptions['readProcessCommand']> = readProcessCommand,
   isAlive: (pid: number) => boolean = processIsAlive,
 ): Promise<ReusableBridge | undefined> {
-  if (!privateOwnedPath(bridgeRoot, 'directory')) return undefined;
+  if (!await isPrivateBridgeDirectory(bridgeRoot)) return undefined;
   let entries: string[];
   try {
-    entries = readdirSync(bridgeRoot).sort((left, right) => right.localeCompare(left));
+    entries = (await readdir(bridgeRoot)).sort((left, right) => right.localeCompare(left));
   } catch {
     return undefined;
   }
   for (const entry of entries) {
     if (!entry.startsWith('launch-')) continue;
     const launchDir = join(bridgeRoot, entry);
-    if (!privateOwnedPath(launchDir, 'directory')) continue;
-    for (const name of lockfiles(launchDir)) {
-      if (lockfilePort(name) === undefined) continue;
+    if (!await isPrivateBridgeDirectory(launchDir)) continue;
+    for (const name of await lockfiles(launchDir)) {
       const lockfilePath = join(launchDir, name);
-      if (!privateOwnedPath(lockfilePath, 'file')) continue;
       try {
-        const body = JSON.parse(readFileSync(lockfilePath, 'utf8')) as { pid?: unknown };
-        if (!Number.isSafeInteger(body.pid) || Number(body.pid) < 1) continue;
-        const pid = Number(body.pid);
+        const { body } = await readLockfileAsync(lockfilePath, { ownerOnly: true });
+        const pid = body.pid;
+        if (!Number.isSafeInteger(pid) || pid < 1) continue;
         // Crashed or force-quit runtimes leave their launch directories
         // behind; skip their pids without spawning `ps` for each one.
         if (!isAlive(pid)) continue;
         const command = await processCommand(pid);
         if (!command || !processCommandOwnsSession(command, ref.sessionId)) continue;
-        const reusable = reusableBridgeInLaunchDirectory(launchDir, ref, pid, true);
+        const reusable = await reusableBridgeInLaunchDirectory(launchDir, ref, pid, true);
         if (reusable) return reusable;
       } catch {
         // A stale or partially-written candidate is not reusable; keep looking.
@@ -208,16 +197,16 @@ function argumentBetween(command: string, start: string, end: string): string | 
   return value || undefined;
 }
 
-export function discoverExternalReusableBridge(
+export async function discoverExternalReusableBridge(
   ref: SessionRef,
   processes: readonly ProcessCommand[],
-): ReusableBridge | undefined {
+): Promise<ReusableBridge | undefined> {
   for (const processInfo of processes) {
     if (!processCommandOwnsSession(processInfo.command, ref.sessionId)) continue;
     const workspace = argumentBetween(processInfo.command, ' --cwd ', ' --bridge-dir ');
     const launchDir = argumentBetween(processInfo.command, ' --bridge-dir ', ' --session-id ');
     if (workspace !== ref.projectPath || !launchDir) continue;
-    const reusable = reusableBridgeInLaunchDirectory(
+    const reusable = await reusableBridgeInLaunchDirectory(
       launchDir,
       ref,
       processInfo.pid,
@@ -260,6 +249,7 @@ export function processIsAlive(pid: number): boolean {
 export function ignorableLockfileError(input: unknown): boolean {
   if (!(input instanceof Error)) return false;
   return (input as NodeJS.ErrnoException).code === 'ENOENT'
+    || (input as NodeJS.ErrnoException).code === 'ELOOP'
     || input instanceof SyntaxError
     || /bridge lockfile|^lockfile (?:name not|missing authToken)|JSON/.test(input.message);
 }

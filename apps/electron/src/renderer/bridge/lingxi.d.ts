@@ -1,6 +1,6 @@
 import type { DesktopInboxApi } from '../../shared/inbox.js';
 import type { ProviderAccountSnapshot } from '../../shared/providerAccounts.js';
-import type { SessionResumePreview, TranscriptHistoryCursor, TranscriptHistoryPage } from '../../shared/sessionHistory.js';
+import type { SessionImagePayload, SessionImageSize, SessionResumePreview, TranscriptHistoryCursor, TranscriptHistoryPage } from '../../shared/sessionHistory.js';
 import type { ProviderAccountsApi } from '../../shared/providerAccounts.js';
 import type { LocalAppsApi, LocalAppEditRequest } from '../../shared/localApps';
 import type { ProjectCreationPurpose, ProjectFolderSelection } from '../../shared/projectCreation';
@@ -22,6 +22,7 @@ import type {
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
   ImageRefDto,
+  MessageDto,
   NativeUiControlRequest,
   NativeUiControlResponseFor,
   PermissionResponseDto,
@@ -78,6 +79,7 @@ export interface RuntimeEventEnvelope<T = unknown> {
 export interface SequencedRuntimeEventEnvelope<T = unknown> extends RuntimeEventEnvelope<T> {
   sequence: number;
   historyBefore?: TranscriptHistoryCursor;
+  historyOverview?: MessageDto[];
 }
 export interface SessionRuntimeSummary {
   projectPath: string;
@@ -253,6 +255,7 @@ export interface LingxiApi {
   openSessionWithPreview?(projectPath: string, sessionId: string, selection: SessionOpenSelection | undefined, linkedMode: ConversationSpace | undefined, requestId: string): Promise<BootstrapState>;
   onSessionResumePreview?(callback: (preview: SessionResumePreview) => void): Unsubscribe;
   loadSessionHistory(sessionId: string, before: TranscriptHistoryCursor): Promise<TranscriptHistoryPage>;
+  loadSessionImage(sessionId: string, reference: string, size: SessionImageSize): Promise<SessionImagePayload>;
   prepareSessionMetadata(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionMetadataSelection>;
   releaseSessionMetadata(selection: SessionMetadataSelection): Promise<void>;
   preflightSessionArchive(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<CronJobDto[]>;

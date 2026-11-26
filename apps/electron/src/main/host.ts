@@ -1,7 +1,7 @@
 import { CH_DECISION } from '../shared/decision.js';
 import type { DecisionHost } from './decision.js';
 import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
-import { CH_SESSION_HISTORY, CH_SESSION_RESUME_PREVIEW, historyCursor, type SessionResumePreview, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
+import { CH_SESSION_HISTORY, CH_SESSION_IMAGE, CH_SESSION_RESUME_PREVIEW, historyCursor, isHistoryImageReference, type SessionResumePreview, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
 import { CH_PROVIDER_ACCOUNTS, CH_PROVIDER_ACCOUNTS_CANCEL, type ProviderAccountCommand } from '../shared/providerAccounts.js';
 import type { DesktopProviderAccounts } from './provider-accounts.js';
 import { ProviderVaultClient, ProviderVaultError, vaultIdForAccount, vaultInstallPlan, vaultUpsertFor } from './provider-vault.js';
@@ -596,6 +596,13 @@ export class HostController {
   private sessionArchiveEpoch = 0;
   private readonly sessionArchivals = new Map<string, Promise<unknown>>();
   private navigationGeneration = 0;
+  private previewImageSource?: {
+    sessionId: string;
+    projectPath: string;
+    transcriptPath: string;
+    references: Set<string>;
+    current(): boolean;
+  };
   private modeNavigation?: { mode: ConversationSpace; pending: Promise<BootstrapState> };
   private readonly handoffs = new Map<string, AbortController>();
   private readonly handoffRetries = new Map<string, { sourceId: string; target: ConversationSpace; release: () => void; expires?: number; timer?: ReturnType<typeof setTimeout>; prepared?: { cutoff: string; summary: string } }>();
@@ -1428,6 +1435,33 @@ export class HostController {
       this.assertSender(event);
       if (this.bridge.get(sessionId) !== runtime || this.settings.getPublic().activeSession?.sessionId !== sessionId) throw new Error('This chat is no longer active');
       return page;
+    });
+    this.ipc.handle(CH_SESSION_IMAGE, async (event: IpcMainInvokeEvent, sessionId: unknown, reference: unknown, size: unknown) => {
+      this.assertSender(event);
+      if (!isSessionId(sessionId) || !isHistoryImageReference(reference) || (size !== 'thumbnail' && size !== 'original')) {
+        throw new Error('Invalid history image request');
+      }
+      const preview = this.previewImageSource;
+      if (preview?.sessionId === sessionId && preview.references.has(reference) && preview.current()) {
+        const image = await this.sessionCatalog.readImage(preview.projectPath, sessionId, preview.transcriptPath, reference, size);
+        this.assertSender(event);
+        if (!preview.current()) throw new Error('This chat is no longer active');
+        return image;
+      }
+      const ref = this.settings.getPublic().activeSession;
+      const runtime = this.bridge.get(sessionId);
+      if (!ref || ref.sessionId !== sessionId || !runtime || runtime.projectPath !== ref.projectPath) {
+        throw new Error('This chat is no longer active');
+      }
+      const state = await runtime.getWorkspaceState();
+      if (!state.transcript_path) throw new Error('History image source is unavailable');
+      const image = await this.sessionCatalog.readImage(ref.projectPath, sessionId, state.transcript_path, reference, size);
+      this.assertSender(event);
+      const active = this.settings.getPublic().activeSession;
+      if (this.bridge.get(sessionId) !== runtime || active?.sessionId !== sessionId || active.projectPath !== ref.projectPath) {
+        throw new Error('This chat is no longer active');
+      }
+      return image;
     });
     this.ipc.handle(CH_SESSION_WORKSPACE, async (event: IpcMainInvokeEvent, sessionId: unknown, operation: unknown) => {
       this.assertSender(event);
@@ -3255,12 +3289,14 @@ export class HostController {
     let source = existing?.projectPath ?? project;
     const catalogStartedAt = performance.now();
     const allowCatalogPreview = publishPreview && !existing && typeof this.sessionCatalog.selectForOpen === 'function';
-    let earlyPreview: TranscriptHistoryPage | undefined;
+    let catalogPreview: Promise<TranscriptHistoryPage | undefined> | undefined;
     const select: ProjectSessionCatalog['select'] = async (projectPath, sessionId, exact) => {
-      if (!allowCatalogPreview || !exact.transcriptPath) return this.sessionCatalog.select(projectPath, sessionId, exact);
-      const prepared = await this.sessionCatalog.selectForOpen(projectPath, sessionId, exact);
-      earlyPreview = prepared.preview;
-      return prepared.session;
+      if (allowCatalogPreview && exact.transcriptPath) {
+        const prepared = await this.sessionCatalog.selectForOpen(projectPath, sessionId, exact);
+        catalogPreview = prepared.preview;
+        return prepared.session;
+      }
+      return this.sessionCatalog.select(projectPath, sessionId, exact);
     };
     const session = remembered ? await resolveSavedConversationTranscriptRow(this.settings, this.sessionCatalog, ref, select)
       : selection ? await select(catalogProject, ref.sessionId, selection) : undefined;
@@ -3305,6 +3341,8 @@ export class HostController {
       && (expectedMode === undefined || this.settings.conversationSpaces.activeMode === expectedMode)));
     let releaseCopy: (() => void) | undefined;
     let releasePublication: (() => void) | undefined;
+    let previewImageSource: HostController['previewImageSource'];
+    let openFinished = false;
     if (selection && existing) {
       const state = existing.connectionState.status === 'connected' ? await existing.getWorkspaceState() : undefined;
       if (existing.projectPath !== source || state?.transcript_path !== session?.path) {
@@ -3334,13 +3372,31 @@ export class HostController {
           throw new Error('The saved session selection changed while opening it. Refresh the session list and try again.');
         }
         const previewSession = { projectPath: canonical.projectPath, sessionId: canonical.sessionId, mode: canonical.mode };
-        if (sourceWasCurrent && !archived() && earlyPreview) {
-          publishPreview({ session: previewSession, messages: earlyPreview.messages });
-        } else if (sourceWasCurrent && !archived()) onPreview = event => {
-          if (!current() || archived() || !sourceIsCurrent() || event.session_id !== canonical.sessionId || event.mode !== canonical.mode
-            || this.bridge.get(canonical.sessionId)?.projectPath !== canonical.projectPath) return;
-          publishPreview({ session: previewSession, messages: event.messages });
+        let previewPublished = false;
+        const previewCurrent = () => current() && !archived() && sourceIsCurrent();
+        const sendPreview = (messages: SessionResumePreview['messages']) => {
+          if (openFinished || previewPublished || !previewCurrent() || messages.length === 0) return;
+          previewPublished = true;
+          const references = new Set(messages.flatMap(message => (message.images ?? []).map(image => image.url).filter(isHistoryImageReference)));
+          if (references.size) {
+            previewImageSource = {
+              ...previewSession, transcriptPath: session.path, references, current: previewCurrent,
+            };
+            this.previewImageSource = previewImageSource;
+          }
+          publishPreview({ session: previewSession, messages });
         };
+        if (sourceWasCurrent && !archived()) {
+          if (catalogPreview) {
+            void catalogPreview.then(page => { if (page) sendPreview(page.messages); });
+          } else {
+            onPreview = event => {
+              if (event.session_id !== canonical.sessionId || event.mode !== canonical.mode
+                || this.bridge.get(canonical.sessionId)?.projectPath !== canonical.projectPath) return;
+              sendPreview(event.messages);
+            };
+          }
+        }
       }
       const openArgs = [canonical, session?.empty_session === true, session?.resume_model, false, selection ? session?.path : undefined] as const;
       if (onPreview) await this.bridge.openSession(...openArgs, undefined, undefined, onPreview);
@@ -3405,7 +3461,12 @@ export class HostController {
       if (!result.current) return this.bootstrap();
       if (result.wasArchived) await this.loadProjectSessions(source);
       return this.bootstrap();
-    } finally { releasePublication?.(); releaseCopy?.(); }
+    } finally {
+      openFinished = true;
+      if (this.previewImageSource === previewImageSource) this.previewImageSource = undefined;
+      releasePublication?.();
+      releaseCopy?.();
+    }
   }
 
   private archiveRef(projectPath: unknown, sessionId: unknown): SessionRef {
@@ -3813,7 +3874,7 @@ export class HostController {
       CH_DECISION, CH_APPLICATION_ICON, CH_IMAGE_SAVE,
       CH_GIT_REQUEST, CH_TERMINAL_REQUEST, CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_SETTINGS_FILE_OPEN, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
       CH_PROJECT_FOLDER_PICK, CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE,
-      CH_PROJECT_REMOVE, CH_SESSION_PIN_SET, CH_CONVERSATION_SPACE, CH_SESSION_HANDOFF, CH_SESSION_HANDOFF_CANCEL, CH_SESSION_HISTORY,
+      CH_PROJECT_REMOVE, CH_SESSION_PIN_SET, CH_CONVERSATION_SPACE, CH_SESSION_HANDOFF, CH_SESSION_HANDOFF_CANCEL, CH_SESSION_HISTORY, CH_SESSION_IMAGE,
       CH_PROJECT_OPEN, CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
       CH_SESSION_METADATA_CAPTURE, CH_SESSION_METADATA_RELEASE, CH_SESSION_TOUCH, CH_SESSION_RENAME,
       CH_SESSION_WORKSPACE, CH_NATIVE_AUDIO_FLOW_LEASE,

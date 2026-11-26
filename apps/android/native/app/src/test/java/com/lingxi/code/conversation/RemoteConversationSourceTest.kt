@@ -277,12 +277,11 @@ class RemoteConversationSourceTest {
         )
     }
 
-    @Test fun promptImagesAreListedForFetching() {
-        val update = remoteUpdate(
-            records = listOf(prompt(7uL, RemotePromptOriginFfi.DESKTOP, images = listOf(RemoteImageRefFfi("ref-1", "image/png")))),
-        )
-        assertEquals(listOf(7L to listOf("ref-1")), mapper.imageRefs(update))
-        assertEquals(1, (mapper.map(update).first() as ExternalFeedItem.UserPrompt).imageCount)
+    @Test fun promptImageReferencesTravelWithTheirRow() {
+        val ref = RemoteImageRefFfi("s1:p:7:0", "image/png")
+        val update = remoteUpdate(records = listOf(prompt(7uL, RemotePromptOriginFfi.DESKTOP, images = listOf(ref))))
+        val row = mapper.map(update).filterIsInstance<ExternalFeedItem.UserPrompt>().single()
+        assertEquals(listOf(MessageImageDto("image/png", ref.imageRef)), row.images)
     }
 
     // --- pending actions, outgoing, notices ------------------------------
@@ -674,19 +673,19 @@ class RemoteConversationSourceTest {
         }
     }
 
-    @Test fun promptImagesAreFetchedOnceAndDeliveredWithTheirTurn() = runTest(UnconfinedTestDispatcher()) {
+    @Test fun remotePromptImagesFetchOnlyWhenRequestedByTheView() = runTest(UnconfinedTestDispatcher()) {
         val port = FakeRemoteSessionPort()
         val source = RemoteConversationSource(port, "s1", "Pixel 9")
         val received = mutableListOf<ExternalFeedItem>()
         val job = launch { source.externalFeed.toList(received) }
-        val record = prompt(4uL, RemotePromptOriginFfi.DESKTOP, images = listOf(RemoteImageRefFfi("ref", "image/png")))
+        val ref = "s1:p:4:0"
+        val record = prompt(4uL, RemotePromptOriginFfi.DESKTOP, images = listOf(RemoteImageRefFfi(ref, "image/png")))
         port.updates.emit(remoteUpdate(records = listOf(record)))
-        port.updates.emit(remoteUpdate(replace = true, records = listOf(record)))
-        val images = received.filterIsInstance<ExternalFeedItem.PromptImages>()
-        assertEquals(2, images.size)
-        assertEquals(4L, images.first().turnId)
-        assertEquals(ImageRefDto("image/png", Base64.getEncoder().encodeToString(byteArrayOf(1, 2, 3))), images.first().images.single())
-        assertEquals(1, port.calls.count { it == "fetch:ref" })
+        val row = received.filterIsInstance<ExternalFeedItem.UserPrompt>().single()
+        assertEquals(ref, row.images.single().url)
+        assertTrue(port.calls.none { it.startsWith("fetch:") })
+        assertEquals(listOf<Byte>(1, 2, 3), source.readImage(ref, thumbnail = true).bytes.toList())
+        assertEquals(1, port.calls.count { it == "fetch:$ref" })
         job.cancel()
     }
 
@@ -776,7 +775,7 @@ class RemoteConversationSourceTest {
         source.dismissExternalPrompt("p")
         assertEquals(listOf("cancel", "model:m", "loadOlder", "foreground:true", "dismiss:p"), port.calls)
     }
-    @Test fun snapshotHistoryAndCompletedMessageImagesAreHydrated() = runTest(UnconfinedTestDispatcher()) {
+    @Test fun snapshotsOlderHistoryAndCompletedMessagesCarryReferences() = runTest(UnconfinedTestDispatcher()) {
         val port = FakeRemoteSessionPort()
         val source = RemoteConversationSource(port, "s1", "Pixel 9")
         val received = mutableListOf<ExternalFeedItem>()
@@ -789,115 +788,57 @@ class RemoteConversationSourceTest {
         port.updates.emit(remoteUpdate(records = listOf(RemoteRecordFfi.Event(
             ClientEvent.MessageComplete(stopReason = "end_turn", message = message("s1:e:2:0")), false,
         ))))
-        val expected = listOf(ImageRefDto("image/png", "AQID"))
-        assertEquals(expected, received.filterIsInstance<ExternalFeedItem.Base>().single().session.transcript.single().images)
-        assertEquals(expected, received.filterIsInstance<ExternalFeedItem.OlderMessages>().single().messages.single().images)
+        assertEquals("s1:m:0:0", received.filterIsInstance<ExternalFeedItem.Base>().single()
+            .session.transcript.single().remoteImages.single().url)
+        assertEquals("s1:m:1:0", received.filterIsInstance<ExternalFeedItem.OlderMessages>().single()
+            .messages.single().remoteImages.single().url)
         val completed = received.filterIsInstance<ExternalFeedItem.Event>().single().event as ClientEvent.MessageComplete
-        assertEquals("data:image/png;base64,AQID", completed.message!!.images.single().url)
-        assertEquals(3, port.calls.count { it.startsWith("fetch:") })
+        assertEquals("s1:e:2:0", completed.message!!.images.single().url)
+        assertTrue(port.calls.none { it.startsWith("fetch:") })
         job.cancel()
     }
 
-    @Test fun slowSnapshotImageDoesNotDelayModeConflictOrPublishStaleBase() = runTest(UnconfinedTestDispatcher()) {
+    @Test fun stalledImageLeavesRowsAndActionsAvailableAndCannotCrossAReset() = runTest(UnconfinedTestDispatcher()) {
         val port = FakeRemoteSessionPort()
         val gate = CompletableDeferred<Unit>()
         port.fetchGate = gate
         val source = RemoteConversationSource(port, "s1", "Pixel 9")
         val received = mutableListOf<ExternalFeedItem>()
         val job = launch { source.externalFeed.toList(received) }
-        val image = textMessage("user", "picture").copy(images = listOf(MessageImageDto("image/png", "ref")))
+        val ref = "s1:m:0:0"
+        val image = textMessage("user", "first").copy(images = listOf(MessageImageDto("image/png", ref)))
         port.updates.emit(remoteUpdate(replace = true, messages = listOf(image)))
-        assertTrue(port.calls.contains("fetch:ref"))
-        assertTrue(received.none { it is ExternalFeedItem.Base })
-
-        port.updates.emit(remoteUpdate(replace = true, sessionMode = com.lingxi.code.bindings.client.SessionModeDto.CHAT))
-        assertEquals(RemoteSessionPhaseFfi.ERROR, source.meta.value.phase)
-        assertEquals("SESSION_MODE_MISMATCH", source.meta.value.error?.code)
-        assertTrue(received.last() is ExternalFeedItem.Readiness && !(received.last() as ExternalFeedItem.Readiness).ready)
-        gate.complete(Unit)
-        assertTrue(received.none { it is ExternalFeedItem.Base })
-        job.cancel()
-    }
-
-    @Test fun projectionWaitsForEarlierImageBeforePublishingLaterRecords() = runTest(UnconfinedTestDispatcher()) {
-        val port = FakeRemoteSessionPort()
-        val gate = CompletableDeferred<Unit>()
-        port.fetchGate = gate
-        val source = RemoteConversationSource(port, "s1", "Pixel 9")
-        val received = mutableListOf<ExternalFeedItem>()
-        val job = launch { source.externalFeed.toList(received) }
-        val image = textMessage("user", "first").copy(images = listOf(MessageImageDto("image/png", "ref")))
-        port.updates.emit(remoteUpdate(replace = true, messages = listOf(image)))
-        port.updates.emit(remoteUpdate(records = listOf(prompt(7uL, RemotePromptOriginFfi.DESKTOP))))
-        assertTrue(received.none { it is ExternalFeedItem.Base || it is ExternalFeedItem.UserPrompt })
-        gate.complete(Unit)
-        val base = received.indexOfFirst { it is ExternalFeedItem.Base }
-        val prompt = received.indexOfFirst { it is ExternalFeedItem.UserPrompt }
-        assertTrue(base >= 0 && prompt > base)
-        job.cancel()
-    }
-
-    @Test fun stalledProjectionQueueFailsClosedAtItsBound() = runTest(UnconfinedTestDispatcher()) {
-        val port = FakeRemoteSessionPort()
-        val gate = CompletableDeferred<Unit>()
-        port.fetchGate = gate
-        val source = RemoteConversationSource(port, "s1", "Pixel 9")
-        val received = mutableListOf<ExternalFeedItem>()
-        val job = launch { source.externalFeed.toList(received) }
-        val image = textMessage("user", "first").copy(images = listOf(MessageImageDto("image/png", "ref")))
-        port.updates.emit(remoteUpdate(replace = true, messages = listOf(image)))
+        val pending = async { runCatching { source.readImage(ref, thumbnail = true) } }
         repeat(128) { index ->
             port.updates.emit(remoteUpdate(records = listOf(prompt(index.toULong(), RemotePromptOriginFfi.DESKTOP))))
         }
-        assertEquals(RemoteSessionPhaseFfi.ERROR, source.meta.value.phase)
-        assertEquals("SESSION_PROJECTION_OVERFLOW", source.meta.value.error?.code)
+        assertTrue(received.any { it is ExternalFeedItem.Base })
+        assertEquals(128, received.filterIsInstance<ExternalFeedItem.UserPrompt>().size)
+        assertEquals(RemoteSessionPhaseFfi.LIVE, source.meta.value.phase)
+        assertTrue(received.filterIsInstance<ExternalFeedItem.Readiness>().last().ready)
+        assertFalse(pending.isCompleted)
+
+        port.updates.emit(remoteUpdate(replace = true))
         gate.complete(Unit)
-        assertTrue(received.none { it is ExternalFeedItem.Base || it is ExternalFeedItem.UserPrompt })
+        assertTrue(pending.await().isFailure)
         job.cancel()
     }
 
-    @Test fun imageFetchFromBeforeReloadCannotRefillTheCacheOrUpdateRows() = runTest(UnconfinedTestDispatcher()) {
+    @Test fun imageRequestCannotCrossTheSessionOwnerOrModeFence() = runTest(UnconfinedTestDispatcher()) {
         val port = FakeRemoteSessionPort()
         val gate = CompletableDeferred<Unit>()
         port.fetchGate = gate
         val source = RemoteConversationSource(port, "s1", "Pixel 9")
-        val received = mutableListOf<ExternalFeedItem>()
-        val job = launch { source.externalFeed.toList(received) }
-        val record = prompt(4uL, RemotePromptOriginFfi.DESKTOP, images = listOf(RemoteImageRefFfi("ref", "image/png")))
-        port.updates.emit(remoteUpdate(records = listOf(record)))
-        port.updates.emit(remoteUpdate(phase = RemoteSessionPhaseFfi.LOADING))
-        port.fetchGate = null
+        val job = launch { source.externalFeed.collect {} }
+        port.updates.emit(remoteUpdate())
+        assertTrue(runCatching { source.readImage("s2:m:0:0", thumbnail = true) }.isFailure)
+        assertTrue(port.calls.none { it.startsWith("fetch:") })
+        val pending = async { runCatching { source.readImage("s1:m:0:0", thumbnail = false) } }
+        port.updates.emit(remoteUpdate(sessionMode = com.lingxi.code.bindings.client.SessionModeDto.CHAT))
         gate.complete(Unit)
-        assertTrue(received.none { it is ExternalFeedItem.PromptImages })
-        port.updates.emit(remoteUpdate(replace = true, records = listOf(record)))
-        assertEquals(1, received.filterIsInstance<ExternalFeedItem.PromptImages>().size)
-        assertEquals(2, port.calls.count { it == "fetch:ref" })
+        assertTrue(pending.await().isFailure)
+        assertEquals(RemoteSessionPhaseFfi.ERROR, source.meta.value.phase)
         job.cancel()
-    }
-
-    @Test fun imageFetchFromBeforeModeConflictCannotRefillTheCacheOrUpdateRows() = runTest(UnconfinedTestDispatcher()) {
-        for (phase in listOf(RemoteSessionPhaseFfi.LIVE, RemoteSessionPhaseFfi.ERROR)) {
-            val port = FakeRemoteSessionPort()
-            val gate = CompletableDeferred<Unit>()
-            port.fetchGate = gate
-            val source = RemoteConversationSource(port, "s1", "Pixel 9")
-            val received = mutableListOf<ExternalFeedItem>()
-            val job = launch { source.externalFeed.toList(received) }
-            val record = prompt(4uL, RemotePromptOriginFfi.DESKTOP, images = listOf(RemoteImageRefFfi("ref", "image/png")))
-            port.updates.emit(remoteUpdate(records = listOf(record)))
-            assertTrue(port.calls.contains("fetch:ref"))
-            port.updates.emit(remoteUpdate(phase = phase,
-                sessionMode = com.lingxi.code.bindings.client.SessionModeDto.CHAT))
-            assertEquals(RemoteSessionPhaseFfi.ERROR, source.meta.value.phase)
-            port.fetchGate = null
-            gate.complete(Unit)
-            assertTrue(received.none { it is ExternalFeedItem.PromptImages })
-            // A conflicting client cannot become live again or fetch more images.
-            port.updates.emit(remoteUpdate(records = listOf(record)))
-            assertEquals(1, port.calls.count { it == "fetch:ref" })
-            assertTrue(received.none { it is ExternalFeedItem.PromptImages })
-            job.cancel()
-        }
     }
 
 }

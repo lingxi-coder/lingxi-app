@@ -250,11 +250,10 @@ class ChatViewModelExternalTurnTest {
         val source = FakeExternalSource()
         val vm = ChatViewModel(source)
         runCurrent()
-        source.feed.emit(ExternalFeedItem.UserPrompt(9L, "see", 1, null))
+        val image = com.lingxi.code.bindings.client.MessageImageDto("image/png", "s1:p:9:0")
+        source.feed.emit(ExternalFeedItem.UserPrompt(9L, "see", 1, null, listOf(image)))
         assertNull(vm.state.value.messages.last().originLabel)
-        val image = ImageRefDto("image/png", "AA==")
-        source.feed.emit(ExternalFeedItem.PromptImages(9L, listOf(image)))
-        assertEquals(listOf(image), vm.state.value.messages.last().images)
+        assertEquals(listOf(image), vm.state.value.messages.last().remoteImages)
     }
     @Test fun remoteConfigurationOutputRendersWithoutOwningOrEndingATurn() = runTest(dispatcher) {
         val source = FakeExternalSource()

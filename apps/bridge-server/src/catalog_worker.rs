@@ -26,6 +26,9 @@ struct Request {
     scope: Option<String>,
     transcript_path: Option<PathBuf>,
     history_before: Option<super::history_page::Cursor>,
+    history_image: Option<super::history_image::ImageRequest>,
+    #[serde(default)]
+    history_latest: bool,
     activity_after: Option<u64>,
     #[serde(default)]
     prepare_open: bool,
@@ -218,6 +221,8 @@ impl CatalogWorker {
                 || request.scope.is_some()
                 || request.transcript_path.is_some()
                 || request.history_before.is_some()
+                || request.history_image.is_some()
+                || request.history_latest
                 || request.activity_after.is_some()
                 || request.prepare_open
             {
@@ -245,9 +250,33 @@ impl CatalogWorker {
                 || request.session_id.is_none()
                 || request.scope.is_none()
                 || request.history_before.is_some()
+                || request.history_image.is_some()
+                || request.history_latest
                 || request.activity_after.is_some())
         {
             return Err("an open preview requires an exact catalog selection".into());
+        }
+        if request.history_latest || request.history_image.is_some() {
+            if request.scope.is_some() || request.history_before.is_some() || request.activity_after.is_some()
+                || (request.history_latest && request.history_image.is_some()) {
+                return Err("Invalid history read operation".into());
+            }
+            let source = request.transcript_path.as_deref().ok_or("History requires an exact source")?;
+            let id = request.session_id.as_deref()
+                .and_then(|id| uuid::Uuid::parse_str(id).ok()).ok_or("Invalid history session")?;
+            let source = super::history_page::LatestSource::open(&home, source, id)?;
+            let operation = request.history_image.clone();
+            return tokio::task::spawn_blocking(move || {
+                if let Some(operation) = operation {
+                    let asset = super::history_image::read(source, operation)?;
+                    return serde_json::to_string(&asset).map_err(|error| error.to_string());
+                }
+                let body = serde_json::to_string(&source.read(id)?).map_err(|error| error.to_string())?;
+                if body.len() > super::history_page::MAX_PREVIEW_BYTES {
+                    return Err("History preview exceeds the output limit".into());
+                }
+                Ok(body)
+            }).await.map_err(|error| error.to_string())?;
         }
         if let Some(after) = request.activity_after {
             let id = request
@@ -432,7 +461,8 @@ async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                     .map_err(|_| "failed to encode session catalog worker error".to_string())?,
             ),
         };
-        write_response(&mut output, request.id, kind, &body).await?;
+        let limit = if request.history_image.is_some() { super::history_image::MAX_IMAGE_OUTPUT } else { MAX_OUTPUT_BYTES };
+        write_response(&mut output, request.id, kind, &body, limit).await?;
         output
             .flush()
             .await
@@ -448,12 +478,13 @@ async fn write_response<W: AsyncWrite + Unpin>(
     id: u64,
     kind: &'static str,
     body: &str,
+    limit: usize,
 ) -> Result<(), String> {
     if id == 0
         || id > 9_007_199_254_740_991
         || !matches!(kind, "output" | "error")
         || body.is_empty()
-        || body.len() > MAX_OUTPUT_BYTES
+        || body.len() > limit
     {
         return Err("invalid session catalog worker response".into());
     }
@@ -496,10 +527,10 @@ mod tests {
     async fn raw_response_keeps_json_bytes_unicode_surrogates_and_embedded_newlines() {
         let body = "{\n\"text\":\"中文🧪\\ud800\\udc00\\ud800\\\"\\\\\\n\"\n}";
         let mut output = Vec::new();
-        write_response(&mut output, 1, "output", body)
+        write_response(&mut output, 1, "output", body, MAX_OUTPUT_BYTES)
             .await
             .unwrap();
-        write_response(&mut output, 2, "error", "\"scoped error\"")
+        write_response(&mut output, 2, "error", "\"scoped error\"", MAX_OUTPUT_BYTES)
             .await
             .unwrap();
         let responses = decode_responses(&output);
@@ -520,7 +551,7 @@ mod tests {
             (1, "output", "x".repeat(MAX_OUTPUT_BYTES + 1)),
         ] {
             let mut output = Vec::new();
-            assert!(write_response(&mut output, id, kind, &body).await.is_err());
+            assert!(write_response(&mut output, id, kind, &body, MAX_OUTPUT_BYTES).await.is_err());
             assert!(output.is_empty());
         }
         let root = tempfile::tempdir().unwrap();

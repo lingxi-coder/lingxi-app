@@ -1,4 +1,5 @@
 import type { ClientEvent, MessageDto, PermissionRequest } from '@lingxi/bridge-client';
+import { planFileContent } from '../../shared/sessionHistory';
 import type { RunItem } from '../model/runItem';
 
 export interface SubmittedPlan {
@@ -94,11 +95,9 @@ export function reduceSubmittedPlanPermission(
 }
 function planFileWrite(state: SubmittedPlanState, id: string, json: string): SubmittedPlanState {
   if (state.draft?.id === id) return state;
-  const input = object(json);
-  const path = typeof input.file_path === 'string' ? input.file_path.replace(/\\/g, '/') : '';
-  if (!/(?:^|\/)(?:\.lingxi|\.claude)\/plans\/[^\n]+\.md$/i.test(path)
-    || typeof input.content !== 'string' || !input.content.trim()) return state;
-  return { ...state, draft: { id, content: input.content, ready: false } };
+  const content = planFileContent(json);
+  if (!content) return state;
+  return { ...state, draft: { id, content, ready: false } };
 }
 function planFileResult(state: SubmittedPlanState, id: string, isError: boolean): SubmittedPlanState {
   if (state.draft?.id !== id) return state;

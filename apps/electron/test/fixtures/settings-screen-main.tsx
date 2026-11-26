@@ -280,10 +280,10 @@ function Fixture() {
     // 记录而不是空实现：设置页的项目切换器必须**既**激活项目**又**真的把引擎
     // 落到那个项目上（`activateProject` 单独用只改元数据，不换引擎进程）。
     // 只有把三个调用都记下来，场景才能证明这件事，而不是只证明「点了没报错」。
-    activateProject: async (path: string) => { navCalls.current.push(`activate:${path}`); return null; },
-    openSession: async (path: string, sessionId: string) => { navCalls.current.push(`open:${path}:${sessionId}`); },
-    newSession: async (path?: string) => { navCalls.current.push(`new:${path ?? ''}`); },
-    listProjectSessions: async (path: string) => { navCalls.current.push(`list:${path}`); },
+    activateProject: async (path: string) => { navCalls.current.push(`activate:${path}`); return { path }; },
+    openSession: async (path: string, sessionId: string) => { navCalls.current.push(`open:${path}:${sessionId}`); return true; },
+    newSession: async (path?: string) => { navCalls.current.push(`new:${path ?? ''}`); return 'new-session'; },
+    listProjectSessions: async (path: string) => { navCalls.current.push(`list:${path}`); return projectCatalogs[path] ?? { sessions: [] }; },
     setThemePreference: noopAsyncVoid,
     // `voice` (Task 9 of the desktop-audio-capability plan) joined the
     // `page-content` scenario's list alongside the Task 18 pages — same
@@ -433,7 +433,7 @@ function Fixture() {
         return el ? (el.__lingxiTestMarker ?? null) : 'element-not-found';
       },
       setSettingsFiles: (files: unknown[]) => {
-        setSettingsSnapshotEvent({ type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}', files_json: JSON.stringify(files) } as SettingsSnapshotEvent);
+        setSettingsSnapshotEvent(previous => ({ type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}', ...previous, files_json: JSON.stringify(files) } as SettingsSnapshotEvent));
       },
       setProjectList: (
         paths: string[],

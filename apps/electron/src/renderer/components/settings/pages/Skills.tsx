@@ -13,7 +13,7 @@ import { useT } from '../../../theme/ThemeContext';
 import type { EditableLayer, PageContentProps } from '../SettingsScreen';
 import { boolFromLayer } from '../layerFields';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
-import { ExtensionCatalogTabs, ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, ExtensionRecommendationCard, ExtensionRecommendationGroups, extensionHubStyle, useExtensionCategoryFilter, useExtensionHubDialogFocus, useExtensionHubNavigation, type ExtensionCatalogTab } from './ExtensionHub';
+import { ExtensionCatalogTabs, ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, ExtensionRecommendationCard, ExtensionRecommendationGroups, extensionHubStyle, useExtensionCategoryFilter, useExtensionCatalogView, useExtensionHubDialogFocus, useExtensionHubNavigation } from './ExtensionHub';
 import { MarkdownContent } from '../../MarkdownContent';
 import {
   asBoolean,
@@ -91,14 +91,15 @@ function sourceScope(source: string): 'user' | 'project' | null {
   return source === 'user' || source === 'project' ? source : null;
 }
 
-function skillCatalogFromBridge(bridge: PageContentProps['bridge']): SkillCatalogEnvelope {
+function skillCatalogFromBridge(bridge: PageContentProps['bridge'], projectDir?: string | null): SkillCatalogEnvelope {
   const fromEvent = parseEventEnvelope<SkillCatalogEnvelope>(bridge.skillCatalogEvent?.catalog_json, {});
   if (Array.isArray(fromEvent.entries) || Array.isArray(fromEvent.trash)) return fromEvent;
+  const projectRoot = (projectDir ?? bridge.activeSession?.projectPath)?.replace(/\\/g, '/').replace(/\/+$/, '');
   return {
     entries: (bridge.skillsEvent?.skills ?? []).map((skill) => ({
       id: skill.source_dir,
       name: skill.name,
-      source: skill.source_dir.includes('/.lingxi/skills/') ? 'project' : 'user',
+      source: projectRoot && skill.source_dir.replace(/\\/g, '/').startsWith(`${projectRoot}/`) ? 'project' : 'user',
       rootDir: skill.source_dir.replace(/\/[^/]+$/, ''),
       directory: skill.source_dir,
       writable: false,
@@ -137,11 +138,11 @@ function defaultCreateScope(editingLayer: EditableLayer): 'user' | 'project' {
   return editingLayer === 'project' ? 'project' : 'user';
 }
 
-export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate, onClose, onRegisterNavigationRequest, onRegisterCloseRequest, linkRequest }: PageContentProps) {
+export function Skills({ bridge, extensionScopes, snapshot, editingLayer, onJumpToLayer, onNavigate, onClose, onRegisterNavigationRequest, onRegisterCloseRequest, linkRequest }: PageContentProps) {
   const t = useT();
   const { locale } = useI18n();
   const model = skillsPageModel({ skills: bridge.skillsEvent?.skills });
-  const catalog = useMemo(() => skillCatalogFromBridge(bridge), [bridge.skillCatalogEvent?.catalog_json, bridge.skillsEvent?.skills, locale]);
+  const catalog = useMemo(() => skillCatalogFromBridge(bridge, extensionScopes?.projectDir), [bridge.skillCatalogEvent?.catalog_json, bridge.skillsEvent?.skills, bridge.activeSession?.projectPath, extensionScopes?.projectDir, locale]);
   const document = useMemo(() => skillDocumentFromBridge(bridge), [bridge.skillDocumentEvent?.document_json]);
   const adminAvailable = typeof (bridge as { skillAdmin?: unknown }).skillAdmin === 'function';
   const skillOperation = bridge.configurationOperations?.skill ?? null;
@@ -151,7 +152,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   const appliedLink = useRef<string>();
   const creatingSkill = useRef(false);
   const [search, setSearch] = useState('');
-  const [catalogTab, setCatalogTab] = useState<ExtensionCatalogTab>(catalog.entries?.length ? 'personal' : 'public');
+  const [catalogTab, setCatalogTab] = useExtensionCatalogView(extensionScopes, catalog.entries?.length ? 'personal' : 'public');
   const [draftContent, setDraftContent] = useState('');
   const [draftCreateName, setDraftCreateName] = useState('');
   const [draftCreateScope, setDraftCreateScope] = useState<'user' | 'project'>(defaultCreateScope(editingLayer));
@@ -195,12 +196,15 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   const activeSkills = catalog.entries ?? [];
   const trashedSkills = catalog.trash ?? [];
   const visibleQuery = search.trim().toLowerCase();
+  const inScope = (entry: SkillCatalogItem) => editingLayer === 'project' ? entry.source === 'project' : entry.source !== 'project';
+  const scopedSkills = activeSkills.filter(inScope);
+  const scopedTrash = trashedSkills.filter(inScope);
   const filteredSkills = visibleQuery
-    ? activeSkills.filter((entry) => `${entry.name} ${entry.description ?? ''} ${entry.whenToUse ?? ''} ${entry.directory} ${entry.source}`.toLowerCase().includes(visibleQuery))
-    : activeSkills;
+    ? scopedSkills.filter((entry) => `${entry.name} ${entry.description ?? ''} ${entry.whenToUse ?? ''} ${entry.directory} ${entry.source}`.toLowerCase().includes(visibleQuery))
+    : scopedSkills;
   const filteredTrash = visibleQuery
-    ? trashedSkills.filter((entry) => `${entry.name} ${entry.directory}`.toLowerCase().includes(visibleQuery))
-    : trashedSkills;
+    ? scopedTrash.filter((entry) => `${entry.name} ${entry.directory}`.toLowerCase().includes(visibleQuery))
+    : scopedTrash;
 
   useEffect(() => {
     if (selection.kind === 'create' || selection.kind === 'list' || selection.kind === 'recommendation') return;
@@ -591,7 +595,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
       : selectedSkill?.name ?? tr('desktop_extension_skill_details');
 
   const sourceLabels: Record<string, string> = { user: tr('desktop_personal'), project: tr('cron_run_project_label'), builtin: tr('settings_voice_backend_system'), system: tr('settings_voice_backend_system'), plugin: tr('desktop_extension_plugins'), managed: tr('settings_parity_managed_layer') };
-  const sources = [...new Set(activeSkills.map((entry) => entry.source))];
+  const sources = [...new Set(scopedSkills.map((entry) => entry.source))];
   const activeSource = sources.includes(sourceFilter) ? sourceFilter : sources[0];
   const sourceSkills = filteredSkills.filter((entry) => entry.source === activeSource);
   const categoryFilter = useExtensionCategoryFilter(publicSkillRecommendations);
@@ -618,9 +622,9 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
     <ExtensionHubLayout>
       {closePrompt}
       {linkRequest?.payload && selection.kind === 'create' && <p role="status">{tr('desktop_extension_skill_import')}</p>}
-      <ExtensionHubHeader title={tr('settings_title_skills')} search={search} onSearch={setSearch} actions={<>
-        <button type="button" onClick={handleReload} disabled={reloading} className="extension-hub-icon-button" aria-label={reloading ? tr('desktop_extension_reloading_skills') : tr('desktop_extension_reload_skills')}><ExtensionGlyph name="refresh" size={16} /></button>
-        <button type="button" onClick={() => setShowSettings(!showSettings)} className="extension-hub-icon-button" aria-label={tr('desktop_extension_skill_settings')} aria-expanded={showSettings}><ExtensionGlyph name="cog" size={16} /></button>
+      <ExtensionHubHeader filter={catalogTab === 'public' ? categoryFilter : undefined} title={tr('settings_title_skills')} search={search} onSearch={setSearch} actions={<>
+        <button type="button" onClick={handleReload} disabled={reloading} className="extension-hub-icon-button" aria-label={reloading ? tr('desktop_extension_reloading_skills') : tr('desktop_extension_reload_skills')} title={reloading ? tr('desktop_extension_reloading_skills') : tr('desktop_extension_reload_skills')}><ExtensionGlyph name="refresh" size={16} /></button>
+        <button type="button" onClick={() => setShowSettings(!showSettings)} className="extension-hub-icon-button" aria-label={tr('desktop_extension_skill_settings')} title={tr('desktop_extension_skill_settings')} aria-expanded={showSettings}><ExtensionGlyph name="cog" size={16} /></button>
         <button type="button" onClick={() => requestSelection({ kind: 'create' })} className="extension-hub-primary"><ExtensionGlyph name="plus" size={14} />{tr('desktop_extension_new_skill')}</button>
       </>} />
       <DomainOperationBanner t={t} operation={skillOperation} fallbackDomainLabel={tr('settings_title_skills')} />
@@ -657,7 +661,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
         </Card>
       </details>}
 
-      <ExtensionCatalogTabs filter={categoryFilter} label={tr('settings_title_skills')} value={catalogTab} onChange={setCatalogTab} personalLabel={tr('apps_installed')} />
+      <ExtensionCatalogTabs scopes={extensionScopes} locked={detailDirty || syncHasChanges || savingSync} label={tr('settings_title_skills')} value={catalogTab} onChange={setCatalogTab} />
       {catalogTab === 'public' && <div className="extension-skills-recommended">
         <ExtensionRecommendationGroups items={recommendedSkills}>{(entry) => {
           const installed = isPublicExtensionInstalled(entry, pluginCatalog);
@@ -679,7 +683,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
         {!filteredSkills.length && <div className="extension-hub-empty">{search ? tr('desktop_extension_no_skill_results') : tr('desktop_extension_first_skill')}</div>}
         {filteredSkills.length > 6 && !search && <button type="button" className="extension-see-more" onClick={() => setShowAllInstalled(!showAllInstalled)}>{showAllInstalled ? tr('chat_tool_show_less') : tr('desktop_extension_more_skills', filteredSkills.length - 6)}</button>}
       </section>
-      {sources.length > 0 && <section className="extension-catalog-section extension-skills-sources">
+      {sources.length > 1 && <section className="extension-catalog-section extension-skills-sources">
         <nav className="extension-catalog-tabs" aria-label={tr('desktop_extension_skill_sources')}>{sources.map((source) => <button key={source} type="button" aria-pressed={activeSource === source} onClick={() => { setSourceFilter(source); setShowAllSource(false); }}>{sourceLabels[source] ?? source}</button>)}</nav>
         {skillRows(showAllSource || search ? sourceSkills : sourceSkills.slice(0, 6))}
         {!sourceSkills.length && <div className="extension-hub-empty">{tr('desktop_extension_no_source_skills')}</div>}

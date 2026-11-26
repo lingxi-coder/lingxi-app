@@ -142,6 +142,25 @@ test('settings controls expose focus, scope, saving and accessibility preference
   }
 });
 
+test('extension scope tabs list named projects after User and bind each view to its actual scope', async () => {
+  for (const theme of ['light', 'dark']) {
+    const result = await runScenario('extension-project-tabs', theme);
+    assert.deepEqual(result.withoutProjects, ['推荐', '用户']);
+    for (const page of Object.values(result.all)) {
+      assert.deepEqual(page.labels, ['推荐', '用户', 'LingXi', 'Breeze', 'client/demo', 'tools/demo']);
+    }
+    assert.deepEqual(result.all.skills.userItems, ['user skill']);
+    assert.deepEqual(result.all.skills.projectItems, ['project skill']);
+    assert.deepEqual(result.all.plugins.userItems, ['User plugin']);
+    assert.deepEqual(result.all.plugins.projectItems, ['Project plugin']);
+    assert.deepEqual(result.all.mcp.userItems, ['user server']);
+    assert.deepEqual(result.all.mcp.projectItems.sort(), ['local server', 'project server']);
+    assert.equal(result.waiting, true, 'old project data stays hidden until the target engine responds');
+    assert.equal(result.createScope, 'project');
+    assert.equal(result.fits, true);
+  }
+});
+
 test('recommendation badges verify source aliases and late catalogs preserve manual drafts', async () => {
   const result = await runScenario('recommendation-catalog-safety');
   assert.deepEqual(result, { aliasInstalled: true, refreshed: true, differentSourceNotInstalled: true, retainedManualDraft: true });
@@ -477,8 +496,8 @@ test('Plugins, MCP and Skills share settings chrome while preserving catalogs, d
       assert.equal(state.legacyChromeCount, 0, `${context}: no separate Customize navigation is rendered`);
       assert.equal(state.duplicateHeadingCount, 0, `${context}: page content does not repeat the shell title`);
       assert.equal(state.nestedScrollCount, 0, `${context}: catalogs do not add a nested scroll surface`);
-      assert.equal(state.layerControlCount, state.page === 'mcp' ? 0 : 1, `${context}: layer controls follow the settings page contract`);
-      assert.equal(state.layerControlsVisible, state.page !== 'mcp', `${context}: layered controls are visible in the regular header`);
+      assert.equal(state.layerControlCount, 0, `${context}: scopes live in the catalog switcher`);
+      assert.equal(state.layerControlsVisible, false, context);
       assert.equal(state.horizontalOverflow, false, `${context}: content fits the window`);
     }
     assert.equal(beforeConfirm.filter(({ command }) => command.action === 'apply_operation').length, 0);

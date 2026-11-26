@@ -6,6 +6,8 @@ import { useI18n } from '../../../i18n/useI18n';
 import { Icon } from '../../Icon';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps, SettingsNavigationRequest } from '../SettingsScreen';
+import { projectDisplayName } from '../useEngineSettings';
+import type { ExtensionCatalogTab, ExtensionScopeNavigation } from '../extensionScopes';
 import { ExtensionGlyph, ExtensionSkillArtwork } from './ExtensionHubIcons';
 
 const DIALOG_FOCUSABLE_SELECTOR = [
@@ -134,8 +136,9 @@ export function ExtensionHubLayout({ children }: { children: ReactNode }) {
   return <div className="extension-hub-main" style={extensionHubStyle(t)}><div className="extension-hub-page">{children}</div></div>;
 }
 
-export function ExtensionHubHeader({ title, search, onSearch, actions }: {
+export function ExtensionHubHeader({ title, search, onSearch, filter, actions }: {
   title: string; search: string; onSearch: (value: string) => void; actions: ReactNode;
+  filter?: ReturnType<typeof useExtensionCategoryFilter>;
 }) {
   const searchLabel = tr('desktop_shell_search_named', title);
   return <header className="extension-hub-header">
@@ -144,12 +147,22 @@ export function ExtensionHubHeader({ title, search, onSearch, actions }: {
         <ExtensionGlyph name="search" size={16} />
         <input value={search} onChange={(event) => onSearch(event.target.value)} placeholder={searchLabel} aria-label={searchLabel} />
       </label>
+      {filter && filter.options.length > 1 && <label className="extension-category-filter">
+        {tr('extension_directory_category')}
+        <select value={filter.value} onChange={(event) => filter.setValue(event.target.value as typeof filter.value)}>
+          <option value="all">{tr('extension_directory_category_all')}</option>
+          {filter.options.map(category => <option key={category} value={category}>{tr(`extension_directory_category_${category}`)}</option>)}
+        </select>
+      </label>}
       <div className="extension-hub-toolbar-actions">{actions}</div>
     </div>
   </header>;
 }
 
-export type ExtensionCatalogTab = 'public' | 'personal';
+export function useExtensionCatalogView(scopes: ExtensionScopeNavigation | undefined, initial: ExtensionCatalogTab) {
+  const [view, setView] = useState(initial);
+  return [scopes?.view ?? view, scopes?.setView ?? setView] as const;
+}
 
 export function useExtensionCategoryFilter(items: readonly PublicExtensionItem[]) {
   const [value, setValue] = useState<PublicExtensionCategory | 'all'>('all');
@@ -160,28 +173,46 @@ export function useExtensionCategoryFilter(items: readonly PublicExtensionItem[]
   };
 }
 
-export function ExtensionCatalogTabs({ label, value, onChange, filter, personalLabel = tr('desktop_personal') }: {
+export function ExtensionCatalogTabs({ label, value, onChange, scopes, locked = false }: {
   label: string;
   value: ExtensionCatalogTab;
   onChange: (value: ExtensionCatalogTab) => void;
-  filter: ReturnType<typeof useExtensionCategoryFilter>;
-  personalLabel?: string;
+  scopes?: ExtensionScopeNavigation;
+  locked?: boolean;
 }) {
-  return <div className="extension-catalog-controls"><nav className="extension-catalog-tabs" aria-label={label}>
-    <button type="button" data-catalog-tab="public" aria-pressed={value === 'public'} onClick={() => onChange('public')}>
-      <ExtensionGlyph name="search" size={14} />{tr('extension_directory_recommended')}
-    </button>
-    <button type="button" data-catalog-tab="personal" aria-pressed={value === 'personal'} onClick={() => onChange('personal')}>
-      <ExtensionGlyph name="archive" size={14} />{personalLabel}
-    </button>
-  </nav>
-    {value === 'public' && filter.options.length > 1 && <label className="extension-category-filter">
-      {tr('extension_directory_category')}
-      <select value={filter.value} onChange={(event) => filter.setValue(event.target.value as typeof filter.value)}>
-        <option value="all">{tr('extension_directory_category_all')}</option>
-        {filter.options.map(category => <option key={category} value={category}>{tr(`extension_directory_category_${category}`)}</option>)}
-      </select>
-    </label>}
+  const projects = scopes?.projects ?? [];
+  const names = projects.map(projectDisplayName);
+  const parts = projects.map(path => path.split(/[\\/]/).filter(Boolean));
+  function projectLabel(index: number) {
+    const name = names[index];
+    if (names.indexOf(name) === names.lastIndexOf(name)) return name;
+    for (let depth = 2; depth <= parts[index].length; depth++) {
+      const suffix = parts[index].slice(-depth).join('/');
+      if (!parts.some((other, j) => j !== index && other.slice(-depth).join('/') === suffix)) return suffix;
+    }
+    return projects[index];
+  }
+  const activeProject = value === 'personal' && scopes && scopes.layer !== 'user' ? scopes.activeProject : null;
+  return <div className="extension-catalog-controls">
+    <nav className="extension-catalog-tabs extension-scope-tabs" aria-label={label}>
+      <button type="button" data-catalog-tab="public" aria-pressed={value === 'public'} disabled={locked}
+        onClick={scopes?.selectRecommended ?? (() => onChange('public'))}>
+        {tr('extension_directory_recommended')}
+      </button>
+      <button type="button" data-catalog-tab="personal" aria-pressed={value === 'personal' && !activeProject} disabled={locked}
+        onClick={scopes?.selectUser ?? (() => onChange('personal'))}>
+        {tr('settings_parity_user_layer')}
+      </button>
+      {projects.map((path, index) => (
+        <button key={path} type="button" data-catalog-tab="project" data-project-path={path}
+          aria-pressed={activeProject === path}
+          title={path === scopes?.activeProject ? path : `${path}\n${tr('settings_parity_switch_project_warning')}`}
+          aria-description={path === scopes?.activeProject ? undefined : tr('settings_parity_switch_project_warning')}
+          disabled={locked} onClick={() => scopes?.selectProject(path)}>
+          <Icon name="folder" size={14} /><bdi>{projectLabel(index)}</bdi>
+        </button>
+      ))}
+    </nav>
   </div>;
 }
 

@@ -10,7 +10,7 @@ import { useT } from '../../../theme/ThemeContext';
 import type { EditableLayer, PageContentProps } from '../SettingsScreen';
 import { objectFromLayer } from '../layerFields';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
-import { ExtensionCatalogTabs, ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, ExtensionRecommendationCard, ExtensionRecommendationGroups, extensionHubStyle, useExtensionHubDialogFocus, useExtensionCategoryFilter, useExtensionHubNavigation } from './ExtensionHub';
+import { ExtensionCatalogTabs, ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, ExtensionRecommendationCard, ExtensionRecommendationGroups, extensionHubStyle, useExtensionHubDialogFocus, useExtensionCategoryFilter, useExtensionCatalogView, useExtensionHubNavigation } from './ExtensionHub';
 import { ExtensionDetails } from './ExtensionDetails';
 import {
   adminRecordCommand,
@@ -29,6 +29,7 @@ import {
 } from './configurationAdmin';
 
 interface PluginCatalogEnvelope {
+  enabled_json?: string;
   installed?: Array<{
     id: string;
     name: string;
@@ -170,7 +171,7 @@ function editableMarketplaces(snapshot: PageContentProps['snapshot'], editingLay
   return objectFromLayer(snapshot, editingLayer, 'additionalMarketplaces');
 }
 
-export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate, onRegisterNavigationRequest, onClose, onRegisterCloseRequest, initialPluginId, linkRequest }: PageContentProps) {
+export function Plugins({ bridge, extensionScopes, snapshot, editingLayer, onJumpToLayer, onNavigate, onRegisterNavigationRequest, onClose, onRegisterCloseRequest, initialPluginId, linkRequest }: PageContentProps) {
   const t = useT();
   const adminAvailable = typeof (bridge as { pluginAdmin?: unknown }).pluginAdmin === 'function';
   const catalog = useMemo(() => parseEventEnvelope<PluginCatalogEnvelope>(bridge.pluginCatalogEvent?.catalog_json, { installed: [], revisions: {} }), [bridge.pluginCatalogEvent?.catalog_json]);
@@ -207,7 +208,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
     restartRequired?: boolean;
   } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [catalogTab, setCatalogTab] = useState<'public' | 'personal'>('public');
+  const [catalogTab, setCatalogTab] = useExtensionCatalogView(extensionScopes, 'public');
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [pendingHubPage, setPendingHubPage] = useState<{ pageId: string; pluginId?: string } | null>(null);
   const detailPageRef = useRef<HTMLElement>(null);
@@ -314,16 +315,23 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
     </div>
   );
 
+  // An install writes enabledPlugins in its scope. The catalog's installed list is a shared cache.
+  // Older catalog events can only report that shared list, so retain it in their user view.
+  const hasScopedInventory = catalog.enabled_json !== undefined && snapshot?.layers?.[editingLayer] !== undefined;
+  const scopedPluginIds = editingLayer !== 'user' || hasScopedInventory
+    ? [...new Set([...Object.keys(enabledPlugins), ...Object.keys(pluginConfigs)])].sort()
+    : pluginIds;
   const filteredPlugins = search.trim()
-    ? pluginIds.filter((id) => {
+    ? scopedPluginIds.filter((id) => {
       const entry = (catalog.installed ?? []).find((candidate) => (candidate.id || candidate.name) === id);
       return `${id} ${entry?.name ?? ''} ${entry?.display_name ?? ''} ${entry?.description ?? ''}`.toLowerCase().includes(search.trim().toLowerCase());
     })
-    : pluginIds;
+    : scopedPluginIds;
   const filteredAvailable = search.trim()
     ? availablePlugins.filter((entry) => `${entry.id} ${entry.name} ${entry.description ?? ''}`.toLowerCase().includes(search.trim().toLowerCase()))
     : availablePlugins;
-  const filteredMarketplaces = search.trim() ? marketplaceNames.filter((name) => name.toLowerCase().includes(search.trim().toLowerCase())) : marketplaceNames;
+  const scopedMarketplaces = catalogTab === 'personal' && editingLayer === 'project' ? Object.keys(marketplaces) : marketplaceNames;
+  const filteredMarketplaces = search.trim() ? scopedMarketplaces.filter((name) => name.toLowerCase().includes(search.trim().toLowerCase())) : scopedMarketplaces;
   const categoryFilter = useExtensionCategoryFilter(publicDirectoryPlugins);
   const filteredPublicDirectory = search.trim()
     ? categoryFilter.items.filter((entry) => publicPluginSearchText(entry).includes(search.trim().toLowerCase()))
@@ -578,9 +586,9 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
       </div>}
       {linkRequest?.payload && <p role="status">{tr('desktop_extension_plugin_import')}</p>}
       {!isPluginDetail && <>
-        <ExtensionHubHeader title={tr('desktop_extension_plugins')} search={search} onSearch={setSearch} actions={<>
-          <button type="button" onClick={refreshCatalog} disabled={busy} className="extension-hub-icon-button" aria-label={tr('desktop_extension_refresh_plugins')}><ExtensionGlyph name="refresh" size={16} /></button>
-          <button type="button" onClick={() => requestSelection({ kind: 'policies' })} className="extension-hub-icon-button" aria-label={tr('desktop_extension_plugin_settings')}><ExtensionGlyph name="cog" size={16} /></button>
+        <ExtensionHubHeader filter={catalogTab === 'public' ? categoryFilter : undefined} title={tr('desktop_extension_plugins')} search={search} onSearch={setSearch} actions={<>
+          <button type="button" onClick={refreshCatalog} disabled={busy} className="extension-hub-icon-button" aria-label={tr('desktop_extension_refresh_plugins')} title={tr('desktop_extension_refresh_plugins')}><ExtensionGlyph name="refresh" size={16} /></button>
+          <button type="button" onClick={() => requestSelection({ kind: 'policies' })} className="extension-hub-icon-button" aria-label={tr('desktop_extension_plugin_settings')} title={tr('desktop_extension_plugin_settings')}><ExtensionGlyph name="cog" size={16} /></button>
           <details className="extension-hub-menu" open={addMenuOpen} onToggle={(event) => setAddMenuOpen(event.currentTarget.open)}>
             <summary className="extension-hub-primary">{tr('workspace_confirm_add')} <ExtensionGlyph name="chevron" size={13} /></summary>
             <div className="extension-hub-menu-popover">
@@ -592,7 +600,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
         {navigationPrompt}
         <DomainOperationBanner t={t} operation={pluginOperation} fallbackDomainLabel={tr('desktop_extension_plugins')} />
         {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
-        <ExtensionCatalogTabs filter={categoryFilter} label={tr('desktop_extension_plugin_catalog')} value={catalogTab} onChange={setCatalogTab} />
+        <ExtensionCatalogTabs scopes={extensionScopes} locked={guardedDirty || busy} label={tr('desktop_extension_plugin_catalog')} value={catalogTab} onChange={setCatalogTab} />
         {catalogTab === 'public' && <ExtensionRecommendationGroups items={filteredPublicDirectory}>{(entry) => {
           const target = publicDirectoryPluginSelection(entry, catalog);
           const conflict = target.kind === 'marketplace' && Boolean(target.sourceConflict);
@@ -642,8 +650,8 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
         </section>}
         {catalogTab === 'public' && search && !hasPublicResults && <div className="extension-hub-empty">{tr('desktop_extension_no_public_plugins_search')}</div>}
         {catalogTab === 'public' && !hasPublicResults && !search && <button type="button" className="extension-see-more" onClick={() => requestSelection({ kind: 'marketplace-add' })}>{tr('desktop_extension_discover_plugins')} <ExtensionGlyph name="chevronR" size={14} /></button>}
-        {marketplaceNames.length > 0 && <details className="extension-hub-marketplaces">
-          <summary>{tr('desktop_extension_marketplaces_count', marketplaceNames.length)}</summary>
+        {scopedMarketplaces.length > 0 && <details className="extension-hub-marketplaces">
+          <summary>{tr('desktop_extension_marketplaces_count', scopedMarketplaces.length)}</summary>
           <div className="extension-hub-list">{filteredMarketplaces.map((name) => <button key={name} type="button" className="extension-hub-row extension-hub-row-open" onClick={() => requestSelection({ kind: 'marketplace', name })}><ExtensionIcon /><span className="extension-hub-row-copy"><span className="extension-hub-row-title">{name}</span><span className="extension-hub-row-description">{asString(asRecord(draftMarketplaces[name]).source, tr('settings_parity_marketplace_source'))}</span></span></button>)}</div>
         </details>}
       </>}

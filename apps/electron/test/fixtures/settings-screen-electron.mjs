@@ -376,8 +376,9 @@ async function runLayerReseedScenario(webContents) {
   await webContents.executeJavaScript(
     'window.__settingsScreenTest.setLayeredSnapshot({ user: { pluginConfigs: { "a@b": { from: "user" } } }, project: { pluginConfigs: { "a@b": { from: "project" } } } })',
   );
+  await webContents.executeJavaScript('window.__settingsScreenTest.setSettingsFiles([{layer:"project",path:"/test/project/.lingxi/settings.json"}])');
   await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("plugins")');
-  await webContents.executeJavaScript(`[...document.querySelectorAll('.extension-catalog-tabs button')].find(el => el.textContent === '个人').click()`);
+  await webContents.executeJavaScript(`document.querySelector('[data-catalog-tab="personal"]').click()`);
   await webContents.executeJavaScript(`(() => {
     const row = document.querySelector('.configuration-entry .extension-hub-row-open');
     if (!row) throw new Error('missing installed plugin configuration row');
@@ -388,9 +389,10 @@ async function runLayerReseedScenario(webContents) {
   const configInitial = await webContents.executeJavaScript('window.__settingsScreenTest.getFieldValue(\'[aria-label="a@b 配置"]\')');
   await webContents.executeJavaScript('window.__settingsScreenTest.setFieldValue(\'[aria-label="a@b 配置"]\', "not even json")');
   const configDirty = await webContents.executeJavaScript('window.__settingsScreenTest.getFieldValue(\'[aria-label="a@b 配置"]\')');
-  await webContents.executeJavaScript('window.__settingsScreenTest.clickLayerTab("project")');
-  await waitFor(webContents, '!document.querySelector(".extension-plugin-page")');
-  await webContents.executeJavaScript(`[...document.querySelectorAll('.extension-catalog-tabs button')].find(el => el.textContent === '个人').click()`);
+  await webContents.executeJavaScript(`document.querySelector('.extension-breadcrumb button').click()`);
+  await waitFor(webContents, 'Boolean(document.querySelector("[data-project-path]"))');
+  await webContents.executeJavaScript(`document.querySelector('[data-project-path="/test/project"]').click()`);
+  await waitFor(webContents, `document.querySelector('[data-project-path="/test/project"]')?.getAttribute('aria-pressed') === 'true'`);
   await webContents.executeJavaScript(`document.querySelector('.configuration-entry .extension-hub-row-open').click()`);
   await webContents.executeJavaScript(`document.querySelector('.extension-plugin-configuration summary').click()`);
   await waitFor(webContents, 'Boolean(document.querySelector(\'[aria-label="a@b 配置"]\'))');
@@ -555,7 +557,7 @@ async function runVisualAdminScenario(window, webContents) {
     await webContents.executeJavaScript(`window.__settingsScreenTest.selectPage(${JSON.stringify(page)})`);
     await delay(100);
     if (page === 'mcp') {
-      await webContents.executeJavaScript(`[...document.querySelectorAll('.extension-catalog-tabs button')].find(el => el.textContent === '个人').click()`);
+      await webContents.executeJavaScript(`document.querySelector('[data-catalog-tab="personal"]').click()`);
       await webContents.executeJavaScript(`(() => {
         const row = document.querySelector('.configuration-entry .extension-hub-row-open');
         if (!row) throw new Error('missing MCP configuration row');
@@ -564,7 +566,7 @@ async function runVisualAdminScenario(window, webContents) {
       await delay(50);
     }
     if (page === 'plugins') {
-      await webContents.executeJavaScript(`[...document.querySelectorAll('.extension-catalog-tabs button')].find(el => el.textContent === '个人').click()`);
+      await webContents.executeJavaScript(`document.querySelector('[data-catalog-tab="personal"]').click()`);
       await webContents.executeJavaScript(`(() => {
         const row = document.querySelector('.configuration-entry .extension-hub-row-open');
         if (!row) throw new Error('missing installed plugin configuration row');
@@ -936,6 +938,8 @@ async function runCustomizeScenario(window, webContents) {
   await button('确认执行');
   const afterConfirm = await run('window.__settingsScreenTest.state().extensionCalls');
   await click('.extension-breadcrumb button');
+  await run('window.__settingsScreenTest.setHasProject(true)');
+  await run('window.__settingsScreenTest.setSettingsFiles([{layer:"project",path:"/test/project/.lingxi/settings.json"}])');
   await click('[data-nav-page="skills"]');
   // Skills is lazy-loaded; the settings shell can switch before its catalog mounts.
   await waitFor(webContents, 'Boolean(document.querySelector(".extension-skills-installed .extension-see-more"))');
@@ -943,10 +947,11 @@ async function runCustomizeScenario(window, webContents) {
   shell.skills = await measureShell('skills');
   const installedPreview = await run('document.querySelectorAll(".extension-skills-installed .extension-hub-row").length === 6');
   await click('.extension-skills-installed .extension-see-more');
-  const expanded = await run('document.querySelectorAll(".extension-skills-installed .extension-hub-row").length === 8');
-  await run(`[...document.querySelectorAll('.extension-skills-sources .extension-catalog-tabs button')].find(button => button.textContent.trim() === '项目').click()`);
-  await delay(40);
-  const sourceFilter = await run('document.querySelectorAll(".extension-skills-sources .extension-hub-row").length === 1 && document.querySelector(".extension-skills-sources").textContent.includes("Project Review")');
+  const expanded = await run('document.querySelectorAll(".extension-skills-installed .extension-hub-row").length === 7');
+  await click('[data-project-path="/test/project"]');
+  await waitFor(webContents, `document.querySelector('[data-project-path="/test/project"]')?.getAttribute('aria-pressed') === 'true'`);
+  const sourceFilter = await run('document.querySelectorAll(".extension-skills-installed .extension-hub-row").length === 1 && document.querySelector(".extension-skills-installed").textContent.includes("Project Review")');
+  await click('[data-catalog-tab="personal"]');
   await run('window.__settingsScreenTest.setFieldValue(\'[aria-label="搜索 Skills"]\', "contrast-missing")');
   await delay(40);
   const emptySearch = await run('document.querySelectorAll(".extension-hub-main .extension-hub-row").length === 0 && document.body.textContent.includes("没有匹配的 Skill")');
@@ -975,7 +980,7 @@ async function runCustomizeScenario(window, webContents) {
   await click('[aria-label="关闭详情"]');
   await button('丢弃并切换');
   await click('[data-nav-page="mcp"]');
-  await button('个人');
+  await click('[data-catalog-tab="personal"]');
   await capture('tools');
   shell.mcp = await measureShell('mcp');
   const tools = await run('document.querySelector(".settings-page-title").textContent === "MCP 服务器" && Boolean(document.querySelector(".configuration-entry"))');
@@ -991,7 +996,7 @@ async function runCustomizeScenario(window, webContents) {
   await button('丢弃并切换');
   const normalNavigation = await run('document.querySelector(".settings-page-title").textContent === "通用"');
   await click('[data-nav-page="plugins"]');
-  await button('个人');
+  await click('[data-catalog-tab="personal"]');
   await run('(() => { const row = [...document.querySelectorAll(".configuration-entry .extension-hub-row-open")].find(el => el.textContent.includes("Secure Tools")); if (!row) throw new Error("missing Personal catalog Secure Tools row"); row.click(); })()');
   await delay(60);
   const personalCatalogDetail = await run('document.querySelector(".extension-plugin-title-row h1")?.textContent === "Secure Tools"');
@@ -1209,6 +1214,70 @@ async function showRecommendedSkills(webContents) {
   await run(`document.querySelector('[data-catalog-tab="public"]').click()`);
 }
 
+async function runExtensionProjectTabs(window, webContents) {
+  const run = expression => webContents.executeJavaScript(expression);
+  const paths = ['/work/LingXi', '/work/Breeze', '/work/client/demo', '/work/tools/demo'];
+  const [a, b] = paths;
+  const projectFiles = path => run(`window.__settingsScreenTest.setSettingsFiles(${JSON.stringify([
+    { layer: 'project', path: path + '/.lingxi/settings.json' },
+  ])})`);
+  const go = async page => {
+    await run(`window.__settingsScreenTest.selectPage(${JSON.stringify(page)})`);
+    await waitFor(webContents, 'Boolean(document.querySelector(".extension-scope-tabs"))');
+  };
+  const click = selector => run(`document.querySelector(${JSON.stringify(selector)}).click()`);
+  const project = path => `[data-project-path="${path}"]`;
+  const waitSelected = selector => waitFor(webContents, `document.querySelector(${JSON.stringify(selector)})?.getAttribute('aria-pressed') === 'true'`);
+  const nav = () => run(`[...document.querySelectorAll('.extension-scope-tabs button')].map(button => button.textContent.trim())`);
+  const names = () => run(`[...document.querySelectorAll('.extension-skills-installed .extension-hub-row-title, .configuration-entry .extension-hub-row-title')].map(title => title.textContent)`);
+  const capture = async name => {
+    const dir = process.env.LINGXI_SETTINGS_SCREENSHOT_DIR;
+    if (!dir) return;
+    mkdirSync(dir, { recursive: true });
+    window.showInactive();
+    await delay(80);
+    writeFileSync(join(dir, `${new URL(url).searchParams.get('theme')}-extension-scopes-${name}.png`), (await window.capturePage()).toPNG());
+  };
+  await go('skills');
+  const withoutProjects = await nav();
+  await run('window.__settingsScreenTest.setHasProject(true)');
+  const session = { uuid: 'b-session', mode: 'code', path: b + '/chat.jsonl', modified_rfc3339: '2026-05-01T00:00:00Z' };
+  await run(`window.__settingsScreenTest.setProjectList(${JSON.stringify(paths)}, ${JSON.stringify({ [b]: { sessions: [session] } })})`);
+  await run('window.__settingsScreenTest.setLayeredSnapshot({user:{enabledPlugins:{"User plugin":true}},project:{enabledPlugins:{"Project plugin":true}}})');
+  await projectFiles(a);
+  const skills = { entries: ['user', 'project'].map(source => ({ id: source, name: source + ' skill', source, directory: '/skills/' + source, writable: true })) };
+  const plugins = { installed: [{ id: 'Project plugin' }, { id: 'Other project only' }], enabled_json: '{}', revisions: { user: 'u', project: 'p' } };
+  const mcp = { scopes: ['user', 'project', 'local'].map(scope => ({ scope, path: '/settings', revision_sha256: scope, raw_json: JSON.stringify({ mcpServers: { [scope + ' server']: { url: 'https://example.org/mcp' } } }) })) };
+  await run(`window.__settingsScreenTest.setExtensionCatalogs(${JSON.stringify({ skills, plugins, mcp })})`);
+  const all = {};
+  for (const page of ['skills', 'plugins', 'mcp']) {
+    await go(page);
+    await click('[data-catalog-tab="personal"]');
+    await waitSelected('[data-catalog-tab="personal"]');
+    const userItems = await names();
+    await click(project(a));
+    await waitSelected(project(a));
+    const projectItems = await names();
+    all[page] = { labels: await nav(), userItems, projectItems };
+    await click('[data-catalog-tab="public"]');
+    await waitSelected('[data-catalog-tab="public"]');
+    if (page === 'skills') await capture('recommended');
+  }
+  await click(project(b));
+  await waitFor(webContents, 'window.__settingsScreenTest.state().navCalls.includes("open:/work/Breeze:b-session")');
+  const waiting = await run('Boolean(document.querySelector(".settings-extension-pending")) && !document.querySelector(".configuration-entry")');
+  await projectFiles(b);
+  await waitSelected(project(b));
+  await click('.extension-hub-toolbar-actions .extension-hub-primary');
+  const createScope = await run('document.querySelector(".mcp-editor select[aria-label=作用域]")?.value ?? document.querySelector(".mcp-editor select")?.value');
+  await click('.configuration-back');
+  window.setContentSize(760, 640);
+  await waitFor(webContents, 'window.innerWidth === 760');
+  const fits = await run('document.querySelector(".settings-content-scroll").scrollWidth <= document.querySelector(".settings-content-scroll").clientWidth + 1');
+  await capture('project');
+  return { withoutProjects, all, waiting, createScope, fits };
+}
+
 async function runExtensionRecommendationsScenario(window, webContents) {
   const run = expression => webContents.executeJavaScript(expression);
   const clickButton = async text => {
@@ -1355,7 +1424,7 @@ async function runRecommendationCatalogSafetyScenario(webContents) {
 async function main() {
   await app.whenReady();
   const scenario = process.env.LINGXI_SETTINGS_SCREEN_SCENARIO ?? 'layer-switcher';
-  const withNativeTitlebar = ['window-chrome', 'extension-recommendations', 'back-click'].includes(scenario);
+  const withNativeTitlebar = ['window-chrome', 'extension-recommendations', 'extension-project-tabs', 'back-click'].includes(scenario);
   const window = new BrowserWindow({
     show: false, width: 1000, height: 720, webPreferences: { sandbox: true },
     ...(withNativeTitlebar && process.platform === 'darwin' && {
@@ -1371,6 +1440,7 @@ async function main() {
       `window.lingxi = { ...window.lingxi, platform: ${JSON.stringify(process.platform)} }; void 0`,
     );
     const result = scenario === 'recommendation-catalog-safety' ? await runRecommendationCatalogSafetyScenario(webContents)
+      : scenario === 'extension-project-tabs' ? await runExtensionProjectTabs(window, webContents)
       : scenario === 'extension-recommendations' ? await runExtensionRecommendationsScenario(window, webContents)
       : scenario === 'localization' ? await runLocalizationScenario(window, webContents)
       : scenario === 'macos-editors' ? await runMacosEditors(window, webContents)

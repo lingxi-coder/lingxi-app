@@ -74,6 +74,7 @@ const ToolsAgent = eagerSettingsPages.ToolsAgent ?? bindSettingsPage('ToolsAgent
 const Voice = eagerSettingsPages.Voice ?? bindSettingsPage('Voice', settingsPageLoaders.Voice);
 import { provenanceDescription, provenanceLabel, type Provenance } from './rows';
 import { projectDirFromSnapshot, projectDisplayName } from './useEngineSettings';
+import { switchSettingsProject, useExtensionScopes, type ExtensionScopeNavigation } from './extensionScopes';
 import type { SettingsSnapshot } from './useEngineSettings';
 
 /**
@@ -248,6 +249,7 @@ export interface PageContentProps {
   bridge: UseBridge;
   snapshot: SettingsSnapshot | null;
   editingLayer: EditableLayer;
+  extensionScopes?: ExtensionScopeNavigation;
   onLayerLockChange?(locked: boolean): void;
   theme: ThemeMode;
   onTheme(value: ThemeMode): void;
@@ -383,12 +385,11 @@ function LayerSwitcher({ value, onChange, hasProject, locked = false }: {
  * （`projectDirFromSnapshot`），不取渲染端的「当前项目」状态 —— 后者可以已经指向
  * 别处，那正是下面 `handleSwitch` 要处理的问题。
  */
-function LayerContext({ bridge, layer, projectDir, locked, showDescription }: {
+function LayerContext({ bridge, layer, projectDir, locked }: {
   bridge: UseBridge;
   layer: EditableLayer;
   projectDir: string | null;
   locked: boolean;
-  showDescription: boolean;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
@@ -420,30 +421,7 @@ function LayerContext({ bridge, layer, projectDir, locked, showDescription }: {
     if (path === projectDir) { setOpen(false); return; }
     setBusy(true);
     try {
-      await bridge.activateProject(path);
-      // `activateProject` 单独用是不够的：它只写 `settings.activeProject`
-      // （`main/host.ts` 的 `selectWorkspaceInternal` 在 addProject=false 分支里
-      // 就只做这一件事），不开会话、不换活动会话、因而不换引擎进程。而项目层写到
-      // 哪个目录完全由引擎进程的 `--cwd` 决定。只调它的话，界面会显示已经切到 B，
-      // 下一次「项目」层写入却仍然落进 A 的 `.lingxi/settings.json`。
-      // 所以这里必须再落到该项目的一个会话上：有历史会话就打开最近的一个，
-      // 没有就新建 —— 两者都会以新项目为 `--cwd` 起一个引擎。
-      // `bridge` is this render's snapshot, so a catalog the prefetch above
-      // landed after that render is invisible here — and falling through to
-      // `newSession` would bury the project's real chats behind a stray empty
-      // one. Fetch it when the snapshot has nothing.
-      const sessions = bridge.bootstrap?.projectCatalogs?.[path]?.sessions
-        ?? (await bridge.listProjectSessions(path).catch(() => undefined))?.sessions
-        ?? [];
-      let latest: (typeof sessions)[number] | undefined;
-      for (const entry of sessions) {
-        const owner = bridge.bootstrap?.conversationSpaces.sessions.find((candidate) => candidate.sessionId === entry.uuid);
-        if (entry.mode !== bridge.bootstrap?.conversationSpaces.activeMode || (owner && owner.projectId !== path)) continue;
-        if (!latest || entry.modified_rfc3339 > latest.modified_rfc3339) latest = entry;
-      }
-      if (latest) {
-        if (!await bridge.openSession(path, latest.uuid, { scope: 'current', transcriptPath: latest.path })) throw new Error(tr('desktop_link_project_conversation_error'));
-      } else await bridge.newSession(path);
+      await switchSettingsProject(bridge, path);
       setOpen(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : tr('desktop_shell_switch_project_error'));
@@ -452,14 +430,11 @@ function LayerContext({ bridge, layer, projectDir, locked, showDescription }: {
     }
   };
 
-  if (!showDescription && !needsProject) return null;
   return (
     <div data-testid="layer-context" style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
-      {showDescription && (
-        <div data-testid="layer-description" style={{ fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
-          {provenanceDescription(layer)}
-        </div>
-      )}
+      <div data-testid="layer-description" style={{ fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
+        {provenanceDescription(layer)}
+      </div>
 
       {needsProject && projectDir && (
         <div data-testid="layer-project" style={{
@@ -702,6 +677,11 @@ export function SettingsScreen({
   const requestError = snapshotRequestError && snapshotRequestError.sessionId === activeSessionId ? snapshotRequestError.message : null;
   const settingsReadError = snapshotError ?? requestError;
 
+  const isExtensionPage = page === 'skills' || page === 'plugins' || page === 'mcp';
+  const extensionScopes = useExtensionScopes(bridge, page, projectDir, editingLayer, setEditingLayer, () => {
+    setPageLinkRequest(undefined);
+    setInitialPluginId(undefined);
+  });
   let body: ReactNode;
   // Whether the body actually has something a layer switcher could target.
   // `false` for a page that will never exist here (not implemented) or one
@@ -712,7 +692,12 @@ export function SettingsScreen({
   // shell's own editing UI for them hasn't been built yet — a temporary
   // packaging gap, not an absence of anything to write.
   let canWriteHere = false;
-  if (!activePage.implemented) {
+  if (isExtensionPage && extensionScopes.pendingProject) {
+    body = <div role="status" className="settings-extension-pending">
+      {tr('desktop_shell_settings_loading')} <bdi>{projectDisplayName(extensionScopes.pendingProject)}</bdi>
+      <button type="button" onClick={extensionScopes.cancel}>{tr('common_cancel')}</button>
+    </div>;
+  } else if (!activePage.implemented) {
     body = <PagePlaceholder page={activePage} kind="not-implemented" />;
   } else if (activePage.needsEngine && !engineReady) {
     body = <EngineRequiredEmptyState page={activePage} />;
@@ -734,6 +719,7 @@ export function SettingsScreen({
             bridge={bridge}
             snapshot={snapshot}
             editingLayer={editingLayer}
+            extensionScopes={isExtensionPage ? extensionScopes : undefined}
             theme={theme}
             onTheme={onTheme}
             onNavigate={navigatePage}
@@ -751,8 +737,7 @@ export function SettingsScreen({
       )
       : <PagePlaceholder page={activePage} kind="not-wired" />;
   }
-  const showLayerSwitcher = activePage.layered && canWriteHere;
-  const isExtensionPage = page === 'skills' || page === 'plugins' || page === 'mcp';
+  const showLayerSwitcher = !isExtensionPage && activePage.layered && canWriteHere;
   const pageTitle = navPageLabel(activePage);
 
   return (
@@ -858,7 +843,7 @@ export function SettingsScreen({
                 )}
               </div>}
               {showLayerSwitcher && (
-                <LayerContext bridge={bridge} layer={editingLayer} projectDir={projectDir} locked={layerLocked} showDescription={!isExtensionPage} />
+                <LayerContext bridge={bridge} layer={editingLayer} projectDir={projectDir} locked={layerLocked} />
               )}
               {settingsReadError && (
                 <div data-testid="settings-snapshot-error" role="alert" style={{
@@ -868,6 +853,7 @@ export function SettingsScreen({
                   {tr('desktop_shell_settings_failed', settingsReadError)}
                 </div>
               )}
+              {isExtensionPage && extensionScopes.error && <div role="alert">{extensionScopes.error}</div>}
               {body}
             </div>
           </div>

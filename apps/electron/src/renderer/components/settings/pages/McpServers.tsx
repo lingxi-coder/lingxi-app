@@ -10,7 +10,7 @@ import { parseJsonObjectInput } from '../jsonInput';
 import { publicExtensionItems, publicExtensionText, type PublicExtensionItem } from '../../../../shared/publicExtensionDirectory';
 import { mcpPrepareRequest } from '../../../../shared/mcpPrepare';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
-import { ExtensionCatalogTabs, ExtensionHubLayout, ExtensionHubHeader, ExtensionRecommendationCard, ExtensionRecommendationGroups, useExtensionCategoryFilter, useExtensionHubNavigation } from './ExtensionHub';
+import { ExtensionCatalogTabs, ExtensionHubLayout, ExtensionHubHeader, ExtensionRecommendationCard, ExtensionRecommendationGroups, useExtensionCategoryFilter, useExtensionCatalogView, useExtensionHubNavigation } from './ExtensionHub';
 import { ExtensionDetails, ExtensionRemovalConfirmation } from './ExtensionDetails';
 import {
   adminRecordCommand,
@@ -234,7 +234,7 @@ function JsonPropertyEditor({
   );
 }
 
-export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, onClose, onRegisterCloseRequest, linkRequest }: PageContentProps) {
+export function McpServers({ bridge, editingLayer, extensionScopes, onNavigate, onRegisterNavigationRequest, onClose, onRegisterCloseRequest, linkRequest }: PageContentProps) {
   const t = useT();
   const adminAvailable = typeof (bridge as { mcpAdmin?: unknown }).mcpAdmin === 'function';
   const snapshot = useMemo(() => parseSnapshot(bridge), [bridge.mcpConfigurationSnapshotEvent?.snapshot_json, bridge.mcpServersEvent?.servers]);
@@ -244,9 +244,9 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
   const approval = snapshot.approval ?? {};
   const appliedLink = useRef<string>();
   const [selection, setSelection] = useState<Selection>({ kind: 'list' });
-  const [catalogTab, setCatalogTab] = useState<'public' | 'personal'>('public');
+  const [catalogTab, setCatalogTab] = useExtensionCatalogView(extensionScopes, 'public');
   const [search, setSearch] = useState('');
-  const [draftScope, setDraftScope] = useState<WritableScopeDto>('user');
+  const [draftScope, setDraftScope] = useState<WritableScopeDto>(editingLayer === 'project' ? 'project' : 'user');
   const [draftName, setDraftName] = useState('');
   const [draftConfigText, setDraftConfigText] = useState(prettyJson(DEFAULT_MCP_CONFIG));
   const [argumentRows, setArgumentRows] = useState<string[]>(['-y', 'package-name']);
@@ -279,7 +279,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
     : null;
   const initialCreateName = selectedDirectoryItem?.mcp?.name ?? '';
   const initialCreateConfigText = prettyJson(selectedDirectoryItem?.mcp?.config ?? DEFAULT_MCP_CONFIG);
-  const newServerScope = draftScope === 'local' ? 'user' : draftScope;
+  const newServerScope = editingLayer === 'project' ? 'project' : 'user';
   const currentScope = selected?.scope ?? (selection.kind === 'create' ? selection.scope : draftScope);
 
   useEffect(() => {
@@ -440,9 +440,11 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
     setPageError(null);
   };
 
+  // Both project settings files belong to the current project. Keep legacy local entries manageable there.
+  const scopedEntries = entries.filter(entry => editingLayer === 'project' ? entry.scope !== 'user' : entry.scope === 'user');
   const filtered = search.trim()
-    ? entries.filter((entry) => `${entry.scope} ${entry.name} ${entry.path}`.toLowerCase().includes(search.trim().toLowerCase()))
-    : entries;
+    ? scopedEntries.filter((entry) => `${entry.scope} ${entry.name} ${entry.path}`.toLowerCase().includes(search.trim().toLowerCase()))
+    : scopedEntries;
   const categoryFilter = useExtensionCategoryFilter(publicMcpItems);
   const filteredPublicMcpItems = search.trim()
     ? categoryFilter.items.filter((item) => directorySearchText(item).includes(search.trim().toLowerCase()))
@@ -523,11 +525,11 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
       {closePrompt}
       {removalDialog}
       {linkRequest?.payload && selection.kind === 'create' && <p role="status">{tr('desktop_extension_mcp_import')}</p>}
-        <ExtensionHubHeader title={tr('settings_mcp_servers')} search={search} onSearch={setSearch} actions={<>
-          <button type="button" aria-label={tr('desktop_extension_refresh_mcp')} onClick={() => void (adminAvailable ? callMcpAdmin(bridge, adminRecordCommand('get_snapshot')) : bridge.refreshMcpServers()).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_refresh_tools_failed')))} className="extension-hub-icon-button"><ExtensionGlyph name="refresh" size={16} /></button>
+        <ExtensionHubHeader filter={catalogTab === 'public' && selection.kind === 'list' ? categoryFilter : undefined} title={tr('settings_mcp_servers')} search={search} onSearch={setSearch} actions={<>
+          <button type="button" aria-label={tr('desktop_extension_refresh_mcp')} title={tr('desktop_extension_refresh_mcp')} onClick={() => void (adminAvailable ? callMcpAdmin(bridge, adminRecordCommand('get_snapshot')) : bridge.refreshMcpServers()).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_refresh_tools_failed')))} className="extension-hub-icon-button"><ExtensionGlyph name="refresh" size={16} /></button>
           <button type="button" onClick={() => requestSelection({ kind: 'create', scope: newServerScope })} className="extension-hub-primary"><ExtensionGlyph name="plus" size={14} />{tr('extension_directory_add_mcp')}</button>
         </>} />
-        {selection.kind === 'list' && <ExtensionCatalogTabs filter={categoryFilter} label={tr('desktop_extension_mcp_catalog')} value={catalogTab} onChange={setCatalogTab} />}
+        {selection.kind === 'list' && <ExtensionCatalogTabs scopes={extensionScopes} locked={dirty} label={tr('desktop_extension_mcp_catalog')} value={catalogTab} onChange={setCatalogTab} />}
         <div className="configuration-page">
           {selection.kind === 'list' ? <div className="configuration-list">
             <DomainOperationBanner t={t} operation={operation} fallbackDomainLabel="MCP" />

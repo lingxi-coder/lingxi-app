@@ -66,7 +66,7 @@ internal fun DeepLinkImportPage(link: DeepLink, bridge: SettingsEngineBridge, on
             TextButton(onClick = onClose) { Text(stringResource(if (applied) R.string.common_done else R.string.settings_link_import_cancel)) }
             Text(stringResource(R.string.settings_link_import_title_fmt, kindLabel), style = MaterialTheme.typography.headlineSmall)
             Text(stringResource(R.string.settings_link_import_intro))
-            SingleChoiceRow(if (kind == "skill") listOf("user", "project") else listOf("user", "project", "local"), scope, { scope = it; reviewed = null })
+            SingleChoiceRow(listOf("user", "project"), scope, { scope = it; reviewed = null })
             OutlinedTextField(draft, { draft = it; reviewed = null }, label = { Text(stringResource(R.string.settings_link_import_proposal)) }, modifier = Modifier.fillMaxWidth(), minLines = 6, readOnly = applied)
             Button(enabled = !applied && state.connected && state.pending == null && !state.savingSettings, onClick = {
                 coroutine.launch {

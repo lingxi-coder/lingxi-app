@@ -244,7 +244,7 @@ struct SettingsLayerPicker: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Picker(String(localized: "settings_layer_label"), selection: $selection) {
-                ForEach(DesktopSettingsLayer.allCases) { Text($0.title).tag($0) }
+                ForEach(DesktopSettingsLayer.allCases.filter { $0 != .local }) { Text($0.title).tag($0) }
             }.pickerStyle(.segmented)
             // 每一层都要有一句「值落到哪、影响谁」。四个裸标签本身不解释任何东西，
             // 而「项目」层的文件是随仓库提交给整个团队的。

@@ -40,7 +40,7 @@ test('extension management screens render the selected language and preserve cat
   for (const locale of DESKTOP_LOCALES) {
     const mcp = renderInLocale(locale, React.createElement(McpServers, props));
     assert.ok(mcp.includes(translate('desktop_extension_mcp_description', locale)), locale);
-    assert.ok(mcp.includes(renderToStaticMarkup(React.createElement(React.Fragment, null, translate('mcp_scope_vs_layers_note', locale)))), locale);
+    assert.ok(!mcp.includes(translate('mcp_scope_vs_layers_note', locale)), locale);
     const skills = renderInLocale(locale, React.createElement(Skills, props));
     assert.ok(skills.includes(translate('desktop_extension_skill_description', locale)), locale);
     assert.ok(skills.includes('User skill name'));

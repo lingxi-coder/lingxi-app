@@ -1294,6 +1294,7 @@ async function runExtensionRecommendationsScenario(window, webContents) {
   await run('document.querySelector(".extension-overview-actions .extension-hub-primary").click()');
   await waitFor(webContents, 'Boolean([...document.querySelectorAll("input")].find(el => el.value === "https://mcp.notion.com/mcp"))');
   const mcpTemplate = await run('[...document.querySelectorAll("input")].some(el => el.value === "notion")');
+  const mcpScopeOptions = await run('[...document.querySelectorAll(`[data-testid="mcp-storage-scope"] option`)].map(option => option.value)');
   await capture('mcp');
   await run('document.querySelector(".configuration-back").click()');
   const mcpSnapshot = { scopes: [
@@ -1313,7 +1314,7 @@ async function runExtensionRecommendationsScenario(window, webContents) {
   await run('document.querySelector("[role=alertdialog] .extension-hub-danger").click()');
   await waitFor(webContents, 'window.__settingsScreenTest.state().extensionCalls.some(({command}) => command.action === "remove_server")');
   const removeMcp = await run('window.__settingsScreenTest.state().extensionCalls.find(({command}) => command.action === "remove_server").command');
-  return { initial, pixelGallery, search, details, copied, beforePreview, beforeConfirmation, selectedPackage, completed, installed, narrow, mcpTemplate, beforeUninstall, cancelUninstall, uninstall, credentialCleanup, cancelMcp, removeMcp };
+  return { initial, pixelGallery, search, details, copied, beforePreview, beforeConfirmation, selectedPackage, completed, installed, narrow, mcpTemplate, mcpScopeOptions, beforeUninstall, cancelUninstall, uninstall, credentialCleanup, cancelMcp, removeMcp };
 }
 
 async function runRecommendationCatalogSafetyScenario(webContents) {

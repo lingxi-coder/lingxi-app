@@ -104,6 +104,7 @@ test('recommended skills search, add their source and follow the chosen package 
     assert.equal(result.installed, true);
     assert.equal(result.narrow, true);
     assert.equal(result.mcpTemplate, true);
+    assert.deepEqual(result.mcpScopeOptions, ['user', 'project']);
     assert.deepEqual(result.details, { examples: 2, skills: 4, noMutations: true });
     assert.equal(result.copied, true);
     assert.equal(result.beforeUninstall, 2);
@@ -157,13 +158,13 @@ test('expanded settings editors fit a narrow macOS window', async () => {
 
 test('the layer switcher appears only on layered pages', async () => {
   const { permissions, diagnostics, mcp, customProviders } = await runScenario('layer-switcher');
-  assert.equal(permissions.hasLayerSwitcher, true, 'permissions is layered and must offer user/project/local');
+  assert.equal(permissions.hasLayerSwitcher, true, 'permissions is layered and must offer user/project');
   assert.equal(diagnostics.hasLayerSwitcher, false, 'diagnostics is client-owned and must not show a layer switcher');
   // `permissions` (编码, layered) vs `diagnostics` (高级, not layered) alone
   // cannot fail a regression that keys the switcher off `group === '编码'`
   // instead of `page.layered` — both pages agree on both properties. These
   // three are the ones that actually separate the two rules.
-  assert.equal(mcp.hasLayerSwitcher, false, 'mcp is inside 编码 but NOT layered — its own three-scope storage, no layer switcher');
+  assert.equal(mcp.hasLayerSwitcher, false, 'mcp is inside 编码 but NOT layered — its own storage, no layer switcher');
   assert.equal(customProviders.hasLayerSwitcher, false, 'custom providers use Host-wide settings');
 });
 
@@ -258,20 +259,20 @@ test('provider drafts and pending credential writes do not survive switching ses
   assert.equal(result.state.hasLayerSwitcher, false, 'provider settings remain Host-wide');
 });
 
-test('project and local tabs are disabled with no project open, with the reason shown as visible text', async () => {
+test('the project tab requires an open project and the local tab is hidden', async () => {
   const { withoutProject, withProject } = await runScenario('project-tabs');
   assert.equal(withoutProject.userDisabled, false, 'the user layer needs no project and must stay editable');
   assert.equal(withoutProject.projectDisabled, true);
-  assert.equal(withoutProject.localDisabled, true);
+  assert.equal(withoutProject.localDisabled, null);
   // The reason must be visible TEXT, not just a `title=` tooltip: Chromium
   // does not dispatch the pointer events a native tooltip needs on a
   // DISABLED control, and a tooltip is invisible to keyboard/screen-reader
   // users regardless.
   assert.match(withoutProject.layerSwitcherReasonText ?? '', /项目/, 'the disabled reason must be visible text, not a title= tooltip');
   // And the disabling is really keyed on the project, not permanent: once one
-  // opens, both re-enable — proving the assertion above isn't just "always disabled".
+  // opens, the project tab becomes usable.
   assert.equal(withProject.projectDisabled, false);
-  assert.equal(withProject.localDisabled, false);
+  assert.equal(withProject.localDisabled, null);
   assert.equal(withProject.userDisabled, false);
   assert.equal(withProject.layerSwitcherReasonText, null, 'once a project is open there is nothing to explain');
 });

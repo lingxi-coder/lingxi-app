@@ -13,7 +13,7 @@ struct DesktopHooksPage: View {
         VStack(alignment: .leading, spacing: 16) {
             SettingsConnectionStatus()
             Picker(String(localized: "settings_layer_label"), selection: $layer) {
-                ForEach(DesktopSettingsLayer.allCases) { Text($0.title).tag($0) }
+                ForEach(DesktopSettingsLayer.allCases.filter { $0 != .local }) { Text($0.title).tag($0) }
             }.pickerStyle(.segmented)
             Text(String(localized: "settings_hooks_intro")).font(.footnote)
             TextEditor(text: $draft).font(.system(.body, design: .monospaced)).frame(minHeight: 260)
@@ -255,13 +255,11 @@ struct DesktopMCPAdminPage: View {
                     ContentUnavailableView(String(localized: "mcp_server_unavailable"), systemImage: "link", description: Text(initialSelectionError))
                 }
                 Picker(String(localized: "mcp_storage_scope"), selection: $scope) {
-                    Text(String(localized: "settings_parity_user_layer")).tag("user"); Text(String(localized: "mcp_scope_local_title")).tag("local"); Text(String(localized: "mcp_scope_project_title")).tag("project")
+                    Text("settings_parity_user_layer").tag("user")
+                    Text("mcp_scope_project_title").tag("project")
+                    if scope == "local" { Text("mcp_scope_local_title").tag("local") }
                 }.pickerStyle(.segmented)
-                // MCP 的三个作用域和设置页的层用了同样的词，却是两套独立存储 —— 而且
-                // 「本地」的含义正好相反：设置层的 local 在项目内，MCP 的 local 在主目录。
-                // 刚在设置页学会一个意思的人，到这一页会把同一个词读成同一个意思。
                 Text(mcpScopeDescription).font(.caption).foregroundStyle(.secondary)
-                Text("mcp_scope_vs_layers_note").font(.caption2).foregroundStyle(.secondary)
                 Text(scopeRow["path"] as? String ?? String(localized: "mcp_scope_load_hint"))
                     .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                 DisclosureGroup(String(localized: "mcp_runtime_servers")) {

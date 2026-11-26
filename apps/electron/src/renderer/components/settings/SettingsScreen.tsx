@@ -84,7 +84,7 @@ import type { SettingsSnapshot } from './useEngineSettings';
  * it as a tab a person could "write to" would lie about what happens next.
  */
 export type EditableLayer = Extract<Provenance, 'user' | 'project' | 'local'>;
-const EDITABLE_LAYERS: EditableLayer[] = ['user', 'project', 'local'];
+const VISIBLE_SETTINGS_LAYERS: EditableLayer[] = ['user', 'project'];
 
 const GROUP_ORDER: NavPage['group'][] = ['个人', '模型与服务', '编码', '高级'];
 
@@ -335,7 +335,7 @@ function LayerSwitcher({ value, onChange, hasProject, locked = false }: {
         className="settings-segmented"
         style={{ display: 'inline-flex', padding: 3, gap: 2, borderRadius: 9, background: t.sidebarBg, border: `0.5px solid ${t.border}` }}
       >
-        {EDITABLE_LAYERS.map((layer) => {
+        {VISIBLE_SETTINGS_LAYERS.map((layer) => {
           const active = value === layer;
           const disabled = locked || layerDisabled(layer, hasProject);
           return (

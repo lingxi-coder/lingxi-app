@@ -31,29 +31,11 @@ import {
 
 export { parseJsonObjectInput };
 
-/**
- * MCP 的三个作用域各自落在哪。**它和设置层不是一回事**，尽管用了同样三个词 ——
- * 见下面 `MCP_SCOPE_VS_LAYERS_NOTE`。这三条对应 `client-protocol` 里
- * `WritableScopeDto` 各变体的文档：user → `~/.lingxi.json` 顶层 `mcpServers`；
- * local → 同一个 `~/.lingxi.json` 里 `projects["<项目>"]` 下；
- * project → `<项目>/.mcp.json`。
- *
- * 与设置层的说明一样不写死路径：每台机器的实际文件位置由引擎在选中条目的
- * `path` 上回传，页面已经在标题下方显示它。
- */
 const MCP_SCOPE_DESCRIPTIONS: Record<WritableScopeDto, string> = {
   user: 'mcp_scope_user_desc',
   local: 'mcp_scope_local_desc',
   project: 'mcp_scope_project_desc',
 };
-
-/**
- * 这句对照是必须的，不是锦上添花：MCP 的「本地」和设置层的「本地」含义正好相反。
- * 设置层的 local 在**项目里**（`<项目>/.lingxi/settings.local.json`），MCP 的 local
- * 在**主目录里**。一个刚在设置页学会「本地 = 项目内、不提交」的人，到这一页会把
- * 同一个词读成同一个意思，然后猜错文件在哪。
- */
-const MCP_SCOPE_VS_LAYERS_NOTE = 'mcp_scope_vs_layers_note';
 
 const DESKTOP_PLATFORMS = new Set(['macos', 'windows', 'linux']);
 const DEFAULT_MCP_CONFIG = { command: 'npx', args: ['-y', 'package-name'] };
@@ -297,6 +279,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
     : null;
   const initialCreateName = selectedDirectoryItem?.mcp?.name ?? '';
   const initialCreateConfigText = prettyJson(selectedDirectoryItem?.mcp?.config ?? DEFAULT_MCP_CONFIG);
+  const newServerScope = draftScope === 'local' ? 'user' : draftScope;
   const currentScope = selected?.scope ?? (selection.kind === 'create' ? selection.scope : draftScope);
 
   useEffect(() => {
@@ -527,10 +510,10 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
   const directoryItem = selection.kind === 'directory' ? publicMcpItems.find((item) => item.id === selection.id) : undefined;
   const removalDialog = removingEntry && <ExtensionRemovalConfirmation name={`${removingEntry.name} · ${mcpScopeLabel(removingEntry.scope)}`} busy={removing} error={pageError} onCancel={() => setRemovingEntry(null)} onConfirm={() => removeServer(removingEntry)} />;
   if (directoryItem) {
-    const action = decidePublicMcpDirectoryAction(directoryItem, entries, draftScope);
+    const action = decidePublicMcpDirectoryAction(directoryItem, entries, newServerScope);
     const configured = action.kind === 'configured' ? action.entry : undefined;
     return <ExtensionHubLayout>{closePrompt}<ExtensionDetails item={directoryItem} breadcrumb={tr('settings_mcp_servers')} onBack={() => requestSelection({ kind: 'list' })} status={configured ? `${tr('desktop_extension_configured')} · ${mcpScopeLabel(configured.scope)}` : undefined} actions={<>
-      {action.kind !== 'documentation' && <button type="button" className="extension-hub-primary" disabled={!adminAvailable || removing} onClick={() => requestSelection(configured ? { kind: 'server', id: configured.id } : { kind: 'create', scope: draftScope, directoryItemId: directoryItem.id })}><ExtensionGlyph name={configured ? 'cog' : 'plus'} size={16} />{tr(configured ? 'desktop_extension_configuration' : 'workspace_confirm_add')}</button>}
+      {action.kind !== 'documentation' && <button type="button" className="extension-hub-primary" disabled={!adminAvailable || removing} onClick={() => requestSelection(configured ? { kind: 'server', id: configured.id } : { kind: 'create', scope: newServerScope, directoryItemId: directoryItem.id })}><ExtensionGlyph name={configured ? 'cog' : 'plus'} size={16} />{tr(configured ? 'desktop_extension_configuration' : 'workspace_confirm_add')}</button>}
       {configured && <button type="button" className="extension-hub-danger" disabled={!adminAvailable || removing} onClick={() => setRemovingEntry(configured)}><ExtensionGlyph name="trash" size={16} />{tr('desktop_extension_remove')}</button>}
     </>}><DomainOperationBanner t={t} operation={operation} fallbackDomainLabel="MCP" />{pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}{navigationPrompt}</ExtensionDetails>{removalDialog}</ExtensionHubLayout>;
   }
@@ -542,17 +525,9 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
       {linkRequest?.payload && selection.kind === 'create' && <p role="status">{tr('desktop_extension_mcp_import')}</p>}
         <ExtensionHubHeader title={tr('settings_mcp_servers')} description={tr('desktop_extension_mcp_description')} search={search} onSearch={setSearch} actions={<>
           <button type="button" aria-label={tr('desktop_extension_refresh_mcp')} onClick={() => void (adminAvailable ? callMcpAdmin(bridge, adminRecordCommand('get_snapshot')) : bridge.refreshMcpServers()).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_refresh_tools_failed')))} className="extension-hub-icon-button"><ExtensionGlyph name="refresh" size={16} /></button>
-          <button type="button" onClick={() => requestSelection({ kind: 'create', scope: draftScope })} className="extension-hub-primary"><ExtensionGlyph name="plus" size={14} />{tr('extension_directory_add_mcp')}</button>
+          <button type="button" onClick={() => requestSelection({ kind: 'create', scope: newServerScope })} className="extension-hub-primary"><ExtensionGlyph name="plus" size={14} />{tr('extension_directory_add_mcp')}</button>
         </>} />
         {selection.kind === 'list' && <ExtensionCatalogTabs filter={categoryFilter} label={tr('desktop_extension_mcp_catalog')} value={catalogTab} onChange={setCatalogTab} />}
-        {/* 同名不同义的提醒放在页首，而不是藏在作用域下拉旁边：读到下拉的时候，
-            人已经在拿设置页的「本地」去理解这里的「本地」了。 */}
-        <details className="extension-hub-scope-note" data-testid="mcp-scope-vs-layers">
-          <summary>{tr('desktop_extension_mcp_storage')}</summary>
-          <div style={{ ...noteStyle(t), marginTop: 8 }}>
-          {tr(MCP_SCOPE_VS_LAYERS_NOTE)}
-          </div>
-        </details>
         <div className="configuration-page">
           {selection.kind === 'list' ? <div className="configuration-list">
             <DomainOperationBanner t={t} operation={operation} fallbackDomainLabel="MCP" />
@@ -560,7 +535,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
             {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
             {catalogTab === 'public' ? <>
               <ExtensionRecommendationGroups items={filteredPublicMcpItems}>{(item) => {
-                const action = decidePublicMcpDirectoryAction(item, entries, draftScope);
+                const action = decidePublicMcpDirectoryAction(item, entries, newServerScope);
                 const configured = action.kind === 'configured' ? action.entry : undefined;
                 const runtime = configured && snapshot.runtime_servers?.find((server) => server.name === configured.name);
                 const status = configured ? [tr('desktop_extension_configured'), runtime && (mcpRuntimeStatusLabel(runtime.status) ?? tr('desktop_extension_mcp_status_unknown'))].filter(Boolean).join(' · ') : undefined;
@@ -571,7 +546,7 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
                       {tr('extension_directory_documentation')}<ExtensionGlyph name="chevronR" size={14} />
                     </a>
                     : <button type="button" className="extension-hub-icon-text" aria-label={tr('desktop_extension_configure_named', item.name)}
-                      onClick={() => requestSelection(configured ? { kind: 'server', id: configured.id } : { kind: 'create', scope: draftScope, directoryItemId: item.id })}>
+                      onClick={() => requestSelection(configured ? { kind: 'server', id: configured.id } : { kind: 'create', scope: newServerScope, directoryItemId: item.id })}>
                       <ExtensionGlyph name={configured ? 'cog' : 'plus'} size={14} />{tr(configured ? 'desktop_extension_configuration' : 'public_extensions_use_template')}
                     </button>} />;
               }}</ExtensionRecommendationGroups>
@@ -649,9 +624,9 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
               <details className="mcp-options">
                 <summary>{tr('desktop_extension_scope_storage')} <span>{currentScope}</span></summary>
                 <Field t={t} label={tr('cron_scope_label')}>
-                  <select value={draftScope} onChange={(event) => { const next = event.target.value as WritableScopeDto; setDraftScope(next); setSelection((current) => ({ kind: 'create', scope: next, ...(current.kind === 'create' && current.directoryItemId ? { directoryItemId: current.directoryItemId } : {}) })); }} style={inputStyle(t)} aria-label={tr('cron_scope_label')} disabled={Boolean(selected)}>
+                  <select data-testid="mcp-storage-scope" value={draftScope} onChange={(event) => { const next = event.target.value as WritableScopeDto; setDraftScope(next); setSelection((current) => ({ kind: 'create', scope: next, ...(current.kind === 'create' && current.directoryItemId ? { directoryItemId: current.directoryItemId } : {}) })); }} style={inputStyle(t)} aria-label={tr('cron_scope_label')} disabled={Boolean(selected)}>
                     <option value="user">{tr('settings_parity_user_layer')}</option>
-                    <option value="local">{tr('settings_parity_local_layer')}</option>
+                    {draftScope === 'local' && <option value="local" disabled>{tr('settings_parity_local_layer')}</option>}
                     <option value="project">{tr('cron_run_project_label')}</option>
                   </select>
                   <div data-testid="mcp-scope-description" style={{ marginTop: 6, fontSize: 11.5, color: t.text3, lineHeight: 1.6 }}>

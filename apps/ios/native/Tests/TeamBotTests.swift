@@ -249,6 +249,20 @@ final class TeamBotTests: XCTestCase {
         XCTAssertEqual(TeamBotSelection.unavailable([sharedBotId], cards: [card], participants: [sharedBotId]), [sharedBotId])
     }
 
+    /// Bot v3 B7b, rule 6: a message sent while the Bot's Desktop was off queues for a day; the task view says so while it is queued and never started.
+    func testAQueuedTaskForADesktopThatWasOffSaysSoAndNothingElseDoes() throws {
+        func task(_ state: String, hostWait: Bool? = nil) throws -> TeamTask {
+            let flag = hostWait.map { #","hostWait":\#($0)"# } ?? ""
+            return try JSONDecoder().decode(TeamTask.self, from: Data(#"{"taskId":"task_0001","conversationId":"chat_0001","sharedBotId":"sharedbot_01","requester":{"uid":"member","generation":3},"state":"\#(state)","createdAt":1,"deadline":2,"replyId":null,"artifactId":null\#(flag)}"#.utf8))
+        }
+        XCTAssertTrue(try task("queued", hostWait: true).waitsForHost)
+        XCTAssertFalse(try task("queued").waitsForHost, "a task queued behind a Desktop that is on keeps the old line")
+        XCTAssertFalse(try task("queued", hostWait: false).waitsForHost)
+        XCTAssertFalse(try task("expired", hostWait: true).waitsForHost, "when the day is over the existing expired state stands")
+        XCTAssertFalse(try task("running", hostWait: true).waitsForHost)
+        XCTAssertTrue(try task("queued", hostWait: true).busy, "it is still a task a worker will take")
+    }
+
     func testAutoReplyOffersPublishedBotsOfTheChatToItsPeopleAndAlwaysLetsOneBeSwitchedOff() throws {
         func card(_ id: String, state: String = "published", daily: Int? = 5) throws -> TeamBotCard {
             var row: [String: Any] = ["sharedBotId": id, "name": id, "description": "", "maintainer": ["uid": "owner", "generation": 1], "revision": 1, "state": state,
@@ -274,6 +288,28 @@ final class TeamBotTests: XCTestCase {
         XCTAssertEqual(TeamAutoReply.targets(hidden.bots, on: hidden.on, kept: hidden.kept, switching: "sharedbot_a", to: true), ["sharedbot_a", "sharedbot_x"])
         chat = TeamMessageConversation(id: "chat_0002", kind: "dm", title: "", participants: ["user:alice", "shared_bot:sharedbot_a"], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0)
         XCTAssertTrue(TeamAutoReply.bots(chat, cards: cards, uid: "alice").bots.isEmpty)
+    }
+
+    /// Bot v3 B7b: how many Bots answer one message and whether a message to people alone is judged. Both read as the defaults until someone sets them, and are for a group or channel only.
+    func testAutoReplySettingsReadAsTheirDefaultsAndBelongToGroupsAndChannels() throws {
+        func chat(_ kind: String, _ auto: TeamConversationAutoReply?) -> TeamMessageConversation {
+            TeamMessageConversation(id: "chat_0001", kind: kind, title: "Trip", participants: ["user:alice", "shared_bot:sharedbot_a"], lastSeq: 0, lastChangeSeq: 0, lastReadSeq: 0, autoReply: auto)
+        }
+        XCTAssertEqual(TeamAutoReply.maxReplies(chat("group", nil)), 1); XCTAssertFalse(TeamAutoReply.judgesHumanMentions(chat("group", nil)))
+        let unset = chat("channel", TeamConversationAutoReply(revision: 1, targets: ["sharedbot_a"]))
+        XCTAssertEqual(TeamAutoReply.maxReplies(unset), 1, "targets alone leave both at their defaults"); XCTAssertFalse(TeamAutoReply.judgesHumanMentions(unset))
+        let set = chat("group", TeamConversationAutoReply(revision: 2, targets: ["sharedbot_a"], maxReplies: 3, humanMentions: "judge"))
+        XCTAssertEqual(TeamAutoReply.maxReplies(set), 3); XCTAssertTrue(TeamAutoReply.judgesHumanMentions(set))
+        XCTAssertFalse(TeamAutoReply.judgesHumanMentions(chat("group", TeamConversationAutoReply(revision: 2, targets: [], humanMentions: "quiet"))))
+        XCTAssertEqual(TeamAutoReply.maxReplies(chat("group", TeamConversationAutoReply(revision: 2, targets: [], maxReplies: 9))), TeamExecutionContract.maxRepliesLimit, "a value past the limit shows as the limit, never a choice the picker lacks")
+        XCTAssertTrue(TeamAutoReply.hasRounds(chat("group", nil))); XCTAssertTrue(TeamAutoReply.hasRounds(chat("channel", nil)))
+        XCTAssertFalse(TeamAutoReply.hasRounds(chat("bot_dm", nil)), "a Bot DM has the one Bot, which is always the one asked")
+        XCTAssertFalse(TeamAutoReply.hasRounds(chat("dm", nil)))
+        // A change of either setting is sent with the Bots as they stand, hidden ones kept.
+        let a = try JSONDecoder().decode(TeamBotCard.self, from: JSONSerialization.data(withJSONObject: ["sharedBotId": "sharedbot_a", "name": "a", "description": "", "maintainer": ["uid": "owner", "generation": 1], "revision": 1,
+            "state": "published", "permitted": true, "ready": true, "onlineUntil": 0, "usePolicy": ["mode": "all"], "quotas": ["team": 1, "member": 1, "bot": 1]] as [String: Any]))
+        XCTAssertEqual(TeamAutoReply.targets([a], on: ["sharedbot_a"], kept: ["sharedbot_x"]), ["sharedbot_a", "sharedbot_x"])
+        XCTAssertEqual(TeamAutoReply.targets([a], on: [], kept: []), [])
     }
 }
 
@@ -382,6 +418,24 @@ final class TeamBotMemberEntryTests: XCTestCase {
         for fields: [String: Any] in [[:], ["availability": "unverified"], ["availability": "ready"]] {
             XCTAssertNil(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: [try card(fields)]))
         }
+    }
+    /// Bot v3 B7b, rule 6: in a group or channel a Bot whose Desktop is off is waited for, so it is no refusal; every other known refusal still is, and so is a Bot DM's.
+    func testAGroupWaitsForADesktopThatIsOffAndRefusesTheRest() throws {
+        let offline = try card(["availability": "offline"])
+        XCTAssertEqual(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: [offline]), .offline, "a Bot DM says no at once")
+        XCTAssertNil(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: [offline], waitsForHost: true))
+        for state in ["paused", "maintenance", "quota_exhausted"] {
+            XCTAssertEqual(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: [try card(["availability": state])], waitsForHost: true)?.rawValue, state)
+        }
+        // A Bot that was offline and whose status then expired is still known to be offline: it is waited for too, and it is not mistaken for another refusal.
+        let pending = try card(["availability": "offline", "statusExpiresAt": 2000]).expiringStatus(at: 2000)
+        XCTAssertEqual(pending.memberAvailability, .unverified)
+        XCTAssertEqual(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: [pending]), .offline)
+        XCTAssertNil(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: [pending], waitsForHost: true))
+        // One Bot that is waited for does not hide another that is refused.
+        let maintenance = try card(["sharedBotId": "sharedbot_02", "availability": "maintenance"])
+        XCTAssertEqual(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01", "sharedbot_02"], cards: [offline, maintenance], waitsForHost: true), .maintenance)
+        XCTAssertNil(TeamBotMemberRules.blockedAvailability(targets: ["sharedbot_01"], cards: [offline, maintenance], waitsForHost: true), "only the Bots asked count")
     }
     func testMaintenanceRefreshExpiresIndependentlyOfHostLeaseUsingFakeClock() throws {
         let maintenance = try card(["availability": "maintenance", "ready": false, "onlineUntil": 9000, "statusExpiresAt": 2000, "dailyRemaining": 4])

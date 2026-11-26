@@ -2756,6 +2756,7 @@
     <string name="teams_replying_to_fmt">回覆 %1$s</string>
     <string name="teams_cancel_reply">取消回覆</string>
     <string name="teams_editing_message">正在編輯訊息</string>
+    <string name="teams_edit_no_notify_hint">編輯訊息不會通知 Bot。要請求 Bot，請另外傳送一則訊息。</string>
     <string name="teams_composer_hint_fmt">傳送給 %1$s</string>
     <string name="teams_composer_edit_hint">修改你的訊息</string>
     <string name="teams_error_mention_target">有被提及的成員已無法使用。請將訊息複製到新草稿並更新提及。</string>
@@ -3008,6 +3009,10 @@
     <string name="teams_task_declined">未回覆</string>
     <string name="teams_auto_reply_title">自主回覆的 Bot</string>
     <string name="teams_auto_reply_note">在此開啟的 Bot 會讀取此會話的每則新訊息，並在判斷需要時主動回覆，無需被點名。</string>
+    <string name="teams_auto_reply_max_replies">每則訊息最多幾個 Bot 自主回覆</string>
+    <string name="teams_auto_reply_human_mentions">讓 Bot 也判斷只 @ 了成員的訊息</string>
+    <string name="teams_auto_reply_human_mentions_hint">關閉時，只 @ 了成員的訊息是說給他們的，Bot 保持安靜。</string>
+    <string name="teams_auto_reply_rank_note">不同 Desktop 上的 Bot 先依各自的把握程度排序；不同維護者判斷服務給出的機率不直接比較，只在把握相同時用來分先後。</string>
     <string name="teams_auto_reply_disclosure_fmt">開啟後，此會話的新訊息會傳送給 %1$s 為 %2$s 設定的判斷服務和模型。它每天最多自主回覆 %3$d 次。</string>
     <string name="teams_auto_reply_unavailable_fmt">%1$s 已不再支援自主回覆，可在此關閉。</string>
     <string name="teams_task_needs_checking_hint">會話之外的某個操作可能已執行，也可能沒有，需要 Bot 維護者確認。</string>
@@ -3222,6 +3227,7 @@
     <string name="teams_confirm_make_owner_title_fmt">將 %1$s 設為擁有者？</string>
     <string name="services_menu">服務選項</string>
     <string name="teams_bot_avail_offline">宿主離線</string>
+    <string name="teams_bot_offline_wait_fmt">%1$s 已離線，上線後會回覆</string>
     <string name="teams_bot_avail_maintenance">暫時維護中</string>
     <string name="teams_bot_avail_quota">今日額度已用完</string>
     <string name="teams_bot_avail_unverified">狀態未確認</string>

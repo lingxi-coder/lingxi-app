@@ -558,7 +558,8 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
                     if (conversation.kind == "bot_dm" && conversation.sharedBotIds.size != 1) throw TeamMessageFailure("BOT_SELECTION_STALE")
                     val selected = if (conversation.kind == "bot_dm") conversation.sharedBotIds else targets
                     requireTeamBotSelections(selected, mutable.value.bots, conversation.participants)
-                    TeamBotEntry.requireNewRequest(selected, mutable.value.bots)
+                    // A group or channel still takes a message for a Bot whose Desktop is off (rule 6); a Bot DM does not.
+                    TeamBotEntry.requireNewRequest(selected, mutable.value.bots, waitsForHost = conversation.kind != "bot_dm")
                     selected
                 } else emptyList()
                 val said = if (carries && text.isBlank()) "" else text

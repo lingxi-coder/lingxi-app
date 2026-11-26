@@ -68,6 +68,17 @@ class TeamBotsTest {
         for (mode in listOf<Any?>("ignore", "Quiet", "", 7L, null)) assertNull("$mode", auto(mapOf("humanMentions" to mode))?.humanMentions)
         assertEquals("the targets are still read", TeamConversationAutoReply(2, listOf("sharedbot_helper")), auto(mapOf("maxReplies" to 99L, "humanMentions" to "a_new_mode")))
     }
+    /** Bot v3 B7b, rule 6: a message sent while the Bot's Desktop was off queues for a day; the task view says so while it is queued and never started. */
+    @Test fun aQueuedTaskForADesktopThatWasOffSaysSoAndNothingElseDoes() {
+        fun task(state: String, hostWait: String = "") = TeamTask.parse(JSONObject("""{"taskId":"task_0001","conversationId":"chat_0001","sharedBotId":"sharedbot_01","requester":{"uid":"member","generation":3},"state":"$state","createdAt":1,"deadline":2$hostWait}"""))
+        val waiting = ""","hostWait":true"""
+        assertTrue(task("queued", waiting).waitsForHost)
+        assertFalse("a task queued behind a Desktop that is on keeps the old line", task("queued").waitsForHost)
+        assertFalse(task("queued", ""","hostWait":false""").waitsForHost)
+        assertFalse("when the day is over the existing expired state stands", task("expired", waiting).waitsForHost)
+        assertFalse(task("running", waiting).waitsForHost)
+        assertTrue("it is still a task a worker will take", task("queued", waiting).busy)
+    }
     /** A reply that waits for its maintainer can still change and can be taken back by the one who asked; no worker is changing it. */
     @Test fun aTaskWhoseReplyAwaitsApprovalIsNeitherFinishedNorBeingWorkedOn() {
         fun task(state: String) = TeamTask.parse(JSONObject("""{"taskId":"task_0001","conversationId":"chat_0001","sharedBotId":"sharedbot_01","requester":{"uid":"member","generation":3},"state":"$state","createdAt":1,"deadline":2}"""))
@@ -269,6 +280,24 @@ class TeamBotsTest {
         assertEquals(setOf("sharedbot_01"), composerStaleTargets(setOf("sharedbot_01"), listOf(groupBot()), other))
     }
 
+    /** Bot v3 B7b: how many Bots answer one message and whether a message to people alone is judged. Both read as their defaults until someone sets them, and are for a group or channel only. */
+    @Test fun autoReplySettingsReadAsTheirDefaultsAndBelongToGroupsAndChannels() {
+        fun chat(kind: String, auto: TeamConversationAutoReply?) = TeamMessageConversation("chat_0001", kind, "Trip", listOf("user:alice", "shared_bot:sharedbot_a"), 0, 0, 0, autoReply = auto)
+        assertEquals(1, TeamAutoReply.maxReplies(chat("group", null))); assertFalse(TeamAutoReply.judgesHumanMentions(chat("group", null)))
+        val unset = chat("channel", TeamConversationAutoReply(1, listOf("sharedbot_a")))
+        assertEquals("targets alone leave both at their defaults", 1, TeamAutoReply.maxReplies(unset)); assertFalse(TeamAutoReply.judgesHumanMentions(unset))
+        val set = chat("group", TeamConversationAutoReply(2, listOf("sharedbot_a"), 3, "judge"))
+        assertEquals(3, TeamAutoReply.maxReplies(set)); assertTrue(TeamAutoReply.judgesHumanMentions(set))
+        assertFalse(TeamAutoReply.judgesHumanMentions(chat("group", TeamConversationAutoReply(2, emptyList(), humanMentions = "quiet"))))
+        assertEquals("a value past the limit shows as the limit, never a choice the chips lack", TeamExecutionContract.MAX_REPLIES_LIMIT, TeamAutoReply.maxReplies(chat("group", TeamConversationAutoReply(2, emptyList(), 9))))
+        assertTrue(TeamAutoReply.hasRounds(chat("group", null))); assertTrue(TeamAutoReply.hasRounds(chat("channel", null)))
+        assertFalse("a Bot DM has the one Bot, which is always the one asked", TeamAutoReply.hasRounds(chat("bot_dm", null)))
+        assertFalse(TeamAutoReply.hasRounds(chat("dm", null)))
+        // A change of either setting is sent with the Bots as they stand, hidden ones kept.
+        val a = TeamBotCard.parse(JSONObject("""{"sharedBotId":"sharedbot_a","name":"a","description":"","maintainer":{"uid":"owner","generation":1},"revision":1,"state":"published","permitted":true,"ready":true,"onlineUntil":0,"usePolicy":{"mode":"all"},"quotas":{"team":1,"member":1,"bot":1}}"""))
+        assertEquals(listOf("sharedbot_a", "sharedbot_x"), TeamAutoReply.targets(TeamAutoReply.Choice(listOf(a), listOf("sharedbot_a"), listOf("sharedbot_x"))))
+        assertEquals(emptyList<String>(), TeamAutoReply.targets(TeamAutoReply.Choice(listOf(a), emptyList())))
+    }
     @Test fun autoReplyOffersPublishedBotsOfTheChatToItsPeopleAndAlwaysLetsOneBeSwitchedOff() {
         fun bot(id: String, state: String = "published", daily: Int? = 5) = TeamBotCard.parse(JSONObject("""{"sharedBotId":"$id","name":"$id","description":"","maintainer":{"uid":"owner","generation":1},"revision":1,"state":"$state","permitted":true,"ready":true,"onlineUntil":0,"usePolicy":{"mode":"all"},"quotas":{"team":1,"member":1,"bot":1}""" + (daily?.let { ""","autoReply":{"daily":$it}""" } ?: "") + "}"))
         val cards = listOf(bot("sharedbot_a"), bot("sharedbot_b", daily = null), bot("sharedbot_c", state = "paused"), bot("sharedbot_d"))

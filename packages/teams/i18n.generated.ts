@@ -229,7 +229,11 @@ export type TeamsKey =
   | 'teams_approval_waiting_member_fmt'
   | 'teams_artifact_open'
   | 'teams_auto_reply_disclosure_fmt'
+  | 'teams_auto_reply_human_mentions'
+  | 'teams_auto_reply_human_mentions_hint'
+  | 'teams_auto_reply_max_replies'
   | 'teams_auto_reply_note'
+  | 'teams_auto_reply_rank_note'
   | 'teams_auto_reply_title'
   | 'teams_auto_reply_unavailable_fmt'
   | 'teams_bot_avail_maintenance'
@@ -242,6 +246,7 @@ export type TeamsKey =
   | 'teams_bot_message'
   | 'teams_bot_not_permitted'
   | 'teams_bot_not_supported'
+  | 'teams_bot_offline_wait_fmt'
   | 'teams_bot_owner_fmt'
   | 'teams_bot_remaining_today'
   | 'teams_bot_resets'
@@ -326,6 +331,7 @@ export type TeamsKey =
   | 'teams_doc_show_latest'
   | 'teams_doc_too_long'
   | 'teams_doc_unsaved'
+  | 'teams_edit_no_notify_hint'
   | 'teams_editing_message'
   | 'teams_empty_thread_hint'
   | 'teams_error'
@@ -1185,7 +1191,11 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_approval_waiting_member_fmt: { en: 'Waiting for %1$s to approve or decline.', 'zh-Hans': '等待 %1$s 批准或拒绝。', 'zh-Hant': '等待 %1$s 核准或拒絕。', ja: '%1$s の承認または却下を待っています。', ko: '%1$s 님의 승인 또는 거절을 기다리는 중입니다.' },
   teams_artifact_open: { en: 'Open document', 'zh-Hans': '打开文档', 'zh-Hant': '開啟文件', ja: 'ドキュメントを開く', ko: '문서 열기' },
   teams_auto_reply_disclosure_fmt: { en: 'New messages in this chat are sent to the Decision service and model that %1$s set up for %2$s. It answers on its own at most %3$d times a day.', 'zh-Hans': '开启后，此会话的新消息会发送给 %1$s 为 %2$s 配置的判断服务和模型。它每天最多自主回复 %3$d 次。', 'zh-Hant': '開啟後，此會話的新訊息會傳送給 %1$s 為 %2$s 設定的判斷服務和模型。它每天最多自主回覆 %3$d 次。', ja: 'オンにすると、このチャットの新しいメッセージは %1$s が %2$s 用に設定した判断サービスとモデルに送られます。自分での返信は 1 日最大 %3$d 回です。', ko: '켜면 이 채팅의 새 메시지가 %1$s 님이 %2$s 용으로 설정한 판단 서비스와 모델로 전송됩니다. 스스로 답장은 하루 최대 %3$d회입니다.' },
+  teams_auto_reply_human_mentions: { en: 'Let Bots also judge messages that @mention only people', 'zh-Hans': '让 Bot 也判断只 @ 了成员的消息', 'zh-Hant': '讓 Bot 也判斷只 @ 了成員的訊息', ja: 'メンバーだけを @ したメッセージも Bot に判断させる', ko: '멤버만 @ 한 메시지도 Bot이 판단하게 하기' },
+  teams_auto_reply_human_mentions_hint: { en: 'Off: a message that @mentions only people is meant for them, and Bots stay quiet.', 'zh-Hans': '关闭时，只 @ 了成员的消息是说给他们的，Bot 保持安静。', 'zh-Hant': '關閉時，只 @ 了成員的訊息是說給他們的，Bot 保持安靜。', ja: 'オフのときは、メンバーだけを @ したメッセージはその人たち宛てとみなし、Bot は黙っています。', ko: '끄면 멤버만 @ 한 메시지는 그 사람들에게 하는 말로 보고 Bot은 조용히 있습니다.' },
+  teams_auto_reply_max_replies: { en: 'Most Bots that answer one message on their own', 'zh-Hans': '每条消息最多几个 Bot 自主回复', 'zh-Hant': '每則訊息最多幾個 Bot 自主回覆', ja: '1 件のメッセージに自分で返信する Bot の最大数', ko: '메시지 하나에 스스로 답장하는 Bot 최대 수' },
   teams_auto_reply_note: { en: 'A Bot turned on here reads every new message in this chat and answers when it judges a reply is wanted, without being asked.', 'zh-Hans': '在此开启的 Bot 会读取此会话的每条新消息，并在判断需要时主动回复，无需被点名。', 'zh-Hant': '在此開啟的 Bot 會讀取此會話的每則新訊息，並在判斷需要時主動回覆，無需被點名。', ja: 'ここでオンにした Bot は、このチャットの新しいメッセージをすべて読み、返信が必要と判断したときに呼ばれなくても返信します。', ko: '여기서 켠 Bot은 이 채팅의 새 메시지를 모두 읽고, 답장이 필요하다고 판단하면 요청 없이도 답장합니다.' },
+  teams_auto_reply_rank_note: { en: 'Bots on different Desktops are ranked by how sure each is first; Decision probabilities from different maintainers are not compared directly and only break ties.', 'zh-Hans': '不同 Desktop 上的 Bot 先按各自的把握程度排序；不同维护者判断服务给出的概率不直接比较，只在把握相同时用来分先后。', 'zh-Hant': '不同 Desktop 上的 Bot 先依各自的把握程度排序；不同維護者判斷服務給出的機率不直接比較，只在把握相同時用來分先後。', ja: '異なる Desktop の Bot は、まず各自の確信度で順位を付けます。メンテナーごとの判断サービスが返す確率は直接比較せず、確信度が同じときの順位付けにだけ使います。', ko: '서로 다른 Desktop의 Bot은 먼저 각자의 확신도로 순위를 매깁니다. 메인테이너마다 다른 판단 서비스의 확률은 직접 비교하지 않고, 확신도가 같을 때 순서를 가르는 데만 씁니다.' },
   teams_auto_reply_title: { en: 'Bots that answer on their own', 'zh-Hans': '自主回复的 Bot', 'zh-Hant': '自主回覆的 Bot', ja: '自分で返信する Bot', ko: '스스로 답장하는 Bot' },
   teams_auto_reply_unavailable_fmt: { en: '%1$s no longer answers on its own. Turn it off here.', 'zh-Hans': '%1$s 已不再支持自主回复，可在此关闭。', 'zh-Hant': '%1$s 已不再支援自主回覆，可在此關閉。', ja: '%1$s は自分で返信しなくなりました。ここでオフにしてください。', ko: '%1$s은(는) 더 이상 스스로 답장하지 않습니다. 여기서 끄세요.' },
   teams_bot_avail_maintenance: { en: 'Temporarily under maintenance', 'zh-Hans': '暂时维护中', 'zh-Hant': '暫時維護中', ja: '一時的にメンテナンス中', ko: '일시적으로 점검 중' },
@@ -1198,6 +1208,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_bot_message: { en: 'Message Bot', 'zh-Hans': '与 Bot 对话', 'zh-Hant': '與 Bot 對話', ja: 'Bot とチャット', ko: 'Bot과 대화' },
   teams_bot_not_permitted: { en: 'Not permitted', 'zh-Hans': '无使用权限', 'zh-Hant': '無使用權限', ja: '利用権限がありません', ko: '사용 권한 없음' },
   teams_bot_not_supported: { en: 'Not supported', 'zh-Hans': '不支持', 'zh-Hant': '不支援', ja: '非対応', ko: '지원되지 않음' },
+  teams_bot_offline_wait_fmt: { en: '%1$s is offline and will reply when it’s back online', 'zh-Hans': '%1$s 已离线，上线后会回复', 'zh-Hant': '%1$s 已離線，上線後會回覆', ja: '%1$s はオフラインです。オンラインに戻ったら返信します', ko: '%1$s은(는) 오프라인입니다. 다시 온라인이 되면 답장합니다' },
   teams_bot_owner_fmt: { en: 'Maintainer: %1$s', 'zh-Hans': '维护者：%1$s', 'zh-Hant': '維護者：%1$s', ja: 'メンテナー: %1$s', ko: '메인테이너: %1$s' },
   teams_bot_remaining_today: { en: 'Your remaining requests today', 'zh-Hans': '本人今日剩余请求', 'zh-Hant': '本人今日剩餘請求', ja: '自分の今日の残りリクエスト数', ko: '오늘 남은 내 요청 수' },
   teams_bot_resets: { en: 'Resets', 'zh-Hans': '重置于', 'zh-Hant': '重置於', ja: 'リセット時刻', ko: '초기화 시각' },
@@ -1282,6 +1293,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_doc_show_latest: { en: 'Show latest', 'zh-Hans': '查看最新版本', 'zh-Hant': '查看最新版本', ja: '最新版を表示', ko: '최신 버전 보기' },
   teams_doc_too_long: { en: 'This document is too long to save. Shorten it and try again.', 'zh-Hans': '文档过长，无法保存。请缩短后重试。', 'zh-Hant': '文件過長，無法儲存。請縮短後重試。', ja: 'ドキュメントが長すぎて保存できません。短くしてもう一度お試しください。', ko: '문서가 너무 길어 저장할 수 없습니다. 줄인 뒤 다시 시도하세요.' },
   teams_doc_unsaved: { en: 'You have unsaved changes.', 'zh-Hans': '你有尚未保存的修改。', 'zh-Hant': '你有尚未儲存的修改。', ja: '保存されていない変更があります。', ko: '저장하지 않은 변경 사항이 있습니다.' },
+  teams_edit_no_notify_hint: { en: 'Editing doesn’t notify Bots. To ask one, send a new message.', 'zh-Hans': '编辑消息不会通知 Bot。要请求 Bot，请另发一条消息。', 'zh-Hant': '編輯訊息不會通知 Bot。要請求 Bot，請另外傳送一則訊息。', ja: '編集しても Bot には通知されません。依頼するには新しいメッセージを送信してください。', ko: '수정해도 Bot에는 알리지 않습니다. 요청하려면 새 메시지를 보내세요.' },
   teams_editing_message: { en: 'Editing message', 'zh-Hans': '正在编辑消息', 'zh-Hant': '正在編輯訊息', ja: 'メッセージを編集中', ko: '메시지 수정 중' },
   teams_empty_thread_hint: { en: 'Say hello to start the conversation.', 'zh-Hans': '打个招呼，开始对话吧。', 'zh-Hant': '打個招呼，開始對話吧。', ja: 'あいさつして会話を始めましょう。', ko: '인사를 건네 대화를 시작해 보세요.' },
   teams_error: { en: 'Could not connect to Teams. Check your connection and try again.', 'zh-Hans': '无法连接团队服务，请检查网络后重试。', 'zh-Hant': '無法連線到團隊服務，請檢查網路後再試。', ja: 'チームに接続できませんでした。接続を確認して、もう一度お試しください。', ko: '팀에 연결할 수 없습니다. 연결 상태를 확인하고 다시 시도하세요.' },

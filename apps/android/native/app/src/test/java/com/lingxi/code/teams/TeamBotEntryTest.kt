@@ -83,6 +83,31 @@ class TeamBotEntryTest {
         assertEquals(R.string.teams_bot_avail_offline, TeamBotEntry.availabilityRes(card().copy(availability = "offline")))
     }
 
+    /** Bot v3 B7b, rule 6: in a group or channel a Bot whose Desktop is off is waited for, so it is no refusal; every other known refusal still is, and so is a Bot DM's. */
+    @Test fun aGroupWaitsForADesktopThatIsOffAndRefusesTheRest() {
+        val targets = setOf(card().sharedBotId)
+        val offline = card().copy(availability = "offline")
+        assertEquals("a Bot DM says no at once", listOf(offline), TeamBotEntry.blockedRequests(targets, listOf(offline), false))
+        assertTrue(TeamBotEntry.blockedRequests(targets, listOf(offline), false, waitsForHost = true).isEmpty())
+        for (status in listOf("paused", "maintenance", "quota_exhausted")) {
+            val bot = card().copy(availability = status)
+            assertEquals(listOf(bot), TeamBotEntry.blockedRequests(targets, listOf(bot), false, waitsForHost = true))
+        }
+        // A fresh offline projection after a refusal is still one Bot waited for; a status that is merely unknown after one is not lifted.
+        val remembered = offline.copy(admissionBlockedPendingRefresh = true)
+        assertTrue(TeamBotEntry.blockedRequests(targets, listOf(remembered), false, waitsForHost = true).isEmpty())
+        val unknown = TeamBotEntry.unverified(offline)
+        assertEquals(listOf(unknown), TeamBotEntry.blockedRequests(targets, listOf(unknown), false, waitsForHost = true))
+        // One Bot that is waited for does not hide another that is refused, and only the Bots asked count.
+        val maintenance = card().copy(sharedBotId = "sharedbot_02", availability = "maintenance")
+        assertEquals(listOf(maintenance), TeamBotEntry.blockedRequests(targets + "sharedbot_02", listOf(offline, maintenance), false, waitsForHost = true))
+        assertTrue(TeamBotEntry.blockedRequests(targets, listOf(offline, maintenance), false, waitsForHost = true).isEmpty())
+        // The send path says the same: a group journals the message, a Bot DM refuses it.
+        TeamBotEntry.requireNewRequest(targets, listOf(offline), waitsForHost = true)
+        try { TeamBotEntry.requireNewRequest(targets, listOf(offline)); fail("A Bot DM must stop before a new submit is journaled") }
+        catch (error: TeamMessageFailure) { assertEquals("HOST_UNAVAILABLE", error.code) }
+    }
+
     @Test fun memberDirectoryKeepsAuthorizedPausedCardsWithoutMakingThemSelectable() {
         val paused = card().copy(state = "paused", permitted = false, availability = "paused")
         val published = card()

@@ -646,7 +646,8 @@ final class TeamMessagingModel {
         }
         let conversation = cache?.conversations.first { $0.id == selected }
         let resolvedTargets = operation == "create" ? conversation.map { Array(TeamBotSelection.targets(in: $0, selected: Set(targets))).sorted() } : nil
-        if let blocked = TeamBotMemberRules.blockedAvailability(targets: Set(resolvedTargets ?? []), cards: bots, operation: operation) {
+        // A group or channel still takes a message for a Bot whose Desktop is off (rule 6); a Bot DM does not.
+        if let blocked = TeamBotMemberRules.blockedAvailability(targets: Set(resolvedTargets ?? []), cards: bots, operation: operation, waitsForHost: conversation.map { $0.kind != "bot_dm" } ?? false) {
             throw TeamMessageFailure(code: blocked == .quota_exhausted ? "REQUEST_QUOTA_EXCEEDED" : "HOST_UNAVAILABLE")
         }
         let intent = TeamMessageIntent(teamId: teamId, generation: generation, conversationId: selected, messageId: messageId ?? UUID().uuidString, changeId: UUID().uuidString, operation: operation, text: carries && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : text, replyTo: replyTo, targets: resolvedTargets ?? nil,

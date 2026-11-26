@@ -91,9 +91,10 @@ enum TeamBotMemberRules {
         cards.filter { $0.state == "published" || $0.state == "paused" }
     }
     /// Only new Bot requests observe this gate. A never-verified projection defers to the server; a known refusal waits for revalidation.
-    static func blockedAvailability(targets: Set<String>, cards: [TeamBotCard], operation: String = "create", answeringWait: Bool = false) -> TeamBotAvailability? {
+    /// `waitsForHost`: in a group or channel a Bot whose Desktop is off is no refusal: the message is sent and its task waits for the Desktop (rule 6). A Bot DM says no at once.
+    static func blockedAvailability(targets: Set<String>, cards: [TeamBotCard], operation: String = "create", answeringWait: Bool = false, waitsForHost: Bool = false) -> TeamBotAvailability? {
         guard operation == "create", !answeringWait else { return nil }
-        return cards.first { targets.contains($0.sharedBotId) && $0.newRequestBlock != nil }?.newRequestBlock
+        return cards.lazy.filter { targets.contains($0.sharedBotId) }.compactMap(\.newRequestBlock).first { !(waitsForHost && $0 == .offline) }
     }
     static func validatedCards(_ incoming: [TeamBotCard], previous: [TeamBotCard], now: Double) -> [TeamBotCard] {
         incoming.map { card in card.preservingAdmission(from: previous.first { $0.sharedBotId == card.sharedBotId }, now: now) }
@@ -180,12 +181,16 @@ struct TeamTask: Decodable, Equatable, Identifiable, Sendable {
     var usage: TeamTaskUsage? = nil
     var cancelRequestedAt: Double? = nil
     var wait: TeamTaskWait? = nil
+    /// Present only while queued: the message was sent while the Bot's Desktop was off, so the task waits up to a day for it instead of five minutes.
+    var hostWait: Bool? = nil
     var id: String { taskId }
     var terminal: Bool { !["queued", "running", "waiting", "awaiting_approval"].contains(state) }
     /// A worker has it or is about to: its state changes within seconds. A waiting task changes only with its answer or its expiry, and one whose reply awaits approval with the maintainer's decision or the end of their time.
     var busy: Bool { state == "queued" || state == "running" }
     /// Cancellation was asked while the Bot was working; the task ends at the worker's next check.
     var cancelling: Bool { state == "running" && cancelRequestedAt != nil }
+    /// Queued for a Desktop that was off when the message was sent (rule 6): the card says the Bot answers when it is back online. Once the day is over the task reads Expired.
+    var waitsForHost: Bool { state == "queued" && hostWait == true }
 }
 /// The identity of one decision on a request. Made once and sent again unchanged on a retry.
 struct TeamDecisionIds: Equatable, Sendable {
@@ -436,4 +441,11 @@ enum TeamAutoReply {
     static func targets(_ bots: [TeamBotCard], on: [String], kept: [String] = [], switching id: String, to enabled: Bool) -> [String] {
         bots.map(\.sharedBotId).filter { $0 == id ? enabled : on.contains($0) } + kept
     }
+    /// The setting as it stands, for a change of one of the other two settings.
+    static func targets(_ bots: [TeamBotCard], on: [String], kept: [String] = []) -> [String] { bots.map(\.sharedBotId).filter(on.contains) + kept }
+    /// How many Bots of a group or channel may answer one message nobody asked them about, and whether a message that mentions only people is judged too. A Bot DM has the one Bot,
+    /// which is always the one asked, so neither means anything there. Until someone sets them it is one Bot, and a message to people alone is theirs.
+    static func hasRounds(_ conversation: TeamMessageConversation) -> Bool { conversation.kind == "group" || conversation.kind == "channel" }
+    static func maxReplies(_ conversation: TeamMessageConversation) -> Int { min(max(conversation.autoReply?.maxReplies ?? 1, 1), TeamExecutionContract.maxRepliesLimit) }
+    static func judgesHumanMentions(_ conversation: TeamMessageConversation) -> Bool { conversation.autoReply?.humanMentions == "judge" }
 }

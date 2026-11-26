@@ -2756,6 +2756,7 @@
     <string name="teams_replying_to_fmt">%1$s에게 답장</string>
     <string name="teams_cancel_reply">답장 취소</string>
     <string name="teams_editing_message">메시지 수정 중</string>
+    <string name="teams_edit_no_notify_hint">수정해도 Bot에는 알리지 않습니다. 요청하려면 새 메시지를 보내세요.</string>
     <string name="teams_composer_hint_fmt">%1$s에게 메시지</string>
     <string name="teams_composer_edit_hint">메시지 수정</string>
     <string name="teams_error_mention_target">멘션한 멤버를 더 이상 선택할 수 없습니다. 메시지를 새 초안에 복사하고 멘션을 업데이트하세요.</string>
@@ -3008,6 +3009,10 @@
     <string name="teams_task_declined">답장 안 함</string>
     <string name="teams_auto_reply_title">스스로 답장하는 Bot</string>
     <string name="teams_auto_reply_note">여기서 켠 Bot은 이 채팅의 새 메시지를 모두 읽고, 답장이 필요하다고 판단하면 요청 없이도 답장합니다.</string>
+    <string name="teams_auto_reply_max_replies">메시지 하나에 스스로 답장하는 Bot 최대 수</string>
+    <string name="teams_auto_reply_human_mentions">멤버만 @ 한 메시지도 Bot이 판단하게 하기</string>
+    <string name="teams_auto_reply_human_mentions_hint">끄면 멤버만 @ 한 메시지는 그 사람들에게 하는 말로 보고 Bot은 조용히 있습니다.</string>
+    <string name="teams_auto_reply_rank_note">서로 다른 Desktop의 Bot은 먼저 각자의 확신도로 순위를 매깁니다. 메인테이너마다 다른 판단 서비스의 확률은 직접 비교하지 않고, 확신도가 같을 때 순서를 가르는 데만 씁니다.</string>
     <string name="teams_auto_reply_disclosure_fmt">켜면 이 채팅의 새 메시지가 %1$s 님이 %2$s 용으로 설정한 판단 서비스와 모델로 전송됩니다. 스스로 답장은 하루 최대 %3$d회입니다.</string>
     <string name="teams_auto_reply_unavailable_fmt">%1$s은(는) 더 이상 스스로 답장하지 않습니다. 여기서 끄세요.</string>
     <string name="teams_task_needs_checking_hint">채팅 밖의 작업이 실행되었는지 확인되지 않았습니다. Bot 관리자의 확인이 필요합니다.</string>
@@ -3222,6 +3227,7 @@
     <string name="teams_confirm_make_owner_title_fmt">%1$s 님을 소유자로 지정할까요?</string>
     <string name="services_menu">서비스 옵션</string>
     <string name="teams_bot_avail_offline">호스트 오프라인</string>
+    <string name="teams_bot_offline_wait_fmt">%1$s은(는) 오프라인입니다. 다시 온라인이 되면 답장합니다</string>
     <string name="teams_bot_avail_maintenance">일시적으로 점검 중</string>
     <string name="teams_bot_avail_quota">오늘의 한도를 모두 사용했습니다</string>
     <string name="teams_bot_avail_unverified">상태를 확인할 수 없음</string>

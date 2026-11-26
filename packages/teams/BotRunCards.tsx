@@ -152,7 +152,8 @@ export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, rea
   const t = useTeamsText(locale);
   const nameOf = (uid: string) => snapshot.directory.find(member => member.uid === uid)?.displayName || t('teams_member');
   const isMember = (who: { uid: string; generation: number }) => who.uid === snapshot.uid && who.generation === scope.generation;
-  const maintainer = snapshot.bots.find(bot => bot.sharedBotId === task.sharedBotId)?.maintainer;
+  const bot = snapshot.bots.find(card => card.sharedBotId === task.sharedBotId);
+  const maintainer = bot?.maintainer;
   const maintains = !!maintainer && isMember(maintainer);
   const canCancel = CANCELLABLE.includes(task.state) && (isMember(task.requester) || maintains);
   const unchecked = task.state === 'needs_reconciliation';
@@ -182,6 +183,8 @@ export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, rea
     : unchecked ? (maintains
       ? t('teams_task_needs_checking_maintainer')
       : t('teams_task_needs_checking_hint'))
+    // Sent while the Bot's Desktop was off (rule 6): it answers when the Desktop is back, within a day.
+    : task.state === 'queued' && task.hostWait ? t('teams_bot_offline_wait_fmt', bot?.name ?? t('teams_bot_tag'))
     : look.detail ? t(look.detail) : '';
   // The usage (U5): always once completed; for any other state only when the run did use something, so a cost is never hidden.
   const usage = task.state === 'completed' || task.usage ? usageText(task.usage, locale) : '';

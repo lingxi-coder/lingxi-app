@@ -450,13 +450,17 @@ test('a task for a Bot whose Desktop is off waits a day in a group, and the mess
   assert.equal(task.deadline, now + 24 * 60 * 60 * 1000);
   assert.equal(online.deadline, now + 300000, 'a Bot whose Desktop is on keeps its five minutes');
   assert.equal((await execute('getTask', { taskId: taskOf(1) }, member)).state, 'queued');
+  // Members are told it waits for the Desktop (the clients' "is offline and will reply when it's back online"); a task queued behind a Desktop that is on is not.
+  assert.equal((await execute('getTask', { taskId: taskOf(1) }, member)).hostWait, true);
+  assert.equal((await execute('getTask', { taskId: taskOf(1, beta) }, member)).hostWait, undefined);
   // The Desktop returns within the day and takes the task; one that never does lets it expire.
   now += 60 * 60 * 1000;
   await beat(alpha);
   assert.equal((await execute('prepareTask', { ...alpha.host, taskId: taskOf(1) })).task.state, 'queued');
   now += 23 * 60 * 60 * 1000;
   await assert.rejects(execute('prepareTask', { ...alpha.host, taskId: taskOf(1) }), { code: 'TASK_EXPIRED' });
-  assert.equal((await execute('getTask', { taskId: taskOf(1) }, member)).state, 'expired');
+  const lapsed = await execute('getTask', { taskId: taskOf(1) }, member);
+  assert.equal(lapsed.state, 'expired'); assert.equal(lapsed.hostWait, undefined, 'the existing expired state, no longer a wait');
   // A Bot DM, where the Bot is the only one asked, still tells the member that nobody is there.
   await execute('createConversation', { conversationId: dm, kind: 'bot_dm', title: 'Alpha', participantUids: [member.uid], sharedBotIds: [alpha.id] }, member);
   await beat(alpha, false);

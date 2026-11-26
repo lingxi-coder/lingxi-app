@@ -121,6 +121,38 @@ scenario('composer: @ offers the Bots of the conversation, only a chosen Bot is 
   assert.equal('targets' in mutations(fake)[0]!, false, 'typing a name never asks a Bot');
 });
 
+scenario('composer: a Bot whose Desktop is off still takes a message in a channel and the hint says it answers when it is back; a Bot DM says no at once', async context => {
+  const { fake, workspace, snapshot, bot } = await open(context, fake => {
+    fake.bots = [botCard({ availability: 'offline', ready: false })];
+    fake.conversations.set('team-aaaa', [
+      conversation('chan-general', { title: 'general', participants: ['user:alice', 'user:bob', 'shared_bot:assistant-fixture'], lastSeq: 3, lastReadSeq: 1 }),
+      conversation('bot-dm', { kind: 'bot_dm', title: 'Fixture Bot', participants: ['user:alice', 'shared_bot:assistant-fixture'] }),
+    ]);
+  });
+  workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 3, 'the thread');
+  const page = await mount(workspace, conversationView(workspace)); context.after(() => page.unmount());
+  const box = () => page.find(node => node.type === 'textarea')[0], hint = () => page.byClass('tw-hint').map(textOf).join(' ');
+  await page.type(box(), 'hey @Fix', 8); await page.key(box(), 'Enter'); assert.deepEqual(page.byClass('tw-target').map(textOf), ['@Fixture Bot']);
+  await page.type(box(), 'hey please look');
+  assert.equal(page.oneByClass('tw-send').props.disabled, false, 'a Desktop that is off does not stop a message to a Bot in a channel');
+  assert.match(hint(), /Fixture Bot is offline and will reply when it’s back online/); assert.doesNotMatch(hint(), /cannot accept a new request/);
+  await page.key(box(), 'Enter'); await until(() => commandsOf(fake, 'submit').length === 1, 'the send');
+  const submitted = commandsOf(fake, 'submit')[0]!; if (submitted.action !== 'submit') return; assert.deepEqual(submitted.payload.targets, [bot.sharedBotId]);
+  // An edit asks no Bot (rule 8): it drops the chosen Bots, so under the box there is the edit hint and no line about waiting for a Desktop.
+  await page.click(page.oneByLabel('Edit'));
+  assert.match(hint(), /Editing doesn’t notify Bots/); assert.doesNotMatch(hint(), /back online/);
+  await page.key(box(), 'Escape'); assert.doesNotMatch(hint(), /notify Bots/);
+  // A Bot DM has the one Bot, and the service still refuses it while its Desktop is off, so the composer does too.
+  workspace.selectConversation('bot-dm'); await until(() => snapshot().selectedConversationId === 'bot-dm', 'the Bot DM');
+  await page.type(box(), 'hello');
+  assert.equal(page.oneByClass('tw-send').props.disabled, true); assert.match(hint(), /This Bot cannot accept a new request now/); assert.doesNotMatch(hint(), /will reply when it’s back online/);
+  // A Bot that is paused or in maintenance is refused in a channel too: only a Desktop that is off is waited for.
+  fake.bots = [botCard({ availability: 'maintenance', ready: false })]; await workspace.refreshBots(); await until(() => snapshot().bots[0]?.availability === 'maintenance', 'the card');
+  workspace.selectConversation('chan-general'); await until(() => snapshot().selectedConversationId === 'chan-general', 'the channel');
+  await page.type(box(), 'hey @Fix', 8); await page.key(box(), 'Enter'); await page.type(box(), 'again please');
+  assert.equal(page.oneByClass('tw-send').props.disabled, true); assert.match(hint(), /This Bot cannot accept a new request now/);
+});
+
 scenario('composer: a full display name selects one member ID and survives draft and cursor changes', async context => {
   const { fake, workspace, snapshot, bot } = await open(context, fake => {
     const chat = fake.conversations.get('team-aaaa')![0]!;
@@ -292,11 +324,14 @@ scenario('replying, editing and recalling go through the same queue as sending',
   await page.type(box(), 'second draft');
   await page.click(page.oneByLabel('Edit'));
   assert.equal(box().props.value, 'Mine'); assert.match(page.byClass('tw-context').map(textOf).join(), /Editing message/);
+  // An edit never asks a Bot (rule 8), so the box says so while a message is edited in a conversation that has Bots.
+  assert.match(page.byClass('tw-hint').map(textOf).join(' '), /Editing doesn’t notify Bots\. To ask one, send a new message\./);
   assert.equal(page.byClass('tw-mentions').length, 0); assert.equal(page.byLabel('Mention (@)').length, 1, 'an edit can still mention members');
   await page.type(box(), 'Mine, corrected');
   await page.key(box(), 'Enter'); await until(() => mutations(fake).length === 2, 'the edit');
   assert.deepEqual([mutations(fake)[1]!.operation, mutations(fake)[1]!.messageId, mutations(fake)[1]!.text], ['edit', 'message-2', 'Mine, corrected']);
   assert.equal(box().props.value, 'second draft', 'the draft returns after the edit');
+  assert.doesNotMatch(page.byClass('tw-hint').map(textOf).join(' '), /notify Bots/, 'the hint goes with the edit');
   // Escape abandons an edit.
   await page.click(page.oneByLabel('Edit')); assert.equal(box().props.value, 'Mine');
   await page.key(box(), 'Escape'); assert.equal(box().props.value, 'second draft'); assert.equal(page.byClass('tw-context').length, 0);

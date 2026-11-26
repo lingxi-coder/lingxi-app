@@ -163,6 +163,8 @@ internal fun TeamTaskCard(
             RunDetail(stringResource(if (resolves) R.string.teams_task_needs_checking_maintainer else R.string.teams_task_needs_checking_hint), "teams.task.checking.${task.taskId}")
         // A Bot that chose not to answer: why, when this person maintains the Bot and its log has a row for the task; otherwise nothing more than "Did not reply".
         task.state == "declined" -> declinedReasonLine(task, viewer, maintainer, reason)?.let { RunDetail(it, "teams.task.reason.${task.taskId}") }
+        // Sent while the Bot's Desktop was off (rule 6): it answers when the Desktop is back, within a day.
+        task.waitsForHost -> RunDetail(stringResource(R.string.teams_bot_offline_wait_fmt, botName), "teams.task.hostwait.${task.taskId}")
         else -> run.detail?.let { RunDetail(stringResource(it), "teams.task.usage.${task.taskId}") }
     }
     val split = if (usageShown) TeamsBotText.tokenSplit(task.usage, words) else null

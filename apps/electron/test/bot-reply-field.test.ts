@@ -256,7 +256,7 @@ test('the tab says what each setting is for, and shows the ones the Bot has', ()
   assert.match(html, /<span>Stay silent below<\/span><input type="range" min="0" max="100" step="5" aria-valuetext="30%" value="30"\/><output>30%<\/output>/);
   assert.match(html, /<span>Answer from<\/span><input type="range" min="0" max="100" step="5" aria-valuetext="75%" value="75"\/><output>75%<\/output>/);
   assert.match(html, /Below the first value the Bot stays silent; from the second it answers; in between it answers only if it still finds a reply is wanted\./);
-  assert.match(html, /A Bot that is @mentioned, replied to or called by name always answers, whatever the quiet hours and cooldown say\./);
+  assert.match(html, /A Bot that is @mentioned always answers\. One that is replied to or called by name answers before other Bots, but may stay silent when the message plainly needs no answer\./);
   assert.ok(!/assistant/i.test(html), 'a Bot is never called an assistant');
 });
 

@@ -130,7 +130,10 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
   const dmBot = conversation.kind === 'bot_dm' ? snapshot.bots.find(bot => conversation.participants.includes(`shared_bot:${bot.sharedBotId}`)) : undefined;
   const contextBots = dmBot ? [dmBot] : snapshot.bots.filter(bot => targets.includes(bot.sharedBotId));
   const requestedBots = dmBot ? [dmBot.sharedBotId] : targets;
-  const unavailable = !editing && !answering && (requestedBots.some(id => snapshot.blockedBotIds.includes(id)) || snapshot.bots.some(bot => requestedBots.includes(bot.sharedBotId) && (bot.state === 'paused' || ['paused', 'offline', 'maintenance', 'quota_exhausted'].includes(bot.availability ?? ''))));
+  // A group or channel takes a message for a Bot whose Desktop is off, and its task waits for the Desktop (rule 6); a Bot DM says no at once.
+  const hostWaiting = (id: string) => conversation.kind !== 'bot_dm' && snapshot.bots.some(bot => bot.sharedBotId === id && bot.state !== 'paused' && bot.availability === 'offline');
+  const unavailable = !editing && !answering && requestedBots.some(id => !hostWaiting(id) && (snapshot.blockedBotIds.includes(id)
+    || snapshot.bots.some(bot => bot.sharedBotId === id && (bot.state === 'paused' || ['paused', 'offline', 'maintenance', 'quota_exhausted'].includes(bot.availability ?? '')))));
   const bytes = byteLength(text);
   const botName = (key: string) => snapshot.bots.find(bot => bot.sharedBotId === key)?.name ?? t('teams_bot_tag');
 
@@ -372,6 +375,8 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
     </ComposerSurface>
     <p className="tw-hint">
       {unavailable ? `${t('tw_composer_unavailable')} ` : ''}
+      {!editing && !answering ? requestedBots.filter(hostWaiting).map(id => `${t('teams_bot_offline_wait_fmt', botName(id))} `).join('') : ''}
+      {editing && conversation.kind !== 'dm' ? `${t('teams_edit_no_notify_hint')} ` : ''}
       {files.length && !filesSettled ? `${files.some(file => file.state === 'failed') ? t('teams_file_note_failed') : t('teams_file_note_uploading')} ` : ''}
       {answering ? t('tw_composer_reply_note')
         : conversation.kind === 'bot_dm' ? t('teams_composer_note_bot_dm')

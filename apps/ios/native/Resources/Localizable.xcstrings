@@ -105550,6 +105550,108 @@
         }
       }
     },
+    "teams_auto_reply_human_mentions": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "让 Bot 也判断只 @ 了成员的消息"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "讓 Bot 也判斷只 @ 了成員的訊息"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Let Bots also judge messages that @mention only people"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "メンバーだけを @ したメッセージも Bot に判断させる"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "멤버만 @ 한 메시지도 Bot이 판단하게 하기"
+          }
+        }
+      }
+    },
+    "teams_auto_reply_human_mentions_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭时，只 @ 了成员的消息是说给他们的，Bot 保持安静。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "關閉時，只 @ 了成員的訊息是說給他們的，Bot 保持安靜。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off: a message that @mentions only people is meant for them, and Bots stay quiet."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "オフのときは、メンバーだけを @ したメッセージはその人たち宛てとみなし、Bot は黙っています。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "끄면 멤버만 @ 한 메시지는 그 사람들에게 하는 말로 보고 Bot은 조용히 있습니다."
+          }
+        }
+      }
+    },
+    "teams_auto_reply_max_replies": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每条消息最多几个 Bot 自主回复"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每則訊息最多幾個 Bot 自主回覆"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Most Bots that answer one message on their own"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 件のメッセージに自分で返信する Bot の最大数"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "메시지 하나에 스스로 답장하는 Bot 최대 수"
+          }
+        }
+      }
+    },
     "teams_auto_reply_note": {
       "localizations": {
         "zh-Hans": {
@@ -105580,6 +105682,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "여기서 켠 Bot은 이 채팅의 새 메시지를 모두 읽고, 답장이 필요하다고 판단하면 요청 없이도 답장합니다."
+          }
+        }
+      }
+    },
+    "teams_auto_reply_rank_note": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "不同 Desktop 上的 Bot 先按各自的把握程度排序；不同维护者判断服务给出的概率不直接比较，只在把握相同时用来分先后。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "不同 Desktop 上的 Bot 先依各自的把握程度排序；不同維護者判斷服務給出的機率不直接比較，只在把握相同時用來分先後。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bots on different Desktops are ranked by how sure each is first; Decision probabilities from different maintainers are not compared directly and only break ties."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "異なる Desktop の Bot は、まず各自の確信度で順位を付けます。メンテナーごとの判断サービスが返す確率は直接比較せず、確信度が同じときの順位付けにだけ使います。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "서로 다른 Desktop의 Bot은 먼저 각자의 확신도로 순위를 매깁니다. 메인테이너마다 다른 판단 서비스의 확률은 직접 비교하지 않고, 확신도가 같을 때 순서를 가르는 데만 씁니다."
           }
         }
       }
@@ -106090,6 +106226,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "오프라인 · 요청이 대기열에 추가됩니다"
+          }
+        }
+      }
+    },
+    "teams_bot_offline_wait %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 已离线，上线后会回复"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 已離線，上線後會回覆"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ is offline and will reply when it’s back online"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ はオフラインです。オンラインに戻ったら返信します"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@은(는) 오프라인입니다. 다시 온라인이 되면 답장합니다"
+          }
+        }
+      }
+    },
+    "teams_bot_offline_wait_fmt": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s 已离线，上线后会回复"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s 已離線，上線後會回覆"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s is offline and will reply when it’s back online"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s はオフラインです。オンラインに戻ったら返信します"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$s은(는) 오프라인입니다. 다시 온라인이 되면 답장합니다"
           }
         }
       }
@@ -111134,6 +111338,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "저장하지 않은 변경 사항이 있습니다."
+          }
+        }
+      }
+    },
+    "teams_edit_no_notify_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "编辑消息不会通知 Bot。要请求 Bot，请另发一条消息。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "編輯訊息不會通知 Bot。要請求 Bot，請另外傳送一則訊息。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Editing doesn’t notify Bots. To ask one, send a new message."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "編集しても Bot には通知されません。依頼するには新しいメッセージを送信してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "수정해도 Bot에는 알리지 않습니다. 요청하려면 새 메시지를 보내세요."
           }
         }
       }

@@ -305,8 +305,11 @@ private fun androidx.compose.foundation.lazy.LazyListScope.botsSection(
 internal fun ConversationDetailsSheet(
     conversation: TeamMessageConversation, label: String, members: List<TeamMember>, bots: List<TeamBotCard>, uid: String, strings: TeamsListStrings,
     unread: Int, online: Boolean, onMarkRead: () -> Unit, onDismiss: () -> Unit,
-    /** Sends the Bots of this Chat that answer on their own. */
-    onAutoReply: (List<String>) -> Unit = {}, busy: Boolean = false,
+    /**
+     * Sends the Bots of this Chat that answer on their own, with the setting that changed beside them: how many answer one message and whether a message that mentions
+     * only people is judged (`judge` or `quiet`). What is null is left as it is.
+     */
+    onAutoReply: (targets: List<String>, maxReplies: Int?, humanMentions: String?) -> Unit = { _, _, _ -> }, busy: Boolean = false,
     /** Opens what the Bots of this Chat may use here; null where the Chat has no such control (a friend chat). */
     onBotScope: (() -> Unit)? = null,
     /** The Bots of this Chat whose auto-reply log this person reads here (the ones they maintain that answer on their own in it), and what opens one of them; null where the Chat has none. */
@@ -347,7 +350,7 @@ internal fun ConversationDetailsSheet(
                 val on = card.sharedBotId in auto.on
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(card.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Switch(checked = on, enabled = online && !busy && (on || TeamAutoReply.available(card)), onCheckedChange = { onAutoReply(TeamAutoReply.targets(auto, card.sharedBotId, it)) },
+                    Switch(checked = on, enabled = online && !busy && (on || TeamAutoReply.available(card)), onCheckedChange = { onAutoReply(TeamAutoReply.targets(auto, card.sharedBotId, it), null, null) },
                         modifier = Modifier.testTag("teams.conversation.details.autoreply.${card.sharedBotId}"))
                 }
                 // Said before it is switched on: where this Chat's messages go.
@@ -355,6 +358,26 @@ internal fun ConversationDetailsSheet(
                 val owner = if (card.maintainer.uid == uid) strings.you else members.firstOrNull { it.uid == card.maintainer.uid }?.displayName ?: card.maintainer.uid
                 Text(if (limit != null && TeamAutoReply.available(card)) stringResource(R.string.teams_auto_reply_disclosure_fmt, owner, card.name, limit.daily)
                     else stringResource(R.string.teams_auto_reply_unavailable_fmt, card.name), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            // A group or channel also says how many of its Bots answer one message and whether a message to people alone is judged; a Bot DM has the one Bot, always the one asked.
+            if (TeamAutoReply.hasRounds(conversation)) {
+                val editable = online && !busy
+                val most = TeamAutoReply.maxReplies(conversation)
+                Text(stringResource(R.string.teams_auto_reply_max_replies), Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodyLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    (1..TeamExecutionContract.MAX_REPLIES_LIMIT).forEach { count ->
+                        FilterChip(selected = count == most, enabled = editable, onClick = { if (count != most) onAutoReply(TeamAutoReply.targets(auto), count, null) },
+                            label = { Text(count.toString()) }, modifier = Modifier.testTag("teams.conversation.details.maxreplies.$count"))
+                    }
+                }
+                Text(stringResource(R.string.teams_auto_reply_rank_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(stringResource(R.string.teams_auto_reply_human_mentions), Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+                    Switch(checked = TeamAutoReply.judgesHumanMentions(conversation), enabled = editable,
+                        onCheckedChange = { onAutoReply(TeamAutoReply.targets(auto), null, if (it) "judge" else "quiet") },
+                        modifier = Modifier.testTag("teams.conversation.details.humanmentions"))
+                }
+                Text(stringResource(R.string.teams_auto_reply_human_mentions_hint), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         // Next to the auto-reply control: what the Bots this person maintains decided about this Chat's messages, and why. A maintainer need not be in the Chat for it.

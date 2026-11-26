@@ -1949,11 +1949,11 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "ko": "승인을 기다리는 답장은 팀 채팅에서 내가 승인한 뒤에만 게시됩니다. 10분 안에 승인하지 않거나, 아무도 Bot을 부르지 않은 경우 채팅에서 누군가 다시 글을 쓰면 답장은 폐기됩니다."
   },
   "bots_reply_mention_note": {
-    "zh-Hans": "被 @ 提及、被回复或被叫到名字时，Bot 一定会回复，不受安静时段和冷却时间影响。",
-    "zh-Hant": "被 @ 提及、被回覆或被叫到名字時，Bot 一定會回覆，不受安靜時段和冷卻時間影響。",
-    "en": "A Bot that is @mentioned, replied to or called by name always answers, whatever the quiet hours and cooldown say.",
-    "ja": "@メンションされた、返信された、名前を呼ばれた Bot は、静かな時間帯やクールダウンに関係なく必ず返信します。",
-    "ko": "@멘션되거나, 답장을 받거나, 이름이 불린 Bot은 방해 금지 시간과 쿨다운에 관계없이 항상 답장합니다."
+    "zh-Hans": "被 @ 提及时，Bot 一定会回复。被回复或被叫到名字时，Bot 优先于其他 Bot 回复，但消息明显不需要回答时可以不回。两种情况都不受安静时段和冷却时间影响。",
+    "zh-Hant": "被 @ 提及時，Bot 一定會回覆。被回覆或被叫到名字時，Bot 優先於其他 Bot 回覆，但訊息明顯不需要回答時可以不回。兩種情況都不受安靜時段和冷卻時間影響。",
+    "en": "A Bot that is @mentioned always answers. One that is replied to or called by name answers before other Bots, but may stay silent when the message plainly needs no answer. Quiet hours and cooldown apply to neither.",
+    "ja": "@メンションされた Bot は必ず返信します。返信された、または名前を呼ばれた Bot は他の Bot より優先して返信しますが、明らかに返答が不要なメッセージには返信しないことがあります。どちらも静かな時間帯やクールダウンの影響を受けません。",
+    "ko": "@멘션된 Bot은 항상 답장합니다. 답장을 받거나 이름이 불린 Bot은 다른 Bot보다 먼저 답장하지만, 답이 필요 없는 메시지에는 답하지 않을 수 있습니다. 두 경우 모두 방해 금지 시간과 쿨다운의 영향을 받지 않습니다."
   },
   "bots_triage_title": {
     "zh-Hans": "自主回复记录",

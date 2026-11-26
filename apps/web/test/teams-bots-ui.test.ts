@@ -212,6 +212,16 @@ scenario('A Bot task\'s card: the glyph beside the state in words, one line unde
   const waiting = draw({ state: 'waiting', wait: { waitId: 'w', kind: 'human_input', recipient: { uid: 'alice', generation: 1 }, messageId: 'm', expiresAt: Date.now() + 120_000 } });
   assert.match(waiting, /data-state="waiting" data-tone="muted"/); assert.ok(waiting.includes('<span>Waiting for a reply</span>')); assert.match(waiting, /<p class="tw-run-detail">Waiting for Member · expires in 2 min<\/p>/);
   assert.match(draw({ state: 'needs_reconciliation' }), /<span>Needs checking<\/span><\/p><p class="tw-run-detail">An action outside the chat may or may not have gone through\. The Bot’s maintainer needs to confirm it\.<\/p>/);
+  // Sent while the Bot's Desktop was off (rule 6): the queued line names the Bot and says it answers when it is back, also for a member who has no card of it.
+  // A task without the flag keeps the old line, and one that expired is the expired state: the service drops the flag at the deadline, and only a queued task speaks of waiting.
+  assert.ok(draw({ state: 'queued', hostWait: true }).includes('<p class="tw-run-detail">Bot is offline and will reply when it’s back online</p>'));
+  viewer = { uid: 'bob', bots: [botCard({ sharedBotId: 's', name: 'Helper', availability: 'offline', ready: false })], directory: [], pending: [] } as never;
+  assert.ok(draw({ state: 'queued', hostWait: true }).includes('<p class="tw-run-detail">Helper is offline and will reply when it’s back online</p>'));
+  assert.ok(draw({ state: 'queued', hostWait: true }, 'zh-Hans').includes('<p class="tw-run-detail">Helper 已离线，上线后会回复</p>'));
+  assert.ok(draw({ state: 'queued', hostWait: true }, 'zh-Hant').includes('<p class="tw-run-detail">Helper 已離線，上線後會回覆</p>'));
+  assert.ok(draw({ state: 'queued' }).includes('<p class="tw-run-detail">Waiting for the Bot’s Desktop to pick this up.</p>'));
+  assert.ok(draw({ state: 'expired', hostWait: true }).includes('<p class="tw-run-detail">The Bot’s Desktop didn’t pick this up in time. Send it again.</p>'));
+  assert.ok(draw({ state: 'running', hostWait: true }).includes('The Bot is working on it.'));
   // The one who asked can cancel a task that is still going: the second action, beside the document.
   viewer = { uid: 'alice', bots: [], directory: [], pending: [] } as never;
   assert.match(draw({ state: 'queued' }), /<button type="button" aria-label="Cancel task">Cancel<\/button>/); assert.doesNotMatch(draw({ state: 'completed' }), /<button/);
@@ -883,6 +893,34 @@ scenario('Auto-reply: a person in a Chat turns a Bot on after being told where t
   await page.check(page.find(n => n.type === 'input' && n.props.type === 'checkbox' && textOf(n.parent) === 'Fixture Bot')[0]); await page.click(page.button('Save'));
   const sent = calls.find(command => command.action === 'setConversationAutoReply') as Extract<MessageCommand, { action: 'setConversationAutoReply' }> | undefined;
   assert.deepEqual(sent?.payload, { conversationId: 'test-chat', expectedRevision: 2, targets: ['assistant-fixture', 'hidden-bot'] });
+});
+scenario('Auto-reply: a group also sets how many Bots answer one message and whether a message that @mentions only people is judged; only what changed is sent; a Bot DM has neither', async context => {
+  const { fake, workspace } = await open(context); const calls: MessageCommand[] = [];
+  fake.bots = [botCard({ maintainer: { uid: 'alice', generation: 1 }, autoReply: { daily: 7 } })]; await workspace.refreshBots(); await until(() => !!workspace.getSnapshot().bots[0]?.autoReply, 'the Bot');
+  fake.conversations.set('team-test', [
+    conversation('test-chat', { kind: 'group', participants: ['user:alice', 'user:bob', 'shared_bot:assistant-fixture'], autoReply: { revision: 3, targets: ['assistant-fixture'], maxReplies: 2 } }),
+    conversation('bot-chat', { kind: 'bot_dm', participants: ['user:alice', 'shared_bot:assistant-fixture'], autoReply: { revision: 1, targets: ['assistant-fixture'] } }),
+  ]);
+  await workspace.refresh(); workspace.selectConversation('test-chat'); await until(() => workspace.getSnapshot().selectedConversationId === 'test-chat', 'selection');
+  fake.messages = async <T>(command: MessageCommand) => { calls.push(command); return (command.action === 'listTasks' ? { tasks: [] } : { bots: fake.bots }) as T; };
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en' })); context.after(() => page.unmount());
+  const sent = () => (calls.filter(command => command.action === 'setConversationAutoReply') as Extract<MessageCommand, { action: 'setConversationAutoReply' }>[]).map(command => command.payload);
+  const most = () => page.find(node => node.type === 'select' && textOf(node.parent).startsWith('Most Bots that answer one message on their own'))[0];
+  const judge = () => page.find(node => node.type === 'input' && node.props.type === 'checkbox' && textOf(node.parent) === 'Let Bots also judge messages that @mention only people')[0];
+  await until(() => /test-chat/.test(page.text()), 'the chat'); await page.click(page.oneByLabel('Bots that answer on their own'));
+  // It opens on what the Chat holds: at most two Bots, and a message to people alone is left to them. One to the limit of five can be chosen.
+  assert.equal(most().props.value, 2); assert.equal(most().props.children.length, 5); assert.equal(judge().props.checked, false);
+  assert.match(page.text(), /Bots on different Desktops are ranked by how sure each is first; Decision probabilities from different maintainers are not compared directly and only break ties\./);
+  assert.match(page.text(), /Off: a message that @mentions only people is meant for them, and Bots stay quiet\./);
+  assert.equal(page.button('Save').props.disabled, true, 'nothing changed yet');
+  await page.type(most(), '3'); await page.click(page.button('Save'));
+  assert.deepEqual(sent(), [{ conversationId: 'test-chat', expectedRevision: 3, targets: ['assistant-fixture'], maxReplies: 3 }], 'only the setting that changed is sent');
+  await page.click(page.oneByLabel('Bots that answer on their own')); await page.check(judge()); await page.click(page.button('Save'));
+  assert.deepEqual(sent()[1], { conversationId: 'test-chat', expectedRevision: 3, targets: ['assistant-fixture'], humanMentions: 'judge' });
+  // A Bot DM has the one Bot, which is always the one asked: neither setting means anything there.
+  workspace.selectConversation('bot-chat'); await until(() => workspace.getSnapshot().selectedConversationId === 'bot-chat', 'selection');
+  await page.click(page.oneByLabel('Bots that answer on their own'));
+  assert.equal(most(), undefined); assert.doesNotMatch(page.text(), /Most Bots that answer one message|only people/);
 });
 scenario('Auto-reply: a Chat whose Bots cannot answer on their own shows no switch', async context => {
   const { fake, workspace } = await open(context);

@@ -2756,6 +2756,7 @@
     <string name="teams_replying_to_fmt">Replying to %1$s</string>
     <string name="teams_cancel_reply">Cancel reply</string>
     <string name="teams_editing_message">Editing message</string>
+    <string name="teams_edit_no_notify_hint">Editing doesn’t notify Bots. To ask one, send a new message.</string>
     <string name="teams_composer_hint_fmt">Message %1$s</string>
     <string name="teams_composer_edit_hint">Edit your message</string>
     <string name="teams_error_mention_target">A mentioned member is no longer available. Copy the message into a new draft and update the mention.</string>
@@ -3008,6 +3009,10 @@
     <string name="teams_task_declined">Did not reply</string>
     <string name="teams_auto_reply_title">Bots that answer on their own</string>
     <string name="teams_auto_reply_note">A Bot turned on here reads every new message in this chat and answers when it judges a reply is wanted, without being asked.</string>
+    <string name="teams_auto_reply_max_replies">Most Bots that answer one message on their own</string>
+    <string name="teams_auto_reply_human_mentions">Let Bots also judge messages that @mention only people</string>
+    <string name="teams_auto_reply_human_mentions_hint">Off: a message that @mentions only people is meant for them, and Bots stay quiet.</string>
+    <string name="teams_auto_reply_rank_note">Bots on different Desktops are ranked by how sure each is first; Decision probabilities from different maintainers are not compared directly and only break ties.</string>
     <string name="teams_auto_reply_disclosure_fmt">New messages in this chat are sent to the Decision service and model that %1$s set up for %2$s. It answers on its own at most %3$d times a day.</string>
     <string name="teams_auto_reply_unavailable_fmt">%1$s no longer answers on its own. Turn it off here.</string>
     <string name="teams_task_needs_checking_hint">An action outside the chat may or may not have gone through. The Bot’s maintainer needs to confirm it.</string>
@@ -3222,6 +3227,7 @@
     <string name="teams_confirm_make_owner_title_fmt">Make %1$s the owner?</string>
     <string name="services_menu">Service options</string>
     <string name="teams_bot_avail_offline">Host offline</string>
+    <string name="teams_bot_offline_wait_fmt">%1$s is offline and will reply when it’s back online</string>
     <string name="teams_bot_avail_maintenance">Temporarily under maintenance</string>
     <string name="teams_bot_avail_quota">Daily quota exhausted</string>
     <string name="teams_bot_avail_unverified">Status unverified</string>

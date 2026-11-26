@@ -44,9 +44,17 @@ struct TeamComposerView: View {
         if (editing != nil || answeringWait), [.botUnavailable, .botChecking, .botUnverified].contains(value) { return .none }
         return value
     }
+    /// A group or channel takes a message for a Bot whose Desktop is off, and its task waits for the Desktop (rule 6); a Bot DM says no at once.
+    private var waitsForHost: Bool { conversation.kind != "bot_dm" }
     private var availabilityBlock: TeamBotAvailability? {
         TeamBotMemberRules.blockedAvailability(targets: TeamBotSelection.targets(in: conversation, selected: Set(draft.targets)), cards: context.bots,
-            operation: editing == nil ? "create" : "edit", answeringWait: answeringWait)
+            operation: editing == nil ? "create" : "edit", answeringWait: answeringWait, waitsForHost: waitsForHost)
+    }
+    /// The Bots this message asks whose Desktop is off, named under the box so the person knows what happens to it.
+    private var hostWaiting: [TeamBotCard] {
+        guard waitsForHost, editing == nil, !answeringWait else { return [] }
+        let targets = TeamBotSelection.targets(in: conversation, selected: Set(draft.targets))
+        return context.bots.filter { targets.contains($0.sharedBotId) && $0.newRequestBlock == .offline }
     }
     private var canMention: Bool { !answeringWait && (conversation.kind == "group" || conversation.kind == "channel") }
     private var asks: Bool { editing == nil && canMention }
@@ -149,6 +157,10 @@ struct TeamComposerView: View {
         if editing != nil {
             bar(systemImage: "pencil") {
                 Text("teams_editing_message").font(.footnote.weight(.semibold))
+                // An edit never asks a Bot (rule 8): said while a message is edited where Bots can be.
+                if conversation.kind != "dm" {
+                    Text("teams_edit_no_notify_hint").font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("teams.composer.editnotify")
+                }
             } trailing: {
                 Button(action: onCancelEdit) { Text("common_cancel").font(.footnote).minimumHitTarget(minWidth: 0) }
             }
@@ -378,6 +390,9 @@ struct TeamComposerView: View {
             let status = model.botsUnverified || context.bots.contains { $0.newRequestBlock == availabilityBlock && $0.memberAvailability == .unverified } ? TeamBotAvailability.unverified : availabilityBlock
             Text(LocalizedStringKey(TeamBotMemberText.availabilityKey(status)))
                 .font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("teams.composer.availability")
+        }
+        ForEach(hostWaiting) { bot in
+            Text("teams_bot_offline_wait \(bot.name)").font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("teams.composer.hostwait.\(bot.sharedBotId)")
         }
         if tooLong {
             Text("teams_composer_too_long").font(.caption).foregroundStyle(.red)

@@ -25,7 +25,10 @@ In Chat or Code enter /create-bot followed by what the assistant should do. Revi
 
 Check the conversation first. In a team, check the published Bot’s availability, your access, remaining quota and any waiting task card. For an unaddressed group message, check this Bot’s auto-reply publication option and then the conversation switch. Even with both enabled it may choose silence. For a personal Bot opened remotely, check the Mac and the Bot’s remote access.
 
+In a group or channel a reply can also be late for these reasons. If the Bot’s Mac is offline, the message still posts and the task card says the Bot will reply when it is back online; after a day it expires. A message that @mentions only people reaches no Bot unless the chat’s “Let Bots also judge messages that @mention only people” is on, and an edit never asks a Bot, so send a new message.
+
 - [Auto-reply settings](teams.md#auto-reply)
+- [Which messages ask a Bot](teams.md#bot-mentions)
 - [Remote connection checks](remote-control.md#direct)
 
 ## Sources and documentation baseline

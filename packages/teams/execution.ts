@@ -50,6 +50,8 @@ export interface TeamTaskView {
   wait?: TaskWait; replyId?: string; artifactId?: string; usage?: TaskUsage;
   /** Nobody asked the Bot: it was given the message because auto-reply is on, and may leave it unanswered. */
   optional?: true;
+  /** Present only while `queued`: the message was sent while the Bot's Desktop was off, so the task waits up to a day for it to come back instead of five minutes. */
+  hostWait?: true;
 }
 /**
  * What a Bot's host decided about a message nobody asked the Bot about, which step of its judgement decided it, and why. Codes only: the

@@ -197,12 +197,14 @@ struct TeamTaskCard: View {
     }
 
     /// The one line under the Bot's name. Waiting and Needs checking write their own, since they know the person: who the task waits
-    /// for, and why the outcome of an action outside the chat is unknown.
+    /// for, and why the outcome of an action outside the chat is unknown. A queued task waiting for a Desktop that is off says so.
     private func detailLine(_ words: TeamsBotText.UsageStrings) -> String? {
         switch task.state {
         case "waiting": waitLine
         case "needs_reconciliation": TeamsText.localized(canResolve ? "teams_task_needs_checking_maintainer" : "teams_task_needs_checking_hint")
         case "declined": reasonLine
+        // Sent while the Bot's Desktop was off (rule 6): it answers when the Desktop is back, within a day.
+        case "queued" where task.waitsForHost: String(localized: "teams_bot_offline_wait \(botName)")
         default: showsUsage ? TeamsBotText.usageLine(task.usage, strings: words) : run.detailKey.map(TeamsText.localized)
         }
     }
@@ -220,6 +222,7 @@ struct TeamTaskCard: View {
         switch task.state {
         case "waiting" where waitLine != nil: "teams.task.wait.\(task.taskId)"
         case "needs_reconciliation": "teams.task.checking.\(task.taskId)"
+        case "queued" where task.waitsForHost: "teams.task.hostwait.\(task.taskId)"
         default: showsUsage ? "teams.task.usage.\(task.taskId)" : "teams.task.state.\(task.taskId)"
         }
     }

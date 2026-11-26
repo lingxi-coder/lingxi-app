@@ -108,7 +108,9 @@ function taskView(task, now) {
     ...(state === 'waiting' ? { wait: { waitId: task.currentWaitId, kind: task.currentWaitKind ?? 'human_input', recipient: task.requester,
       expiresAt: task.deadline, messageId: questionIds(task.taskId, task.currentWaitId).messageId } } : {}),
     ...(task.replyId ? { replyId: task.replyId } : {}), ...(task.artifactId ? { artifactId: task.artifactId } : {}),
-    ...(task.usage ? { usage: task.usage } : {}), ...(task.optional ? { optional: true } : {}) };
+    ...(task.usage ? { usage: task.usage } : {}), ...(task.optional ? { optional: true } : {}),
+    // Sent while the Bot's Desktop was off (rule 6): until it first starts, the task waits for the Desktop for a day, and members are told so.
+    ...(state === 'queued' && task.hostWait && !task.epoch ? { hostWait: true } : {}) };
 }
 /** A queued task for one Bot, admitted in the transaction that writes its trigger message. */
 /**
@@ -120,7 +122,7 @@ function queuedTask({ sharedBotId, taskId, conversationId, messageId, changeId, 
     requester, botRevision: bot.identity.revision, deploymentId: bot.identity.activeDeploymentId, maintainer: bot.identity.maintainer,
     state: 'queued', createdAt: now, deadline: Math.max(now, lockUntil) + (offline ? hostWaitMs : queueMs), inputGrantIds: bot.grants.map(g => g.grantId),
     epoch: 0, attemptStartedAt: 0, activeBudgetMs: 300000, activeSpentMs: 0, physicalDispatchesSpent: 0,
-    rootTaskId: taskId, operationCount: 0, unverifiedOperations: 0, ...(optional ? { optional: true } : {}), visibility,
+    rootTaskId: taskId, operationCount: 0, unverifiedOperations: 0, ...(optional ? { optional: true } : {}), visibility, ...(offline ? { hostWait: true } : {}),
     // The round it is a candidate of; whether a person spoke to the Bot in it (a reply to it, its name); the other Bots a message asked beside it.
     ...(roundId ? { roundId } : {}), ...(addressed ? { addressed: true } : {}), ...(coMentioned?.length ? { coMentioned } : {}) };
 }

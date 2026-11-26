@@ -2756,6 +2756,7 @@
     <string name="teams_replying_to_fmt">%1$s への返信</string>
     <string name="teams_cancel_reply">返信をキャンセル</string>
     <string name="teams_editing_message">メッセージを編集中</string>
+    <string name="teams_edit_no_notify_hint">編集しても Bot には通知されません。依頼するには新しいメッセージを送信してください。</string>
     <string name="teams_composer_hint_fmt">%1$s にメッセージ</string>
     <string name="teams_composer_edit_hint">メッセージを編集</string>
     <string name="teams_error_mention_target">メンションしたメンバーを選択できなくなりました。メッセージを新しい下書きにコピーし、メンションを更新してください。</string>
@@ -3008,6 +3009,10 @@
     <string name="teams_task_declined">返信なし</string>
     <string name="teams_auto_reply_title">自分で返信する Bot</string>
     <string name="teams_auto_reply_note">ここでオンにした Bot は、このチャットの新しいメッセージをすべて読み、返信が必要と判断したときに呼ばれなくても返信します。</string>
+    <string name="teams_auto_reply_max_replies">1 件のメッセージに自分で返信する Bot の最大数</string>
+    <string name="teams_auto_reply_human_mentions">メンバーだけを @ したメッセージも Bot に判断させる</string>
+    <string name="teams_auto_reply_human_mentions_hint">オフのときは、メンバーだけを @ したメッセージはその人たち宛てとみなし、Bot は黙っています。</string>
+    <string name="teams_auto_reply_rank_note">異なる Desktop の Bot は、まず各自の確信度で順位を付けます。メンテナーごとの判断サービスが返す確率は直接比較せず、確信度が同じときの順位付けにだけ使います。</string>
     <string name="teams_auto_reply_disclosure_fmt">オンにすると、このチャットの新しいメッセージは %1$s が %2$s 用に設定した判断サービスとモデルに送られます。自分での返信は 1 日最大 %3$d 回です。</string>
     <string name="teams_auto_reply_unavailable_fmt">%1$s は自分で返信しなくなりました。ここでオフにしてください。</string>
     <string name="teams_task_needs_checking_hint">チャット外の操作が実行されたかどうか確認できていません。Bot の管理者による確認が必要です。</string>
@@ -3222,6 +3227,7 @@
     <string name="teams_confirm_make_owner_title_fmt">%1$s さんをオーナーにしますか？</string>
     <string name="services_menu">サービスのオプション</string>
     <string name="teams_bot_avail_offline">ホストがオフライン</string>
+    <string name="teams_bot_offline_wait_fmt">%1$s はオフラインです。オンラインに戻ったら返信します</string>
     <string name="teams_bot_avail_maintenance">一時的にメンテナンス中</string>
     <string name="teams_bot_avail_quota">本日の上限に達しました</string>
     <string name="teams_bot_avail_unverified">状態を確認できません</string>

@@ -59,8 +59,33 @@ Use the + beside Bot chats, select an available shared Bot and open the chat. A 
 ## Let a Bot decide whether to reply
 
 1. In this shared Bot’s publication settings on its Mac, enable “Let the Bot decide when to answer”, set its daily limit and confirm publication. This option is off by default for each Bot. If unavailable, configure Settings → Models and services → Decision on the publishing Mac first.
-2. In the group, channel or Bot DM, a participant opens “Bots that answer on their own”, selects the participating Bot and saves. This setting applies to that conversation.
+2. In the group, channel or Bot DM, a participant opens “Bots that answer on their own”, selects the participating Bot and saves. This setting applies to that conversation. A group or channel has two more settings in the same window: “Most Bots that answer one message on their own” (1 to 5, 1 by default) and “Let Bots also judge messages that @mention only people” (off by default).
 3. Send a normal group or channel message without an @. An enabled, available Bot can answer or stay silent. With either switch off, an ordinary unaddressed group message does not start a task for it. A Bot DM already makes a direct request. Enabling this option there lets it leave an acknowledgement unanswered.
+
+- [Who answers when several Bots could](teams.md#reply-rounds)
+- [Which messages ask a Bot](teams.md#bot-mentions)
+
+<a id="reply-rounds"></a>
+
+## Who answers when several Bots could
+
+In a group or channel, a message that asks no Bot is not judged by each Bot on its own. The service opens a round of about 15 seconds. Each Bot with auto-reply on in this chat reports how sure it is that a reply is wanted, and the service picks the surest ones, up to “Most Bots that answer one message on their own” (1 by default). The Bots not picked do not run and use no quota. A newer message from a person ends a round that is still open, and a Desktop that does not answer within the round is left out of it.
+
+Bots are ranked by how sure they are. A Bot that was spoken to comes first, then one whose own keyword matched, then one that judged a reply is wanted, then one that is willing to reply but may stay silent. Bots on different Desktops are compared by that level first. Decision probabilities from different maintainers’ services are not compared directly: they only order Bots of the same level, and a fixed order settles any tie left. A Bot whose own judgement was “no” never answers. If a chosen Bot has not started about 20 seconds later, the next-ranked Bot takes its place, once.
+
+<a id="bot-mentions"></a>
+
+## Which messages ask a Bot
+
+- @ a Bot: that Bot answers and no other Bot joins in, whatever its settings. In a group it cannot choose to stay silent.
+- @ several Bots: each one answers in its own role, and each is told which others were asked too.
+- Replying to a Bot’s message, or calling a Bot by name, without an @: this counts as speaking to that Bot. It answers unless the message plainly needs no answer.
+- @ only people: Bots stay quiet, unless the chat turns on “Let Bots also judge messages that @mention only people”. Then the message takes part in a round like any ordinary message.
+- No @ and no name: the Bots with auto-reply on in this chat take part in a round.
+- Quiet hours and the cooldown set for a Bot apply only when it judges for itself, never to a message that asked it.
+- The Bot’s Desktop is offline: in a group or channel the message still posts, and the chat shows that the Bot is offline and will reply when it’s back online. The Bot answers once its Desktop returns, for up to a day, and after that the task card shows it expired. A Bot DM, or a hosted Bot service, does not take a message while its host is offline.
+- Editing a message does not notify a Bot, because an edit never starts a Bot task. To ask a Bot, send a new message. Recalling a message ends its open round and cancels the Bot requests still waiting to run.
+- A message written by a Bot never asks another Bot and never opens a round.
 
 <a id="share-bot"></a>
 

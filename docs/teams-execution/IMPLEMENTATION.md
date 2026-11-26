@@ -778,7 +778,7 @@ is shown any of it; every other member keeps seeing a task that "Waits for appro
 Until B7 every Bot with auto-reply on judged an unasked group or channel message on its own Desktop, so three Bots could answer one message. Now the
 service decides who answers, because no Desktop can referee the others: the message that admits the optional tasks (B5) also opens a **round**, the
 Desktops bid, and the service picks the best bids, as many as the Chat allows (`maxReplies`, 1 to 5, default 1). This phase is the service, the
-Desktop host and the clients' decoding; the Chat settings screen, the offline line (rule 6) and the edit hint (rule 8) are B7b.
+Desktop host and the clients' decoding; the Chat settings screen, the offline line (rule 6) and the edit hint (rule 8) are B7b, below.
 
 - Round (`apps/firebase/src/reply-rounds.mjs`). `teams/{team}/replyRounds/{messageId}` is written by `optionalTasks` in the transaction that writes
   the message and its tasks (`openRound`): `{ state: 'open', deadlineAt: now + 15 s, maxReplies, candidates: [{ taskId, sharedBotId, addressed? }],
@@ -835,11 +835,11 @@ Whom a message speaks to is decided by the service once, when it admits the mess
    folding, whole words where the script has words, at least two code points); `replyTriage.ts` no longer looks for names, its `addressed` check
    and that check's tests and text are deleted, and a task with `addressed: true` is judged `run`, source `rule`, reason `addressed`.
 6. **A mentioned Bot whose Desktop is offline:** the message still posts and its task queues for 24 hours (`offlineHost` in `submit`; a Bot DM or a
-   hosted service still refuses with `HOST_UNAVAILABLE`). The sender's "X is offline, will reply when online" line is B7b.
+   hosted service still refuses with `HOST_UNAVAILABLE`). The sender's "X is offline, will reply when online" line is B7b, below.
 7. **Settings against an @:** quiet hours, the cooldown and the Bot's policy are part of the unasked judgement only, so they never apply to an asked
    task; approval `always` holds the reply of an asked task too, `uncertain` only that of an unasked one (B6); an asked Bot in a group cannot choose
    silence (`mayDecline` belongs to optional tasks: unasked ones, soft mentions included, and a Bot DM's).
-8. **Edit and recall:** an edit never creates a task, and so never triggers a Bot (its hint in the UI is B7b); a recall voids the message's open round
+8. **Edit and recall:** an edit never creates a task, and so never triggers a Bot (its hint in the UI is B7b, below); a recall voids the message's open round
    and cancels its queued asked tasks (`recalled` in `reply-rounds.mjs`, called from `team-messages.mjs`).
 9. **A message written by a Bot** (a reply, a status message, an @ it wrote) never creates a task or a round.
 10. **A new human message** voids every unsettled round of the Chat and ends its unasked held replies (`end()` in `optionalTasks`, in the same
@@ -865,7 +865,7 @@ Settings. `setConversationAutoReply { conversationId, expectedRevision, targets,
 - Contract. `execution-vectors.json` lists `bidTiers`, `roundOutcomes`, `humanMentionModes` and `maxRepliesLimit` and has 14 new rows for
   `setConversationAutoReply` and the member's `bidReply`; the validators of Web and Desktop (`execution-validation.ts`), iOS
   (`TeamExecutionContract`) and Android (`TeamExecutionContract`) read the same rows. The member commands builder (`executionCommand`) accepts
-  the two settings; the screens for them are B7b.
+  the two settings; the screens for them are B7b, below.
 - Index. None: the round is read by id, and `openRounds` queries `replyRounds` on two equality fields (`conversationId`, `state`), which Firestore
   serves without a composite index.
 - Tests: `apps/firebase/test/reply-rounds.test.mjs` (codes, schemas, name matching, trigger rules), `reply-rounds.emulator.test.mjs` (the state
@@ -873,10 +873,45 @@ Settings. `setConversationAutoReply { conversationId, expectedRevision, targets,
   replays), the adapted `shared-bots`, `bot-triage` and `held-replies` emulator suites and `teams.rules.emulator.test.mjs`;
   `apps/electron/test/teams-reply-triage.test.ts` and `teams-host.test.ts` (the bid flow, restart, `coMentioned`); `apps/web/test/teams-reply-rounds.test.ts`
   and `teams-triage-log-ui.test.ts`; iOS `TeamTriageLogTests`, `TeamsPointerParserTests`, `TeamBotTests`; Android `TeamTriageLogTest`, `TeamBotsTest`.
-- Not here, or not verified. The Chat settings screen, the offline line (rule 6) and the edit hint (rule 8): B7b. Nothing was run against a signed Desktop package or a real Desktop restart. The
+- Not here, or not verified. The Chat settings screen, the offline line (rule 6) and the edit hint (rule 8): B7b, below. Nothing was run against a signed Desktop package or a real Desktop restart. The
   bids window (15 s) covers the host's 2.5 s burst wait and a Decision call of up to 10 s (`TRIAGE_TIMEOUT_MS`); a Desktop slower than that bids late and
   the round settles without it. A name or a reply in an earlier message of a burst no longer makes a later message `addressed` (the service judges each message
   itself, and each has its own round), where the old local check read the burst. Round documents are not deleted yet (no TTL).
+
+## Chat settings, the offline line and the edit hint on the clients (Bot v3 B7b)
+
+The screens for what B7a built, on Web and Desktop (`packages/teams`), iOS and Android. The service keeps its rules; the only addition is one
+field, `hostWait`, on the task view. All text is in `resources/translations/*.json` (`teams_auto_reply_max_replies`, `_human_mentions`,
+`_human_mentions_hint`, `_rank_note`, `teams_bot_offline_wait` / `_fmt`, `teams_edit_no_notify_hint`).
+
+- Chat settings. Where a Chat's auto-reply Bots are edited (Web and Desktop `AutoReplyDialog.tsx`; the iOS details sheet, `TeamDetailsViews.swift`;
+  the Android details sheet, `TeamDetailsScreens.kt`) a group or channel also sets `maxReplies` (1 to `maxRepliesLimit`: a select, a segmented
+  picker, chips) and `humanMentions` (`quiet` or `judge`: a checkbox, a toggle, a switch). A Bot DM shows neither, since it has the one Bot, which is
+  always the one asked. One line says Bots on different Desktops are ranked by how sure each is first, and that Decision probabilities from different
+  maintainers are not compared directly (the code does use the score, but only between Bots of the same tier, before the fixed hash). Every change
+  goes through `setConversationAutoReply` with the revision the screen read, so a change made meanwhile by someone else is a conflict. The dialog
+  sends its whole Bot list and, of the two settings, only what changed; iOS and Android send one change per tap, with the Bots as they stand (hidden
+  Bots kept) and the controls locked until the listener brings the next revision. Decoding of the two fields (default 1 and `quiet`) was B7a's.
+- Offline line (rule 6). `taskView` carries `hostWait: true` for a task that is `queued`, was admitted while its Bot's Desktop was off (`queuedTask`
+  stores it) and has never started (`epoch` 0). It is gone once the task starts, ends or, after `answerWait`, is queued again for the usual five
+  minutes, so an expired task shows the existing expired state. The run card says "<Bot> is offline and will reply when it's back online" in place of the
+  generic queued line (Web and Desktop `BotRunCards.tsx`, iOS `TeamBotViews.swift`, Android `TeamBotComponents.kt`; `waitsForHost` on the iOS and
+  Android `TeamTask`). The composer had to stop refusing for it: in a group or channel a Bot whose card says `offline` no longer blocks the message and
+  the footer says the same line (Web `Composer.tsx`, iOS `blockedAvailability(... waitsForHost:)` and `TeamComposerView`, Android
+  `TeamBotEntry.blockedRequests`/`requireNewRequest(... waitsForHost)` and `TeamComposer.kt`). A Bot DM keeps its refusal, and paused, maintenance
+  and quota exhausted refuse in every Chat. Android's "refused before" flag has no kind, so a Bot whose status is merely unknown after a refusal
+  still blocks everywhere; only a current `offline` is waited for.
+- Edit hint (rule 8). While a message is being edited in a group, a channel or a Bot DM, the composer says "Editing doesn't notify Bots. To ask one,
+  send a new message." Always, not only when the edit adds a Bot mention; an edit between two people shows nothing.
+- Docs. `apps/web/src/data/docs/collaboration.ts` (Teams `auto-reply`, the new `reply-rounds` and `bot-mentions`, Bots `no-reply`) and the
+  generated `docs/technical/{en,zh}/{teams,bots}.md`. The documentation baseline (`docs:sync`) was not refreshed here.
+- Tests: Web `teams-bots-ui.test.ts` (the run card's offline line in three locales, the Chat dialog and what it sends) and
+  `teams-workspace-interaction.test.ts` (a Bot whose Desktop is off in a channel and in a Bot DM, the edit hint); iOS `TeamBotTests` and
+  `TeamBotMemberEntryTests`; Android `TeamBotsTest` and `TeamBotEntryTest`; `reply-rounds.emulator.test.mjs` gained the `hostWait` assertions
+  (set, absent for a started Bot, gone once expired).
+- Not here, or not verified. The `hostWait` assertions of the emulator suite were written but not run. The iOS and Android screens were type-checked
+  and unit tested, not run on a simulator or a device. The Desktop's own Bot editor still says a Bot that is replied to or called by name "always
+  answers" (`bots_reply_mention_note`), where rule 4 lets it stay silent when the message plainly needs no answer.
 
 ## What a Bot may use of its maintainer's Desktop (Bot scope)
 

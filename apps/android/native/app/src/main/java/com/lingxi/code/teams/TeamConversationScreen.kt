@@ -220,8 +220,8 @@ internal fun TeamConversationScreen(
         conversation = conversation, label = label, members = members, bots = bots, uid = uid, strings = strings,
         unread = unread, online = online,
         onMarkRead = { workspace.messagingModel.markRead(conversation.id, conversation.lastSeq) }, onDismiss = { showDetails = false },
-        onAutoReply = { targets -> val revision = conversation.autoReply?.revision ?: 0; autoReplySent = revision
-            workspace.messagingModel.setConversationAutoReply(conversation.id, revision, targets, onFailed = { autoReplySent = null }) },
+        onAutoReply = { targets, maxReplies, humanMentions -> val revision = conversation.autoReply?.revision ?: 0; autoReplySent = revision
+            workspace.messagingModel.setConversationAutoReply(conversation.id, revision, targets, maxReplies, humanMentions, onFailed = { autoReplySent = null }) },
         busy = autoReplySent != null && autoReplySent == (conversation.autoReply?.revision ?: 0),
         // Not in a friend chat, which has no Bots of its own to limit. The details give way to the editor.
         onBotScope = if (friend == null) ({ showDetails = false; showBotScope = true }) else null,

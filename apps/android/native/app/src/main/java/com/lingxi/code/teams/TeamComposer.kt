@@ -177,7 +177,9 @@ internal fun TeamComposer(
     val staleBotDm = conversation.kind == "bot_dm" && conversation.sharedBotIds.size != 1
     val tooLong = TeamsComposeLogic.byteLength(text) > TeamsComposeLogic.MESSAGE_BYTES
     val requestTargets = if (conversation.kind == "bot_dm") conversation.sharedBotIds else draft.targets
-    val blockedBots = TeamBotEntry.blockedRequests(requestTargets, bots, editing != null || answeringWait)
+    // A group or channel takes a message for a Bot whose Desktop is off, and its task waits for the Desktop (rule 6); a Bot DM says no at once.
+    val waitsForHost = conversation.kind != "bot_dm"
+    val blockedBots = TeamBotEntry.blockedRequests(requestTargets, bots, editing != null || answeringWait, waitsForHost)
     val canSend = TeamAttachments.canSend(text, files) && !messaging.submitting && blockedBots.isEmpty() && (editing != null || (staleTargets.isEmpty() && !staleBotDm))
     val hasAskableBots = askable && bots.any { it.selectable && "shared_bot:${it.sharedBotId}" in conversation.participants }
     fun update(value: String, caret: TextRange = TextRange(value.length), targets: Set<String> = draft.targets,
@@ -263,6 +265,8 @@ internal fun TeamComposer(
                         )
                         val quoted = editing ?: replyTo!!
                         Text(if (quoted.recalled) stringResource(R.string.teams_message_recalled) else TeamsComposeLogic.snippet(quoted.text), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        // An edit never asks a Bot (rule 8): said while a message is edited where Bots can be.
+                        if (editing != null && conversation.kind != "dm") Text(stringResource(R.string.teams_edit_no_notify_hint), Modifier.testTag("teams.composer.editnotify"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     IconButton(onClick = { if (editing != null) onCancelEdit() else onCancelReply() }) { Icon(Icons.Outlined.Close, stringResource(R.string.teams_cancel_reply)) }
                 }
@@ -290,6 +294,11 @@ internal fun TeamComposer(
             TeamDraftFiles(files, refusals, onRemoveFile, onDismissRefusals)
             blockedBots.forEach { bot ->
                 Text(bot.name + " · " + botAvailabilityText(bot), Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+            // The Bots this message asks whose Desktop is off, named so the person knows what happens to it.
+            if (waitsForHost && editing == null && !answeringWait) bots.filter { it.sharedBotId in requestTargets && it.availability == "offline" }.forEach { bot ->
+                Text(stringResource(R.string.teams_bot_offline_wait_fmt, bot.name), Modifier.padding(horizontal = 16.dp, vertical = 4.dp).testTag("teams.composer.hostwait.${bot.sharedBotId}"),
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             if (staleTargets.isNotEmpty() || staleBotDm) Text(stringResource(R.string.teams_error_bot_access_changed), Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             val palette = LingXiTheme.palette

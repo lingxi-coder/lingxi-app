@@ -472,7 +472,7 @@
   "bots_reply_approval_uncertain_hint": "判断服务拿不准 Bot 该不该回复时，回复会先等你批准；其余回复直接发出。",
   "bots_reply_approval_always_hint": "Bot 的每条回复都先等你批准，包括被 @ 提及时的回复，以及与 Bot 的私聊。",
   "bots_reply_approval_note": "等待批准的回复，只有你在团队的聊天中批准后才会发出。超过 10 分钟没有批准，或者（没有人叫 Bot 时）聊天里有人再次发言，回复就会被丢弃。",
-  "bots_reply_mention_note": "被 @ 提及、被回复或被叫到名字时，Bot 一定会回复，不受安静时段和冷却时间影响。",
+  "bots_reply_mention_note": "被 @ 提及时，Bot 一定会回复。被回复或被叫到名字时，Bot 优先于其他 Bot 回复，但消息明显不需要回答时可以不回。两种情况都不受安静时段和冷却时间影响。",
   "bots_triage_title": "自主回复记录",
   "bots_triage_intro": "Bot 对没有人点名的消息所做的决定，最新的在前。只保留决定和原因，不保留模型说的内容。",
   "bots_triage_signed_out": "登录后才能查看自主回复记录。",

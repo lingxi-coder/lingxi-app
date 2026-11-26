@@ -70,6 +70,21 @@ struct TeamConversationDetailsSheet: View {
         return result
     }
 
+    /// The switches wait until the listener brings the next revision, since another change before then would send the old one and conflict.
+    private func autoReplyLocked(_ context: TeamConversationContext) -> Bool {
+        context.model.offline || workspace.messageBusy || autoReplySent == "\(context.conversation.id)#\(context.conversation.autoReply?.revision ?? 0)"
+    }
+
+    /// One of the two settings that are not a Bot's switch changes: sent with the Bots as they stand, and only the setting that changed.
+    private func changeAutoReply(_ context: TeamConversationContext, maxReplies: Int? = nil, humanMentions: String? = nil) {
+        let conversation = context.conversation
+        let auto = TeamAutoReply.bots(conversation, cards: context.bots, uid: context.uid)
+        let targets = TeamAutoReply.targets(auto.bots, on: auto.on, kept: auto.kept)
+        let revision = conversation.autoReply?.revision ?? 0
+        autoReplySent = "\(conversation.id)#\(revision)"
+        Task { if await !workspace.run({ try await context.model.setConversationAutoReply(conversation.id, expectedRevision: revision, targets: targets, maxReplies: maxReplies, humanMentions: humanMentions) }) { autoReplySent = nil } }
+    }
+
     private func details(_ context: TeamConversationContext) -> some View {
         let conversation = context.conversation
         let model = context.model
@@ -123,7 +138,7 @@ struct TeamConversationDetailsSheet: View {
                                 autoReplySent = "\(conversation.id)#\(revision)"
                                 Task { if await !workspace.run({ try await model.setConversationAutoReply(conversation.id, expectedRevision: revision, targets: targets) }) { autoReplySent = nil } }
                             }))
-                            .disabled(model.offline || workspace.messageBusy || autoReplySent == "\(conversation.id)#\(conversation.autoReply?.revision ?? 0)" || !on && !TeamAutoReply.available(card))
+                            .disabled(autoReplyLocked(context) || !on && !TeamAutoReply.available(card))
                             .accessibilityIdentifier("teams.conversation.details.autoreply.\(card.sharedBotId)")
                             // Said before it is switched on: where this Chat's messages go.
                             Group {
@@ -134,6 +149,25 @@ struct TeamConversationDetailsSheet: View {
                                 }
                             }
                             .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    // A group or channel also says how many of its Bots answer one message and whether a message to people alone is judged; a Bot DM has the one Bot, always the one asked.
+                    if TeamAutoReply.hasRounds(conversation) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("teams_auto_reply_max_replies").font(.subheadline)
+                            Picker("teams_auto_reply_max_replies", selection: Binding(get: { TeamAutoReply.maxReplies(conversation) }, set: { changeAutoReply(context, maxReplies: $0) })) {
+                                ForEach(1...TeamExecutionContract.maxRepliesLimit, id: \.self) { Text(verbatim: "\($0)").tag($0) }
+                            }
+                            .pickerStyle(.segmented).labelsHidden()
+                            .disabled(autoReplyLocked(context))
+                            .accessibilityIdentifier("teams.conversation.details.maxreplies")
+                            Text("teams_auto_reply_rank_note").font(.caption).foregroundStyle(.secondary)
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Toggle("teams_auto_reply_human_mentions", isOn: Binding(get: { TeamAutoReply.judgesHumanMentions(conversation) }, set: { changeAutoReply(context, humanMentions: $0 ? "judge" : "quiet") }))
+                                .disabled(autoReplyLocked(context))
+                                .accessibilityIdentifier("teams.conversation.details.humanmentions")
+                            Text("teams_auto_reply_human_mentions_hint").font(.caption).foregroundStyle(.secondary)
                         }
                     }
                 } header: {

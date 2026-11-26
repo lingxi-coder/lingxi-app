@@ -75,13 +75,18 @@ internal object TeamBotEntry {
 
     fun canOpen(origin: TeamBotEntryContext, current: TeamBotEntryContext?, active: Boolean): Boolean = active && origin == current
 
-    /** Explicit host availability blocks new Bot requests; device network state is a separate existing queue concern. */
-    fun blockedRequests(targets: Collection<String>, bots: List<TeamBotCard>, continuation: Boolean): List<TeamBotCard> =
-        if (continuation) emptyList() else bots.filter { it.sharedBotId in targets && (it.admissionBlockedPendingRefresh || it.availability in unavailableStatuses) }
+    /**
+     * Explicit host availability blocks new Bot requests; device network state is a separate existing queue concern. [waitsForHost]: in a group or channel a Bot whose
+     * Desktop is off is no refusal, the message is sent and its task waits for the Desktop (rule 6); a Bot DM says no at once.
+     */
+    fun blockedRequests(targets: Collection<String>, bots: List<TeamBotCard>, continuation: Boolean, waitsForHost: Boolean = false): List<TeamBotCard> =
+        if (continuation) emptyList() else bots.filter {
+            it.sharedBotId in targets && !(waitsForHost && it.availability == "offline") && (it.admissionBlockedPendingRefresh || it.availability in unavailableStatuses)
+        }
 
     /** Called by queue before journaling a new Bot submit, as well as by the composer gate. */
-    fun requireNewRequest(targets: Collection<String>, bots: List<TeamBotCard>) {
-        val blocked = blockedRequests(targets, bots, continuation = false).firstOrNull() ?: return
+    fun requireNewRequest(targets: Collection<String>, bots: List<TeamBotCard>, waitsForHost: Boolean = false) {
+        val blocked = blockedRequests(targets, bots, continuation = false, waitsForHost = waitsForHost).firstOrNull() ?: return
         throw TeamMessageFailure(when {
             blocked.admissionBlockedPendingRefresh -> "BOT_STATUS_UNVERIFIED"
             blocked.availability == "quota_exhausted" -> "REQUEST_QUOTA_EXCEEDED"

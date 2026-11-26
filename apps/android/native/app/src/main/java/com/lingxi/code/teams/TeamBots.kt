@@ -48,6 +48,15 @@ internal object TeamAutoReply {
     fun available(card: TeamBotCard) = card.state == "published" && card.autoReply != null
     /** The setting after one Bot is switched, in the Chat's Bot order, with the Bots this person cannot see left as they are. */
     fun targets(choice: Choice, switching: String, enabled: Boolean) = choice.bots.map { it.sharedBotId }.filter { if (it == switching) enabled else it in choice.on } + choice.kept
+    /** The setting as it stands, for a change of one of the other two settings. */
+    fun targets(choice: Choice) = choice.bots.map { it.sharedBotId }.filter { it in choice.on } + choice.kept
+    /**
+     * How many Bots of a group or channel may answer one message nobody asked them about, and whether a message that mentions only people is judged too. A Bot DM has the
+     * one Bot, which is always the one asked, so neither means anything there. Until someone sets them it is one Bot, and a message to people alone is theirs.
+     */
+    fun hasRounds(conversation: TeamMessageConversation) = conversation.kind == "group" || conversation.kind == "channel"
+    fun maxReplies(conversation: TeamMessageConversation) = (conversation.autoReply?.maxReplies ?: 1).coerceIn(1, TeamExecutionContract.MAX_REPLIES_LIMIT)
+    fun judgesHumanMentions(conversation: TeamMessageConversation) = conversation.autoReply?.humanMentions == "judge"
 }
 /** What a Bot run cost, as the host reports it: `missing` carries no figures; the cost only when the host could price it (`costMicros` is millionths of `currency`). */
 internal data class TeamTaskUsage(val status: String, val inputTokens: Long = 0, val outputTokens: Long = 0, val costMicros: Double? = null, val currency: String? = null) {
@@ -60,15 +69,20 @@ internal data class TeamTaskWait(val waitId: String, val kind: String, val recip
 /** `deadline` ends the current phase: the pick-up limit while queued, the running budget while running, the wait's expiry while waiting, the maintainer's time to decide while the reply awaits approval. */
 internal data class TeamTask(val taskId: String, val conversationId: String, val sharedBotId: String, val requester: TeamMemberRef,
     val state: String, val createdAt: Long, val deadline: Long, val replyId: String?, val artifactId: String?, val usage: TeamTaskUsage? = null,
-    val cancelRequestedAt: Long? = null, val wait: TeamTaskWait? = null) {
+    val cancelRequestedAt: Long? = null, val wait: TeamTaskWait? = null,
+    /** Present only while queued: the message was sent while the Bot's Desktop was off, so the task waits up to a day for it instead of five minutes. */
+    val hostWait: Boolean = false) {
     val terminal get() = state !in setOf("queued", "running", "waiting", "awaiting_approval")
     /** A worker has it or is about to: its state changes within seconds. A waiting task changes only with its answer or its expiry, and one whose reply awaits approval with the maintainer's decision or the end of their time. */
     val busy get() = state == "queued" || state == "running"
     /** Cancellation was asked while the Bot was working; the task ends at the worker's next check. */
     val cancelling get() = state == "running" && cancelRequestedAt != null
+    /** Queued for a Desktop that was off when the message was sent (rule 6): the card says the Bot answers when it is back online. Once the day is over the task reads Expired. */
+    val waitsForHost get() = state == "queued" && hostWait
     companion object { fun parse(v: JSONObject) = TeamTask(v.getString("taskId"), v.getString("conversationId"), v.getString("sharedBotId"),
         TeamMemberRef.parse(v.getJSONObject("requester")), v.getString("state"), v.getLong("createdAt"), v.getLong("deadline"), v.stringOrNull("replyId"), v.stringOrNull("artifactId"), v.optJSONObject("usage")?.let(TeamTaskUsage::parse),
-        if (v.has("cancelRequestedAt") && !v.isNull("cancelRequestedAt")) v.getLong("cancelRequestedAt") else null, v.optJSONObject("wait")?.let(TeamTaskWait::parse)) }
+        if (v.has("cancelRequestedAt") && !v.isNull("cancelRequestedAt")) v.getLong("cancelRequestedAt") else null, v.optJSONObject("wait")?.let(TeamTaskWait::parse),
+        v.optBoolean("hostWait", false)) }
 }
 /** The identity of one decision on a request. Made once and sent again unchanged on a retry, so a lost answer cannot post the reply twice. */
 internal data class TeamDecisionIds(val commandId: String = java.util.UUID.randomUUID().toString(), val messageId: String = java.util.UUID.randomUUID().toString(),

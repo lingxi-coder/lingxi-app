@@ -472,7 +472,7 @@
   "bots_reply_approval_uncertain_hint": "判斷服務拿不準 Bot 該不該回覆時，回覆會先等你核准；其餘回覆直接送出。",
   "bots_reply_approval_always_hint": "Bot 的每則回覆都先等你核准，包括被 @ 提及時的回覆，以及與 Bot 的私訊。",
   "bots_reply_approval_note": "等待核准的回覆，只有你在團隊的對話中核准後才會送出。超過 10 分鐘沒有核准，或者（沒有人叫 Bot 時）對話中有人再次發言，回覆就會被捨棄。",
-  "bots_reply_mention_note": "被 @ 提及、被回覆或被叫到名字時，Bot 一定會回覆，不受安靜時段和冷卻時間影響。",
+  "bots_reply_mention_note": "被 @ 提及時，Bot 一定會回覆。被回覆或被叫到名字時，Bot 優先於其他 Bot 回覆，但訊息明顯不需要回答時可以不回。兩種情況都不受安靜時段和冷卻時間影響。",
   "bots_triage_title": "自主回覆紀錄",
   "bots_triage_intro": "Bot 對沒有人點名的訊息所做的決定，最新的在前。只保留決定和原因，不保留模型說的內容。",
   "bots_triage_signed_out": "登入後才能查看自主回覆紀錄。",

@@ -82,6 +82,8 @@ import java.util.UUID
 internal fun TeamDetailsScreen(
     workspace: TeamsWorkspace, uid: String, team: TeamSummary, teams: TeamsState, messaging: TeamMessagingState, showBack: Boolean,
     friendUids: Set<String>, onAddFriend: (TeamMember) -> Unit, onInviteFriends: () -> Unit, onClose: () -> Unit, onMessageBot: (String) -> Unit, modifier: Modifier = Modifier, onBotExample: (String, String) -> Unit = { _, _ -> },
+    /** Opens a Chat of this Team: where "Replies waiting" takes the person to the Chat a reply was made in. */
+    onOpenConversation: (String) -> Unit = {},
 ) {
     val detail = teams.detail?.takeIf { it.team.id == team.id }
     val current = detail?.team ?: team
@@ -124,7 +126,7 @@ internal fun TeamDetailsScreen(
             when (segments[selected]) {
                 R.string.teams_members -> membersSection(detail, current, uid, busy, friendUids, onAddFriend) { confirmation = it }
                 R.string.teams_invites -> invitesSection(detail, current, teams, busy, model, onInviteFriends) { confirmation = it }
-                else -> botsSection(messaging, detail, uid, onMessageBot, workspace, onBotExample, triageDenied, { triageOf = it }) { listOf = it }
+                else -> botsSection(messaging, detail, uid, onMessageBot, workspace, onBotExample, triageDenied, { triageOf = it }, onOpenConversation) { listOf = it }
             }
             item {
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
@@ -264,7 +266,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.invitesSection(
 
 private fun androidx.compose.foundation.lazy.LazyListScope.botsSection(
     messaging: TeamMessagingState, detail: TeamDetail?, uid: String, onMessageBot: (String) -> Unit, workspace: TeamsWorkspace, onBotExample: (String, String) -> Unit,
-    triageDenied: Set<String>, onOpenTriage: (TeamBotCard) -> Unit, onOpenList: (TeamBotCard) -> Unit,
+    triageDenied: Set<String>, onOpenTriage: (TeamBotCard) -> Unit, onOpenChat: (String) -> Unit, onOpenList: (TeamBotCard) -> Unit,
 ) {
     item { Text(stringResource(R.string.teams_bots_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     when {
@@ -289,6 +291,9 @@ private fun androidx.compose.foundation.lazy.LazyListScope.botsSection(
                     onList = if (TeamSharedListRules.canOpen(bot, uid, messaging.cache?.generation ?: 0)) ({ onOpenList(bot) }) else null,
                     // The maintainer's log of what the Bot decided about the messages nobody asked it about: only for a Bot that answers on its own.
                     onTriageLog = if (TeamTriageRules.maintains(bot, TeamMemberRef(uid, messaging.cache?.generation ?: 0)) && bot.autoReply != null && bot.sharedBotId !in triageDenied) ({ onOpenTriage(bot) }) else null,
+                    // The replies of the Bot that wait for their maintainer to let them go, across every Chat of this Team.
+                    heldModel = if (TeamTriageRules.maintains(bot, TeamMemberRef(uid, messaging.cache?.generation ?: 0))) workspace.messagingModel else null,
+                    heldSignals = messaging.botSignals, onHeldChat = onOpenChat,
                 )
             }
         }

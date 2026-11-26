@@ -249,6 +249,8 @@ function wire(fake: FakeTeams, service: ReturnType<typeof serve>, extra: (comman
     if (command.action === 'listTriage') return service.answer(command) as T;
     if (command.action === 'listTasks') return { tasks: tasks() } as T;
     if (command.action === 'listSharedBots') return { bots: structuredClone(fake.bots) } as T;
+    // A Chat of a Bot the person maintains also reads the replies of the Bot that wait for them; none do here.
+    if (command.action === 'listHeldReplies') return { replies: [] } as T;
     return extra(command) as T;
   };
   return calls;
@@ -439,7 +441,7 @@ scenario('The reason of a silence is a courtesy: a log that cannot be read leave
   const declined = { taskId: 'task-0003', conversationId: CHAT, sharedBotId: BOT, requester: { uid: 'alice', generation: 1 }, state: 'declined', optional: true, createdAt: 1, deadline: 2, epoch: 1, activeSpentMs: 0 };
   const { fake, workspace } = await open(context, [mine()]);
   const calls: MessageCommand[] = [];
-  fake.messages = async <T>(command: MessageCommand) => { calls.push(command); if (command.action === 'listTasks') return { tasks: [declined] } as T; if (command.action === 'listTriage') throw new Error('MAINTAINER_REQUIRED'); return { bots: fake.bots } as T; };
+  fake.messages = async <T>(command: MessageCommand) => { calls.push(command); if (command.action === 'listTasks') return { tasks: [declined] } as T; if (command.action === 'listTriage') throw new Error('MAINTAINER_REQUIRED'); if (command.action === 'listHeldReplies') return { replies: [] } as T; return { bots: fake.bots } as T; };
   fake.conversations.set('team-test', [conversation(CHAT, { kind: 'bot_dm', participants: ['user:alice', `shared_bot:${BOT}`] })]);
   await workspace.refresh(); await workspace.refreshBots(); workspace.selectConversation(CHAT);
   await until(() => workspace.getSnapshot().selectedConversationId === CHAT && workspace.getSnapshot().botsLoaded, 'the Chat');

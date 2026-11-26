@@ -3214,6 +3214,11 @@
     <string name="tool_denied_no_output">無輸出</string>
     <string name="tool_denied_reason">拒絕原因</string>
     <string name="teams_bot_avail_ready">已就緒</string>
+    <string name="teams_error_reply_decided">這則回覆已經處理過了。</string>
+    <string name="teams_error_reply_expired">決定的時間已過，這則回覆已捨棄。</string>
+    <string name="teams_error_reply_superseded">有人在對話中再次發言，這則回覆已捨棄。</string>
+    <string name="teams_error_reply_gone">這則回覆已不存在。</string>
+    <string name="teams_error_held_maintainer">只有 Bot 的維護者可以處理它的回覆。</string>
     <string name="teams_confirm_make_owner_title_fmt">將 %1$s 設為擁有者？</string>
     <string name="services_menu">服務選項</string>
     <string name="teams_bot_avail_offline">宿主離線</string>
@@ -3554,6 +3559,20 @@
     <string name="teams_triage_approval_timeout">逾時未核准</string>
     <string name="teams_triage_approval_superseded">因新訊息而捨棄</string>
     <string name="teams_triage_probability_fmt">機率 %1$d%%</string>
+    <string name="teams_held_title">等待你核准</string>
+    <string name="teams_held_expires_fmt">若未核准，%1$s捨棄</string>
+    <string name="teams_held_document_fmt">附帶文件「%1$s」</string>
+    <string name="teams_held_reject">拒絕</string>
+    <string name="teams_held_reject_confirm">拒絕這則回覆？</string>
+    <string name="teams_held_reject_detail">不會送出任何內容。Bot 的這則回覆將被捨棄，無法復原。</string>
+    <string name="teams_held_edit_label">回覆內容</string>
+    <string name="teams_held_empty_text">回覆不能是空的。</string>
+    <string name="teams_held_too_long">這則回覆太長，無法傳送，請縮短。</string>
+    <string name="teams_held_unasked">自主回覆</string>
+    <string name="teams_held_waiting">待核准的回覆</string>
+    <string name="teams_held_intro">Bot 已產生、要等你核准後才會送出的回覆。沒有及時決定的會被捨棄。</string>
+    <string name="teams_held_none">沒有待核准的回覆。</string>
+    <string name="teams_held_revoked">未送出。請求或其權限已變更，這則回覆已捨棄。</string>
     <string name="teams_error_scope_conflict">剛有人修改了此設定，已顯示最新內容。請檢查後重試。</string>
     <string name="teams_error_scope_not_published">維護者變更了此 Bot 共享的內容，已顯示最新內容。請檢查後重試。</string>
 </resources>

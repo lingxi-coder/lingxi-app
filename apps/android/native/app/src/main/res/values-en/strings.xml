@@ -3214,6 +3214,11 @@
     <string name="tool_denied_no_output">No output</string>
     <string name="tool_denied_reason">Why it was denied</string>
     <string name="teams_bot_avail_ready">Ready</string>
+    <string name="teams_error_reply_decided">This reply was already decided.</string>
+    <string name="teams_error_reply_expired">The time to decide ran out, so the reply was dropped.</string>
+    <string name="teams_error_reply_superseded">Someone wrote in the chat again, so the reply was dropped.</string>
+    <string name="teams_error_reply_gone">This reply is no longer available.</string>
+    <string name="teams_error_held_maintainer">Only the Bot’s maintainer can decide on its replies.</string>
     <string name="teams_confirm_make_owner_title_fmt">Make %1$s the owner?</string>
     <string name="services_menu">Service options</string>
     <string name="teams_bot_avail_offline">Host offline</string>
@@ -3554,6 +3559,20 @@
     <string name="teams_triage_approval_timeout">Not approved in time</string>
     <string name="teams_triage_approval_superseded">Dropped for a newer message</string>
     <string name="teams_triage_probability_fmt">%1$d%% likely</string>
+    <string name="teams_held_title">Waiting for your approval</string>
+    <string name="teams_held_expires_fmt">Dropped %1$s if not approved</string>
+    <string name="teams_held_document_fmt">Includes the document “%1$s”</string>
+    <string name="teams_held_reject">Reject</string>
+    <string name="teams_held_reject_confirm">Reject this reply?</string>
+    <string name="teams_held_reject_detail">Nothing is posted. The Bot’s reply is dropped and can’t be brought back.</string>
+    <string name="teams_held_edit_label">Reply text</string>
+    <string name="teams_held_empty_text">The reply can’t be empty.</string>
+    <string name="teams_held_too_long">This reply is too long to send. Shorten it.</string>
+    <string name="teams_held_unasked">Auto-reply</string>
+    <string name="teams_held_waiting">Replies waiting</string>
+    <string name="teams_held_intro">Replies the Bot made that wait for your approval before they are posted. Each one is dropped if you don’t decide in time.</string>
+    <string name="teams_held_none">No replies are waiting.</string>
+    <string name="teams_held_revoked">Not posted. The request or its access changed, so the reply was dropped.</string>
     <string name="teams_error_scope_conflict">Someone changed this a moment ago. The latest is shown. Check it and try again.</string>
     <string name="teams_error_scope_not_published">The maintainer changed what this Bot shares. The latest is shown. Check it and try again.</string>
 </resources>

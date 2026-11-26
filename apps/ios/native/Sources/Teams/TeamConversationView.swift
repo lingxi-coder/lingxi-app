@@ -49,10 +49,12 @@ struct TeamConversationView: View {
     /// The app's voice input, made the first time the microphone is used here. What it hears goes into the box.
     @State private var voice: VoiceInteractionController?
     @State private var composerFocused = false
+    /// The replies of this Chat's Bots that wait for the viewer, when they maintain one of them (Bot v3 B6).
+    @State private var held = TeamHeldKeeper()
 
     var body: some View {
         Group {
-            if let context = TeamConversationContext.make(workspace: workspace, conversationID: conversationID) {
+            if let context = TeamConversationContext.make(workspace: workspace, conversationID: conversationID, held: held) {
                 loaded(context)
             } else {
                 missing
@@ -186,6 +188,9 @@ struct TeamConversationView: View {
         let connectionOffline = model.directoryReady && model.offline
         let reasonBot = TeamTriageRules.reasonBot(conversation, cards: context.bots, viewer: context.viewer)
         let silent = reasonBot.map { TeamTriageRules.silentTasks(model.tasks, of: $0.sharedBotId) } ?? []
+        let heldBots = context.heldBots.map(\.sharedBotId)
+        // What moves the replies of this Chat: the service says a Bot changed, a message came, or a task of the Chat started to wait for approval. They are read again then, no oftener.
+        let heldWatch = "\(model.botSignals)|\(conversation.lastSeq)|" + model.tasks.filter { $0.state == "awaiting_approval" }.map(\.taskId).joined(separator: ",")
         return VStack(spacing: 0) {
             banners(context)
             if let notice = inbox.inlineNotice, notice.ref == activeInboxRef {
@@ -292,6 +297,12 @@ struct TeamConversationView: View {
         .task(id: TriageWanted(bot: reasonBot?.sharedBotId, conversationId: conversation.id, taskIds: silent, offline: model.offline)) {
             if let bot = reasonBot?.sharedBotId, !silent.isEmpty, !model.offline { await model.loadTriageReasons(sharedBotId: bot, conversationId: conversation.id, taskIds: silent) }
         }
+        // The replies that wait for the viewer, who maintains a Bot of this Chat: read when the Chat opens, whenever `heldWatch` moves and when the connection returns, and only then.
+        // The time left is kept while the Chat is on screen.
+        .task(id: TeamHeldWanted(model: ObjectIdentifier(model), bots: heldBots, conversationId: conversation.id, online: !model.offline, watch: heldWatch)) {
+            held.sync(model: model, bots: heldBots, conversationId: conversation.id, online: !model.offline, watch: heldWatch)
+            await held.keepTime()
+        }
         // The divider's anchor: the read mark as it was on opening, once the marks are known.
         .task(id: model.readsReady) {
             guard anchorSeq == nil else { return }
@@ -352,6 +363,11 @@ struct TeamConversationView: View {
             if !workspace.actionError.isEmpty, workspace.actionError != model.error {
                 TeamsBanner(kind: .error, title: LocalizedStringKey(TeamsErrors.key(workspace.actionError)), actionTitle: "common_close") { workspace.clearActionError() }
             }
+            // The replies that wait could not be read: the cards would show no draft and no buttons, so say why, unless the Chat is already saying the same.
+            if !model.offline, held.list.status == .failed, let error = held.list.error, error != model.error {
+                TeamsBanner(kind: .error, title: LocalizedStringKey(TeamHeldRules.errorKey(error)), actionTitle: "common_retry") { held.reload() }
+                    .accessibilityIdentifier("teams.held.read.error")
+            }
         }
     }
 
@@ -377,6 +393,9 @@ struct TeamConversationView: View {
             uid: context.uid, kind: conversation.kind, participants: conversation.participants, readers: conversation.readers,
             bots: context.bots, botsLoaded: context.model.botsLoaded, botsUnverified: context.model.botsUnverified) != .none
         let outbox = (context.model.cache?.outbox ?? []).filter { $0.conversationId == conversation.id }
+        // A reply nobody asked for has no task in the Chat: it is a row of its own at the end, as the stream is.
+        let heldList = held.list
+        let heldRows = TeamHeldRules.place(heldList.rows, listed: Set(context.model.tasks.map(\.taskId))).orphans
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 if showNotice {
@@ -428,6 +447,9 @@ struct TeamConversationView: View {
                         }
                     }
                 }
+                ForEach(heldRows) { row in
+                    TeamHeldCell(row: row, now: heldList.now, context: context, keeper: held)
+                }
                 ForEach(outbox) { intent in
                     TeamOutboxCell(intent: intent) {
                         Task { await workspace.run { try await context.model.discard(intent.id) } }
@@ -467,6 +489,9 @@ struct TeamConversationView: View {
         }
         .onChange(of: outbox.count) { old, new in
             if placed, new > old { position.scrollTo(edge: .bottom) }
+        }
+        .onChange(of: heldRows.count) { old, new in
+            if placed, new > old, atBottom { position.scrollTo(edge: .bottom) }
         }
         // Opens at the first unread message (with a little context above it), else at the newest.
         .task(id: PlaceKey(anchored: anchorSeq != nil, loaded: thread != nil)) {

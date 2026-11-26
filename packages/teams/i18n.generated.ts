@@ -334,6 +334,7 @@ export type TeamsKey =
   | 'teams_error_doc_limit'
   | 'teams_error_doc_revision'
   | 'teams_error_doc_unchanged'
+  | 'teams_error_held_maintainer'
   | 'teams_error_invalid_data'
   | 'teams_error_list_full'
   | 'teams_error_list_unavailable'
@@ -342,6 +343,10 @@ export type TeamsKey =
   | 'teams_error_ops_maintainer'
   | 'teams_error_ops_running'
   | 'teams_error_ops_unavailable'
+  | 'teams_error_reply_decided'
+  | 'teams_error_reply_expired'
+  | 'teams_error_reply_gone'
+  | 'teams_error_reply_superseded'
   | 'teams_error_sync_failed'
   | 'teams_expiry'
   | 'teams_file_add'
@@ -365,6 +370,20 @@ export type TeamsKey =
   | 'teams_group_bot_chats'
   | 'teams_group_channels'
   | 'teams_group_direct'
+  | 'teams_held_document_fmt'
+  | 'teams_held_edit_label'
+  | 'teams_held_empty_text'
+  | 'teams_held_expires_fmt'
+  | 'teams_held_intro'
+  | 'teams_held_none'
+  | 'teams_held_reject'
+  | 'teams_held_reject_confirm'
+  | 'teams_held_reject_detail'
+  | 'teams_held_revoked'
+  | 'teams_held_title'
+  | 'teams_held_too_long'
+  | 'teams_held_unasked'
+  | 'teams_held_waiting'
   | 'teams_hour'
   | 'teams_invite_create'
   | 'teams_invite_error'
@@ -730,10 +749,7 @@ export type TeamsKey =
   | 'tw_error_question_recipient'
   | 'tw_error_quota'
   | 'tw_error_replace_kind'
-  | 'tw_error_reply_decided'
-  | 'tw_error_reply_expired'
   | 'tw_error_reply_kind'
-  | 'tw_error_reply_superseded'
   | 'tw_error_review_publication'
   | 'tw_error_role'
   | 'tw_error_runtime'
@@ -1269,6 +1285,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_error_doc_limit: { en: 'This document has reached its limit of 200 revisions and can no longer be edited.', 'zh-Hans': '此文档已达到 200 个版本的上限，无法继续编辑。', 'zh-Hant': '此文件已達到 200 個版本的上限，無法繼續編輯。', ja: 'このドキュメントはリビジョンの上限（200）に達したため、これ以上編集できません。', ko: '이 문서는 리비전 한도(200개)에 도달하여 더 이상 편집할 수 없습니다.' },
   teams_error_doc_revision: { en: 'That revision is not available.', 'zh-Hans': '该版本不可用。', 'zh-Hant': '該版本無法使用。', ja: 'そのリビジョンは利用できません。', ko: '해당 리비전을 사용할 수 없습니다.' },
   teams_error_doc_unchanged: { en: 'There are no changes to save.', 'zh-Hans': '没有需要保存的修改。', 'zh-Hant': '沒有需要儲存的修改。', ja: '保存する変更はありません。', ko: '저장할 변경 사항이 없습니다.' },
+  teams_error_held_maintainer: { en: 'Only the Bot’s maintainer can decide on its replies.', 'zh-Hans': '只有 Bot 的维护者可以处理它的回复。', 'zh-Hant': '只有 Bot 的維護者可以處理它的回覆。', ja: 'Bot の返信を決められるのは、その Bot のメンテナーだけです。', ko: 'Bot의 답장은 Bot 메인테이너만 결정할 수 있습니다.' },
   teams_error_invalid_data: { en: 'Some of this team’s data is in an unsupported format and cannot be shown.', 'zh-Hans': '此团队的部分数据格式不受支持，无法显示。', 'zh-Hant': '此團隊的部分資料格式不受支援，無法顯示。', ja: 'このチームの一部のデータは未対応の形式のため表示できません。', ko: '이 팀의 일부 데이터가 지원되지 않는 형식이라 표시할 수 없습니다.' },
   teams_error_list_full: { en: 'The list is full. Remove some items before adding more.', 'zh-Hans': '清单已满，请先移除一些条目再添加。', 'zh-Hant': '清單已滿，請先移除一些項目再新增。', ja: 'リストがいっぱいです。追加する前にいくつか項目を削除してください。', ko: '목록이 가득 찼습니다. 더 추가하려면 먼저 일부 항목을 제거하세요.' },
   teams_error_list_unavailable: { en: 'This list is no longer available.', 'zh-Hans': '此清单已不可用。', 'zh-Hant': '此清單已無法使用。', ja: 'このリストは利用できなくなりました。', ko: '이 목록은 더 이상 사용할 수 없습니다.' },
@@ -1277,6 +1294,10 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_error_ops_maintainer: { en: 'Only the Bot’s maintainer can confirm what happened.', 'zh-Hans': '只有 Bot 维护者可以确认实际结果。', 'zh-Hant': '只有 Bot 維護者可以確認實際結果。', ja: '実際の結果を確定できるのは Bot の管理者だけです。', ko: 'Bot 관리자만 실제 결과를 확정할 수 있습니다.' },
   teams_error_ops_running: { en: 'The task is still running and may report the result itself. Try again after it stops.', 'zh-Hans': '任务仍在运行，可能会自行报告结果。请在任务停止后重试。', 'zh-Hant': '任務仍在執行，可能會自行回報結果。請在任務停止後重試。', ja: 'タスクはまだ実行中で、自身で結果を報告する可能性があります。停止してからもう一度お試しください。', ko: '작업이 아직 실행 중이며 스스로 결과를 보고할 수 있습니다. 작업이 멈춘 뒤 다시 시도해 주세요.' },
   teams_error_ops_unavailable: { en: 'These actions are not available to you.', 'zh-Hans': '你无法查看这些操作。', 'zh-Hant': '你無法查看這些操作。', ja: 'これらの操作は表示できません。', ko: '이 작업들을 볼 수 없습니다.' },
+  teams_error_reply_decided: { en: 'This reply was already decided.', 'zh-Hans': '这条回复已经处理过了。', 'zh-Hant': '這則回覆已經處理過了。', ja: 'この返信はすでに処理されています。', ko: '이 답장은 이미 처리되었습니다.' },
+  teams_error_reply_expired: { en: 'The time to decide ran out, so the reply was dropped.', 'zh-Hans': '决定的时间已过，这条回复已丢弃。', 'zh-Hant': '決定的時間已過，這則回覆已捨棄。', ja: '決定までの時間が過ぎたため、この返信は破棄されました。', ko: '결정 시간이 지나 이 답장은 폐기되었습니다.' },
+  teams_error_reply_gone: { en: 'This reply is no longer available.', 'zh-Hans': '这条回复已不存在。', 'zh-Hant': '這則回覆已不存在。', ja: 'この返信はもう利用できません。', ko: '이 답장은 더 이상 사용할 수 없습니다.' },
+  teams_error_reply_superseded: { en: 'Someone wrote in the chat again, so the reply was dropped.', 'zh-Hans': '有人在会话中再次发言，这条回复已丢弃。', 'zh-Hant': '有人在對話中再次發言，這則回覆已捨棄。', ja: 'チャットで誰かが再び書き込んだため、この返信は破棄されました。', ko: '채팅에서 누군가 다시 글을 써서 이 답장은 폐기되었습니다.' },
   teams_error_sync_failed: { en: 'Could not sync messages. Check your connection and try again.', 'zh-Hans': '消息同步未完成，请检查网络后重试。', 'zh-Hant': '訊息同步未完成，請檢查網路後重試。', ja: 'メッセージを同期できませんでした。接続を確認してもう一度お試しください。', ko: '메시지를 동기화하지 못했습니다. 연결을 확인한 후 다시 시도하세요.' },
   teams_expiry: { en: 'Expires in', 'zh-Hans': '有效期', 'zh-Hant': '有效期限', ja: '有効期間', ko: '유효 기간' },
   teams_file_add: { en: 'Add files', 'zh-Hans': '添加文件', 'zh-Hant': '加入檔案', ja: 'ファイルを追加', ko: '파일 추가' },
@@ -1300,6 +1321,20 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_group_bot_chats: { en: 'Bot chats', 'zh-Hans': 'Bot 对话', 'zh-Hant': 'Bot 對話', ja: 'Bot とのチャット', ko: 'Bot 대화' },
   teams_group_channels: { en: 'Channels', 'zh-Hans': '频道', 'zh-Hant': '頻道', ja: 'チャンネル', ko: '채널' },
   teams_group_direct: { en: 'Direct messages', 'zh-Hans': '私信', 'zh-Hant': '私訊', ja: 'ダイレクトメッセージ', ko: '개인 메시지' },
+  teams_held_document_fmt: { en: 'Includes the document “%1$s”', 'zh-Hans': '附带文档“%1$s”', 'zh-Hant': '附帶文件「%1$s」', ja: 'ドキュメント「%1$s」を添付', ko: '문서 “%1$s” 포함' },
+  teams_held_edit_label: { en: 'Reply text', 'zh-Hans': '回复内容', 'zh-Hant': '回覆內容', ja: '返信の内容', ko: '답장 내용' },
+  teams_held_empty_text: { en: 'The reply can’t be empty.', 'zh-Hans': '回复不能为空。', 'zh-Hant': '回覆不能是空的。', ja: '返信を空にはできません。', ko: '답장을 비워 둘 수 없습니다.' },
+  teams_held_expires_fmt: { en: 'Dropped %1$s if not approved', 'zh-Hans': '若未批准，%1$s丢弃', 'zh-Hant': '若未核准，%1$s捨棄', ja: '%1$sに承認されていない場合は破棄されます', ko: '승인하지 않으면 %1$s 폐기됩니다' },
+  teams_held_intro: { en: 'Replies the Bot made that wait for your approval before they are posted. Each one is dropped if you don’t decide in time.', 'zh-Hans': 'Bot 已生成、要等你批准后才会发出的回复。没有及时决定的会被丢弃。', 'zh-Hant': 'Bot 已產生、要等你核准後才會送出的回覆。沒有及時決定的會被捨棄。', ja: 'Bot が作成し、あなたが承認するまで投稿されない返信です。時間内に決めないと破棄されます。', ko: 'Bot이 만들었고 승인해야 게시되는 답장입니다. 제때 결정하지 않으면 폐기됩니다.' },
+  teams_held_none: { en: 'No replies are waiting.', 'zh-Hans': '没有待批准的回复。', 'zh-Hant': '沒有待核准的回覆。', ja: '承認待ちの返信はありません。', ko: '승인 대기 중인 답장이 없습니다.' },
+  teams_held_reject: { en: 'Reject', 'zh-Hans': '拒绝', 'zh-Hant': '拒絕', ja: '却下', ko: '거부' },
+  teams_held_reject_confirm: { en: 'Reject this reply?', 'zh-Hans': '拒绝这条回复？', 'zh-Hant': '拒絕這則回覆？', ja: 'この返信を却下しますか？', ko: '이 답장을 거부할까요?' },
+  teams_held_reject_detail: { en: 'Nothing is posted. The Bot’s reply is dropped and can’t be brought back.', 'zh-Hans': '不会发出任何内容。Bot 的这条回复将被丢弃，无法恢复。', 'zh-Hant': '不會送出任何內容。Bot 的這則回覆將被捨棄，無法復原。', ja: '何も投稿されません。Bot の返信は破棄され、元に戻せません。', ko: '아무것도 게시되지 않습니다. Bot의 답장은 폐기되며 되돌릴 수 없습니다.' },
+  teams_held_revoked: { en: 'Not posted. The request or its access changed, so the reply was dropped.', 'zh-Hans': '未发出。请求或其权限已变化，这条回复已丢弃。', 'zh-Hant': '未送出。請求或其權限已變更，這則回覆已捨棄。', ja: '投稿されませんでした。リクエストまたはそのアクセス権が変わったため、この返信は破棄されました。', ko: '게시되지 않았습니다. 요청이나 접근 권한이 바뀌어 이 답장은 폐기되었습니다.' },
+  teams_held_title: { en: 'Waiting for your approval', 'zh-Hans': '等待你批准', 'zh-Hant': '等待你核准', ja: 'あなたの承認待ち', ko: '내 승인 대기 중' },
+  teams_held_too_long: { en: 'This reply is too long to send. Shorten it.', 'zh-Hans': '这条回复太长，无法发送，请缩短。', 'zh-Hant': '這則回覆太長，無法傳送，請縮短。', ja: 'この返信は長すぎて送信できません。短くしてください。', ko: '이 답장이 너무 길어서 보낼 수 없습니다. 줄여 주세요.' },
+  teams_held_unasked: { en: 'Auto-reply', 'zh-Hans': '自主回复', 'zh-Hant': '自主回覆', ja: '自動返信', ko: '자동 답장' },
+  teams_held_waiting: { en: 'Replies waiting', 'zh-Hans': '待批准的回复', 'zh-Hant': '待核准的回覆', ja: '承認待ちの返信', ko: '승인 대기 중인 답장' },
   teams_hour: { en: '1 hour', 'zh-Hans': '1 小时', 'zh-Hant': '1 小時', ja: '1 時間', ko: '1시간' },
   teams_invite_create: { en: 'Create invite link', 'zh-Hans': '创建邀请链接', 'zh-Hant': '建立邀請連結', ja: '招待リンクを作成', ko: '초대 링크 만들기' },
   teams_invite_error: { en: 'This invite has expired, was revoked or has no uses left.', 'zh-Hans': '邀请已过期、撤销或用尽。', 'zh-Hant': '邀請已過期、已撤銷或已用盡。', ja: 'この招待は期限切れ、取り消し済み、または使用回数の上限に達しています。', ko: '이 초대는 만료되었거나 철회되었거나 남은 사용 횟수가 없습니다.' },
@@ -1665,10 +1700,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_error_question_recipient: { en: 'Only the person who asked the Bot can answer this question.', 'zh-Hans': '只有向 Bot 提出请求的人才能回答此问题。', 'zh-Hant': '只有向 Bot 提出請求的人才能回答此問題。', ja: 'この質問に答えられるのは、Bot に依頼した本人だけです。', ko: '이 질문에는 Bot에게 요청한 사람만 답할 수 있습니다.' },
   tw_error_quota: { en: 'The daily request quota is exhausted. Ask the maintainer to review quotas or try after the UTC day resets.', 'zh-Hans': '每日请求额度已用尽，请联系维护者检查额度或在 UTC 日期切换后重试。', 'zh-Hant': '每日請求額度已用盡，請聯絡維護者檢查額度，或在 UTC 日期切換後再試。', ja: '1日のリクエスト上限に達しました。メンテナーに上限の見直しを依頼するか、UTC の日付が変わってからもう一度お試しください。', ko: '일일 요청 한도를 모두 사용했습니다. 메인테이너에게 한도를 검토해 달라고 요청하거나 UTC 날짜가 바뀐 뒤 다시 시도하세요.' },
   tw_error_replace_kind: { en: 'A Skill can only be replaced by a SKILL.md file, and a file by another file.', 'zh-Hans': 'Skill 只能用 SKILL.md 替换，文件只能用其他文件替换。', 'zh-Hant': 'Skill 只能用 SKILL.md 替換，檔案只能用其他檔案替換。', ja: 'Skill は SKILL.md でのみ、ファイルは別のファイルでのみ置き換えられます。', ko: 'Skill은 SKILL.md로만, 파일은 다른 파일로만 교체할 수 있습니다.' },
-  tw_error_reply_decided: { en: 'This reply was already decided.', 'zh-Hans': '这条回复已经处理过了。', 'zh-Hant': '這則回覆已經處理過了。', ja: 'この返信はすでに処理されています。', ko: '이 답장은 이미 처리되었습니다.' },
-  tw_error_reply_expired: { en: 'The time to decide ran out, so the reply was dropped.', 'zh-Hans': '决定的时间已过，这条回复已丢弃。', 'zh-Hant': '決定的時間已過，這則回覆已捨棄。', ja: '決定までの時間が過ぎたため、この返信は破棄されました。', ko: '결정 시간이 지나 이 답장은 폐기되었습니다.' },
   tw_error_reply_kind: { en: 'This request needs a different kind of reply. Refresh and try again.', 'zh-Hans': '此请求需要另一种回复方式，请刷新后重试。', 'zh-Hant': '此請求需要另一種回覆方式，請重新整理後再試。', ja: 'このリクエストには別の種類の返信が必要です。更新してもう一度お試しください。', ko: '이 요청에는 다른 종류의 답장이 필요합니다. 새로 고친 뒤 다시 시도하세요.' },
-  tw_error_reply_superseded: { en: 'Someone wrote in the chat again, so the reply was dropped.', 'zh-Hans': '有人在会话中再次发言，这条回复已丢弃。', 'zh-Hant': '有人在對話中再次發言，這則回覆已捨棄。', ja: 'チャットで誰かが再び書き込んだため、この返信は破棄されました。', ko: '채팅에서 누군가 다시 글을 써서 이 답장은 폐기되었습니다.' },
   tw_error_review_publication: { en: 'Review and confirm the publication before continuing.', 'zh-Hans': '请检查并确认发布内容后继续。', 'zh-Hant': '請先檢查並確認發布內容後再繼續。', ja: '続ける前に、公開内容を確認して承認してください。', ko: '계속하기 전에 게시 내용을 검토하고 확인하세요.' },
   tw_error_role: { en: 'Your role cannot perform this action.', 'zh-Hans': '当前角色无权执行此操作。', 'zh-Hant': '目前的角色無權執行此操作。', ja: '現在のロールでは、この操作を実行できません。', ko: '현재 역할로는 이 작업을 수행할 수 없습니다.' },
   tw_error_runtime: { en: 'The isolated Teams runtime is unavailable on this Desktop. Install a Desktop build that includes it.', 'zh-Hans': '此 Desktop 缺少团队隔离运行时，请安装包含此运行时的 Desktop 版本。', 'zh-Hant': '此 Desktop 缺少團隊隔離執行環境，請安裝包含該環境的 Desktop 版本。', ja: 'この Desktop では、分離されたチーム用ランタイムを利用できません。ランタイムを含む Desktop のビルドをインストールしてください。', ko: '이 Desktop에서는 격리된 팀 런타임을 사용할 수 없습니다. 런타임이 포함된 Desktop 빌드를 설치하세요.' },

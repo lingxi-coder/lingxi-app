@@ -591,6 +591,29 @@ final class TeamMessagingModel {
         guard active, life == lifecycle, !found.isEmpty else { return }
         triageReasons.merge(found) { _, new in new }
     }
+    // MARK: Held replies (Bot v3 B6)
+
+    /// The replies of these Bots that wait for this person to let them go, newest first, each tagged with its Bot: in one Chat, or in every one. A Bot the service says is not
+    /// theirs adds nothing; if that is every Bot the answer is `MAINTAINER_REQUIRED`. The service keeps a held reply where only the Bot's maintainer can read it.
+    func listHeldReplies(_ sharedBotIds: [String], conversationId: String? = nil) async throws -> [TeamHeldReply] {
+        let life = lifecycle
+        return try await TeamHeldRules.read(sharedBotIds) { [self] id in
+            do {
+                let answer: TeamHeldAnswer = try await execute("listHeldReplies", payload: TeamHeldRules.listPayload(sharedBotId: id, conversationId: conversationId), life: life)
+                return answer.replies
+            } catch is DecodingError { throw TeamMessageFailure(code: "INVALID_DATA") }
+        }
+    }
+    /// Lets a held reply go: as the Bot made it, or with `text` as the maintainer changed it to. `commandId` is the one of the first attempt when this one retries it, so an
+    /// approval whose answer was lost is answered again and not decided twice. A reply that is no longer held is refused with `REPLY_APPROVED`, `REPLY_REJECTED`, `REPLY_EXPIRED` or
+    /// `REPLY_SUPERSEDED`, for whichever came first.
+    func approveReply(_ taskId: String, text: String?, commandId: String) async throws -> TeamHeldDecision {
+        do { return try await execute("approveReply", payload: TeamHeldRules.approvePayload(taskId: taskId, text: text), commandId: commandId, life: lifecycle) } catch is DecodingError { throw TeamMessageFailure(code: "INVALID_DATA") }
+    }
+    /// Drops a held reply: nothing is posted. Refused like an approval when the reply is no longer held.
+    func rejectReply(_ taskId: String, commandId: String) async throws -> TeamHeldDecision {
+        do { return try await execute("rejectReply", payload: TeamHeldRules.rejectPayload(taskId: taskId), commandId: commandId, life: lifecycle) } catch is DecodingError { throw TeamMessageFailure(code: "INVALID_DATA") }
+    }
     func writeList(_ sharedBotId: String, operationId: String, expectedDataRevision: Int, changes: [TeamSharedListChange]) async throws {
         let _: TeamSharedListWritten = try await execute("writeList", payload: ["sharedBotId": sharedBotId, "operationId": operationId,
                                                                              "expectedDataRevision": expectedDataRevision, "changes": changes.map(\.payload)], life: lifecycle)

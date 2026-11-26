@@ -229,6 +229,7 @@ internal fun TeamsTab(joinCode: String?, onJoinCodeHandled: () -> Unit, modifier
                         onInviteFriends = { sheet = "inviteFriends" }, onClose = { setStack(stack.filterNot { it == "details" }) },
                         onMessageBot = { key -> messageBot(workspace, messaging, uid, key, isCurrent = entryIsCurrent) { openConversation(it) } },
                         onBotExample = { key, example -> messageBot(workspace, messaging, uid, key, example, entryIsCurrent) { openConversation(it) } }, modifier = m,
+                        onOpenConversation = ::openConversation,
                     )
                 }
                 if (wide) {

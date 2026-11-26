@@ -16,6 +16,8 @@ struct TeamConversationContext {
     /// Set in a friend chat (docs/FRIENDS-CLIENTS.md D9): the friend stands in for the conversation's name. Only for the friend
     /// chat itself: a Bot DM on the same pair workspace is an ordinary Bot DM (D22), headed by the Bot.
     let pair: PairTeam?
+    /// The replies of this Chat's Bots that wait for the viewer, kept by the open Chat. `nil` where nothing is read for them (the details of the Chat).
+    var held: TeamHeldKeeper? = nil
 
     /// The signed-in member as commands and tasks name them.
     var viewer: TeamMemberRef { TeamMemberRef(uid: uid, generation: team.generation) }
@@ -113,7 +115,7 @@ struct TeamConversationContext {
     /// The context of an open conversation, or `nil` while the viewer, the team, the model or the conversation is
     /// not there (yet).
     @MainActor
-    static func make(workspace: TeamsWorkspace, conversationID: String) -> TeamConversationContext? {
+    static func make(workspace: TeamsWorkspace, conversationID: String, held: TeamHeldKeeper? = nil) -> TeamConversationContext? {
         guard let model = workspace.messaging, let uid = workspace.uid, let team = workspace.team,
               let conversation = model.cache?.conversations.first(where: { $0.id == conversationID }) else { return nil }
         let strings = TeamsListStrings.current
@@ -123,7 +125,7 @@ struct TeamConversationContext {
         return TeamConversationContext(
             uid: uid, team: team, model: model, conversation: conversation,
             label: pair?.team.name ?? TeamsListLogic.conversationLabel(conversation, members: members, uid: uid, bots: bots, strings: strings),
-            members: members, bots: bots, strings: strings, pair: pair)
+            members: members, bots: bots, strings: strings, pair: pair, held: held)
     }
 }
 
@@ -427,11 +429,17 @@ struct TeamMessageCell: View {
         ForEach(ids, id: \.self) { taskId in
             if let task = context.model.tasks.first(where: { $0.taskId == taskId }) {
                 let bot = context.bots.first { $0.sharedBotId == task.sharedBotId }
-                TeamTaskCard(task: task, botName: bot?.name ?? context.strings.bot, viewer: context.viewer, maintainer: bot?.maintainer,
-                             recipientName: task.wait.map { context.userName($0.recipient.uid) } ?? "",
-                             onReply: context.answerableWait(of: message) == nil ? nil : onReply.map { reply in { reply(message) } },
-                             reason: context.model.triageReasons[taskId])
-                    .padding(.top, 4)
+                // The reply of a Bot the viewer maintains waits for them, who read it: it is theirs to decide. Everyone else sees the card that says it awaits approval.
+                if task.state == "awaiting_approval", let held = context.held, let row = held.list.row(taskId) {
+                    TeamHeldCard(row: row, now: held.list.now, botName: bot?.name ?? context.strings.bot, keeper: held)
+                        .padding(.top, 4)
+                } else {
+                    TeamTaskCard(task: task, botName: bot?.name ?? context.strings.bot, viewer: context.viewer, maintainer: bot?.maintainer,
+                                 recipientName: task.wait.map { context.userName($0.recipient.uid) } ?? "",
+                                 onReply: context.answerableWait(of: message) == nil ? nil : onReply.map { reply in { reply(message) } },
+                                 reason: context.model.triageReasons[taskId])
+                        .padding(.top, 4)
+                }
             } else {
                 Button {
                     Task { try? await context.model.refreshTask(taskId) }

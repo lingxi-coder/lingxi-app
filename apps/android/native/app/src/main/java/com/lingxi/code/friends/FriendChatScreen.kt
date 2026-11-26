@@ -144,6 +144,8 @@ private fun FriendChat(
             onMessage = { sharedBotId -> messageBot(chat, messaging, uid, sharedBotId) { view = "dm:$it" } },
             onStop = { bot -> chat.messagingModel.pause(bot) }, onReconnect = chat::reconnect, modifier = modifier, onList = { listOf = it },
             onTriageLog = { triageOf = it }, triageDenied = triageDenied,
+            // Only a Bot's chat has a reply that waits: the chat the person is taken to is a Bot DM of this friendship.
+            heldModel = chat.messagingModel, onHeldChat = { id -> view = "dm:$id" },
         )
         view.startsWith("dm:") -> TeamConversationScreen(
             workspace = chat, uid = uid, team = summary, teams = teams, messaging = messaging,

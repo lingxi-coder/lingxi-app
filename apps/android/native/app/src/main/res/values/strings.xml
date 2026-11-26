@@ -3214,6 +3214,11 @@
     <string name="tool_denied_no_output">无输出</string>
     <string name="tool_denied_reason">拒绝原因</string>
     <string name="teams_bot_avail_ready">已就绪</string>
+    <string name="teams_error_reply_decided">这条回复已经处理过了。</string>
+    <string name="teams_error_reply_expired">决定的时间已过，这条回复已丢弃。</string>
+    <string name="teams_error_reply_superseded">有人在会话中再次发言，这条回复已丢弃。</string>
+    <string name="teams_error_reply_gone">这条回复已不存在。</string>
+    <string name="teams_error_held_maintainer">只有 Bot 的维护者可以处理它的回复。</string>
     <string name="teams_confirm_make_owner_title_fmt">将 %1$s 设为所有者？</string>
     <string name="services_menu">服务选项</string>
     <string name="teams_bot_avail_offline">宿主离线</string>
@@ -3554,6 +3559,20 @@
     <string name="teams_triage_approval_timeout">超时未批准</string>
     <string name="teams_triage_approval_superseded">因新消息而丢弃</string>
     <string name="teams_triage_probability_fmt">概率 %1$d%%</string>
+    <string name="teams_held_title">等待你批准</string>
+    <string name="teams_held_expires_fmt">若未批准，%1$s丢弃</string>
+    <string name="teams_held_document_fmt">附带文档“%1$s”</string>
+    <string name="teams_held_reject">拒绝</string>
+    <string name="teams_held_reject_confirm">拒绝这条回复？</string>
+    <string name="teams_held_reject_detail">不会发出任何内容。Bot 的这条回复将被丢弃，无法恢复。</string>
+    <string name="teams_held_edit_label">回复内容</string>
+    <string name="teams_held_empty_text">回复不能为空。</string>
+    <string name="teams_held_too_long">这条回复太长，无法发送，请缩短。</string>
+    <string name="teams_held_unasked">自主回复</string>
+    <string name="teams_held_waiting">待批准的回复</string>
+    <string name="teams_held_intro">Bot 已生成、要等你批准后才会发出的回复。没有及时决定的会被丢弃。</string>
+    <string name="teams_held_none">没有待批准的回复。</string>
+    <string name="teams_held_revoked">未发出。请求或其权限已变化，这条回复已丢弃。</string>
     <string name="teams_error_scope_conflict">刚有人修改了此设置，已显示最新内容。请检查后重试。</string>
     <string name="teams_error_scope_not_published">维护者修改了此 Bot 共享的内容，已显示最新内容。请检查后重试。</string>
 </resources>

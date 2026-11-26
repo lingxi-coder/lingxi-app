@@ -390,6 +390,8 @@ struct TeamDetailsPage: View {
                     onStopSharing: { stopping = bot },
                     onList: TeamSharedListRules.canOpen(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: team.generation)) && !offline ? { listOf = bot } : nil,
                     onTriageLog: TeamTriageRules.maintains(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: team.generation)) && bot.autoReply != nil && !triageDenied.contains(bot.sharedBotId) && !offline ? { triageOf = bot } : nil,
+                    heldModel: TeamTriageRules.maintains(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: team.generation)) && !offline ? model : nil,
+                    onHeldChat: { onOpenConversation($0) },
                     onExample: { example in
                         Task { if let id = await workspace.openBotDM(bot, example: example) { onOpenConversation(id) } }
                     }, unverified: model?.botsUnverified == true)

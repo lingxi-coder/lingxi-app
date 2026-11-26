@@ -80,7 +80,9 @@ struct FriendBotsView: View {
                         onMessage: { Task { if let id = await workspace.openBotDM(bot) { onOpenBot(id) } } },
                         onStopSharing: { stopping = bot },
                         onList: TeamSharedListRules.canOpen(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: chat.generation)) && !offline ? { listOf = bot } : nil,
-                        onTriageLog: TeamTriageRules.maintains(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: chat.generation)) && bot.autoReply != nil && !triageDenied.contains(bot.sharedBotId) && !offline ? { triageOf = bot } : nil)
+                        onTriageLog: TeamTriageRules.maintains(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: chat.generation)) && bot.autoReply != nil && !triageDenied.contains(bot.sharedBotId) && !offline ? { triageOf = bot } : nil,
+                        heldModel: TeamTriageRules.maintains(bot, viewer: TeamMemberRef(uid: workspace.uid ?? "", generation: chat.generation)) && !offline ? model : nil,
+                        onHeldChat: { onOpenBot($0) })
                 }
                 if empty {
                     // What is empty, and what to do about it (U9): the hint is the body here, so it is not repeated below.

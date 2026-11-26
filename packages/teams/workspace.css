@@ -608,6 +608,18 @@
 .tw-triage-row > .tw-tag { flex: none; }
 .tw-triage-row > .tw-tag[data-outcome='replied'] { color: var(--tw-online); }
 .tw-triage-row > .tw-tag[data-outcome='failed'] { color: var(--tw-danger); }
+/* Replies a Bot made that wait for its maintainer (Bot v3, B6): the Bot's words as they will be posted, the time left, and the decision; and the list of them across Chats. */
+.tw-scope .team-bot-run.tw-held, .tw-dialog .team-bot-run.tw-held { width: 100%; max-width: 560px; gap: 6px; }
+.tw-held-text { margin: 0; max-inline-size: 100%; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; color: var(--tw-fg); }
+.tw-held-text.tw-md { white-space: normal; }
+.tw-held-document { display: flex; align-items: center; gap: 4px; }
+.tw-scope .tw-held-edit, .tw-dialog .tw-held-edit, .tw-embed .tw-held-edit { min-height: 80px; max-height: 40vh; font-size: 13px; line-height: 1.5; }
+.tw-held-entry .tw-badge { margin-inline-start: 6px; }
+.tw-held-list { min-inline-size: 0; max-height: 70vh; overflow: auto; }
+.tw-held-group { display: flex; flex-direction: column; gap: 6px; }
+.tw-held-group-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tw-held-group-head h3 { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.tw-held-cards { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .tw-task-export { padding-block: .5rem 1rem; }
 .tw-task-export a { display: inline-block; padding-block: .4rem; }
 /* U6: on a touch screen no control is smaller than 44 x 44. Last in the file on purpose: the base rules of the same weight (`.tw-embed button`, `.tw-mention`, `.tw-target`) come before it and so give way. */

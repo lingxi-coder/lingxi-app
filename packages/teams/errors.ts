@@ -153,11 +153,11 @@ export function messageErrorText(code: string, locale: string): string {
     case 'REPLY_APPROVED':
     case 'REPLY_REJECTED':
     case 'REPLY_NOT_HELD':
-      return t('tw_error_reply_decided');
+      return t('teams_error_reply_decided');
     case 'REPLY_EXPIRED':
-      return t('tw_error_reply_expired');
+      return t('teams_error_reply_expired');
     case 'REPLY_SUPERSEDED':
-      return t('tw_error_reply_superseded');
+      return t('teams_error_reply_superseded');
     case 'BOT_MAINTAINER_CHANGED':
       return t('tw_error_handed_over');
     case 'TRANSFER_PENDING':
@@ -191,6 +191,24 @@ export function messageErrorText(code: string, locale: string): string {
       return t('teams_message_failed');
     default:
       return t('teams_error_sync_failed');
+  }
+}
+
+/**
+ * What a decision on a held reply that did not go through says: the codes every message command can fail with, and the three of its own (the Bot is not theirs
+ * to decide for, the reply is gone, and `REPLY_NOT_POSTED`, which the service never sends: a client says it of an approval that was taken and posted nothing).
+ */
+export function heldReplyErrorText(code: string, locale: string): string {
+  const t = teamsText(locale);
+  switch (code) {
+    case 'MAINTAINER_REQUIRED':
+      return t('teams_error_held_maintainer');
+    case 'TASK_REQUIRED':
+      return t('teams_error_reply_gone');
+    case 'REPLY_NOT_POSTED':
+      return t('teams_held_revoked');
+    default:
+      return messageErrorText(code, locale);
   }
 }
 

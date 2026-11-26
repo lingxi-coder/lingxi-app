@@ -97,6 +97,8 @@ private sealed interface StreamItem {
     data class Local(val intent: JSONObject, val kind: String) : StreamItem {
         override val key get() = "$kind:" + (intent.optJSONObject("payload") ?: intent).getString("changeId")
     }
+    /** A reply of a Bot that waits for the person who maintains it and that nobody asked for: it has no task in the Chat, so it is a row of its own. */
+    data class Held(val row: TeamHeldRow) : StreamItem { override val key get() = "held:${row.reply.taskId}" }
 }
 
 /**
@@ -302,6 +304,7 @@ private fun ConversationBody(
     val conversationId = conversation.id
     val cache = messaging.cache
     val bots = messaging.bots
+    val viewer = TeamMemberRef(uid, team.generation)
     val thread = cache?.threads?.get(conversationId)
     val messages = thread?.messages.orEmpty()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -350,7 +353,15 @@ private fun ConversationBody(
     val rows = remember(streamMessages, start, effectiveAnchor, uid, minute) { TeamsStreamLogic.buildStreamRows(streamMessages.drop(start), effectiveAnchor, uid, minute, zone) }
     val byId = remember(messages) { messages.associateBy { it.id } }
     val outbox = cache?.outbox.orEmpty().filter { (it.optJSONObject("payload") ?: it).optString("conversationId") == conversationId }
-    val stream: List<StreamItem> = remember(rows, byId, outbox, start, disclosure, thread?.hasEarlier) {
+    // The replies that wait for this person, who maintains a Bot of this Chat: read when the Chat opens, whenever the signals, the Chat's messages or the tasks that wait say that
+    // something moved, and when the connection returns, and only then. Nobody else reads them.
+    val heldBots = TeamHeldRules.bots(conversation, bots, viewer).map { it.sharedBotId }
+    val awaiting = messaging.tasks.filter { it.state == "awaiting_approval" }.map { it.taskId }
+    val held = rememberTeamHeld(workspace.messagingModel, heldBots, conversationId, online, "${messaging.botSignals}|${conversation.lastSeq}|${awaiting.joinToString(",")}")
+    val heldList = held.list
+    // A reply nobody asked for has no task in the Chat: it is a row of its own at the end, as the stream is.
+    val heldOrphans = remember(heldList.rows, messaging.tasks) { TeamHeldRules.place(heldList.rows, messaging.tasks.mapTo(mutableSetOf()) { it.taskId }).orphans }
+    val stream: List<StreamItem> = remember(rows, byId, outbox, start, disclosure, thread?.hasEarlier, heldOrphans) {
         buildList {
             // A friend chat omits the Teams disclosure, as on iOS and Web.
             if (start > 0 || thread?.hasEarlier == true) add(StreamItem.Earlier) else if (disclosure) add(StreamItem.Notice)
@@ -359,6 +370,7 @@ private fun ConversationBody(
                 StreamRow.Unread -> add(StreamItem.NewMessages)
                 is StreamRow.Message -> byId[row.message.id]?.let { add(StreamItem.Msg(it, row.grouped)) }
             }
+            heldOrphans.forEach { add(StreamItem.Held(it)) }
             outbox.forEach { add(StreamItem.Local(it, "pending")) }
         }
     }
@@ -389,6 +401,7 @@ private fun ConversationBody(
         if (wasAtBottom) { listState.scrollToItem(maxOf(0, stream.lastIndex)); unseen = 0 } else unseen += arrived
     }
     LaunchedEffect(atBottom) { if (atBottom && thread?.hasLater != true) unseen = 0 }
+    LaunchedEffect(heldOrphans.size) { if (initial && listState.isAtBottom()) listState.scrollToItem(maxOf(0, stream.lastIndex)) }
 
     val visibleKeys by remember(listState) {
         derivedStateOf {
@@ -429,7 +442,6 @@ private fun ConversationBody(
         else -> personName(message.authorUid)
     }
     val copyText = rememberCopyToClipboard(stringResource(R.string.teams_clip_message))
-    val viewer = TeamMemberRef(uid, team.generation)
     // Why the Bot of a Bot DM stayed silent, for the person who maintains it: read from the Bot's log for this Chat, once, as soon as a task of the Bot has, and only
     // while there is a connection to read it over (it is read again when the connection returns).
     val reasonBot = TeamTriageRules.reasonBot(conversation, bots, viewer)
@@ -492,6 +504,7 @@ private fun ConversationBody(
                                 onEdit = { editingId = it.id; setDraft(draft.copy(replyToId = null)) },
                                 onRecall = onRecall, onCopy = { copyText(it.text) }, onArtifact = { workspace.messagingModel.openArtifact(it) }, onRefreshTask = { workspace.messagingModel.refreshTask(it) }, onCancelTask = { workspace.messagingModel.cancelTask(it) }, onReviewTask = { reviewing = it },
                                 onDecideWait = { waitId, taskId, approve, ids -> workspace.messagingModel.decideWait(waitId, taskId, approve, ids) },
+                                held = held,
                             )
                             if (item.message.id == receiptMessage) Text(
                                 stringResource(R.string.inbox_read_receipt),
@@ -500,6 +513,7 @@ private fun ConversationBody(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
+                        is StreamItem.Held -> TeamHeldCell(item.row, heldList.now, held, bots.firstOrNull { it.sharedBotId == item.row.reply.sharedBotId }, strings)
                         is StreamItem.Local -> LocalCommandRow(item, tick, onCopy = copyText, onDiscard = {
                             workspace.messagingModel.discard((item.intent.optJSONObject("payload") ?: item.intent).getString("changeId"))
                         })
@@ -522,6 +536,8 @@ private fun ConversationBody(
                 shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer, shadowElevation = 4.dp,
             ) { JumpPill(unseen) }
         }
+        // The replies that wait could not be read: the cards would show no draft and no buttons, so say why.
+        if (online && heldList.status == TeamHeldList.Status.Failed && heldList.error != null && heldList.error != messaging.error) TeamHeldReadFailure(heldList.error, onRetry = held::reload)
         if (conversation.kind == "bot_dm") bots.firstOrNull { it.sharedBotId == conversation.sharedBotId }?.let { bot ->
             val lock = TeamsComposeLogic.composerLock(uid, conversation.kind, conversation.participants, bots, messaging.botsLoaded, messaging.botsFailed, conversation.readers)
             TeamBotMemberInfo(
@@ -604,6 +620,7 @@ private fun MessageCell(
     onReply: (TeamMessage) -> Unit, onEdit: (TeamMessage) -> Unit, onRecall: (TeamMessage) -> Unit, onCopy: (TeamMessage) -> Unit,
     onArtifact: (String) -> Unit, onRefreshTask: (String) -> Unit, onCancelTask: (String) -> Unit, onReviewTask: (String) -> Unit,
     onDecideWait: (waitId: String, taskId: String, approve: Boolean, ids: TeamDecisionIds) -> Unit,
+    held: TeamHeldKeeper,
 ) {
     val message = item.message
     var menu by remember { mutableStateOf(false) }
@@ -750,7 +767,10 @@ private fun MessageCell(
                 val taskIds = message.taskId?.let { listOf(it) } ?: message.taskIds
                 taskIds.forEach { taskId ->
                     val task = messaging.tasks.firstOrNull { it.taskId == taskId }
-                    if (task != null) {
+                    // A reply that waits for this person to let it go is shown with its words and its decisions; for anyone else, and while it is not read, the task says it waits.
+                    val heldRow = task?.takeIf { it.state == "awaiting_approval" }?.let { held.list.row(it.taskId) }
+                    if (task != null && heldRow != null) TeamHeldCard(heldRow, held.list.now, held, botName = bots.firstOrNull { it.sharedBotId == task.sharedBotId }?.name ?: strings.bot)
+                    else if (task != null) {
                         val taskBot = bots.firstOrNull { it.sharedBotId == task.sharedBotId }
                         val answerable = TeamTaskActions.answerableWait(message, messaging.tasks, viewer, pendingWaits) != null
                         TeamTaskCard(
@@ -791,7 +811,7 @@ private fun Modifier.teamBubble(own: Boolean, grouped: Boolean): Modifier {
 
 /** "Bot" beside a Bot's name, on its secondary container so the two never read as one word. */
 @Composable
-private fun BotTag() {
+internal fun BotTag() {
     Text(
         stringResource(R.string.teams_bot_tag), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSecondaryContainer, maxLines = 1,
         modifier = Modifier.clip(RoundedCornerShape(4.dp)).background(MaterialTheme.colorScheme.secondaryContainer).padding(horizontal = 4.dp, vertical = 1.dp),

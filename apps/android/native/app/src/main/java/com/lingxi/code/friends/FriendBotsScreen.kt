@@ -30,6 +30,8 @@ import com.lingxi.code.teams.TeamSharedListRules
 import com.lingxi.code.teams.TeamTriageRules
 import com.lingxi.code.teams.TeamMember
 import com.lingxi.code.teams.StopSharingDialog
+import com.lingxi.code.teams.TeamHeldEntry
+import com.lingxi.code.teams.TeamMessagingModel
 import com.lingxi.code.teams.TeamMessagingState
 import com.lingxi.code.teams.TeamsMessageState
 import com.lingxi.code.teams.TeamsConnectionMenu
@@ -43,7 +45,8 @@ import com.lingxi.code.theme.BotAvatar
  * first and then runs [onStop] (the Teams `pauseSharedBot`). It offers no other Bot management, and an Android phone cannot publish a Bot.
  *
  * [onTriageLog] opens the auto-reply log of one of the person's own Bots that answers on its own; [triageDenied] holds the Bots the service said the person does not
- * maintain after all, whose entry is not offered again.
+ * maintain after all, whose entry is not offered again. [heldModel] reads the replies of the person's own Bots that wait for them to let them go ("Replies waiting"), and
+ * [onHeldChat] opens the Bot chat one of them was made in.
  *
  * [members] is the pair's two-person directory, for the maintainer's name; [generation] is the friendship's. A Bot command that ends the chat
  * (`messaging.revoked`) is handled by the chat that hosts this page, which replaces the whole area.
@@ -63,6 +66,8 @@ internal fun FriendBotsScreen(
     onList: (TeamBotCard) -> Unit = {},
     onTriageLog: (TeamBotCard) -> Unit = {},
     triageDenied: Set<String> = emptySet(),
+    heldModel: TeamMessagingModel? = null,
+    onHeldChat: (String) -> Unit = {},
 ) {
     val online = !messaging.offline
     // The read has not settled: it failed, or it is still out. A settled empty list is the empty state.
@@ -90,7 +95,8 @@ internal fun FriendBotsScreen(
             items(messaging.bots, key = { "bot-${it.sharedBotId}" }) { bot ->
                 FriendBotRow(bot, ownerName(bot, members, uid), uid, generation, online, onMessage = { onMessage(bot.sharedBotId) }, onStop = { onStop(bot) },
                     onList = if (TeamSharedListRules.canOpen(bot, uid, generation)) ({ onList(bot) }) else null,
-                    onTriageLog = if (TeamTriageRules.maintains(bot, TeamMemberRef(uid, generation)) && bot.autoReply != null && bot.sharedBotId !in triageDenied) ({ onTriageLog(bot) }) else null)
+                    onTriageLog = if (TeamTriageRules.maintains(bot, TeamMemberRef(uid, generation)) && bot.autoReply != null && bot.sharedBotId !in triageDenied) ({ onTriageLog(bot) }) else null,
+                    heldModel = heldModel.takeIf { TeamTriageRules.maintains(bot, TeamMemberRef(uid, generation)) }, heldSignals = messaging.botSignals, onHeldChat = onHeldChat)
             }
             item(key = "note") {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -113,13 +119,14 @@ private fun ownerName(bot: TeamBotCard, members: List<TeamMember>, uid: String):
 
 /**
  * One Bot of the friendship: the Teams Bot card without its audience and quota lines, which a friendship does not have (D21). Message needs a
- * usable Bot and a connection; the auto-reply log is the maintainer's, for a Bot that answers on its own; Stop sharing is the person's own published Bot only, and asks first (D23). The (up to three) actions wrap under each
- * other rather than run out of the row at a large font size.
+ * usable Bot and a connection; the auto-reply log is the maintainer's, for a Bot that answers on its own, and so are the replies that wait for them; Stop sharing is the person's own
+ * published Bot only, and asks first (D23). The (up to five) actions wrap under each other rather than run out of the row at a large font size.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun FriendBotRow(
     bot: TeamBotCard, owner: String, uid: String, generation: Long, online: Boolean, onMessage: () -> Unit, onStop: () -> Unit, onList: (() -> Unit)? = null, onTriageLog: (() -> Unit)? = null,
+    heldModel: TeamMessagingModel? = null, heldSignals: Long = 0, onHeldChat: (String) -> Unit = {},
 ) {
     var confirm by remember(bot.sharedBotId, bot.revision, bot.state) { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp).testTag(FriendsTags.bot(bot.sharedBotId)), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -133,6 +140,7 @@ private fun FriendBotRow(
                 TextButton(enabled = online && bot.selectable, onClick = onMessage, modifier = Modifier.testTag(FriendsTags.botMessage(bot.sharedBotId))) { Text(stringResource(R.string.teams_bot_message)) }
                 if (onList != null) TextButton(enabled = online, onClick = onList, modifier = Modifier.testTag("teams.bot.list.${bot.sharedBotId}")) { Text(stringResource(R.string.teams_list_open)) }
                 if (onTriageLog != null) TextButton(enabled = online, onClick = onTriageLog, modifier = Modifier.testTag("teams.bot.triage.${bot.sharedBotId}")) { Text(stringResource(R.string.teams_triage_title)) }
+                if (heldModel != null) TeamHeldEntry(bot, heldModel, heldSignals, online, onHeldChat)
                 if (bot.canPause(uid, generation)) {
                     TextButton(enabled = online, onClick = { confirm = true }, modifier = Modifier.testTag(FriendsTags.botStop(bot.sharedBotId))) { Text(stringResource(R.string.friends_share_bot_stop)) }
                 }

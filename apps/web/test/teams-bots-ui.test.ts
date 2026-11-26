@@ -331,6 +331,8 @@ async function openChat(context: Parameters<Parameters<typeof scenario>[1]>[0], 
     sent.push(structuredClone(command));
     if (command.action === 'listTasks') return { tasks: tasks() } as T;
     if (command.action === 'listSharedBots') return { bots: fake.bots } as T;
+    // The maintainer's view of the Chat also reads the replies of their Bot that wait for them; none do here.
+    if (command.action === 'listHeldReplies') return { replies: [] } as T;
     return handle(command) as T;
   };
   const messages = [message(1, { text: 'Plan my trip', author: { kind: 'user', uid: 'alice' } }), message(2, { text: 'Which city?', author: botAuthor, waitId: 'wait-test', taskId: 'task-test', ...thread.second }), ...(thread.then ?? [])];

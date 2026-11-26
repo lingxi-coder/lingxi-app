@@ -486,6 +486,25 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
             mutable.update { it.copy(triageReasons = it.triageReasons + found) }
         }
     }
+    /**
+     * The replies of a Bot that wait for the person who maintains it, as it made them (anyone else is refused: `MAINTAINER_REQUIRED`): in one Chat when [conversationId] is given,
+     * else in every Chat of the Team. The service keeps a held reply where only its maintainer can read it, so this is the one way a client sees one.
+     */
+    suspend fun listHeldReplies(sharedBotId: String, conversationId: String? = null): List<TeamHeldReply> = onModel {
+        TeamHeldAnswer.parse(execute("listHeldReplies", TeamHeldRules.listPayload(sharedBotId, conversationId), lifecycle))
+    }
+    /**
+     * Lets a held reply go, as the Bot made it or with [text] as the maintainer changed it to. [commandId] is made once per decision by the caller: sending it again repeats the same
+     * command, so an approval whose answer was lost is answered again and not decided twice. A reply that is no longer held is refused with `REPLY_APPROVED`, `REPLY_REJECTED`,
+     * `REPLY_EXPIRED` or `REPLY_SUPERSEDED`, for whichever came first.
+     */
+    suspend fun approveReply(taskId: String, text: String?, commandId: String): TeamHeldDecision = onModel {
+        TeamHeldDecision.parse(call(executionCommand("approveReply", TeamHeldRules.approvePayload(taskId, text), commandId), lifecycle))
+    }
+    /** Drops a held reply: nothing is posted. Refused like an approval when the reply is no longer held. */
+    suspend fun rejectReply(taskId: String, commandId: String): TeamHeldDecision = onModel {
+        TeamHeldDecision.parse(call(executionCommand("rejectReply", TeamHeldRules.rejectPayload(taskId), commandId), lifecycle))
+    }
     suspend fun writeList(sharedBotId: String, operationId: String, expectedDataRevision: Long, changes: List<TeamSharedListChange>) {
         onModel { execute("writeList", JSONObject().put("sharedBotId", sharedBotId).put("operationId", operationId).put("expectedDataRevision", expectedDataRevision).put("changes", changes.json()), lifecycle) }
     }

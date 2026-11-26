@@ -713,9 +713,9 @@ and its gate does not list the commands).
 - Contract. `execution-vectors.json` has `awaiting_approval` among `taskStates`, `approvalOutcomes`, and 24 rows for `listHeldReplies`,
   `approveReply`, `rejectReply` and for `holdReply` from a member (`reject-holdReply-member`: it is the host's command, as `recordTriage` is).
   `packages/teams/held-replies.ts` has the client calls (`readHeldReplies`, `approveHeldReply`, `rejectHeldReply`) and the decoders the
-  approval screens (B6b) build on; the native clients have the validators (`TeamExecutionContract`) and the state and outcome tables, and
+  approval screens build on; the native clients have the validators (`TeamExecutionContract`) and the state and outcome tables, and
   show a held task as "Waiting for approval" with the sentence that its maintainer reads it first. The approval screens of Web, iOS and
-  Android are B6b.
+  Android are B6b, below.
 - Index. One field override (`firestore.teams.indexes.json`, to be deployed): `heldReplies.result` is not indexed (the draft's text and document
   are never queried). The list reads by one field (`sharedBotId` or `conversationId`) so that no composite index is needed.
 - Tests: `apps/firebase/test/held-replies.test.mjs` (schemas, codes, vectors, the trigger's rule), `held-replies.emulator.test.mjs` (the state
@@ -724,6 +724,53 @@ and its gate does not list the commands).
   (the control, the log words); `apps/web/test/teams-held-replies.test.ts`, `teams-bots-ui.test.ts`, `teams-triage-log-ui.test.ts`; iOS
   `TeamBotTests`, `TeamTriageLogTests`, `TeamsTests`, `FriendLinkTests`; Android `TeamBotsTest`, `TeamTriageLogTest`, `TeamsBotTextTest`,
   `FriendLinkTest`.
+
+### The maintainer's approval screens (Bot v3 B6b)
+
+The three commands above, as screens on Web and Desktop (`packages/teams`, one implementation), iOS and Android. Only the Bot's maintainer
+is shown any of it; every other member keeps seeing a task that "Waits for approval". No new request shape: the vectors did not change.
+
+- Where. (1) In the Chat, in the place of the task's card, for a task in `awaiting_approval` of a Bot the viewer maintains: the draft (as
+  Markdown, with the title of the document when it has one), the time left, and Approve (posts it as it is), Edit (an editor with the draft,
+  Send and Cancel) and Reject (an in-app confirmation, never the browser's). (2) A reply nobody asked for has no task in the Chat's list (the
+  service keeps such a task out of every member's), so it is a row of its own after the last message, from the Bot that made it, tagged
+  "Auto-reply". (3) The Bot's card, where the log button is: "Replies waiting" with the number, only while there are some, opens the list of
+  the Bot's replies in every Chat, grouped by Chat (`conversationTitle`), each with the same card and "Open chat". (4) The push opens the Chat
+  by its route and the Chat reads the replies when it opens, so the card is there.
+- Reading. `listHeldReplies` is asked for each Bot of the Chat that the viewer maintains (membership and generation as now held), with
+  `conversationId` in a Chat and without it on the Bot card, and only by a maintainer and only while there is a connection. It is read when
+  the screen opens, whenever the Chat's tasks may have moved (the Bot signals, the Chat's last sequence, the set of tasks that await approval),
+  when the connection returns and when a reply runs out; never on a timer of its own, so no oftener than the tasks are. One read at a time:
+  a request that comes during one is answered by one more read after it. A reply this version cannot read is left out and the rest are shown;
+  a document that cannot be read leaves its reply out (nobody approves what they did not see); an answer that is not a list is `INVALID_DATA`.
+  `MAINTAINER_REQUIRED` from every Bot means the person does not maintain it any more: the entry and the list go away.
+- Time. The card says how long is left (minutes, hours, days, rounded up, at least a minute) and is brought up to date every 30 seconds and
+  at the end of the first reply that waits (read again 0.5 s after it). A reply whose time ran out on the clock shows as dropped, without
+  buttons, even before the service is asked; the client's clock is only ever used for this and for the line, the service decides.
+- Decisions. Each is one command, with a command id made once per decision and reused by every retry of it, so an approval whose answer was
+  lost is not decided twice; Approve and Send (with other text) are different decisions. Sending trims the text and needs 1 to 8192 UTF-8
+  bytes; text equal to the Bot's once trimmed is sent as no text, so the reply is not recorded as changed. A decision on its way disables the
+  card's buttons. Once the service took a decision the Chat's tasks are read again. An approval answered with `declined` and `revoked` posted
+  nothing: the card says so (`REPLY_NOT_POSTED`, a client-only code) and stays until closed.
+- Errors. Every code has words (`teams_error_reply_*`, `teams_error_held_maintainer`, `teams_held_revoked`). A reply the service says is not
+  there to decide (`REPLY_APPROVED`, `REPLY_REJECTED`, `REPLY_NOT_HELD`, `REPLY_EXPIRED`, `REPLY_SUPERSEDED`, `TASK_REQUIRED`,
+  `MAINTAINER_REQUIRED`) stays on screen saying what became of it, with Close, and is not tried again; a reply that leaves the list for no such
+  reason (decided on another screen, dropped for a newer message) simply goes, unless a decision on it is on its way or its time ran out
+  while it was shown. Any other failure leaves the card as it was, with the message, and Retry is the same button. A failed read keeps the
+  rows that were read and says so, with Retry (Chat banner and list), unless the Chat is already saying the same.
+- Code. Web and Desktop: `held-replies.ts` (rules and `HeldRepliesBoard`), `held-hooks.ts` (`useHeldReplies`), `HeldReplyCard.tsx`,
+  `HeldRepliesDialog.tsx`, wired in `TeamConversationView.tsx`, `BotDirectory.tsx` (Teams) and `FriendBotsPanel.tsx`; `heldReplyErrorText`
+  in `errors.ts`. iOS: `TeamHeldReplies.swift` (Foundation only: decoding, rules, `TeamHeldBoard`), `TeamHeldViews.swift`, the three model
+  calls in `TeamMessagingModel.swift`, wired in `TeamConversationView.swift`, `TeamMessageViews.swift`, `TeamBotViews.swift`,
+  `TeamDetailsPage.swift`, `FriendBotsView.swift`. Android: `TeamHeldReplies.kt` (the same, with `TeamHeldBoard`), `TeamHeldViews.kt`, the
+  three model calls in `TeamMessagingModel.kt`, wired in `TeamConversationScreen.kt`, `TeamBotComponents.kt`, `TeamDetailsScreens.kt`,
+  `TeamsTab.kt`, `friends/FriendBotsScreen.kt`, `friends/FriendChatScreen.kt`. Words: `teams_held_*` in `resources/translations/*.json`
+  (`tw_error_reply_*` became `teams_error_reply_*`).
+- Not here. The Desktop's local Bot editor is unchanged (it sets the policy, B6a); the Desktop's own Bots tab has no "Replies waiting" yet (the
+  Chat shows the cards). A friend chat itself has no Bot and reads nothing; a friendship's Bot DM is a Chat like any other.
+- Tests: `apps/web/test/teams-held-replies-ui.test.ts` (the board, the card, the Chat, the Bot card and the list, the words), iOS
+  `TeamHeldRepliesTests` (Foundation-only, run with the macOS logic runner), Android `TeamHeldRepliesTest`. The screens were not run on a
+  simulator or a device.
 
 ## What a Bot may use of its maintainer's Desktop (Bot scope)
 

@@ -89,9 +89,13 @@ internal fun rememberTeamBotLinkOpener(): (String) -> Unit {
 
 /** "in 4 minutes" in the UI language, for a wait's expiry. */
 @Composable
-internal fun teamWaitExpiryText(expiresAt: Long): String {
+internal fun teamWaitExpiryText(expiresAt: Long): String = teamExpiryText(expiresAt, System.currentTimeMillis())
+
+/** "in 4 minutes" in the UI language: how long until [expiresAt] as of [now], both in epoch milliseconds. */
+@Composable
+internal fun teamExpiryText(expiresAt: Long, now: Long): String {
     val locale = LocalConfiguration.current.locales[0]
-    val (value, unit) = TeamTaskActions.expiry(expiresAt, System.currentTimeMillis())
+    val (value, unit) = TeamTaskActions.expiry(expiresAt, now)
     return remember(locale, value, unit) {
         RelativeDateTimeFormatter.getInstance(ULocale.forLocale(locale)).format(value.toDouble(), RelativeDateTimeFormatter.Direction.NEXT, when (unit) {
             TeamTaskActions.ExpiryUnit.MINUTES -> RelativeDateTimeFormatter.RelativeUnit.MINUTES
@@ -281,13 +285,15 @@ internal fun TeamApprovalCard(approval: TeamListApproval, waitId: String, state:
 /**
  * [onStopSharing] is the maintainer's Stop sharing (confirmed first); [onList], when set, opens the Bot's shared list; [onTriageLog], when set, opens the Bot's
  * auto-reply log (set only for its maintainer, and only for a Bot that answers on its own); [onExample], when set, starts a chat with one of the Bot's example
- * requests (see [TeamBotMemberInfo]).
+ * requests (see [TeamBotMemberInfo]). [heldModel], when set (only for the Bot's maintainer), reads the replies of the Bot that wait for them to let them go and offers "Replies
+ * waiting" while there are some; [heldSignals] counts the service's Bot change signals, and [onHeldChat] takes the person to the Chat a reply was made in.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun TeamBotCardView(
     bot: TeamBotCard, ownerName: String, uid: String, generation: Long, enabled: Boolean, onMessage: () -> Unit, onStopSharing: () -> Unit,
     modifier: Modifier = Modifier, onList: (() -> Unit)? = null, onExample: ((String) -> Unit)? = null, onTriageLog: (() -> Unit)? = null,
+    heldModel: TeamMessagingModel? = null, heldSignals: Long = 0, onHeldChat: ((String) -> Unit)? = null,
 ) {
     var confirm by remember(bot.sharedBotId, bot.revision, bot.state) { mutableStateOf(false) }
     Column(modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -299,11 +305,12 @@ internal fun TeamBotCardView(
                 Text("${botAvailabilityText(bot)} · ${stringResource(R.string.teams_bot_owner_fmt, ownerName)}", style = MaterialTheme.typography.bodySmall)
                 Text(stringResource(if (bot.usePolicy.getString("mode") == "all") R.string.teams_bot_use_all else R.string.teams_bot_use_listed), style = MaterialTheme.typography.bodySmall)
                 TeamBotMemberInfo(bot, enabled, onExample)
-                // Up to four actions: they wrap under each other rather than run out of the card at a large font size.
+                // Up to five actions: they wrap under each other rather than run out of the card at a large font size.
                 FlowRow {
                     TextButton(enabled = enabled && bot.selectable, onClick = onMessage) { Text(stringResource(R.string.teams_bot_message)) }
                     if (onList != null) TextButton(enabled = enabled, onClick = onList, modifier = Modifier.testTag("teams.bot.list.${bot.sharedBotId}")) { Text(stringResource(R.string.teams_list_open)) }
                     if (onTriageLog != null) TextButton(enabled = enabled, onClick = onTriageLog, modifier = Modifier.testTag("teams.bot.triage.${bot.sharedBotId}")) { Text(stringResource(R.string.teams_triage_title)) }
+                    if (heldModel != null && onHeldChat != null) TeamHeldEntry(bot, heldModel, heldSignals, enabled, onHeldChat)
                     if (bot.canPause(uid, generation)) TextButton(enabled = enabled, onClick = { confirm = true }) { Text(stringResource(R.string.friends_share_bot_stop)) }
                 }
             }

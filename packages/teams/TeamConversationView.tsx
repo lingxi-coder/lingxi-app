@@ -13,7 +13,7 @@ import { botAvailabilityText } from './BotMemberDetails';
 import { BotDatasetTaskSettings } from './BotDatasetTaskSettings.js';
 import { snippet } from './compose.js';
 import { Composer, composerLock } from './Composer';
-import { messageErrorText } from './errors.js';
+import { heldReplyErrorText, messageErrorText } from './errors.js';
 import { ApprovalCard } from './ApprovalCard';
 import { ConversationData } from './ConversationData.js';
 import { PrivatePreviewRequest } from './PrivatePreviewRequest.js';
@@ -32,6 +32,9 @@ import { BotScopeDialog, scopedBots } from './BotScopeDialog';
 import { TriageLogDialog } from './TriageLogDialog';
 import { useTriageReasons } from './triage-hooks.js';
 import { maintainsBot, triageBots } from './triage-log.js';
+import { HeldReplyCard } from './HeldReplyCard';
+import { useHeldReplies } from './held-hooks.js';
+import { heldReplyBots, placeHeld, type HeldRow } from './held-replies.js';
 import { buildStreamRows, formatClock, placeTasks, visibleStart, WINDOW_SIZE } from './stream.js';
 import { Avatar, ConversationLead, Dialog, Icon, platformChip, platformNotice, useIsoLayoutEffect, type RenderAvatar, type RenderMarkdown } from './ui';
 import { conversationLabel, unreadCount, type Identity, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';
@@ -204,6 +207,12 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   const reasonBot = !friend && conversationBot ? snapshot.bots.find(bot => bot.sharedBotId === conversationBot && maintainsBot(bot, uid, team.generation)) : undefined;
   const reasons = useTriageReasons(workspace.api, scope, reasonBot ? { sharedBotId: reasonBot.sharedBotId, conversationId: conversation.id } : undefined,
     reasonBot ? runs.tasks.filter(task => task.state === 'declined' && task.sharedBotId === reasonBot.sharedBotId).map(task => task.taskId) : [], !snapshot.offline);
+  // The replies of the Bots this person maintains that wait for them to be let go (Bot v3, B6): read when the Chat opens, whenever a task of it starts or stops waiting for approval, and
+  // whenever the service says a Bot or the Chat changed, since a reply nobody asked for is no task of the Chat's list.
+  const heldBots = friend ? [] : heldReplyBots(conversation, snapshot.bots, uid, team.generation);
+  const held = useHeldReplies(workspace.api, scope, heldBots.length ? { sharedBotIds: heldBots.map(bot => bot.sharedBotId), conversationId: conversation.id } : undefined,
+    { online: !snapshot.offline, watch: runs.tasks.filter(task => task.state === 'awaiting_approval').map(task => task.taskId).join(','), onDecided: runs.refresh });
+  const placedHeld = useMemo(() => placeHeld(held.view.rows, new Set(runs.tasks.map(task => task.taskId))), [held.view.rows, runs.tasks]);
   // Answer mode ends by itself once the task is not waiting for this viewer on that question any more.
   const answerTask = answerWait ? runs.tasks.find(task => task.state === 'waiting' && task.wait?.waitId === answerWait && task.wait.kind === 'human_input' && isViewer(task.wait.recipient)) : undefined;
   useEffect(() => { if (answerWait && !answerTask) setAnswerWait(undefined); }, [answerWait, answerTask]);
@@ -225,8 +234,14 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   // A task gets a reply message only once it is delivered. Until then (queued, running, failed, expired, …)
   // it has no message to sit under, so it is shown as its own Bot row placed by time among the messages.
   const unanswered = useMemo(() => placeTasks(visible, runs.tasks.filter(task => !task.replyId).reverse(), start > 0), [visible, runs.tasks, start]);
-  const botRun = (task: TeamTaskView) => <BotRun task={task} api={workspace.api} scope={scope} locale={locale} renderMarkdown={renderMarkdown} snapshot={snapshot} reason={reasons.get(task.taskId)}
-    onReply={answerable(task) ? startAnswer : undefined} onChanged={runs.refresh} />;
+  const heldCard = (row: HeldRow) => <HeldReplyCard row={row} now={held.view.now} locale={locale} renderMarkdown={renderMarkdown}
+    onApprove={text => held.approve(row.reply.taskId, text)} onReject={() => held.reject(row.reply.taskId)} onDismiss={() => held.dismiss(row.reply.taskId)} />;
+  // The maintainer reads the reply their Bot made where everyone else is told it waits for approval; the others see that line.
+  const botRun = (task: TeamTaskView) => {
+    const row = task.state === 'awaiting_approval' ? placedHeld.byTask.get(task.taskId) : undefined;
+    return row ? heldCard(row) : <BotRun task={task} api={workspace.api} scope={scope} locale={locale} renderMarkdown={renderMarkdown} snapshot={snapshot} reason={reasons.get(task.taskId)}
+      onReply={answerable(task) ? startAnswer : undefined} onChanged={runs.refresh} />;
+  };
   const taskRow = (task: TeamTaskView) => <TaskRow key={`task:${task.taskId}`} task={task} author={botIdentity(task.sharedBotId)} locale={locale} renderAvatar={renderAvatar}>
     <div className="tw-embed">{botRun(task)}</div>
   </TaskRow>;
@@ -373,6 +388,8 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
     {snapshot.actionError && snapshot.actionError !== snapshot.messagingError ? <p className="tw-banner" role="alert" data-kind="error">{messageErrorText(snapshot.actionError, locale)}</p> : null}
     <CreationBanner workspace={workspace} snapshot={snapshot} locale={locale} />
     {runs.error ? <p role="alert" className="tw-banner">{messageErrorText(runs.error, locale)}</p> : null}
+    {held.view.status === 'failed' && held.view.error && held.view.error !== runs.error
+      ? <div role="alert" className="tw-banner" data-kind="error"><span>{heldReplyErrorText(held.view.error, locale)}</span><button type="button" className="tw-link" onClick={held.reload}>{t('common_retry')}</button></div> : null}
 
     <div className="tw-stream-wrap tw-chat-thread">
       <div ref={scroller} className="tw-stream" role="log" aria-label={t('tw_messages')} tabIndex={0} onScroll={measure}>
@@ -424,6 +441,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
             </MessageItem>{placed?.map(taskRow)}</Fragment>;
           })}
           {unanswered.tail.map(taskRow)}
+          {placedHeld.orphans.map(row => <HeldReplyRow key={`held:${row.reply.taskId}`} row={row} author={botIdentity(row.reply.sharedBotId)} renderAvatar={renderAvatar} locale={locale}>{heldCard(row)}</HeldReplyRow>)}
           {snapshot.pending.map(intent => {
             const payload = pendingPayload(intent);
             const operation = 'operation' in payload ? payload.operation : 'create';
@@ -479,6 +497,18 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
       </div>
     </Dialog> : null}
   </section>;
+}
+
+/** The row of a reply nobody asked for that waits for its Bot's maintainer: the service lists no task for it, so it is a row of its own, like a task's. */
+function HeldReplyRow({ row, author, locale, renderAvatar, children }: { row: HeldRow; author: Identity; locale: string; renderAvatar?: RenderAvatar; children: ReactNode }): ReactElement {
+  const t = useTeamsText(locale);
+  return <li className="tw-msg" data-grouped="false" data-kind="bot" data-task-id={row.reply.taskId} data-task-state="awaiting_approval" data-held="true">
+    <div className="tw-msg-lead"><Avatar identity={author} size={32} render={renderAvatar} /></div>
+    <div className="tw-msg-main">
+      <div className="tw-msg-head"><b className="tw-msg-author">{author.name}</b><span className="tw-tag">{t('teams_bot_tag')}</span></div>
+      <div className="tw-embed">{children}</div>
+    </div>
+  </li>;
 }
 
 /** The row of a Bot task that has no reply message yet: the Bot's avatar and name, then its status card. */

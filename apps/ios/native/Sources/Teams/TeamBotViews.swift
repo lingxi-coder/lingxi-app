@@ -64,8 +64,16 @@ struct TeamBotCardView: View {
     var onList: (() -> Void)? = nil
     /// Opens the Bot's auto-reply log. Set only for its maintainer, and only for a Bot that answers on its own.
     var onTriageLog: (() -> Void)? = nil
+    /// The model that reads the replies of this Bot that wait for its maintainer, across Chats (Bot v3 B6). Set only for the maintainer, and only while there is a connection; the card
+    /// then offers "Replies waiting" while there are some. `onHeldChat` takes the person to the Chat a reply was made in.
+    var heldModel: TeamMessagingModel? = nil
+    var onHeldChat: ((String) -> Void)? = nil
     var onExample: ((String) -> Void)? = nil
     var unverified = false
+    @State private var held = TeamHeldKeeper()
+    @State private var heldOpen = false
+    /// The Chat the list was left for: it is opened once the list is gone.
+    @State private var heldChat: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -106,6 +114,15 @@ struct TeamBotCardView: View {
         .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("teams.bot.\(bot.sharedBotId)")
+        // The replies of this Bot that wait for its maintainer: read when the card is there, and again whenever the service says a Bot changed.
+        .task(id: TeamHeldWanted(model: heldModel.map(ObjectIdentifier.init), bots: [bot.sharedBotId], conversationId: nil, online: heldModel != nil, watch: String(heldModel?.botSignals ?? 0))) {
+            guard let heldModel else { held.stop(); return }
+            held.sync(model: heldModel, bots: [bot.sharedBotId], conversationId: nil, online: true, watch: String(heldModel.botSignals))
+            await held.keepTime()
+        }
+        .sheet(isPresented: $heldOpen, onDismiss: { if let id = heldChat { heldChat = nil; onHeldChat?(id) } }) {
+            TeamHeldListSheet(bot: bot, keeper: held, onOpenChat: { heldChat = $0; heldOpen = false }, onClose: { heldOpen = false })
+        }
     }
 
     @ViewBuilder private var actions: some View {
@@ -122,6 +139,12 @@ struct TeamBotCardView: View {
             Button(action: onTriageLog) { Label("teams_triage_title", systemImage: "clock.arrow.circlepath").minimumHitTarget(minWidth: 0) }
                 .buttonStyle(.bordered)
                 .accessibilityIdentifier("teams.bot.triage.\(bot.sharedBotId)")
+        }
+        let waiting = TeamHeldRules.waiting(held.list)
+        if heldModel != nil, held.list.status != .denied, waiting > 0 || heldOpen {
+            Button { heldOpen = true } label: { TeamHeldEntryLabel(count: waiting) }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("teams.bot.held.\(bot.sharedBotId)")
         }
         if isOwner && (bot.state == "published") {
             Button(role: .destructive, action: onStopSharing) { Text("friends_share_bot_stop").minimumHitTarget(minWidth: 0) }

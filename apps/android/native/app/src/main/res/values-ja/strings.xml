@@ -3214,6 +3214,11 @@
     <string name="tool_denied_no_output">出力なし</string>
     <string name="tool_denied_reason">拒否された理由</string>
     <string name="teams_bot_avail_ready">準備完了</string>
+    <string name="teams_error_reply_decided">この返信はすでに処理されています。</string>
+    <string name="teams_error_reply_expired">決定までの時間が過ぎたため、この返信は破棄されました。</string>
+    <string name="teams_error_reply_superseded">チャットで誰かが再び書き込んだため、この返信は破棄されました。</string>
+    <string name="teams_error_reply_gone">この返信はもう利用できません。</string>
+    <string name="teams_error_held_maintainer">Bot の返信を決められるのは、その Bot のメンテナーだけです。</string>
     <string name="teams_confirm_make_owner_title_fmt">%1$s さんをオーナーにしますか？</string>
     <string name="services_menu">サービスのオプション</string>
     <string name="teams_bot_avail_offline">ホストがオフライン</string>
@@ -3554,6 +3559,20 @@
     <string name="teams_triage_approval_timeout">時間内に承認されず</string>
     <string name="teams_triage_approval_superseded">新しいメッセージのため破棄</string>
     <string name="teams_triage_probability_fmt">確率 %1$d%%</string>
+    <string name="teams_held_title">あなたの承認待ち</string>
+    <string name="teams_held_expires_fmt">%1$sに承認されていない場合は破棄されます</string>
+    <string name="teams_held_document_fmt">ドキュメント「%1$s」を添付</string>
+    <string name="teams_held_reject">却下</string>
+    <string name="teams_held_reject_confirm">この返信を却下しますか？</string>
+    <string name="teams_held_reject_detail">何も投稿されません。Bot の返信は破棄され、元に戻せません。</string>
+    <string name="teams_held_edit_label">返信の内容</string>
+    <string name="teams_held_empty_text">返信を空にはできません。</string>
+    <string name="teams_held_too_long">この返信は長すぎて送信できません。短くしてください。</string>
+    <string name="teams_held_unasked">自動返信</string>
+    <string name="teams_held_waiting">承認待ちの返信</string>
+    <string name="teams_held_intro">Bot が作成し、あなたが承認するまで投稿されない返信です。時間内に決めないと破棄されます。</string>
+    <string name="teams_held_none">承認待ちの返信はありません。</string>
+    <string name="teams_held_revoked">投稿されませんでした。リクエストまたはそのアクセス権が変わったため、この返信は破棄されました。</string>
     <string name="teams_error_scope_conflict">直前に誰かがこの設定を変更しました。最新の内容を表示しています。確認してからもう一度お試しください。</string>
     <string name="teams_error_scope_not_published">メンテナーがこの Bot の共有内容を変更しました。最新の内容を表示しています。確認してからもう一度お試しください。</string>
 </resources>

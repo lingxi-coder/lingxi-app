@@ -56,9 +56,10 @@ test('an approval carries the task and, when the maintainer changed it, their te
   assert.deepEqual(approved, { taskId: TASK, state: 'completed', replyId: 'reply-0001', artifactId: null });
   await approveHeldReply(api, SCOPE, TASK, { text: '  Dinner at 8 works better.  ', commandId: 'command-retry-0001' });
   await approveHeldReply(api, SCOPE, TASK, { text: '  Dinner at 8 works better.  ', commandId: 'command-retry-0001' });
-  assert.deepEqual(sent.map(command => [command.action, (command as { payload: unknown }).payload, command.commandId === 'command-retry-0001']), [
+  const ids = sent.map(command => (command as { commandId: string }).commandId);
+  assert.deepEqual(sent.map((command, index) => [command.action, (command as { payload: unknown }).payload, ids[index] === 'command-retry-0001']), [
     ['approveReply', { taskId: TASK }, false], ['approveReply', { taskId: TASK, text: '  Dinner at 8 works better.  ' }, true], ['approveReply', { taskId: TASK, text: '  Dinner at 8 works better.  ' }, true]]);
-  assert.notEqual(sent[0]!.commandId, sent[1]!.commandId, 'a new decision is a new command');
+  assert.notEqual(ids[0], ids[1], 'a new decision is a new command');
   // The service refuses an empty reply and one longer than a Bot's own; so does the command before it is sent.
   for (const text of ['', '   ', 'x'.repeat(8193), '€'.repeat(2731)]) await assert.rejects(approveHeldReply(api, SCOPE, TASK, { text }), /INVALID_INPUT/, JSON.stringify(text.slice(0, 8)));
   await approveHeldReply(api, SCOPE, TASK, { text: '€'.repeat(2730) });
@@ -99,7 +100,7 @@ test('the codes of a held reply\'s fate are those the contract lists, and a deci
 
 test('the words of this feature are in every language, each different from the others, and a Bot is never called an assistant', () => {
   const locales = ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko'];
-  for (const key of ['teams_run_awaiting_approval_detail', 'teams_triage_approval_timeout', 'teams_triage_approval_superseded', 'tw_error_reply_decided', 'tw_error_reply_expired', 'tw_error_reply_superseded'] as const) {
+  for (const key of ['teams_run_awaiting_approval_detail', 'teams_triage_approval_timeout', 'teams_triage_approval_superseded', 'teams_error_reply_decided', 'teams_error_reply_expired', 'teams_error_reply_superseded'] as const) {
     const values = locales.map(locale => teamsText(locale)(key));
     assert.equal(new Set(values).size, 5, key); assert.ok(!values.some(value => value === key || value === ''), key);
     assert.doesNotMatch(values.join(' '), /assistant|助手|アシスタント|어시스턴트/iu, key);

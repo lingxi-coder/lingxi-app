@@ -128,7 +128,7 @@ test('equal bids are ordered by a hash of the task id, the same way every time',
 test('a Desktop that never answers abstains at the deadline: the job settles once, early it asks to be tried again, and a late bid is told what became of the task', options, async () => {
   await say(member, 1);
   await bid(alpha, 1, 'run', 0.7);
-  now += 5999;
+  now += 14999;
   await assert.rejects(jobs('bids', 1), /REPLY_ROUND_NOT_DUE/u);
   now += 1;
   assert.deepEqual(await jobs('bids', 1), { settled: true });

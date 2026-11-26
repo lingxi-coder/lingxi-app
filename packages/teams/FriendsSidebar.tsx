@@ -82,6 +82,16 @@ export function FriendsSidebar({ workspace, snapshot, renderAvatar, locale, now 
       </div>
     </header>
 
+    {!searching && <div className="tw-friend-me" data-selected={snapshot.page === 'me'}>
+      <button type="button" className="tw-me-main" aria-current={snapshot.page === 'me' ? 'page' : undefined} onClick={() => workspace.show('me')}>
+        <Avatar identity={{ kind: 'user', id: snapshot.uid, name: snapshot.profile?.displayName ?? t('friends_me') }} size={40} render={renderAvatar} />
+        <span className="tw-person-text"><b>{t('friends_me')}</b>
+          <small>{snapshot.profile?.handle ? `@${snapshot.profile.handle}` : t('friends_my_card')}</small>
+        </span>
+        <Icon name="chevronRight" size={16} />
+      </button>
+    </div>}
+
     {snapshot.profileNameUnset ? <div className="tw-banner" role="status">
       <span>{t('friends_name_prompt')}</span>
       <button type="button" className="tw-link" onClick={() => workspace.show('profile')}>{t('friends_name_prompt_action')}</button>

@@ -32,7 +32,7 @@ Shared test vectors, loaded by every client's unit tests and never adjusted per 
 
 | Client | Entry |
 | --- | --- |
-| Desktop | Rail mode `friends` after `teams`, before `apps`. `SidebarMode` and `AppPage` gain `friends`; `pageForMode`, `reconcileSidebarMode` and `restoredSidebarMode` treat it like `teams`. The sidebar is the Friends root (D3); the main area is a chat or one page (Add friend, Profile settings, Blocked people). |
+| Desktop | Rail mode `friends` after `teams`, before `apps`. `SidebarMode` and `AppPage` gain `friends`; `pageForMode`, `reconcileSidebarMode` and `restoredSidebarMode` treat it like `teams`. The sidebar is the Friends root (D3); the main area is a chat or one page (Add friend, My card, Profile settings, Blocked people). |
 | Web | `/friends` (list and chat) and `/friends/add`. Both belong to the `teams` security zone (`securityZone`, `firebase.json` headers and CSP, exactly as `/teams`). |
 | iOS | `AppTab.friends` after `.teams` and before `.settings`, titled "Friends" / "好友". |
 | Android | `AppTab.Friends` after `Teams` and before `Settings`, same title. |
@@ -48,7 +48,7 @@ Shared test vectors, loaded by every client's unit tests and never adjusted per 
   `friendsTransport` shaped like `teamsTransport` (same error shape, same 20 s timeout).
 - Chat data is the Teams message layer, unchanged (D9); so are the Bots of a friendship, which are the SharedBots commands
   of that layer (D21 to D25).
-- On the first open per signed-in account, and on every open of Add friend or Profile settings, call
+- On the first open per signed-in account, and on every open of My card or Profile settings, call
   `GET /v1/friends/profile` (it creates the profile and the first friend code on first use). The result lives in
   memory only. A failure shows an inline error with `common_retry`; it never blocks the list.
 - There is no other cache; Firestore's own persistence is all the offline support there is.
@@ -121,17 +121,11 @@ text, never Markdown or links).
 1. *Find someone* (`friends_search_title`): one text field (`friends_search_placeholder`; no autocapitalisation or
    autocorrect; Return looks up) and `friends_search_action`. The text is classified by D7; `invalid` shows
    `friends_search_hint` and keeps the button disabled. For a handle or handle fragment of at least three characters,
-   search after a 350 ms typing pause or immediately on submit. Display username results above the link controls.
+   search after a 350 ms typing pause or immediately on submit. Display matches under the search field.
    Only accept responses for the current input. The user can submit the same username again after an empty result.
    Keep the search cooldown in the account workspace so it survives leaving the page. Email and friend links require submit.
 2. *Result card* after selecting a username result or executing an exact email or link lookup: avatar, name,
    @handle if any, and one action by relation.
-3. *My friend link* (`friends_link_title`): `profile.friendCode.link`, selectable, one line, middle-truncated.
-   `friends_link_copy` copies it and answers `friends_link_copied`. `friends_link_share` opens the native share sheet
-   with `friends_link_share_message` + space + link (mobile; Web only when `navigator.share` exists; Desktop has none).
-   `friends_link_reset` (`rotateCode`) and `friends_link_off` (`revokeCode`) each ask first
-   (`friends_link_reset_title` / `_body`, `friends_link_off_title` / `_body`). With `friendCode == null` show `friends_link_is_off`
-   and `friends_link_create` (`rotateCode`, no confirmation). `friends_link_disclosure` always sits under the card.
 
 | relation | action |
 | --- | --- |
@@ -141,6 +135,16 @@ text, never Markdown or links).
 | `friends` | `friends_relation_friends` and `friends_open_chat` |
 
 Lookup errors appear under the field (D18); a new lookup replaces the card; editing the field clears it.
+
+**My card.** The signed-in account appears as *Me* at the top of the unfiltered Friends list. Open it to see the
+avatar, display name, and username if set, with links to Profile settings and Blocked people.
+- *My friend link* (`friends_link_title`): `profile.friendCode.link`, selectable, one line, middle-truncated.
+   The QR code encodes that same link on the device and follows its reset and revocation state.
+   `friends_link_copy` copies it and answers `friends_link_copied`. `friends_link_share` opens the native share sheet
+   with `friends_link_share_message` + space + link (mobile; Web only when `navigator.share` exists; Desktop has none).
+   `friends_link_reset` (`rotateCode`) and `friends_link_off` (`revokeCode`) each ask first
+   (`friends_link_reset_title` / `_body`, `friends_link_off_title` / `_body`). With `friendCode == null` show `friends_link_is_off`
+   and `friends_link_create` (`rotateCode`, no confirmation). `friends_link_disclosure` always sits under the card.
 
 **D7 One field, three kinds** (vectors `query`). Classify the trimmed text, first match wins:
 1. empty: invalid;

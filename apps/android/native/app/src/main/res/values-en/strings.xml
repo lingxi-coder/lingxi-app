@@ -2881,6 +2881,10 @@
     <string name="friends_signin">Sign in to your LingXi account to add friends and chat.</string>
     <string name="friends_loading">Loading friends…</string>
     <string name="friends_load_error">Couldn\'t load your friends. Check your connection and try again.</string>
+    <string name="friends_me">Me</string>
+    <string name="friends_my_card">My card</string>
+    <string name="friends_link_qr">Friend invite QR code</string>
+    <string name="friends_search_clear">Clear search</string>
     <string name="friends_add">Add friend</string>
     <string name="friends_empty_title">No friends yet</string>
     <string name="friends_empty_body">Add someone by @username, email or friend link to chat one-to-one.</string>

@@ -6,7 +6,7 @@ import {
 import { TeamsWorkspace, type TeamsWorkspaceOptions } from './workspace.js';
 
 /** The pages of the Friends main area (D1). The chat is a page of its own, never mixed with the others. */
-export type FriendsPage = 'home' | 'chat' | 'add' | 'profile' | 'blocked';
+export type FriendsPage = 'home' | 'chat' | 'add' | 'me' | 'profile' | 'blocked';
 
 /** An open friend chat (D9). */
 export interface FriendChat {

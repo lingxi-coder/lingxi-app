@@ -187,7 +187,7 @@ internal fun FriendsTab(
             val list: @Composable (Modifier) -> Unit = { m ->
                 FriendsListScreen(
                     state = state, uid = uid, projectedUnread = projectedUnread, openChatUid = if (wide) chatUid else "", listState = listState, scrollToRequests = scrollToRequests,
-                    onOpenChat = ::openChat, onAdd = { openPage("add") }, onProfile = { openPage("profile") }, onBlocked = { openPage("blocked") },
+                    onOpenChat = ::openChat, onAdd = { openPage("add") }, onMe = { openPage("me") }, onProfile = { openPage("profile") }, onBlocked = { openPage("blocked") },
                     onRetry = workspace::retry, onRetryProfile = workspace::loadProfile,
                     onAccept = { workspace.accept(it, state.card(it)?.version ?: FriendsLogic.LEGACY_VERSION) },
                     onDecline = { workspace.decline(it, state.card(it)?.version ?: FriendsLogic.LEGACY_VERSION) },
@@ -205,11 +205,16 @@ internal fun FriendsTab(
             val page: @Composable (String, Modifier) -> Unit = { entry, m ->
                 when {
                     entry == "add" -> AddFriendScreen(
-                        state, search, showBack = !wide, onClose = { close(entry) }, onOpenChat = ::openChat, onLoadProfile = workspace::loadProfile,
-                        onRotateCode = workspace::rotateCode, onRevokeCode = workspace::revokeCode, onLookup = workspace.search::lookup,
+                        state, search, showBack = !wide, onClose = { close(entry) }, onOpenChat = ::openChat,
+                        onLookup = workspace.search::lookup,
                         onSearchHandles = workspace.search::searchHandles, onSelect = workspace.search::select,
                         onBackToResults = workspace.search::clearSelection,
                         onConfirm = workspace.search::confirm, onClear = workspace.search::clear, modifier = m,
+                    )
+                    entry == "me" -> MyFriendCardScreen(
+                        state, showBack = !wide, onClose = { close(entry) }, onLoadProfile = workspace::loadProfile,
+                        onRotateCode = workspace::rotateCode, onRevokeCode = workspace::revokeCode,
+                        onProfile = { openPage("profile") }, onBlocked = { openPage("blocked") }, modifier = m,
                     )
                     entry == "profile" -> FriendProfileScreen(
                         state, showBack = !wide, onClose = { close(entry) }, onLoad = workspace::loadProfile, onSave = workspace::saveProfile, modifier = m,

@@ -77,6 +77,7 @@ export type TeamsKey =
   | 'friends_link_off'
   | 'friends_link_off_body'
   | 'friends_link_off_title'
+  | 'friends_link_qr'
   | 'friends_link_reset'
   | 'friends_link_reset_body'
   | 'friends_link_reset_title'
@@ -85,9 +86,11 @@ export type TeamsKey =
   | 'friends_link_title'
   | 'friends_load_error'
   | 'friends_loading'
+  | 'friends_me'
   | 'friends_menu_block'
   | 'friends_menu_remove'
   | 'friends_menu_view_profile'
+  | 'friends_my_card'
   | 'friends_name_prompt'
   | 'friends_name_prompt_action'
   | 'friends_note_placeholder'
@@ -119,6 +122,7 @@ export type TeamsKey =
   | 'friends_requests_sent'
   | 'friends_search_action'
   | 'friends_search_back'
+  | 'friends_search_clear'
   | 'friends_search_hint'
   | 'friends_search_placeholder'
   | 'friends_search_title'
@@ -993,6 +997,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   friends_link_off: { en: 'Turn off link', 'zh-Hans': '关闭链接', 'zh-Hant': '關閉連結', ja: 'リンクを無効にする', ko: '링크 끄기' },
   friends_link_off_body: { en: 'No one can add you with it until you create a new one.', 'zh-Hans': '在你创建新链接之前，任何人都无法通过它添加你。', 'zh-Hant': '在你建立新連結之前，任何人都無法透過它新增你。', ja: '新しいリンクを作成するまで、このリンクで追加されることはありません。', ko: '새 링크를 만들 때까지 아무도 이 링크로 나를 추가할 수 없습니다.' },
   friends_link_off_title: { en: 'Turn off your friend link?', 'zh-Hans': '关闭好友链接？', 'zh-Hant': '關閉好友連結？', ja: '友だちリンクを無効にしますか？', ko: '친구 링크를 끌까요?' },
+  friends_link_qr: { en: 'Friend invite QR code', 'zh-Hans': '好友邀请二维码', 'zh-Hant': '好友邀請 QR 碼', ja: '友だち招待用QRコード', ko: '친구 초대 QR 코드' },
   friends_link_reset: { en: 'Reset link', 'zh-Hans': '重置链接', 'zh-Hant': '重設連結', ja: 'リンクをリセット', ko: '링크 재설정' },
   friends_link_reset_body: { en: 'The old link stops working immediately.', 'zh-Hans': '旧链接会立即失效。', 'zh-Hant': '舊連結會立即失效。', ja: '古いリンクはすぐに使えなくなります。', ko: '이전 링크는 즉시 사용할 수 없게 됩니다.' },
   friends_link_reset_title: { en: 'Reset your friend link?', 'zh-Hans': '重置好友链接？', 'zh-Hant': '重設好友連結？', ja: '友だちリンクをリセットしますか？', ko: '친구 링크를 재설정할까요?' },
@@ -1001,9 +1006,11 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   friends_link_title: { en: 'My friend link', 'zh-Hans': '我的好友链接', 'zh-Hant': '我的好友連結', ja: '自分の友だちリンク', ko: '내 친구 링크' },
   friends_load_error: { en: 'Couldn\'t load your friends. Check your connection and try again.', 'zh-Hans': '无法加载好友，请检查网络后重试。', 'zh-Hant': '無法載入好友，請檢查網路後重試。', ja: '友だちを読み込めませんでした。接続を確認してもう一度お試しください。', ko: '친구를 불러오지 못했습니다. 연결을 확인하고 다시 시도하세요.' },
   friends_loading: { en: 'Loading friends…', 'zh-Hans': '正在加载好友…', 'zh-Hant': '正在載入好友…', ja: '友だちを読み込み中…', ko: '친구를 불러오는 중…' },
+  friends_me: { en: 'Me', 'zh-Hans': '我', 'zh-Hant': '我', ja: '自分', ko: '나' },
   friends_menu_block: { en: 'Block', 'zh-Hans': '屏蔽', 'zh-Hant': '封鎖', ja: 'ブロック', ko: '차단' },
   friends_menu_remove: { en: 'Remove friend', 'zh-Hans': '删除好友', 'zh-Hant': '刪除好友', ja: '友だちを削除', ko: '친구 삭제' },
   friends_menu_view_profile: { en: 'View profile', 'zh-Hans': '查看资料', 'zh-Hant': '查看資料', ja: 'プロフィールを見る', ko: '프로필 보기' },
+  friends_my_card: { en: 'My card', 'zh-Hans': '我的名片', 'zh-Hant': '我的名片', ja: 'マイカード', ko: '내 프로필 카드' },
   friends_name_prompt: { en: 'Set your name so friends recognize you.', 'zh-Hans': '设置你的名字，好友才能认出你。', 'zh-Hant': '設定你的名字，好友才能認出你。', ja: '友だちが分かるように名前を設定しましょう。', ko: '친구가 알아볼 수 있도록 이름을 설정하세요.' },
   friends_name_prompt_action: { en: 'Set name', 'zh-Hans': '设置名字', 'zh-Hant': '設定名字', ja: '名前を設定', ko: '이름 설정' },
   friends_note_placeholder: { en: 'Add a note (optional)', 'zh-Hans': '添加留言（可选）', 'zh-Hant': '新增留言（選填）', ja: 'メモを追加（任意）', ko: '메모 추가(선택 사항)' },
@@ -1035,6 +1042,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   friends_requests_sent: { en: 'Sent', 'zh-Hans': '已发送的请求', 'zh-Hant': '已傳送的請求', ja: '送信したリクエスト', ko: '보낸 요청' },
   friends_search_action: { en: 'Look up', 'zh-Hans': '查找', 'zh-Hant': '尋找', ja: '検索', ko: '찾기' },
   friends_search_back: { en: 'Back to results', 'zh-Hans': '返回搜索结果', 'zh-Hant': '返回搜尋結果', ja: '検索結果に戻る', ko: '검색 결과로 돌아가기' },
+  friends_search_clear: { en: 'Clear search', 'zh-Hans': '清空搜索', 'zh-Hant': '清除搜尋', ja: '検索をクリア', ko: '검색 지우기' },
   friends_search_hint: { en: 'Enter at least 3 username characters, an email address or a friend link.', 'zh-Hans': '请输入至少 3 个用户名字符、邮箱地址或好友链接。', 'zh-Hant': '請輸入至少 3 個使用者名稱字元、電子郵件地址或好友連結。', ja: 'ユーザー名を3文字以上、メールアドレス、または友だちリンクを入力してください。', ko: '사용자 이름을 3자 이상 입력하거나 이메일 주소 또는 친구 링크를 입력하세요.' },
   friends_search_placeholder: { en: '@username, email or friend link', 'zh-Hans': '@用户名、邮箱或好友链接', 'zh-Hant': '@使用者名稱、電子郵件或好友連結', ja: '@ユーザー名、メールアドレス、友だちリンク', ko: '@사용자 이름, 이메일 또는 친구 링크' },
   friends_search_title: { en: 'Find someone', 'zh-Hans': '查找好友', 'zh-Hant': '尋找好友', ja: '友だちを探す', ko: '친구 찾기' },

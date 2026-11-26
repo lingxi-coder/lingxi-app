@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.MoreVert
@@ -87,6 +88,7 @@ internal fun FriendsListScreen(
     scrollToRequests: Int,
     onOpenChat: (String) -> Unit,
     onAdd: () -> Unit,
+    onMe: () -> Unit,
     onProfile: () -> Unit,
     onBlocked: () -> Unit,
     onRetry: () -> Unit,
@@ -145,6 +147,27 @@ internal fun FriendsListScreen(
                         DropdownMenuItem(text = { Text(stringResource(R.string.friends_blocked_title)) }, onClick = { more = false; onBlocked() })
                     }
                 }
+            }
+        }
+
+        if (query.isBlank()) {
+            Row(
+                Modifier.fillMaxWidth().testTag(FriendsTags.ME).clickable(onClick = onMe)
+                    .heightIn(min = 60.dp).padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                val me = stringResource(R.string.friends_me)
+                PersonAvatar(uid, state.profile?.displayName ?: me, 40.dp)
+                Column(Modifier.weight(1f)) {
+                    Text(me, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        state.profile?.handle?.let { "@$it" } ?: stringResource(R.string.friends_my_card),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
 

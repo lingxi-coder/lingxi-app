@@ -14,6 +14,7 @@ import { classes, mount, reactTestRenderer, scenario, textOf, withDom } from './
 
 const { FriendsSidebar } = loadTeamsModule<typeof import('../../../packages/teams/FriendsSidebar')>('FriendsSidebar');
 const { AddFriendView } = loadTeamsModule<typeof import('../../../packages/teams/AddFriendView')>('AddFriendView');
+const { MyFriendCard } = loadTeamsModule<typeof import('../../../packages/teams/MyFriendCard')>('MyFriendCard');
 const { FriendProfileSettings } = loadTeamsModule<typeof import('../../../packages/teams/FriendProfileSettings')>('FriendProfileSettings');
 const { BlockedList } = loadTeamsModule<typeof import('../../../packages/teams/BlockedList')>('BlockedList');
 const { FriendsMain } = loadTeamsModule<typeof import('../../../packages/teams/FriendsMain')>('FriendsMain');
@@ -459,7 +460,20 @@ scenario('a failed confirmation is told on the card, which stays, and retrying a
 });
 
 scenario('my friend link: shown with copy, reset and turn off behind confirmations, and created again when off', async context => {
-  const { fake, snapshot, page } = await addPage(context);
+  const { fake, workspace, snapshot } = friendsFixture();
+  context.after(() => workspace.close());
+  await ready(snapshot);
+  const page = await mount(workspace, view(workspace, FriendsMain)); context.after(() => page.unmount());
+  const sidebar = await mount(workspace, view(workspace, FriendsSidebar)); context.after(() => sidebar.unmount());
+  await page.click(page.button('Add friend'));
+  assert.equal(page.find(node => node.type === 'input' && node.props.type === 'search').length, 1);
+  assert.ok(!page.has('My friend link'));
+  await sidebar.click(sidebar.byClass('tw-me-main')[0]!);
+  assert.equal(snapshot().page, 'me');
+  assert.ok(page.has('Profile settings') && page.has('Blocked people'));
+  const qr = () => page.find(node => node.type === 'img' && node.props.alt === 'Friend invite QR code')[0]?.props.src;
+  const firstQr = qr();
+  assert.match(firstQr, /^data:image\/gif;base64,/);
   const link = profile().friendCode!.link;
   assert.ok(page.find(node => node.props.title === link).length === 1, 'the whole link is in the title of the shortened text');
   assert.ok(page.text().includes('My friend link')); assert.ok(page.text().includes('without your approval'));
@@ -470,19 +484,26 @@ scenario('my friend link: shown with copy, reset and turn off behind confirmatio
   await page.click(dialogs(page)[0].findAll((node: any) => node.type === 'button').find((node: any) => textOf(node) === 'Reset link'));
   assert.equal(fake.executed('rotateCode').length, 1); assert.equal(dialogs(page).length, 0);
   assert.equal(snapshot().profile?.friendCode?.code, 'b'.repeat(32));
+  assert.notEqual(qr(), firstQr, 'the QR follows the current link');
   await page.click(page.button('Turn off link'));
   await page.click(dialogs(page)[0].findAll((node: any) => node.type === 'button').find((node: any) => textOf(node) === 'Turn off link'));
   assert.equal(fake.executed('revokeCode').length, 1); assert.ok(page.text().includes('Your friend link is off.'));
+  assert.equal(qr(), undefined);
   await page.click(page.button('Create link'));
   assert.equal(fake.executed('rotateCode').length, 2); assert.equal(snapshot().profile?.friendCode?.code, 'b'.repeat(32));
+  await page.click(page.button('Profile settings'));
+  assert.equal(snapshot().page, 'profile');
+  await sidebar.click(sidebar.byClass('tw-me-main')[0]!);
+  await page.click(page.button('Blocked people'));
+  assert.equal(snapshot().page, 'blocked');
 });
 
-scenario('opening Add friend reads the profile again, and a profile that cannot be read can be retried', async context => {
+scenario('opening My card reads the profile again, and a profile that cannot be read can be retried', async context => {
   const { fake, workspace, snapshot } = friendsFixture(f => { f.profileError = 'SERVICE_UNAVAILABLE'; });
   context.after(() => workspace.close());
   await until(() => snapshot().profileError !== '', 'the profile error');
   const reads = fake.profileCalls;
-  const page = await mount(workspace, view(workspace, AddFriendView)); context.after(() => page.unmount());
+  const page = await mount(workspace, view(workspace, MyFriendCard)); context.after(() => page.unmount());
   await until(() => fake.profileCalls > reads, 'the page to read the profile'); await page.during(() => undefined);
   assert.ok(page.text().includes(friendsErrorText('SERVICE_UNAVAILABLE', 'en')));
   fake.profileError = undefined;
@@ -644,7 +665,7 @@ scenario('a new friendship greets once and the main area shows the page the work
   assert.ok(page.text().includes('Friends') && page.text().includes('Add someone by @username'), 'the root shows a short welcome');
   workspace.show('profile'); await page.during(() => undefined); assert.ok(page.text().includes('Profile settings'));
   workspace.show('blocked'); await page.during(() => undefined); assert.ok(page.text().includes('Blocked people'));
-  workspace.show('add'); await page.during(() => undefined); assert.ok(page.text().includes('Find someone'));
+  workspace.show('add'); await page.during(() => undefined); assert.equal(page.find(node => node.type === 'input' && node.props['aria-label'] === 'Find someone').length, 1);
   workspace.openChat('bob', true);
   await until(() => !!snapshot().chat?.workspace?.getSnapshot().conversation, 'the chat'); await page.during(() => undefined);
   assert.ok(page.text().includes('You and Bob are now friends'));

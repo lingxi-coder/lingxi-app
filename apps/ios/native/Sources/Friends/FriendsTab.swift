@@ -8,6 +8,7 @@ enum FriendsRoute: Hashable {
     /// A Bot DM on the friendship's workspace (D22), over its chat.
     case botChat(uid: String, conversationID: String)
     case add
+    case me
     case profile
     case blocked
 
@@ -15,7 +16,7 @@ enum FriendsRoute: Hashable {
     var chatUID: String? {
         switch self {
         case let .chat(uid), let .bots(uid), let .botChat(uid, _): uid
-        case .add, .profile, .blocked: nil
+        case .add, .me, .profile, .blocked: nil
         }
     }
 
@@ -23,7 +24,7 @@ enum FriendsRoute: Hashable {
     var stack: [FriendsRoute] {
         switch self {
         case let .bots(uid), let .botChat(uid, _): [.chat(uid), self]
-        case .chat, .add, .profile, .blocked: [self]
+        case .chat, .add, .me, .profile, .blocked: [self]
         }
     }
 }
@@ -138,7 +139,7 @@ struct FriendsTab: View {
     private func list(selected: String) -> some View {
         FriendsListView(
             selectedChat: selected, scrollToTop: scrollToTop, scrollToRequests: scrollToRequests,
-            onOpen: { open(.chat($0)) }, onAdd: { open(.add) }, onProfile: { open(.profile) }, onBlocked: { open(.blocked) },
+            onOpen: { open(.chat($0)) }, onAdd: { open(.add) }, onMe: { open(.me) }, onProfile: { open(.profile) }, onBlocked: { open(.blocked) },
             onJoined: joined)
     }
 
@@ -157,6 +158,8 @@ struct FriendsTab: View {
             FriendBotChatView(uid: uid, conversationID: conversationID, onBack: { open(.chat(uid)) }, onClose: closeIfCurrent)
         case .add:
             AddFriendView(onOpenChat: { open(.chat($0)) })
+        case .me:
+            MyFriendCardView(onProfile: { push(.profile) }, onBlocked: { push(.blocked) })
         case .profile:
             FriendProfileView()
         case .blocked:

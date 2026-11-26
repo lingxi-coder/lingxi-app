@@ -4,7 +4,7 @@ import { friendsErrorText } from './errors.js';
 import { classifyQuery, NOTE_MAX, relationAction, type LookupResult, type Proof } from './friends.js';
 import type { Confirmed, FriendsWorkspace } from './friends-workspace.js';
 import type { FriendsViewProps } from './FriendsSidebar';
-import { Avatar, Dialog, type RenderAvatar } from './ui';
+import { Avatar, Icon, type RenderAvatar } from './ui';
 import { teamsText, useTeamsText } from './i18n.js';
 
 export const nowFriends = (name: string, locale: string): string => teamsText(locale)('friends_now_friends_fmt', name);
@@ -51,65 +51,7 @@ export function LookupCard({ workspace, locale, proof, result, renderAvatar, onD
   </div>;
 }
 
-/** Middle-truncated on one line; the whole link stays selectable and copied. */
-function LinkText({ link }: { link: string }): ReactElement {
-  const cut = Math.max(8, link.length - 12);
-  return <span className="tw-link-text" title={link}><span className="tw-link-head">{link.slice(0, cut)}</span><span className="tw-link-tail">{link.slice(cut)}</span></span>;
-}
-
-/** D6 step 1: my friend link, with copy, share, reset and turn off. */
-function MyLink({ workspace, snapshot, locale }: Pick<FriendsViewProps, 'workspace' | 'snapshot' | 'locale'>): ReactElement {
-  const t = useTeamsText(locale);
-  const { profile } = snapshot, code = profile?.friendCode;
-  const [copied, setCopied] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState('');
-  const [ask, setAsk] = useState<'reset' | 'off'>();
-  useEffect(() => {
-    if (!copied) return;
-    const timer = setTimeout(() => setCopied(false), 2000);
-    return () => clearTimeout(timer);
-  }, [copied]);
-  const run = async (action: () => Promise<string>) => {
-    setBusy(true); setError('');
-    const failed = await action();
-    setBusy(false); setError(failed); setAsk(undefined);
-  };
-  const share = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
-  return <section className="tw-friends-card" aria-labelledby="tw-friends-link">
-    <h3 id="tw-friends-link">{t('friends_link_title')}</h3>
-    {snapshot.profileLoading && !profile ? <p className="tw-hint" role="status">{t('teams_loading')}</p>
-      : !profile ? <div className="tw-form">
-        <p role="alert" className="tw-error">{friendsErrorText(snapshot.profileError, locale)}</p>
-        <button type="button" onClick={() => void workspace.refreshProfile()}>{t('common_retry')}</button>
-      </div>
-      : code ? <>
-        <LinkText link={code.link} />
-        <div className="tw-lookup-actions">
-          <button type="button" onClick={() => void navigator.clipboard?.writeText(code.link).then(() => setCopied(true), () => undefined)}>{t('friends_link_copy')}</button>
-          {share ? <button type="button" onClick={() => void navigator.share({ text: `${t('friends_link_share_message')} ${code.link}` }).catch(() => undefined)}>{t('friends_link_share')}</button> : null}
-          <button type="button" disabled={busy} onClick={() => setAsk('reset')}>{t('friends_link_reset')}</button>
-          <button type="button" className="tw-danger-btn" disabled={busy} onClick={() => setAsk('off')}>{t('friends_link_off')}</button>
-          {copied ? <span className="tw-hint" role="status">{t('friends_link_copied')}</span> : null}
-        </div>
-      </> : <div className="tw-lookup-actions">
-        <span className="tw-hint">{t('friends_link_is_off')}</span>
-        <button type="button" disabled={busy} onClick={() => void run(workspace.rotateCode)}>{t('friends_link_create')}</button>
-      </div>}
-    {error ? <p role="alert" className="tw-error">{friendsErrorText(error, locale)}</p> : null}
-    <p className="tw-hint">{t('friends_link_disclosure')}</p>
-    {ask ? <Dialog role="alertdialog" title={ask === 'reset' ? t('friends_link_reset_title') : t('friends_link_off_title')}
-      description={ask === 'reset' ? t('friends_link_reset_body') : t('friends_link_off_body')}
-      onClose={() => setAsk(undefined)}>
-      <div className="tw-form">
-        <div className="tw-dialog-actions">
-          <button type="button" data-autofocus onClick={() => setAsk(undefined)}>{t('common_cancel')}</button>
-          <button type="button" className="tw-danger-btn" disabled={busy} onClick={() => void run(ask === 'reset' ? workspace.rotateCode : workspace.revokeCode)}>{ask === 'reset' ? t('friends_link_reset') : t('friends_link_off')}</button>
-        </div>
-      </div>
-    </Dialog> : null}
-  </section>;
-}
-
-/** The Add friend page (D6): live username search, exact email or link lookup, and my link. */
+/** The Add friend page (D6): live username search, and exact email or link lookup. */
 export function AddFriendView({ workspace, snapshot, locale, renderAvatar }: FriendsViewProps): ReactElement {
   const t = useTeamsText(locale);
   const [text, setText] = useState('');
@@ -120,10 +62,10 @@ export function AddFriendView({ workspace, snapshot, locale, renderAvatar }: Fri
   const [searchedHandle, setSearchedHandle] = useState<string>();
   const cooldownUntil = snapshot.handleSearchRetryUntil ?? 0;
   const [confirming, setConfirming] = useState(false);
+  const input = useRef<HTMLInputElement>(null);
   const round = useRef(0);
   const request = useRef<AbortController>();
   useEffect(() => {
-    void workspace.refreshProfile();
     return () => { round.current++; request.current?.abort(); };
   }, [workspace]);
   const query = classifyQuery(text);
@@ -173,34 +115,39 @@ export function AddFriendView({ workspace, snapshot, locale, renderAvatar }: Fri
   const selectionRound = round.current;
   return <section className="tw-scope tw-friends-page" aria-labelledby="tw-friends-add">
     <ChatPageHeading id="tw-friends-add" title={t('friends_add')} />
-    <section className="tw-friends-card" aria-labelledby="tw-friends-find">
-      <h3 id="tw-friends-find">{t('friends_search_title')}</h3>
+    <section className="tw-friends-discovery" aria-label={t('friends_search_title')}>
       <search>
-        <form className="tw-friends-find" aria-labelledby="tw-friends-find" onSubmit={event => {
+        <form className="tw-friends-find" onSubmit={event => {
           event.preventDefault();
           if (!composing && !disableSearch) void look(query);
         }}>
-          <input type="search" name="query" disabled={confirming} aria-label={t('friends_search_title')} placeholder={t('friends_search_placeholder')}
-            autoCapitalize="off" autoCorrect="off" spellCheck={false} value={text} onChange={event => { if (!confirming) edit(event.target.value); }}
-            onCompositionStart={() => setComposing(true)} onCompositionEnd={() => setComposing(false)} />
+          <div className="tw-friend-search-field">
+            <Icon name="search" size={17} />
+            <input ref={input} type="search" name="query" disabled={confirming} aria-label={t('friends_search_title')} placeholder={t('friends_search_placeholder')}
+              autoCapitalize="off" autoCorrect="off" spellCheck={false} value={text} onChange={event => { if (!confirming) edit(event.target.value); }}
+              onCompositionStart={() => setComposing(true)} onCompositionEnd={() => setComposing(false)} />
+            {text ? <button type="button" className="tw-icon-btn tw-friend-search-clear" disabled={confirming} aria-label={t('friends_search_clear')}
+              onClick={() => { edit(''); input.current?.focus(); }}><Icon name="x" /></button> : null}
+          </div>
           <button type="submit" className="tw-primary" disabled={disableSearch}>{t('friends_search_action')}</button>
         </form>
       </search>
-      {text.trim() && query.kind === 'invalid' ? <p className="tw-hint">{t('friends_search_hint')}</p> : null}
+      {query.kind === 'invalid' ? <p className="tw-hint">{t('friends_search_hint')}</p> : null}
       {errorCode ? <p role="alert" className="tw-error">{friendsErrorText(errorCode, locale)}</p> : null}
       {busy ? <p role="status" className="tw-hint">{t('teams_loading')}</p> : null}
       {!found && matches?.length === 0 ? <p role="status" className="tw-hint">{t('friends_error_not_found')}</p> : null}
-      {!found && matches?.length ? <div className="tw-form" aria-label={t('friends_search_title')}>
+      {!found && matches?.length ? <ul className="tw-friend-results" aria-label={t('friends_search_title')}>
         {matches.map(result => {
           const { handle } = result;
           if (!handle) return null;
-          return <button type="button" className="tw-lookup-who" key={result.uid}
+          return <li key={result.uid}><button type="button" className="tw-lookup-who"
             onClick={() => setFound({ proof: { kind: 'handle', handle, expectedUid: result.uid }, result })}>
             <Avatar identity={{ kind: 'user', id: result.uid, name: result.displayName }} size={40} render={renderAvatar} />
             <span className="tw-person-text"><b>{result.displayName}</b><small>@{handle}</small></span>
-          </button>;
+            <Icon name="chevronRight" size={16} />
+          </button></li>;
         })}
-      </div> : null}
+      </ul> : null}
       {found ? <>
         {matches ? <button type="button" disabled={confirming} onClick={() => setFound(undefined)}>{t('friends_search_back')}</button> : null}
         <LookupCard key={found.result.uid} workspace={workspace} locale={locale} proof={found.proof} result={found.result} renderAvatar={renderAvatar}
@@ -213,6 +160,5 @@ export function AddFriendView({ workspace, snapshot, locale, renderAvatar }: Fri
       </> : null}
       {sent ? <p role="status" className="tw-hint">{sent}</p> : null}
     </section>
-    <MyLink workspace={workspace} snapshot={snapshot} locale={locale} />
   </section>;
 }

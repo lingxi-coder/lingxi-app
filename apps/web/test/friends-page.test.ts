@@ -126,7 +126,7 @@ scenario('/friends/add opens Add friend and /friends?chat= opens that friend\'s 
   tab('', '/friends/add');
   const adding = await open(fixture.Page); context.after(() => adding.act(async () => adding.tree.unmount()));
   await adding.act(async () => { fixture.signIn(); await settle(); });
-  await until(() => adding.text().includes('Find someone'), 'the Add friend page');
+  await until(() => adding.find(node => node.type === 'input' && node.props['aria-label'] === 'Find someone').length === 1, 'the Add friend page');
   await adding.act(async () => adding.tree.unmount());
 
   const chat = pageFixture(), again = browserTabs(context, persistent);

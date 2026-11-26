@@ -56,7 +56,7 @@ export default defineConfig({
       },
     },
     resolve: {
-      dedupe: ['react', 'react-dom', 'firebase'],
+      dedupe: ['react', 'react-dom', 'firebase', 'qrcode-generator'],
       alias: {
         '@renderer': resolve(__dirname, 'src/renderer'),
       },

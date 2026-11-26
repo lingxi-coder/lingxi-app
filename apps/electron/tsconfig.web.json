@@ -42,6 +42,7 @@
       "react/jsx-dev-runtime": [
         "./node_modules/@types/react/jsx-dev-runtime"
       ],
+      "qrcode-generator": ["./node_modules/qrcode-generator"],
       "firebase/*": [
         "./node_modules/firebase/*"
       ]

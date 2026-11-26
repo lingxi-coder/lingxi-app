@@ -14,6 +14,7 @@ struct FriendsListView: View {
     var scrollToRequests = 0
     let onOpen: (String) -> Void
     let onAdd: () -> Void
+    let onMe: () -> Void
     let onProfile: () -> Void
     let onBlocked: () -> Void
     /// A team offer was joined (`friends_offer_joined`, and the Teams list refreshes): the tab does both.
@@ -40,6 +41,7 @@ struct FriendsListView: View {
                     .listRowInsets(EdgeInsets()).listRowSeparator(.hidden).listRowBackground(Color.clear)
                     .id(Self.topID)
                     .accessibilityHidden(true)
+                if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { meRow }
                 if friends.profile?.displayName == FriendsLogic.placeholderName { namePrompt }
                 // The empty state also waits for the offers: they are a listener of their own, and an invitation is something to show.
                 if friends.loading || (friends.list.isEmpty && !friends.cardsFailed && !friends.offersAnswered) {
@@ -133,6 +135,28 @@ struct FriendsListView: View {
             }
             FriendsNotice()
         }
+    }
+
+    private var meRow: some View {
+        Button(action: onMe) {
+            HStack(spacing: 12) {
+                PersonAvatar(id: friends.uid ?? "", name: friends.profile?.displayName ?? String(localized: "friends_me"), size: 40)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("friends_me").font(.body.weight(.semibold)).foregroundStyle(.primary)
+                    if let handle = friends.profile?.handle {
+                        Text("@\(handle)").font(.subheadline).foregroundStyle(.secondary)
+                    } else {
+                        Text("friends_my_card").font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.forward")
+                    .font(.footnote.weight(.semibold)).foregroundStyle(.tertiary).accessibilityHidden(true)
+            }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .accessibilityIdentifier("friends.me")
     }
 
     private var namePrompt: some View {

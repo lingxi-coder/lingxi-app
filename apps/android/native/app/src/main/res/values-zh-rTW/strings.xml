@@ -2881,6 +2881,10 @@
     <string name="friends_signin">請登入靈犀帳號以新增好友並聊天。</string>
     <string name="friends_loading">正在載入好友…</string>
     <string name="friends_load_error">無法載入好友，請檢查網路後重試。</string>
+    <string name="friends_me">我</string>
+    <string name="friends_my_card">我的名片</string>
+    <string name="friends_link_qr">好友邀請 QR 碼</string>
+    <string name="friends_search_clear">清除搜尋</string>
     <string name="friends_add">新增好友</string>
     <string name="friends_empty_title">還沒有好友</string>
     <string name="friends_empty_body">透過 @使用者名稱、電子郵件或好友連結新增好友，即可一對一聊天。</string>

@@ -388,6 +388,7 @@ dependencies {
 
     // Activity + Compose
     implementation(libs.coil3.compose)
+    implementation(libs.core)
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.documentfile)

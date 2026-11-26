@@ -131,7 +131,7 @@ class FriendsScreensUiTest {
         show(height) {
             FriendsListScreen(
                 state = state, uid = uid, openChatUid = open, listState = rememberLazyListState(), scrollToRequests = 0,
-                onOpenChat = { events += "chat:$it" }, onAdd = { events += "add" }, onProfile = { events += "profile" }, onBlocked = { events += "blocked" },
+                onOpenChat = { events += "chat:$it" }, onAdd = { events += "add" }, onMe = { events += "me" }, onProfile = { events += "profile" }, onBlocked = { events += "blocked" },
                 onRetry = { events += "retry" }, onRetryProfile = { events += "retryProfile" },
                 onAccept = { events += "accept:$it" }, onDecline = { events += "decline:$it" }, onCancel = { events += "cancel:$it" },
                 onJoinOffer = { events += "join:$it" }, onDeclineOffer = { events += "declineOffer:$it" },
@@ -145,9 +145,20 @@ class FriendsScreensUiTest {
         show {
             AddFriendScreen(
                 state = state, lookup = lookup, showBack = showBack, onClose = { events += "close" }, onOpenChat = { events += "chat:$it" },
-                onLoadProfile = { events += "load" }, onRotateCode = { events += "rotate" }, onRevokeCode = { events += "revoke" },
                 onLookup = { lookups += it }, onSearchHandles = { query, debounce -> searches += query to debounce },
                 onBackToResults = { events += "backToResults" }, onSelect = { events += "select:${it.uid}" }, onConfirm = { notes += it }, onClear = { events += "clear" },
+            )
+        }
+    }
+
+    private fun showMyCard(initial: FriendsState = loaded()) {
+        state = initial
+        show {
+            MyFriendCardScreen(
+                state = state, showBack = true, onClose = { events += "close" },
+                onLoadProfile = { events += "load" }, onRotateCode = { events += "rotate" },
+                onRevokeCode = { events += "revoke" }, onProfile = { events += "profile" },
+                onBlocked = { events += "blocked" },
             )
         }
     }
@@ -420,10 +431,24 @@ class FriendsScreensUiTest {
 
     // --- Add friend (D6, D7) ---------------------------------------------------------------------------------------
 
-    @Test fun myLinkCardShowsTheLinkItsFourActionsAndTheDisclosureBelowIt() {
+    @Test fun meIsAvailableWithNoFriends() {
+        showList(loaded())
+        rule.onNodeWithTag(FriendsTags.ME).performClick()
+        assertEquals(listOf("me"), events)
+    }
+
+    @Test fun addFriendShowsSearchWithoutMyInviteLink() {
         showAdd()
+        rule.onNodeWithTag(FriendsTags.SEARCH_INPUT).assertIsDisplayed()
+        rule.onNodeWithTag(FriendsTags.LINK_CARD).assertDoesNotExist()
+        assertTrue(events.isEmpty())
+    }
+
+    @Test fun myLinkCardShowsTheLinkItsFourActionsAndTheDisclosureBelowIt() {
+        showMyCard()
         assertTrue("the profile is asked for on every open: $events", "load" in events)
         rule.onNodeWithTag(FriendsTags.LINK_CARD).assertIsDisplayed()
+        rule.onNodeWithTag(FriendsTags.LINK_QR).assertIsDisplayed()
         rule.onNodeWithText("https://lingxios.net/open/friend/add?code=$code").assertIsDisplayed()
         listOf(FriendsTags.LINK_COPY, FriendsTags.LINK_SHARE, FriendsTags.LINK_RESET, FriendsTags.LINK_OFF).forEach { rule.onNodeWithTag(it).assertIsDisplayed() }
         rule.onNodeWithTag(FriendsTags.LINK_CREATE).assertDoesNotExist()
@@ -434,14 +459,14 @@ class FriendsScreensUiTest {
     }
 
     @Test fun copyingTheLinkSaysSoInline() {
-        showAdd()
+        showMyCard()
         rule.onNodeWithText(text(R.string.friends_link_copied)).assertDoesNotExist()
         rule.onNodeWithTag(FriendsTags.LINK_COPY).performClick()
         rule.onNodeWithText(text(R.string.friends_link_copied)).assertIsDisplayed()
     }
 
     @Test fun resetAndTurnOffAskBeforeTheyActAndCancelChangesNothing() {
-        showAdd()
+        showMyCard()
         rule.onNodeWithTag(FriendsTags.LINK_RESET).performClick()
         rule.onNodeWithText(text(R.string.friends_link_reset_title)).assertIsDisplayed()
         rule.onNodeWithText(text(R.string.friends_link_reset_body)).assertIsDisplayed()
@@ -463,9 +488,10 @@ class FriendsScreensUiTest {
     }
 
     @Test fun withoutALinkTheCardOffersToCreateOne() {
-        showAdd(loaded(profile = profile(linkOn = false)))
+        showMyCard(loaded(profile = profile(linkOn = false)))
         rule.onNodeWithText(text(R.string.friends_link_is_off)).assertIsDisplayed()
         rule.onNodeWithTag(FriendsTags.LINK_COPY).assertDoesNotExist()
+        rule.onNodeWithTag(FriendsTags.LINK_QR).assertDoesNotExist()
         rule.onNodeWithTag(FriendsTags.LINK_CREATE).performClick()
         assertEquals(1, events.count { it == "rotate" })
 
@@ -474,13 +500,13 @@ class FriendsScreensUiTest {
     }
 
     @Test fun aRotateThatFailedShowsItsErrorInTheCard() {
-        showAdd(loaded().copy(linkOp = FriendsOp(error = FriendsError.Network)))
+        showMyCard(loaded().copy(linkOp = FriendsOp(error = FriendsError.Network)))
         rule.onNodeWithText(text(R.string.friends_error_network)).assertIsDisplayed()
         rule.onNodeWithTag(FriendsTags.LINK_COPY).assertIsDisplayed()
     }
 
     @Test fun theLinkCardWaitsForTheProfileAndOffersRetryWhenItFails() {
-        showAdd(FriendsState(uid = uid))
+        showMyCard(FriendsState(uid = uid))
         rule.onNodeWithTag(FriendsTags.LINK_COPY).assertDoesNotExist()
         rule.onNodeWithTag(FriendsTags.PROFILE_ERROR).assertDoesNotExist()
 

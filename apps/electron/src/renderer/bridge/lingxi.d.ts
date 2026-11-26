@@ -185,6 +185,7 @@ export interface VisualizationApi {
 
 export interface LingxiApi {
   projectSettings: import('../../shared/projectSettings.js').ProjectSettingsRequest;
+  pluginInstallCounts?(): Promise<import('../../shared/pluginInstallCounts.js').PluginInstallCounts>;
   decision: import('../../shared/decision').DecisionApi;
   computerSettings: import('../../shared/computerSettings').ComputerSettingsApi;
   saveImage(request: import('../../shared/imageSave').ImageSaveRequest): Promise<boolean>;

@@ -76,6 +76,10 @@ function Fixture() {
   const pluginAdmin = useCallback(async (command: Record<string, unknown>) => {
     extensionCalls.current.push({ domain: 'plugin', command });
     const payload = typeof command.payload_json === 'string' ? JSON.parse(command.payload_json) : {};
+    if (command.action === 'preview_operation' && payload.action === 'marketplace_add') {
+      if (payload.source === 'denied/marketplace') throw new Error('Marketplace source is blocked.');
+      return { details_json: JSON.stringify({ action: payload.action, target: payload.source, requiresConfirmation: true }) };
+    }
     if (command.action === 'apply_operation' && payload.action === 'uninstall') return { details_json: JSON.stringify({ credentialCleanup: { pluginId: payload.plugin, lastScopeRemoved: true } }) };
   }, []);
   const mcpAdmin = useCallback(async (command: Record<string, unknown>) => { extensionCalls.current.push({ domain: 'mcp', command }); }, []);

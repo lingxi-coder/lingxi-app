@@ -234,11 +234,12 @@ export function ExtensionRecommendationGroups({ items, children }: {
   });
 }
 
-export function ExtensionRecommendationCard({ item, kind = item.kind, onOpen, status, action }: {
+export function ExtensionRecommendationCard({ item, kind = item.kind, onOpen, status, installCount, action }: {
   item: PublicExtensionItem;
   kind?: 'plugin' | 'skill' | 'mcp';
   onOpen: () => void;
   status?: string;
+  installCount?: string;
   action: ReactNode;
 }) {
   const { locale } = useI18n();
@@ -255,6 +256,7 @@ export function ExtensionRecommendationCard({ item, kind = item.kind, onOpen, st
         <span>{item.publisher}{kind === 'skill' && item.skills?.length
           ? ` · ${tr('extension_directory_skills_count', item.skills.length)}` : item.version ? ` · ${item.version}` : ''}</span>
         {status && <span className="extension-card-status">{status}</span>}
+        {installCount && <span className="plugin-install-count">{installCount}</span>}
       </div>
       {action}
     </footer>

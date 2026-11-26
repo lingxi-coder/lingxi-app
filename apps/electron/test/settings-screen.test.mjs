@@ -23,7 +23,10 @@ async function runScenario(scenario, fixtureTheme = process.env.LINGXI_SETTINGS_
     logLevel: 'error',
     server: { host: '127.0.0.1', port: 0, strictPort: false, hmr: false },
     plugins: [react()],
-    resolve: { alias: { '@renderer': resolve(electronRoot, 'src/renderer') } },
+    resolve: {
+      dedupe: ['react', 'react-dom', 'firebase', 'qrcode-generator'],
+      alias: { '@renderer': resolve(electronRoot, 'src/renderer') },
+    },
   });
   const temporaryUserData = mkdtempSync(join(tmpdir(), `lingxi-settings-screen-electron-${scenario}-`));
   const childOutput = [];
@@ -116,6 +119,8 @@ test('recommended skills search, add their source and follow the chosen package 
     assert.equal(result.removeMcp.scope, 'project');
     assert.equal(result.removeMcp.revision, 'p'.repeat(64));
     assert.deepEqual(JSON.parse(result.removeMcp.payload_json), { scope: 'project', name: 'notion' });
+    assert.equal(result.sourceFocused, true);
+    assert.deepEqual(result.review, { focused: true, source: 'anthropics/skills', leakedJson: false, hasInput: false });
     assert(result.beforePreview.every(({ command }) => command.action === 'get_catalog'));
     assert.equal(result.beforeConfirmation.filter(({ command }) => command.action === 'apply_operation').length, 0);
     assert.equal(result.selectedPackage.filter(({ command }) => command.action === 'apply_operation').length, 1);
@@ -168,9 +173,18 @@ test('extension scope tabs list named projects after User and bind each view to 
   }
 });
 
+test('plugin install counts appear only for plugins from the verified public source', async () => {
+  const result = await runScenario('plugin-install-counts');
+  assert.deepEqual(result, { recommended: true, alias: true, customHidden: true, missingHidden: true, detail: true });
+});
+
 test('recommendation badges verify source aliases and late catalogs preserve manual drafts', async () => {
   const result = await runScenario('recommendation-catalog-safety');
-  assert.deepEqual(result, { aliasInstalled: true, refreshed: true, differentSourceNotInstalled: true, retainedManualDraft: true });
+  assert.deepEqual(result, {
+    aliasInstalled: true, refreshed: true, differentSourceNotInstalled: true, retainedManualDraft: true,
+    errorKeptSource: true, longSourceFits: true, keepEditingFocused: true, restoredFocus: true, noApplyOnCancel: true,
+    removed: { action: 'marketplace_remove', name: 'my-skills', scope: 'user', confirmed: true },
+  });
 });
 
 test('expanded settings editors fit a narrow macOS window', async () => {

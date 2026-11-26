@@ -13,6 +13,8 @@ import { CH_IMAGE_SAVE } from '../shared/imageSave.js';
 import { registerImageSave } from './imageSave.js';
 import { CH_APPLICATION_ICON } from '../shared/applicationIcon.js';
 import { CH_PROJECT_SETTINGS, isProjectSettingsCommand } from '../shared/projectSettings.js';
+import { CH_PLUGIN_INSTALL_COUNTS } from '../shared/pluginInstallCounts.js';
+import { readPluginInstallCounts } from './pluginInstallCounts.js';
 import { CH_MCP_PREPARE, mcpPrepareRequest, type McpPrepareRequest, type McpPrepareStatus } from '../shared/mcpPrepare.js';
 import { MCP_PREPARE_DEADLINE_MS, prepareMcpServer } from './mcpPrepare.js';
 import { CH_INTERFACE_LOCALE } from '../shared/interfaceLocale.js';
@@ -1692,6 +1694,10 @@ export class HostController {
     });
     this.ipc.handle('lingxi:provider-accounts:routing:get', (event: IpcMainInvokeEvent) => {
       this.assertSender(event); return this.providerAccounts?.lastRouting;
+    });
+    this.ipc.handle(CH_PLUGIN_INSTALL_COUNTS, (event: IpcMainInvokeEvent) => {
+      this.assertSender(event);
+      return readPluginInstallCounts();
     });
     this.ipc.handle(CH_PROJECT_SETTINGS, async (event: IpcMainInvokeEvent, path: unknown, input: unknown) => {
       this.assertSender(event);
@@ -3929,6 +3935,7 @@ export class HostController {
       CH_SESSION_WORKSPACE, CH_NATIVE_AUDIO_FLOW_LEASE,
       CH_WORKSPACE_FILES_SEARCH, CH_COMPUTER_SETTINGS,
       CH_PROVIDER_ACCOUNTS, CH_PROVIDER_ACCOUNTS_CANCEL, 'lingxi:provider-accounts:routing:get', CH_PROJECT_SETTINGS, 'lingxi:provider-settings', CH_PROVIDER_VAULT,
+      CH_PLUGIN_INSTALL_COUNTS,
       CH_PLUGIN_SECRET_GET, CH_PLUGIN_SECRET_SET, CH_PLUGIN_SECRET_CLEAR, CH_PLUGIN_SECRET_CLEANUP,
       CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET, CH_MICROPHONE_ACCESS_GET,
       CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_CLIPBOARD_WRITE_TEXT, CH_INTERFACE_LOCALE, CH_OPEN_SYSTEM_SETTINGS,

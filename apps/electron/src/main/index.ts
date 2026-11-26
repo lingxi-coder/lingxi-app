@@ -40,6 +40,7 @@ import { applicationMenuTemplate } from './applicationMenu.js';
 import { CH_APPLICATION_MENU } from '../shared/applicationMenu.js';
 import { installDesktopUpdates } from './desktopUpdates.js';
 import { desktopUpdateManifestUrl } from '../shared/productConfig.js';
+import { seedDefaultPluginMarketplaces } from './defaultPluginMarketplaces.js';
 import { CH_BOTS_PROMPT_SENT, CH_BOTS_TASKS_CHANGED, type BotPromptSentUi, type BotTasksChangedUi } from '../shared/bots.js';
 import { join } from 'node:path';
 import { dirname } from 'node:path';
@@ -1289,6 +1290,18 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   });
   // Read once, here: the system says "opened at login" only for the start that it did.
   if (!loginItem.openedInBackground()) createWindow();
+  void seedDefaultPluginMarketplaces({
+    brandHome: productPaths.brandHome,
+    pluginAdmin: command => sessionCatalog.projectSettings(app.getPath('home'), { type: 'plugin_admin', command }),
+    onAdded: () => {
+      const active = settings.getPublic().activeSession;
+      const runtime = active && bridge?.get(active.sessionId);
+      if (runtime?.connectionState.status === 'connected') {
+        void runtime.dispatchCommand({ type: 'plugin_admin', command: { action: 'get_catalog' } }).catch(() => undefined);
+      }
+    },
+    onError: (source, error) => diagnostics.add('warn', 'host', `Could not register the default marketplace ${source}: ${sanitizeDiagnostic(error)}`),
+  }).catch(error => diagnostics.add('warn', 'host', `Default plugin marketplaces could not be loaded: ${sanitizeDiagnostic(error)}`));
   if (app.isPackaged) {
     desktopUpdates.start();
     powerMonitor.on('resume', () => { void desktopUpdates?.check(); });

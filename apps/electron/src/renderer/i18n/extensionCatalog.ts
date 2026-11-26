@@ -1588,12 +1588,54 @@ export const extensionCatalog: Record<string, Record<string, string>> = {
     "ja": "owner/repoまたはhttps://…",
     "ko": "owner/repo 또는 https://…"
   },
+  "desktop_extension_claude_code_install_count": {
+    "zh-Hans": "Claude Code 安装量",
+    "zh-Hant": "Claude Code 安裝量",
+    "en": "Claude Code installs",
+    "ja": "Claude Code インストール数",
+    "ko": "Claude Code 설치 수"
+  },
+  "desktop_extension_marketplace_add_description": {
+    "zh-Hans": "添加来源后即可浏览目录，按需单独安装插件。",
+    "zh-Hant": "新增來源後即可瀏覽目錄，按需個別安裝外掛。",
+    "en": "Add a source to browse its catalog and install plugins individually.",
+    "ja": "追加元のカタログを閲覧し、必要なプラグインを個別にインストールできます。",
+    "ko": "소스를 추가하면 카탈로그를 둘러보고 필요한 플러그인을 개별 설치할 수 있습니다."
+  },
   "desktop_extension_preview_add": {
-    "zh-Hans": "预检添加",
-    "zh-Hant": "預覽新增",
-    "en": "Preview adding",
-    "ja": "追加を事前確認",
-    "ko": "추가 사전 검토"
+    "zh-Hans": "预览",
+    "zh-Hant": "預覽",
+    "en": "Preview",
+    "ja": "プレビュー",
+    "ko": "미리보기"
+  },
+  "desktop_extension_marketplace_preparing_preview": {
+    "zh-Hans": "正在准备预览…",
+    "zh-Hant": "正在準備預覽…",
+    "en": "Preparing preview…",
+    "ja": "プレビューを準備中…",
+    "ko": "미리보기 준비 중…"
+  },
+  "desktop_extension_marketplace_review_ready": {
+    "zh-Hans": "添加前确认",
+    "zh-Hant": "新增前確認",
+    "en": "Review before adding",
+    "ja": "追加前に内容を確認",
+    "ko": "추가 전 검토"
+  },
+  "desktop_extension_marketplace_edit_source": {
+    "zh-Hans": "编辑来源",
+    "zh-Hant": "編輯來源",
+    "en": "Edit source",
+    "ja": "追加元を編集",
+    "ko": "소스 편집"
+  },
+  "desktop_extension_marketplace_adding": {
+    "zh-Hans": "正在添加市场…",
+    "zh-Hant": "正在新增市集…",
+    "en": "Adding marketplace…",
+    "ja": "マーケットプレイスを追加中…",
+    "ko": "마켓플레이스 추가 중…"
   },
   "desktop_extension_policies_readonly": {
     "zh-Hans": "管理员策略仍保持只读展示。",

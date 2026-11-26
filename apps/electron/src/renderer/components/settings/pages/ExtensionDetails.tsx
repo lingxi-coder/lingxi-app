@@ -5,12 +5,13 @@ import { tr } from '../../../i18n/locale';
 import { ExtensionIcon, useExtensionHubDialogFocus } from './ExtensionHub';
 import { ExtensionGlyph } from './ExtensionHubIcons';
 
-export function ExtensionDetails({ item, breadcrumb, onBack, actions, status, children, kind = item.kind }: {
+export function ExtensionDetails({ item, breadcrumb, onBack, actions, status, installCount, children, kind = item.kind }: {
   item: PublicExtensionItem;
   breadcrumb: string;
   onBack: () => void;
   actions: ReactNode;
   status?: string;
+  installCount?: string;
   children?: ReactNode;
   kind?: 'plugin' | 'skill' | 'mcp';
 }) {
@@ -51,6 +52,7 @@ export function ExtensionDetails({ item, breadcrumb, onBack, actions, status, ch
         <h1 id="extension-overview-title" ref={heading} tabIndex={-1}>{item.name}</h1>
         <p>{item.publisher} · {publicExtensionText(item.description, locale)}</p>
         {status && <span className="extension-overview-status"><ExtensionGlyph name="check" size={14} />{status}</span>}
+        {installCount && <p className="plugin-install-count">{installCount}</p>}
       </div>
       <div className="extension-overview-actions">
         {item.previewUrl && <a className="extension-hub-icon-text" href={item.previewUrl} target="_blank" rel="noopener noreferrer">

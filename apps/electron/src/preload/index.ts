@@ -11,6 +11,7 @@ import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, type LocalAppsApi, type LocalAppE
 import { CH_IMAGE_SAVE, type ImageSaveRequest } from '../shared/imageSave.js';
 import { CH_APPLICATION_ICON, type ApplicationIconApi } from '../shared/applicationIcon.js';
 import { CH_PROJECT_SETTINGS, type ProjectSettingsRequest } from '../shared/projectSettings.js';
+import { CH_PLUGIN_INSTALL_COUNTS, type PluginInstallCounts } from '../shared/pluginInstallCounts.js';
 import { CH_MCP_PREPARE, type McpPrepareApi } from '../shared/mcpPrepare.js';
 import { CH_DESKTOP_UPDATES, CH_DESKTOP_UPDATES_CHANGED, type DesktopUpdatesApi } from '../shared/desktopUpdates.js';
 import { CH_INTERFACE_LOCALE } from '../shared/interfaceLocale.js';
@@ -279,6 +280,7 @@ export interface LingxiApi {
   applicationIcon: ApplicationIconApi;
   mcpPrepare: McpPrepareApi;
   projectSettings: ProjectSettingsRequest;
+  pluginInstallCounts(): Promise<PluginInstallCounts>;
   desktopUpdates: DesktopUpdatesApi;
   localApps: LocalAppsApi;
   onLocalAppEdit(listener: (app: LocalAppEditRequest) => void): () => void;
@@ -473,6 +475,7 @@ const api: LingxiApi = {
   saveImage: request => ipcRenderer.invoke(CH_IMAGE_SAVE, request),
   applicationIcon: { get: bundleId => ipcRenderer.invoke(CH_APPLICATION_ICON, bundleId) },
   projectSettings: (path, command) => ipcRenderer.invoke(CH_PROJECT_SETTINGS, path, command),
+  pluginInstallCounts: () => ipcRenderer.invoke(CH_PLUGIN_INSTALL_COUNTS),
   mcpPrepare: { prepare: request => ipcRenderer.invoke(CH_MCP_PREPARE, request) },
   desktopUpdates: {
     getState: () => ipcRenderer.invoke(CH_DESKTOP_UPDATES, 'get'),

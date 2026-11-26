@@ -1342,10 +1342,24 @@ async function runExtensionRecommendationsScenario(window, webContents) {
   await waitFor(webContents, 'Boolean([...document.querySelectorAll(".extension-detail-dialog input")].find(el => el.value === "anthropics/skills"))');
   await capture('source');
   const beforePreview = await run('window.__settingsScreenTest.state().extensionCalls');
-  await clickButton('预检添加');
-  await waitFor(webContents, 'window.__settingsScreenTest.state().extensionCalls.some(({command}) => command.action === "preview_operation")');
+  const sourceFocused = await run('document.activeElement === document.querySelector(".marketplace-add-dialog input")');
+  await webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+  await webContents.sendInputEvent({ type: 'char', keyCode: 'Enter' });
+  await webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+  await waitFor(webContents, 'Boolean(document.querySelector(".marketplace-add-review"))');
+  const review = await run(`(() => {
+    const dialog = document.querySelector('.marketplace-add-dialog');
+    const card = dialog.querySelector('.marketplace-add-review');
+    return { focused: document.activeElement === card, source: card.querySelector('dd').textContent,
+      leakedJson: dialog.textContent.includes('requiresConfirmation'), hasInput: Boolean(dialog.querySelector('input')) };
+  })()`);
+  await capture('source-review');
+  await clickButton('编辑来源');
+  await waitFor(webContents, 'document.querySelector(".marketplace-add-dialog input")?.value === "anthropics/skills"');
+  await run('document.querySelector(".marketplace-add-actions button[type=submit]").click()');
+  await waitFor(webContents, 'Boolean(document.querySelector(".marketplace-add-review"))');
   const beforeConfirmation = await run('window.__settingsScreenTest.state().extensionCalls');
-  await clickButton('确认执行');
+  await run('document.querySelector(".marketplace-add-actions .extension-hub-primary").click()');
   await waitFor(webContents, 'window.__settingsScreenTest.state().extensionCalls.some(({command}) => command.action === "apply_operation")');
   const available = [{ id: 'document-skills@anthropic-agent-skills', name: 'document-skills', marketplace: 'anthropic-agent-skills', description: 'Word, Excel, PowerPoint and PDF skills.', installed: false }];
   const catalog = { installed: [], available, marketplaces: [{ name: 'anthropic-agent-skills', source_json: JSON.stringify({ source: 'github', repo: 'anthropics/skills' }) }], revisions: { user: 'b'.repeat(64), project: 'c'.repeat(64) } };
@@ -1407,10 +1421,44 @@ async function runExtensionRecommendationsScenario(window, webContents) {
   await run('document.querySelector("[role=alertdialog] .extension-hub-danger").click()');
   await waitFor(webContents, 'window.__settingsScreenTest.state().extensionCalls.some(({command}) => command.action === "remove_server")');
   const removeMcp = await run('window.__settingsScreenTest.state().extensionCalls.find(({command}) => command.action === "remove_server").command');
-  return { initial, pixelGallery, search, details, copied, beforePreview, beforeConfirmation, selectedPackage, completed, installed, narrow, mcpTemplate, mcpScopeOptions, beforeUninstall, cancelUninstall, uninstall, credentialCleanup, cancelMcp, removeMcp };
+  return { initial, pixelGallery, search, details, copied, sourceFocused, review, beforePreview, beforeConfirmation, selectedPackage, completed, installed, narrow, mcpTemplate, mcpScopeOptions, beforeUninstall, cancelUninstall, uninstall, credentialCleanup, cancelMcp, removeMcp };
 }
 
-async function runRecommendationCatalogSafetyScenario(webContents) {
+async function runPluginInstallCountsScenario(webContents) {
+  const run = expression => webContents.executeJavaScript(expression);
+  const catalog = {
+    installed: [],
+    available: [
+      { id: 'frontend-design@official-alias', name: 'Official Design', marketplace: 'official-alias' },
+      { id: 'unlisted@official-alias', name: 'Unlisted Plugin', marketplace: 'official-alias' },
+      { id: 'frontend-design@other-market', name: 'Other Design', marketplace: 'other-market' },
+    ],
+    marketplaces: [
+      { name: 'official-alias', source_json: JSON.stringify({ source: 'github', repo: 'anthropics/claude-plugins-official' }) },
+      { name: 'other-market', source_json: JSON.stringify({ source: 'github', repo: 'other/market' }) },
+    ],
+  };
+  await run(`window.lingxi = { ...window.lingxi, pluginInstallCounts: async () => ({ 'frontend-design': 1234567 }) };
+    window.__settingsScreenTest.setExtensionCatalogs({plugins:${JSON.stringify(catalog)}});
+    window.__settingsScreenTest.selectPage('plugins');`);
+  await waitFor(webContents, 'document.querySelector(".extension-catalog-section .plugin-install-count")?.textContent.includes("1,234,567")');
+  const result = await run(`(() => {
+    const row = name => [...document.querySelectorAll('.extension-catalog-section .extension-hub-row')]
+      .find(el => el.querySelector('.extension-hub-row-title').textContent === name);
+    const marker = '.plugin-install-count';
+    const recommended = Boolean(document.querySelector('#extension-card-frontend-design')?.closest('article')?.querySelector(marker));
+    const alias = row('Official Design')?.querySelector(marker)?.textContent.includes('1,234,567');
+    const customHidden = Boolean(row('Other Design')) && !row('Other Design').querySelector(marker);
+    const missingHidden = Boolean(row('Unlisted Plugin')) && !row('Unlisted Plugin').querySelector(marker);
+    row('Official Design').querySelector('.extension-hub-row-open').click();
+    return { recommended, alias, customHidden, missingHidden };
+  })()`);
+  await waitFor(webContents, 'Boolean(document.querySelector(".extension-plugin-hero .plugin-install-count"))');
+  const detail = await run('document.querySelector(".extension-plugin-hero .plugin-install-count").textContent.includes("1,234,567")');
+  return { ...result, detail };
+}
+
+async function runRecommendationCatalogSafetyScenario(window, webContents) {
   const run = expression => webContents.executeJavaScript(expression);
   const aliasCatalog = {
     marketplaces: [{ name: 'my-skills', source_json: JSON.stringify({ source: 'github', repo: 'anthropics/skills' }) }],
@@ -1438,7 +1486,42 @@ async function runRecommendationCatalogSafetyScenario(webContents) {
   await run('window.__settingsScreenTest.setExtensionCatalogs({plugins:{installed:[],available:[],marketplaces:[],revisions:{user:"a".repeat(64)}}})');
   await waitFor(webContents, 'window.__settingsScreenTest.state().pluginCatalogReady');
   const retainedManualDraft = await run('document.querySelector(".extension-detail-dialog input")?.value === "my/own-plugins"');
-  return { aliasInstalled, refreshed, differentSourceNotInstalled, retainedManualDraft };
+  const setSource = (source) => run(`window.__settingsScreenTest.setFieldValue('.marketplace-add-dialog input', ${JSON.stringify(source)})`);
+  const preview = () => run('document.querySelector(".marketplace-add-dialog form").requestSubmit()');
+  await setSource('denied/marketplace');
+  await preview();
+  await waitFor(webContents, 'document.querySelector(".marketplace-add-dialog [role=alert]")?.textContent.includes("Marketplace source is blocked.")');
+  const errorKeptSource = await run('document.querySelector(".marketplace-add-dialog input")?.value === "denied/marketplace"');
+
+  window.setContentSize(360, 420);
+  const longSource = `https://example.com/${'long-segment'.repeat(32)}/marketplace.json`;
+  await setSource(longSource);
+  await preview();
+  await waitFor(webContents, 'Boolean(document.querySelector(".marketplace-add-review"))');
+  const longSourceFits = await run(`(() => {
+    const dialog = document.querySelector('.marketplace-add-dialog');
+    const source = dialog.querySelector('dd');
+    return dialog.matches(':modal') && source.textContent === ${JSON.stringify(longSource)}
+      && source.scrollWidth <= source.clientWidth + 1 && dialog.scrollWidth <= dialog.clientWidth + 1;
+  })()`);
+  await webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+  await webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+  await waitFor(webContents, 'Boolean(document.querySelector(".marketplace-add-discard"))');
+  const keepEditingFocused = await run('document.activeElement === document.querySelector(".marketplace-add-actions .extension-hub-primary")');
+  await run('document.querySelector(".marketplace-add-actions .extension-hub-danger").click()');
+  await waitFor(webContents, '!document.querySelector(".marketplace-add-dialog")');
+  const restoredFocus = await run('document.activeElement === document.querySelector(".extension-hub-menu summary")');
+  const noApplyOnCancel = await run('window.__settingsScreenTest.state().extensionCalls.every(({command}) => command.action !== "apply_operation")');
+  await run(`window.__settingsScreenTest.setExtensionCatalogs({plugins:${JSON.stringify(aliasCatalog)}})`);
+  await waitFor(webContents, 'Boolean(document.querySelector(".plugin-marketplace-list summary"))');
+  await run('document.querySelector(".plugin-marketplace-list summary").click(); document.querySelector(".plugin-marketplace-list button").click()');
+  const clickDialogButton = label => run(`(() => { const button = [...document.querySelectorAll('.extension-detail-dialog button')].find(el => el.textContent.trim() === ${JSON.stringify(label)}); if (!button) throw new Error('Marketplace button not found'); button.click(); })()`);
+  await clickDialogButton('预检移除');
+  await waitFor(webContents, 'document.querySelector(".extension-detail-dialog strong")?.textContent.includes("my-skills")');
+  await clickDialogButton('移除市场');
+  await waitFor(webContents, '!document.querySelector(".extension-detail-dialog")');
+  const removed = await run('JSON.parse(window.__settingsScreenTest.state().extensionCalls.find(({command}) => command.action === "apply_operation").command.payload_json)');
+  return { aliasInstalled, refreshed, differentSourceNotInstalled, retainedManualDraft, errorKeptSource, longSourceFits, keepEditingFocused, restoredFocus, noApplyOnCancel, removed };
 }
 
 async function main() {
@@ -1459,7 +1542,8 @@ async function main() {
     if (withNativeTitlebar) await webContents.executeJavaScript(
       `window.lingxi = { ...window.lingxi, platform: ${JSON.stringify(process.platform)} }; void 0`,
     );
-    const result = scenario === 'recommendation-catalog-safety' ? await runRecommendationCatalogSafetyScenario(webContents)
+    const result = scenario === 'plugin-install-counts' ? await runPluginInstallCountsScenario(webContents)
+      : scenario === 'recommendation-catalog-safety' ? await runRecommendationCatalogSafetyScenario(window, webContents)
       : scenario === 'extension-project-tabs' ? await runExtensionProjectTabs(window, webContents)
       : scenario === 'extension-recommendations' ? await runExtensionRecommendationsScenario(window, webContents)
       : scenario === 'localization' ? await runLocalizationScenario(window, webContents)

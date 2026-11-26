@@ -596,7 +596,7 @@ export function Hooks({ bridge, snapshot, editingLayer, onNavigate, onJumpToLaye
         </div>
       </Card>
 
-      {!showDetail && <Card title={tr('desktop_shell_runtime_status')}>
+      {!bridge.settingsOnly && !showDetail && <Card title={tr('desktop_shell_runtime_status')}>
         <Row title={tr('desktop_shell_refresh_catalog')} desc={tr('desktop_shell_hooks_runtime_desc')} align="center">
           <button type="button" onClick={() => void bridge.refreshHooks()} style={ghostButtonStyle(t)}>{tr('settings_linux_refresh_button')}</button>
         </Row>

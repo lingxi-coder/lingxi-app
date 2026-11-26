@@ -206,8 +206,7 @@ export function ExtensionCatalogTabs({ label, value, onChange, scopes, locked = 
       {projects.map((path, index) => (
         <button key={path} type="button" data-catalog-tab="project" data-project-path={path}
           aria-pressed={activeProject === path}
-          title={path === scopes?.activeProject ? path : `${path}\n${tr('settings_parity_switch_project_warning')}`}
-          aria-description={path === scopes?.activeProject ? undefined : tr('settings_parity_switch_project_warning')}
+          title={path}
           disabled={locked} onClick={() => scopes?.selectProject(path)}>
           <Icon name="folder" size={14} /><bdi>{projectLabel(index)}</bdi>
         </button>

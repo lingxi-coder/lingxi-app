@@ -74,18 +74,14 @@ export function removeDisabledReasonId(projectPath: string): string {
   return `projects-remove-disabled-${encodeURIComponent(projectPath)}`;
 }
 
-export function Projects({ bridge }: PageContentProps) {
+export function Projects({ bridge, settingsProject, onSelectSettingsProject }: PageContentProps) {
   const t = useT();
   const [busyPath, setBusyPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const settings = bridge.bootstrap?.settings;
   const spaces = bridge.bootstrap?.conversationSpaces;
-  // Mirrors `BetaSidebar`'s own precedence for "which project is active"
-  // (an in-flight session's project outranks the persisted `activeProject`,
-  // which outranks whatever `workspace` currently resolves to) — `projectRows`
-  // itself stays simple and pure, taking a single resolved path.
-  const activePath = bridge.activeSession?.projectId ?? (spaces ? spaces.navigation[spaces.activeMode].projectId : undefined) ?? undefined;
+  const activePath = settingsProject ?? bridge.activeSession?.projectId ?? (spaces ? spaces.navigation[spaces.activeMode].projectId : undefined) ?? undefined;
   const rows = projectRows({ projects: (settings?.projects ?? []).filter((path) => spaces?.projects[path]?.includes(spaces.activeMode)), activeProject: activePath });
   const pinnedRows = pinnedSessionRows({ pinnedSessions: (settings?.pinnedSessions ?? []).filter((row) => row.mode === spaces?.activeMode
     && (row.projectId == null || (spaces && spaces.projects[row.projectId]?.includes(spaces.activeMode)))) });
@@ -114,13 +110,6 @@ export function Projects({ bridge }: PageContentProps) {
   const handleAdd = () => {
     setError(null);
     void bridge.addProject().catch((cause) => setError(cause instanceof Error ? cause.message : tr('desktop_shell_add_project_error')));
-  };
-  const handleActivate = (path: string) => {
-    setError(null);
-    setBusyPath(path);
-    void bridge.activateProject(path)
-      .catch((cause) => setError(cause instanceof Error ? cause.message : tr('desktop_shell_switch_project_error')))
-      .finally(() => setBusyPath((current) => (current === path ? null : current)));
   };
   const handleRemove = (path: string) => {
     setError(null);
@@ -170,8 +159,8 @@ export function Projects({ bridge }: PageContentProps) {
               desc={row.path}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                {!row.active && (
-                  <button type="button" disabled={busy} onClick={() => handleActivate(row.path)} style={ghostButtonStyle(t, busy)}>
+                {!row.active && onSelectSettingsProject && (
+                  <button type="button" disabled={busy} onClick={() => onSelectSettingsProject(row.path)} style={ghostButtonStyle(t, busy)}>
                     {tr('desktop_shell_switch')}
                   </button>
                 )}

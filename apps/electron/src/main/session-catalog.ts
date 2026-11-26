@@ -1,3 +1,4 @@
+import type { ProjectSettingsCommand } from '../shared/projectSettings.js';
 import type { ProviderAccountCredentialVersion } from './provider-accounts.js';
 import type { HostProviderSettings, ProviderAccountCommand, ProviderAccountSnapshot } from '../shared/providerAccounts.js';
 import { spawn } from 'node:child_process';
@@ -79,6 +80,7 @@ interface CatalogCacheEntry {
 
 /** A lease covers the child's lifetime, including a timed-out writer's drain. */
 class CatalogChildAdmission {
+  constructor(private readonly capacity = MAX_CATALOG_CHILDREN) {}
   private active = 0;
   private readonly waiting: Array<() => void> = [];
   private readonly idle = new Map<() => void, () => void>();
@@ -100,7 +102,7 @@ class CatalogChildAdmission {
         try { resolve(start(release) as Awaited<T>); }
         catch (error) { release(); reject(error); }
       };
-      if (this.active < MAX_CATALOG_CHILDREN && this.waiting.length === 0) launch();
+      if (this.active < this.capacity && this.waiting.length === 0) launch();
       else if (this.waiting.length >= MAX_QUEUED_CATALOG_OPERATIONS) reject(this.busyError());
       else {
         const admitted = () => { clearTimeout(timeout); launch(); };
@@ -134,7 +136,7 @@ class CatalogChildAdmission {
   }
 
   private drain(): void {
-    while (this.waiting.length > 0 && this.active < MAX_CATALOG_CHILDREN) this.waiting.shift()!();
+    while (this.waiting.length > 0 && this.active < this.capacity) this.waiting.shift()!();
     // A persistent reader must give up its process slot when another helper,
     // especially a durable metadata writer, is waiting to start.
     if (this.waiting.length > 0) {
@@ -145,6 +147,8 @@ class CatalogChildAdmission {
 }
 
 const catalogChildren = new CatalogChildAdmission();
+// A timed-out writer can still own a settings file until its process closes.
+const settingsChildren = new CatalogChildAdmission(1);
 
 /** Signalling is an attempt; only the ChildProcess close event returns its lease. */
 class CatalogChildTermination {
@@ -153,14 +157,14 @@ class CatalogChildTermination {
   private closed = false;
   private retry?: ReturnType<typeof setTimeout>;
 
-  constructor(private readonly child: ReturnType<typeof spawn>, private readonly release: () => void) {
+  constructor(private readonly child: ReturnType<typeof spawn>, private readonly release: () => void, private readonly admission = catalogChildren) {
     const stopRetries = () => { if (this.retry) clearTimeout(this.retry); this.retry = undefined; };
     child.once('exit', () => { this.exited = true; stopRetries(); });
     child.once('close', () => { this.closed = true; stopRetries(); });
   }
 
   error(): void {
-    if (this.requested && !this.closed && !this.exited) catalogChildren.notReaped(this.release);
+    if (this.requested && !this.closed && !this.exited) this.admission.notReaped(this.release);
   }
 
   stop(): void {
@@ -177,7 +181,7 @@ class CatalogChildTermination {
       if (this.closed || this.exited) return;
       this.retry = setTimeout(() => {
         this.retry = undefined;
-        if (!this.closed && !this.exited) catalogChildren.notReaped(this.release);
+        if (!this.closed && !this.exited) this.admission.notReaped(this.release);
       }, CHILD_TERMINATION_RETRY_MS);
       this.retry.unref();
     }, CHILD_TERMINATION_RETRY_MS);
@@ -481,6 +485,16 @@ export class ProjectSessionCatalog {
     const result = await this.metadataRequest(projectPath, { action, receipt, ...(title === undefined ? {} : { title }) });
     if (result.ok !== true) throw new Error('Invalid session metadata result.');
     if (action === 'rename' || action === 'touch') this.invalidate(projectPath);
+  }
+
+  async projectSettings(projectPath: string, command: ProjectSettingsCommand) {
+    const read = command.type === 'refresh_listings' || ('command' in command
+      && /^(get_|preview_operation$|validate_document$)/.test(command.command.action));
+    const output = await this.runOutput(realpathSync.native(projectPath), ['--project-settings-command'],
+      JSON.stringify(command), read ? 'default' : 'durable-write', this.options.timeoutMs ?? (read ? 15_000 : 300_000), settingsChildren);
+    const events: unknown = JSON.parse(boundedOutput(output));
+    if (!Array.isArray(events)) throw new Error('Invalid project settings response');
+    return events.map(validateClientEvent);
   }
 
   private async metadataRequest(projectPath: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -844,7 +858,7 @@ export class ProjectSessionCatalog {
     return { ...buildBridgeEnvironment(process.env), ...(this.options.configHome ? { LINGXI_CONFIG_DIR: this.options.configHome } : {}) };
   }
 
-  private runOutput(canonical: string, args: string[], input?: string, kind: 'default' | 'durable-write' | 'provider-list' = 'default'): Promise<string> {
+  private runOutput(canonical: string, args: string[], input?: string, kind: 'default' | 'durable-write' | 'provider-list' = 'default', timeoutMs = this.options.timeoutMs ?? 15_000, admission = catalogChildren): Promise<string> {
     const bin = resolveServerBin({
       serverBin: this.options.serverBin,
       isPackaged: this.options.isPackaged,
@@ -852,7 +866,7 @@ export class ProjectSessionCatalog {
     } as Omit<BridgeManagerOptions, 'launchConfig'>);
     const env = this.childEnvironment();
     const killOnTimeout = kind !== 'durable-write';
-    const launch = () => catalogChildren.start((release) => new Promise<string>((resolve, reject) => {
+    const launch = () => admission.start((release) => new Promise<string>((resolve, reject) => {
       if (this.disposed) { release(); reject(new Error('session catalog is disposed')); return; }
       let child: ReturnType<typeof spawn>;
       try {
@@ -864,7 +878,7 @@ export class ProjectSessionCatalog {
           detached: !killOnTimeout,
         });
       } catch (error) { release(); reject(error); return; }
-      const termination = new CatalogChildTermination(child, release);
+      const termination = new CatalogChildTermination(child, release, admission);
       if (input !== undefined) {
         child.stdin?.on('error', () => { /* Process close carries the bounded failure. */ });
         child.stdin?.end(input);
@@ -879,7 +893,7 @@ export class ProjectSessionCatalog {
         settled = true;
         if (killOnTimeout) termination.stop(); else child.unref();
         reject(new Error(killOnTimeout ? 'session catalog timed out' : 'The metadata result is unconfirmed; its writer is still completing.'));
-      }, this.options.timeoutMs ?? 15_000);
+      }, timeoutMs);
       timeout.unref();
       child.stdout!.on('data', (chunk: Buffer | string) => {
         if (settled) return;

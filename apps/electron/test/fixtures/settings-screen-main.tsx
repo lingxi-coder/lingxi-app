@@ -52,6 +52,23 @@ function Fixture() {
   const [projectCatalogs, setProjectCatalogs] = useState<Record<string, { sessions: Array<{ uuid: string; title: string; modified_rfc3339: string; message_count: number }> }>>({});
   // Ref, not state: `state()` reads it and a state update here would have to
   // join the reporter effect's dep list just to be observable.
+  const projectReads = useRef<string[]>([]);
+  const heldScope = useRef<{ path: string; resume?: () => void }>();
+  const projectSettings = useCallback<import('../../src/shared/projectSettings').ProjectSettingsRequest>(async (path, cmd) => {
+    projectReads.current.push(path + ':' + cmd.type);
+    if (heldScope.current?.path === path && cmd.type === 'refresh_listings') {
+      await new Promise<void>(resolve => { heldScope.current!.resume = resolve; });
+    }
+    if (cmd.type === 'mcp_admin') {
+      return [{ type: 'mcp_configuration_snapshot', snapshot_json: JSON.stringify({ scopes: [
+        { scope: 'project', path: path + '/.mcp.json', revision_sha256: 'b'.repeat(64), raw_json: JSON.stringify({ mcpServers: {
+          [path.split('/').pop() + '-only']: { type: 'http', url: 'https://example.org/mcp' },
+        } }) },
+      ] }) }];
+    }
+    return [{ type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}',
+      files_json: JSON.stringify([{ layer: 'project', path: path + '/.lingxi/settings.json' }]), layers_json: '{"project":{}}' }];
+  }, []);
   const navCalls = useRef<string[]>([]);
   const extensionCalls = useRef<Array<{ domain: string; command: Record<string, unknown> }>>([]);
   const [hookOperation, setHookOperation] = useState<ConfigurationOperationEvent>();
@@ -145,7 +162,8 @@ function Fixture() {
     setCredentialWrites(values => [...values, providerId]);
   } }), []);
   const bridge = {
-    activeSession: { projectPath: '/test/project', sessionId: activeSessionId },
+    projectSettings,
+    activeSession: activeSessionId ? { projectPath: '/test/project', sessionId: activeSessionId } : undefined,
     providerSettings, providerSettingsApplyPending,
     bootstrap: {
       // `settings`/`diagnostics`/`runtimes`/`versions` below only matter to
@@ -361,6 +379,8 @@ function Fixture() {
         throw new Error(`Settings page ${id} did not finish rendering`);
       },
       setExtensionCatalogs,
+      holdProjectRead: (path: string) => { heldScope.current = { path }; },
+      releaseProjectRead: () => { heldScope.current?.resume?.(); heldScope.current = undefined; },
       setHasProject,
       setConnected,
       setSessionLoading,
@@ -471,6 +491,8 @@ function Fixture() {
         hasProjectPicker: Boolean(document.querySelector('[data-testid="layer-project-picker"]')),
         projectSwitchWarning: document.querySelector('[data-testid="layer-project-switch-warning"]')?.textContent ?? null,
         navCalls: [...navCalls.current],
+        projectReads: [...projectReads.current],
+        activeChat: activeSessionId,
         extensionCalls: [...extensionCalls.current],
         hasBanner: Boolean(document.querySelector('[data-testid="settings-pending-banner"]')),
         placeholderKind: document.querySelector('[data-testid="page-placeholder"]')?.getAttribute('data-placeholder-kind') ?? null,
@@ -489,7 +511,7 @@ function Fixture() {
       }),
     };
     return () => { delete window.__settingsScreenTest; };
-  }, [refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch, lastProviderSettingsPatch, providerSettings, credentialWrites, providerAccountSnapshot, settingsSnapshotEvent, extensionCatalogs]);
+  }, [activeSessionId, refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch, lastProviderSettingsPatch, providerSettings, credentialWrites, providerAccountSnapshot, settingsSnapshotEvent, extensionCatalogs]);
 
   return (
     <Theme.Provider value={tokens(fixtureTheme === 'dark')}>
@@ -513,6 +535,8 @@ declare global {
     __settingsScreenTest?: {
       selectPage(id: string): Promise<void>;
       setExtensionCatalogs(catalogs: { plugins?: object | null; skills?: object; document?: object; mcp?: object }): void;
+      holdProjectRead(path: string): void;
+      releaseProjectRead(): void;
       setHasProject(value: boolean): void;
       setConnected(value: boolean): void;
       setSessionLoading(value: boolean): void;
@@ -554,6 +578,8 @@ declare global {
         hasProjectPicker: boolean;
         projectSwitchWarning: string | null;
         navCalls: string[];
+        projectReads: string[];
+        activeChat: string;
         extensionCalls: Array<{ domain: string; command: Record<string, unknown> }>;
         hasBanner: boolean;
         placeholderKind: string | null;

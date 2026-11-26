@@ -4001,10 +4001,9 @@ mod catalog;
 mod configuration;
 mod sessions;
 mod settings;
+pub(crate) use settings::parse_settings_patch;
 mod tasks;
 
-#[cfg(test)]
-use settings::parse_settings_patch;
 use tasks::emit_correlated_task_list;
 use tasks::task_status_wire;
 pub use tasks::TaskPoll;

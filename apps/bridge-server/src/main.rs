@@ -78,6 +78,18 @@ async fn async_main() -> anyhow::Result<()> {
         println!("{result}");
         return Ok(());
     }
+    if std::env::args().nth(1).as_deref() == Some("--project-settings-command") {
+        let home = boot::brand_home().ok_or_else(|| anyhow::anyhow!("settings home unavailable"))?;
+        let events = bridge_server::project_settings::run(
+            home,
+            std::env::current_dir()?,
+            std::io::stdin().lock(),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        println!("{}", serde_json::to_string(&events)?);
+        return Ok(());
+    }
     if std::env::args().nth(1).as_deref() == Some("--provider-settings-command") {
         let home = boot::brand_home()
             .ok_or_else(|| anyhow::anyhow!("provider settings home unavailable"))?;

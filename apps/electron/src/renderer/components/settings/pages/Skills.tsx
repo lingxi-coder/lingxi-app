@@ -734,11 +734,11 @@ export function Skills({ bridge, extensionScopes, snapshot, editingLayer, onJump
           </div>
           {selection.kind === 'skill' && !editingDocument && <footer className="extension-detail-footer">
             <button type="button" className="extension-hub-danger" disabled={!selectedDocument?.writable && !selectedSkill?.pluginOwner} aria-describedby={uninstallDisabledReason ? 'skill-uninstall-readonly-reason' : undefined} onClick={() => selectedSkill?.pluginOwner ? requestHubNavigation('plugins', selectedSkill.pluginOwner) : handleTrashSkill()}>{tr('apps_action_uninstall')}</button>
-            <button type="button" className="extension-hub-primary" disabled={tryingSkill || !!selectedSkill?.parseError || !selectedDocument} onClick={() => {
+            {!bridge.settingsOnly && <button type="button" className="extension-hub-primary" disabled={tryingSkill || !!selectedSkill?.parseError || !selectedDocument} onClick={() => {
               if (!selectedSkill) return;
               setTryingSkill(true);
               void bridge.runSlashCommand(`/${selectedSkill.name}`, []).then((accepted) => { if (accepted) onClose(); }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_skill_start_failed'))).finally(() => setTryingSkill(false));
-            }}><ExtensionGlyph name="chat" size={16} />{tr('desktop_extension_try_now')}</button>
+            }}><ExtensionGlyph name="chat" size={16} />{tr('desktop_extension_try_now')}</button>}
           </footer>}
         </section>
       </div>}

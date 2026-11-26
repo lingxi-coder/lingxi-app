@@ -113,6 +113,9 @@ export interface TrackedSpeechEvent {
 }
 
 export interface UseBridge {
+  /** This settings surface targets files in a directory without a conversation runtime. */
+  settingsOnly?: boolean;
+  projectSettings?: import('../../shared/projectSettings.js').ProjectSettingsRequest;
   providerSettings?: Record<string, unknown>;
   providerSettingsLocked?: string[];
   providerSettingsError?: string;

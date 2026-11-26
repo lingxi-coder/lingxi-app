@@ -72,9 +72,7 @@ async function runProjectTabsScenario(webContents) {
  * `/test/project`，快照里的 project 层却指向 `/test/engine-answer`。
  * 直接读 workspace 的实现会在这里报出 `project` 而不是 `engine-answer`。
  *
- * 第二半证明切换项目不是只喊了一嗓子：`activateProject` 单独用不换引擎
- * （`main/host.ts` 那一分支只写元数据），所以调用序列里必须还有一次
- * `open:`/`new:`。
+ * 随后选择另一个项目，检查设置请求的目标目录和当前对话的身份。
  */
 async function runLayerProjectScenario(webContents) {
   const call = (expression) => webContents.executeJavaScript(expression);
@@ -1241,8 +1239,7 @@ async function runExtensionProjectTabs(window, webContents) {
   await go('skills');
   const withoutProjects = await nav();
   await run('window.__settingsScreenTest.setHasProject(true)');
-  const session = { uuid: 'b-session', mode: 'code', path: b + '/chat.jsonl', modified_rfc3339: '2026-05-01T00:00:00Z' };
-  await run(`window.__settingsScreenTest.setProjectList(${JSON.stringify(paths)}, ${JSON.stringify({ [b]: { sessions: [session] } })})`);
+  await run(`window.__settingsScreenTest.setProjectList(${JSON.stringify(paths)}, {})`);
   await run('window.__settingsScreenTest.setLayeredSnapshot({user:{enabledPlugins:{"User plugin":true}},project:{enabledPlugins:{"Project plugin":true}}})');
   await projectFiles(a);
   const skills = { entries: ['user', 'project'].map(source => ({ id: source, name: source + ' skill', source, directory: '/skills/' + source, writable: true })) };
@@ -1263,11 +1260,21 @@ async function runExtensionProjectTabs(window, webContents) {
     await waitSelected('[data-catalog-tab="public"]');
     if (page === 'skills') await capture('recommended');
   }
+  const before = await run('window.__settingsScreenTest.state()');
+  await run(`window.__settingsScreenTest.holdProjectRead(${JSON.stringify(b)})`);
   await click(project(b));
-  await waitFor(webContents, 'window.__settingsScreenTest.state().navCalls.includes("open:/work/Breeze:b-session")');
-  const waiting = await run('Boolean(document.querySelector(".settings-extension-pending")) && !document.querySelector(".configuration-entry")');
-  await projectFiles(b);
+  await waitFor(webContents, `window.__settingsScreenTest.state().projectReads.includes(${JSON.stringify(b + ':refresh_listings')})`);
+  const waiting = await run('Boolean(document.querySelector("[data-testid=settings-snapshot-loading]")) && !document.querySelector(".configuration-entry")');
+  // A slow response for B may arrive after the user has already selected C.
+  await click(project(paths[2]));
+  await waitFor(webContents, 'document.querySelector(".configuration-entry .extension-hub-row-title")?.textContent === "demo-only"');
+  await run('window.__settingsScreenTest.releaseProjectRead()');
+  await waitSelected(project(paths[2]));
+  const staleIsolated = (await names()).includes('demo-only');
+  await click(project(b));
+  await waitFor(webContents, 'document.querySelector(".configuration-entry .extension-hub-row-title")?.textContent === "Breeze-only"');
   await waitSelected(project(b));
+  const after = await run('window.__settingsScreenTest.state()');
   await click('.extension-hub-toolbar-actions .extension-hub-primary');
   const createScope = await run('document.querySelector(".mcp-editor select[aria-label=作用域]")?.value ?? document.querySelector(".mcp-editor select")?.value');
   await click('.configuration-back');
@@ -1275,7 +1282,20 @@ async function runExtensionProjectTabs(window, webContents) {
   await waitFor(webContents, 'window.innerWidth === 760');
   const fits = await run('document.querySelector(".settings-content-scroll").scrollWidth <= document.querySelector(".settings-content-scroll").clientWidth + 1');
   await capture('project');
-  return { withoutProjects, all, waiting, createScope, fits };
+  await run('window.__settingsScreenTest.setActiveSession("")');
+  await run('window.__settingsScreenTest.setConnected(false)');
+  await click(project(paths[3]));
+  await waitFor(webContents, 'document.querySelector(".configuration-entry .extension-hub-row-title")?.textContent === "demo-only"');
+  const chatless = await run('window.__settingsScreenTest.state()');
+  await run('window.__settingsScreenTest.selectPage("projects")');
+  await run(`(() => {
+    const row = [...document.querySelectorAll('.settings-row')].find(el => el.textContent.includes('/work/Breeze'));
+    row.querySelector('button').click();
+  })()`);
+  await go('mcp');
+  await waitFor(webContents, 'document.querySelector(".configuration-entry .extension-hub-row-title")?.textContent === "Breeze-only"');
+  const projectManager = await run('window.__settingsScreenTest.state()');
+  return { withoutProjects, all, waiting, createScope, fits, staleIsolated, before, after, chatless, projectManager };
 }
 
 async function runExtensionRecommendationsScenario(window, webContents) {

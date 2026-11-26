@@ -10,6 +10,7 @@ import type { ProviderAccountsApi } from '../shared/providerAccounts.js';
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, type LocalAppsApi, type LocalAppEditRequest } from '../shared/localApps.js';
 import { CH_IMAGE_SAVE, type ImageSaveRequest } from '../shared/imageSave.js';
 import { CH_APPLICATION_ICON, type ApplicationIconApi } from '../shared/applicationIcon.js';
+import { CH_PROJECT_SETTINGS, type ProjectSettingsRequest } from '../shared/projectSettings.js';
 import { CH_MCP_PREPARE, type McpPrepareApi } from '../shared/mcpPrepare.js';
 import { CH_DESKTOP_UPDATES, CH_DESKTOP_UPDATES_CHANGED, type DesktopUpdatesApi } from '../shared/desktopUpdates.js';
 import { CH_INTERFACE_LOCALE } from '../shared/interfaceLocale.js';
@@ -276,6 +277,7 @@ export interface LingxiApi {
   saveImage(request: ImageSaveRequest): Promise<boolean>;
   applicationIcon: ApplicationIconApi;
   mcpPrepare: McpPrepareApi;
+  projectSettings: ProjectSettingsRequest;
   desktopUpdates: DesktopUpdatesApi;
   localApps: LocalAppsApi;
   onLocalAppEdit(listener: (app: LocalAppEditRequest) => void): () => void;
@@ -466,6 +468,7 @@ const api: LingxiApi = {
   },
   saveImage: request => ipcRenderer.invoke(CH_IMAGE_SAVE, request),
   applicationIcon: { get: bundleId => ipcRenderer.invoke(CH_APPLICATION_ICON, bundleId) },
+  projectSettings: (path, command) => ipcRenderer.invoke(CH_PROJECT_SETTINGS, path, command),
   mcpPrepare: { prepare: request => ipcRenderer.invoke(CH_MCP_PREPARE, request) },
   desktopUpdates: {
     getState: () => ipcRenderer.invoke(CH_DESKTOP_UPDATES, 'get'),

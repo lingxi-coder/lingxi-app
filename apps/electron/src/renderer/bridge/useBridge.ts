@@ -2976,6 +2976,7 @@ export function useBridge(): UseBridge {
   ) : null, [bootstrap, presentedCatalogs]);
 
   return {
+    projectSettings: host?.projectSettings,
     history: runtime?.history ?? EMPTY_TRANSCRIPT_HISTORY, loadMoreHistory,
     linkDraft, offerLinkDraft: setLinkDraft, clearLinkDraft: () => setLinkDraft(null),
     scheduledScopes, refreshScheduledScopes, scheduledContext, manageScheduled, readScheduledHistory, openScheduledSession,

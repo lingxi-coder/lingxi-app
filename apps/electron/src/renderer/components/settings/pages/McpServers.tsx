@@ -260,7 +260,8 @@ export function McpServers({ bridge, editingLayer, extensionScopes, onNavigate, 
   const [preparing, setPreparing] = useState<string | null>(null);
 
   useEffect(() => {
-    if (adminAvailable) void callMcpAdmin(bridge, adminRecordCommand('get_snapshot'));
+    if (adminAvailable) void callMcpAdmin(bridge, adminRecordCommand('get_snapshot'))
+      .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_refresh_tools_failed')));
     else void bridge.refreshMcpServers();
   }, [adminAvailable, bridge.mcpAdmin, bridge.refreshMcpServers]);
 

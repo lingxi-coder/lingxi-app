@@ -155,7 +155,14 @@ test('extension scope tabs list named projects after User and bind each view to 
     assert.deepEqual(result.all.plugins.projectItems, ['Project plugin']);
     assert.deepEqual(result.all.mcp.userItems, ['user server']);
     assert.deepEqual(result.all.mcp.projectItems.sort(), ['local server', 'project server']);
-    assert.equal(result.waiting, true, 'old project data stays hidden until the target engine responds');
+    assert.equal(result.waiting, true, 'the previous project is hidden while reading a different directory');
+    assert.equal(result.staleIsolated, true);
+    assert.equal(result.after.activeChat, result.before.activeChat);
+    assert.deepEqual(result.after.navCalls, []);
+    assert.equal(result.chatless.activeChat, '');
+    assert.deepEqual(result.chatless.navCalls, []);
+    assert.equal(result.projectManager.activeChat, '');
+    assert.deepEqual(result.projectManager.navCalls, []);
     assert.equal(result.createScope, 'project');
     assert.equal(result.fits, true);
   }
@@ -421,7 +428,7 @@ test('adding an allow rule dispatches exactly what capturePermissionEdit would p
   });
 });
 
-test('the layer switcher names the project the ENGINE reported, and switching it really re-points the engine', async () => {
+test('the layer picker changes the settings directory without opening, creating or activating a conversation', async () => {
   const { beforeSnapshot, onUserLayer, onProjectLayer, pickerOpen, afterSwitch } = await runScenario('layer-project');
 
   // 每一层都要有一句说明。三个裸标签（用户/项目/本地）不解释任何东西，而它们的
@@ -448,21 +455,11 @@ test('the layer switcher names the project the ENGINE reported, and switching it
     'with no snapshot yet the UI must say it does not know the project, not invent one');
 
   assert.equal(pickerOpen.hasProjectPicker, true, 'the switch button must open a project list');
-  assert.match(pickerOpen.projectSwitchWarning ?? '', /切换当前会话/,
-    'switching the settings project also switches the conversation — say so before it happens');
-
-  // 判据落在**调用序列**上，不是「点了没报错」：`activateProject` 只写元数据，
-  // 引擎进程的 `--cwd` 不会因它改变。所以必须还有一次 open/new 把引擎真的
-  // 落到新项目上，否则下一次「项目」层写入仍然写进旧项目的文件。
-  assert.ok(afterSwitch.navCalls.includes('activate:/test/other'),
-    `expected the project to be activated, got ${JSON.stringify(afterSwitch.navCalls)}`);
-  assert.ok(
-    afterSwitch.navCalls.some((entry) => entry.startsWith('open:/test/other:') || entry.startsWith('new:/test/other')),
-    `activateProject alone does not re-point the engine; expected an open/new session call, got ${JSON.stringify(afterSwitch.navCalls)}`,
-  );
-  // 有历史会话时打开最近的那个，而不是每切一次项目就凭空造一个空会话。
-  assert.ok(afterSwitch.navCalls.includes('open:/test/other:newest'),
-    `expected the most recently modified session to be opened, got ${JSON.stringify(afterSwitch.navCalls)}`);
+  assert.equal(pickerOpen.projectSwitchWarning, null);
+  assert.equal(afterSwitch.layerProjectPath, '/test/other');
+  assert.equal(afterSwitch.activeChat, beforeSnapshot.activeChat);
+  assert.deepEqual(afterSwitch.navCalls, []);
+  assert.ok(afterSwitch.projectReads.includes('/test/other:refresh_listings'));
 });
 
  test('Skills and MCP use separate list and detail pages with guarded back navigation', async () => {

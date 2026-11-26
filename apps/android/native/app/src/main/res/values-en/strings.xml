@@ -2787,6 +2787,7 @@
     <string name="teams_run_interrupted_detail">The Bot’s Desktop stopped before finishing. Send a new request.</string>
     <string name="teams_run_authorization_required_detail">This result can’t be shown yet. Ask the Bot’s maintainer to authorize it.</string>
     <string name="teams_run_revoked_detail">You no longer have access to this Bot.</string>
+    <string name="teams_run_awaiting_approval_detail">The Bot’s maintainer reads the reply before it is posted.</string>
     <string name="teams_run_refresh">Refresh status</string>
     <string name="teams_bots_title">Team Bots</string>
     <string name="teams_bots_loading">Loading Bots…</string>
@@ -3550,6 +3551,8 @@
     <string name="teams_triage_state_silent">Stayed silent</string>
     <string name="teams_triage_state_failed">Failed</string>
     <string name="teams_triage_state_waiting">In progress</string>
+    <string name="teams_triage_approval_timeout">Not approved in time</string>
+    <string name="teams_triage_approval_superseded">Dropped for a newer message</string>
     <string name="teams_triage_probability_fmt">%1$d%% likely</string>
     <string name="teams_error_scope_conflict">Someone changed this a moment ago. The latest is shown. Check it and try again.</string>
     <string name="teams_error_scope_not_published">The maintainer changed what this Bot shares. The latest is shown. Check it and try again.</string>

@@ -63,6 +63,22 @@ final class FriendLinkTests: XCTestCase {
         }
     }
 
+    /// Bot v3 B6: the push that tells a Bot's maintainer a reply waits for them opens that Chat, for the account it was sent to and nobody else.
+    func testPushOpensTheChatOfAReplyThatWaitsForItsMaintainer() {
+        let now = Date(timeIntervalSince1970: 1)
+        var payload: [AnyHashable: Any] = ["recipientUid": "A", "expiresAt": "2000", "route": "team/chat?conversation=chat_0001&team=team_0001", "kind": "reply_approval"]
+        guard case .canonical(let target)? = PushMessagePolicy.remoteControlAction(payload, uid: "A", enabled: true, now: now) else { return XCTFail("the Chat is opened") }
+        XCTAssertEqual(target.route, "team/chat"); XCTAssertEqual(target.params, ["conversation": "chat_0001", "team": "team_0001"])
+        XCTAssertNil(PushMessagePolicy.remoteControlAction(payload, uid: "B", enabled: true, now: now))
+        XCTAssertNil(PushMessagePolicy.remoteControlAction(payload, uid: "A", enabled: false, now: now))
+        XCTAssertNil(PushMessagePolicy.remoteControlAction(payload, uid: "A", enabled: true, now: Date(timeIntervalSince1970: 2)))
+        for invalid in ["team/chat", "team/chat?conversation=chat_0001", "team/chat?team=team_0001&conversation=chat_0001", "team/chat?conversation=chat_0001&team=team_0001&x=1",
+                        "team/chat?conversation=chat%5F0001&team=team_0001", "team/bot?bot=sharedbot_01&team=team_0001", "team/join?code=\(code)"] {
+            payload["route"] = invalid
+            XCTAssertNil(PushMessagePolicy.remoteControlAction(payload, uid: "A", enabled: true, now: now), invalid)
+        }
+    }
+
     func testFriendRoutesAreNotConfusedWithOtherRoutes() {
         XCTAssertNil(CanonicalDeepLink.parse("lingxi://session/abc?mode=chat&uid=x"))
         XCTAssertNil(CanonicalDeepLink.parse("lingxi://new?uid=x"))

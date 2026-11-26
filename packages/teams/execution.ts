@@ -32,14 +32,17 @@ export interface SharedBotCard {
 }
 /** A Bot being handed to another member: `offered` until that member accepts, `accepted` while their computer takes it over. It ends by itself at `expiresAt`. */
 export interface BotTransfer { transferId: string; from: MemberRef; to: MemberRef; state: 'offered' | 'accepted'; expiresAt: number }
-/** `declined`: a Bot nobody asked chose not to answer; nothing was posted. */
-export type TaskState = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'expired' | 'interrupted' | 'authorization_required' | 'revoked' | 'cancelled' | 'needs_reconciliation' | 'declined';
+/**
+ * `declined`: a Bot nobody asked chose not to answer, or its reply was held for approval and never posted; nothing was posted. `awaiting_approval`: the Bot's
+ * reply is made and its maintainer has not yet decided whether it is posted (see `HeldReply`); it ends `completed` when they approve and `declined` otherwise.
+ */
+export type TaskState = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'expired' | 'interrupted' | 'authorization_required' | 'revoked' | 'cancelled' | 'needs_reconciliation' | 'declined' | 'awaiting_approval';
 export type TaskUsage = { status: 'missing' } | { status: 'partial' | 'complete'; inputTokens: number; outputTokens: number; costMicros?: number; currency?: string };
 /** What a waiting task is blocked on: a question to `recipient`, or (`tool_approval`) a list change only they can approve. Present only while `state` is `waiting`. */
 export interface TaskWait { waitId: string; kind: 'human_input' | 'tool_approval'; recipient: MemberRef; expiresAt: number; messageId: string }
 export interface TeamTaskView {
   taskId: string; conversationId: string; sharedBotId: string; requester: MemberRef;
-  /** `deadline` ends the current phase: pick-up limit while queued, running budget while running, wait expiry while waiting. */
+  /** `deadline` ends the current phase: pick-up limit while queued, running budget while running, wait expiry while waiting, the maintainer's time to decide while awaiting approval. */
   state: TaskState; createdAt: number; deadline: number; epoch: number; activeSpentMs: number; cancelRequestedAt?: number;
   /** Outside actions whose outcome nobody has confirmed yet; absent when there are none. */
   unverifiedOperations?: number;
@@ -65,10 +68,19 @@ export interface TriageVerdict {
 }
 /** A verdict as the service keeps it on the task; `at` is the service's clock. */
 export interface TaskTriage extends TriageVerdict { at: number }
+/**
+ * What became of a reply the Bot's maintainer was asked to approve before it was posted: `held` is the reply still waiting, `approved` was posted,
+ * `rejected` was dropped by the maintainer, `timeout` was dropped when the ten minutes ran out and `superseded` when someone wrote in the Chat again.
+ * Codes only, like a verdict. The service's `approvalOutcomes` (`shared-bot-commands.mjs`) is the same list.
+ */
+export const APPROVAL_OUTCOMES = ['held', 'approved', 'rejected', 'timeout', 'superseded'] as const;
+export type ApprovalOutcome = typeof APPROVAL_OUTCOMES[number];
 /** One message the Bot's host judged, as its maintainer reads the log. `state` is where the task stands now: it settles after the verdict. */
 export interface TriageLogItem {
   taskId: string; conversationId: string; messageId: string; createdAt: number; triage: TaskTriage; state: TaskState;
   conversationTitle?: string;
+  /** Only when the Bot's reply was held for approval. */
+  approval?: ApprovalOutcome;
 }
 /** A page of the log, newest verdict first; pass `nextCursor` back for the page after. */
 export interface TriageLogPage { items: TriageLogItem[]; nextCursor?: string }
@@ -77,6 +89,25 @@ export interface TriageLogRequest { teamId: string; sharedBotId: string; convers
 /** A Team one of this Desktop's Bots is published to: where its auto-reply log is read. */
 export interface TriageTarget { teamId: string; teamName: string; sharedBotId: string }
 export interface TeamDocument { title: string; body: string }
+/**
+ * A reply of one of your Bots that waits for you to let it go, exactly as the Bot made it: what its maintainer reads before anyone else does. The service keeps
+ * it where only the maintainer can read it, and drops it at `expiresAt` (ten minutes after `heldAt`) or when someone writes in the Chat again, whichever is first.
+ */
+export interface HeldReply {
+  taskId: string; conversationId: string; messageId: string; requester: MemberRef;
+  /** Nobody asked the Bot: it was given the message because auto-reply is on. Only such a reply is dropped by a newer message. */
+  unasked: boolean;
+  heldAt: number; expiresAt: number;
+  text: string; document?: TeamDocument; conversationTitle?: string;
+}
+/** The held replies of one Bot, newest first. */
+export interface HeldReplies { replies: HeldReply[] }
+/**
+ * What a decision on a held reply came to. Approving posts it (`completed`, with the `replyId` of the message and the `artifactId` of the document when it has one);
+ * rejecting drops it (`declined`, `approval_rejected`). A reply that may not be posted any more (the message it answers was edited, its requester left) is dropped
+ * too: `declined`, `revoked`.
+ */
+export interface HeldReplyDecision { taskId: string; state: TaskState; declineReason?: 'approval_rejected' | 'revoked'; replyId?: string | null; artifactId?: string | null }
 /** One revision of a shared document. `currentRevision` is the newest one, so `revision < currentRevision` is history. */
 export interface TeamArtifact { artifactId: string; revision: number; digest: string; document: TeamDocument; currentRevision: number }
 export type RevisionAuthor = { kind: 'user'; uid: string; generation: number } | { kind: 'shared_bot'; sharedBotId: string };
@@ -133,6 +164,12 @@ export interface MemberExecutionPayloads {
   listTasks: { conversationId?: string; after?: string };
   /** The auto-reply log of one Bot, read by its maintainer: newest verdict first, optionally of one Chat; `cursor` is the `nextCursor` of the page before, `limit` at most 50. Anyone else is refused (`MAINTAINER_REQUIRED`). */
   listTriage: { sharedBotId: string; conversationId?: string; cursor?: string; limit?: number };
+  /** The replies of one Bot that wait for you, optionally of one Chat: the drafts themselves, which only the Bot's maintainer is shown (`MAINTAINER_REQUIRED` for anyone else). */
+  listHeldReplies: { sharedBotId: string; conversationId?: string };
+  /** The maintainer lets a held reply go: as it is, or with `text` as they changed it to (trimmed, at most 8 KiB). The service posts it, so it works while the Bot's Desktop is off; a reply that is no longer held is refused (`REPLY_APPROVED`, `REPLY_REJECTED`, `REPLY_EXPIRED`, `REPLY_SUPERSEDED`). */
+  approveReply: { taskId: string; text?: string };
+  /** The maintainer drops a held reply: nothing is posted. Refused like an approval when the reply is no longer held. */
+  rejectReply: { taskId: string };
   readArtifact: { artifactId: string; revision?: number };
   listArtifactRevisions: { artifactId: string };
   reviseArtifact: { artifactId: string; expectedRevision: number; operationId: string; document: TeamDocument };

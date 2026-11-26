@@ -5,8 +5,9 @@ import Foundation
 // reason are kept, never what a model said. This file has no UI and no network: the rules, the decoding and the paged list, which the logic tests run.
 
 /// Where a judged message ended up, in the words of the log: it was answered, the Bot stayed silent (it declined, or the task was canceled before it spoke),
-/// it failed, or it is still going on.
-enum TeamTriageOutcome: Equatable, Sendable { case replied, silent, failed, waiting }
+/// it failed, it is still going on, or its reply waits for the maintainer to approve it. A reply that was held and then decided is `replied` or `silent` like any
+/// other and says so in `approval`.
+enum TeamTriageOutcome: Equatable, Sendable { case replied, silent, failed, waiting, approval }
 
 /// What the Bot's host decided and why. A reason or a probability this version does not know is left out; the decision is kept.
 struct TeamTriageVerdict: Decodable, Equatable, Sendable {
@@ -35,6 +36,7 @@ struct TeamTriageVerdict: Decodable, Equatable, Sendable {
 }
 
 /// One message the Bot's host judged, as its maintainer reads the log. `state` is where the task stands now: it settles after the verdict.
+/// `approval` is what became of a reply held for approval: `held`, `approved`, `rejected`, `timeout` or `superseded`; a code this version does not know is left out.
 struct TeamTriageItem: Decodable, Equatable, Identifiable, Sendable {
     let taskId: String
     let conversationId: String
@@ -43,13 +45,14 @@ struct TeamTriageItem: Decodable, Equatable, Identifiable, Sendable {
     let triage: TeamTriageVerdict
     let state: String
     var conversationTitle: String? = nil
+    var approval: String? = nil
     var id: String { taskId }
 
-    init(taskId: String, conversationId: String, messageId: String, createdAt: Double, triage: TeamTriageVerdict, state: String, conversationTitle: String? = nil) {
+    init(taskId: String, conversationId: String, messageId: String, createdAt: Double, triage: TeamTriageVerdict, state: String, conversationTitle: String? = nil, approval: String? = nil) {
         self.taskId = taskId; self.conversationId = conversationId; self.messageId = messageId; self.createdAt = createdAt
-        self.triage = triage; self.state = state; self.conversationTitle = conversationTitle
+        self.triage = triage; self.state = state; self.conversationTitle = conversationTitle; self.approval = approval
     }
-    private enum CodingKeys: String, CodingKey { case taskId, conversationId, messageId, createdAt, triage, state, conversationTitle }
+    private enum CodingKeys: String, CodingKey { case taskId, conversationId, messageId, createdAt, triage, state, conversationTitle, approval }
     /// A row is never half read: what this version needs of it is there and known, or the row is not one.
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -60,7 +63,8 @@ struct TeamTriageItem: Decodable, Equatable, Identifiable, Sendable {
             throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "A row this version cannot read."))
         }
         let title = (try? values.decodeIfPresent(String.self, forKey: .conversationTitle)).flatMap { $0.isEmpty ? nil : $0 }
-        self.init(taskId: taskId, conversationId: conversationId, messageId: messageId, createdAt: createdAt, triage: triage, state: state, conversationTitle: title)
+        let approval = (try? values.decodeIfPresent(String.self, forKey: .approval)).flatMap { TeamTriageRules.approvals.contains($0) ? $0 : nil }
+        self.init(taskId: taskId, conversationId: conversationId, messageId: messageId, createdAt: createdAt, triage: triage, state: state, conversationTitle: title, approval: approval)
     }
 }
 
@@ -94,9 +98,11 @@ enum TeamTriageRules {
     static let actions: Set<String> = ["decline", "run", "run_may_decline"]
     static let sources: Set<String> = ["quiet", "cooldown", "rule", "decision", "fallback"]
     static let reasons: Set<String> = ["quiet_hours", "cooldown", "keyword", "addressed", "below_threshold", "between_thresholds", "above_threshold", "decision_unavailable", "message_unavailable"]
+    /// What became of a reply held for approval: still waiting, posted, dropped by the maintainer, dropped when its time ran out, dropped for a newer message.
+    static let approvals: Set<String> = ["held", "approved", "rejected", "timeout", "superseded"]
     /// Every state a task can be in, and where it leaves the judged message. A state this table does not have is a row this version cannot read.
     static let outcomes: [String: TeamTriageOutcome] = [
-        "completed": .replied, "declined": .silent, "cancelled": .silent, "queued": .waiting, "running": .waiting, "waiting": .waiting,
+        "completed": .replied, "declined": .silent, "cancelled": .silent, "queued": .waiting, "running": .waiting, "waiting": .waiting, "awaiting_approval": .approval,
         "failed": .failed, "expired": .failed, "interrupted": .failed, "authorization_required": .failed, "revoked": .failed, "needs_reconciliation": .failed,
     ]
     /// A time in epoch milliseconds that a date can hold.
@@ -125,6 +131,17 @@ enum TeamTriageRules {
         case .silent: "teams_triage_state_silent"
         case .failed: "teams_triage_state_failed"
         case .waiting: "teams_triage_state_waiting"
+        case .approval: "teams_task_waiting_approval"
+        }
+    }
+    /// How a held reply came out once it was decided, in words; nothing for a reply that never was held, one that still waits (its outcome says so), or a code this version does not know.
+    static func approvalKey(_ approval: String?) -> String? {
+        switch approval {
+        case "approved": "teams_approval_reply_approved"
+        case "rejected": "teams_approval_reply_declined"
+        case "timeout": "teams_triage_approval_timeout"
+        case "superseded": "teams_triage_approval_superseded"
+        default: nil
         }
     }
     /// The SF Symbol of a verdict: stay silent, answer, or leave it to the Bot.
@@ -141,7 +158,8 @@ enum TeamTriageRules {
         "teams_triage_action_decline", "teams_triage_action_run", "teams_triage_action_maybe",
         "teams_triage_reason_quiet_hours", "teams_triage_reason_cooldown", "teams_triage_reason_keyword", "teams_triage_reason_addressed", "teams_triage_reason_below_threshold",
         "teams_triage_reason_between_thresholds", "teams_triage_reason_above_threshold", "teams_triage_reason_decision_unavailable", "teams_triage_reason_message_unavailable",
-        "teams_triage_state_replied", "teams_triage_state_silent", "teams_triage_state_failed", "teams_triage_state_waiting",
+        "teams_triage_state_replied", "teams_triage_state_silent", "teams_triage_state_failed", "teams_triage_state_waiting", "teams_task_waiting_approval",
+        "teams_approval_reply_approved", "teams_approval_reply_declined", "teams_triage_approval_timeout", "teams_triage_approval_superseded",
         "teams_triage_probability %lld", "teams_list_refresh", "common_retry", "common_close",
     ]
 

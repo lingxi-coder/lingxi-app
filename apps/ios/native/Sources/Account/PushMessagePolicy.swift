@@ -24,12 +24,15 @@ enum PushMessagePolicy {
 
     /// The link a notification route opens, or nil when a push may not open it. Besides the Teams inbox and a
     /// Remote Control session, a push may open the Friends requests and one friend's chat
-    /// (`friend/chat?uid=<sender>`, the uid never percent-encoded); it never carries a friend code (`friend/add`).
+    /// (`friend/chat?uid=<sender>`, the uid never percent-encoded), and the Chat of a reply that waits for its maintainer
+    /// (`team/chat?conversation=<id>&team=<id>`, the keys in that order and the ids never percent-encoded); it never carries a friend code (`friend/add`).
     static func link(forRoute route: String) -> CanonicalDeepLink? {
         let remote = "^remote/[A-Za-z0-9_-]{22}/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
         let friendChat = #"^friend/chat\?uid=[A-Za-z0-9_-]{1,128}$"#
+        let teamChat = #"^team/chat\?conversation=[A-Za-z0-9_-]{1,128}&team=[A-Za-z0-9_-]{1,128}$"#
         guard route == "team/inbox" || route == "friend/requests"
                 || route.range(of: friendChat, options: .regularExpression) != nil
+                || route.range(of: teamChat, options: .regularExpression) != nil
                 || route.range(of: remote, options: .regularExpression) != nil else { return nil }
         return CanonicalDeepLink.parse("lingxi://" + route)
     }

@@ -211,7 +211,7 @@ test('teams: unimplemented App, task, invite and epoch writes remain denied', op
   const alice = user('alice');
   for (const path of ['appGrants/example_alice', 'appOpens/example01', 'tasks/example01', 'invites/example01', 'membershipEpochs/alice',
     'sharedBots/example01', 'deployments/example01', 'executionReceipts/example01', 'requestQuotas/example01', 'chatExecutionLocks/example01', 'artifacts/example01', 'waits/example01', 'operations/example01', 'lists/example01', 'lists/example01/operations/task_example01',
-    'transfers/example01', 'sharedBots/example01/transferParts/example01', 'uploads/example01', 'uploads/example01/parts/0']) {
+    'transfers/example01', 'sharedBots/example01/transferParts/example01', 'uploads/example01', 'uploads/example01/parts/0', 'heldReplies/example01']) {
     await assertFails(setDoc(ref(alice, path), { uid: 'alice' }));
     await assertFails(getDoc(ref(alice, path)));
   }
@@ -231,6 +231,23 @@ test('teams: durable wait records are server-only, even for the recipient and th
   }
   assert.equal((await admin.doc('teams/team-test/waits/wait_0001').get()).data().state, 'pending');
   assert.equal((await admin.doc('teams/team-test/waits/wait_0002').get()).exists, false);
+});
+test('teams: a reply held for approval is server-only, even for the Bot maintainer and the member who asked', options, async () => {
+  const held = { schemaVersion: 1, taskId: 'task_0001', sharedBotId, conversationId: 'bot-chat', maintainer: { uid: 'owner', generation: 1 }, requester: { uid: 'alice', generation: 1 },
+    unasked: false, heldAt: Date.now(), expiresAt: Date.now() + 600000, result: { outcome: 'completed', text: 'A reply nobody has read yet.' } };
+  await admin.doc('teams/team-test/heldReplies/task_0001').set(held);
+  for (const uid of ['alice', 'bob', 'owner']) {
+    const db = user(uid);
+    await assertFails(getDoc(ref(db, 'heldReplies/task_0001')));
+    await assertFails(getDocs(collection(db, 'teams/team-test/heldReplies')));
+    await assertFails(getDocs(query(collection(db, 'teams/team-test/heldReplies'), where('maintainer.uid', '==', uid))));
+    await assertFails(getDocs(query(collection(db, 'teams/team-test/heldReplies'), where('requester.uid', '==', uid))));
+    await assertFails(setDoc(ref(db, 'heldReplies/task_0002'), held));
+    await assertFails(updateDoc(ref(db, 'heldReplies/task_0001'), { 'result.text': 'Edited by a client.' }));
+    await assertFails(deleteDoc(ref(db, 'heldReplies/task_0001')));
+  }
+  assert.equal((await admin.doc('teams/team-test/heldReplies/task_0001').get()).data().result.text, 'A reply nobody has read yet.');
+  assert.equal((await admin.doc('teams/team-test/heldReplies/task_0002').get()).exists, false);
 });
 test('teams: both configured non-Team rule files compile and deny client access', options, async () => {
   const config = JSON.parse(readFileSync(new URL('../../../firebase.json', import.meta.url), 'utf8'));

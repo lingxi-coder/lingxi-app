@@ -1,4 +1,4 @@
-import { executionCommand, TRIAGE_ACTIONS, TRIAGE_REASONS, TRIAGE_SOURCES, type ExecutionScope, type SharedBotCard, type TaskState, type TriageAction, type TriageLogItem, type TriageLogPage, type TriageReason } from './execution.js';
+import { APPROVAL_OUTCOMES, executionCommand, TRIAGE_ACTIONS, TRIAGE_REASONS, TRIAGE_SOURCES, type ApprovalOutcome, type ExecutionScope, type SharedBotCard, type TaskState, type TriageAction, type TriageLogItem, type TriageLogPage, type TriageReason } from './execution.js';
 import { TRIAGE_LOG_LIMIT } from './execution-validation.js';
 import type { TeamsApi } from './index.js';
 import type { TeamConversation } from './messages.js';
@@ -14,14 +14,18 @@ import { tk, type TeamsKey, type TeamsText } from './i18n.js';
 /** How many rows a page of the log has: the service gives at most `TRIAGE_LOG_LIMIT`. */
 export const TRIAGE_LOG_PAGE = 20;
 
-/** Where a judged message ended up, in the words of the log: it was answered, the Bot stayed silent (it declined, or the task was canceled before it spoke), it failed, or it is still going on. */
-export type TriageOutcome = 'replied' | 'silent' | 'failed' | 'waiting';
+/**
+ * Where a judged message ended up, in the words of the log: it was answered, the Bot stayed silent (it declined, or the task was canceled before it spoke), it failed,
+ * it is still going on, or its reply waits for the maintainer to approve it. A reply that was held and then decided is `replied` or `silent` like any other and says so
+ * in `approval` (`triageApprovalText`).
+ */
+export type TriageOutcome = 'replied' | 'silent' | 'failed' | 'waiting' | 'approval';
 
 /** Every state a task can be in, and where it leaves the judged message. A state this table does not have is a row this version cannot read. */
 const OUTCOMES: Record<TaskState, TriageOutcome> = {
   completed: 'replied',
   declined: 'silent', cancelled: 'silent',
-  queued: 'waiting', running: 'waiting', waiting: 'waiting',
+  queued: 'waiting', running: 'waiting', waiting: 'waiting', awaiting_approval: 'approval',
   failed: 'failed', expired: 'failed', interrupted: 'failed', authorization_required: 'failed', revoked: 'failed', needs_reconciliation: 'failed',
 };
 export const triageOutcome = (state: TaskState): TriageOutcome => OUTCOMES[state];
@@ -39,11 +43,18 @@ const REASON_TEXT: Record<TriageReason, TeamsKey> = {
 };
 const OUTCOME_TEXT: Record<TriageOutcome, TeamsKey> = {
   replied: tk('teams_triage_state_replied'), silent: tk('teams_triage_state_silent'), failed: tk('teams_triage_state_failed'), waiting: tk('teams_triage_state_waiting'),
+  approval: tk('teams_task_waiting_approval'),
+};
+/** What became of a held reply once it was decided; a reply still waiting says so as its outcome, so `held` has no words of its own. */
+const APPROVAL_TEXT: Partial<Record<ApprovalOutcome, TeamsKey>> = {
+  approved: tk('teams_approval_reply_approved'), rejected: tk('teams_approval_reply_declined'), timeout: tk('teams_triage_approval_timeout'), superseded: tk('teams_triage_approval_superseded'),
 };
 export const triageActionText = (t: TeamsText, action: TriageAction): string => t(ACTION_TEXT[action]);
 /** Why, in words; nothing for a reason this version does not know. */
 export const triageReasonText = (t: TeamsText, reason: TriageReason | undefined): string => reason !== undefined && Object.prototype.hasOwnProperty.call(REASON_TEXT, reason) ? t(REASON_TEXT[reason]) : '';
 export const triageOutcomeText = (t: TeamsText, outcome: TriageOutcome): string => t(OUTCOME_TEXT[outcome]);
+/** How a held reply was decided, in words: nothing for a reply that was never held, one that still waits, or a code this version does not know. */
+export const triageApprovalText = (t: TeamsText, approval: ApprovalOutcome | undefined): string => approval !== undefined && Object.prototype.hasOwnProperty.call(APPROVAL_TEXT, approval) ? t(APPROVAL_TEXT[approval]!) : '';
 /** "62% likely": what the Decision service gave. */
 export const triageProbabilityText = (t: TeamsText, probability: number): string => t('teams_triage_probability_fmt', triagePercent(probability));
 
@@ -58,7 +69,7 @@ const oneOf = <T extends string>(values: readonly T[], value: unknown): value is
 
 /**
  * One row of the log as the service sent it, or nothing when this version cannot read it: a row is never half shown, and one row that is not
- * understood does not hide the page it came in. A reason or a probability it does not know is left out of the row; the decision is kept.
+ * understood does not hide the page it came in. A reason, a probability or an approval it does not know is left out of the row; the decision is kept.
  */
 export function triageItem(value: unknown): TriageLogItem | undefined {
   if (!record(value) || !record(value.triage)) return undefined;
@@ -74,6 +85,7 @@ export function triageItem(value: unknown): TriageLogItem | undefined {
       ...(finite(triage.probability) && triage.probability >= 0 && triage.probability <= 1 ? { probability: triage.probability } : {}),
     },
     ...(word(value.conversationTitle) ? { conversationTitle: value.conversationTitle } : {}),
+    ...(oneOf(APPROVAL_OUTCOMES, value.approval) ? { approval: value.approval } : {}),
   };
 }
 /** A page as the service sent it. An answer that is not a page at all is `INVALID_DATA`, never an empty log. */

@@ -74,6 +74,7 @@ final class TeamsTests: XCTestCase {
             "queued": "teams_run_queued", "running": "teams_run_processing", "completed": "chat_status_completed", "failed": "chat_status_failed",
             "expired": "teams_run_expired", "interrupted": "teams_run_interrupted", "authorization_required": "teams_run_authorization_required", "revoked": "teams_run_revoked",
             "waiting": "teams_task_waiting", "cancelled": "teams_task_cancelled", "needs_reconciliation": "teams_task_needs_checking", "declined": "teams_task_declined",
+            "awaiting_approval": "teams_task_waiting_approval",
         ]
         for (state, key) in states { XCTAssertEqual(TeamsBotText.stateKey(state), key, state) }
         for retired in ["pending", "claimed", "recovery", "recovered", "missed"] { XCTAssertEqual(TeamsBotText.stateKey(retired), "chat_status_unknown") }
@@ -105,6 +106,8 @@ final class TeamsTests: XCTestCase {
             ("waiting", "teams_task_waiting", nil, "ellipsis.bubble", .muted, true),
             ("cancelled", "teams_task_cancelled", nil, "xmark.circle", .muted, false),
             ("needs_reconciliation", "teams_task_needs_checking", nil, "questionmark.circle", .muted, true),
+            // Bot v3 B6: the Bot's reply is made and its maintainer reads it first; the word is the one of an approval, the sentence says who reads.
+            ("awaiting_approval", "teams_task_waiting_approval", "teams_run_awaiting_approval_detail", "clock", .muted, true),
             ("anything else", "chat_status_unknown", nil, "questionmark.circle", .muted, false),
         ]
         for row in table {

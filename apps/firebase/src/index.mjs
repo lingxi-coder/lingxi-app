@@ -17,6 +17,7 @@ import { onTeamMessageCreated } from './team-message-push.mjs';
 import { InboxStore } from './inbox-store.mjs';
 import { InboxDelivery } from './inbox-delivery.mjs';
 import { InboxJobs } from './inbox-jobs.mjs';
+import { HeldReplyJobs, becameHeld } from './held-reply-jobs.mjs';
 import { mirrorFriendChat, mirrorFriendRead } from './friend-summary.mjs';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { defineSecret } from 'firebase-functions/params';
@@ -149,7 +150,8 @@ const enqueue = async (payload, id, delay = 0) => {
 };
 const inbox = new InboxStore(teamsDb,Date.now,enqueue,cost=>info('inbox.fanout',cost));
 const delivery = new InboxDelivery({ db: teamsDb, pushStore, messaging: getMessaging(app), enqueue });
-const jobs = new InboxJobs(inbox, delivery, enqueue);
+const heldReplies = new HeldReplyJobs({ db: teamsDb, pushStore, messaging: getMessaging(app), enqueue });
+const jobs = new InboxJobs(inbox, delivery, enqueue, heldReplies);
 const triggerOpts = {
   database: '(default)',
   region: 'us-central1',
@@ -258,7 +260,7 @@ const membershipTrigger = (collection, kind) =>
 export const onInboxTeamMember = membershipTrigger('teams', 'team');
 export const onInboxServiceMember = membershipTrigger('services', 'service');
 const taskTrigger = (collection, kind) =>
-  onDocumentWritten({ ...triggerOpts, document: collection + '/{sourceId}/tasks/{taskId}' }, e => {
+  onDocumentWritten({ ...triggerOpts, document: collection + '/{sourceId}/tasks/{taskId}' }, async e => {
     const task = e.data.after.data() ?? e.data.before.data();
     if (!task?.requester || !task.conversationId) return;
     const ref = {
@@ -267,7 +269,11 @@ const taskTrigger = (collection, kind) =>
       conversationId: task.conversationId,
       generation: task.requester.generation
     };
-    return jobs.run({ type: 'task', uid: task.requester.uid, ref, taskId: e.params.taskId });
+    const work = [jobs.run({ type: 'task', uid: task.requester.uid, ref, taskId: e.params.taskId })];
+    // A reply just held for its Bot's maintainer: its time limit and the maintainer's push. Only a Team holds replies.
+    if (kind === 'team' && becameHeld(e.data.before.data(), e.data.after.data())) work.push(heldReplies.held(e.params.sourceId, e.params.taskId));
+    const results = await Promise.allSettled(work), failure = results.find(r => r.status === 'rejected');
+    if (failure) throw failure.reason;
   });
 export const onInboxTeamTask = taskTrigger('teams', 'team');
 export const onInboxServiceTask = taskTrigger('services', 'service');

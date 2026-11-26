@@ -590,7 +590,7 @@ for that Chat with the member command `setConversationAutoReply { conversationId
   posted). An unasked task that fails or is refused posts nothing, and members' `listTasks` hides unasked tasks without a reply.
 - Desktop host (`teams/replyTriage.ts`, `teams/connector.ts`): an optional task waits 2.5 s so a burst is judged once; earlier queued
   optional tasks of the same Bot and Chat are declined as `superseded`. Before `startTask` each Bot is judged by its own settings
-  (`autoReply` of its `bot.json`: `policy`, `keywords`, `quietHours`, `cooldownSec`, `thresholds`; `approval` is stored and not read yet),
+  (`autoReply` of its `bot.json`: `policy`, `keywords`, `quietHours`, `cooldownSec`, `thresholds`; `approval` does not judge: it holds a finished reply, see "Replies the maintainer reads first"),
   and the first step that fits decides:
   1. a reply to the Bot or its name (case and width folded, whole words where the script has words) → run, source `rule`, reason
      `addressed`: a person talking to the Bot is answered even in quiet hours or the cooldown;
@@ -652,6 +652,78 @@ for that Chat with the member command `setConversationAutoReply { conversationId
   (the tab), `apps/web/test/teams-bots-ui.test.ts` (`Auto-reply:`), vectors in `contracts/execution-vectors.json`, iOS
   `TeamBotTests`/`TeamsPointerParserTests`, Android `TeamBotsTest`. B5b: `apps/web/test/teams-triage-log-ui.test.ts`, the member read in
   `teams-host.test.ts`, the vectors in `bot-triage.test.mjs`, iOS `TeamTriageLogTests`, Android `TeamTriageLogTest`.
+
+## Replies the maintainer reads first (approval, Bot v3 B6a)
+
+A Bot's maintainer can ask to read its reply before anyone else does. The setting is `autoReply.approval` of the Bot's own `bot.json`:
+`never` (today's behaviour), `uncertain` (a reply whose triage verdict was `run_may_decline` waits) or `always` (every reply waits,
+@mentions and Bot DMs included). The Desktop Auto-reply tab edits it (`BotReplyApproval` in `BotAutoReplyField.tsx`, `bots_reply_approval_*`
+in `botsCatalog.ts`); the copy says a held reply is posted only once the maintainer approves it in Teams and is dropped after 10 minutes or,
+when nobody asked the Bot, as soon as someone writes in the chat again. A hosted Bot service is never held (no Team, no maintainer to ask there,
+and its gate does not list the commands).
+
+- Host (`teams/connector.ts`). The hold is decided once, when the task starts, from the setting then (`always`, or `uncertain` with `mayDecline`)
+  and kept as `hold: true` on the saved execution; a later change of the setting reaches the next task, not a running one. `saveResult` copies
+  it onto the saved delivery only for a result that would have been posted (outcome `completed`, no private data), so a Bot that stayed
+  silent, a failure and the failure the host makes up for a task with no result go as they always did. The delivery is sent as `holdReply`
+  with the payload and the command id `completeTask` would have had, at both sends (the run's own and the outbox loop), so retries, a
+  restart and a new account epoch behave exactly as they do for a completion. The outbox file carries `hold`, so a restart sends it as
+  `holdReply` again; an execution record left behind with its result is held by its own `hold`.
+- Service (`held-replies.mjs`, `shared-bots.mjs`). `holdReply` is `completeTask` for a run that completed, kept instead of posted. After the
+  same checks (permit, deadline, output gate, the digest of the result for replays) the task moves to `awaiting_approval` with its deadline
+  set to now + 10 minutes, and the Chat's execution lock is released at once. A result that could not be posted anyway (output gate refuses,
+  a stale revision) ends as `completeTask` ends it; a replay with the same payload answers the same, a different one is `TASK_RESULT_CONFLICT`.
+- Where the draft lives. `teams/{team}/heldReplies/{taskId}` holds the reply exactly as the host sent it (text, document, usage, files read,
+  who asked, whether anybody asked, when it was held and when it expires). Only the service reads it: no rule matches the path, so the default
+  deny applies to members, the maintainer and the Bot's host alike (`teams.rules.emulator.test.mjs`). The task, which every member reads
+  through `taskView`, never carries a word of it, so the other members see a task in `awaiting_approval` and nothing else; a held task past
+  its deadline is shown as `declined` even before the job that ends it has run. The maintainer reads the draft only through
+  `listHeldReplies`, which also checks that they still read the Chat.
+- Commands (maintainer only, `MAINTAINER_REQUIRED` 403 for anyone else; `TASK_REQUIRED` 404 for an unknown task):
+  - `listHeldReplies { sharedBotId, conversationId? }` → `{ replies: [{ taskId, conversationId, messageId, requester, unasked, heldAt,
+    expiresAt, text, document?, conversationTitle? }] }`, newest first, at most 100, drafts past their time left out.
+  - `approveReply { taskId, text? }`: posts the draft by the same code `completeTask` posts with (`post`), as if the host had just finished, so
+    it works while the Desktop is off. `text` replaces the reply text (trimmed, 1 to 8192 bytes); the document stays as the run made it.
+    The output gate is checked again at that time: a message edited or recalled since, or a requester who left, ends the task as `declined`
+    with `declineReason: revoked` and posts nothing. Answer: `{ taskId, state, replyId, artifactId }` (`state` is what posting came to,
+    `completed` as a rule).
+  - `rejectReply { taskId }` → `{ taskId, state: 'declined', declineReason: 'approval_rejected' }`; nothing is posted.
+  - Races: each command reads the task and its draft in one transaction and writes both, so of an approval, a rejection, the end of the time,
+    a newer message and a cancellation the first one wins and the later ones are refused with `409` and the way the task ended:
+    `REPLY_APPROVED`, `REPLY_REJECTED`, `REPLY_EXPIRED`, `REPLY_SUPERSEDED`, or `REPLY_NOT_HELD` for any other end (a cancellation, a
+    revocation). A repeat with the same command id is answered from its receipt, so an approval whose answer was lost is not decided twice.
+- Time and supersede. 10 minutes: `approvalMs`. The task trigger (`index.mjs`, `becameHeld`) calls `HeldReplyJobs.held`, which enqueues a
+  Cloud Tasks job on the existing `inboxWork` queue (`type: heldReply`, id from team, task and deadline, so a replayed trigger enqueues once,
+  due one second after the deadline) and sends the push; `expireHeldReply` ends a reply nobody decided as `declined` with `declineReason:
+  approval_timeout` and deletes the draft (`HELD_REPLY_NOT_DUE`, retried, if the queue is early). A new human message in the Chat ends the
+  drafts of replies nobody asked for as `declined` with `declineReason: superseded`, in the transaction that writes the message (`supersedable`
+  and `endSuperseded`, from `optionalTasks`, and from an answer to a wait); a reply to a task someone asked for (an @mention, a Bot DM) is
+  never superseded. `cancelTask` accepts a task in `awaiting_approval` and deletes its draft with it. Every end of the state deletes the draft
+  in the same transaction, so the draft exists exactly while the task is held. A run that left an operation of unknown outcome
+  (`unverifiedOperations > 0`, copied onto the draft) is not declined by a rejection, the timeout or a supersede but ends in
+  `needs_reconciliation` with `reconciledState: declined` (and is shown if it was hidden), as `completeTask` would end it: a person still has
+  to check what it did.
+- Push. Kind `reply_approval` to the Bot's maintainer, once per reply and person (claimed before FCM, as for a message), only while they are
+  still a member who reads the Chat; copy is generic (`HELD_REPLY_COPY`), route `team/chat?conversation=<id>&team=<id>`, which the three
+  clients' push-route allow-lists accept (`packages/deep-links`, iOS `PushMessagePolicy`, Android `PushRoute`; vectors in
+  `friends-vectors.json`).
+- Log. A row of `listTriage` carries `approval` (`held`, `approved`, `rejected`, `timeout`, `superseded`), derived from the task by
+  `approvalOutcome`; the row's state is `awaiting_approval` while it waits. Web and Desktop label it (`teams_task_waiting_approval`, and the
+  four decided words), iOS and Android decode it and show the same words; no client decoding ever fails on the new state or code.
+- Contract. `execution-vectors.json` has `awaiting_approval` among `taskStates`, `approvalOutcomes`, and 24 rows for `listHeldReplies`,
+  `approveReply`, `rejectReply` and for `holdReply` from a member (`reject-holdReply-member`: it is the host's command, as `recordTriage` is).
+  `packages/teams/held-replies.ts` has the client calls (`readHeldReplies`, `approveHeldReply`, `rejectHeldReply`) and the decoders the
+  approval screens (B6b) build on; the native clients have the validators (`TeamExecutionContract`) and the state and outcome tables, and
+  show a held task as "Waiting for approval" with the sentence that its maintainer reads it first. The approval screens of Web, iOS and
+  Android are B6b.
+- Index. One field override (`firestore.teams.indexes.json`, to be deployed): `heldReplies.result` is not indexed (the draft's text and document
+  are never queried). The list reads by one field (`sharedBotId` or `conversationId`) so that no composite index is needed.
+- Tests: `apps/firebase/test/held-replies.test.mjs` (schemas, codes, vectors, the trigger's rule), `held-replies.emulator.test.mjs` (the state
+  machine on the emulator: hold, approve with and without edits, reject, timeout, supersede, cancel, races and replays, the draft unreadable to
+  everyone but the service) and `teams.rules.emulator.test.mjs`; `apps/electron/test/teams-host.test.ts` (`approval`), `bot-reply-field.test.ts`
+  (the control, the log words); `apps/web/test/teams-held-replies.test.ts`, `teams-bots-ui.test.ts`, `teams-triage-log-ui.test.ts`; iOS
+  `TeamBotTests`, `TeamTriageLogTests`, `TeamsTests`, `FriendLinkTests`; Android `TeamBotsTest`, `TeamTriageLogTest`, `TeamsBotTextTest`,
+  `FriendLinkTest`.
 
 ## What a Bot may use of its maintainer's Desktop (Bot scope)
 

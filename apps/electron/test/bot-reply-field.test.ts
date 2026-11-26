@@ -16,11 +16,12 @@ import {
 } from '../src/renderer/bridge/botTriageLog';
 import { Field, problemText } from '../src/renderer/components/BotFields';
 import {
-  BotAutoReplyField, BotAutoReplyTab, BotReplyQuietHours, BotReplyThresholds, BotTriageLog, formatLogTime, triageActionText, triageOutcomeText, triageReasonText,
+  BotAutoReplyField, BotAutoReplyTab, BotReplyQuietHours, BotReplyThresholds, BotTriageLog, approvalText, formatLogTime, triageActionText, triageApprovalText,
+  triageOutcomeText, triageReasonText,
 } from '../src/renderer/components/BotAutoReplyField';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
-import type { TaskState, TriageLogItem, TriageLogPage, TriageLogRequest, TriageTarget } from '../../../packages/teams/execution';
+import { APPROVAL_OUTCOMES, type TaskState, type TriageLogItem, type TriageLogPage, type TriageLogRequest, type TriageTarget } from '../../../packages/teams/execution';
 import { pinEnglish } from './bot-ui-helpers';
 
 (globalThis as { React?: typeof React }).React = React;
@@ -84,7 +85,7 @@ test('a change to any part sends the whole setting, with the approval as it is s
   assert.deepEqual(sent({ quietHours: { start: '23:00', end: '07:00', timeZone: 'Asia/Tokyo' } }), { autoReply: { ...SET_REPLY, quietHours: { start: '23:00', end: '07:00', timeZone: 'Asia/Tokyo' } } });
   const off = botChanges(saved, '', { ...draftOf({}, SET_REPLY), autoReply: withQuietHours(draftOf({}, SET_REPLY).autoReply, undefined) }).patch.autoReply!;
   assert.ok(!('quietHours' in off), 'quiet hours turned off are left out, and replace the ones saved');
-  assert.equal(off.approval, 'uncertain', 'what is not edited here is carried');
+  assert.equal(off.approval, 'uncertain', 'the approval is carried with the rest');
   const on = botChanges(bot(), '', draftOf({ quietHours: startingQuietHours('UTC') })).patch.autoReply!;
   assert.deepEqual(on.quietHours, { start: '22:00', end: '07:00', timeZone: 'UTC' });
 });
@@ -101,7 +102,7 @@ test('what the editor sends is what the main process accepts, down to the saved 
   const drafts: Array<Partial<BotReplyDraft>> = [
     { policy: 'Only billing.' }, { keywords: ['a', 'B', '账单', 'two words'] }, { cooldown: '0' }, { cooldown: '86400' }, { thresholds: { decline: 0, run: 0 } },
     { thresholds: { decline: 1, run: 1 } }, { thresholds: { decline: 0.05, run: 0.95 } }, { quietHours: { start: '00:00', end: '23:59', timeZone: 'Europe/Berlin' } },
-    { quietHours: { start: '09:30', end: '09:31', timeZone: computerTimeZone() } },
+    { quietHours: { start: '09:30', end: '09:31', timeZone: computerTimeZone() } }, { approval: 'never' }, { approval: 'uncertain' }, { approval: 'always' },
   ];
   for (const change of drafts) {
     const draft = draftOf({ policy: 'Only billing.', ...change });
@@ -270,6 +271,46 @@ test('a Bot with the defaults shows an empty policy, no keywords, the quiet hour
   assert.match(html, /class="bots-reply-number"[^>]*value="0"/);
   assert.match(html, /aria-valuetext="30%" value="30"/);
   assert.match(html, /aria-valuetext="75%" value="75"/);
+});
+
+test('the tab asks whether the owner reads a reply before it is posted, says what each choice means, and when a reply that waits is dropped', () => {
+  const view = (approval: BotAutoReplyUi['approval']) => render(React.createElement(BotAutoReplyField, { draft: draftFromBot(bot({ ...NO_REPLY, approval }), ''), problems: {}, onChange: noop }));
+  const never = view('never');
+  assert.match(never, /<label class="bots-label"[^>]*>Approval before posting<\/label>/);
+  assert.match(never, /<option value="never" selected="">Never<\/option><option value="uncertain">When the Bot is unsure<\/option><option value="always">Always<\/option>/);
+  assert.match(never, /The Bot posts its replies by itself\./);
+  assert.match(view('uncertain'), /<option value="uncertain" selected="">When the Bot is unsure<\/option>/);
+  assert.match(view('uncertain'), /When the Decision service is unsure whether the Bot should answer, its reply waits for your approval; the other replies are posted at once\./);
+  assert.match(view('always'), /<option value="always" selected="">Always<\/option>/);
+  assert.match(view('always'), /Every reply of the Bot waits for your approval, including answers to @mentions and in direct chats with the Bot\./);
+  for (const approval of ['never', 'uncertain', 'always'] as const) {
+    const html = view(approval), hints = ['never', 'uncertain', 'always'].filter((other) => html.includes(approvalText(other as never).hint));
+    assert.deepEqual(hints, [approval], 'only the hint of the choice that is made is shown');
+    assert.match(html, /A reply that waits for your approval is posted only once you approve it in Teams\. It is dropped after 10 minutes or, if nobody asked the Bot, as soon as someone writes in the chat again\./);
+    assert.ok(!/assistant/i.test(html), 'a Bot is never called an assistant');
+  }
+  assert.ok(view('never').indexOf('How sure the Decision service must be') < view('never').indexOf('Approval before posting'), 'after the thresholds');
+  assert.ok(view('never').indexOf('Approval before posting') < view('never').indexOf('A Bot that is @mentioned'), 'before the note on mentions');
+  const locked = render(React.createElement(BotAutoReplyField, { draft: draftFromBot(bot(), ''), problems: {}, disabled: true, onChange: noop }));
+  assert.match(locked, /<select[^>]*disabled=""[^>]*><option value="never" selected="">Never/);
+});
+
+test('choosing when the owner approves changes that part of the draft only; a value that is none of the three is no choice', () => {
+  const draft = draftFromBot(bot(SET_REPLY), '');
+  const changes: Array<Partial<BotDraft>> = [];
+  const tree = BotAutoReplyField({ draft, problems: {}, onChange: (change) => changes.push(change) }) as React.ReactElement;
+  const approval = find(tree, (element) => typeof element.type === 'function' && 'reply' in element.props && 'replace' in element.props && !('problems' in element.props))[0]!;
+  const select = find((approval.type as (props: unknown) => React.ReactElement)(approval.props), (element) => element.type === Field && element.props.label === 'Approval before posting')
+    .map((field) => (field.props.children as (control: { id: string }) => React.ReactElement<Record<string, any>>)({ id: 'x' }).props)[0]!;
+  assert.equal(select.value, 'uncertain');
+  select.onChange({ target: { value: 'always' } });
+  select.onChange({ target: { value: 'never' } });
+  select.onChange({ target: { value: 'sometimes' } });
+  select.onChange({ target: { value: '' } });
+  assert.deepEqual(changes.map((change) => Object.keys(change)), [['autoReply'], ['autoReply']], 'two choices, and no change for what is no choice');
+  assert.deepEqual(changes.map((change) => change.autoReply), [{ ...draft.autoReply, approval: 'always' }, { ...draft.autoReply, approval: 'never' }]);
+  assert.equal(approvalText('uncertain').label, 'When the Bot is unsure');
+  assert.equal(new Set(['never', 'uncertain', 'always'].flatMap((choice) => Object.values(approvalText(choice as never)))).size, 6, 'six different texts');
 });
 
 test('problems are said next to the part they are in, and saving them is not allowed', () => {
@@ -492,13 +533,19 @@ test('the bridge gives the log only to an account that is signed in, as its own 
   assert.deepEqual(calls, [['targets', 'uid_1', 'bot_1'], ['log', 'uid_1', { teamId: 'team_trip', sharedBotId: 'sharedbot_a', limit: 20, cursor: 'c' }]]);
 });
 
-test('where a judged message ended up is one of four words, for every state the service has', () => {
+test('where a judged message ended up is one of five words, for every state the service has', () => {
   const states: Record<TaskState, string> = {
-    completed: 'replied', declined: 'silent', cancelled: 'silent', queued: 'waiting', running: 'waiting', waiting: 'waiting',
+    completed: 'replied', declined: 'silent', cancelled: 'silent', queued: 'waiting', running: 'waiting', waiting: 'waiting', awaiting_approval: 'approval',
     failed: 'failed', expired: 'failed', interrupted: 'failed', authorization_required: 'failed', revoked: 'failed', needs_reconciliation: 'failed',
   };
   for (const [state, outcome] of Object.entries(states)) assert.equal(triageOutcome(state as TaskState), outcome, state);
-  assert.deepEqual(['replied', 'silent', 'failed', 'waiting'].map((outcome) => triageOutcomeText(outcome as never)), ['Replied', 'Stayed silent', 'Failed', 'In progress']);
+  assert.deepEqual(['replied', 'silent', 'failed', 'waiting', 'approval'].map((outcome) => triageOutcomeText(outcome as never)), ['Replied', 'Stayed silent', 'Failed', 'In progress', 'Waiting for approval']);
+});
+
+test('how a held reply was decided is said in words; a reply that was never held, one that still waits, and a code from a later version have none', () => {
+  assert.deepEqual(APPROVAL_OUTCOMES.map(triageApprovalText), ['', 'Approved', 'Declined', 'Not approved in time', 'Dropped for a newer message']);
+  assert.equal(triageApprovalText(undefined), '');
+  assert.equal(triageApprovalText('from_the_future' as never), '');
 });
 
 test('every code the service keeps has words, and a code this version does not know has none rather than the code', () => {
@@ -561,6 +608,31 @@ test('each row says what was decided and why, how sure the Decision service was,
   assert.match(cells[5]!, /No reply<\/span>/);
   assert.ok(!cells[5]!.includes('bots-triage-why'), 'a verdict with no reason says none');
   assert.ok(!html.includes('Load more'), 'there is no more');
+  assert.ok(!/assistant/i.test(html));
+});
+
+test('a reply that waits for its maintainer is a row of its own, and a reply that was decided says how', () => {
+  const rows = [
+    item('h1', { state: 'awaiting_approval', approval: 'held', triage: { action: 'run_may_decline', source: 'decision', reason: 'between_thresholds', probability: 0.5, at: 1_700_000_001_000 } }),
+    item('h2', { state: 'completed', approval: 'approved', triage: { action: 'run_may_decline', source: 'decision', reason: 'between_thresholds', probability: 0.5, at: 1_700_000_002_000 } }),
+    item('h3', { state: 'declined', approval: 'rejected', triage: { action: 'run_may_decline', source: 'decision', reason: 'between_thresholds', probability: 0.5, at: 1_700_000_003_000 } }),
+    item('h4', { state: 'declined', approval: 'timeout', triage: { action: 'run_may_decline', source: 'decision', reason: 'between_thresholds', probability: 0.5, at: 1_700_000_004_000 } }),
+    item('h5', { state: 'declined', approval: 'superseded', triage: { action: 'run', source: 'rule', reason: 'keyword', at: 1_700_000_005_000 } }),
+    item('h6', { state: 'completed' }),
+  ];
+  const html = render(React.createElement(BotTriageLog, { state: logState({ sections: [{ target: TRIP, items: rows, nextCursor: undefined, status: 'ready', error: undefined }] }), onRefresh: noop, onMore: noop }));
+  const cells = html.split('<li class="bots-row bots-triage-row">').slice(1);
+  assert.equal(cells.length, 6);
+  const text = (cell: string) => cell.match(/<span class="bots-row-text">(.*?)<\/span>/)![1]!.replace(/<[^>]+>/g, '');
+  assert.match(cells[0]!, /<span class="bots-tag" data-status="input-required">Waiting for approval<\/span>/);
+  assert.ok(!/ · (Approved|Declined|Not approved|Dropped)/.test(text(cells[0]!)), 'a reply that still waits says so in its tag, not twice');
+  assert.match(cells[1]!, /<span class="bots-tag" data-status="completed">Replied<\/span>/);
+  assert.match(text(cells[1]!), / · Approved$/);
+  assert.match(cells[2]!, /<span class="bots-tag">Stayed silent<\/span>/);
+  assert.match(text(cells[2]!), / · Declined$/);
+  assert.match(text(cells[3]!), / · Not approved in time$/);
+  assert.match(text(cells[4]!), / · Dropped for a newer message$/);
+  assert.ok(!/ · (Approved|Declined|Not approved|Dropped)/.test(text(cells[5]!)), 'a reply that was not held has no such line');
   assert.ok(!/assistant/i.test(html));
 });
 

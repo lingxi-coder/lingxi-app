@@ -57,12 +57,12 @@ internal data class TeamTaskUsage(val status: String, val inputTokens: Long = 0,
 internal data class TeamTaskWait(val waitId: String, val kind: String, val recipient: TeamMemberRef, val expiresAt: Long, val messageId: String) {
     companion object { fun parse(v: JSONObject) = TeamTaskWait(v.getString("waitId"), v.getString("kind"), TeamMemberRef.parse(v.getJSONObject("recipient")), v.getLong("expiresAt"), v.getString("messageId")) }
 }
-/** `deadline` ends the current phase: the pick-up limit while queued, the running budget while running, the wait's expiry while waiting. */
+/** `deadline` ends the current phase: the pick-up limit while queued, the running budget while running, the wait's expiry while waiting, the maintainer's time to decide while the reply awaits approval. */
 internal data class TeamTask(val taskId: String, val conversationId: String, val sharedBotId: String, val requester: TeamMemberRef,
     val state: String, val createdAt: Long, val deadline: Long, val replyId: String?, val artifactId: String?, val usage: TeamTaskUsage? = null,
     val cancelRequestedAt: Long? = null, val wait: TeamTaskWait? = null) {
-    val terminal get() = state !in setOf("queued", "running", "waiting")
-    /** A worker has it or is about to: its state changes within seconds. A waiting task changes only with its answer or its expiry. */
+    val terminal get() = state !in setOf("queued", "running", "waiting", "awaiting_approval")
+    /** A worker has it or is about to: its state changes within seconds. A waiting task changes only with its answer or its expiry, and one whose reply awaits approval with the maintainer's decision or the end of their time. */
     val busy get() = state == "queued" || state == "running"
     /** Cancellation was asked while the Bot was working; the task ends at the worker's next check. */
     val cancelling get() = state == "running" && cancelRequestedAt != null
@@ -147,6 +147,8 @@ internal object TeamExecutionContract {
     const val LIST_CHANGES = 20
     /** The most rows one page of a Bot's auto-reply log has. */
     const val TRIAGE_LIMIT = 50
+    /** The longest reply a maintainer may approve with their own text, trimmed, in UTF-8 bytes. */
+    const val HELD_REPLY_BYTES = 8192
     fun validate(v: JSONObject) {
         fun fail(): Nothing = throw TeamMessageFailure("INVALID_INPUT")
         fun JSONObject.keysSet() = keys().asSequence().toSet()
@@ -219,6 +221,14 @@ internal object TeamExecutionContract {
                 listOf("conversationId", "cursor").filter(p::has).forEach(::requireId)
                 if (p.has("limit") && (!integer(p.opt("limit"), 1) || (p.opt("limit") as Number).toLong() > TRIAGE_LIMIT)) fail()
             }
+            // The maintainer's read of the replies of a Bot that wait for them, optionally of one Chat. Holding a reply is the Bot's host's command, which no member sends.
+            "listHeldReplies" -> { shape(setOf("sharedBotId"), setOf("conversationId")); requireId("sharedBotId"); if (p.has("conversationId")) requireId("conversationId") }
+            // The task, and the reply as the maintainer changed it to: trimmed, with something in it, and no longer than a Bot's own.
+            "approveReply" -> {
+                shape(setOf("taskId"), setOf("text")); requireId("taskId")
+                if (p.has("text")) { val text = (p.opt("text") as? String ?: fail()).trim(); if (text.isEmpty() || text.toByteArray(Charsets.UTF_8).size > HELD_REPLY_BYTES) fail() }
+            }
+            "rejectReply" -> { shape(setOf("taskId")); requireId("taskId") }
             "pauseSharedBot" -> { shape(setOf("sharedBotId", "expectedRevision")); requireId("sharedBotId"); if (!integer(p.opt("expectedRevision"), 1)) fail() }
             "setConversationPolicy", "setConversationAutoReply" -> { shape(setOf("conversationId", "expectedRevision", "targets")); requireId("conversationId"); ids("targets", 0); if (!integer(p.opt("expectedRevision"), 0)) fail() }
             // The scope is the whole narrowing or null; a key that is left out is not a lifted narrowing.

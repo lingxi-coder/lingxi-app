@@ -72,10 +72,11 @@ test('the Friends client vectors agree with the canonical grammar', async () => 
   };
   assert.ok(vectors.links.typed.length >= 25);
   for (const row of vectors.links.typed) assert.deepEqual(typed(row.url), row.expect, row.url);
-  // A push route is accepted when it is the Teams inbox, the Friends requests, or one friend's chat with an unencoded uid,
-  // and the link it makes is a valid canonical one; a push never carries a friend code.
+  // A push route is accepted when it is the Teams inbox, the Friends requests, one friend's chat with an unencoded uid, or the Chat of a reply that
+  // waits for its maintainer (`team/chat`, its two keys in this order and unencoded), and the link it makes is a valid canonical one; a push never carries a friend code.
   const push = (route: string) => {
-    if (!(route === 'team/inbox' || route === 'friend/requests' || /^friend\/chat\?uid=[A-Za-z0-9_-]{1,128}$/u.test(route))) return null;
+    if (!(route === 'team/inbox' || route === 'friend/requests' || /^friend\/chat\?uid=[A-Za-z0-9_-]{1,128}$/u.test(route)
+      || /^team\/chat\?conversation=[A-Za-z0-9_-]{1,128}&team=[A-Za-z0-9_-]{1,128}$/u.test(route))) return null;
     try { parseDeepLink(`lingxi://${route}`); } catch { return null; }
     return `lingxi://${route}`;
   };

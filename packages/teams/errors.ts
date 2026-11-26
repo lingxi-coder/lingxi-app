@@ -150,6 +150,14 @@ export function messageErrorText(code: string, locale: string): string {
       return t('tw_error_task_authorization');
     case 'TASK_CANCEL_FORBIDDEN':
       return t('tw_error_cancel_who');
+    case 'REPLY_APPROVED':
+    case 'REPLY_REJECTED':
+    case 'REPLY_NOT_HELD':
+      return t('tw_error_reply_decided');
+    case 'REPLY_EXPIRED':
+      return t('tw_error_reply_expired');
+    case 'REPLY_SUPERSEDED':
+      return t('tw_error_reply_superseded');
     case 'BOT_MAINTAINER_CHANGED':
       return t('tw_error_handed_over');
     case 'TRANSFER_PENDING':

@@ -734,6 +734,11 @@
       "indexes": []
     },
     {
+      "collectionGroup": "heldReplies",
+      "fieldPath": "result",
+      "indexes": []
+    },
+    {
       "collectionGroup": "executionReceipts",
       "fieldPath": "response",
       "indexes": []

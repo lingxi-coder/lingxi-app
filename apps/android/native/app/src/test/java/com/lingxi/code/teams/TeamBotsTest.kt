@@ -10,12 +10,38 @@ import java.nio.file.Files
 
 class TeamBotsTest {
     private fun command() = JSONObject("""{"schemaVersion":1,"commandId":"command_0001","teamId":"team_0001","generation":7,"action":"submit","payload":{"conversationId":"chat_0001","messageId":"message_0001","changeId":"change_0001","text":"Hello","targets":["sharedbot_01"]}}""")
-    @Test fun sharedCommandVectors() {
+    private fun vectors(): JSONObject {
         val root = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }.first { File(it, "packages/teams/contracts/execution-vectors.json").isFile }
-        JSONObject(File(root, "packages/teams/contracts/execution-vectors.json").readText()).getJSONArray("commands").objects().forEach { row ->
+        return JSONObject(File(root, "packages/teams/contracts/execution-vectors.json").readText())
+    }
+    @Test fun sharedCommandVectors() {
+        vectors().getJSONArray("commands").objects().forEach { row ->
             val result = runCatching { TeamExecutionContract.validate(row.getJSONObject("input")) }
             assertEquals(row.getString("name"), row.getBoolean("valid"), result.isSuccess)
         }
+    }
+    /** Bot v3 B6: the states and codes the contract lists are the ones this app can show and read from the log (`taskStates`, `approvalOutcomes`). */
+    @Test fun everyStateOfTheContractIsOneThisAppKnows() {
+        val root = vectors()
+        val states = root.getJSONArray("taskStates").let { array -> (0 until array.length()).map { array.getString(it) } }
+        assertTrue(states.contains("awaiting_approval"))
+        for (state in states) {
+            assertTrue(state, TeamsBotText.runState(state).label != R.string.chat_status_unknown)
+            assertTrue(state, state in TeamTriageRules.outcomes)
+        }
+        assertEquals("the log reads every state the contract lists, and no other", states.toSet(), TeamTriageRules.outcomes.keys)
+        assertEquals(root.getJSONArray("approvalOutcomes").let { array -> (0 until array.length()).map { array.getString(it) } }.toSet(), TeamTriageRules.approvals)
+    }
+    /** A reply that waits for its maintainer can still change and can be taken back by the one who asked; no worker is changing it. */
+    @Test fun aTaskWhoseReplyAwaitsApprovalIsNeitherFinishedNorBeingWorkedOn() {
+        fun task(state: String) = TeamTask.parse(JSONObject("""{"taskId":"task_0001","conversationId":"chat_0001","sharedBotId":"sharedbot_01","requester":{"uid":"member","generation":3},"state":"$state","createdAt":1,"deadline":2}"""))
+        val requester = TeamMemberRef("member", 3); val maintainer = TeamMemberRef("owner", 1); val other = TeamMemberRef("other", 1)
+        val held = task("awaiting_approval")
+        assertFalse(held.terminal); assertFalse(held.busy)
+        assertTrue(TeamTaskActions.canCancel(held, requester, maintainer))
+        assertTrue(TeamTaskActions.canCancel(held, maintainer, maintainer))
+        assertFalse(TeamTaskActions.canCancel(held, other, maintainer))
+        for (state in listOf("completed", "declined", "failed", "cancelled")) assertTrue(state, task(state).terminal)
     }
     private fun card(extra: String = "", permitted: Boolean = true, state: String = "published") = TeamBotCard.parse(JSONObject(
         """{"sharedBotId":"sharedbot_01","name":"Helper","description":"","maintainer":{"uid":"owner","generation":3},"revision":2,"state":"$state","permitted":$permitted,"ready":true,"onlineUntil":0,"usePolicy":{"mode":"all"},"quotas":{"team":1,"member":1,"bot":1}$extra}"""))

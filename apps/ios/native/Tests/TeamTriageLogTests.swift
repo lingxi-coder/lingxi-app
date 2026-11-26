@@ -38,8 +38,8 @@ final class TeamTriageLogTests: XCTestCase {
 
     // MARK: Where a message ended up
 
-    func testEveryStateOfATaskIsOneOfFourOutcomes() {
-        let expected: [String: TeamTriageOutcome] = ["completed": .replied, "declined": .silent, "cancelled": .silent, "queued": .waiting, "running": .waiting, "waiting": .waiting,
+    func testEveryStateOfATaskIsOneOfFiveOutcomes() {
+        let expected: [String: TeamTriageOutcome] = ["completed": .replied, "declined": .silent, "cancelled": .silent, "queued": .waiting, "running": .waiting, "waiting": .waiting, "awaiting_approval": .approval,
                                                      "failed": .failed, "expired": .failed, "interrupted": .failed, "authorization_required": .failed, "revoked": .failed, "needs_reconciliation": .failed]
         XCTAssertEqual(TeamTriageRules.outcomes, expected)
         for state in expected.keys { XCTAssertNotEqual(TeamsBotText.runState(state).labelKey, "chat_status_unknown", "the card of every state this log lists is one the app knows: \(state)") }
@@ -79,6 +79,22 @@ final class TeamTriageLogTests: XCTestCase {
         for nonsense: Any in [["nope": true], ["items": "x"], ["items": NSNull()]] { XCTAssertThrowsError(try decode(TeamTriagePage.self, nonsense), "an answer that is no page is not an empty log: \(nonsense)") }
     }
 
+    // MARK: A reply held for the maintainer
+
+    func testAHeldReplySaysHowItCameOutAndACodeThisVersionDoesNotKnowIsLeftOut() throws {
+        for approval in ["held", "approved", "rejected", "timeout", "superseded"] {
+            XCTAssertEqual(try decode(TeamTriageItem.self, row(3, state: "awaiting_approval", extra: ["approval": approval])).approval, approval, approval)
+        }
+        XCTAssertNil(try item(4).approval, "a reply that never was held says nothing")
+        XCTAssertEqual(try item(4, state: "awaiting_approval").state, "awaiting_approval", "a row whose reply waits is a row this version reads")
+        for approval: Any in ["a_new_outcome", "", 7, NSNull()] { XCTAssertNil(try decode(TeamTriageItem.self, row(5, extra: ["approval": approval])).approval, "\(approval)") }
+        // The words: a reply that still waits says so as its outcome, so `held` has none of its own; the others say how it was decided.
+        XCTAssertEqual(TeamTriageRules.outcomeKey(.approval), "teams_task_waiting_approval")
+        XCTAssertEqual(["approved", "rejected", "timeout", "superseded"].map { TeamTriageRules.approvalKey($0) },
+                       ["teams_approval_reply_approved", "teams_approval_reply_declined", "teams_triage_approval_timeout", "teams_triage_approval_superseded"])
+        for none in [nil, "held", "a_new_outcome"] as [String?] { XCTAssertNil(TeamTriageRules.approvalKey(none), "\(none ?? "nil")") }
+    }
+
     // MARK: The words
 
     func testEveryVerdictReasonAndOutcomeHasWordsInEveryLanguage() throws {
@@ -87,7 +103,8 @@ final class TeamTriageLogTests: XCTestCase {
         var keys = TeamTriageRules.allKeys
         for action in TeamTriageRules.actions.sorted() { keys.append(try XCTUnwrap(TeamTriageRules.actionKey(action), action)) }
         for reason in TeamTriageRules.reasons.sorted() { keys.append(try XCTUnwrap(TeamTriageRules.reasonKey(reason), reason)) }
-        for outcome in [TeamTriageOutcome.replied, .silent, .failed, .waiting] { keys.append(TeamTriageRules.outcomeKey(outcome)) }
+        for outcome in [TeamTriageOutcome.replied, .silent, .failed, .waiting, .approval] { keys.append(TeamTriageRules.outcomeKey(outcome)) }
+        for approval in TeamTriageRules.approvals.sorted() { if let key = TeamTriageRules.approvalKey(approval) { keys.append(key) } }
         for key in Set(keys) {
             let values = languages.map { catalogue.value(key, $0) }
             for (language, value) in zip(languages, values) { XCTAssertFalse((value ?? "").isEmpty, "\(key) has no text in \(language)") }

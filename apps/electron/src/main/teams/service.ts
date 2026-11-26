@@ -215,13 +215,13 @@ export class TeamsService {
     if (this.account.snapshot().user?.uid !== expectedUid) throw new Error('INVALID_SESSION');
     if (!command || !/^[A-Za-z0-9_-]{8,64}$/u.test(command.teamId) || !Number.isSafeInteger(command.generation) || command.generation < 1) throw new Error('INVALID_INPUT');
     if ('schemaVersion' in command) {
-      if (command.schemaVersion !== 1 || !['listSharedBots', 'createConversation', 'submit', 'pauseSharedBot', 'answerWait', 'cancelTask', 'getTask', 'listTasks', 'listTriage', 'readArtifact', 'listArtifactRevisions', 'reviseArtifact', 'listOperations', 'resolveOperation', 'readList', 'writeList', 'listHistory', 'decideWait', 'setConversationPolicy', 'setConversationAutoReply', 'setConversationBotScope', 'endTransfer',
+      if (command.schemaVersion !== 1 || !['listSharedBots', 'createConversation', 'submit', 'pauseSharedBot', 'answerWait', 'cancelTask', 'getTask', 'listTasks', 'listTriage', 'listHeldReplies', 'approveReply', 'rejectReply', 'readArtifact', 'listArtifactRevisions', 'reviseArtifact', 'listOperations', 'resolveOperation', 'readList', 'writeList', 'listHistory', 'decideWait', 'setConversationPolicy', 'setConversationAutoReply', 'setConversationBotScope', 'endTransfer',
         'createUpload', 'putUploadPart', 'finalizeUpload', 'cancelUpload', 'readAttachmentPart', 'revokeAttachment'].includes(command.action)) throw new Error('INVALID_INPUT');
       if (command.action === 'pauseSharedBot') this.host?.stopBinding(command.teamId, command.payload.sharedBotId);
     } else if (!['create', 'read', 'mutate'].includes(command.action)) throw new Error('INVALID_INPUT');
     await this.connect(expectedUid);
     const result = await this.checked<T>(expectedUid, '/messages', command);
-    if (['create','mutate','createConversation','submit','pauseSharedBot','answerWait','cancelTask','setConversationPolicy','setConversationAutoReply','setConversationBotScope','endTransfer','revokeAttachment'].includes(command.action)) this.events.emit('messages');
+    if (['create','mutate','createConversation','submit','pauseSharedBot','answerWait','cancelTask','approveReply','rejectReply','setConversationPolicy','setConversationAutoReply','setConversationBotScope','endTransfer','revokeAttachment'].includes(command.action)) this.events.emit('messages');
     return result;
   }
   async historyPage(uid:string,scope:MessageScope,conversationId:string,beforeSeq:number):Promise<TeamMessage[]> {
@@ -348,7 +348,7 @@ export class TeamsService {
     this.assertHostContext(context);
     if (command.schemaVersion !== 1 || ![
       'listSharedBots', 'publishSharedBot', 'heartbeatDeployment', 'activateDeployment', 'listHostTasks',
-      'prepareTask', 'validateTask', 'startTask', 'completeTask', 'pauseTask', 'continueTask', 'getTask',
+      'prepareTask', 'validateTask', 'startTask', 'completeTask', 'holdReply', 'pauseTask', 'continueTask', 'getTask',
       'readTaskList', 'recordOperation', 'writeTaskList', 'readAttachmentPart',
       'putTransferPart', 'offerTransfer', 'acceptTransfer', 'readTransferPart', 'completeTransfer', 'declineTask', 'recordTriage', 'listTriage',
     ].includes(command.action as string)) throw new Error('INVALID_INPUT');

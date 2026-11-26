@@ -2787,6 +2787,7 @@
     <string name="teams_run_interrupted_detail">Bot 所在的 Desktop 在完成前停止了，请发送新的请求。</string>
     <string name="teams_run_authorization_required_detail">暂时无法显示此结果，请联系 Bot 的维护者授权。</string>
     <string name="teams_run_revoked_detail">你已无法再使用此 Bot。</string>
+    <string name="teams_run_awaiting_approval_detail">Bot 的维护者会先查看回复，确认后才会发出。</string>
     <string name="teams_run_refresh">刷新状态</string>
     <string name="teams_bots_title">团队 Bot</string>
     <string name="teams_bots_loading">正在加载 Bot…</string>
@@ -3550,6 +3551,8 @@
     <string name="teams_triage_state_silent">未回复</string>
     <string name="teams_triage_state_failed">失败</string>
     <string name="teams_triage_state_waiting">进行中</string>
+    <string name="teams_triage_approval_timeout">超时未批准</string>
+    <string name="teams_triage_approval_superseded">因新消息而丢弃</string>
     <string name="teams_triage_probability_fmt">概率 %1$d%%</string>
     <string name="teams_error_scope_conflict">刚有人修改了此设置，已显示最新内容。请检查后重试。</string>
     <string name="teams_error_scope_not_published">维护者修改了此 Bot 共享的内容，已显示最新内容。请检查后重试。</string>

@@ -8,16 +8,44 @@ final class TeamBotTests: XCTestCase {
         ["schemaVersion": 1, "commandId": "command_0001", "teamId": "team_0001", "generation": 7, "action": action,
          "payload": ["conversationId": "chat_0001", "messageId": "message_0001", "changeId": "change_0001", "text": "Hello", "targets": [sharedBotId]]]
     }
-    func testSharedCommandVectors() throws {
+    private func vectors() throws -> [String: Any] {
         var path = URL(fileURLWithPath: #filePath)
         while !FileManager.default.fileExists(atPath: path.appendingPathComponent("packages/teams/contracts/execution-vectors.json").path), path.path != "/" { path.deleteLastPathComponent() }
         let fixture = Bundle(for: Self.self).url(forResource: "execution-vectors", withExtension: "json") ?? path.appendingPathComponent("packages/teams/contracts/execution-vectors.json")
-        let value = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fixture)) as? [String: Any])
+        return try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fixture)) as? [String: Any])
+    }
+    func testSharedCommandVectors() throws {
+        let value = try vectors()
         for row in try XCTUnwrap(value["commands"] as? [[String: Any]]) {
             let input = try XCTUnwrap(row["input"] as? [String: Any])
             if row["valid"] as? Bool == true { XCTAssertNoThrow(try TeamExecutionContract.validate(input), "\(row["name"] ?? "")") }
             else { XCTAssertThrowsError(try TeamExecutionContract.validate(input), "\(row["name"] ?? "")") }
         }
+    }
+    /// Bot v3 B6: the states and codes the contract lists are the ones this app can show and read from the log (`taskStates`, `approvalOutcomes`).
+    func testEveryStateOfTheContractIsOneThisAppKnows() throws {
+        let value = try vectors()
+        let states = try XCTUnwrap(value["taskStates"] as? [String])
+        XCTAssertTrue(states.contains("awaiting_approval"))
+        for state in states {
+            XCTAssertNotEqual(TeamsBotText.runState(state).labelKey, "chat_status_unknown", state)
+            XCTAssertNotNil(TeamTriageRules.outcomes[state], state)
+        }
+        XCTAssertEqual(Set(TeamTriageRules.outcomes.keys), Set(states), "the log reads every state the contract lists, and no other")
+        XCTAssertEqual(TeamTriageRules.approvals, Set(try XCTUnwrap(value["approvalOutcomes"] as? [String])))
+    }
+    /// A reply that waits for its maintainer can still change and can be taken back by the one who asked; no worker is changing it.
+    func testATaskWhoseReplyAwaitsApprovalIsNeitherFinishedNorBeingWorkedOn() throws {
+        func task(_ state: String) throws -> TeamTask {
+            try JSONDecoder().decode(TeamTask.self, from: Data(#"{"taskId":"task_0001","conversationId":"chat_0001","sharedBotId":"sharedbot_01","requester":{"uid":"member","generation":3},"state":"\#(state)","createdAt":1,"deadline":2,"replyId":null,"artifactId":null}"#.utf8))
+        }
+        let requester = TeamMemberRef(uid: "member", generation: 3), maintainer = TeamMemberRef(uid: "owner", generation: 1), other = TeamMemberRef(uid: "other", generation: 1)
+        let held = try task("awaiting_approval")
+        XCTAssertFalse(held.terminal); XCTAssertFalse(held.busy)
+        XCTAssertTrue(TeamTaskActions.canCancel(held, viewer: requester, maintainer: maintainer))
+        XCTAssertTrue(TeamTaskActions.canCancel(held, viewer: maintainer, maintainer: maintainer))
+        XCTAssertFalse(TeamTaskActions.canCancel(held, viewer: other, maintainer: maintainer))
+        for state in ["completed", "declined", "failed", "cancelled"] { XCTAssertTrue(try task(state).terminal, state) }
     }
     private func card(_ extra: String = "", permitted: Bool = true, state: String = "published") throws -> TeamBotCard {
         let json = #"{"sharedBotId":"sharedbot_01","name":"Helper","description":"","maintainer":{"uid":"owner","generation":3},"revision":2,"state":"\#(state)","permitted":\#(permitted),"ready":true,"onlineUntil":0,"usePolicy":{"mode":"all"},"quotas":{"team":1,"member":1,"bot":1}\#(extra)}"#

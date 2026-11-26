@@ -2787,6 +2787,7 @@
     <string name="teams_run_interrupted_detail">완료되기 전에 Bot의 Desktop이 멈췄습니다. 새 요청을 보내세요.</string>
     <string name="teams_run_authorization_required_detail">이 결과는 아직 표시할 수 없습니다. Bot 메인테이너에게 승인을 요청하세요.</string>
     <string name="teams_run_revoked_detail">이 Bot을 더 이상 사용할 수 없습니다.</string>
+    <string name="teams_run_awaiting_approval_detail">Bot 관리자가 답장을 확인한 뒤에 게시됩니다.</string>
     <string name="teams_run_refresh">상태 새로고침</string>
     <string name="teams_bots_title">팀 Bot</string>
     <string name="teams_bots_loading">Bot을 불러오는 중…</string>
@@ -3550,6 +3551,8 @@
     <string name="teams_triage_state_silent">조용히 있음</string>
     <string name="teams_triage_state_failed">실패</string>
     <string name="teams_triage_state_waiting">진행 중</string>
+    <string name="teams_triage_approval_timeout">시간 내에 승인되지 않음</string>
+    <string name="teams_triage_approval_superseded">새 메시지로 인해 폐기됨</string>
     <string name="teams_triage_probability_fmt">확률 %1$d%%</string>
     <string name="teams_error_scope_conflict">방금 누군가 이 설정을 변경했습니다. 최신 내용을 표시했습니다. 확인한 후 다시 시도하세요.</string>
     <string name="teams_error_scope_not_published">메인테이너가 이 Bot의 공유 내용을 변경했습니다. 최신 내용을 표시했습니다. 확인한 후 다시 시도하세요.</string>

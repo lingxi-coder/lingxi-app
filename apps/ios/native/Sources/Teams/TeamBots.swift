@@ -173,7 +173,7 @@ struct TeamTask: Decodable, Equatable, Identifiable, Sendable {
     let requester: TeamMemberRef
     let state: String
     let createdAt: Double
-    /// Ends the current phase: the pick-up limit while queued, the running budget while running, the wait's expiry while waiting.
+    /// Ends the current phase: the pick-up limit while queued, the running budget while running, the wait's expiry while waiting, the maintainer's time to decide while the reply awaits approval.
     let deadline: Double
     let replyId: String?
     let artifactId: String?
@@ -181,8 +181,8 @@ struct TeamTask: Decodable, Equatable, Identifiable, Sendable {
     var cancelRequestedAt: Double? = nil
     var wait: TeamTaskWait? = nil
     var id: String { taskId }
-    var terminal: Bool { !["queued", "running", "waiting"].contains(state) }
-    /// A worker has it or is about to: its state changes within seconds. A waiting task changes only with its answer or its expiry.
+    var terminal: Bool { !["queued", "running", "waiting", "awaiting_approval"].contains(state) }
+    /// A worker has it or is about to: its state changes within seconds. A waiting task changes only with its answer or its expiry, and one whose reply awaits approval with the maintainer's decision or the end of their time.
     var busy: Bool { state == "queued" || state == "running" }
     /// Cancellation was asked while the Bot was working; the task ends at the worker's next check.
     var cancelling: Bool { state == "running" && cancelRequestedAt != nil }
@@ -269,6 +269,8 @@ enum TeamExecutionContract {
     static let listItemBytes = 500, listChanges = 20
     /// The most rows one page of a Bot's auto-reply log has.
     static let triageLimit = 50
+    /// The longest reply a maintainer may approve with their own text, trimmed, in UTF-8 bytes.
+    static let heldReplyBytes = 8192
     /// One change of a shared-list write exactly as the service accepts it.
     private static func listChange(_ change: [String: Any]) -> Bool {
         func text(_ value: Any?) -> Bool {
@@ -344,6 +346,17 @@ enum TeamExecutionContract {
             try shape(["sharedBotId"], ["conversationId", "cursor", "limit"]); try id("sharedBotId")
             for key in ["conversationId", "cursor"] where payload[key] != nil { try id(key) }
             if payload["limit"] != nil { guard let limit = integer(payload["limit"], minimum: 1), limit <= Double(triageLimit) else { try fail() } }
+        case "listHeldReplies":
+            // The maintainer's read of the replies of a Bot that wait for them, optionally of one Chat. Holding a reply is the Bot's host's command, which no member sends.
+            try shape(["sharedBotId"], ["conversationId"]); try id("sharedBotId")
+            if payload["conversationId"] != nil { try id("conversationId") }
+        case "approveReply":
+            // The task, and the reply as the maintainer changed it to: trimmed, with something in it, and no longer than a Bot's own.
+            try shape(["taskId"], ["text"]); try id("taskId")
+            if payload["text"] != nil {
+                guard let text = payload["text"] as? String, case let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty, trimmed.utf8.count <= heldReplyBytes else { try fail() }
+            }
+        case "rejectReply": try shape(["taskId"]); try id("taskId")
         case "pauseSharedBot":
             try shape(["sharedBotId", "expectedRevision"]); try id("sharedBotId")
             guard integer(payload["expectedRevision"], minimum: 1) != nil else { try fail() }

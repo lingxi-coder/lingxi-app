@@ -11,7 +11,7 @@ import { TeamsApiError, type TeamSummary } from '../../../../../packages/teams/i
 import type { ChatReadRequest, ChatReadResult, ChatSourceMessage } from '../../../../../packages/teams/chat-source.js';
 import { isServiceId } from '../../../../../packages/teams/hosted-service.js';
 import { ATTACHMENT_MESSAGE_BYTES, ATTACHMENT_MESSAGE_FILES, downloadAttachment, type MessageAttachment } from '../../../../../packages/teams/attachments.js';
-import { defaultAutoReply, type BotScope, type BotStore } from '../bots/store.js';
+import { defaultAutoReply, type BotAutoReply, type BotScope, type BotStore } from '../bots/store.js';
 import { sandboxAvailability } from '../bots/sandboxAvailability.js';
 import type { BotSandboxAvailability } from '../../shared/bots.js';
 import { validateBotManifest } from '../bots/package.js';
@@ -20,7 +20,7 @@ import { runTeamHost, runResult, LOCAL_APPS_OFFERED, OPERATION_BYTES, TeamHostFa
 import type { TeamDataProof, TeamDatasetOffer } from './process.js';
 import type { LocalTeamHost, TeamAccountContext } from './service.js';
 import type { PrivatePreviewLease, PrivatePreviewPage, PrivatePreviewProof } from './dataPreview.js';
-import { cooldownUnseen, triageReply, type ReplyDecision, type TriageSettings } from './replyTriage.js';
+import { cooldownUnseen, triageReply, type ReplyDecision } from './replyTriage.js';
 
 export interface TeamHostApi {
   hostContext(): TeamAccountContext | undefined;
@@ -776,7 +776,8 @@ export class TeamConnector implements LocalTeamHost {
       const payload = { ...delivery.payload, accountEpoch: b.accountEpoch };
       const commandId = delivery.payload.accountEpoch === b.accountEpoch ? delivery.commandId : digest(JSON.stringify([delivery.commandId,b.accountEpoch]));
       try {
-        try { await this.command(c,delivery,'completeTask',payload,commandId); }
+        // A held result is sent as `holdReply`, with the payload and the command id of `completeTask`: the retry, the restart and the new account epoch treat it the same.
+        try { await this.command(c,delivery,delivery.hold ? 'holdReply' : 'completeTask',payload,commandId); }
         catch (error) {
           // A failure this host made up (no worker result) was stamped with the host clock. A host clock behind the server puts it before the server's `startedAt`, and
           // the server then answers TASK_EXPIRED to every try. Send it again stamped with the current time, capped at the deadline. A real worker result is never restamped.
@@ -1027,6 +1028,9 @@ export class TeamConnector implements LocalTeamHost {
       if (verdict.action === 'decline') { await this.decline(c,b,task.taskId,'triage'); return; }
       mayDecline = verdict.action === 'run_may_decline';
     }
+    // The maintainer's own setting decides, once and for the life of the task, whether they read the reply before it is posted: every reply of the Bot, or only one
+    // its triage was unsure of. A hosted service has no maintainer in a Team to ask, and its gate does not carry the command.
+    const approval = this.replySettings(b).approval, hold = !isServiceId(b.teamId) && (approval === 'always' || approval === 'uncertain' && mayDecline);
     const run = this.options.run ?? runTeamHost;
     const inspected = runResult(await run({ executable:bins.host,home:paths.home,tmp:paths.tmp,signal,assertCurrent:assert,bootstrap:{version:3,type:'inspect_scope',storageRoot:paths.runtime,workerExecutable:bins.worker,scope} })); assert();
     const cursor = inspected.cursor;
@@ -1050,7 +1054,7 @@ export class TeamConnector implements LocalTeamHost {
       commandId:digest(JSON.stringify([task.taskId,'delivery'])),deadlineAt:prepared.task.deadline,payload:{...fields,inputGrantIds:b.grantIds},
       epoch:1,messageSeq:prepared.messageSeq,lastChangeSeq:source.lastChangeSeq,batch:reference,dispatched:0,recoveries:0,
       ask:prepared.deployment?.capabilities?.durableWait === true && CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) && !unasked,
-      ...(unasked ? { unasked: true } : {}), ...(mayDecline ? { mayDecline: true } : {}),
+      ...(unasked ? { unasked: true } : {}), ...(mayDecline ? { mayDecline: true } : {}), ...(hold ? { hold: true as const } : {}),
       ...(files.length ? { files: files.map(({ attachmentId, sha256 }) => ({ attachmentId, sha256 })) } : {}),
       ...(CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) && runList(prepared.sharedList,unasked) ? { list: runList(prepared.sharedList,unasked)! } : {}) };
     const pending=this.grantIntent(b,record,prepared,'startTask',startPayload);
@@ -1270,7 +1274,7 @@ export class TeamConnector implements LocalTeamHost {
       }
       const delivery = await this.saveResult(c,record,result); assert();
       if(!delivery)return;
-      await this.command(c,b,'completeTask',delivery.payload,delivery.commandId); assert(); await this.options.privateStore.delivered(c.uid,record.taskId,record);
+      await this.command(c,b,delivery.hold ? 'holdReply' : 'completeTask',delivery.payload,delivery.commandId); assert(); await this.options.privateStore.delivered(c.uid,record.taskId,record);
     } finally { clearInterval(interval); await Promise.all(references.map(ref=>this.options.privateStore.releaseDataRef(c.uid,ref))); }
   }
   /** The most this Bot's own scope (`bot.json`) lets a Team run use of this computer, as it is now; none when the Bot is gone. */
@@ -1452,8 +1456,10 @@ export class TeamConnector implements LocalTeamHost {
       outputAudience:{mode:'published_inputs'},usage:totalUsage(record.usage,result.usage,record.recoveries>0),
       // A finished run was given these files as model input: the worker refuses a batch whose files it cannot show the model.
       ...(!record.privateData && result.status==='completed' && record.files?.length ? { readFiles: record.files } : {}),...(!record.privateData && result.document && !declined ? {document:{title:result.document.title,body:result.document.markdown}} : {})};
+    // Only what would have been posted waits for the maintainer: a Bot that chose silence, a failure (the host's own included) and a task on private data have no reply to approve.
+    const held = record.hold === true && !record.privateData && payload.outcome === 'completed';
     const delivery: SavedDelivery = {schemaVersion:1,teamId:record.teamId,generation:record.generation,taskId:record.taskId,deadlineAt:record.deadlineAt,commandId:record.commandId,
-      ...(synthesized ? { synthesized: true as const } : {}),payload};
+      ...(synthesized ? { synthesized: true as const } : {}),...(held ? { hold: true as const } : {}),payload};
     return await this.options.privateStore.saveDelivery(c.uid,delivery,record)?delivery:undefined;
   }
   /** An unasked task this host will not run: the server ends it before any model runs, and with a verdict the earlier tasks of its Chat it was judged with.
@@ -1464,7 +1470,7 @@ export class TeamConnector implements LocalTeamHost {
     this.log('team_task_declined', { taskId, reason });
   }
   /** What the Bot's own `bot.json` says about answering on its own; a Bot that is gone judges as a new one does, and is not served anyway. */
-  private replySettings(b: SharedBotBinding): TriageSettings {
+  private replySettings(b: SharedBotBinding): BotAutoReply {
     try { return this.options.store.get(b.instanceId).autoReply; } catch { return defaultAutoReply(); }
   }
   /** Whether an unasked task's Bot answers. The messages of earlier unasked tasks of the Chat count as asking it too, and a reply to a message older than

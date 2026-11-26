@@ -35,6 +35,7 @@ function fakeService(){
   if(command.action==='validateTask'&&(task.state==='queued'||task._permit&&task._permit!==p.permitId))throw new TeamsApiError('EXECUTION_PERMIT_REQUIRED',403);
   result={task:{...task},messageId:task.messageId,messageSeq:task.messageSeq,inputs,deployment,...(task.privateDataSource?{privateDataSource:task.privateDataSource,sourceLastChangeSeq:task.messageSeq}:{})};if(command.action==='startTask'){if(task.state==='running')return {execute:false,taskId:task.taskId} as T;task.state='running';task.epoch=1;task._permit=commandPermit(command,1);result={...result,task:{...task},execute:true,permitId:task._permit};}}
  else if(command.action==='completeTask'){const task=tasks.find(t=>t.taskId===p.taskId);if(task)task.state='completed';}
+ else if(command.action==='holdReply'){const task=tasks.find(t=>t.taskId===p.taskId);if(task)task.state='awaiting_approval';}
  return result as T;},
  hostReadChat:async(_c,request)=>{reads.push(request);if(request.mode==='changes')return {messages:[],lastSeq:1000,lastChangeSeq:1000,hasMore:false};const through=request.mode==='recent'?request.throughSeq:request.mode==='range'?request.toSeqInclusive:1;const from=request.mode==='recent'?Math.max(0,through-200):request.mode==='range'?request.fromSeqExclusive:0;
  return {messages:Array.from({length:through-from},(_,i)=>({messageId:`message${String(from+i+1).padStart(6,'0')}`,seq:from+i+1,changeSeq:from+i+1,changeId:`change${String(from+i+1).padStart(6,'0')}`,author:{kind:'user' as const,uid:i%2?'human2':'human1',displayName:'Same name'},createdAt:1700000000000+i,text:`original ${i}`})),lastSeq:1000,lastChangeSeq:1000,hasMore:from>0};},};
@@ -147,7 +148,7 @@ test('Bot model preflight uses its isolated run and commits admission before wor
   assert.ok(reference && !reference.path.startsWith(paths.runtime));
 });
 
-for (const restart of [false, true]) test(`a private source run delivers only a redacted receipt (${restart ? 'host restarted before model' : 'uninterrupted'})`, async t => {
+for (const restart of [false, true]) for (const approval of ['never', 'always'] as const) test(`a private source run delivers only a redacted receipt (${restart ? 'host restarted before model' : 'uninterrupted'}, approval ${approval}: nothing of it is held)`, async t => {
   const taskId = 'private-task01';
   let modelReads = 0;
   let pageReads = 0;
@@ -179,6 +180,9 @@ for (const restart of [false, true]) test(`a private source run delivers only a 
     if (restart && pageReads === 1) f.connector.close();
     return { rows: [{ title: 'PRIVATE_PROJECTED_ROW' }], cursor: null, truncated: false };
   };
+  // A receipt has no reply to approve: the maintainer's setting does not reach a run on private data.
+  const own = f.store.get(f.bot.bot_id);
+  f.store.update(own.bot_id, own.revision, { autoReply: { ...own.autoReply, approval } } as never);
   await f.connector.publishLocalBot('owner', f.input);
   f.mock.tasks.push({ taskId, conversationId, sharedBotId, requester: { uid: 'member', generation: 1 }, state: 'queued',
     messageId: 'message000001', messageSeq: 1, createdAt: Date.now(), deadline: Date.now() + 300000, privateDataSource: 'private-orders' });
@@ -198,6 +202,7 @@ for (const restart of [false, true]) test(`a private source run delivers only a 
   assert.equal(completion.text, '');
   assert.equal(completion.privateData, true);
   assert.equal(completion.document, undefined);
+  assert.equal(f.mock.commands.filter(command => command.action === 'holdReply').length, 0);
   assert.doesNotMatch(JSON.stringify(f.mock.commands), /PRIVATE_PROJECTED_ROW|PRIVATE_DRAFT/u);
   assert.deepEqual(f.mock.reads, []);
 });
@@ -221,7 +226,7 @@ test('all Bots read the service data session, including current ACL and account 
 test('public message boundary rejects retired execution and private host commands',async()=>{
  const service=new TeamsService({snapshot:()=>({user:{uid:'owner'}}),getIdToken:async()=>'',onChanged:()=>()=>{}},{});
  for(const action of ['bindBot','claimBot','startBot','finishBot','botQueue','publishSharedBot','prepareTask','validateTask','startTask','completeTask','pauseTask','continueTask','heartbeatDeployment','activateDeployment','listHostTasks',
-  'readTaskList','recordOperation','writeTaskList','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer','declineTask','recordTriage'])await assert.rejects(service.messages({schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload:{}} as any,'owner'),/INVALID_INPUT/);service.close();
+  'readTaskList','recordOperation','writeTaskList','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer','declineTask','recordTriage','holdReply'])await assert.rejects(service.messages({schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload:{}} as any,'owner'),/INVALID_INPUT/);service.close();
 });
 test('the real private TeamsService forwards every connector command while rejecting unknown actions and stale accounts',async t=>{
  let uid='owner',epoch=0,notify=()=>{},requests=0;const service=new TeamsService({snapshot:()=>({user:{uid}}),sessionEpoch:()=>epoch,getIdToken:async()=>'synthetic-token',onChanged:cb=>{notify=cb;return()=>{};}},{});t.after(()=>service.close());
@@ -229,12 +234,28 @@ test('the real private TeamsService forwards every connector command while rejec
  const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});let sent:any,moveAccount=false;
  globalThis.fetch=(async(_url,init)=>{requests++;sent=JSON.parse(String(init?.body));if(moveAccount){uid='other';epoch++;notify();}return new Response(JSON.stringify({forwarded:true}),{status:200});}) as typeof fetch;
  const context=service.hostContext()!,actions=['listSharedBots','publishSharedBot','heartbeatDeployment','activateDeployment','listHostTasks','prepareTask','validateTask','startTask','completeTask','pauseTask','continueTask','getTask',
-  'readTaskList','recordOperation','writeTaskList','readAttachmentPart','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer','declineTask','recordTriage','listTriage'];
+  'readTaskList','recordOperation','writeTaskList','readAttachmentPart','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer','declineTask','holdReply','recordTriage','listTriage'];
  for(const action of actions){const command={schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload:{synthetic:'preserved'}};assert.deepEqual(await service.hostMessages(context,command),{forwarded:true},action);assert.deepEqual(sent,command);}
- assert.equal(requests,actions.length);for(const action of ['submit','answerWait','decideWait','cancelTask','writeList','setCustomClaim','unknown'])await assert.rejects(service.hostMessages(context,{schemaVersion:1,action}),/INVALID_INPUT/);
+ assert.equal(requests,actions.length);for(const action of ['submit','answerWait','decideWait','cancelTask','writeList','setCustomClaim','listHeldReplies','approveReply','rejectReply','unknown'])await assert.rejects(service.hostMessages(context,{schemaVersion:1,action}),/INVALID_INPUT/);
  await assert.rejects(service.hostMessages(context,{schemaVersion:2,action:'readTaskList'}),/INVALID_INPUT/);assert.equal(requests,actions.length);
  moveAccount=true;await assert.rejects(service.hostMessages(context,{schemaVersion:1,commandId:'command002',teamId,generation:1,action:'readTaskList',payload:{}}),/INVALID_SESSION/);
  const before=requests;await assert.rejects(service.hostMessages(context,{schemaVersion:1,action:'readTaskList'}),/INVALID_SESSION/);assert.equal(requests,before);
+});
+test('the member commands of a held reply reach the service and a decision refreshes the chats; a member cannot hold a reply, nor the host decide one',async t=>{
+ const service=new TeamsService({snapshot:()=>({user:{uid:'owner'}}),getIdToken:async()=>'synthetic-token',onChanged:()=>()=>{}},{});t.after(()=>service.close());
+ (service as any).connect=async()=>({db:{}});const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});const bodies:any[]=[];
+ globalThis.fetch=(async(_url,init)=>{bodies.push(JSON.parse(String(init?.body)));return new Response(JSON.stringify({forwarded:true}),{status:200});}) as typeof fetch;
+ let refreshed=0;t.after(service.onMessagesChanged(()=>{refreshed++;}));
+ const decisions:Array<[string,Record<string,unknown>]>=[['approveReply',{taskId:'task00001'}],['approveReply',{taskId:'task00001',text:'Edited by the maintainer'}],['rejectReply',{taskId:'task00001'}]];
+ for(const [action,payload] of [['listHeldReplies',{sharedBotId}] as [string,Record<string,unknown>],...decisions]){
+  const command={schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload};
+  assert.deepEqual(await service.messages(command as any,'owner'),{forwarded:true},action);assert.deepEqual(bodies.at(-1),command);}
+ assert.equal(refreshed,decisions.length,'a decision shows in the chat and its tasks; reading the list does not');
+ // The host sends holdReply as the host; the commands of the maintainer are not the host's.
+ const context=service.hostContext()!;(service as any).sdk={collection:()=>({}),onSnapshot:()=>()=>{}};
+ assert.deepEqual(await service.hostMessages(context,{schemaVersion:1,commandId:'command002',teamId,generation:1,action:'holdReply',payload:{taskId:'task00001'}}),{forwarded:true});
+ for(const action of ['listHeldReplies','approveReply','rejectReply'])await assert.rejects(service.hostMessages(context,{schemaVersion:1,commandId:'command003',teamId,generation:1,action,payload:{}}),/INVALID_INPUT/,action);
+ await assert.rejects(service.messages({schemaVersion:1,commandId:'command004',teamId,generation:1,action:'holdReply',payload:{taskId:'task00001'}} as any,'owner'),/INVALID_INPUT/);
 });
 test('scheduler is bounded at four and serializes the same Bot Chat',async t=>{
  const runs:TeamHostProcessOptions[]=[];const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};runs.push(o);return new Promise<TeamHostResult>((_resolve,reject)=>o.signal.addEventListener('abort',()=>reject(Error('abort')),{once:true}));});
@@ -1468,6 +1489,15 @@ test('a file that cannot be read for another reason ends the try before a permit
  down=false;f.mock.wake();await settle(()=>f.mock.commands.some(c=>c.action==='completeTask'));
  const done=f.mock.commands.find(c=>c.action==='completeTask')!.payload;assert.equal(done.outcome,'failed');assert.equal('readFiles' in done,false);
 });
+test('a Bot offered as a hosted service is served in the service scope and its reply is posted, whatever its own approval setting says',async t=>{
+ const serviceId='s_service_0001';const f=fixture(t,async o=>o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor}:{status:'completed',cursor,text:'Done',finishedAt:Date.now()});
+ // A service has no Team and no maintainer to ask in one, and its command gate does not carry the command.
+ const own=f.store.get(f.bot.bot_id);f.store.update(own.bot_id,own.revision,{autoReply:{...own.autoReply,approval:'always'}} as never);
+ await f.connector.publishLocalBot('owner',{...f.input,teamId:serviceId});
+ f.mock.tasks.push({taskId:'task00001',conversationId:'session001',sharedBotId,requester:{uid:'caller',generation:1},state:'queued',messageId:'message000001',messageSeq:1,createdAt:Date.now(),deadline:Date.now()+300000});
+ f.connector.revoke();await settle(()=>f.mock.commands.some(c=>c.action==='completeTask'));await f.connector.idle();
+ assert.equal(f.mock.commands.filter(c=>c.action==='holdReply').length,0);assert.equal(f.mock.tasks[0].state,'completed');
+});
 test('a Bot offered as a hosted service is published and served in the service scope, never as a Team',async t=>{
  const serviceId='s_service_0001';const runs:TeamHostProcessOptions[]=[];
  const f=fixture(t,async o=>{if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};runs.push(o);return {status:'completed',cursor,text:'Done',finishedAt:Date.now()};});
@@ -1809,6 +1839,121 @@ test('Dataset v2 normal Team Bot task commits its approved reply', { skip: !hasD
   }
   assert.ok(f.mock.commands.some(c => c.action === 'completeTask' && c.payload.outcome === 'completed'));
   await staging.assertOutput('Done');
+});
+
+// ---- Bot v3 B6a: a reply the Bot's maintainer reads before it is posted ----
+type Approval='never'|'uncertain'|'always';
+/** The Bot's own approval setting, as its owner saves it in `bot.json`. */
+const approving=(f:ReturnType<typeof autoFixture>,approval:Approval)=>setReply(f,{approval});
+/** A task someone asked the Bot to do (an @mention): it is not judged. */
+const mentioned=(f:ReturnType<typeof autoFixture>,n=1)=>({...f.task(n),optional:false});
+const holds=(f:ReturnType<typeof autoFixture>)=>f.sent('holdReply');
+/** Runs one task of a Bot with the given setting to the point where its result has gone to the service, one way or the other. */
+async function runToEnd(f:ReturnType<typeof autoFixture>,approval:Approval,task:Record<string,unknown>){
+ approving(f,approval);await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(task as any);f.mock.wake();
+ await waitFor(()=>f.sent('completeTask').length+holds(f).length===1);await f.connector.idle();
+}
+test('approval never: a finished reply is posted by completeTask as before, whatever the triage was',async t=>{
+ for(const probability of [0.5,0.9]){
+  const f=autoFixture(t,{decision:decisionOf(probability)});await runToEnd(f,'never',f.task(1));
+  assert.equal(holds(f).length,0,String(probability));assert.equal(f.mock.tasks[0].state,'completed');
+ }
+ const asking=autoFixture(t);await runToEnd(asking,'never',mentioned(asking));assert.equal(holds(asking).length,0);
+});
+test('approval uncertain: a reply the triage was unsure of goes as holdReply with the payload and the command id completeTask would have had; the others are posted',async t=>{
+ const plain=autoFixture(t,{decision:decisionOf(0.5)});await runToEnd(plain,'never',plain.task(1));
+ const unsure=autoFixture(t,{decision:decisionOf(0.5)});await runToEnd(unsure,'uncertain',unsure.task(1));
+ const [held]=holds(unsure),[posted]=plain.sent('completeTask');
+ assert.equal(unsure.sent('completeTask').length,0);assert.equal(unsure.mock.tasks[0].state,'awaiting_approval');assert.equal(unsure.runs()[0].mayDecline,true);
+ assert.deepEqual(Object.keys(held.payload).sort(),Object.keys(posted.payload).sort(),'the payload of completeTask, field for field');
+ assert.deepEqual([held.payload.outcome,held.payload.text,held.payload.outputAudience],['completed','Done',{mode:'published_inputs'}]);
+ assert.equal(held.commandId,posted.commandId,'the command id of the delivery: the same task is the same request');
+ assert.deepEqual([held.teamId,held.generation,held.schemaVersion],[teamId,1,1]);
+ // What is handed over is done with here: nothing waits for a retry, and nothing is kept of the reply.
+ assert.deepEqual(await unsure.privateStore.deliveries('owner'),[]);assert.deepEqual(await unsure.privateStore.executions('owner'),[]);
+ const sure=autoFixture(t,{decision:decisionOf(0.9)});await runToEnd(sure,'uncertain',sure.task(1));
+ assert.equal(holds(sure).length,0,'a sure verdict is no doubt');assert.equal(sure.sent('completeTask').length,1);
+ const asking=autoFixture(t,{decision:decisionOf(0.5)});await runToEnd(asking,'uncertain',mentioned(asking));
+ assert.equal(holds(asking).length,0,'a task someone asked for is not judged, so the Bot was not unsure');assert.equal(asking.sent('completeTask').length,1);
+});
+test('approval always: every reply is held, the one nobody asked for, the one asked for in a Chat, and the one in the Bot\'s own chat',async t=>{
+ const cases:Array<[string,ReturnType<typeof autoFixture>,(f:ReturnType<typeof autoFixture>)=>Record<string,unknown>]>=[
+  ['unasked and sure',autoFixture(t,{decision:decisionOf(0.9)}),f=>f.task(1)],
+  ['unasked and unsure',autoFixture(t,{decision:decisionOf(0.5)}),f=>f.task(1)],
+  ['asked (an @mention)',autoFixture(t),f=>mentioned(f)],
+  ['in the Bot\'s own chat',autoFixture(t,{kind:'bot_dm'}),f=>f.task(1)],
+ ];
+ for(const [name,f,task] of cases){
+  await runToEnd(f,'always',task(f));
+  assert.equal(holds(f).length,1,name);assert.equal(f.sent('completeTask').length,0,name);assert.equal(f.mock.tasks[0].state,'awaiting_approval',name);
+  assert.equal(holds(f)[0].payload.outcome,'completed',name);
+ }
+});
+test('approval always: only a reply is held; the silence of the Bot and a failure have nothing to approve and are delivered as they always were',async t=>{
+ const silent=autoFixture(t,{decision:decisionOf(0.5),result:()=>({status:'declined',cursor,text:'',finishedAt:Date.now(),usage:{status:'missing'}})});
+ await runToEnd(silent,'always',silent.task(1));
+ assert.equal(holds(silent).length,0);assert.deepEqual([silent.sent('completeTask')[0].payload.outcome,silent.sent('completeTask')[0].payload.text],['declined','']);
+ // A failure the worker reported, and one the host made up for a task with no result.
+ const reported=autoFixture(t,{result:o=>o.bootstrap.type==='inspect_result'?({status:'not_found',cursor} as TeamHostResult):({status:'failed',cursor,text:'',finishedAt:Date.now(),usage:{status:'missing'}} as unknown as TeamHostResult)});
+ await runToEnd(reported,'always',mentioned(reported));
+ assert.equal(holds(reported).length,0);assert.equal(reported.sent('completeTask')[0].payload.outcome,'failed');
+ const lost=autoFixture(t,{result:o=>{if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};throw new TeamHostFailure('MODEL_UNAVAILABLE');}});
+ await runToEnd(lost,'always',mentioned(lost));
+ assert.equal(holds(lost).length,0);assert.deepEqual([lost.sent('completeTask')[0].payload.outcome,lost.sent('completeTask')[0].payload.text],['failed','The assistant could not complete this request.']);
+ for(const f of [silent,reported,lost]){assert.deepEqual(await f.privateStore.deliveries('owner'),[]);assert.deepEqual(await f.privateStore.executions('owner'),[]);}
+});
+test('approval: the setting the task started with is the one that holds, in both directions; a later change reaches the next task',async t=>{
+ for(const [before,after,sent] of [['always','never','holdReply'],['never','always','completeTask']] as const){
+  const release:Array<(r:TeamHostResult)=>void>=[],reply=(text:string)=>({status:'completed' as const,cursor,text,finishedAt:Date.now(),usage:{status:'missing' as const}});
+  const f=autoFixture(t,{result:o=>o.bootstrap.type==='run'?new Promise<TeamHostResult>(resolve=>{release.push(resolve);}) as unknown as TeamHostResult:{status:'not_found',cursor} as unknown as TeamHostResult});
+  approving(f,before);await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(mentioned(f));f.mock.wake();await waitFor(()=>release.length===1);
+  approving(f,after);release[0]!(reply('Late'));
+  await waitFor(()=>f.sent(sent).length===1);await f.connector.idle();
+  assert.equal(f.sent(sent==='holdReply'?'completeTask':'holdReply').length,0,`${before} then ${after}`);
+  // The next task is held, or not, by the setting as it is now.
+  f.mock.tasks.push(mentioned(f,2));f.mock.wake();await waitFor(()=>release.length===2);release[1]!(reply('Next'));
+  await waitFor(()=>f.sent('completeTask').length+holds(f).length===2);
+  const [heldTask,postedTask]=before==='always'?['task00001','task00002']:['task00002','task00001'];
+  assert.deepEqual([holds(f).map(c=>c.payload.taskId),f.sent('completeTask').map(c=>c.payload.taskId)],[[heldTask],[postedTask]],`${before} then ${after}`);
+ }
+});
+test('approval: a held reply that could not be handed over is kept and sent again as holdReply, the same request, with no model call',async t=>{
+ const f=autoFixture(t,{decision:decisionOf(0.5)});(f.connector as any).options.retryMs=10;approving(f,'uncertain');await f.connector.publishLocalBot('owner',f.input);
+ const inner=f.mock.service.hostMessages;let refused=0;
+ f.mock.service.hostMessages=async(c,command)=>{if(command.action==='holdReply'&&refused<2){refused++;f.mock.commands.push(command);throw new TeamsApiError('SERVICE_UNAVAILABLE',503);}return inner(c,command);};
+ f.mock.tasks.push(f.task(1));f.mock.wake();await waitFor(()=>holds(f).length===3);await f.connector.idle();
+ assert.equal(refused,2);assert.equal(f.sent('completeTask').length,0,'a held reply is never posted as a completion');assert.equal(f.runs().length,1,'the model ran once');
+ const [first,...later]=holds(f);for(const again of later){assert.equal(again.commandId,first.commandId);assert.deepEqual(again.payload,first.payload);}
+ assert.equal(f.mock.tasks[0].state,'awaiting_approval');assert.deepEqual(await f.privateStore.deliveries('owner'),[]);assert.deepEqual(await f.privateStore.executions('owner'),[]);
+ // An answer the service gives for good ends the delivery instead of repeating it.
+ const gone=autoFixture(t,{decision:decisionOf(0.5)});(gone.connector as any).options.retryMs=10;approving(gone,'always');await gone.connector.publishLocalBot('owner',gone.input);
+ const real=gone.mock.service.hostMessages;gone.mock.service.hostMessages=async(c,command)=>{if(command.action==='holdReply'){gone.mock.commands.push(command);throw new TeamsApiError('TASK_REVOKED',403);}return real(c,command);};
+ gone.mock.tasks.push(mentioned(gone));gone.mock.wake();await waitFor(()=>holds(gone).length===2);await gone.connector.idle();await new Promise(r=>setTimeout(r,80));
+ assert.equal(holds(gone).length,2,'once as the run ended, once from the outbox, and no more');assert.deepEqual(await gone.privateStore.deliveries('owner'),[]);assert.deepEqual(await gone.privateStore.executions('owner'),[]);
+});
+test('approval: a held reply survives a restart of the host, whether the result was saved for sending or only recovered afterwards, and is never posted by completeTask',async t=>{
+ // The reply was ready and the Desktop closed while it was being handed over: the saved delivery is held, and the new account epoch is told.
+ let modelCalls=0;const f=autoFixture(t,{decision:decisionOf(0.5),result:o=>{if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};modelCalls++;return {status:'completed',cursor,text:'Exact durable reply',finishedAt:Date.now(),usage:{status:'partial',inputTokens:17,outputTokens:5}};}});
+ approving(f,'uncertain');await f.connector.publishLocalBot('owner',f.input);const inner=f.mock.service.hostMessages;let lose=true;
+ f.mock.service.hostMessages=async(c,command)=>{const result=await inner(c,command);if(command.action==='holdReply'&&lose){lose=false;f.connector.close();throw Error('SERVICE_UNAVAILABLE');}return result;};
+ f.mock.tasks.push(f.task(1));f.mock.wake();await waitFor(()=>!lose);
+ const [saved]=await f.privateStore.deliveries('owner');assert.equal(saved!.hold,true,'the delivery says it is held, on disk');assert.equal(saved!.payload.outcome,'completed');
+ const restarted=new TeamConnector({...((f.connector as any).options)});t.after(()=>restarted.close());await restarted.idle();
+ assert.deepEqual(await f.privateStore.deliveries('owner'),[]);assert.equal(modelCalls,1);assert.equal(f.sent('completeTask').length,0);
+ const [first,second]=holds(f);assert.equal(holds(f).length,2);assert.ok(second.payload.accountEpoch>first.payload.accountEpoch);
+ assert.deepEqual({...second.payload,accountEpoch:first.payload.accountEpoch},first.payload);assert.deepEqual(second.payload.usage,{status:'partial',inputTokens:17,outputTokens:5});
+});
+test('approval: an execution the host left behind with its result is held as the task decided, and one that was not held to be held is posted',async t=>{
+ for(const held of [true,false]){
+  let clock=Date.now();const f=fixture(t,async o=>o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor}:o.bootstrap.type==='inspect_result'?{status:'completed',cursor,text:'Recovered reply',finishedAt:clock,usage:{status:'missing'}}:Promise.reject(Error('model must not run')));
+  (f.connector as any).options.retryMs=10;(f.connector as any).options.now=()=>clock;await f.connector.publishLocalBot('owner',f.input);const b=(await f.privateStore.bindings('owner'))[0]!;
+  await f.privateStore.saveExecution('owner',await savedExecution(f,{scope:{teamId,sharedBotId,conversationId,sessionEpoch:b.sessionEpoch},teamId,taskId:'task00001',deadlineAt:clock+60000,commandId:'delivery001',
+   payload:{deploymentId:b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',permitId:'permit0001',inputGrantIds:b.grantIds},...(held?{hold:true}:{})}));
+  f.mock.wake();await settle(()=>f.mock.commands.some(c=>c.action===(held?'holdReply':'completeTask')));await f.connector.idle();
+  assert.equal(f.mock.commands.some(c=>c.action===(held?'completeTask':'holdReply')),false,String(held));
+  const sent=f.mock.commands.find(c=>c.action===(held?'holdReply':'completeTask'))!;assert.deepEqual([sent.payload.outcome,sent.payload.text,sent.payload.permitId,sent.commandId],['completed','Recovered reply','permit0001','delivery001']);
+  assert.deepEqual(await f.privateStore.executions('owner'),[]);assert.deepEqual(await f.privateStore.deliveries('owner'),[]);
+ }
 });
 
 // ---- Bot v3 B4a: what a run may use of this computer: the Local Apps and datasets in the Bot's own scope, its publication and its Chat ----

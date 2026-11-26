@@ -2787,6 +2787,7 @@
     <string name="teams_run_interrupted_detail">完了する前に Bot の Desktop が停止しました。新しいリクエストを送信してください。</string>
     <string name="teams_run_authorization_required_detail">この結果はまだ表示できません。Bot のメンテナーに承認を依頼してください。</string>
     <string name="teams_run_revoked_detail">この Bot を利用できなくなりました。</string>
+    <string name="teams_run_awaiting_approval_detail">Bot の管理者が内容を確認してから投稿されます。</string>
     <string name="teams_run_refresh">状態を更新</string>
     <string name="teams_bots_title">チームの Bot</string>
     <string name="teams_bots_loading">Bot を読み込んでいます…</string>
@@ -3550,6 +3551,8 @@
     <string name="teams_triage_state_silent">返信せず</string>
     <string name="teams_triage_state_failed">失敗</string>
     <string name="teams_triage_state_waiting">処理中</string>
+    <string name="teams_triage_approval_timeout">時間内に承認されず</string>
+    <string name="teams_triage_approval_superseded">新しいメッセージのため破棄</string>
     <string name="teams_triage_probability_fmt">確率 %1$d%%</string>
     <string name="teams_error_scope_conflict">直前に誰かがこの設定を変更しました。最新の内容を表示しています。確認してからもう一度お試しください。</string>
     <string name="teams_error_scope_not_published">メンテナーがこの Bot の共有内容を変更しました。最新の内容を表示しています。確認してからもう一度お試しください。</string>

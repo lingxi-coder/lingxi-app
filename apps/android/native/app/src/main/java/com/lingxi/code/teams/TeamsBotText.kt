@@ -78,6 +78,8 @@ internal object TeamsBotText {
         "needs_reconciliation" -> TeamRunState(R.string.teams_task_needs_checking, null, RunGlyph.Checking, RunTone.Muted, active = true)
         // A Bot nobody asked that chose not to answer: nothing to wait for or act on.
         "declined" -> TeamRunState(R.string.teams_task_declined, null, RunGlyph.Unknown, RunTone.Muted, active = false)
+        // The reply is made and its Bot's maintainer reads it first; the word is the one of an approval a member gives, which says the same.
+        "awaiting_approval" -> TeamRunState(R.string.teams_task_waiting_approval, R.string.teams_run_awaiting_approval_detail, RunGlyph.Clock, RunTone.Muted, active = true)
         else -> TeamRunState(R.string.chat_status_unknown, null, RunGlyph.Unknown, RunTone.Muted, active = false)
     }
 

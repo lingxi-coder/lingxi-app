@@ -13,6 +13,8 @@ const permitNonce = z.string().regex(/^[a-f0-9]{64}$/u);
 const text = z.string().min(1).refine(value => Buffer.byteLength(value, 'utf8') <= 8192);
 /** A run's reply. A Bot that chose not to answer has none. */
 const replyText = z.string().refine(value => Buffer.byteLength(value, 'utf8') <= 8192);
+/** A reply as its maintainer edited it before approving it: trimmed, with something to say, and no longer than a run's own. */
+const approvedText = z.string().trim().min(1).refine(value => Buffer.byteLength(value, 'utf8') <= 8192);
 /** One part of a file or of a handover package: at most 700 KiB of bytes, which with its record stays under Firestore's 1 MiB per document. */
 const base64Part = z.string().min(4).max(4 * Math.ceil(attachmentLimits.partBytes / 3)).regex(/^[A-Za-z0-9+/]+={0,2}$/u);
 const partIndex = z.number().int().min(0).max(Math.ceil(attachmentLimits.fileBytes / attachmentLimits.partBytes) - 1);
@@ -67,6 +69,23 @@ export const triageSources = ['quiet', 'cooldown', 'rule', 'decision', 'fallback
 export const triageReasons = ['quiet_hours', 'cooldown', 'keyword', 'addressed', 'below_threshold', 'between_thresholds', 'above_threshold', 'decision_unavailable', 'message_unavailable'];
 /** The most rows of the auto-reply log one page carries. */
 export const triageLogPage = 50;
+/**
+ * What became of a reply the maintainer was asked to approve before it was posted, as the auto-reply log says it: the codes of `packages/teams/execution.ts`
+ * (`APPROVAL_OUTCOMES`), which `test/held-replies.test.mjs` checks against. `held` is the reply still waiting.
+ */
+export const approvalOutcomes = ['held', 'approved', 'rejected', 'timeout', 'superseded'];
+/** What a host sends of a run's result: `completeTask` and, for a run that completed, `holdReply`. */
+const result = { ...host, ...task, permitId: executionId, text: replyText, finishedAt: cursor, inputGrantIds: grantIds, outputAudience,
+  document: artifactDocument.optional(),
+  // The files of Chat messages the model was given as input. Kept only where each is a checked file of the task's conversation.
+  readFiles: z.array(z.object({ attachmentId: executionId, sha256: digest }).strict()).min(1).max(5).optional(),
+  // The document is the next revision of an existing artifact of this Bot in this Chat, not a new artifact.
+  revises: z.object({ artifactId: executionId, expectedRevision: positive }).strict().optional(),
+  usage: z.discriminatedUnion('status', [
+    z.object({ status: z.literal('missing') }).strict(),
+    z.object({ status: z.enum(['partial', 'complete']), inputTokens: cursor, outputTokens: cursor,
+      costMicros: cursor.optional(), currency: z.string().length(3).optional() }).strict(),
+  ]) };
 const pause = { ...host, ...task, permitId: executionId, waitId: executionId, requestDigest: digest, checkpointDigest: digest,
   pausedAt: cursor, expiresInMs: z.number().int().min(60000).max(86400000), dispatchedRequests: cursor,
   inputGrantIds: grantIds, outputAudience };
@@ -130,23 +149,21 @@ const payloads = {
   startTask: z.object({ ...host, ...task, expectedLastChangeSeq: cursor, permitNonce: permitNonce.optional(), privateData: z.literal(true).optional() }).strict(),
   prepareTask: z.object({ ...host, ...task }).strict(),
   validateTask: z.object({ ...host, ...task, permitId: executionId, expectedLastChangeSeq: cursor }).strict(),
-  completeTask: z.object({ ...host, ...task, permitId: executionId, privateData: z.literal(true).optional(),
+  completeTask: z.object({ ...result, privateData: z.literal(true).optional(),
     // `declined`: the Bot of an optional task chose not to answer. Nothing is posted, so there is no text or document.
-    outcome: z.enum(['completed', 'failed', 'declined']), text: replyText, finishedAt: cursor,
-    inputGrantIds: grantIds, outputAudience,
-    document: artifactDocument.optional(),
-    // The files of Chat messages the model was given as input. Kept only where each is a checked file of the task's conversation.
-    readFiles: z.array(z.object({ attachmentId: executionId, sha256: digest }).strict()).min(1).max(5).optional(),
-    // The document is the next revision of an existing artifact of this Bot in this Chat, not a new artifact.
-    revises: z.object({ artifactId: executionId, expectedRevision: positive }).strict().optional(),
-    usage: z.discriminatedUnion('status', [
-      z.object({ status: z.literal('missing') }).strict(),
-      z.object({ status: z.enum(['partial', 'complete']), inputTokens: cursor, outputTokens: cursor,
-        costMicros: cursor.optional(), currency: z.string().length(3).optional() }).strict(),
-    ]),
+    outcome: z.enum(['completed', 'failed', 'declined']),
   }).strict().refine(value => !value.revises || value.document, 'A revision needs its document')
     .refine(value => value.privateData || value.outcome === 'declined' ? value.text === '' && !value.document && !value.readFiles : value.text.length > 0,
       'Only a private or declined run has no reply'),
+  // A run's finished reply that its maintainer wants to approve before it is posted (the Bot's `approval` setting): exactly what `completeTask` carries for a
+  // run that completed, kept by the service instead of posted. Never a private-data run, a failure or a decline: those end as they do without it.
+  holdReply: z.object({ ...result, outcome: z.literal('completed') }).strict().refine(value => !value.revises || value.document, 'A revision needs its document')
+    .refine(value => value.text.length > 0, 'A held reply has text'),
+  // The maintainer's side of it: the replies of one of their Bots that wait (optionally in one Chat), and the decision on one. An approval may carry the
+  // text as the maintainer edited it; the document the run made stays as it is.
+  listHeldReplies: z.object({ sharedBotId: executionId, conversationId: executionId.optional() }).strict(),
+  approveReply: z.object({ ...task, text: approvedText.optional() }).strict(),
+  rejectReply: z.object(task).strict(),
   // The host leaves an optional task unanswered before any model runs: its triage said no, or a later message of the
   // same Chat superseded it.
   declineTask: z.object({ ...host, ...task, reason: z.enum(['triage', 'superseded', 'revoked']) }).strict(),

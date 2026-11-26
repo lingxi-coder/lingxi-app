@@ -38,6 +38,7 @@ export interface SavedExecution { schemaVersion: 2; scope: BotChatScope; teamId:
   /** The Bot may ask its requester a question (the deployment publishes durable waits). */ ask: boolean;
   /** Nobody asked the Bot in a group or channel: it never asks the member a question back. */ unasked?: boolean;
   /** Nobody asked the Bot and its triage was unsure: the Bot may leave the message unanswered. Every attempt is offered the same. */ mayDecline?: boolean;
+  /** The Bot's maintainer reads its reply before it is posted. Decided once, when the task started, from the Bot's own setting: a later change of the setting does not reach a task that is running. */ hold?: true;
   /** The files of Chat messages in the batch: the model was given them, and a finished task says so. */ files?: { attachmentId: string; sha256: string }[];
   /** The Bot's shared list, offered to the worker of this task. Its writes go through the operation ledger. */ list?: { title: string; description: string; approval?: 'requester' };
   /** Model requests of the attempts so far, as the server counted them. */ dispatched: number;
@@ -55,7 +56,8 @@ export type AppCallEntry = { state: 'new' | 'begun' | 'conflict' | 'full' | 'ref
 /** The most calls of Local Apps one task may make, and the most bytes of one record of such a call. */
 const APP_CALLS_PER_TASK = 64, APP_CALL_BYTES = 80 * 1024;
 export interface SavedDelivery { schemaVersion: 1; teamId: string; generation: number; taskId: string; deadlineAt: number; commandId: string; payload: Record<string, unknown>;
-  /** The host made this failure up (no worker result), so its `finishedAt` is a host clock stamp that delivery may replace. */ synthesized?: true }
+  /** The host made this failure up (no worker result), so its `finishedAt` is a host clock stamp that delivery may replace. */ synthesized?: true;
+  /** The result waits for the Bot's maintainer: it is handed to the service as `holdReply` (same payload) and posted by their approval, not by `completeTask`. */ hold?: true }
 
 export interface TeamModelSelection { route: TeamModelRoute; profiles: Record<string, unknown>[]; assertCurrent(): Promise<void> }
 

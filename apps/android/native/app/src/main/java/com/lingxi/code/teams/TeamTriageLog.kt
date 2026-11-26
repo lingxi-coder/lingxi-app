@@ -9,8 +9,11 @@ import org.json.JSONObject
 // host decided about each message nobody asked the Bot about, and why, in codes. Newest first, a page at a time, for every Chat of the Team or for one. Only
 // the decision and the reason are kept, never what a model said. This file has no UI and no network: the rules, the decoding and the paged list.
 
-/** Where a judged message ended up: it was answered, the Bot stayed silent (it declined, or the task was canceled before it spoke), it failed, or it is still going on. */
-internal enum class TeamTriageOutcome { Replied, Silent, Failed, Waiting }
+/**
+ * Where a judged message ended up: it was answered, the Bot stayed silent (it declined, or the task was canceled before it spoke), it failed, it is still going on,
+ * or its reply waits for the maintainer to approve it. A reply that was held and then decided is [Replied] or [Silent] like any other and says so in `approval`.
+ */
+internal enum class TeamTriageOutcome { Replied, Silent, Failed, Waiting, Approval }
 
 /** What the Bot's host decided and why. A reason or a probability this version does not know is left out; the decision is kept. [at] is the service's clock, in epoch milliseconds. */
 internal data class TeamTriageVerdict(val action: String, val source: String, val at: Long, val reason: String? = null, val probability: Double? = null) {
@@ -29,9 +32,13 @@ internal data class TeamTriageVerdict(val action: String, val source: String, va
     }
 }
 
-/** One message the Bot's host judged, as its maintainer reads the log. [state] is where the task stands now: it settles after the verdict. */
+/**
+ * One message the Bot's host judged, as its maintainer reads the log. [state] is where the task stands now: it settles after the verdict. [approval] is what became of a
+ * reply held for approval (`held`, `approved`, `rejected`, `timeout`, `superseded`); a code this version does not know is left out.
+ */
 internal data class TeamTriageItem(
     val taskId: String, val conversationId: String, val messageId: String, val createdAt: Long, val triage: TeamTriageVerdict, val state: String, val conversationTitle: String? = null,
+    val approval: String? = null,
 ) {
     companion object {
         /** A row is never half read: what this version needs of it is there and known, or the row is not one (null). */
@@ -44,7 +51,7 @@ internal data class TeamTriageItem(
             val createdAt = TeamTriageRules.moment(v.opt("createdAt")) ?: return null
             val triage = TeamTriageVerdict.parse(v.optJSONObject("triage")) ?: return null
             val state = text("state")?.takeIf { it in TeamTriageRules.outcomes } ?: return null
-            return TeamTriageItem(taskId, conversationId, messageId, createdAt, triage, state, text("conversationTitle"))
+            return TeamTriageItem(taskId, conversationId, messageId, createdAt, triage, state, text("conversationTitle"), text("approval")?.takeIf { it in TeamTriageRules.approvals })
         }
     }
 }
@@ -73,10 +80,12 @@ internal object TeamTriageRules {
     val actions = setOf("decline", "run", "run_may_decline")
     val sources = setOf("quiet", "cooldown", "rule", "decision", "fallback")
     val reasons = setOf("quiet_hours", "cooldown", "keyword", "addressed", "below_threshold", "between_thresholds", "above_threshold", "decision_unavailable", "message_unavailable")
+    /** What became of a reply held for approval: still waiting, posted, dropped by the maintainer, dropped when its time ran out, dropped for a newer message. */
+    val approvals = setOf("held", "approved", "rejected", "timeout", "superseded")
     /** Every state a task can be in, and where it leaves the judged message. A state this table does not have is a row this version cannot read. */
     val outcomes: Map<String, TeamTriageOutcome> = mapOf(
         "completed" to TeamTriageOutcome.Replied, "declined" to TeamTriageOutcome.Silent, "cancelled" to TeamTriageOutcome.Silent,
-        "queued" to TeamTriageOutcome.Waiting, "running" to TeamTriageOutcome.Waiting, "waiting" to TeamTriageOutcome.Waiting,
+        "queued" to TeamTriageOutcome.Waiting, "running" to TeamTriageOutcome.Waiting, "waiting" to TeamTriageOutcome.Waiting, "awaiting_approval" to TeamTriageOutcome.Approval,
         "failed" to TeamTriageOutcome.Failed, "expired" to TeamTriageOutcome.Failed, "interrupted" to TeamTriageOutcome.Failed,
         "authorization_required" to TeamTriageOutcome.Failed, "revoked" to TeamTriageOutcome.Failed, "needs_reconciliation" to TeamTriageOutcome.Failed,
     )
@@ -111,6 +120,15 @@ internal object TeamTriageRules {
         TeamTriageOutcome.Silent -> R.string.teams_triage_state_silent
         TeamTriageOutcome.Failed -> R.string.teams_triage_state_failed
         TeamTriageOutcome.Waiting -> R.string.teams_triage_state_waiting
+        TeamTriageOutcome.Approval -> R.string.teams_task_waiting_approval
+    }
+    /** How a held reply came out once it was decided, in words; nothing for a reply that never was held, one that still waits (its outcome says so), or a code this version does not know. */
+    @StringRes fun approvalLabel(approval: String?): Int? = when (approval) {
+        "approved" -> R.string.teams_approval_reply_approved
+        "rejected" -> R.string.teams_approval_reply_declined
+        "timeout" -> R.string.teams_triage_approval_timeout
+        "superseded" -> R.string.teams_triage_approval_superseded
+        else -> null
     }
     /** The names of every string the log says anything with: each has text in every language (the `strings.xml` of each `values` folder). */
     val stringNames = listOf(
@@ -119,6 +137,7 @@ internal object TeamTriageRules {
         "teams_triage_reason_quiet_hours", "teams_triage_reason_cooldown", "teams_triage_reason_keyword", "teams_triage_reason_addressed", "teams_triage_reason_below_threshold",
         "teams_triage_reason_between_thresholds", "teams_triage_reason_above_threshold", "teams_triage_reason_decision_unavailable", "teams_triage_reason_message_unavailable",
         "teams_triage_state_replied", "teams_triage_state_silent", "teams_triage_state_failed", "teams_triage_state_waiting", "teams_triage_probability_fmt",
+        "teams_task_waiting_approval", "teams_approval_reply_approved", "teams_approval_reply_declined", "teams_triage_approval_timeout", "teams_triage_approval_superseded",
         "teams_list_refresh", "common_retry", "common_close",
     )
 

@@ -63,6 +63,16 @@ class FriendLinkTest {
         assertNull(FriendLink.parse(PushRoute.link("team/inbox")))
     }
 
+    /** Bot v3 B6: the push that tells a Bot's maintainer a reply waits for them opens that Chat, and no other team link. */
+    @Test fun aPushOpensTheChatOfAReplyThatWaitsForItsMaintainer() {
+        val link = PushRoute.link("team/chat?conversation=chat_0001&team=team_0001")
+        assertEquals("lingxi://team/chat?conversation=chat_0001&team=team_0001", link)
+        val parsed = DeepLink.parse(link!!)!!
+        assertEquals("team/chat", parsed.route); assertEquals(mapOf("conversation" to "chat_0001", "team" to "team_0001"), parsed.params)
+        for (invalid in listOf("team/chat", "team/chat?conversation=chat_0001", "team/chat?team=team_0001&conversation=chat_0001", "team/chat?conversation=chat_0001&team=team_0001&x=1",
+            "team/chat?conversation=chat%5F0001&team=team_0001", "team/bot?bot=sharedbot_01&team=team_0001", "team/join?code=aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-")) assertNull(invalid, PushRoute.link(invalid))
+    }
+
     @Test fun existingPushRoutesStayAccepted() {
         assertEquals("lingxi://team/inbox", PushRoute.link("team/inbox"))
         assertEquals("lingxi://remote/host_1/session_1", PushRoute.link("remote/host_1/session_1"))

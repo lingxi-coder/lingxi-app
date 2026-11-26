@@ -118324,6 +118324,40 @@
         }
       }
     },
+    "teams_run_awaiting_approval_detail": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bot 的维护者会先查看回复，确认后才会发出。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bot 的維護者會先查看回覆，確認後才會送出。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The Bot’s maintainer reads the reply before it is posted."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bot の管理者が内容を確認してから投稿されます。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bot 관리자가 답장을 확인한 뒤에 게시됩니다."
+          }
+        }
+      }
+    },
     "teams_run_expired": {
       "localizations": {
         "zh-Hans": {
@@ -119850,6 +119884,74 @@
           "stringUnit": {
             "state": "translated",
             "value": "답장"
+          }
+        }
+      }
+    },
+    "teams_triage_approval_superseded": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "因新消息而丢弃"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "因新訊息而捨棄"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dropped for a newer message"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新しいメッセージのため破棄"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "새 메시지로 인해 폐기됨"
+          }
+        }
+      }
+    },
+    "teams_triage_approval_timeout": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "超时未批准"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "逾時未核准"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not approved in time"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "時間内に承認されず"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "시간 내에 승인되지 않음"
           }
         }
       }

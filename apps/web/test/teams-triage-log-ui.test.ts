@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import vectors from '../../../packages/teams/contracts/execution-vectors.json';
 import { createElement } from 'react';
 import { TeamsWorkspace } from '../../../packages/teams/workspace';
 import type { SharedBotCard, TaskState, TaskTriage, TriageLogItem, TriageLogPage } from '../../../packages/teams/execution';
@@ -43,12 +44,13 @@ function serve(all: TriageLogItem[]) {
 
 // ───────────────────────────── the words, the decoding and the list, without a screen ─────────────────────────────
 
-test('where a judged message ended up is told from the state of its task: every state is one of four outcomes', () => {
+test('where a judged message ended up is told from the state of its task: every state is one of five outcomes', () => {
   const states: Record<TaskState, string> = {
-    completed: 'replied', declined: 'silent', cancelled: 'silent', queued: 'waiting', running: 'waiting', waiting: 'waiting',
+    completed: 'replied', declined: 'silent', cancelled: 'silent', queued: 'waiting', running: 'waiting', waiting: 'waiting', awaiting_approval: 'approval',
     failed: 'failed', expired: 'failed', interrupted: 'failed', authorization_required: 'failed', revoked: 'failed', needs_reconciliation: 'failed',
   };
   for (const [state, outcome] of Object.entries(states)) assert.equal(log.triageOutcome(state as TaskState), outcome, state);
+  assert.deepEqual(Object.keys(states).sort(), [...vectors.taskStates].sort(), 'the contract lists these states and no others: iOS and Android read the same list');
   assert.equal(log.triagePercent(0.124), 12); assert.equal(log.triagePercent(0.125), 13); assert.equal(log.triagePercent(1), 100); assert.equal(log.triagePercent(0), 0);
 });
 
@@ -57,13 +59,18 @@ test('every verdict, reason and outcome has words in every language, and a reaso
   const en = teamsText('en');
   assert.equal(log.triageActionText(en, 'decline'), 'No reply'); assert.equal(log.triageActionText(en, 'run'), 'Reply'); assert.equal(log.triageActionText(en, 'run_may_decline'), 'Left to the Bot');
   assert.equal(log.triageOutcomeText(en, 'silent'), 'Stayed silent'); assert.equal(log.triageProbabilityText(en, 0.124), '12% likely');
+  assert.equal(log.triageOutcomeText(en, 'approval'), 'Waiting for approval');
+  assert.deepEqual((['approved', 'rejected', 'timeout', 'superseded'] as const).map(approval => log.triageApprovalText(en, approval)), ['Approved', 'Declined', 'Not approved in time', 'Dropped for a newer message']);
   assert.equal(log.triageReasonText(en, undefined), ''); assert.equal(log.triageReasonText(en, 'a_new_reason' as never), '');
   for (const locale of locales) {
     const t = teamsText(locale), seen = new Set<string>();
     for (const action of ['decline', 'run', 'run_may_decline'] as const) seen.add(log.triageActionText(t, action));
     for (const reason of ['quiet_hours', 'cooldown', 'keyword', 'addressed', 'below_threshold', 'between_thresholds', 'above_threshold', 'decision_unavailable', 'message_unavailable'] as const) seen.add(log.triageReasonText(t, reason));
-    for (const outcome of ['replied', 'silent', 'failed', 'waiting'] as const) seen.add(log.triageOutcomeText(t, outcome));
-    assert.equal(seen.size, 16, `${locale}: every one reads differently and none is empty`); assert.ok(!seen.has(''), locale);
+    for (const outcome of ['replied', 'silent', 'failed', 'waiting', 'approval'] as const) seen.add(log.triageOutcomeText(t, outcome));
+    // How a reply that was held came out; one that still waits says so as its outcome, and a reply that never was held, or a code this version does not know, says nothing.
+    for (const approval of ['approved', 'rejected', 'timeout', 'superseded'] as const) seen.add(log.triageApprovalText(t, approval));
+    assert.equal(seen.size, 21, `${locale}: every one reads differently and none is empty`); assert.ok(!seen.has(''), locale);
+    assert.equal(log.triageApprovalText(t, 'held'), ''); assert.equal(log.triageApprovalText(t, undefined), ''); assert.equal(log.triageApprovalText(t, 'a_new_outcome' as never), '');
     assert.match(log.triageProbabilityText(t, 0.5), /50/, locale);
     if (locale !== 'en') assert.notEqual(log.triageProbabilityText(t, 0.5), log.triageProbabilityText(en, 0.5), locale);
   }
@@ -75,6 +82,10 @@ test('a row of the log is read as the service sent it; a row this version cannot
   const bare = { ...row(2), triage: { action: 'run', source: 'rule', at: 5 } } as unknown;
   assert.deepEqual(log.triageItem(bare), { ...row(2), triage: { action: 'run', source: 'rule', at: 5 } });
   assert.equal(log.triageItem({ ...row(3), conversationTitle: '' })!.conversationTitle, undefined, 'an empty title is no title');
+  // A reply that was held says how it came out; a code this version does not know is left out of the row, the row stays.
+  for (const approval of ['held', 'approved', 'rejected', 'timeout', 'superseded'] as const) assert.equal(log.triageItem({ ...row(3), state: 'awaiting_approval', approval })!.approval, approval, approval);
+  assert.equal(log.triageItem({ ...row(3), state: 'awaiting_approval' })!.state, 'awaiting_approval'); assert.equal('approval' in log.triageItem(row(3))!, false);
+  for (const approval of ['a_new_outcome', 7, null, '']) assert.equal('approval' in log.triageItem({ ...row(3), approval })!, false, String(approval));
   // What it does not know is left out of the row; what it needs is the row.
   assert.equal(log.triageItem({ ...row(4), triage: { ...row(4).triage, reason: 'a_new_reason' } })!.triage.reason, undefined);
   for (const probability of [-0.1, 1.2, '0.5', Number.NaN]) assert.equal(log.triageItem({ ...row(5), triage: { ...row(5).triage, probability } })!.triage.probability, undefined, String(probability));
@@ -260,6 +271,8 @@ scenario('Opening the log shows the newest verdicts first: what was decided, why
   all[0] = row(25, { state: 'completed', conversationTitle: 'Trip' }, { action: 'run', source: 'rule', reason: 'keyword', probability: undefined, at: 1_700_000_500_000 });
   all[1] = row(24, { state: 'failed' }, { action: 'run_may_decline', source: 'decision', reason: 'between_thresholds', probability: 0.5 });
   all[3] = row(22, { state: 'running', conversationTitle: undefined });
+  all[4] = row(21, { state: 'awaiting_approval', approval: 'held' }); all[5] = row(20, { state: 'completed', approval: 'approved' }); all[6] = row(19, { state: 'declined', approval: 'timeout' });
+  all[7] = row(18, { state: 'declined', approval: 'rejected' }); all[8] = row(17, { state: 'declined', approval: 'superseded' });
   const service = serve(all), calls = wire(fake, service);
   const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
   await until(() => entries(page).length === 1, 'the entry');
@@ -278,6 +291,10 @@ scenario('Opening the log shows the newest verdicts first: what was decided, why
   assert.match(third, /^No reply/); assert.match(third, /A reply seemed unlikely to be wanted/); assert.match(third, /12% likely/); assert.match(third, /Planning/); assert.match(third, /Stayed silent$/);
   assert.equal(items()[0]!.props['data-action'], 'run'); assert.equal(items()[2]!.props['data-action'], 'decline');
   const fourth = textOf(items()[3]!); assert.match(fourth, /Chat · /, 'a Chat with no title is still named'); assert.match(fourth, /In progress$/);
+  // A reply held for the maintainer says so while it waits, and how it came out after.
+  const held = textOf(items()[4]!); assert.match(held, /Waiting for approval$/); assert.doesNotMatch(held, /Approved|Declined|Not approved|Dropped/);
+  const approved = textOf(items()[5]!); assert.match(approved, /· ApprovedReplied$/); const timeout = textOf(items()[6]!); assert.match(timeout, /· Not approved in timeStayed silent$/);
+  assert.match(textOf(items()[7]!), /· DeclinedStayed silent$/); assert.match(textOf(items()[8]!), /· Dropped for a newer messageStayed silent$/);
   assert.match(dialogText(page), /Only the decision and the reason are kept/, 'it says what is kept');
   assert.equal(page.has('Load more'), true);
   await page.click(page.button('Load more'));

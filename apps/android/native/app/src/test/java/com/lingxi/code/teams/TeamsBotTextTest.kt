@@ -90,6 +90,8 @@ class TeamsBotTextTest {
             "cancelled" to Row(R.string.teams_task_cancelled, null, RunGlyph.Cancelled, RunTone.Muted, false),
             "needs_reconciliation" to Row(R.string.teams_task_needs_checking, null, RunGlyph.Checking, RunTone.Muted, true),
             "declined" to Row(R.string.teams_task_declined, null, RunGlyph.Unknown, RunTone.Muted, false),
+            // Bot v3 B6: the Bot's reply is made and its maintainer reads it first; the word is the one of an approval, the sentence says who reads.
+            "awaiting_approval" to Row(R.string.teams_task_waiting_approval, R.string.teams_run_awaiting_approval_detail, RunGlyph.Clock, RunTone.Muted, true),
             "something-new" to Row(R.string.chat_status_unknown, null, RunGlyph.Unknown, RunTone.Muted, false),
         )
         for ((state, want) in table) {
@@ -98,13 +100,13 @@ class TeamsBotTextTest {
         }
     }
 
-    private val allRunStates = listOf("queued", "running", "waiting", "completed", "failed", "expired", "interrupted", "authorization_required", "revoked", "cancelled", "needs_reconciliation", "other")
+    private val allRunStates = listOf("queued", "running", "waiting", "completed", "failed", "expired", "interrupted", "authorization_required", "revoked", "cancelled", "needs_reconciliation", "awaiting_approval", "other")
 
     @Test fun onlyCompletedIsOkOnlyFailedIsDangerAndOnlyTheOpenStatesOfferRefresh() {
         val states = allRunStates
         assertEquals(listOf("completed"), states.filter { TeamsBotText.runState(it).tone == RunTone.Ok })
         assertEquals(listOf("failed"), states.filter { TeamsBotText.runState(it).tone == RunTone.Danger })
-        assertEquals(listOf("queued", "running", "waiting", "authorization_required", "needs_reconciliation"), states.filter { TeamsBotText.runState(it).active })
+        assertEquals(listOf("queued", "running", "waiting", "authorization_required", "needs_reconciliation", "awaiting_approval"), states.filter { TeamsBotText.runState(it).active })
         // The states of the table of U4 say what is going on or what to do in one sentence; Completed shows the usage, and Waiting, Cancelled and Needs checking
         // are written by the card itself (who it waits for, what to check, what was used); the unknown one has nothing to say.
         assertEquals(listOf("waiting", "completed", "cancelled", "needs_reconciliation", "other"), states.filter { TeamsBotText.runState(it).detail == null })

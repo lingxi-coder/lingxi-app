@@ -4,10 +4,11 @@ import { owner, pooled } from './inbox-store.mjs';
 import { digest } from './inbox-model.mjs';
 
 export class InboxJobs {
-  constructor(store, delivery, enqueue) {
+  constructor(store, delivery, enqueue, held) {
     this.store = store;
     this.delivery = delivery;
     this.enqueue = enqueue;
+    this.held = held;
   }
   async wake(ref) {
     const now = this.store.clock(),
@@ -48,6 +49,8 @@ export class InboxJobs {
       return;
     }
     if (p.type === 'task') return projectTask(this.store, p, this.enqueue);
+    // The time of a reply held for its Bot's maintainer is up (`held-reply-jobs.mjs`).
+    if (p.type === 'heldReply') return this.held.expire(p);
     if (p.type === 'deliver') return this.delivery.deliver(p);
     if (p.type === 'fold') {
       if (await this.store.fanout(p.ref)) await this.enqueue(p);

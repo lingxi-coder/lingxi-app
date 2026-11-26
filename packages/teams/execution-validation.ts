@@ -21,6 +21,8 @@ export const DOCUMENT_BYTES = 256 * 1024;
 export const LIST_ITEM_BYTES = 500, LIST_CHANGES = 20;
 /** The most rows one page of a Bot's auto-reply log has. */
 export const TRIAGE_LOG_LIMIT = 50;
+/** The longest reply a maintainer may approve with their own text, as the service accepts it: trimmed, with something in it, in UTF-8 bytes. */
+export const HELD_REPLY_BYTES = 8192;
 const itemText: Check = v => typeof v === 'string' && v.trim().length > 0 && bytes(v) <= LIST_ITEM_BYTES && !v.includes('\0');
 const listChange: Check = v => record(v) && (v.op === 'add' ? shape({ op: oneOf('add'), text: itemText })(v)
   : v.op === 'update' ? shape({ op: oneOf('update'), itemId: id, text: optional(itemText), done: optional(d => typeof d === 'boolean') })(v) && (v.text !== undefined || v.done !== undefined)
@@ -65,6 +67,9 @@ const payloads: Record<string, Check> = {
   getTask: shape({ taskId: id }),
   listTasks: shape({ conversationId: optional(id), after: optional(id) }),
   listTriage: shape({ sharedBotId: id, conversationId: optional(id), cursor: optional(id), limit: optional(v => integer(v) && (v as number) >= 1 && (v as number) <= TRIAGE_LOG_LIMIT) }),
+  listHeldReplies: shape({ sharedBotId: id, conversationId: optional(id) }),
+  approveReply: shape({ taskId: id, text: optional(v => typeof v === 'string' && v.trim().length >= 1 && bytes(v.trim()) <= HELD_REPLY_BYTES) }),
+  rejectReply: shape({ taskId: id }),
   readArtifact: shape({ artifactId: id, revision: optional(positive) }),
   listArtifactRevisions: shape({ artifactId: id }),
   reviseArtifact: shape({ artifactId: id, expectedRevision: positive, operationId: id, document: shape({

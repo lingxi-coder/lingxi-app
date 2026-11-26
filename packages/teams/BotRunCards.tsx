@@ -31,6 +31,8 @@ export const RUN_STATES: Record<string, RunLook> = {
   cancelled: { label: tk('teams_task_cancelled'), icon: 'xCircle', tone: 'muted' },
   needs_reconciliation: { label: tk('teams_task_needs_checking'), icon: 'help', tone: 'muted' },
   declined: { label: tk('teams_task_declined'), icon: 'help', tone: 'muted' },
+  // The reply is made and its maintainer reads it first; the words are those of an approval a member gives, which says the same.
+  awaiting_approval: { label: tk('teams_task_waiting_approval'), detail: tk('teams_run_awaiting_approval_detail'), icon: 'clock', tone: 'muted' },
 };
 const UNKNOWN_STATE: RunLook = { label: tk('chat_status_unknown'), icon: 'help', tone: 'muted' };
 export const runLook = (state: string): RunLook => Object.prototype.hasOwnProperty.call(RUN_STATES, state) ? RUN_STATES[state]! : UNKNOWN_STATE;
@@ -135,7 +137,7 @@ export function OperationsDialog({ api, scope, task, locale, canResolve, people,
     <div className="tw-dialog-actions"><button type="button" onClick={onClose}>{t('common_close')}</button></div>
   </Dialog>;
 }
-const CANCELLABLE: TeamTaskView['state'][] = ['queued', 'running', 'waiting'];
+const CANCELLABLE: TeamTaskView['state'][] = ['queued', 'running', 'waiting', 'awaiting_approval'];
 type RunViewer = Pick<TeamsSnapshot, 'uid' | 'bots' | 'directory' | 'pending'>;
 export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, reason, onReply, onChanged }: {
   task: TeamTaskView; api: TeamsApi; scope: ExecutionScope; locale: string; renderMarkdown?: RenderMarkdown; snapshot: RunViewer;

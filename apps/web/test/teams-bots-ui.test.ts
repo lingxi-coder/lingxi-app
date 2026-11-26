@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import vectors from '../../../packages/teams/contracts/execution-vectors.json';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { TeamsWorkspace } from '../../../packages/teams/workspace';
@@ -200,7 +201,13 @@ scenario('A Bot task\'s card: the glyph beside the state in words, one line unde
   assert.match(draw({ state: 'completed', artifactId: 'artifact-1' }, 'zh-Hans'), />打开文档</);
   // Only Completed is ok and only Failed is danger; a state the service adds later is one more row of the table, and until then it reads Unknown.
   assert.deepEqual(Object.entries(RUN_STATES).filter(([, look]) => look.tone === 'ok').map(([state]) => state), ['completed']); assert.deepEqual(Object.entries(RUN_STATES).filter(([, look]) => look.tone === 'danger').map(([state]) => state), ['failed']);
-  assert.deepEqual(Object.keys(RUN_STATES).sort(), ['authorization_required', 'cancelled', 'completed', 'declined', 'expired', 'failed', 'interrupted', 'needs_reconciliation', 'queued', 'revoked', 'running', 'waiting']);
+  assert.deepEqual(Object.keys(RUN_STATES).sort(), ['authorization_required', 'awaiting_approval', 'cancelled', 'completed', 'declined', 'expired', 'failed', 'interrupted', 'needs_reconciliation', 'queued', 'revoked', 'running', 'waiting']);
+  assert.deepEqual(Object.keys(RUN_STATES).sort(), [...vectors.taskStates].sort(), 'the table has a row for every state the contract lists, iOS and Android read the same list');
+  // A reply held for its Bot's maintainer: the words of an approval, a sentence that says who reads it first, and nothing to approve here.
+  const held = draw({ state: 'awaiting_approval' });
+  assert.match(held, /data-state="awaiting_approval" data-tone="muted"/); assert.ok(held.includes('<span>Waiting for approval</span>')); assert.ok(held.includes('<p class="tw-run-detail">The Bot’s maintainer reads the reply before it is posted.</p>'));
+  assert.doesNotMatch(held, /<button/, 'a member who is not the one asked to approve has nothing to press');
+  assert.ok(draw({ state: 'awaiting_approval' }, 'zh-Hans').includes('<span>等待批准</span>'));
   // Main's states keep their own line: who the Bot waits for, and what needs checking.
   const waiting = draw({ state: 'waiting', wait: { waitId: 'w', kind: 'human_input', recipient: { uid: 'alice', generation: 1 }, messageId: 'm', expiresAt: Date.now() + 120_000 } });
   assert.match(waiting, /data-state="waiting" data-tone="muted"/); assert.ok(waiting.includes('<span>Waiting for a reply</span>')); assert.match(waiting, /<p class="tw-run-detail">Waiting for Member · expires in 2 min<\/p>/);
@@ -208,6 +215,7 @@ scenario('A Bot task\'s card: the glyph beside the state in words, one line unde
   // The one who asked can cancel a task that is still going: the second action, beside the document.
   viewer = { uid: 'alice', bots: [], directory: [], pending: [] } as never;
   assert.match(draw({ state: 'queued' }), /<button type="button" aria-label="Cancel task">Cancel<\/button>/); assert.doesNotMatch(draw({ state: 'completed' }), /<button/);
+  assert.match(draw({ state: 'awaiting_approval' }), /<button type="button" aria-label="Cancel task">Cancel<\/button>/, 'the one who asked may take back a request whose reply waits for approval');
   const everyLanguage = ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko'].map(locale => teamsText(locale));
   assert.ok(Object.values(RUN_STATES).every(look => look.icon && everyLanguage.every(t => t(look.label) !== look.label && (!look.detail || t(look.detail) !== look.detail))), 'every row has its words in all five languages and a glyph');
   assert.equal(RUN_STATES.cancelled!.detail, undefined, 'the cancelled row has no detail cell');

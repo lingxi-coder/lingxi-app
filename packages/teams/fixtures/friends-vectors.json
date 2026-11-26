@@ -1483,6 +1483,54 @@
       {
         "route": "friend/requests\n",
         "expect": null
+      },
+      {
+        "route": "team/chat?conversation=chat_0001&team=team_0001",
+        "expect": "lingxi://team/chat?conversation=chat_0001&team=team_0001"
+      },
+      {
+        "route": "team/chat?conversation=a_b-9&team=f_Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e",
+        "expect": "lingxi://team/chat?conversation=a_b-9&team=f_Hk3xQ9vR2mT7wL1pZ8cN4aB0cD2e"
+      },
+      {
+        "route": "team/chat",
+        "expect": null
+      },
+      {
+        "route": "team/chat?conversation=chat_0001",
+        "expect": null
+      },
+      {
+        "route": "team/chat?team=team_0001",
+        "expect": null
+      },
+      {
+        "route": "team/chat?team=team_0001&conversation=chat_0001",
+        "expect": null
+      },
+      {
+        "route": "team/chat?conversation=chat_0001&team=team_0001&x=1",
+        "expect": null
+      },
+      {
+        "route": "team/chat?conversation=chat%5F0001&team=team_0001",
+        "expect": null
+      },
+      {
+        "route": "team/chat?conversation=&team=team_0001",
+        "expect": null
+      },
+      {
+        "route": "team/chat/?conversation=chat_0001&team=team_0001",
+        "expect": null
+      },
+      {
+        "route": "team/bot?bot=sharedbot_01&team=team_0001",
+        "expect": null
+      },
+      {
+        "route": "team/join?code=aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-",
+        "expect": null
       }
     ],
     "tabForLink": [

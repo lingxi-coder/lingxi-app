@@ -79,7 +79,7 @@ export interface BotReplyDraft {
   cooldown: string;
   /** Below `decline` the Bot stays silent; from `run` it answers; in between it answers if it still finds a reply is wanted. */
   thresholds: { decline: number; run: number };
-  /** Not edited here (a later version asks before an answer is sent); kept as it is saved. */
+  /** Whether the owner reads a reply before it is posted: never, only one the Bot was unsure it should send, or every one. Held replies are approved in the Team's chat. */
   approval: BotReplyApprovalUi;
 }
 

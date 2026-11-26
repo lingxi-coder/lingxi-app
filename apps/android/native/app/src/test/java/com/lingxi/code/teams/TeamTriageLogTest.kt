@@ -45,10 +45,10 @@ class TeamTriageLogTest {
 
     // Where a message ended up
 
-    @Test fun everyStateOfATaskIsOneOfFourOutcomes() {
+    @Test fun everyStateOfATaskIsOneOfFiveOutcomes() {
         val expected = mapOf(
             "completed" to TeamTriageOutcome.Replied, "declined" to TeamTriageOutcome.Silent, "cancelled" to TeamTriageOutcome.Silent,
-            "queued" to TeamTriageOutcome.Waiting, "running" to TeamTriageOutcome.Waiting, "waiting" to TeamTriageOutcome.Waiting,
+            "queued" to TeamTriageOutcome.Waiting, "running" to TeamTriageOutcome.Waiting, "waiting" to TeamTriageOutcome.Waiting, "awaiting_approval" to TeamTriageOutcome.Approval,
             "failed" to TeamTriageOutcome.Failed, "expired" to TeamTriageOutcome.Failed, "interrupted" to TeamTriageOutcome.Failed,
             "authorization_required" to TeamTriageOutcome.Failed, "revoked" to TeamTriageOutcome.Failed, "needs_reconciliation" to TeamTriageOutcome.Failed,
         )
@@ -90,6 +90,25 @@ class TeamTriageLogTest {
         assertNull(TeamTriageItem.parse(row(11, probability = -0.1))?.triage?.probability)
         assertEquals(0.0, TeamTriageItem.parse(row(12, probability = 0.0))?.triage?.probability)
         assertEquals(1.0, TeamTriageItem.parse(row(13, probability = 1.0))?.triage?.probability)
+    }
+
+    @Test fun aHeldReplySaysHowItCameOutAndACodeThisVersionDoesNotKnowIsLeftOut() {
+        for (approval in listOf("held", "approved", "rejected", "timeout", "superseded")) {
+            assertEquals(approval, TeamTriageItem.parse(row(3, state = "awaiting_approval").put("approval", approval))?.approval)
+        }
+        assertNull("a reply that never was held says nothing", item(4).approval)
+        assertEquals("a row whose reply waits is a row this version reads", "awaiting_approval", TeamTriageItem.parse(row(4, state = "awaiting_approval"))?.state)
+        for (approval in listOf<Any>("a_new_outcome", "", 7, JSONObject.NULL)) {
+            val parsed = TeamTriageItem.parse(row(5).put("approval", approval))
+            assertNotNull("$approval: the row is still read", parsed); assertNull("$approval", parsed?.approval)
+        }
+        // The words: a reply that still waits says so as its outcome, so `held` has none of its own; the others say how it was decided.
+        assertEquals(R.string.teams_task_waiting_approval, TeamTriageRules.outcomeLabel(TeamTriageOutcome.Approval))
+        assertEquals(listOf(R.string.teams_approval_reply_approved, R.string.teams_approval_reply_declined, R.string.teams_triage_approval_timeout, R.string.teams_triage_approval_superseded),
+            listOf("approved", "rejected", "timeout", "superseded").map { TeamTriageRules.approvalLabel(it) })
+        for (none in listOf(null, "held", "a_new_outcome")) assertNull("$none", TeamTriageRules.approvalLabel(none))
+        // Every code the service sends is one this version lists.
+        assertEquals(setOf("held", "approved", "rejected", "timeout", "superseded"), TeamTriageRules.approvals)
     }
 
     @Test fun aRowThisVersionCannotReadIsNotOne() {

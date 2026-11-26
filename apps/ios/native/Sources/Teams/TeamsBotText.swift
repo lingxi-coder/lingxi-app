@@ -39,6 +39,8 @@ enum TeamsBotText {
         case "needs_reconciliation": RunState(labelKey: "teams_task_needs_checking", detailKey: nil, symbol: "questionmark.circle", tone: .muted, active: true)
         // A Bot nobody asked that chose not to answer: nothing to wait for or act on.
         case "declined": RunState(labelKey: "teams_task_declined", detailKey: nil, symbol: "bubble.left", tone: .muted, active: false)
+        // The reply is made and its Bot's maintainer reads it first; the word is the one of an approval a member gives, which says the same.
+        case "awaiting_approval": RunState(labelKey: "teams_task_waiting_approval", detailKey: "teams_run_awaiting_approval_detail", symbol: "clock", tone: .muted, active: true)
         default: RunState(labelKey: "chat_status_unknown", detailKey: nil, symbol: "questionmark.circle", tone: .muted, active: false)
         }
     }
@@ -130,7 +132,7 @@ enum TeamsBotText {
         return format(amount)
     }
 
-    static let allKeys = ["teams_run_queued", "teams_run_processing", "chat_status_completed", "chat_status_failed", "teams_run_expired", "teams_run_interrupted", "teams_run_authorization_required", "teams_run_revoked", "teams_task_waiting", "teams_task_cancelled", "teams_task_needs_checking", "teams_task_declined", "chat_status_unknown"]
+    static let allKeys = ["teams_run_queued", "teams_run_processing", "chat_status_completed", "chat_status_failed", "teams_run_expired", "teams_run_interrupted", "teams_run_authorization_required", "teams_run_revoked", "teams_task_waiting", "teams_task_cancelled", "teams_task_needs_checking", "teams_task_declined", "teams_task_waiting_approval", "chat_status_unknown"]
     /// The one-sentence details of the states that have one.
-    static let allDetailKeys = ["teams_run_queued_detail", "teams_run_processing_detail", "teams_run_failed_detail", "teams_run_expired_detail", "teams_run_interrupted_detail", "teams_run_authorization_required_detail", "teams_run_revoked_detail"]
+    static let allDetailKeys = ["teams_run_queued_detail", "teams_run_processing_detail", "teams_run_failed_detail", "teams_run_expired_detail", "teams_run_interrupted_detail", "teams_run_authorization_required_detail", "teams_run_revoked_detail", "teams_run_awaiting_approval_detail"]
 }

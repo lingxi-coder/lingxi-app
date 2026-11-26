@@ -112,7 +112,7 @@ struct TeamTriageLogView: View {
                     }
                 }
                 if let key = TeamTriageRules.reasonKey(item.triage.reason) { Text(LocalizedStringKey(key)).font(.footnote).foregroundStyle(.secondary) }
-                Text(verbatim: TeamsStreamLogic.joinedLine([chat, when])).font(.caption).foregroundStyle(.secondary)
+                Text(verbatim: TeamsStreamLogic.joinedLine([chat, when, TeamTriageRules.approvalKey(item.approval).map(TeamsText.localized)])).font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
             Text(LocalizedStringKey(TeamTriageRules.outcomeKey(outcome)))

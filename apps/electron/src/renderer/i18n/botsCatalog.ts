@@ -1892,6 +1892,62 @@ export const botsCatalog: Record<string, Record<string, string>> = {
     "ja": "返信しない基準値は、返信する基準値より高くできません。",
     "ko": "조용히 있는 기준값은 답장하는 기준값보다 높을 수 없습니다."
   },
+  "bots_reply_approval_title": {
+    "zh-Hans": "发出前需要批准",
+    "zh-Hant": "發出前需要核准",
+    "en": "Approval before posting",
+    "ja": "投稿前の承認",
+    "ko": "게시 전 승인"
+  },
+  "bots_reply_approval_never": {
+    "zh-Hans": "从不",
+    "zh-Hant": "從不",
+    "en": "Never",
+    "ja": "しない",
+    "ko": "안 함"
+  },
+  "bots_reply_approval_uncertain": {
+    "zh-Hans": "Bot 拿不准时",
+    "zh-Hant": "Bot 拿不準時",
+    "en": "When the Bot is unsure",
+    "ja": "Bot が迷うとき",
+    "ko": "Bot이 확신하지 못할 때"
+  },
+  "bots_reply_approval_always": {
+    "zh-Hans": "总是",
+    "zh-Hant": "一律",
+    "en": "Always",
+    "ja": "常に",
+    "ko": "항상"
+  },
+  "bots_reply_approval_never_hint": {
+    "zh-Hans": "Bot 直接发出自己的回复。",
+    "zh-Hant": "Bot 直接送出自己的回覆。",
+    "en": "The Bot posts its replies by itself.",
+    "ja": "Bot は自分の返信をそのまま投稿します。",
+    "ko": "Bot이 자신의 답장을 바로 게시합니다."
+  },
+  "bots_reply_approval_uncertain_hint": {
+    "zh-Hans": "判断服务拿不准 Bot 该不该回复时，回复会先等你批准；其余回复直接发出。",
+    "zh-Hant": "判斷服務拿不準 Bot 該不該回覆時，回覆會先等你核准；其餘回覆直接送出。",
+    "en": "When the Decision service is unsure whether the Bot should answer, its reply waits for your approval; the other replies are posted at once.",
+    "ja": "返信すべきか Decision サービスが迷ったときは、返信があなたの承認を待ちます。それ以外の返信はそのまま投稿されます。",
+    "ko": "답장해야 할지 Decision 서비스가 확신하지 못할 때는 답장이 내 승인을 기다립니다. 나머지 답장은 바로 게시됩니다."
+  },
+  "bots_reply_approval_always_hint": {
+    "zh-Hans": "Bot 的每条回复都先等你批准，包括被 @ 提及时的回复，以及与 Bot 的私聊。",
+    "zh-Hant": "Bot 的每則回覆都先等你核准，包括被 @ 提及時的回覆，以及與 Bot 的私訊。",
+    "en": "Every reply of the Bot waits for your approval, including answers to @mentions and in direct chats with the Bot.",
+    "ja": "Bot のすべての返信があなたの承認を待ちます。@メンションへの返信や、Bot との 1 対 1 のチャットも含みます。",
+    "ko": "Bot의 모든 답장이 내 승인을 기다립니다. @멘션에 대한 답장과 Bot과의 1:1 채팅도 포함됩니다."
+  },
+  "bots_reply_approval_note": {
+    "zh-Hans": "等待批准的回复，只有你在团队的聊天中批准后才会发出。超过 10 分钟没有批准，或者（没有人叫 Bot 时）聊天里有人再次发言，回复就会被丢弃。",
+    "zh-Hant": "等待核准的回覆，只有你在團隊的對話中核准後才會送出。超過 10 分鐘沒有核准，或者（沒有人叫 Bot 時）對話中有人再次發言，回覆就會被捨棄。",
+    "en": "A reply that waits for your approval is posted only once you approve it in Teams. It is dropped after 10 minutes or, if nobody asked the Bot, as soon as someone writes in the chat again.",
+    "ja": "承認待ちの返信は、チームのチャットであなたが承認してはじめて投稿されます。10 分以内に承認しなかった場合や、Bot が呼ばれていないときにチャットで誰かが再び書き込んだ場合は、返信は破棄されます。",
+    "ko": "승인을 기다리는 답장은 팀 채팅에서 내가 승인한 뒤에만 게시됩니다. 10분 안에 승인하지 않거나, 아무도 Bot을 부르지 않은 경우 채팅에서 누군가 다시 글을 쓰면 답장은 폐기됩니다."
+  },
   "bots_reply_mention_note": {
     "zh-Hans": "被 @ 提及、被回复或被叫到名字时，Bot 一定会回复，不受安静时段和冷却时间影响。",
     "zh-Hant": "被 @ 提及、被回覆或被叫到名字時，Bot 一定會回覆，不受安靜時段和冷卻時間影響。",

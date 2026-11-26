@@ -106,7 +106,7 @@ export function buildStreamRows(messages: readonly TeamMessage[], options: Strea
 }
 
 /** States that can still change; such a task must stay reachable even when its place in the log is out of view. */
-const ACTIVE_TASKS: ReadonlySet<TaskState> = new Set<TaskState>(['queued', 'running', 'authorization_required']);
+const ACTIVE_TASKS: ReadonlySet<TaskState> = new Set<TaskState>(['queued', 'running', 'authorization_required', 'awaiting_approval']);
 
 /**
  * Where Bot tasks that have no reply message sit in the log. A task is created in the same

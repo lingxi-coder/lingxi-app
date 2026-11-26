@@ -11,6 +11,7 @@ import { messagePreview } from './team-message-preview.mjs';
 import { prepareSharedConversation } from './team-conversations.mjs';
 import { effectiveScope, emptyScope, scopeSize, withinPublished } from './bot-scope.mjs';
 import { attachable, cancelUpload, createUpload, finalizeUpload, putUploadPart, readAttachmentPart, revokeAttachment, taskFiles } from './team-attachments.mjs';
+import { approvalMs, approvalOutcome, approveReply, endSuperseded, listHeldReplies, rejectReply, supersedable } from './held-replies.mjs';
 
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value !== null && typeof value === 'object'
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
@@ -25,7 +26,7 @@ const grantPermit = (command, targetEpoch) => command.payload.permitNonce === un
     command.payload.deploymentId, command.payload.taskId, targetEpoch, command.payload.permitNonce);
 const nowDay = now => new Date(now).toISOString().slice(0, 10);
 const memberIdentity = (uid, member) => ({ uid, generation: member.generation });
-const readActions = new Set(['getTask', 'listTasks', 'listTriage', 'readArtifact', 'listArtifactRevisions', 'listSharedBots', 'listHostTasks', 'prepareTask', 'validateTask', 'listOperations', 'readTaskList', 'readList', 'listHistory', 'getTransfer', 'readTransferPart', 'readAttachmentPart']);
+const readActions = new Set(['getTask', 'listTasks', 'listTriage', 'listHeldReplies', 'readArtifact', 'listArtifactRevisions', 'listSharedBots', 'listHostTasks', 'prepareTask', 'validateTask', 'listOperations', 'readTaskList', 'readList', 'listHistory', 'getTransfer', 'readTransferPart', 'readAttachmentPart']);
 /** An offer to hand a Bot over is open for seven days. */
 const transferMs = 7 * 24 * 60 * 60 * 1000, openTransfer = state => state === 'offered' || state === 'accepted';
 const revisionLimit = 200;
@@ -49,7 +50,7 @@ export class SharedBotError extends Error {
   constructor(status, code) { super(code); this.status = status; this.code = code; }
 }
 function identityPermitted(bot, identity) { return bot && sharedBotPermits(bot.identity, identity); }
-function ownerOf(bot, identity) { return bot && same(bot.identity.maintainer, identity); }
+export function ownerOf(bot, identity) { return bot && same(bot.identity.maintainer, identity); }
 /** The runtime's name of the list write; the ledger entry of a list write must carry it. */
 const listWriteTool = 'TeamListWrite', listItemLimit = 500, listBytes = 48 * 1024;
 /** How many of a list's latest revisions are kept, and how many one history page carries. */
@@ -90,7 +91,8 @@ function recordListRevision(tx, listRef, list, log, author, operationId, now) {
 }
 function taskView(task, now) {
   const over = task.deadline <= now;
-  const state = over && ['queued', 'waiting'].includes(task.state) ? 'expired'
+  // A held reply whose time is up is declined, whether or not the job that ends it has run.
+  const state = over && task.state === 'awaiting_approval' ? (task.unverifiedOperations > 0 ? 'needs_reconciliation' : 'declined') : over && ['queued', 'waiting'].includes(task.state) ? 'expired'
     // A run the host never closed: with an operation of unknown outcome it must be checked by a person; a cancelled one
     // ends as cancelled, not interrupted, because nothing can be published after the deadline.
     : over && task.state === 'running' ? (task.unverifiedOperations > 0 ? 'needs_reconciliation' : task.cancelRequestedAt ? 'cancelled' : 'interrupted') : task.state;
@@ -195,6 +197,10 @@ export class SharedBotsStore {
       else if (action === 'listHistory') response = await this.listHistory(context);
       else if (action === 'prepareTask' || action === 'validateTask') response = await this.taskContext(context);
       else if (action === 'completeTask') response = await this.complete(context);
+      else if (action === 'holdReply') response = await this.complete(context, true);
+      else if (action === 'listHeldReplies') response = await listHeldReplies(this, context);
+      else if (action === 'approveReply') response = await approveReply(this, context);
+      else if (action === 'rejectReply') response = await rejectReply(this, context);
       else if (action === 'getTask' || action === 'listTasks') response = await this.tasks(context);
       else if (action === 'readArtifact') response = await this.artifact(context);
       else if (action === 'listArtifactRevisions') response = await this.artifactRevisions(context);
@@ -610,12 +616,14 @@ export class SharedBotsStore {
    * A member's new message in a group or channel also goes to each Bot of the Chat with auto-reply on that it did not
    * ask: as an optional task, whose host decides whether the Bot answers. It is checked like an asked task, but a Bot that
    * fails a check is left out instead of refusing the message. Nothing is charged here; a run is charged when it starts.
+   * A new message also ends the replies the Chat's Bots hold for their maintainers that nobody asked for: the Chat has moved on (`held-replies.mjs`).
    * Reads only, so it runs before the message is written; `write` creates the tasks in the same transaction.
    */
   async optionalTasks(tx, team, c, { conversationId, messageId, changeId }, identity, asked, now) {
+    const held = await supersedable(tx, team, c, conversationId);
     const ids = ['group', 'channel'].includes(c.kind) ? (c.autoReply?.targets ?? []).filter(id => !asked.includes(id)
       && c.participants.includes(`shared_bot:${id}`) && (!c.executionPolicy || c.executionPolicy.targets.includes(id))) : [];
-    if (!ids.length) return { write() {} };
+    if (!ids.length) return { write() { endSuperseded(tx, team, held, now); } };
     const all = refs => tx.getAll(...refs);
     const bots = await all(ids.map(id => team.collection('sharedBots').doc(id)));
     const owners = await all(bots.map(doc => team.collection('members').doc(doc.data()?.identity.maintainer.uid ?? '_missing')));
@@ -630,6 +638,7 @@ export class SharedBotsStore {
         && !!d?.enabled && d.ready && d.onlineUntil > now && bot.grants.every(grant => this.grantPermits(grant, identity));
     });
     return { write: seq => {
+      endSuperseded(tx, team, held, now);
       for (const sharedBotId of admitted) {
         const i = ids.indexOf(sharedBotId), taskId = admissionId(messageId, sharedBotId);
         tx.create(team.collection('tasks').doc(taskId), queuedTask({ sharedBotId, taskId, conversationId, messageId, changeId, seq,
@@ -887,7 +896,11 @@ export class SharedBotsStore {
       lastMessage: { id: messageId, seq, at, author, preview: messagePreview(text) } });
     return seq;
   }
-  async complete({ tx, team, identity, command: { payload: p }, now }) {
+  /**
+   * A run's result from its host. With `hold` (`holdReply`) the Bot's maintainer wants to read a reply before it is posted, so a reply that would be posted is
+   * kept for them instead (`awaiting_approval`, see `held-replies.mjs`); every other result, a refusal, a failure and a decline among them, ends as it does without it.
+   */
+  async complete({ tx, team, identity, command: { payload: p }, now }, hold = false) {
     const { bot } = await this.checkHost(tx, team, identity, p);
     const ref = team.collection('tasks').doc(p.taskId), task = (await tx.get(ref)).data();
     if (!task || task.deploymentId !== p.deploymentId || task.permitDigest !== hash(p.permitId)) deny(403, 'EXECUTION_PERMIT_REQUIRED');
@@ -930,17 +943,47 @@ export class SharedBotsStore {
       if (lock?.taskId === p.taskId) tx.delete(lockRef);
       return { taskId: task.taskId, state, replyId: null, artifactId: null };
     }
-    const gate = await this.outputGate(tx, team, task, bot, p), { readers, sourceCurrent } = gate;
-    const replyId = botId([p.taskId, 'reply']), changeId = botId([p.taskId, 'reply-change']);
+    const gate = await this.outputGate(tx, team, task, bot, p), fate = await this.fate(tx, team, task, gate, p);
+    if (hold && fate.allowed) {
+      const expiresAt = now + approvalMs;
+      // The draft is a document of its own that only the service reads: the task, which members read through `taskView`, carries none of it.
+      tx.create(team.collection('heldReplies').doc(task.taskId), { schemaVersion: 1, taskId: task.taskId, sharedBotId: task.sharedBotId,
+        conversationId: task.conversationId, messageId: task.messageId, requester: task.requester, maintainer: task.maintainer,
+        unasked: unasked(task, gate.c), heldAt: now, expiresAt, unverifiedOperations: task.unverifiedOperations, visibility: task.visibility,
+        result: { outcome: 'completed', text: p.text, finishedAt: p.finishedAt, inputGrantIds: p.inputGrantIds, outputAudience: p.outputAudience, usage: p.usage,
+          ...(p.document ? { document: p.document } : {}), ...(p.readFiles ? { readFiles: p.readFiles } : {}), ...(p.revises ? { revises: p.revises } : {}) } });
+      // The Chat is free for its Bot again at once; the deadline is now the time the maintainer has.
+      tx.update(ref, { state: 'awaiting_approval', resultDigest, usage: p.usage, finishedAt: p.finishedAt, heldAt: now, deadline: expiresAt });
+      if (lock?.taskId === p.taskId) tx.delete(lockRef);
+      tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
+      return { taskId: task.taskId, state: 'awaiting_approval', replyId: null, artifactId: null };
+    }
+    const response = await this.post(tx, team, task, bot, identity, now, gate, fate, p, { resultDigest });
+    if (lock?.taskId === p.taskId) tx.delete(lockRef);
+    return response;
+  }
+  /**
+   * What posting a finished result would come to, decided before anything is written. `allowed`: its text may enter the Chat. `stale`: it revises a document
+   * that is no longer the one the Bot read. `silent`: nobody asked the run, so a failure or a refusal is recorded on the task and not posted.
+   */
+  async fate(tx, team, task, gate, p) {
     // A revision is saved only onto the revision the Bot read, of a document of this Bot in this Chat whose readers are
     // the Chat's readers; otherwise nothing is saved and the reply says so instead of the result.
     const base = gate.allowed && p.revises ? (await tx.get(team.collection('artifacts').doc(p.revises.artifactId))).data() : null;
     const stale = Boolean(gate.allowed && p.revises) && (!base || base.conversationId !== task.conversationId || base.sharedBotId !== task.sharedBotId
-      || base.botRevision !== task.botRevision || !same(byUid(base.readers), byUid(readers)) || base.revision !== p.revises.expectedRevision
+      || base.botRevision !== task.botRevision || !same(byUid(base.readers), byUid(gate.readers)) || base.revision !== p.revises.expectedRevision
       || base.revision >= revisionLimit || base.digest === hash(p.document));
     const allowed = gate.allowed && !stale;
-    // Nobody asked an unasked run: a failure or a refusal is recorded on the task and not posted.
-    const silent = unasked(task, gate.c) && !(allowed && p.outcome === 'completed');
+    return { base, stale, allowed, silent: unasked(task, gate.c) && !(allowed && p.outcome === 'completed') };
+  }
+  /**
+   * A finished result enters its Chat: the reply as a message of the Bot, its document as an artifact revision, and the task as what that came to. The one
+   * place this happens, for the host's own `completeTask` and for a maintainer's approval of a reply that was held (`approveReply`), which is the same
+   * result later and with the maintainer in the host's place. `more` is written to the task with it.
+   */
+  async post(tx, team, task, bot, identity, now, gate, { base, stale, allowed, silent }, p, more) {
+    const { readers, sourceCurrent } = gate, ref = team.collection('tasks').doc(task.taskId);
+    const replyId = botId([p.taskId, 'reply']), changeId = botId([p.taskId, 'reply-change']);
     // Shown on the reply as its sources, and kept on the task as the record of what the model was given.
     const read = allowed && p.outcome === 'completed' ? await taskFiles(tx, team, task, p.readFiles) : [];
     const artifactId = silent || !allowed || !p.document ? null : p.revises ? p.revises.artifactId : hash([p.taskId, 'document']);
@@ -962,10 +1005,9 @@ export class SharedBotsStore {
     // A run that ends while an operation's outcome is unknown is not finished: a person has to check it first.
     const state = task.unverifiedOperations > 0 ? 'needs_reconciliation' : settled;
     // No restricted body, document or diagnostic trace is persisted in shared projections/receipts.
-    tx.update(ref, { state, resultDigest, replyId: silent ? null : replyId, artifactId, usage: p.usage, finishedAt: p.finishedAt, deliveredAt: now,
+    tx.update(ref, { state, resultDigest: more.resultDigest, replyId: silent ? null : replyId, artifactId, usage: p.usage, finishedAt: p.finishedAt, deliveredAt: now,
       ...(read.length ? { readFiles: read.map(({ attachmentId, sha256 }) => ({ attachmentId, sha256 })) } : {}),
-      ...(state === settled ? {} : { reconciledState: settled }), ...shown(task, silent ? null : replyId, state) });
-    if (lock?.taskId === p.taskId) tx.delete(lockRef);
+      ...(state === settled ? {} : { reconciledState: settled }), ...shown(task, silent ? null : replyId, state), ...(more.approval ? { approval: more.approval } : {}) });
     return { taskId: task.taskId, state, replyId: silent ? null : replyId, artifactId };
   }
   async pauseForWait({ tx, team, identity, command: { payload: p }, now }) {
@@ -1054,6 +1096,7 @@ export class SharedBotsStore {
     await this.validateTask(tx, team, task);
     const lockRef = team.collection('chatExecutionLocks').doc(hash([task.sharedBotId, task.conversationId]));
     const lock = (await tx.get(lockRef)).data();
+    const held = await supersedable(tx, team, c, p.conversationId);
     const seq = c.lastSeq + 1, changeSeq = c.lastChangeSeq + 1;
     if (!Number.isSafeInteger(seq) || !Number.isSafeInteger(changeSeq)) deny(409, 'CURSOR_LIMIT');
     const response = { messageId: p.messageId, changeId: p.changeId, changeSeq, taskId: task.taskId };
@@ -1073,6 +1116,7 @@ export class SharedBotsStore {
       resume: { waitId: p.waitId, answerMessageId: p.messageId, answerSeq: seq, ...(deciding ? { decision: p.decision } : {}) } });
     if (!lock || lock.until <= now || lock.taskId === task.taskId) tx.set(lockRef, { taskId: task.taskId, until: deadline });
     tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
+    endSuperseded(tx, team, held, now);
     return response;
   }
   async cancelTask({ tx, team, identity, command: { payload: p }, now }) {
@@ -1081,7 +1125,7 @@ export class SharedBotsStore {
     const bot = (await tx.get(team.collection('sharedBots').doc(task.sharedBotId))).data();
     if (!same(task.requester, identity) && !ownerOf(bot, identity)) deny(403, 'TASK_CANCEL_FORBIDDEN');
     const state = taskView(task, now).state;
-    if (!['queued', 'waiting', 'running'].includes(state)) deny(409, 'TASK_FINISHED');
+    if (!['queued', 'waiting', 'running', 'awaiting_approval'].includes(state)) deny(409, 'TASK_FINISHED');
     const lockRef = team.collection('chatExecutionLocks').doc(hash([task.sharedBotId, task.conversationId]));
     const lock = (await tx.get(lockRef)).data();
     const waitRef = state === 'waiting' ? team.collection('waits').doc(task.currentWaitId) : null;
@@ -1090,6 +1134,8 @@ export class SharedBotsStore {
     } else {
       tx.update(ref, { state: 'cancelled', finishedAt: now, resume: FieldValue.delete() });
       if (waitRef) tx.update(waitRef, { state: 'revoked', resolvedAt: now });
+      // A reply held for approval goes with its task: nobody reads it any more.
+      if (state === 'awaiting_approval') tx.delete(team.collection('heldReplies').doc(task.taskId));
       if (lock?.taskId === task.taskId) tx.delete(lockRef);
     }
     tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
@@ -1376,7 +1422,7 @@ export class SharedBotsStore {
   }
   /**
    * What the maintainer's host decided about the unasked messages of one of their Bots, newest verdict first. Tasks nobody was shown are in it,
-   * since the log is for the maintainer alone; a Chat the maintainer does not read is not.
+   * since the log is for the maintainer alone; a Chat the maintainer does not read is not. A reply held for the maintainer's approval says how that went (`approval`).
    */
   async triageLog({ tx, team, identity, command: { payload: p }, now }) {
     const bot = (await tx.get(team.collection('sharedBots').doc(p.sharedBotId))).data();
@@ -1393,9 +1439,9 @@ export class SharedBotsStore {
     const page = await tx.get(query), docs = page.docs.slice(0, limit);
     const chats = docs.length ? await tx.getAll(...docs.map(doc => team.collection('conversations').doc(doc.data().conversationId))) : [];
     const items = docs.flatMap((doc, i) => {
-      const t = doc.data(), chat = chats[i].data();
+      const t = doc.data(), chat = chats[i].data(), state = taskView(t, now).state, approval = approvalOutcome(t, state);
       return chat?.memberUids?.includes(identity.uid) ? [{ taskId: t.taskId, conversationId: t.conversationId, messageId: t.messageId, createdAt: t.createdAt,
-        triage: t.triage, state: taskView(t, now).state, ...(chat.title ? { conversationTitle: chat.title } : {}) }] : [];
+        triage: t.triage, state, ...(approval ? { approval } : {}), ...(chat.title ? { conversationTitle: chat.title } : {}) }] : [];
     });
     return { items, ...(page.size > limit ? { nextCursor: docs.at(-1).id } : {}) };
   }

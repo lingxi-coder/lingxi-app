@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { BOT_REPLY_POLICY_USED_CHARS, BOT_REPLY_KEYWORD_CHARS_MAX } from '../../shared/bots';
-import type { TriageAction, TriageReason } from '../../../../../packages/teams/execution';
+import { BOT_REPLY_POLICY_USED_CHARS, BOT_REPLY_KEYWORD_CHARS_MAX, type BotReplyApprovalUi } from '../../shared/bots';
+import type { ApprovalOutcome, TriageAction, TriageReason } from '../../../../../packages/teams/execution';
 import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
 import { desktopHost } from '../bridge/bridgeConnection';
@@ -59,6 +59,7 @@ export function BotAutoReplyField({ draft, problems, disabled = false, onChange 
         onChange={(event) => replace({ ...reply, cooldown: event.target.value })} />}
     </Field>
     <BotReplyThresholds reply={reply} problems={problems} disabled={disabled} replace={replace} />
+    <BotReplyApproval reply={reply} disabled={disabled} replace={replace} />
     <p className="bots-hint">{tr('bots_reply_mention_note')}</p>
   </div>;
 }
@@ -153,6 +154,29 @@ export function BotReplyThresholds({ reply, problems, disabled, replace }: PartP
   </fieldset>;
 }
 
+const APPROVALS: readonly BotReplyApprovalUi[] = ['never', 'uncertain', 'always'];
+/** What each choice of asking the maintainer first is called, and what it means. */
+export function approvalText(approval: BotReplyApprovalUi): { label: string; hint: string } {
+  switch (approval) {
+    case 'never': return { label: tr('bots_reply_approval_never'), hint: tr('bots_reply_approval_never_hint') };
+    case 'uncertain': return { label: tr('bots_reply_approval_uncertain'), hint: tr('bots_reply_approval_uncertain_hint') };
+    case 'always': return { label: tr('bots_reply_approval_always'), hint: tr('bots_reply_approval_always_hint') };
+  }
+}
+
+/** Whether the owner reads the Bot's reply before it is posted: never, only when the Bot was unsure it should answer, or every time. The reply is approved in the Team's chat. */
+export function BotReplyApproval({ reply, disabled, replace }: Pick<PartProps, 'reply' | 'disabled' | 'replace'>) {
+  return <div className="bots-fields bots-reply-approval">
+    <Field label={tr('bots_reply_approval_title')} hint={approvalText(reply.approval).hint}>
+      {(control) => <select {...control} value={reply.approval} disabled={disabled}
+        onChange={(event) => { const approval = APPROVALS.find((known) => known === event.target.value); if (approval) replace({ ...reply, approval }); }}>
+        {APPROVALS.map((approval) => <option key={approval} value={approval}>{approvalText(approval).label}</option>)}
+      </select>}
+    </Field>
+    <p className="bots-hint">{tr('bots_reply_approval_note')}</p>
+  </div>;
+}
+
 function ThresholdSlider({ label, percent, onChange }: { label: string; percent: number; onChange(percent: number): void }) {
   return <label className="bots-slider">
     <span>{label}</span>
@@ -191,12 +215,24 @@ export function triageOutcomeText(outcome: TriageOutcome): string {
     case 'silent': return tr('bots_triage_state_silent');
     case 'failed': return tr('bots_triage_state_failed');
     case 'waiting': return tr('bots_triage_state_waiting');
+    case 'approval': return tr('teams_task_waiting_approval');
+  }
+}
+
+/** How a held reply was decided, in words: nothing for a message whose reply was never held, one that still waits, or a code this version does not know. */
+export function triageApprovalText(approval: ApprovalOutcome | undefined): string {
+  switch (approval) {
+    case 'approved': return tr('teams_approval_reply_approved');
+    case 'rejected': return tr('teams_approval_reply_declined');
+    case 'timeout': return tr('teams_triage_approval_timeout');
+    case 'superseded': return tr('teams_triage_approval_superseded');
+    default: return '';
   }
 }
 
 const VERDICT_ICON: Record<TriageAction, string> = { decline: 'pauseCircle', run: 'playCircle', run_may_decline: 'circleAlert' };
 /** The colour of the tag that says where the message ended up; the ones that are none of these keep the plain tag. */
-const OUTCOME_STATUS: Partial<Record<TriageOutcome, string>> = { replied: 'completed', failed: 'failed', waiting: 'working' };
+const OUTCOME_STATUS: Partial<Record<TriageOutcome, string>> = { replied: 'completed', failed: 'failed', waiting: 'working', approval: 'input-required' };
 
 /** What the Bot decided about the messages nobody asked it about, for each Team it is published to. */
 export function BotTriageLog({ state, onRefresh, onMore }: { state: TriageLogState; onRefresh(): void; onMore(section: TriageLogSection): void }) {
@@ -225,7 +261,7 @@ function BotTriageSection({ section, onRetry, onMore }: { section: TriageLogSect
     {items.length > 0 ? <ul className="bots-rows" aria-label={section.target.teamName}>
       {items.map((item) => {
         const outcome = triageOutcome(item.state);
-        const why = triageReasonText(item.triage.reason);
+        const why = triageReasonText(item.triage.reason), decided = triageApprovalText(item.approval);
         return <li key={item.taskId} className="bots-row bots-triage-row">
           <span className="bots-triage-icon" data-action={item.triage.action} aria-hidden="true"><Icon name={VERDICT_ICON[item.triage.action]} size={16} /></span>
           <div className="bots-row-main">
@@ -234,7 +270,7 @@ function BotTriageSection({ section, onRetry, onMore }: { section: TriageLogSect
               {why ? <span className="bots-triage-why">{why}</span> : null}
               {item.triage.probability !== undefined ? <span className="bots-tag">{tr('bots_triage_probability', triagePercent(item.triage.probability))}</span> : null}
             </span>
-            <span className="bots-row-text">{item.conversationTitle || tr('bots_triage_chat_untitled')} · <time dateTime={new Date(item.triage.at).toISOString()}>{formatLogTime(item.triage.at, locale)}</time></span>
+            <span className="bots-row-text">{item.conversationTitle || tr('bots_triage_chat_untitled')} · <time dateTime={new Date(item.triage.at).toISOString()}>{formatLogTime(item.triage.at, locale)}</time>{decided ? ` · ${decided}` : ''}</span>
           </div>
           <span className="bots-tag" data-status={OUTCOME_STATUS[outcome]}>{triageOutcomeText(outcome)}</span>
         </li>;

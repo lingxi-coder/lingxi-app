@@ -476,6 +476,7 @@ export type TeamsKey =
   | 'teams_revoked'
   | 'teams_run_authorization_required'
   | 'teams_run_authorization_required_detail'
+  | 'teams_run_awaiting_approval_detail'
   | 'teams_run_expired'
   | 'teams_run_expired_detail'
   | 'teams_run_failed_detail'
@@ -509,6 +510,8 @@ export type TeamsKey =
   | 'teams_triage_action_decline'
   | 'teams_triage_action_maybe'
   | 'teams_triage_action_run'
+  | 'teams_triage_approval_superseded'
+  | 'teams_triage_approval_timeout'
   | 'teams_triage_chat_untitled'
   | 'teams_triage_empty'
   | 'teams_triage_intro'
@@ -727,7 +730,10 @@ export type TeamsKey =
   | 'tw_error_question_recipient'
   | 'tw_error_quota'
   | 'tw_error_replace_kind'
+  | 'tw_error_reply_decided'
+  | 'tw_error_reply_expired'
   | 'tw_error_reply_kind'
+  | 'tw_error_reply_superseded'
   | 'tw_error_review_publication'
   | 'tw_error_role'
   | 'tw_error_runtime'
@@ -1405,6 +1411,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_revoked: { en: 'Revoked', 'zh-Hans': '已撤销', 'zh-Hant': '已撤銷', ja: '取り消し済み', ko: '철회됨' },
   teams_run_authorization_required: { en: 'Authorization required', 'zh-Hans': '需要授权', 'zh-Hant': '需要授權', ja: '承認が必要です', ko: '승인 필요' },
   teams_run_authorization_required_detail: { en: 'This result can’t be shown yet. Ask the Bot’s maintainer to authorize it.', 'zh-Hans': '暂时无法显示此结果，请联系 Bot 的维护者授权。', 'zh-Hant': '暫時無法顯示此結果，請聯絡 Bot 的維護者授權。', ja: 'この結果はまだ表示できません。Bot のメンテナーに承認を依頼してください。', ko: '이 결과는 아직 표시할 수 없습니다. Bot 메인테이너에게 승인을 요청하세요.' },
+  teams_run_awaiting_approval_detail: { en: 'The Bot’s maintainer reads the reply before it is posted.', 'zh-Hans': 'Bot 的维护者会先查看回复，确认后才会发出。', 'zh-Hant': 'Bot 的維護者會先查看回覆，確認後才會送出。', ja: 'Bot の管理者が内容を確認してから投稿されます。', ko: 'Bot 관리자가 답장을 확인한 뒤에 게시됩니다.' },
   teams_run_expired: { en: 'Expired', 'zh-Hans': '已过期', 'zh-Hant': '已過期', ja: '期限切れ', ko: '만료됨' },
   teams_run_expired_detail: { en: 'The Bot’s Desktop didn’t pick this up in time. Send it again.', 'zh-Hans': 'Bot 所在的 Desktop 未能及时接收，请重新发送。', 'zh-Hant': 'Bot 所在的 Desktop 未能及時接收，請重新傳送。', ja: 'Bot の Desktop が時間内に受け取れませんでした。もう一度送信してください。', ko: 'Bot의 Desktop이 제때 요청을 받지 못했습니다. 다시 보내세요.' },
   teams_run_failed_detail: { en: 'The Bot couldn’t finish this request. Send it again.', 'zh-Hans': 'Bot 未能完成此请求，请重新发送。', 'zh-Hant': 'Bot 未能完成此請求，請重新傳送。', ja: 'Bot はこのリクエストを完了できませんでした。もう一度送信してください。', ko: 'Bot이 이 요청을 완료하지 못했습니다. 다시 보내세요.' },
@@ -1438,6 +1445,8 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_triage_action_decline: { en: 'No reply', 'zh-Hans': '不回复', 'zh-Hant': '不回覆', ja: '返信しない', ko: '답장 안 함' },
   teams_triage_action_maybe: { en: 'Left to the Bot', 'zh-Hans': '交给 Bot 决定', 'zh-Hant': '交給 Bot 決定', ja: 'Bot に任せた', ko: 'Bot에 맡김' },
   teams_triage_action_run: { en: 'Reply', 'zh-Hans': '回复', 'zh-Hant': '回覆', ja: '返信', ko: '답장' },
+  teams_triage_approval_superseded: { en: 'Dropped for a newer message', 'zh-Hans': '因新消息而丢弃', 'zh-Hant': '因新訊息而捨棄', ja: '新しいメッセージのため破棄', ko: '새 메시지로 인해 폐기됨' },
+  teams_triage_approval_timeout: { en: 'Not approved in time', 'zh-Hans': '超时未批准', 'zh-Hant': '逾時未核准', ja: '時間内に承認されず', ko: '시간 내에 승인되지 않음' },
   teams_triage_chat_untitled: { en: 'Chat', 'zh-Hans': '会话', 'zh-Hant': '對話', ja: 'チャット', ko: '채팅' },
   teams_triage_empty: { en: 'Nothing yet. A line appears here for every message the Bot judges.', 'zh-Hans': '还没有记录。Bot 每判断一条消息，这里就会出现一行。', 'zh-Hant': '還沒有紀錄。Bot 每判斷一則訊息，這裡就會出現一行。', ja: 'まだ記録はありません。Bot が判断したメッセージごとに、ここに 1 行表示されます。', ko: '아직 기록이 없습니다. Bot이 메시지를 판단할 때마다 여기에 한 줄이 나타납니다.' },
   teams_triage_intro: { en: 'What the Bot decided about messages nobody asked it about, newest first. Only the decision and the reason are kept, never what the model said.', 'zh-Hans': 'Bot 对没有人点名的消息所做的决定，最新的在前。只保留决定和原因，不保留模型说的内容。', 'zh-Hant': 'Bot 對沒有人點名的訊息所做的決定，最新的在前。只保留決定和原因，不保留模型說的內容。', ja: '誰にも呼ばれていないメッセージに対する Bot の判断を新しい順に表示します。保存されるのは判断とその理由だけで、モデルの発言は保存されません。', ko: '아무도 요청하지 않은 메시지에 대한 Bot의 판단을 최신순으로 표시합니다. 판단과 이유만 보관되며 모델이 한 말은 보관되지 않습니다.' },
@@ -1656,7 +1665,10 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_error_question_recipient: { en: 'Only the person who asked the Bot can answer this question.', 'zh-Hans': '只有向 Bot 提出请求的人才能回答此问题。', 'zh-Hant': '只有向 Bot 提出請求的人才能回答此問題。', ja: 'この質問に答えられるのは、Bot に依頼した本人だけです。', ko: '이 질문에는 Bot에게 요청한 사람만 답할 수 있습니다.' },
   tw_error_quota: { en: 'The daily request quota is exhausted. Ask the maintainer to review quotas or try after the UTC day resets.', 'zh-Hans': '每日请求额度已用尽，请联系维护者检查额度或在 UTC 日期切换后重试。', 'zh-Hant': '每日請求額度已用盡，請聯絡維護者檢查額度，或在 UTC 日期切換後再試。', ja: '1日のリクエスト上限に達しました。メンテナーに上限の見直しを依頼するか、UTC の日付が変わってからもう一度お試しください。', ko: '일일 요청 한도를 모두 사용했습니다. 메인테이너에게 한도를 검토해 달라고 요청하거나 UTC 날짜가 바뀐 뒤 다시 시도하세요.' },
   tw_error_replace_kind: { en: 'A Skill can only be replaced by a SKILL.md file, and a file by another file.', 'zh-Hans': 'Skill 只能用 SKILL.md 替换，文件只能用其他文件替换。', 'zh-Hant': 'Skill 只能用 SKILL.md 替換，檔案只能用其他檔案替換。', ja: 'Skill は SKILL.md でのみ、ファイルは別のファイルでのみ置き換えられます。', ko: 'Skill은 SKILL.md로만, 파일은 다른 파일로만 교체할 수 있습니다.' },
+  tw_error_reply_decided: { en: 'This reply was already decided.', 'zh-Hans': '这条回复已经处理过了。', 'zh-Hant': '這則回覆已經處理過了。', ja: 'この返信はすでに処理されています。', ko: '이 답장은 이미 처리되었습니다.' },
+  tw_error_reply_expired: { en: 'The time to decide ran out, so the reply was dropped.', 'zh-Hans': '决定的时间已过，这条回复已丢弃。', 'zh-Hant': '決定的時間已過，這則回覆已捨棄。', ja: '決定までの時間が過ぎたため、この返信は破棄されました。', ko: '결정 시간이 지나 이 답장은 폐기되었습니다.' },
   tw_error_reply_kind: { en: 'This request needs a different kind of reply. Refresh and try again.', 'zh-Hans': '此请求需要另一种回复方式，请刷新后重试。', 'zh-Hant': '此請求需要另一種回覆方式，請重新整理後再試。', ja: 'このリクエストには別の種類の返信が必要です。更新してもう一度お試しください。', ko: '이 요청에는 다른 종류의 답장이 필요합니다. 새로 고친 뒤 다시 시도하세요.' },
+  tw_error_reply_superseded: { en: 'Someone wrote in the chat again, so the reply was dropped.', 'zh-Hans': '有人在会话中再次发言，这条回复已丢弃。', 'zh-Hant': '有人在對話中再次發言，這則回覆已捨棄。', ja: 'チャットで誰かが再び書き込んだため、この返信は破棄されました。', ko: '채팅에서 누군가 다시 글을 써서 이 답장은 폐기되었습니다.' },
   tw_error_review_publication: { en: 'Review and confirm the publication before continuing.', 'zh-Hans': '请检查并确认发布内容后继续。', 'zh-Hant': '請先檢查並確認發布內容後再繼續。', ja: '続ける前に、公開内容を確認して承認してください。', ko: '계속하기 전에 게시 내용을 검토하고 확인하세요.' },
   tw_error_role: { en: 'Your role cannot perform this action.', 'zh-Hans': '当前角色无权执行此操作。', 'zh-Hant': '目前的角色無權執行此操作。', ja: '現在のロールでは、この操作を実行できません。', ko: '현재 역할로는 이 작업을 수행할 수 없습니다.' },
   tw_error_runtime: { en: 'The isolated Teams runtime is unavailable on this Desktop. Install a Desktop build that includes it.', 'zh-Hans': '此 Desktop 缺少团队隔离运行时，请安装包含此运行时的 Desktop 版本。', 'zh-Hant': '此 Desktop 缺少團隊隔離執行環境，請安裝包含該環境的 Desktop 版本。', ja: 'この Desktop では、分離されたチーム用ランタイムを利用できません。ランタイムを含む Desktop のビルドをインストールしてください。', ko: '이 Desktop에서는 격리된 팀 런타임을 사용할 수 없습니다. 런타임이 포함된 Desktop 빌드를 설치하세요.' },

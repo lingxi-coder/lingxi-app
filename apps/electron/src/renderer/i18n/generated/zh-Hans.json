@@ -54,6 +54,8 @@
   "apps_no_development_chats": "选择编辑，继续完善这个 App。",
   "apps_edit_named": "编辑 %s",
   "apps_create_hint": "每个 App 从独立的开发对话开始。已有会话和草稿会保留。",
+  "provider_accounts_additional_openai_models": "启用更多 OpenAI 模型",
+  "provider_accounts_additional_openai_models_desc": "在 Chat 和 Code 中为此 API Key 显示更多 GPT 和推理模型。可用性和费用以 OpenAI 账户为准。",
   "provider_accounts_presets_only": "正在显示提供商预设，模型可用性尚未加载。",
   "provider_accounts_temporarily_unavailable": "暂时不可用",
   "provider_accounts_connections_desc": "连接用于配置协议和服务地址，认证与账号优先级在账号列表中管理。",

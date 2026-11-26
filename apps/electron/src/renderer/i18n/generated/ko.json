@@ -17,6 +17,8 @@
   "apps_no_development_chats": "편집을 선택해 앱을 개선하세요.",
   "apps_edit_named": "%s 편집",
   "apps_create_hint": "앱마다 별도의 개발 채팅을 시작합니다. 기존 채팅과 초안은 유지됩니다.",
+  "provider_accounts_additional_openai_models": "추가 OpenAI 모델 사용",
+  "provider_accounts_additional_openai_models_desc": "이 API 키로 Chat 및 Code에서 추가 GPT 및 추론 모델을 표시합니다. 모델 이용 권한과 요금은 OpenAI 계정에 따릅니다.",
   "provider_accounts_presets_only": "제공업체 프리셋이 표시됩니다. 모델 사용 가능 여부는 아직 불러오지 않았습니다.",
   "provider_accounts_temporarily_unavailable": "일시적으로 사용할 수 없음",
   "provider_accounts_connections_desc": "연결에서 프로토콜과 엔드포인트를 설정합니다. 인증과 계정 우선순위는 계정 목록에서 관리합니다.",

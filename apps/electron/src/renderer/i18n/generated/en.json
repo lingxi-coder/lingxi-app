@@ -54,6 +54,8 @@
   "apps_no_development_chats": "Choose Edit to work on this app.",
   "apps_edit_named": "Edit %s",
   "apps_create_hint": "Each app starts in its own development chat. Your existing chats and drafts stay in place.",
+  "provider_accounts_additional_openai_models": "Enable additional OpenAI models",
+  "provider_accounts_additional_openai_models_desc": "Show more GPT and reasoning models in Chat and Code for this API key. OpenAI account access and billing apply.",
   "provider_accounts_presets_only": "Provider presets are shown. Model availability is not loaded.",
   "provider_accounts_temporarily_unavailable": "Temporarily unavailable",
   "provider_accounts_connections_desc": "Connections configure protocol and endpoints. Authentication and account priority are managed in Accounts.",

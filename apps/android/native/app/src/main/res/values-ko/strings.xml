@@ -3559,4 +3559,6 @@
     <string name="teams_visualization_more">데이터세트 더 보기</string>
     <string name="teams_visualization_audience">공유 대상</string>
     <string name="teams_visualization_audience_fmt">공유 대상: %1$s</string>
+    <string name="provider_account_additional_openai_models">추가 OpenAI 모델 사용</string>
+    <string name="provider_account_additional_openai_models_desc">이 API 키로 Chat 및 Code에서 추가 GPT 및 추론 모델을 표시합니다. 모델 이용 권한과 요금은 OpenAI 계정에 따릅니다.</string>
 </resources>

@@ -204,7 +204,7 @@ export class RemoteCommands {
     const action = request.action;
     if (['begin_oauth', 'complete_oauth', 'cancel_oauth', 'reconnect'].includes(String(action)) || (action === 'add' && request.authKind === 'oauth'))
       throw new RemoteRpcError('forbidden', 'OAuth browser authorization must be completed on the execution Host.');
-    if (!['list', 'add', 'update', 'reorder', 'set_enabled', 'set_credential', 'clear_credential', 'remove', 'logout', 'test', 'set_policy'].includes(String(action))) throw invalid('Unsupported provider account operation.');
+    if (!['list', 'add', 'update', 'reorder', 'set_enabled', 'set_credential', 'clear_credential', 'remove', 'logout', 'test', 'set_policy', 'set_additional_openai_models'].includes(String(action))) throw invalid('Unsupported provider account operation.');
     const normalized = { ...request, action: action === 'set_enabled' ? 'enable' : action === 'set_credential' ? 'reconnect' : action === 'clear_credential' ? 'logout' : action } as unknown as ProviderAccountCommand;
     if (normalized.action === 'add' && normalized.authKind !== 'api_key') throw invalid('Unsupported account authentication method.');
     if (action === 'set_credential') {

@@ -7,6 +7,7 @@ export interface ProviderAccountMetadata {
   executionBindingId: string;
   credentialRef: { storeScope: string; secretRef: string };
   enabled: boolean;
+  additionalOpenaiModels?: boolean;
   userPriority: number;
   configRevision: number;
   identityGeneration: number;
@@ -58,7 +59,7 @@ export interface ProviderAccountSnapshot {
   cloudSync?: { syncId: string };
 }
 export interface ProviderAccountCommand {
-  action: 'list' | 'add' | 'update' | 'reorder' | 'enable' | 'remove' | 'test' | 'logout' | 'reconnect' | 'set_credential' | 'set_policy';
+  action: 'list' | 'add' | 'update' | 'reorder' | 'enable' | 'remove' | 'test' | 'logout' | 'reconnect' | 'set_credential' | 'set_policy' | 'set_additional_openai_models';
   expectedRevision: number;
   operationId?: number;
   providerId?: string;

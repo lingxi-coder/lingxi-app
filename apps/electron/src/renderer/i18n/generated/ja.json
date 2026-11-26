@@ -17,6 +17,8 @@
   "apps_no_development_chats": "編集を選んでアプリを改良しましょう。",
   "apps_edit_named": "%s を編集",
   "apps_create_hint": "アプリごとに専用の開発チャットを開始します。既存のチャットと下書きは保持されます。",
+  "provider_accounts_additional_openai_models": "追加の OpenAI モデルを有効にする",
+  "provider_accounts_additional_openai_models_desc": "この API キーで Chat と Code に追加の GPT モデルと推論モデルを表示します。利用可否と料金は OpenAI アカウントに従います。",
   "provider_accounts_presets_only": "プロバイダーのプリセットを表示しています。モデルの利用状況は未読み込みです。",
   "provider_accounts_temporarily_unavailable": "一時的に利用できません",
   "provider_accounts_connections_desc": "接続でプロトコルとエンドポイントを設定します。認証と優先順位はアカウント一覧で管理します。",

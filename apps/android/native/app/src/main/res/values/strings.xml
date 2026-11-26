@@ -3559,4 +3559,6 @@
     <string name="teams_visualization_more">更多数据集</string>
     <string name="teams_visualization_audience">共享给</string>
     <string name="teams_visualization_audience_fmt">共享给：%1$s</string>
+    <string name="provider_account_additional_openai_models">启用更多 OpenAI 模型</string>
+    <string name="provider_account_additional_openai_models_desc">在 Chat 和 Code 中为此 API Key 显示更多 GPT 和推理模型。可用性和费用以 OpenAI 账户为准。</string>
 </resources>

@@ -1730,7 +1730,7 @@ export class HostController {
       const { cloudSync, ...rest } = request as ProviderAccountCommand;
       const command = rest as ProviderAccountCommand;
       if (cloudSync !== undefined && (typeof cloudSync !== 'boolean' || (command.action !== 'add' && command.action !== 'reconnect'))) throw new Error('Invalid account operation.');
-      if (!['list', 'add', 'update', 'reorder', 'enable', 'remove', 'test', 'logout', 'reconnect', 'set_policy'].includes(command.action)
+      if (!['list', 'add', 'update', 'reorder', 'enable', 'remove', 'test', 'logout', 'reconnect', 'set_policy', 'set_additional_openai_models'].includes(command.action)
         || !Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0
         || (command.operationId !== undefined && (!Number.isSafeInteger(command.operationId) || command.operationId < 0))
         || (credential !== undefined && typeof credential !== 'string')) throw new Error('Invalid account operation.');

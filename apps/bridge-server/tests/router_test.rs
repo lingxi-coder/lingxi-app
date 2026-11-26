@@ -736,6 +736,7 @@ async fn account_injection_tombstones_removed_records_and_rejects_stale_snapshot
             secret_ref: format!("acct.{id}"),
         },
         enabled: true,
+        additional_openai_models: false,
         user_priority: priority,
         config_revision: 1,
         identity_generation: 1,

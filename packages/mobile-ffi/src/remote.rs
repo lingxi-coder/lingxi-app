@@ -100,6 +100,7 @@ fn validate_remote_provider_account_request(request: &str) -> Result<(), RemoteF
             | "clear_credential"
             | "test"
             | "set_policy"
+            | "set_additional_openai_models"
     ) {
         return Err(RemoteFfiError::InvalidArgument {
             message: "unsupported account action".into(),
@@ -126,6 +127,7 @@ mod provider_account_rpc_tests {
             "logout",
             "test",
             "set_policy",
+            "set_additional_openai_models",
         ] {
             assert!(validate_remote_provider_account_request(
                 &serde_json::json!({"action":action,"expectedRevision":0}).to_string()

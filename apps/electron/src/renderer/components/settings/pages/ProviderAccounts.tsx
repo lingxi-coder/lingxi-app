@@ -30,8 +30,9 @@ function AccountSessionUsageLines({ usage }: { usage: AccountSessionUsage }) {
 }
 
 /** User priority stays stable; observed availability is shown independently. */
-export function ProviderAccounts({ api, provider, running, onConfigured, usageRows, cloudSyncable = false, account }: {
+export function ProviderAccounts({ api, provider, running, onConfigured, onModelsChanged, usageRows, cloudSyncable = false, account }: {
   api: ProviderAccountsApi; provider: ProviderDefinition; running: boolean; onConfigured?: () => Promise<unknown>;
+  onModelsChanged?: () => Promise<unknown>;
   usageRows?: readonly AccountUsageRowDto[];
   /** Offer "sync to my LingXi account" for a key: a provider the cloud vault can hold. Shown only while signed in. */
   cloudSyncable?: boolean;
@@ -124,6 +125,7 @@ export function ProviderAccounts({ api, provider, running, onConfigured, usageRo
         });
         await onConfigured?.();
       }
+      if (command.action === 'set_additional_openai_models') await onModelsChanged?.();
       if (command.action === 'remove') setRemovalId(undefined);
       if (command.action === 'test') setNotice(tr('provider_accounts_test_success'));
     } catch (cause) {
@@ -183,6 +185,19 @@ export function ProviderAccounts({ api, provider, running, onConfigured, usageRo
                 onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') { event.currentTarget.value = account.displayName; event.currentTarget.blur(); event.stopPropagation(); } }}
                 onBlur={event => { const displayName = event.currentTarget.value.trim(); if (!displayName) event.currentTarget.value = account.displayName; else if (displayName !== account.displayName) void perform({ action: 'update', accountId: account.accountId, displayName }); }} />
               <div className="pa-meta"><span>{account.authKind === 'oauth' ? tr('provider_accounts_subscription') : tr('provider_accounts_key')}</span><span className="pa-health" data-status={health?.status} role="status"><i />{providerAccountHealthLabel(health)}</span></div>
+              {account.providerId === 'openai' && account.executionBindingId === 'openai' && account.authKind === 'api_key' && (
+                <div className="pa-account-models">
+                  <label className="pa-account-model-toggle">
+                    <span className="pa-switch">
+                      <input type="checkbox" role="switch" checked={account.additionalOpenaiModels === true}
+                        disabled={locked} onChange={event => void perform({ action: 'set_additional_openai_models', accountId: account.accountId, enabled: event.currentTarget.checked })} />
+                      <span />
+                    </span>
+                    {tr('provider_accounts_additional_openai_models')}
+                  </label>
+                  <p className="pa-caption">{tr('provider_accounts_additional_openai_models_desc')}</p>
+                </div>
+              )}
               <AccountSessionUsageLines usage={sessionUsageFromIndex(usageByAccount, account)} />
               {routing?.selectedAccountId === account.accountId && routing.identityGeneration === account.identityGeneration && <p className="pa-caption">{tr('provider_accounts_last_used', routing.model, routing.attempt)}</p>}
             </div>

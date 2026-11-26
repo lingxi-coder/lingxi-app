@@ -171,6 +171,7 @@ impl AudioProviderHost {
                         secret_ref: "acct.00000000-0000-4000-8000-000000000001".into(),
                     },
                     enabled: true,
+                    additional_openai_models: false,
                     user_priority: 0,
                     config_revision: 1,
                     identity_generation: 1,

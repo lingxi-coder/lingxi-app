@@ -587,6 +587,7 @@ export class ProjectSessionCatalog {
       : action === 'set_policy' ? { action, expectedRevision, providerId, allowSubscriptionToMetered }
       : action === 'update' ? { action, expectedRevision, accountId, displayName }
       : action === 'reorder' ? { action, expectedRevision, providerId, accountIds }
+      : action === 'set_additional_openai_models' ? { action, expectedRevision, accountId, enabled }
       : action === 'enable' ? { action: 'set_enabled', expectedRevision, accountId, enabled }
       : { action, expectedRevision, accountId };
     const cwd = realpathSync.native(homedir());

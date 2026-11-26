@@ -477,3 +477,7 @@
   mask-repeat: no-repeat;
   mask-size: contain;
 }
+
+.pa-account-models { margin-top: 8px; }
+.pa-account-model-toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; }
+.pa-account-model-toggle .pa-switch input:focus-visible + span { background: color-mix(in srgb, var(--pa-accent) 64%, var(--pa-text)); }

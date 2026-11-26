@@ -3559,4 +3559,6 @@
     <string name="teams_visualization_more">さらに表示</string>
     <string name="teams_visualization_audience">共有先</string>
     <string name="teams_visualization_audience_fmt">共有先：%1$s</string>
+    <string name="provider_account_additional_openai_models">追加の OpenAI モデルを有効にする</string>
+    <string name="provider_account_additional_openai_models_desc">この API キーで Chat と Code に追加の GPT モデルと推論モデルを表示します。利用可否と料金は OpenAI アカウントに従います。</string>
 </resources>

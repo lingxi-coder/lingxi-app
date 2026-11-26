@@ -213,9 +213,11 @@ interface CatalogWorkerQuery {
   scope?: SessionCatalogScope;
   transcriptPath?: string;
   historyBefore?: TranscriptHistoryCursor;
+  historyLimit?: number;
   historyLatest?: true;
   historyImage?: { reference: string; size: SessionImageSize };
   activityAfter?: number;
+  activityPreview?: number;
 }
 
 /** One request at a time bounds worker IO; catalog callers retain their own deduplication. */
@@ -469,6 +471,10 @@ export class ProjectSessionCatalog {
   private readonly overlappingCatalogLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
   private readonly historyLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
   private readonly imageLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
+  private readonly imageRevisions = new LRUCache<string, {
+    dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number; revision: number;
+  }>({ max: 128 });
+  private nextImageRevision = 0;
   private readonly imageSources = new WeakMap<SessionImageRuntime, ReturnType<SessionImageRuntime['getWorkspaceState']>>();
   private readonly images = new CancellableImageRequests<SessionImagePayload>(new LRUCache<string, SessionImagePayload>({
     max: 128,
@@ -506,6 +512,26 @@ export class ProjectSessionCatalog {
     }
     if (page.hasMore && page.items.length === 0) throw new Error('Activity cursor did not advance.');
     return page;
+  }
+
+  async readActivityPreview(projectPath: string, sessionId: string, transcriptPath: string, through: number): Promise<import('../shared/inbox.js').AssistantActivityPreview> {
+    if (!isSessionId(sessionId) || !isAbsolute(transcriptPath) || transcriptPath.includes('\0')
+      || basename(transcriptPath).toLowerCase() !== `${sessionId.toLowerCase()}.jsonl`
+      || !Number.isSafeInteger(through) || through < 1) throw new Error('Invalid activity source.');
+    const output = await this.runWorker({ cwd: realpathSync.native(projectPath), sessionId: sessionId.toLowerCase(), transcriptPath, activityPreview: through }, this.historyLane);
+    const rows = JSON.parse(output) as { uuid: string; at: number; blocks: number[][] }[];
+    if (!Array.isArray(rows) || rows.length > 16) throw new Error('Invalid activity preview');
+    let units = 0, blocks = 0;
+    const messages = rows.map(row => {
+      if (!isSessionId(row?.uuid) || !Number.isSafeInteger(row.at) || !Array.isArray(row.blocks)
+        || !row.blocks.length || (blocks += row.blocks.length) > 16) throw new Error('Invalid activity preview');
+      return { role: 'assistant' as const, transcript_uuid: row.uuid, sent_at_ms: row.at, blocks: row.blocks.map(text => {
+        if (!Array.isArray(text) || !text.length || (units += text.length) > 32_768
+          || text.some(unit => !Number.isInteger(unit) || unit < 0 || unit > 0xffff)) throw new Error('Invalid activity preview');
+        return { type: 'text' as const, text: String.fromCharCode(...text) };
+      }) };
+    });
+    return { available: messages.length > 0, messages };
   }
 
   async captureMetadataSource(projectPath: string, sessionId: string, transcriptPath: string, sessionMode: 'chat' | 'code'): Promise<string> {
@@ -781,10 +807,12 @@ export class ProjectSessionCatalog {
     return row ? { ...row } : undefined;
   }
 
-  async readHistory(projectPath: string, sessionId: string, transcriptPath: string, before: TranscriptHistoryCursor): Promise<TranscriptHistoryPage> {
+  async readHistory(projectPath: string, sessionId: string, transcriptPath: string, before: TranscriptHistoryCursor, limit?: number): Promise<TranscriptHistoryPage> {
     if (!isSessionId(sessionId) || !isAbsolute(transcriptPath) || transcriptPath.includes('\0')
       || basename(transcriptPath).toLowerCase() !== `${sessionId.toLowerCase()}.jsonl`) throw new Error('Invalid history source.');
-    const query = { cwd: realpathSync.native(projectPath), sessionId: sessionId.toLowerCase(), transcriptPath, historyBefore: historyCursor(before) };
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 200)) throw new Error('Invalid history limit');
+    const query = { cwd: realpathSync.native(projectPath), sessionId: sessionId.toLowerCase(), transcriptPath,
+      historyBefore: historyCursor(before), ...(limit === undefined ? {} : { historyLimit: limit }) };
     const key = JSON.stringify(query);
     const existing = this.pendingHistory.get(key);
     if (existing) return existing;
@@ -824,10 +852,22 @@ export class ProjectSessionCatalog {
     }
     signal?.throwIfAborted();
     const source = await lstat(transcriptPath);
-    if (!source.isFile()) throw new Error('History image source is unavailable');
+    if (!source.isFile() || source.nlink !== 1) throw new Error('History image source is unavailable');
     const query = { cwd: realpathSync.native(projectPath), sessionId: sessionId.toLowerCase(), transcriptPath,
       historyImage: { reference, size } };
-    const key = JSON.stringify([query, source.dev, source.ino, source.mtimeMs, source.size]);
+    // Located references name a physical row. A pure append cannot change it;
+    // UUID-only references still follow the newest matching row.
+    const [, , , , offset] = reference.split(':');
+    const previous = offset === undefined ? undefined : this.imageRevisions.get(transcriptPath);
+    const sameRevision = previous?.dev === source.dev && previous.ino === source.ino
+      && (source.size > previous.size || (source.size === previous.size
+        && source.mtimeMs === previous.mtimeMs && source.ctimeMs === previous.ctimeMs));
+    const revision = sameRevision ? previous.revision : ++this.nextImageRevision;
+    if (offset !== undefined) this.imageRevisions.set(transcriptPath, {
+      dev: source.dev, ino: source.ino, size: source.size, mtimeMs: source.mtimeMs, ctimeMs: source.ctimeMs, revision,
+    });
+    const key = JSON.stringify([query, offset === undefined
+      ? [source.dev, source.ino, source.mtimeMs, source.ctimeMs, source.size] : revision]);
     return this.images.fetch(key, async loadSignal => {
       const output = await this.runWorker(query, this.imageLane, size === 'thumbnail' ? loadSignal : undefined);
       const image = JSON.parse(output) as SessionImagePayload;
@@ -855,7 +895,7 @@ export class ProjectSessionCatalog {
   }
 
   /** Invalidate after a durable transcript/metadata mutation. */
-  invalidate(projectPath?: string): void {
+  invalidate(projectPath?: string, options?: { preserveImages: true }): void {
     this.generation++;
     // An alias may refer to the mutated transcript, so all discovery scopes
     // expire together. Pending readers may finish, but cannot repopulate them.
@@ -866,8 +906,13 @@ export class ProjectSessionCatalog {
     this.pendingHistory.clear();
     // Retire after the current captured response; a mutation must never reuse
     // projections from before its durable revision/generation boundary.
-    this.images.clear();
-    for (const lane of [this.foregroundLane, this.overlappingCatalogLane, this.historyLane, this.imageLane]) {
+    if (!options?.preserveImages) {
+      this.images.clear();
+      this.imageRevisions.clear();
+    }
+    const lanes = [this.foregroundLane, this.overlappingCatalogLane, this.historyLane];
+    if (!options?.preserveImages) lanes.push(this.imageLane);
+    for (const lane of lanes) {
       lane.worker?.retire();
       lane.worker = undefined;
       lane.key = undefined;
@@ -1005,7 +1050,7 @@ export class ProjectSessionCatalog {
         cwd: canonical, env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
       });
       return new CatalogWorker(child, canonical, release, this.options.timeoutMs ?? 15_000, this.options.workerIdleMs ?? DEFAULT_WORKER_IDLE_MS);
-    }, this.options.timeoutMs, (query.sessionId && !query.historyLatest && !query.historyBefore && !query.historyImage && query.activityAfter === undefined) || query.workspaceEnvironment
+    }, this.options.timeoutMs, (query.sessionId && !query.historyLatest && !query.historyBefore && !query.historyImage && query.activityAfter === undefined && query.activityPreview === undefined) || query.workspaceEnvironment
       ? 'selection' : 'default').then((worker) => {
       if (generation !== this.generation) {
         worker.retire();

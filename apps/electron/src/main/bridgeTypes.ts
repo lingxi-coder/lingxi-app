@@ -314,6 +314,7 @@ export type RemoteObservation =
   /** A permission, question or computer-access request became pending or was settled. */
   | { type: 'pending' }
   | { type: 'state'; state: ConnectionState }
+  | { type: 'action_readiness'; ready: boolean }
   | { type: 'disposed' };
 
 export type RemoteObserver = (observation: RemoteObservation) => void;

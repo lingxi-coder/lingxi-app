@@ -107,17 +107,33 @@ pub(crate) fn reference_images(message: &mut MessageDto) {
 
 /// Replace embedded binary strings before retaining a page of routed rows.
 /// Exact UTF-16 transcript text stays in the native projection.
-pub(super) fn project_images(row: &mut session::jsonl::JsonlMessage, offset: u64, identity: &str) -> Result<bool, String> {
-    let Some(id) = uuid::Uuid::parse_str(&row.uuid).ok() else { return Ok(false) };
+pub(super) fn project_images(
+    row: &mut session::jsonl::JsonlMessage,
+    location: Option<(u64, &str)>,
+) -> Result<bool, String> {
+    let Some(id) = uuid::Uuid::parse_str(&row.uuid).ok() else {
+        return Ok(false);
+    };
     if row.message_type != "user" {
         return Ok(false);
     }
     let mut changed = false;
-    let replacements: Vec<_> = image_sources(&row.message).enumerate().filter_map(|(index, (pointer, source))| {
-        if source.get_property("type")?.as_str()? != "base64" { return None; }
-        let reference = image_ref(id, index, source.get_property("media_type")?.as_str()?)?;
-        Some((pointer, format!("{reference}:{offset}:{}", URL_SAFE_NO_PAD.encode(identity))))
-    }).collect();
+    let replacements: Vec<_> = image_sources(&row.message)
+        .enumerate()
+        .filter_map(|(index, (pointer, source))| {
+            if source.get_property("type")?.as_str()? != "base64" {
+                return None;
+            }
+            let reference = image_ref(id, index, source.get_property("media_type")?.as_str()?)?;
+            let reference = match location {
+                Some((offset, identity)) => {
+                    format!("{reference}:{offset}:{}", URL_SAFE_NO_PAD.encode(identity))
+                }
+                None => reference,
+            };
+            Some((pointer, reference))
+        })
+        .collect();
     for (pointer, reference) in replacements {
         let projected = Utf16JsonProjection::from_serde_value(&serde_json::json!({
             "type": "url",
@@ -127,6 +143,61 @@ pub(super) fn project_images(row: &mut session::jsonl::JsonlMessage, offset: u64
         changed = true;
     }
     Ok(changed)
+}
+
+/// Resolve the offsets of the selected image rows directly against the admitted
+/// bytes. The small envelope parser borrows UUIDs and skips the image strings.
+pub(crate) fn project_captured_images(
+    rows: &mut [session::jsonl::JsonlMessage],
+    source: Option<(&str, &str)>,
+) {
+    use std::collections::{HashMap, HashSet};
+
+    #[derive(Deserialize)]
+    struct ImageRow<'a> {
+        #[serde(rename = "type")]
+        kind: &'a str,
+        uuid: &'a str,
+        #[serde(rename = "sessionId")]
+        owner: &'a str,
+        #[serde(rename = "isSidechain", default)]
+        sidechain: bool,
+    }
+
+    let mut locations = HashMap::new();
+    if let Some((content, identity)) = source {
+        let mut needed = rows
+            .iter()
+            .filter(|row| {
+                row.message_type == "user"
+                    && image_sources(&row.message).any(|(_, image)| {
+                        image.get_property("type").and_then(|kind| kind.as_str()) == Some("base64")
+                    })
+            })
+            .map(|row| (row.uuid.as_str(), row.session_id.as_str()))
+            .collect::<HashSet<_>>();
+        let mut end = content.len();
+        for line in content.rsplit('\n') {
+            if needed.is_empty() {
+                break;
+            }
+            let offset = end - line.len();
+            end = offset.saturating_sub(1);
+            if let Ok(row) = serde_json::from_str::<ImageRow<'_>>(line) {
+                if row.kind == "user" && !row.sidechain && needed.remove(&(row.uuid, row.owner)) {
+                    locations.insert((row.uuid, row.owner), (offset as u64, identity));
+                }
+            }
+        }
+    }
+    for row in rows {
+        let location = locations
+            .get(&(row.uuid.as_str(), row.session_id.as_str()))
+            .copied();
+        // A legacy row whose projection cannot be rewritten is handled by the
+        // normal lowering path, which also converts inline images to references.
+        let _ = project_images(row, location);
+    }
 }
 
 fn image_sources(message: &Utf16JsonProjection) -> impl Iterator<Item = (String, JsonValueView<'_>)> + '_ {

@@ -121,10 +121,10 @@ mod workspace_resume_tests;
 
 #[path = "catalog_worker.rs"]
 mod catalog_worker;
-#[path = "history_page.rs"]
-mod history_page;
 #[path = "history_image.rs"]
 pub(crate) mod history_image;
+#[path = "history_page.rs"]
+pub(crate) mod history_page;
 
 /// Serve bounded metadata requests without resolving providers or building an engine.
 pub async fn run_session_catalog_worker() -> Result<(), String> {
@@ -2211,22 +2211,11 @@ pub async fn assemble_with_account_credentials(
             "bridge boot phase"
         );
     }
-    let cold_resume =
-        (!cfg.restore_draft && !cfg.defer_session_start && cfg.session_resume_snapshot.is_some())
-            .then(|| {
-                let capture = cfg.clone();
-                tokio::task::spawn_blocking(move || {
-                    let started = Instant::now();
-                    let result =
-                        crate::workspace_commands::ColdBootResume::from_prepared_config(&capture);
-                    tracing::info!(
-                        phase = "resume_display_projection",
-                        duration_ms = started.elapsed().as_millis() as u64,
-                        "bridge boot phase"
-                    );
-                    result
-                })
-            });
+    let cold_resume = if cold_start {
+        crate::workspace_commands::ColdBootResume::from_prepared_config(&cfg)?
+    } else {
+        None
+    };
     let provider_credentials_ephemeral = matches!(
         cfg.credential_storage_policy,
         lingxi_core::host::CredentialStoragePolicy::NativeOrMemory
@@ -2555,13 +2544,7 @@ pub async fn assemble_with_account_credentials(
         }
         result
     };
-    let proof = async {
-        match cold_resume {
-            Some(task) => task.await.map_err(|error| error.to_string())?,
-            None => Ok(None),
-        }
-    };
-    let (runtime, cold_resume) = tokio::try_join!(assembly, proof)?;
+    let runtime = assembly.await?;
     if cold_resume.is_some() {
         tracing::info!(
             duration_ms = assembly_started_at.elapsed().as_millis(),

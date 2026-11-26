@@ -20,7 +20,6 @@ import type {
   RemoteSeqRecord,
   SessionAttachParams,
   SessionHistoryResult,
-  SessionActivityPreviewResult,
   SessionSnapshotParams,
 } from '@lingxi/bridge-client/remote';
 import { MESSAGE_MAX_BYTES } from '@lingxi/bridge-client/remote';
@@ -140,11 +139,13 @@ function mapBlock(block: MessageBlockDto, cuts: { any: boolean }): MessageBlockD
  * A message as a viewer receives it: thinking without its signature, tool
  * fields cut, and locally resolvable images represented as remote references.
  */
-function mapMessage(message: Message, refFor: (index: number) => string, cuts: { any: boolean }): Message {
+export function mapMessage(message: Message, refFor: (index: number) => string, cuts: { any: boolean }): Message {
   const mapped: Message = { ...message, blocks: message.blocks.map((block) => mapBlock(block, cuts)) };
   if (message.images !== undefined) {
-    const images = message.images.flatMap((image, index) => (isHistoryImageReference(image.url) || parseDataUrl(image.url)
-      ? [{ media_type: image.media_type, url: refFor(index) }] : []));
+    const images = message.images.flatMap((image, index) => {
+      const url = (isHistoryImageReference(image.url) || parseDataUrl(image.url)) && refFor(index);
+      return url ? [{ media_type: image.media_type, url }] : [];
+    });
     if (images.length > 0) mapped.images = images;
     else delete mapped.images;
   }
@@ -341,8 +342,7 @@ function snapshotMessages(view: RemoteRuntimeView): { first: number; pages: Mess
 export function buildSnapshot(view: RemoteRuntimeView, botAware = false): SessionSnapshotParams[] {
   const sessionId = view.sessionId;
   const { first, pages } = snapshotMessages(view);
-  const mode = view.base?.event.type === 'session_started' || view.base?.event.type === 'session_resumed'
-    ? view.base.event.mode : view.sessionMode;
+  const mode = view.sessionMode;
   const frames: SessionSnapshotParams[] = [{
     phase: 'begin',
     session_id: sessionId,
@@ -397,32 +397,6 @@ export function historyTail(source: readonly Message[], end: number, minimum: nu
     bytes += size;
   }
   return messages.reverse();
-}
-
-/** An exact semantic result from the already attached source, with no history replay. */
-export function activityPreview(view: RemoteRuntimeView, uuids: readonly string[]): SessionActivityPreviewResult {
-  const ids = new Set(uuids);
-  if (!ids.size || ids.size > 16) return { available: false, messages: [] };
-  const found = new Map<string, Message>();
-  const add = (message: Message) => {
-    if (message.role !== 'assistant' || !message.transcript_uuid || !ids.has(message.transcript_uuid)) return;
-    const blocks = message.blocks.filter(block => block.type === 'text');
-    if (blocks.length)
-      found.set(message.transcript_uuid, { role: 'assistant', transcript_uuid: message.transcript_uuid, blocks });
-  };
-  const base = view.base?.event;
-  if (base?.type === 'session_resumed')
-    base.messages.forEach(add);
-  for (const envelope of view.events) {
-    if (envelope.event.type === 'message_complete' && envelope.event.message)
-      add(envelope.event.message);
-  }
-  const messages = [...ids].flatMap(id => found.get(id) ?? []);
-  const blocks = messages.flatMap(message => message.blocks);
-  const characters = blocks.reduce((sum, block) => sum + (block.type === 'text' ? block.text.length : 0), 0);
-  if (found.size !== ids.size || blocks.length > 16 || characters > 32_768 || jsonBytes(messages) > PAGE_MAX_BYTES)
-    return { available: false, messages: [] };
-  return { available: true, messages };
 }
 
 function localImage(url: string | undefined) {

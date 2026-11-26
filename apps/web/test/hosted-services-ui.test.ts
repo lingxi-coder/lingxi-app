@@ -197,6 +197,48 @@ scenario('history appears before task and entitlement reads and a stalled sync d
   assert.deepEqual(sentActions(f), ['submit']);
 });
 
+scenario('a discovered active task accelerates an already scheduled conversation sync', async context => {
+  const f = fake(); f.state.view = { ...f.state.view, entered: true, generation: 1 };
+  addSession(f, 'session-001', 'An earlier session');
+  const idle = 10_123, answering = 2_123;
+  const scheduled = new Map<ReturnType<typeof setTimeout>, { run: () => void; delay: number }>();
+  const setTimer = globalThis.setTimeout, clearTimer = globalThis.clearTimeout;
+  context.mock.method(globalThis, 'setTimeout', ((run: () => void, delay?: number) => {
+    if (delay !== idle && delay !== answering) return setTimer(run, delay);
+    const handle = setTimer(() => {}, 60_000);
+    scheduled.set(handle, { run, delay });
+    return handle;
+  }) as typeof setTimeout);
+  context.mock.method(globalThis, 'clearTimeout', (handle: ReturnType<typeof setTimeout>) => {
+    scheduled.delete(handle);
+    clearTimer(handle);
+  });
+  context.after(() => { for (const handle of scheduled.keys()) clearTimer(handle); });
+  const messages = f.api.serviceMessages;
+  let releaseTasks!: () => void;
+  const pending = new Promise<void>(resolve => { releaseTasks = resolve; });
+  context.after(releaseTasks);
+  f.api.serviceMessages = async <T,>(command: Parameters<typeof messages>[0]) => {
+    if (command.action === 'listTasks') await pending;
+    return messages<T>(command);
+  };
+  const { page } = await open(context, f, { initialServiceId: serviceId, initialSessionId: 'session-001', refreshMs: { idle, answering } });
+  assert.deepEqual([...scheduled.values()].map(timer => timer.delay), [idle, idle]);
+  f.state.tasks.push({ taskId: 'task-00001', conversationId: 'session-001', state: 'running', createdAt: 1 });
+  await page.during(releaseTasks);
+  assert.deepEqual([...scheduled.values()].map(timer => timer.delay), [answering, answering, answering]);
+  const syncs = () => f.state.sent.filter(command => command.action === 'sync').length;
+  const before = syncs();
+  await page.during(() => {
+    for (const [handle, timer] of [...scheduled]) {
+      scheduled.delete(handle);
+      clearTimer(handle);
+      timer.run();
+    }
+  });
+  assert.ok(syncs() > before);
+});
+
 scenario('explicit creation needs entitlement while implicit creation waits for the session list', async context => {
   const f = fake(); f.state.view = { ...f.state.view, entered: true, generation: 1 };
   addSession(f, 'session-001', 'An earlier session');

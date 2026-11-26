@@ -37,7 +37,7 @@ import { isPermissionModeId, sanitizeDiagnostic } from '../host-utils.js';
 import { validateImageRefs, validatePrompt } from '../validation.js';
 import type { RemoteViewer } from './gateway.js';
 import type { RemoteRuntime } from './remoteRuntime.js';
-import { historyPage, historyTail, parseImageRef, remoteBaseOffset, resolveImage } from './snapshot.js';
+import { historyPage, mapMessage, parseImageRef, remoteBaseOffset, resolveImage } from './snapshot.js';
 
 /** The renderer shows this as a user row, marked as sent from another device. */
 export interface RemotePromptEcho {
@@ -69,7 +69,7 @@ export interface RemoteCommandsDeps {
   echo(echo: RemotePromptEcho): void;
   codec?: ImageCodec;
   readHistoryImage?: (runtime: RemoteRuntime, reference: string, size: SessionImageSize, signal?: AbortSignal) => Promise<SessionImagePayload>;
-  readHistory?: (runtime: RemoteRuntime, before: TranscriptHistoryCursor) => Promise<TranscriptHistoryPage>;
+  readHistory?: (runtime: RemoteRuntime, before: TranscriptHistoryCursor, limit: number) => Promise<TranscriptHistoryPage>;
   clock: Clock;
   /** A random integer in 1…2^53−1. */
   randomTurnId?: () => number;
@@ -482,16 +482,15 @@ export class RemoteCommands {
     }
     const cursor = before === baseOffset ? view.historyBefore : archive.cursors.get(before);
     if (!cursor) throw invalid('History cursor expired. Reopen this chat to reload it.');
-    const page = await this.deps.readHistory(runtime, cursor).catch(error => { throw refused(error); });
+    const page = await this.deps.readHistory(runtime, cursor, limit).catch(error => { throw refused(error); });
     if (runtime.remoteView().epoch !== view.epoch) throw new RemoteRpcError('closed', 'The transcript changed.');
-    const messages = historyTail(page.messages, page.messages.length, Math.max(0, page.messages.length - limit), (row, image) => {
-      const reference = page.messages[row]?.images?.[image]?.url;
+    const messages = page.messages.map(message => mapMessage(message, index => {
+      const reference = message.images?.[index]?.url;
       if (!isHistoryImageReference(reference)) return '';
       const token = Buffer.from(reference).toString('base64url');
       return [view.sessionId, 'h', token, this.archiveSignature(view, token)].join(':');
-    }).map(message => ({ ...message, ...(message.images ? { images: message.images.filter(image => image.url.length > 0) } : {}) }));
-    const next = messages.length < page.messages.length && messages[0]?.transcript_uuid
-      ? { uuid: messages[0].transcript_uuid } : page.before;
+    }, { any: false }));
+    const next = page.before;
     const start = before - (next ? Math.max(1, messages.length) : messages.length);
     if (next) archive.cursors.set(start, next);
     return { messages, first_index: start, has_more: next !== null };

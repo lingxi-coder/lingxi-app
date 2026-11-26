@@ -324,14 +324,15 @@ test('compact history continues on disk and its historical image references expi
   const begin = frames(runtime)[0];
   assert.equal(begin?.phase, 'begin');
   if (!begin || begin.phase !== 'begin') return;
-  const reads: string[] = [];
+  const reads: import('../src/shared/sessionHistory.js').TranscriptHistoryCursor[] = [];
+  const physical = { uuid: older, offset: 73, identity: 'abc' };
   const commands = new RemoteCommands({
     clock: new ManualClock(), allowAlwaysAllow: () => false, echo: () => {},
-    readHistory: async (_runtime, cursor) => {
-      reads.push(cursor.uuid);
+    readHistory: async (_runtime, cursor, limit) => {
+      reads.push(cursor);
+      assert.equal(limit, 1);
       return cursor.uuid === anchor
-        ? { messages: [{ ...text('oldest'), transcript_uuid: oldest },
-          { ...userText('older'), transcript_uuid: older, images: [{ media_type: 'image/png', url: reference }] }], before: null }
+        ? { messages: [{ ...userText('older'), transcript_uuid: older, images: [{ media_type: 'image/png', url: reference }] }], before: physical }
         : { messages: [{ ...text('oldest'), transcript_uuid: oldest }], before: null };
     },
     readHistoryImage: async (_runtime, ref) => {
@@ -350,7 +351,7 @@ test('compact history continues on disk and its historical image references expi
   const last = await commands.history(runtime, { before_index: first.first_index, limit: 1 });
   assert.deepEqual([last.first_index, last.has_more, last.messages[0]?.transcript_uuid],
     [first.first_index - 1, false, oldest]);
-  assert.deepEqual(reads, [anchor, older]);
+  assert.deepEqual(reads, [{ uuid: anchor }, physical]);
   runtime.resume();
   assert.throws(() => commands.imageGet(runtime, { ref: image }), /no longer available/);
 });

@@ -35,6 +35,7 @@ export interface RemoteRuntime {
   readonly projectPath: string;
   readonly engineWorkspacePath?: string;
   readonly connectionState: ConnectionState;
+  readonly remoteActionReady: boolean;
   readonly turnActive: boolean;
   readonly remoteModel: string | undefined;
   observeRemote(observer: RemoteObserver): () => void;

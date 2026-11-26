@@ -278,8 +278,8 @@ private fun AttachedImages(
         }
         images.forEachIndexed { index, thumbnail ->
             val request = remember(context, thumbnail, sizePx) { thumbnail.request(context, sizePx) }
-            var loading by remember(thumbnail.key) { mutableStateOf(false) }
-            var painted by remember(thumbnail.key) { mutableStateOf(false) }
+            var loading by remember(thumbnail.key, request != null) { mutableStateOf(false) }
+            var painted by remember(thumbnail.key, request != null) { mutableStateOf(false) }
             var visibleForProgress by remember(thumbnail.key) { mutableStateOf(false) }
             val label = stringResource(R.string.chat_attached_image_fmt, index + 1)
             Box(
@@ -288,7 +288,9 @@ private fun AttachedImages(
                     .size(chatThumbnailSize)
                     .onVisibilityChanged(minDurationMs = 140, minFractionVisible = 0.01f) { visibleForProgress = it }
                     .clip(RoundedCornerShape(11.dp))
-                    .clickable(role = androidx.compose.ui.semantics.Role.Button) { selectedImage = thumbnail.preview }
+                    .clickable(enabled = thumbnail.preview != null, role = androidx.compose.ui.semantics.Role.Button) {
+                        selectedImage = thumbnail.preview
+                    }
                     .background(t.surfaceActive)
                     .border(0.5.dp, t.border, RoundedCornerShape(11.dp)),
             ) {
@@ -296,10 +298,10 @@ private fun AttachedImages(
                     if (loading && visibleForProgress && android.animation.ValueAnimator.areAnimatorsEnabled()) {
                         CircularProgressIndicator(Modifier.size(20.dp), color = t.text3, strokeWidth = 1.5.dp)
                     } else {
-                        Icon(Icons.Outlined.Image, contentDescription = null, tint = t.text3, modifier = Modifier.size(20.dp))
+                        Icon(Icons.Outlined.Image, contentDescription = if (request == null) label else null, tint = t.text3, modifier = Modifier.size(20.dp))
                     }
                 }
-                AsyncImage(
+                if (request != null) AsyncImage(
                     model = request,
                     contentDescription = label,
                     contentScale = androidx.compose.ui.layout.ContentScale.Crop,

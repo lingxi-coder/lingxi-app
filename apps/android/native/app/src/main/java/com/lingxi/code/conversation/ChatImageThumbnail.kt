@@ -81,23 +81,26 @@ internal class ThumbnailInFlight<T>(private val scope: CoroutineScope) {
 internal class ChatImageThumbnail(
     val key: String,
     private val mediaType: String,
-    private val read: suspend () -> ByteArray,
-    val preview: ImagePreviewSource,
+    private val read: (suspend () -> ByteArray)?,
+    val preview: ImagePreviewSource?,
 ) {
-    fun request(context: Context, sizePx: Int): ImageRequest = ImageRequest.Builder(context)
-        .data(this)
-        .fetcherFactory(ThumbnailFetcherFactory, ChatImageThumbnail::class)
-        .memoryCacheKey("$key:$sizePx")
-        .size(sizePx)
-        .scale(Scale.FILL)
-        .diskCachePolicy(CachePolicy.DISABLED)
-        .build()
+    fun request(context: Context, sizePx: Int): ImageRequest? {
+        if (read == null) return null
+        return ImageRequest.Builder(context)
+            .data(this)
+            .fetcherFactory(ThumbnailFetcherFactory, ChatImageThumbnail::class)
+            .memoryCacheKey("$key:$sizePx")
+            .size(sizePx)
+            .scale(Scale.FILL)
+            .diskCachePolicy(CachePolicy.DISABLED)
+            .build()
+    }
 
     private object ThumbnailFetcherFactory : Fetcher.Factory<ChatImageThumbnail> {
         override fun create(data: ChatImageThumbnail, options: Options, imageLoader: ImageLoader): Fetcher =
             object : Fetcher {
                 override suspend fun fetch() = SourceFetchResult(
-                    ImageSource(Buffer().write(data.read()), FileSystem.SYSTEM),
+                    ImageSource(Buffer().write(requireNotNull(data.read).invoke()), FileSystem.SYSTEM),
                     data.mediaType,
                     DataSource.MEMORY,
                 )
@@ -118,15 +121,18 @@ internal fun chatImageThumbnails(
             ImagePreviewSource.Encoded(image.base64, image.mediaType),
         ))
     }
-    if (loadRemoteImage != null) {
-        for (image in message.remoteImages) {
-            yield(ChatImageThumbnail(
-                "remote:$remoteCacheKey:${image.url}",
-                image.mediaType,
-                { loadRemoteImage(image.url, true) },
-                ImagePreviewSource.Remote(image.url, image.mediaType) { loadRemoteImage(image.url, false) },
-            ))
+    for (image in message.remoteImages) {
+        val read: (suspend () -> ByteArray)? = if (loadRemoteImage == null) null else {
+            { loadRemoteImage(image.url, true) }
         }
+        yield(ChatImageThumbnail(
+            "remote:$remoteCacheKey:${image.url}",
+            image.mediaType,
+            read,
+            loadRemoteImage?.let { load ->
+                ImagePreviewSource.Remote(image.url, image.mediaType) { load(image.url, false) }
+            },
+        ))
     }
 }
 
@@ -157,9 +163,10 @@ internal fun PrefetchChatThumbnails(
             }
             val thumbnails = nearby.mapNotNull { index -> (rows.getOrNull(index) as? ChatRenderItem.Message)?.message }
                 .flatMap { chatImageThumbnails(it, remoteCacheKey, read) }
+                .mapNotNull { it.request(context, sizePx) }
                 .take(2)
             // Keep a single speculative decode in flight. The next viewport cancels this pass.
-            for (thumbnail in thumbnails) loader.execute(thumbnail.request(context, sizePx))
+            for (request in thumbnails) loader.execute(request)
         }
     }
 }

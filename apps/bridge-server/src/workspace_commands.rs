@@ -53,60 +53,98 @@ struct RuntimeControls {
 pub(crate) struct ColdBootResume {
     session_id: uuid::Uuid,
     transcript_path: PathBuf,
-    replayed: Option<orchestrator::ReplayedSession>,
     mode: ConversationMode,
-    preview: OnceLock<Arc<ColdResumePreview>>,
+    preview: Arc<ColdResumePreview>,
 }
 
-/// A bounded copy of the admitted display rows. It can be lowered on the
-/// blocking pool even after the ordered resume consumes the replay proof.
-#[derive(Default)]
+/// Holds only the boot-validated source and shares its display window between
+/// the read-only preview and the authoritative resume.
 pub struct ColdResumePreview {
+    capture: harness_runtime::desktop::DesktopConfig,
+    session_id: uuid::Uuid,
+    transcript_path: PathBuf,
+    window: OnceLock<ColdDisplayWindow>,
+}
+
+#[derive(Clone, Default)]
+struct ColdDisplayWindow {
     history: Vec<ConversationMessage>,
     tool_results: HashMap<String, Utf16JsonProjection>,
     timestamps: HashMap<String, i64>,
+    captured_ids: HashSet<MessageId>,
+    has_earlier: bool,
+    overview: Vec<MessageDto>,
 }
 
 impl ColdResumePreview {
-    fn capture(replayed: &orchestrator::ReplayedSession) -> Self {
-        const MAX_PREVIEW_ROWS: usize = 64;
-        let all = &replayed.display_history;
-        let history = recent_display_history(&all[all.len().saturating_sub(MAX_PREVIEW_ROWS)..]);
-        let tool_results = history
-            .iter()
-            .filter_map(|row| match row {
-                ConversationMessage::User { content, .. }
-                | ConversationMessage::Assistant { content, .. } => Some(content),
-                _ => None,
-            })
-            .flatten()
-            .filter_map(|block| {
-                let ContentBlock::ToolResult { tool_use_id, .. } = block else {
-                    return None;
-                };
-                let id = tool_use_id.as_str();
-                replayed
-                    .client_state_tool_results
-                    .get(id)
-                    .map(|row| (id.to_owned(), row.clone()))
-            })
-            .collect();
-        let timestamps = history
-            .iter()
-            .filter_map(|row| {
-                let id = row.id().as_uuid().to_string();
-                replayed.display_timestamps.get(&id).map(|&time| (id, time))
-            })
-            .collect();
-        Self {
-            history: history.to_vec(),
-            tool_results,
-            timestamps,
+    fn loaded(&self) -> &session::jsonl::LoadedTranscript {
+        self.capture
+            .prepared_session_resume()
+            .expect("cold source includes its admitted parse")
+    }
+
+    fn window(&self) -> &ColdDisplayWindow {
+        self.window.get_or_init(|| {
+            let source = self
+                .capture
+                .session_resume_snapshot
+                .as_ref()
+                .expect("cold source");
+            let identity =
+                self.capture
+                    .session_transcript_authority
+                    .as_ref()
+                    .and_then(|authority| {
+                        use lingxi_core::host::rooted_fs;
+                        let pinned = authority.pinned_resume_source(String::new());
+                        let file = rooted_fs::open_read_file_pinned(
+                            &pinned.root,
+                            &pinned.relative,
+                            Some(&pinned.root_identity),
+                        )
+                        .ok()?;
+                        if rooted_fs::opened_file_identity(&file).ok()? != pinned.file_identity {
+                            return None;
+                        }
+                        Some(crate::boot::history_page::identity(&file.metadata().ok()?))
+                    });
+            project_cold_display(
+                self.loaded(),
+                self.session_id,
+                identity
+                    .as_deref()
+                    .map(|value| (source.content.as_ref(), value)),
+            )
+        })
+    }
+
+    // Older callers request the legacy baseline. Build it only for that RPC.
+    fn replay_legacy(&self) -> Result<Option<orchestrator::ReplayedSession>, String> {
+        if session::jsonl::find_tip(self.loaded(), &self.session_id.to_string()).is_none() {
+            return Ok(None);
         }
+        let source = self
+            .capture
+            .session_resume_snapshot
+            .as_ref()
+            .expect("cold source");
+        let mut replayed = orchestrator::resume::replay_prepared_session(
+            self.transcript_path.clone(),
+            &source.content,
+            self.loaded(),
+            self.session_id,
+        )
+        .map_err(|error| format!("cold resume proof is unavailable: {error}"))?;
+        for row in &mut replayed.display_history {
+            crate::boot::history_image::reference_captured_images(row);
+        }
+        Ok(Some(replayed))
     }
 
     pub(crate) fn messages(&self) -> Vec<MessageDto> {
-        lower_display_rows(&self.history, &self.tool_results, &self.timestamps)
+        let window = self.window();
+        let rows = lower_display_rows(&window.history, &window.tool_results, &window.timestamps);
+        fit_cold_display(rows, crate::boot::history_page::MAX_PREVIEW_BYTES - 4096).0
     }
 }
 
@@ -139,42 +177,27 @@ impl ColdBootResume {
         let mode = cfg
             .initial_conversation_mode
             .ok_or("selected transcript requires an expected conversation mode")?;
-        let fallback;
-        let loaded = if let Some(loaded) = cfg.prepared_session_resume() {
-            loaded
+        let mut capture = harness_runtime::desktop::DesktopConfig::default();
+        capture.session_resume_snapshot = Some(snapshot.clone());
+        capture.session_transcript_authority = cfg.session_transcript_authority.clone();
+        capture.session_resume_loaded = Some(if cfg.prepared_session_resume().is_some() {
+            cfg.session_resume_loaded.clone().expect("prepared capture")
         } else {
-            fallback = session::jsonl::route_lines(&snapshot.content);
-            &fallback
-        };
-        let id_text = session_id.to_string();
-        // Explicit mobile draft anchors are allowed by the cold loader and
-        // have no display baseline or deferred tool calls to replay.
-        let mut replayed = if loaded.mobile_empty_sessions.contains(&id_text)
-            && session::jsonl::find_tip(loaded, &id_text).is_none()
-        {
-            None
-        } else {
-            Some(
-                orchestrator::resume::replay_prepared_session(
-                    path.clone(),
-                    &snapshot.content,
-                    loaded,
-                    session_id,
-                )
-                .map_err(|error| format!("cold resume proof is unavailable: {error}"))?,
+            harness_runtime::desktop::DesktopSessionResumeLoaded::new(
+                snapshot,
+                Arc::new(session::jsonl::route_lines(&snapshot.content)),
             )
-        };
-        if let Some(replayed) = replayed.as_mut() {
-            for row in &mut replayed.display_history {
-                crate::boot::history_image::reference_captured_images(row);
-            }
-        }
+        });
         Ok(Some(Self {
             session_id,
             transcript_path: path.clone(),
-            replayed,
             mode,
-            preview: OnceLock::new(),
+            preview: Arc::new(ColdResumePreview {
+                capture,
+                session_id,
+                transcript_path: path.clone(),
+                window: OnceLock::new(),
+            }),
         }))
     }
 }
@@ -204,104 +227,277 @@ pub(crate) fn lower_initial_transcript(
     )
 }
 
-// Only the selected Desktop resume uses this display window. The engine still
-// owns the complete replay and pages older display rows from the pinned JSONL.
-fn lower_cold_display_page(
-    replayed: &orchestrator::ReplayedSession,
-) -> (Vec<MessageDto>, Option<String>, Vec<MessageDto>) {
-    const DISPLAY_ROWS: usize = 60;
-    const DISPLAY_BYTES: usize = 6 * 1024 * 1024;
-    let history = recent_display_history(&replayed.display_history);
-    let mut start = history.len().saturating_sub(DISPLAY_ROWS);
-    if start > 0 {
-        let mut results = HashSet::new();
-        for (index, row) in history.iter().enumerate().rev() {
-            let content = match row {
-                ConversationMessage::User { content, .. }
-                | ConversationMessage::Assistant { content, .. } => content,
-                _ => continue,
-            };
-            for block in content {
-                match block {
-                    ContentBlock::ToolResult { tool_use_id, .. } if index >= start => {
-                        results.insert(tool_use_id.as_str());
-                    }
-                    ContentBlock::ToolUse { id, .. }
-                        if results.remove(id.as_str()) && index < start =>
-                    {
-                        start = index;
-                    }
-                    _ => {}
-                }
-            }
-            if index <= start && results.is_empty() {
-                break;
-            }
-        }
-    }
-    let mut messages = lower_display_rows(
-        &history[start..],
-        &replayed.client_state_tool_results,
-        &replayed.display_timestamps,
-    );
-    let mut bytes = 0usize;
-    let mut byte_start = messages.len();
-    for message in messages.iter().rev() {
-        let size =
-            serde_json::to_vec(message).map_or(usize::MAX, |value| value.len().saturating_add(1));
-        let combined = bytes.saturating_add(size);
-        if bytes > 0 && combined > DISPLAY_BYTES {
+fn project_cold_display(
+    loaded: &session::jsonl::LoadedTranscript,
+    session_id: uuid::Uuid,
+    image_source: Option<(&str, &str)>,
+) -> ColdDisplayWindow {
+    use crate::boot::history_page::{PAGE_ROWS, assistant_group, owns_row, update_activity};
+
+    let is_compact = |row: &session::jsonl::JsonlMessage| {
+        row.message_type == "system" && row.extra.string_at("/subtype") == Some("compact_boundary")
+    };
+    let source = &loaded.messages_in_order;
+    // Uncompacted, single-owner transcripts already have the exact display scope.
+    // Only mixed-owner or compacted sources need the SDK's lineage walk.
+    let chain = source
+        .iter()
+        .any(|row| !row.is_sidechain && (is_compact(row) || !owns_row(row, session_id)))
+        .then(|| session::jsonl::build_conversation_chain(loaded, &session_id.to_string()).0);
+    let lineage = chain.as_ref().map(|rows| {
+        rows.iter()
+            .map(|row| row.uuid.as_str())
+            .collect::<HashSet<_>>()
+    });
+    let boundary = lineage
+        .as_ref()
+        .and_then(|lineage| {
+            source.iter().rposition(|row| {
+                !row.is_sidechain && is_compact(row) && lineage.contains(row.uuid.as_str())
+            })
+        })
+        .unwrap_or(0);
+    let rows = source[boundary..]
+        .iter()
+        .filter(|row| {
+            !row.is_sidechain
+                && (owns_row(row, session_id)
+                    || lineage
+                        .as_ref()
+                        .is_some_and(|ids| ids.contains(row.uuid.as_str())))
+        })
+        .collect::<Vec<_>>();
+    let mut start = rows.len();
+    let mut results = HashSet::new();
+    let mut summary = false;
+    let mut newer_assistant = None;
+    for (index, row) in rows.iter().enumerate().rev() {
+        let group = assistant_group(row);
+        if rows.len() - start >= PAGE_ROWS
+            && results.is_empty()
+            && !summary
+            && (group.is_none() || group != newer_assistant)
+        {
             break;
         }
-        bytes = combined;
-        byte_start -= 1;
+        update_activity(row, &mut results, &mut summary);
+        newer_assistant = group;
+        start = index;
     }
-    if byte_start > 0 {
-        let mut results = HashSet::new();
-        for (index, row) in messages.iter().enumerate().rev() {
-            for block in &row.blocks {
-                match block {
-                    MessageBlockDto::ToolResult { id, .. } if index >= byte_start => {
-                        results.insert(id.as_str());
+    let mut visible = rows[start..]
+        .iter()
+        .map(|row| (*row).clone())
+        .collect::<Vec<_>>();
+    crate::boot::history_image::project_captured_images(&mut visible, image_source);
+    let mut state = orchestrator::resume::state_from_messages(session_id, &visible);
+    for row in &mut state.history {
+        crate::boot::history_image::reference_captured_images(row);
+    }
+    let captured_ids = source
+        .iter()
+        .filter(|row| !row.is_sidechain)
+        .filter_map(|row| {
+            uuid::Uuid::parse_str(&row.uuid)
+                .ok()
+                .map(MessageId::from_uuid)
+        })
+        .collect();
+    let tool_results = orchestrator::resume::client_state_tool_results_from_messages(&visible);
+    let timestamps = display_timestamps(&visible);
+    let overview = project_earlier_plans(&rows[..start], session_id);
+    ColdDisplayWindow {
+        history: state.history,
+        tool_results,
+        timestamps,
+        captured_ids,
+        has_earlier: start > 0 || boundary > 0,
+        overview,
+    }
+}
+
+fn display_timestamps(rows: &[session::jsonl::JsonlMessage]) -> HashMap<String, i64> {
+    rows.iter()
+        .filter_map(|row| {
+            row.timestamp
+                .parse::<jiff::Timestamp>()
+                .ok()
+                .map(|at| (row.uuid.clone(), at.as_millisecond()))
+        })
+        .collect()
+}
+
+fn project_earlier_plans(
+    rows: &[&session::jsonl::JsonlMessage],
+    session_id: uuid::Uuid,
+) -> Vec<MessageDto> {
+    let mut calls = HashSet::new();
+    let mut relevant = Vec::new();
+    for row in rows {
+        let mut keep = false;
+        for index in 0..row.message.array_len("/content").unwrap_or_default() {
+            let pointer = format!("/content/{index}");
+            match row.message.string_at(&format!("{pointer}/type")) {
+                Some("tool_use") => {
+                    let name = row.message.string_at(&format!("{pointer}/name"));
+                    let plan_path = name == Some("Write")
+                        && row
+                            .message
+                            .string_at(&format!("{pointer}/input/file_path"))
+                            .is_some_and(is_plan_file);
+                    if plan_path || matches!(name, Some("EnterPlanMode" | "ExitPlanMode")) {
+                        calls.extend(row.message.string_at(&format!("{pointer}/id")));
+                        keep = true;
                     }
-                    MessageBlockDto::ToolUse { id, .. }
-                        if results.remove(id.as_str()) && index < byte_start =>
-                    {
-                        byte_start = index;
-                    }
-                    _ => {}
                 }
+                Some("tool_result") => {
+                    keep |= row
+                        .message
+                        .string_at(&format!("{pointer}/tool_use_id"))
+                        .is_some_and(|id| calls.contains(id));
+                }
+                _ => {}
             }
-            if index <= byte_start && results.is_empty() {
+        }
+        if keep {
+            relevant.push((*row).clone());
+        }
+    }
+    if relevant.is_empty() {
+        return Vec::new();
+    }
+    let history = orchestrator::resume::state_from_messages(session_id, &relevant).history;
+    let tool_results = orchestrator::resume::client_state_tool_results_from_messages(&relevant);
+    let timestamps = display_timestamps(&relevant);
+    lower_cold_plan_overview(&history, &tool_results, &timestamps)
+}
+
+fn is_plan_file(path: &str) -> bool {
+    let path = format!("/{}", path.replace('\\', "/"));
+    path.ends_with(".md") && (path.contains("/.lingxi/plans/") || path.contains("/.claude/plans/"))
+}
+
+/// Count actual escaped JSON bytes, stopping at the budget without collecting a large buffer.
+fn json_size(value: &impl serde::Serialize, budget: usize) -> Option<usize> {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_sub(bytes.len())
+                .ok_or(std::io::ErrorKind::FileTooLarge)?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut remaining = Count(budget);
+    serde_json::to_writer(&mut remaining, value).ok()?;
+    Some(budget - remaining.0)
+}
+
+/// Keep a suffix of complete tool activities. If the newest activity cannot fit
+/// by itself, use its oldest row as a durable boundary for the following page.
+fn fit_cold_display(mut rows: Vec<MessageDto>, budget: usize) -> (Vec<MessageDto>, usize) {
+    let mut pending = HashSet::new();
+    let mut remaining = Some(budget.saturating_sub(2));
+    let mut first = rows.len();
+    for (index, row) in rows.iter().enumerate().rev() {
+        remaining = remaining.and_then(|bytes| {
+            json_size(row, bytes.saturating_sub(1)).and_then(|size| bytes.checked_sub(size + 1))
+        });
+        for block in row.blocks.iter().rev() {
+            match block {
+                MessageBlockDto::ToolResult { id, .. } => {
+                    pending.insert(id.as_str());
+                }
+                MessageBlockDto::ToolUse { id, .. } => {
+                    pending.remove(id.as_str());
+                }
+                _ => {}
+            }
+        }
+        if pending.is_empty() || index == 0 {
+            if remaining.is_some() {
+                first = index;
+            } else {
+                if first == rows.len() {
+                    return (
+                        vec![crate::boot::history_page::oversized_activity(
+                            row.transcript_uuid.clone(),
+                            &row.role,
+                        )],
+                        index,
+                    );
+                }
                 break;
             }
         }
     }
-    let has_earlier = start > 0
-        || byte_start > 0
-        || history.len() < replayed.display_history.len()
+    rows.drain(..first);
+    (rows, first)
+}
+
+// A selected cold resume also has to fit the bridge frame for older clients.
+fn cap_legacy_cold_display(messages: Vec<MessageDto>) -> Vec<MessageDto> {
+    const BUDGET: usize = 16 * 1024 * 1024 - 64 * 1024;
+    if json_size(&messages, BUDGET).is_some() {
+        messages
+    } else {
+        fit_cold_display(messages, BUDGET).0
+    }
+}
+
+fn lower_cold_display_page(
+    window: &ColdDisplayWindow,
+) -> (Vec<MessageDto>, Option<String>, Vec<MessageDto>) {
+    use crate::boot::history_page::MAX_PAGE_BYTES;
+    let history = recent_display_history(&window.history);
+    let rows = lower_display_rows(history, &window.tool_results, &window.timestamps);
+    let (messages, skipped) = fit_cold_display(rows, MAX_PAGE_BYTES - 4096);
+    let has_earlier = window.has_earlier
+        || skipped > 0
+        || history.len() < window.history.len()
         || messages.first().is_some_and(|row| {
             row.blocks
                 .iter()
                 .any(|block| matches!(block, MessageBlockDto::CompactBoundary { .. }))
         });
-    messages.drain(..byte_start);
     let before = has_earlier
         .then(|| messages.first()?.transcript_uuid.clone())
         .flatten();
-    let overview = before
+    let earlier = before
         .as_deref()
         .and_then(|id| uuid::Uuid::parse_str(id).ok())
-        .and_then(|id| history.iter().position(|row| row.id().as_uuid() == id))
-        .map_or_else(Vec::new, |end| {
-            lower_cold_plan_overview(replayed, &history[..end])
-        });
+        .and_then(|id| history.iter().position(|row| row.id().as_uuid() == id));
+    let mut overview = window.overview.clone();
+    if let Some(end) = earlier {
+        overview.extend(lower_cold_plan_overview(
+            &history[..end],
+            &window.tool_results,
+            &window.timestamps,
+        ));
+    }
+    let mut bytes = MAX_PAGE_BYTES - 4096;
+    let mut overview = overview
+        .into_iter()
+        .rev()
+        .filter(|row| {
+            let Some(size) = json_size(row, bytes.saturating_sub(1)) else {
+                return false;
+            };
+            bytes = bytes.saturating_sub(size + 1);
+            true
+        })
+        .collect::<Vec<_>>();
+    overview.reverse();
     (messages, before, overview)
 }
 
 fn lower_cold_plan_overview(
-    replayed: &orchestrator::ReplayedSession,
     earlier: &[ConversationMessage],
+    tool_results: &HashMap<String, Utf16JsonProjection>,
+    timestamps: &HashMap<String, i64>,
 ) -> Vec<MessageDto> {
     let mut calls = HashSet::new();
     let rows: Vec<_> = earlier
@@ -319,12 +515,7 @@ fn lower_cold_plan_overview(
                         id, name, input, ..
                     } => {
                         let plan_write = name == "Write"
-                            && input.string_at("/file_path").is_some_and(|path| {
-                                let path = format!("/{}", path.replace('\\', "/"));
-                                path.ends_with(".md")
-                                    && (path.contains("/.lingxi/plans/")
-                                        || path.contains("/.claude/plans/"))
-                            });
+                            && input.string_at("/file_path").is_some_and(is_plan_file);
                         if plan_write || matches!(name.as_str(), "EnterPlanMode" | "ExitPlanMode") {
                             calls.insert(id.as_str().to_owned());
                             return true;
@@ -350,11 +541,7 @@ fn lower_cold_plan_overview(
             Some(row)
         })
         .collect();
-    let mut messages = lower_display_rows(
-        &rows,
-        &replayed.client_state_tool_results,
-        &replayed.display_timestamps,
-    );
+    let mut messages = lower_display_rows(&rows, tool_results, timestamps);
     for block in messages.iter_mut().flat_map(|row| &mut row.blocks) {
         if let MessageBlockDto::ToolResult {
             tool, result_json, ..
@@ -414,6 +601,22 @@ fn merge_live_resume_projection(
             .ok()
             .map(MessageId::from_uuid)
     }));
+    merge_live_projection(
+        &mut replayed.display_history,
+        &mut replayed.client_state_tool_results,
+        captured_ids,
+        live,
+        envelopes,
+    );
+}
+
+fn merge_live_projection(
+    display: &mut Vec<ConversationMessage>,
+    tool_results: &mut HashMap<String, Utf16JsonProjection>,
+    captured_ids: HashSet<MessageId>,
+    live: &[ConversationMessage],
+    envelopes: &HashMap<MessageId, lingxi_core::host::TaskDeliveryHistoryEnvelope>,
+) {
     let mut tool_names = None;
     for message in live {
         let id = message.id();
@@ -437,8 +640,7 @@ fn merge_live_resume_projection(
         // Only a newly recovered structured result needs this index. Most
         // resumes can reuse the structured results already in the replay.
         let tool_names = tool_names.get_or_insert_with(|| {
-            replayed
-                .display_history
+            display
                 .iter()
                 .chain(live)
                 .filter_map(|message| match message {
@@ -457,12 +659,10 @@ fn merge_live_resume_projection(
             .get(id)
             .is_some_and(|name| orchestrator::CLIENT_STATE_TOOLS.contains(name))
         {
-            replayed
-                .client_state_tool_results
-                .insert(id.to_owned(), raw.clone());
+            tool_results.insert(id.to_owned(), raw.clone());
         }
     }
-    merge_live_display_history(&mut replayed.display_history, live, captured_ids);
+    merge_live_display_history(display, live, captured_ids);
 }
 
 #[derive(Default)]
@@ -553,18 +753,7 @@ impl WorkspaceCommands {
                     && captured.mode == mode
             })
             .ok_or("cold resume preview is unavailable for this selection")?;
-        Ok(captured
-            .preview
-            .get_or_init(|| {
-                Arc::new(
-                    captured
-                        .replayed
-                        .as_ref()
-                        .map(ColdResumePreview::capture)
-                        .unwrap_or_default(),
-                )
-            })
-            .clone())
+        Ok(captured.preview.clone())
     }
 
     pub(crate) async fn merge_live_resume_display(
@@ -597,7 +786,7 @@ impl WorkspaceCommands {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .take();
-        let Some(mut captured) = captured.filter(|captured| {
+        let Some(captured) = captured.filter(|captured| {
             captured.session_id == session_id && captured.transcript_path == path
         }) else {
             return Ok(None);
@@ -619,11 +808,28 @@ impl WorkspaceCommands {
         {
             return Ok(None);
         }
-        let deferred_tools = captured
-            .replayed
-            .as_mut()
-            .map(|replayed| std::mem::take(&mut replayed.runtime_metadata.deferred_tools))
-            .unwrap_or_default();
+        enum Display {
+            Paged(ColdDisplayWindow),
+            Legacy(Option<Box<orchestrator::ReplayedSession>>),
+        }
+        let source = captured.preview.clone();
+        let projection = tokio::task::spawn_blocking(move || {
+            if page_display {
+                Ok(Display::Paged(source.window().clone()))
+            } else {
+                source
+                    .replay_legacy()
+                    .map(|replayed| Display::Legacy(replayed.map(Box::new)))
+            }
+        });
+        let deferred_tools = tokio::task::spawn_blocking(move || {
+            orchestrator::resume::deferred_tool_replays_for_session(
+                &captured.preview.loaded().messages_in_order,
+                session_id,
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())?;
         runtime
             .orchestrator
             .complete_cold_resume_deferred_tools(
@@ -633,17 +839,37 @@ impl WorkspaceCommands {
             )
             .await
             .map_err(|error| format!("cold resume completion failed: {error}"))?;
-        let (messages, history_before, history_overview) = if let Some(mut replayed) = captured.replayed {
-            self.merge_live_resume_display(&mut replayed).await?;
-            if page_display {
-                lower_cold_display_page(&replayed)
-            } else {
-                (lower_initial_transcript(&replayed), None, Vec::new())
-            }
-        } else {
-            let live = runtime.orchestrator.snapshot_history().await;
-            (client::adapter::lowering::lower_transcript(&live), None, Vec::new())
-        };
+        let (messages, history_before, history_overview) =
+            match projection.await.map_err(|error| error.to_string())?? {
+                Display::Paged(mut window) => {
+                    let session = runtime.orchestrator.session();
+                    {
+                        let session = session.lock().await;
+                        merge_live_projection(
+                            &mut window.history,
+                            &mut window.tool_results,
+                            std::mem::take(&mut window.captured_ids),
+                            &session.history,
+                            &session.native_request_history.task_delivery_envelopes,
+                        );
+                    }
+                    tokio::task::spawn_blocking(move || lower_cold_display_page(&window))
+                        .await
+                        .map_err(|error| error.to_string())?
+                }
+                Display::Legacy(Some(mut replayed)) => {
+                    self.merge_live_resume_display(&mut replayed).await?;
+                    (cap_legacy_cold_display(lower_initial_transcript(&replayed)), None, Vec::new())
+                }
+                Display::Legacy(None) => {
+                    let live = runtime.orchestrator.snapshot_history().await;
+                    (
+                        cap_legacy_cold_display(client::adapter::lowering::lower_transcript(&live)),
+                        None,
+                        Vec::new(),
+                    )
+                }
+            };
         Ok(Some(ColdResumeProof {
             messages,
             history_before,
@@ -1518,7 +1744,6 @@ mod tests {
 
     #[test]
     fn cold_display_sends_the_same_tail_for_100_and_600_rows() {
-        let root = tempfile::tempdir().unwrap();
         let session_id = uuid::Uuid::new_v4();
         let ids = (0..600).map(|_| uuid::Uuid::new_v4()).collect::<Vec<_>>();
         let prepare = |offset: usize| {
@@ -1536,13 +1761,7 @@ mod tests {
                 })));
             }
             let loaded = session::jsonl::route_lines(&source);
-            orchestrator::resume::replay_captured_session(
-                root.path().join(format!("{session_id}.jsonl")),
-                source,
-                loaded,
-                session_id,
-            )
-            .unwrap()
+            project_cold_display(&loaded, session_id, None)
         };
         let short = prepare(500);
         let long = prepare(0);
@@ -1552,8 +1771,54 @@ mod tests {
         assert_eq!(short_page, long_page);
         assert_eq!(short_before, long_before);
         assert_eq!(long_before.as_deref(), Some(ids[540].to_string().as_str()));
-        assert_eq!(short.state.history.len(), 100);
-        assert_eq!(long.state.history.len(), 600);
+        assert_eq!(short.history.len(), 60);
+        assert_eq!(long.history.len(), 60);
+    }
+
+    #[test]
+    fn cold_display_never_sends_an_oversized_tool_group() {
+        let id = uuid::Uuid::new_v4();
+        let first = uuid::Uuid::new_v4();
+        let call = uuid::Uuid::new_v4();
+        let result = uuid::Uuid::new_v4();
+        let source = [
+            serde_json::json!({"type":"user","sessionId":id,"uuid":first,"message":{"role":"user","content":"earlier"}}),
+            serde_json::json!({"type":"assistant","sessionId":id,"uuid":call,"parentUuid":first,"message":{"role":"assistant","content":[
+                {"type":"tool_use","id":"paired","name":"Bash","input":{"command":"x".repeat(9 * 1024 * 1024)}}
+            ]}}),
+            serde_json::json!({"type":"user","sessionId":id,"uuid":result,"parentUuid":call,"message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"paired","content":"y".repeat(9 * 1024 * 1024)}
+            ]}}),
+        ].iter().map(|row| format!("{row}\n")).collect::<String>();
+        let loaded = session::jsonl::route_lines(&source);
+        let window = project_cold_display(&loaded, id, None);
+        let (messages, before, overview) = lower_cold_display_page(&window);
+        assert_eq!(before, Some(call.to_string()));
+        assert_eq!(messages.len(), 1);
+        let json = serde_json::to_string(&messages).unwrap();
+        assert!(json.contains("exceeds the display size limit"));
+        assert!(json.len() < 1024);
+        assert!(overview.is_empty());
+    }
+
+    #[test]
+    fn cold_image_references_keep_the_physical_row_offset() {
+        let id = uuid::Uuid::new_v4();
+        let message = uuid::Uuid::new_v4();
+        let prefix = "{}\n";
+        let row = serde_json::json!({
+            "type":"user","sessionId":id,"uuid":message,"isSidechain":false,
+            "message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"QUJD"}}]}
+        });
+        let source = format!("{prefix}{row}\n");
+        let loaded = session::jsonl::route_lines(&source);
+        let window = project_cold_display(&loaded, id, Some((&source, "abc")));
+        let (messages, _, _) = lower_cold_display_page(&window);
+        assert_eq!(
+            messages[0].images[0].url,
+            format!("lingxi-history-image:{message}:0:png:3:YWJj")
+        );
+        assert!(!serde_json::to_string(&messages).unwrap().contains("QUJD"));
     }
 
     #[test]

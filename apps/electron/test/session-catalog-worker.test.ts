@@ -97,6 +97,44 @@ test('abandoning thumbnails cancels queued reads and retires a busy worker', { t
   assert.equal(children.calls[1].queries.length, 1);
 });
 
+test('a located thumbnail survives append, and refreshes after the source changes in place', { timeout: 5_000 }, async t => {
+  const cwd = project(t), children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const transcript = join(cwd, `${uuid}.jsonl`);
+  writeFileSync(transcript, 'first row\n');
+  const read = () => catalog.readImage(cwd, uuid, transcript, `lingxi-history-image:${uuid}:0:png:0:YWJj`, 'thumbnail');
+  const first = read();
+  while (!children.calls[0]?.queries.length) await nextTurn();
+  const child = children.calls[0];
+  child.reply(JSON.stringify({ mediaType: 'image/png', base64: 'AQID' }));
+  assert.equal((await first).base64, 'AQID');
+  appendFileSync(transcript, 'newer row\n');
+  catalog.invalidate(cwd, { preserveImages: true });
+  assert.equal((await read()).base64, 'AQID');
+  assert.equal(child.queries.length, 1);
+  writeFileSync(transcript, 'replacement\n');
+  const changed = read();
+  while (child.queries.length < 2) await nextTurn();
+  child.reply(JSON.stringify({ mediaType: 'image/png', base64: 'BAUG' }));
+  assert.equal((await changed).base64, 'BAUG');
+});
+
+test('durable Inbox activity can be read without a session runtime and keeps exact text', async t => {
+  const cwd = project(t), children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const transcript = join(cwd, `${uuid}.jsonl`);
+  const preview = catalog.readActivityPreview(cwd, uuid, transcript, 4);
+  await nextTurn();
+  const child = children.calls[0];
+  assert.equal(child.queries[0].activityPreview, 4);
+  child.reply(JSON.stringify([{ uuid, at: 40, blocks: [[65, 0xd800, 66]] }]));
+  assert.deepEqual(await preview, { available: true, messages: [
+    { role: 'assistant', transcript_uuid: uuid, sent_at_ms: 40, blocks: [{ type: 'text', text: 'A\ud800B' }] },
+  ] });
+});
+
 test('an exact cold selection shares its in-flight read and validates the page separately', async t => {
   const cwd = project(t), children = processes();
   const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });

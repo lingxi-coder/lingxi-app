@@ -26,10 +26,12 @@ struct Request {
     scope: Option<String>,
     transcript_path: Option<PathBuf>,
     history_before: Option<super::history_page::Cursor>,
+    history_limit: Option<usize>,
     history_image: Option<super::history_image::ImageRequest>,
     #[serde(default)]
     history_latest: bool,
     activity_after: Option<u64>,
+    activity_preview: Option<u64>,
     #[serde(default)]
     prepare_open: bool,
     #[serde(default, deserialize_with = "workspace_environment_flag")]
@@ -212,6 +214,22 @@ impl CatalogWorker {
         {
             return Err("invalid session catalog worker request".into());
         }
+        if request
+            .history_limit
+            .is_some_and(|limit| !(1..=200).contains(&limit))
+            || (request.history_limit.is_some() && request.history_before.is_none())
+            || request.activity_preview.is_some_and(|cursor| cursor == 0)
+            || (request.activity_preview.is_some()
+                && (request.activity_after.is_some()
+                    || request.history_before.is_some()
+                    || request.history_latest
+                    || request.history_image.is_some()
+                    || request.scope.is_some()
+                    || request.prepare_open
+                    || request.workspace_environment.is_some()))
+        {
+            return Err("Invalid catalog read operation".into());
+        }
         let cwd = tokio::fs::canonicalize(&request.cwd)
             .await
             .map_err(|_| "session catalog workspace is unavailable".to_string())?;
@@ -276,9 +294,12 @@ impl CatalogWorker {
                     return Err("History preview exceeds the output limit".into());
                 }
                 Ok(body)
-            }).await.map_err(|error| error.to_string())?;
+            })
+            .await
+            .map_err(|error| error.to_string())?;
         }
-        if let Some(after) = request.activity_after {
+        let (activity_after, activity_preview) = (request.activity_after, request.activity_preview);
+        if activity_after.is_some() || activity_preview.is_some() {
             let id = request
                 .session_id
                 .as_deref()
@@ -295,8 +316,14 @@ impl CatalogWorker {
                 return Err("Activity source is outside the session catalog".into());
             }
             return tokio::task::spawn_blocking(move || {
-                let page =
-                    session::jsonl::activity::page(&source, after).map_err(|e| e.to_string())?;
+                if let Some(cursor) = activity_preview {
+                    let messages = session::jsonl::activity::preview(&source, cursor).map_err(|e| e.to_string())?;
+                    return serde_json::to_string(&messages.into_iter().map(|message| {
+                        serde_json::json!({"uuid": message.uuid, "at": message.at, "blocks": message.blocks})
+                    }).collect::<Vec<_>>()).map_err(|e| e.to_string());
+                }
+                let page = session::jsonl::activity::page(&source, activity_after.unwrap_or_default())
+                    .map_err(|e| e.to_string())?;
                 serde_json::to_string(&page).map_err(|e| e.to_string())
             })
             .await
@@ -312,8 +339,9 @@ impl CatalogWorker {
                 .as_deref()
                 .and_then(|id| uuid::Uuid::parse_str(id).ok())
                 .ok_or("Invalid history session")?;
+            let limit = request.history_limit;
             let page = tokio::task::spawn_blocking(move || {
-                super::history_page::read(&source, session_id, cursor)
+                super::history_page::read_limited(&source, session_id, cursor, limit)
             })
             .await
             .map_err(|error| error.to_string())??;
@@ -566,6 +594,60 @@ mod tests {
                 .is_err());
             assert!(output.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn committed_inbox_result_can_be_read_after_600_newer_rows() {
+        use session::jsonl::durable_writer::DurableTranscriptWriter;
+        use session::jsonl::{JsonlMessage, JsonlWriter, activity};
+        use serde_json::json;
+
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("workspace");
+        let home = root.path().join("config");
+        std::fs::create_dir(&cwd).unwrap();
+        let home = {
+            std::fs::create_dir(&home).unwrap();
+            home.canonicalize().unwrap()
+        };
+        let session_id = uuid::Uuid::new_v4();
+        let transcript = session::jsonl::session_path(&home, cwd.to_str().unwrap(), &session_id.to_string());
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, "").unwrap();
+        let state = home.join("state");
+        std::fs::create_dir(&state).unwrap();
+        let fs = Arc::new(crate::HostFileSystem::new(home.clone()));
+        let writer = JsonlWriter::new(transcript.clone(), fs)
+            .with_durable_lock(Arc::new(DurableTranscriptWriter::open(state).unwrap()));
+        writer.bootstrap_session_message_identity_snapshot(&transcript).await.unwrap();
+        let result_id = uuid::Uuid::new_v4();
+        let result: JsonlMessage = serde_json::from_value(json!({
+            "type": "assistant", "uuid": result_id, "sessionId": session_id,
+            "timestamp": "2026-11-16T16:00:00Z",
+            "message": { "id": "old", "role": "assistant", "stop_reason": "end_turn",
+                "content": [{ "type": "text", "text": "Committed old result" }] }
+        })).unwrap();
+        writer.append_batch(&[result]).await.unwrap();
+        activity::finish_turn(&transcript, Some("old"), None, false).unwrap();
+        let through = activity::summary(&transcript).unwrap().unwrap().cursor;
+        assert!(through > 0);
+        let newer = (0..600).map(|index| serde_json::from_value::<JsonlMessage>(json!({
+            "type": "user", "uuid": uuid::Uuid::new_v4(), "sessionId": session_id,
+            "message": { "role": "user", "content": format!("newer {index}") }
+        })).unwrap()).collect::<Vec<_>>();
+        writer.append_batch(&newer).await.unwrap();
+
+        let input = format!("{}\n", json!({
+            "version": 2, "id": 1, "cwd": cwd, "sessionId": session_id,
+            "transcriptPath": transcript, "activityPreview": through,
+        }));
+        let mut output = Vec::new();
+        serve(input.as_bytes(), &mut output, home).await.unwrap();
+        let responses = decode_responses(&output);
+        assert_eq!(responses[0].0["kind"], "output");
+        let body: serde_json::Value = serde_json::from_slice(responses[0].1).unwrap();
+        assert_eq!(body[0]["uuid"], result_id.to_string());
+        assert_eq!(body[0]["blocks"][0], json!("Committed old result".encode_utf16().collect::<Vec<_>>()));
     }
 
     #[test]

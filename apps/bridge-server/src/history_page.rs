@@ -5,16 +5,16 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
-use client::protocol::message::MessageDto;
+use client::protocol::message::{MessageBlockDto, MessageDto};
 use serde::{Deserialize, Serialize};
 
 const CHUNK: u64 = 64 * 1024;
-const MAX_PAGE_BYTES: usize = 6 * 1024 * 1024;
+pub(crate) const MAX_PAGE_BYTES: usize = 6 * 1024 * 1024;
+pub(crate) const PAGE_ROWS: usize = 60;
 // Legacy rows may carry four inline 20 MiB attachments before projection.
 const MAX_RAW_ROW_BYTES: usize = 112 * 1024 * 1024;
 const MAX_PREVIEW_SCAN_BYTES: u64 = 128 * 1024 * 1024;
-const PAGE_ROWS: usize = 60;
-pub(super) const MAX_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -152,7 +152,7 @@ impl ReverseLines {
     }
 }
 
-fn identity(metadata: &std::fs::Metadata) -> String {
+pub(crate) fn identity(metadata: &std::fs::Metadata) -> String {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -164,7 +164,17 @@ fn identity(metadata: &std::fs::Metadata) -> String {
     }
 }
 
-pub(super) fn read(path: &Path, session_id: uuid::Uuid, cursor: Cursor) -> Result<Page, String> {
+#[cfg(test)]
+fn read(path: &Path, session_id: uuid::Uuid, cursor: Cursor) -> Result<Page, String> {
+    read_limited(path, session_id, cursor, None)
+}
+
+pub(super) fn read_limited(
+    path: &Path,
+    session_id: uuid::Uuid,
+    cursor: Cursor,
+    limit: Option<usize>,
+) -> Result<Page, String> {
     if path
         .file_stem()
         .and_then(|v| v.to_str())
@@ -191,7 +201,14 @@ pub(super) fn read(path: &Path, session_id: uuid::Uuid, cursor: Cursor) -> Resul
     {
         return Err("History source changed. Reopen this chat to reload history.".into());
     }
-    read_page(file, opened, session_id, Some(cursor), None)
+    read_page(
+        file,
+        opened,
+        session_id,
+        Some(cursor),
+        None,
+        limit.unwrap_or(PAGE_ROWS),
+    )
 }
 
 /// Hold the very same no-symlink file across scope validation and preview by
@@ -257,6 +274,7 @@ impl LatestSource {
             session_id,
             None,
             Some(MAX_PREVIEW_SCAN_BYTES),
+            PAGE_ROWS,
         )?;
         let current = Self::open_file(&self.home, &self.relative)?;
         if opened_file_identity(&current).map_err(|error| error.to_string())?
@@ -343,6 +361,7 @@ fn read_page(
     session_id: uuid::Uuid,
     cursor: Option<Cursor>,
     scan_limit: Option<u64>,
+    row_limit: usize,
 ) -> Result<Page, String> {
     let source_identity = identity(&opened);
     let mut found = cursor.as_ref().is_none_or(|cursor| cursor.offset.is_some());
@@ -387,8 +406,15 @@ fn read_page(
     let mut pending_calls = HashSet::new();
     let mut pending_summary = false;
     let mut safe_offsets = Vec::new();
-    let mut bytes = 0;
-    let page_budget = if scan_limit.is_some() { MAX_PREVIEW_BYTES } else { MAX_PAGE_BYTES };
+    let mut assistant_offsets = HashMap::new();
+    let mut bytes = 0usize;
+    let mut oversized = None;
+    let mut skip_activity = false;
+    let page_budget = if scan_limit.is_some() {
+        MAX_PREVIEW_BYTES
+    } else {
+        MAX_PAGE_BYTES
+    };
     while let Some((offset, line)) = reader.next()? {
         let loaded = session::jsonl::route_lines(&line);
         let Some(mut row) = loaded
@@ -409,7 +435,46 @@ fn read_page(
             }
             continue;
         }
-        let projected_image = super::history_image::project_images(&mut row, offset, &source_identity)?;
+        let group = assistant_group(&row);
+        let continues_group = group
+            .as_ref()
+            .and_then(|group| assistant_offsets.get(group));
+        if let Some(sibling) = continues_group {
+            // A cut between split assistant rows would duplicate or fragment a logical message.
+            safe_offsets.retain(|offset| offset > sibling);
+        }
+        if skip_activity
+            && pending_calls.is_empty()
+            && !pending_summary
+            && continues_group.is_none()
+        {
+            break;
+        }
+        if !skip_activity
+            && rows.len() >= row_limit
+            && truncate_complete_page(&mut rows, &safe_offsets, &pending_siblings)
+        {
+            break;
+        }
+        let owned = owns_row(&row, session_id);
+        let linked = owned
+            || ancestors.contains(&row.uuid)
+            || group.as_ref().is_some_and(|group| groups.contains(group));
+        if !linked && (group.is_none() || skip_activity) {
+            continue;
+        }
+        if skip_activity {
+            ancestors.extend(row.parent_uuid.iter().cloned());
+            if let Some(group) = group {
+                groups.insert(group.clone());
+                assistant_offsets.insert(group, offset);
+            }
+            update_activity(&row, &mut pending_calls, &mut pending_summary);
+            oversized = Some((offset, row.uuid, row.message_type));
+            continue;
+        }
+        let projected_image =
+            super::history_image::project_images(&mut row, Some((offset, &source_identity)))?;
         if line.len() > page_budget {
             // Full pre-edit files and raw image tool results are omitted by the
             // canonical display lowerer. Avoid spending the page budget on them.
@@ -425,25 +490,19 @@ fn read_page(
         } else {
             line.len()
         };
-        if bytes + weight > page_budget {
-            if !truncate_complete_page(&mut rows, &safe_offsets, &pending_siblings) {
-                return Err("One history activity exceeds the page size limit".into());
-            }
-            break;
+        if !linked && bytes.saturating_add(weight) > page_budget {
+            // A speculative foreign sibling cannot consume the whole page.
+            continue;
         }
-        bytes += weight;
-        let group = assistant_group(&row);
-        let owned = uuid::Uuid::parse_str(
-            row.session_id
-                .strip_prefix("sess:")
-                .unwrap_or(&row.session_id),
-        )
-        .ok()
-            == Some(session_id);
-        if !owned
-            && !ancestors.contains(&row.uuid)
-            && !group.as_ref().is_some_and(|group| groups.contains(group))
-        {
+        if bytes.saturating_add(weight) > page_budget {
+            if truncate_complete_page(&mut rows, &safe_offsets, &pending_siblings) {
+                break;
+            }
+            skip_activity = true;
+            rows.clear();
+        }
+        bytes = bytes.saturating_add(weight);
+        if !linked {
             // A foreign assistant sibling may precede its proven ancestor in
             // reverse order. Keep it bounded by this page's byte budget until
             // that ancestor proves the whole assistant group belongs here.
@@ -458,30 +517,41 @@ fn read_page(
         ancestors.extend(row.parent_uuid.iter().cloned());
         if let Some(group) = group {
             groups.insert(group.clone());
+            assistant_offsets.insert(group.clone(), offset);
             if let Some(siblings) = pending_siblings.remove(&group) {
                 for sibling in siblings {
                     ancestors.extend(sibling.1.parent_uuid.iter().cloned());
                     update_activity(&sibling.1, &mut pending_calls, &mut pending_summary);
-                    rows.push(sibling);
+                    if !skip_activity {
+                        rows.push(sibling);
+                    }
                 }
                 rows.sort_by_key(|(offset, _)| std::cmp::Reverse(*offset));
             }
         }
         update_activity(&row, &mut pending_calls, &mut pending_summary);
-        rows.push((offset, row));
-        if pending_calls.is_empty() && !pending_summary {
-            safe_offsets.push(offset);
-        }
-        if rows.len() >= PAGE_ROWS
-            && truncate_complete_page(&mut rows, &safe_offsets, &pending_siblings)
-        {
-            // Keep a call/result activity together, allowing a larger single
-            // batch within the byte budget rather than dropping raw results.
-            break;
+        if skip_activity {
+            oversized = Some((offset, row.uuid, row.message_type));
+            pending_siblings.clear();
+        } else {
+            rows.push((offset, row));
+            if pending_calls.is_empty() && !pending_summary {
+                safe_offsets.push(offset);
+            }
         }
     }
     if !found {
         return Err("History anchor is unavailable. Reopen this chat.".into());
+    }
+    if let Some((offset, uuid, role)) = oversized {
+        return Ok(Page {
+            before: (offset > 0).then(|| Cursor {
+                uuid: uuid.clone(),
+                offset: Some(offset),
+                identity: Some(source_identity),
+            }),
+            messages: vec![oversized_activity(Some(uuid), &role)],
+        });
     }
     if reader.reached_scan_limit
         && !truncate_complete_page(&mut rows, &safe_offsets, &pending_siblings)
@@ -491,25 +561,68 @@ fn read_page(
     let (offsets, rows): (Vec<_>, Vec<_>) = rows.into_iter().rev().unzip();
     let mut first = 0;
     loop {
-        let before = offsets.get(first).filter(|offset| **offset > 0).map(|offset| Cursor {
-            uuid: rows[first].uuid.clone(),
-            offset: Some(*offset),
-            identity: Some(source_identity.clone()),
-        });
-        let page = Page { messages: lower_history_rows(session_id, &rows[first..]), before };
-        if scan_limit.is_none() || serde_json::to_vec(&page).map_err(|e| e.to_string())?.len() <= page_budget {
+        let before = offsets
+            .get(first)
+            .filter(|offset| **offset > 0)
+            .map(|offset| Cursor {
+                uuid: rows[first].uuid.clone(),
+                offset: Some(*offset),
+                identity: Some(source_identity.clone()),
+            });
+        let page = Page {
+            messages: lower_history_rows(session_id, &rows[first..]),
+            before,
+        };
+        if serde_json::to_vec(&page).map_err(|e| e.to_string())?.len() <= page_budget {
             return Ok(page);
         }
         // The display DTO can grow while lowering structured results. Retry
         // with a smaller complete tail and keep its exclusive physical cursor.
         let target = first + (rows.len() - first).div_ceil(2);
         let pending_offset = latest_pending_offset(&pending_siblings);
-        first = ((first + 1)..rows.len())
-            .filter(|index| safe_offsets.contains(&offsets[*index])
-                && pending_offset.is_none_or(|pending| offsets[*index] > pending))
-            .min_by_key(|index| index.abs_diff(target))
-            .ok_or("One history activity exceeds the preview output limit")?;
+        let smaller = ((first + 1)..rows.len())
+            .filter(|index| {
+                safe_offsets.contains(&offsets[*index])
+                    && pending_offset.is_none_or(|pending| offsets[*index] > pending)
+            })
+            .min_by_key(|index| index.abs_diff(target));
+        let Some(smaller) = smaller else {
+            let row = &rows[first];
+            return Ok(Page {
+                messages: vec![oversized_activity(
+                    Some(row.uuid.clone()),
+                    &row.message_type,
+                )],
+                before: page.before,
+            });
+        };
+        first = smaller;
     }
+}
+
+pub(crate) fn oversized_activity(uuid: Option<String>, role: &str) -> MessageDto {
+    MessageDto {
+        role: if role == "user" { "user" } else { "assistant" }.into(),
+        transcript_uuid: uuid,
+        blocks: vec![MessageBlockDto::Text {
+            text: "This history activity exceeds the display size limit.".into(),
+        }],
+        images: Vec::new(),
+        loop_wakeup: None,
+        visualization_context: None,
+        sent_at_ms: None,
+        skill_name: None,
+    }
+}
+
+pub(crate) fn owns_row(row: &session::jsonl::JsonlMessage, session_id: uuid::Uuid) -> bool {
+    uuid::Uuid::parse_str(
+        row.session_id
+            .strip_prefix("sess:")
+            .unwrap_or(&row.session_id),
+    )
+    .ok()
+        == Some(session_id)
 }
 
 fn lower_history_rows(session_id: uuid::Uuid, rows: &[session::jsonl::JsonlMessage]) -> Vec<MessageDto> {
@@ -534,7 +647,7 @@ fn lower_history_rows(session_id: uuid::Uuid, rows: &[session::jsonl::JsonlMessa
             .collect()
 }
 
-type AssistantGroup = (String, String, String);
+pub(crate) type AssistantGroup = (String, String, String);
 type HistoryRow = (u64, session::jsonl::JsonlMessage);
 
 fn truncate_complete_page(
@@ -560,7 +673,7 @@ fn latest_pending_offset(pending: &HashMap<AssistantGroup, Vec<HistoryRow>>) -> 
     pending.values().flatten().map(|(offset, _)| *offset).max()
 }
 
-fn assistant_group(row: &session::jsonl::JsonlMessage) -> Option<AssistantGroup> {
+pub(crate) fn assistant_group(row: &session::jsonl::JsonlMessage) -> Option<AssistantGroup> {
     (row.message_type == "assistant").then(|| {
         Some((
             uuid::Uuid::parse_str(
@@ -575,7 +688,7 @@ fn assistant_group(row: &session::jsonl::JsonlMessage) -> Option<AssistantGroup>
     })?
 }
 
-fn update_activity(
+pub(crate) fn update_activity(
     row: &session::jsonl::JsonlMessage,
     pending_calls: &mut HashSet<String>,
     pending_summary: &mut bool,
@@ -656,6 +769,67 @@ mod tests {
                 identity: None,
             },
         )
+    }
+
+    #[test]
+    fn one_oversized_activity_keeps_an_exclusive_physical_cursor() {
+        let id = uuid::Uuid::new_v4();
+        let call = uuid::Uuid::new_v4().to_string();
+        let mut call_row = agent_call("paired");
+        call_row["uuid"] = call.clone().into();
+        let mut result = agent_result("paired");
+        result["message"]["content"][0]["content"] = "x".repeat(MAX_PAGE_BYTES + 4096).into();
+        let (_root, path, cursor) = saved_rows(
+            vec![text_row("earlier"), call_row, result, text_row("anchor")],
+            id,
+        );
+        let page = read_limited(&path, id, cursor, Some(1)).unwrap();
+        assert_eq!(page.messages.len(), 1);
+        assert!(matches!(
+            &page.messages[0].blocks[..],
+            [MessageBlockDto::Text { .. }]
+        ));
+        let before = page.before.unwrap();
+        assert_eq!(before.uuid, call);
+        assert!(before.offset.is_some());
+        let older = read_limited(&path, id, before, Some(1)).unwrap();
+        assert!(
+            serde_json::to_string(&older.messages)
+                .unwrap()
+                .contains("earlier")
+        );
+        assert!(older.before.is_none());
+    }
+
+    #[test]
+    fn remote_row_limit_keeps_tool_activity_on_one_page() {
+        let id = uuid::Uuid::new_v4();
+        let (_root, path, cursor) = saved_rows(
+            vec![
+                text_row("earlier"),
+                agent_call("paired"),
+                agent_result("paired"),
+                text_row("anchor"),
+            ],
+            id,
+        );
+        let page = read_limited(&path, id, cursor, Some(1)).unwrap();
+        assert_eq!(page.messages.len(), 2);
+        assert!(matches!(
+            page.messages[0].blocks[0],
+            MessageBlockDto::ToolUse { .. }
+        ));
+        assert!(matches!(
+            page.messages[1].blocks[0],
+            MessageBlockDto::ToolResult { .. }
+        ));
+        let before = page.before.unwrap();
+        assert!(before.offset.is_some());
+        assert!(
+            serde_json::to_string(&read_limited(&path, id, before, Some(1)).unwrap().messages)
+                .unwrap()
+                .contains("earlier")
+        );
     }
 
     fn text_row(text: &str) -> serde_json::Value {
@@ -791,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn byte_budget_returns_a_complete_newer_page_and_rejects_one_oversized_activity() {
+    fn byte_budget_returns_a_complete_newer_page_then_an_oversized_activity_notice() {
         let id = uuid::Uuid::new_v4();
         let mut huge = agent_result("agent");
         huge["message"]["content"][0]["content"] = "x".repeat(MAX_PAGE_BYTES).into();
@@ -806,10 +980,10 @@ mod tests {
         );
         let newer = read(&path, id, cursor).unwrap();
         assert_eq!(newer.messages.len(), 1);
-        assert!(read(&path, id, newer.before.unwrap())
-            .err()
-            .unwrap()
-            .contains("page size limit"));
+        let oversized = read(&path, id, newer.before.unwrap()).unwrap();
+        assert_eq!(oversized.messages.len(), 1);
+        assert!(oversized.before.is_none());
+        assert!(serde_json::to_string(&oversized.messages).unwrap().contains("exceeds the display size limit"));
     }
 
     #[test]
@@ -895,7 +1069,7 @@ mod tests {
         let read_preview = |scan_limit| {
             let file = File::open(&path).unwrap();
             let metadata = file.metadata().unwrap();
-            read_page(file, metadata, id, None, Some(scan_limit))
+            read_page(file, metadata, id, None, Some(scan_limit), PAGE_ROWS)
         };
         // Stop in the middle of row 2, after consuming complete rows 3 and 4.
         let scan_limit = source.len() - newlines[2] + 12;
@@ -925,7 +1099,15 @@ mod tests {
         let (_root, path, tip) = saved_rows((0..60).map(|_| text_row(&value)).collect(), id);
         let file = File::open(&path).unwrap();
         let metadata = file.metadata().unwrap();
-        let page = read_page(file, metadata, id, None, Some(MAX_PREVIEW_SCAN_BYTES)).unwrap();
+        let page = read_page(
+            file,
+            metadata,
+            id,
+            None,
+            Some(MAX_PREVIEW_SCAN_BYTES),
+            PAGE_ROWS,
+        )
+        .unwrap();
         assert!(!page.messages.is_empty());
         assert!(page.messages.len() < 60);
         assert!(serde_json::to_vec(&page).unwrap().len() <= MAX_PREVIEW_BYTES);

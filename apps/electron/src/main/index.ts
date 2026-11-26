@@ -69,7 +69,7 @@ import { BotStore } from './bots/store.js';
 import { TaskChangeAnnouncer } from './bots/taskChanges.js';
 import { BotTasks } from './bots/taskService.js';
 import { SessionGateway } from './remoteControl/sessionGateway.js';
-import { activityPreview, historyTail } from './remoteControl/snapshot.js';
+import { historyTail } from './remoteControl/snapshot.js';
 import { LocalAppsGateway } from './remoteControl/localAppsGateway.js';
 import { createRemoteLocalAppsDelegate } from './remoteControl/localAppsBindings.js';
 import { LocalAppRtc } from './local-apps/remoteRtc.js';
@@ -633,7 +633,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       return host.rememberCreatedSessionSource(ref, runtime, scheduled);
     },
     notifier,
-    onInboxActivity: (ref) => { sessionCatalog.invalidate(ref.projectPath); },
+    onInboxActivity: (ref) => { sessionCatalog.invalidate(ref.projectPath, { preserveImages: true }); },
     onCronRunRequested: (runtime, event) => scheduled ? scheduled.run(runtime, event.run_id, event.task) : Promise.reject(new Error('Scheduled task service unavailable')),
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
@@ -871,10 +871,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     activityPreview: async (ref, through) => {
       const row = await sessionCatalog.find(ref.projectPath, ref.sessionId);
       if (!row) throw new Error('SOURCE_ACCESS_REQUIRED');
-      const page = await sessionCatalog.readActivity(ref.projectPath, ref.sessionId, row.path, through - 1);
-      const runtime = bridge?.get(ref.sessionId);
-      if (!runtime || runtime.projectPath !== ref.projectPath) return { available: false, messages: [] };
-      return activityPreview(runtime.remoteView(), page.items.find(item => item.cursor === through)?.resultUuids ?? []);
+      return sessionCatalog.readActivityPreview(ref.projectPath, ref.sessionId, row.path, through);
     },
     notify: notice => {
       if (!Notification.isSupported()) return;
@@ -939,12 +936,12 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       allowAlwaysAllow: () => policy.allowAlwaysAllow(),
       echo: (echo) => remoteUi?.echo(echo),
       codec: nativeImageCodec,
-      readHistory: async (runtime, before) => {
+      readHistory: async (runtime, before, limit) => {
         const owner = runtimes.get(runtime.sessionId);
         if (!owner || owner !== runtime) throw new Error('The transcript owner is unavailable');
         const workspace = await owner.getWorkspaceState();
         if (runtimes.get(runtime.sessionId) !== owner || !workspace.transcript_path) throw new Error('The transcript owner changed');
-        return sessionCatalog.readHistory(owner.projectPath, owner.sessionId, workspace.transcript_path, before);
+        return sessionCatalog.readHistory(owner.projectPath, owner.sessionId, workspace.transcript_path, before, limit);
       },
       readHistoryImage: async (runtime, reference, size, signal) => {
         const owner = runtimes.get(runtime.sessionId);
@@ -955,6 +952,11 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     }),
     titleOf: async (ref) => (await sessionCatalog.find(ref.projectPath, ref.sessionId))?.title,
     activityOf: async (ref) => (await sessionCatalog.find(ref.projectPath, ref.sessionId))?.activity_json ?? undefined,
+    activityPreview: async (ref, through) => {
+      const row = await sessionCatalog.find(ref.projectPath, ref.sessionId);
+      if (!row) throw new Error('SOURCE_ACCESS_REQUIRED');
+      return sessionCatalog.readActivityPreview(ref.projectPath, ref.sessionId, row.path, through);
+    },
     activityPage: async (ref, after) => {
       const row = await sessionCatalog.find(ref.projectPath, ref.sessionId);
       if (!row) throw new Error('SOURCE_ACCESS_REQUIRED');

@@ -297,6 +297,7 @@ export class SessionRuntime {
   private resumeOperationInProgress = false;
   private sessionHasHistory = false;
   private ownedSessionResumeRequired = false;
+  private lastRemoteActionReady = false;
   private sessionIdentityCommitted = false;
   private eventSequence = 0;
   private replayCheckpointWanted = false;
@@ -1269,6 +1270,13 @@ export class SessionRuntime {
   /** A connected transport alone does not prove that owned history restored. */
   get needsSessionResume(): boolean { return this.ownedSessionResumeRequired; }
 
+  get remoteActionReady(): boolean {
+    return this.state.status === 'connected' && !this.isStarting && !this.resumeOperationInProgress
+      && !this.ownedSessionResumeRequired && !this.draftModeRestorationRequired && !this.changingWorkspace
+      && (!this.ownedTranscriptPath || this.sessionHasHistory || this.draftSessionMode !== undefined)
+      && !this.disposed && !this.disposing;
+  }
+
   get isStarting(): boolean { return this.startPromise !== null || this.automaticRecovery !== undefined; }
 
   /** Wait for existing lifecycle work without starting a stopped runtime. */
@@ -1433,8 +1441,7 @@ export class SessionRuntime {
       ? base.historyBefore ?? initialHistory(base.event.messages).before : undefined;
     return {
       sessionId: this.sessionId,
-      ...(!this.draftModeRestorationRequired && !this.ownedSessionResumeRequired && this.sessionMode
-        ? { sessionMode: this.sessionMode } : {}),
+      ...(this.remoteActionReady && this.sessionMode ? { sessionMode: this.sessionMode } : {}),
       runtimeId: this.runtimeId,
       ...position,
       base,
@@ -1653,6 +1660,11 @@ export class SessionRuntime {
   }
 
   private notifyActivityChanged(): void {
+    const ready = this.remoteActionReady;
+    if (ready !== this.lastRemoteActionReady) {
+      this.lastRemoteActionReady = ready;
+      this.notifyRemote({ type: 'action_readiness', ready });
+    }
     this.opts.onActivityChanged?.();
     this.queueReplayCheckpoint();
   }
@@ -1916,7 +1928,10 @@ export class SessionRuntime {
     });
     this.restartChain = starting;
     const completion = starting.finally(() => {
-      if (this.startPromise === completion) this.startPromise = null;
+      if (this.startPromise === completion) {
+        this.startPromise = null;
+        this.notifyActivityChanged();
+      }
     });
     this.startPromise = completion;
     // Account IO may involve Keychain, OAuth and other processes. It must
@@ -2137,11 +2152,13 @@ export class SessionRuntime {
     this.restartChain = operation;
     void operation.then(() => {
       this.automaticRecovery = undefined;
+      this.notifyActivityChanged();
       if (epoch === this.recoveryEpoch && (this.recoveryKind !== undefined || this.state.status === 'disconnected')) {
         this.scheduleAutomaticRecovery(this.recoveryKind ?? kind);
       }
     }, (error) => {
       this.automaticRecovery = undefined;
+      this.notifyActivityChanged();
       if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
       this.diagnostics.add('warn', 'host', `automatic engine recovery failed: ${sanitizeDiagnostic(error)}`);
       this.scheduleAutomaticRecovery(this.recoveryKind ?? kind);
@@ -4284,6 +4301,7 @@ export class SessionRuntime {
       this.freshOwnedReplay = undefined;
     }
     this.draftModeRestorationRequired = false;
+    this.notifyActivityChanged();
   }
 
   private requestDraftModeSnapshot(): Promise<void> {

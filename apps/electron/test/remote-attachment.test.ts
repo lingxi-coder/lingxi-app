@@ -128,6 +128,25 @@ test('a new base tells the viewer at once and sends a fresh snapshot by itself a
   assert.deepEqual(channel.methods(), ['session.event']);
 });
 
+test('an attached viewer waits for restored controls even after the resume base arrives', () => {
+  const { runtime, channel, clock, attachment } = setup();
+  attachment.attach(undefined);
+  channel.clear();
+  runtime.setActionReady(false);
+  runtime.resume([{ role: 'user', blocks: [{ type: 'text', text: 'saved history' }] }]);
+  clock.advance(LIVE_BATCH_MS * 5);
+  const waiting = channel.of('session.snapshot');
+  assert.deepEqual(waiting.map(frame => frame.phase), ['begin']);
+  assert.equal(waiting[0].session_mode, undefined);
+  assert.equal(channel.of('session.reset').length, 0);
+  runtime.setActionReady(true);
+  clock.advance(LIVE_BATCH_MS);
+  const frames = channel.of('session.snapshot').slice(1);
+  assert.deepEqual(frames.map(frame => frame.phase), ['begin', 'messages', 'end']);
+  assert.equal(frames[0].session_mode, 'code');
+  assert.match(JSON.stringify(frames[1]), /saved history/);
+});
+
 test('two new bases in a row make one reset and one snapshot', () => {
   const { runtime, channel, clock, attachment } = setup();
   attachment.attach(undefined);

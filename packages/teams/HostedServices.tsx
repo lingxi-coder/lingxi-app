@@ -289,7 +289,12 @@ function ServiceSessions({ api, uid, locale, service, initialSessionId, renderMa
     };
     const poll = (kind: SessionCheck, read: (accepts: () => boolean) => Promise<void>) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let dueAt = 0;
       let inFlight = false, requested = 0;
+      function schedule(delay: number) {
+        dueAt = Date.now() + delay;
+        timer = setTimeout(() => { timer = undefined; void run(); }, delay);
+      }
       async function run() {
         if (!current()) return;
         const request = requested;
@@ -309,13 +314,18 @@ function ServiceSessions({ api, uid, locale, service, initialSessionId, renderMa
           }
         }
         inFlight = false;
-        if (current()) timer = setTimeout(() => void run(), request === requested ? nextDelay : 0);
+        if (current()) schedule(request === requested ? nextDelay : 0);
       }
       void run();
       return {
         refresh() {
           requested += 1;
-          if (!inFlight) { clearTimeout(timer); void run(); }
+          if (!inFlight) { clearTimeout(timer); timer = undefined; void run(); }
+        },
+        accelerate() {
+          if (timer === undefined || Date.now() + nextDelay >= dueAt) return;
+          clearTimeout(timer);
+          schedule(nextDelay);
         },
         stop() { clearTimeout(timer); },
       };
@@ -338,7 +348,9 @@ function ServiceSessions({ api, uid, locale, service, initialSessionId, renderMa
         if (tasks.some(task => task.conversationId !== sessionId)) throw new Error('INVALID_DATA');
         setTasks([...tasks].sort((a, b) => a.createdAt - b.createdAt));
         updateChecks({ tasks: true });
+        const previousDelay = nextDelay;
         nextDelay = tasks.some(task => LIVE.includes(task.state)) ? refreshMs.answering : refreshMs.idle;
+        if (nextDelay < previousDelay) for (const read of reads) read.accelerate();
       }));
     }
     refreshCurrent.current = () => { for (const read of reads) read.refresh(); };

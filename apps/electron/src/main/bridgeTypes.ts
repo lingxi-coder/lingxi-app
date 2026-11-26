@@ -1,4 +1,5 @@
 import type { ProviderAccountSnapshot, ProviderAccountRouting } from '../shared/providerAccounts.js';
+import type { TranscriptHistoryCursor } from '../shared/sessionHistory.js';
 import type { RuntimeProviderAccountCredential } from './provider-accounts.js';
 import type {
   AudioCapabilitySnapshotDto,
@@ -118,6 +119,7 @@ export interface BridgeManagerOptions {
   isPackaged?: boolean;
   resourcesPath?: string;
   launchConfig: () => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
+  prepareLaunchConfig?: () => Promise<() => BridgeLaunchConfig>;
   /** Provider ids whose shared secure-store status is cached after connect. */
   providerIds?: readonly string[];
   /** Synchronous trust snapshot used by privileged IPC checks. */
@@ -190,6 +192,7 @@ export interface RuntimeEventEnvelope<T = unknown> {
 
 export interface SequencedRuntimeEventEnvelope<T = unknown> extends RuntimeEventEnvelope<T> {
   sequence: number;
+  historyBefore?: TranscriptHistoryCursor;
   /** Replay-only equivalent span, inclusive through `sequence`. Live frames have no span. */
   replayFromSequence?: number;
 }

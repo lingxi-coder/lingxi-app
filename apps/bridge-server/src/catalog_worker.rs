@@ -27,6 +27,8 @@ struct Request {
     transcript_path: Option<PathBuf>,
     history_before: Option<super::history_page::Cursor>,
     activity_after: Option<u64>,
+    #[serde(default)]
+    prepare_open: bool,
     #[serde(default, deserialize_with = "workspace_environment_flag")]
     workspace_environment: Option<bool>,
 }
@@ -217,6 +219,7 @@ impl CatalogWorker {
                 || request.transcript_path.is_some()
                 || request.history_before.is_some()
                 || request.activity_after.is_some()
+                || request.prepare_open
             {
                 return Err("invalid workspace environment request".into());
             }
@@ -237,6 +240,15 @@ impl CatalogWorker {
         } else {
             cwd.join(&self.home)
         };
+        if request.prepare_open
+            && (request.transcript_path.is_none()
+                || request.session_id.is_none()
+                || request.scope.is_none()
+                || request.history_before.is_some()
+                || request.activity_after.is_some())
+        {
+            return Err("an open preview requires an exact catalog selection".into());
+        }
         if let Some(after) = request.activity_after {
             let id = request
                 .session_id
@@ -298,10 +310,45 @@ impl CatalogWorker {
                 .as_deref()
                 .ok_or_else(|| "selected session id is required".to_string())?;
             let scope = scope.ok_or_else(|| "selected session scope is required".to_string())?;
-            super::validate_selected_transcript_identity(source, id)?;
+            let uuid = super::validate_selected_transcript_identity(source, id)?;
+            let preview_source = request
+                .prepare_open
+                .then(|| super::history_page::LatestSource::open(&home, source, uuid).ok())
+                .flatten();
             // Exact-source requests still capture/revalidate the selected source;
             // they never resolve a cached UUID winner or a substitute transcript.
-            super::list_selected_session_json_from_in_scope(&cwd, &home, id, source, scope).await?
+            let catalog =
+                super::list_selected_session_json_from_in_scope(&cwd, &home, id, source, scope)
+                    .await?;
+            if !request.prepare_open {
+                catalog
+            } else {
+                // A missing row must never expose a page from a different scope.
+                let has_row = serde_json::from_str::<serde_json::Value>(&catalog)
+                    .ok()
+                    .and_then(|result| result["sessions"].as_array().map(|rows| !rows.is_empty()))
+                    .unwrap_or(false);
+                let preview = match preview_source.filter(|_| has_row) {
+                    Some(source) => tokio::task::spawn_blocking(move || {
+                        source
+                            .read(uuid)
+                            .ok()
+                            .filter(|page| !page.messages.is_empty())
+                            .and_then(|page| serde_json::to_string(&page).ok())
+                            .filter(|page| page.len() <= super::history_page::MAX_PREVIEW_BYTES)
+                    })
+                    .await
+                    .ok()
+                    .flatten(),
+                    None => None,
+                };
+                // Both fragments are module-generated JSON. Preserve escaped
+                // UTF-16 units in transcript text when framing them together.
+                format!(
+                    r#"{{"catalog":{catalog},"preview":{}}}"#,
+                    preview.as_deref().unwrap_or("null")
+                )
+            }
         } else {
             let fs = self.filesystem(cwd.clone(), home.clone());
             // Discovery and revision/alias checks still run on every request.

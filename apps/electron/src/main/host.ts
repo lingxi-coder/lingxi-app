@@ -1,7 +1,7 @@
 import { CH_DECISION } from '../shared/decision.js';
 import type { DecisionHost } from './decision.js';
 import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
-import { CH_SESSION_HISTORY, CH_SESSION_RESUME_PREVIEW, historyCursor, type SessionResumePreview } from '../shared/sessionHistory.js';
+import { CH_SESSION_HISTORY, CH_SESSION_RESUME_PREVIEW, historyCursor, type SessionResumePreview, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
 import { CH_PROVIDER_ACCOUNTS, CH_PROVIDER_ACCOUNTS_CANCEL, type ProviderAccountCommand } from '../shared/providerAccounts.js';
 import type { DesktopProviderAccounts } from './provider-accounts.js';
 import { ProviderVaultClient, ProviderVaultError, vaultIdForAccount, vaultInstallPlan, vaultUpsertFor } from './provider-vault.js';
@@ -500,6 +500,7 @@ export async function resolveSavedConversationTranscript(
 
 async function resolveSavedConversationTranscriptRow(
   settings: SettingsStore, catalog: ProjectSessionCatalog, ref: SessionRef,
+  select: ProjectSessionCatalog['select'] = (project, id, selection) => catalog.select(project, id, selection),
 ): Promise<ProjectSessionCatalogRow | undefined> {
   const owner = settings.conversationSpaces.findBySessionId(ref.sessionId);
   // Look up the saved path through the UUID owner first, so a caller cannot
@@ -510,7 +511,7 @@ async function resolveSavedConversationTranscriptRow(
     || (ref.projectId !== undefined && owner.projectId !== ref.projectId)) {
     throw new Error('The saved session owner does not match this conversation.');
   }
-  const row = await catalog.select(selected.catalogProjectPath, ref.sessionId,
+  const row = await select(selected.catalogProjectPath, ref.sessionId,
     { scope: selected.scope, transcriptPath: selected.transcriptPath });
   if (!row || row.uuid.toLowerCase() !== ref.sessionId.toLowerCase() || row.mode !== owner.mode
     || row.path !== selected.transcriptPath || !isAbsolute(row.path)) {
@@ -3253,8 +3254,16 @@ export class HostController {
     }
     let source = existing?.projectPath ?? project;
     const catalogStartedAt = performance.now();
-    let session = remembered ? await resolveSavedConversationTranscriptRow(this.settings, this.sessionCatalog, ref)
-      : selection ? await this.sessionCatalog.select(catalogProject, ref.sessionId, selection) : undefined;
+    const allowCatalogPreview = publishPreview && !existing && typeof this.sessionCatalog.selectForOpen === 'function';
+    let earlyPreview: TranscriptHistoryPage | undefined;
+    const select: ProjectSessionCatalog['select'] = async (projectPath, sessionId, exact) => {
+      if (!allowCatalogPreview || !exact.transcriptPath) return this.sessionCatalog.select(projectPath, sessionId, exact);
+      const prepared = await this.sessionCatalog.selectForOpen(projectPath, sessionId, exact);
+      earlyPreview = prepared.preview;
+      return prepared.session;
+    };
+    const session = remembered ? await resolveSavedConversationTranscriptRow(this.settings, this.sessionCatalog, ref, select)
+      : selection ? await select(catalogProject, ref.sessionId, selection) : undefined;
     if (selection) this.diagnostics.add('info', 'host', diagnosticEvent('session_open_catalog_completed', {
       sessionId: ref.sessionId, durationMs: Math.round(performance.now() - catalogStartedAt),
     }));
@@ -3324,10 +3333,13 @@ export class HostController {
         if (remembered && !sourceWasCurrent) {
           throw new Error('The saved session selection changed while opening it. Refresh the session list and try again.');
         }
-        if (sourceWasCurrent && !archived()) onPreview = event => {
+        const previewSession = { projectPath: canonical.projectPath, sessionId: canonical.sessionId, mode: canonical.mode };
+        if (sourceWasCurrent && !archived() && earlyPreview) {
+          publishPreview({ session: previewSession, messages: earlyPreview.messages });
+        } else if (sourceWasCurrent && !archived()) onPreview = event => {
           if (!current() || archived() || !sourceIsCurrent() || event.session_id !== canonical.sessionId || event.mode !== canonical.mode
             || this.bridge.get(canonical.sessionId)?.projectPath !== canonical.projectPath) return;
-          publishPreview({ session: { projectPath: canonical.projectPath, sessionId: canonical.sessionId, mode: canonical.mode }, messages: event.messages });
+          publishPreview({ session: previewSession, messages: event.messages });
         };
       }
       const openArgs = [canonical, session?.empty_session === true, session?.resume_model, false, selection ? session?.path : undefined] as const;

@@ -65,6 +65,29 @@ function processes() {
   return { calls, spawnProcess, get live() { return live; }, get peak() { return peak; } };
 }
 
+test('an exact cold selection shares its in-flight read and validates the page separately', async t => {
+  const cwd = project(t), children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const selection = { scope: 'current' as const, transcriptPath: row().path };
+  const first = catalog.selectForOpen(cwd, uuid, selection);
+  assert.equal(catalog.selectForOpen(cwd, uuid, selection), first);
+  await nextTurn();
+  const child = children.calls[0];
+  assert.equal(child.queries[0].prepareOpen, true);
+  assert.equal(child.queries[0].transcriptPath, selection.transcriptPath);
+  const messages = [{ role: 'user', transcript_uuid: uuid, blocks: [{ type: 'text', text: 'recent' }] }];
+  child.reply(JSON.stringify({ catalog: JSON.parse(output()), preview: { messages, before: null } }));
+  assert.deepEqual((await first).preview?.messages, messages);
+
+  const changed = catalog.selectForOpen(cwd, uuid, selection);
+  await nextTurn();
+  child.reply(JSON.stringify({ catalog: JSON.parse(output()), preview: { messages, before: { uuid: 'invalid' } } }));
+  const next = await changed;
+  assert.equal(next.session?.path, selection.transcriptPath);
+  assert.equal(next.preview, undefined);
+});
+
 test('workspace launch settings reuse only an idle reader started in the requested cwd', async t => {
   const cwd = project(t), other = project(t), children = processes();
   const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
@@ -712,6 +735,28 @@ test('disposal cancels retries on exit and queued writers still wait for close',
   assert.equal(process.peak, 2);
   await assert.rejects(readers[0].find(cwd, uuid), /disposed/);
 });
+
+test('real exact-open worker previews the newest page only within the selected scope',
+  { skip: !process.env.LINGXI_SESSION_CATALOG_TEST_BIN, timeout: 60_000 }, async t => {
+    const cwd = project(t), foreign = project(t), home = join(cwd, 'isolated-home');
+    const path = join(home, 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${uuid}.jsonl`);
+    const ids = Array.from({ length: 600 }, (_, index) => `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`);
+    const rows = ids.map((id, index) => ({
+      type: 'user', uuid: id, sessionId: uuid, cwd, isSidechain: false, parentUuid: index ? ids[index - 1] : null,
+      timestamp: '2026-11-12T00:00:00Z', message: { role: 'user', content: `message ${index}` },
+    }));
+    const mode = { type: 'fixed-session-mode', sessionId: uuid, sessionMode: 'code', instructionEpoch: 0 };
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, [mode, ...rows].map(row => JSON.stringify(row)).join('\n') + '\n');
+    const catalog = new ProjectSessionCatalog({ serverBin: process.env.LINGXI_SESSION_CATALOG_TEST_BIN, configHome: home });
+    t.after(() => catalog.dispose());
+    const selection = { scope: 'current', transcriptPath: path } as const;
+    const result = await catalog.selectForOpen(cwd, uuid, selection);
+    assert.equal(result.session?.path, path);
+    assert.deepEqual(result.preview?.messages.map(row => row.transcript_uuid), ids.slice(-60));
+    assert.equal(result.preview?.before?.uuid, ids[540]);
+    assert.deepEqual(await catalog.selectForOpen(foreign, uuid, selection), { session: undefined });
+  });
 
 test('real bridge history worker pages across compacts without gaps while the source grows',
   { skip: !process.env.LINGXI_SESSION_CATALOG_TEST_BIN, timeout: 60_000 }, async t => {

@@ -1,8 +1,11 @@
+import type { TranscriptHistoryCursor } from '../shared/sessionHistory.js';
+
 export interface SequencedRuntimeEventEnvelope<T = unknown> {
   sessionId: string;
   sequence: number;
   /** The cached event replaces all stream frames in this inclusive span. */
   replayFromSequence?: number;
+  historyBefore?: TranscriptHistoryCursor;
   event: T;
 }
 

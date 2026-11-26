@@ -4,7 +4,7 @@ import { runInNewContext } from 'node:vm';
 import { test } from 'node:test';
 import ts from 'typescript';
 import type { MessageDto } from '@lingxi/bridge-client';
-import { historyCursor, initialHistory, recentTranscript } from '../src/shared/sessionHistory';
+import { historyCursor, initialDisplayPage, initialHistory, recentTranscript } from '../src/shared/sessionHistory';
 import { conversationFromMessages, emptyConversation, prependHistory, reduceEvent } from '../src/renderer/bridge/conversation';
 import { addRuntimeResources, emptyRuntimeCenterState, prependRuntimeHistory, resourcesFromRestoredMessages, reduceRuntimeCenterEvent } from '../src/renderer/bridge/runtimeCenterState';
 import { conversationPlans } from '../src/renderer/bridge/planDocuments';
@@ -21,6 +21,30 @@ test('initial replay retains only the latest compact and all later messages', ()
   assert.equal(initialHistory([message(1)]).before, null);
   const state = reduceEvent(emptyConversation(), { type: 'session_resumed', session_id: uuid(100), messages: rows } as any);
   assert.equal(state.items.length, 2);
+});
+
+test('100 and 600 persisted messages both start with the newest 60 visual rows', () => {
+  for (const count of [100, 600]) {
+    const rows = Array.from({ length: count }, (_, index) => message(index));
+    const page = initialDisplayPage(rows);
+    assert.deepEqual(page.messages, rows.slice(-60));
+    assert.deepEqual(page.before, { uuid: uuid(count - 60) });
+    assert.equal(rows.length, count);
+  }
+});
+
+test('the visual cursor preserves deferred tool pairs and the compact marker', () => {
+  const rows = Array.from({ length: 100 }, (_, index) => message(index));
+  rows[35] = { ...message(35), role: 'assistant', blocks: [
+    { type: 'tool_use', id: 'call', tool: 'Read', input_json: '{}', header: { verb: 'read', label: 'Read', title: 'Read' } },
+  ] };
+  rows[42] = { ...message(42), blocks: [
+    { type: 'tool_result', id: 'call', tool: 'Read', result_json: '{}', is_error: false, display: { body_lines: 1, body: 'done' } },
+  ] };
+  assert.deepEqual(initialDisplayPage(rows), { messages: rows.slice(34), before: { uuid: uuid(34) } });
+  rows[33] = boundary(33);
+  const page = initialDisplayPage(rows.slice(0, 91));
+  assert.deepEqual(page, { messages: rows.slice(33, 91), before: { uuid: uuid(33) } });
 });
 
 test('older pages preserve current item identities, streaming state and latest plan', () => {

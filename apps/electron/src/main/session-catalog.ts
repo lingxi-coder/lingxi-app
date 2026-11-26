@@ -78,15 +78,17 @@ interface CatalogCacheEntry {
   expiresAt: number;
 }
 
+type CatalogChildKind = 'selection' | 'default';
+
 /** A lease covers the child's lifetime, including a timed-out writer's drain. */
 class CatalogChildAdmission {
   constructor(private readonly capacity = MAX_CATALOG_CHILDREN) {}
   private active = 0;
-  private readonly waiting: Array<() => void> = [];
+  private readonly waiting: Array<{ launch(): void; kind: CatalogChildKind }> = [];
   private readonly idle = new Map<() => void, () => void>();
   private readonly unreaped = new Set<() => void>();
 
-  start<T>(start: (release: () => void) => T, waitMs = 15_000): Promise<Awaited<T>> {
+  start<T>(start: (release: () => void) => T, waitMs = 15_000, kind: CatalogChildKind = 'default'): Promise<Awaited<T>> {
     return new Promise<Awaited<T>>((resolve, reject) => {
       const launch = () => {
         this.active++;
@@ -105,7 +107,7 @@ class CatalogChildAdmission {
       if (this.active < this.capacity && this.waiting.length === 0) launch();
       else if (this.waiting.length >= MAX_QUEUED_CATALOG_OPERATIONS) reject(this.busyError());
       else {
-        const admitted = () => { clearTimeout(timeout); launch(); };
+        const admitted = { launch: () => { clearTimeout(timeout); launch(); }, kind };
         const timeout = setTimeout(() => {
           const index = this.waiting.indexOf(admitted);
           if (index < 0) return;
@@ -136,7 +138,10 @@ class CatalogChildAdmission {
   }
 
   private drain(): void {
-    while (this.waiting.length > 0 && this.active < this.capacity) this.waiting.shift()!();
+    while (this.waiting.length > 0 && this.active < this.capacity) {
+      const selection = this.waiting.findIndex(entry => entry.kind === 'selection');
+      this.waiting.splice(Math.max(0, selection), 1)[0]!.launch();
+    }
     // A persistent reader must give up its process slot when another helper,
     // especially a durable metadata writer, is waiting to start.
     if (this.waiting.length > 0) {
@@ -203,6 +208,7 @@ interface CatalogWorkerQuery {
   transcriptPath?: string;
   historyBefore?: TranscriptHistoryCursor;
   activityAfter?: number;
+  prepareOpen?: true;
 }
 
 /** One request at a time bounds worker IO; catalog callers retain their own deduplication. */
@@ -415,6 +421,10 @@ function parseCatalog(output: string, maxSessions?: number): ProjectSessionCatal
   } catch {
     throw new Error('session catalog returned invalid JSON');
   }
+  return parseCatalogValue(parsed, maxSessions);
+}
+
+function parseCatalogValue(parsed: unknown, maxSessions?: number): ProjectSessionCatalogResult {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('session catalog returned an invalid payload');
   const input = parsed as Record<string, unknown>;
   if (input['version'] !== 1 || !Array.isArray(input['sessions'])) throw new Error('session catalog returned an unsupported payload');
@@ -434,6 +444,7 @@ export class ProjectSessionCatalog {
   private readonly cache = new Map<string, CatalogCacheEntry>();
   private readonly pending = new Map<string, Promise<ProjectSessionCatalogResult>>();
   private readonly pendingSessions = new Map<string, Promise<ProjectSessionCatalogResult>>();
+  private readonly pendingOpen = new Map<string, Promise<{ session?: ProjectSessionCatalogRow; preview?: TranscriptHistoryPage }>>();
   private readonly pendingHistory = new Map<string, Promise<TranscriptHistoryPage>>();
   private providerListTail: Promise<void> = Promise.resolve();
   private queuedProviderList?: { key: string; output: Promise<string> };
@@ -600,7 +611,7 @@ export class ProjectSessionCatalog {
   /** Read settings with the engine's merge rules before starting its process. */
   async workspaceSettings(projectPath: string): Promise<WorkspaceLaunchSettings> {
     const canonical = realpathSync.native(projectPath);
-    const readOnce = () => this.runOutput(canonical, ['--cwd', canonical, '--workspace-environment-json']);
+    const readOnce = () => this.runOutput(canonical, ['--cwd', canonical, '--workspace-environment-json'], undefined, 'selection');
     // A selected transcript usually leaves a reader idle in the target workspace.
     // Read current settings there, with the same process cwd as the one-shot CLI.
     const idle = [this.foregroundLane, this.overlappingCatalogLane].find(lane =>
@@ -676,16 +687,57 @@ export class ProjectSessionCatalog {
 
   /** A picker selection must retain its displayed scope and exact file. */
   async select(projectPath: string, sessionId: string, selection: SessionOpenSelection): Promise<ProjectSessionCatalogRow | undefined> {
+    const query = this.selectionQuery(projectPath, sessionId, selection);
+    const result = await this.loadSession(query.cwd, query.sessionId, query.scope, query.transcriptPath);
+    return this.selectedRow(result, query);
+  }
+
+  /** Read the selected row and its first display page without starting an engine. */
+  selectForOpen(projectPath: string, sessionId: string, selection: SessionOpenSelection): Promise<{
+    session?: ProjectSessionCatalogRow;
+    preview?: TranscriptHistoryPage;
+  }> {
+    if (!selection.transcriptPath || this.options.catalogWorker === false) {
+      return this.select(projectPath, sessionId, selection).then(session => ({ session }));
+    }
+    const query = this.selectionQuery(projectPath, sessionId, selection);
+    const key = JSON.stringify(query);
+    const existing = this.pendingOpen.get(key);
+    if (existing) return existing;
+    const operation = this.runCatalogWorker({ ...query, prepareOpen: true }).then(output => {
+      const result = JSON.parse(output) as { catalog?: unknown; preview?: unknown };
+      const session = this.selectedRow(result.catalog ? parseCatalogValue(result.catalog) : parseCatalogValue(result), query);
+      if (!session || result.preview == null) return { session };
+      try {
+        const page = result.preview as Partial<TranscriptHistoryPage>;
+        const event = validateClientEvent({ type: 'session_resumed', mode: session.mode, session_id: session.uuid, messages: page.messages });
+        if (event.type === 'session_resumed' && event.messages.length && event.messages.every(message =>
+          message && typeof message.role === 'string' && Array.isArray(message.blocks)
+            && message.blocks.every(block => block && typeof block.type === 'string'))) {
+          return { session, preview: { messages: event.messages, before: page.before == null ? null : historyCursor(page.before) } };
+        }
+      } catch { /* An optional page can fail independently of opening its source. */ }
+      return { session };
+    }).finally(() => {
+      if (this.pendingOpen.get(key) === operation) this.pendingOpen.delete(key);
+    });
+    this.pendingOpen.set(key, operation);
+    return operation;
+  }
+
+  private selectionQuery(projectPath: string, sessionId: string, selection: SessionOpenSelection): CatalogWorkerQuery & { sessionId: string } {
     if (!isSessionId(sessionId)) throw new Error('invalid session id');
     sessionId = sessionId.toLowerCase();
     if (selection.transcriptPath !== undefined && (!isAbsolute(selection.transcriptPath)
       || selection.transcriptPath.includes('\0') || basename(selection.transcriptPath).toLowerCase() !== `${sessionId}.jsonl`)) {
       throw new Error('invalid selected transcript path');
     }
-    const canonical = realpathSync.native(projectPath);
-    const result = await this.loadSession(canonical, sessionId, sessionCatalogScope(selection.scope), selection.transcriptPath);
-    const row = result.sessions.find((candidate) => candidate.uuid === sessionId);
-    if (row && selection.transcriptPath !== undefined && row.path !== selection.transcriptPath) {
+    return { cwd: realpathSync.native(projectPath), sessionId, scope: sessionCatalogScope(selection.scope), transcriptPath: selection.transcriptPath };
+  }
+
+  private selectedRow(result: ProjectSessionCatalogResult, query: { sessionId: string; transcriptPath?: string }): ProjectSessionCatalogRow | undefined {
+    const row = result.sessions.find((candidate) => candidate.uuid === query.sessionId);
+    if (row && query.transcriptPath !== undefined && row.path !== query.transcriptPath) {
       throw new Error('This session selection has changed. Refresh the session list and try again.');
     }
     return row ? { ...row } : undefined;
@@ -729,6 +781,7 @@ export class ProjectSessionCatalog {
     this.cache.clear();
     this.pending.clear();
     this.pendingSessions.clear();
+    this.pendingOpen.clear();
     this.pendingHistory.clear();
     // Retire after the current captured response; a mutation must never reuse
     // projections from before its durable revision/generation boundary.
@@ -782,13 +835,7 @@ export class ProjectSessionCatalog {
   private run(canonical: string, sessionId?: string, scope?: SessionCatalogScope, transcriptPath?: string): Promise<ProjectSessionCatalogResult> {
     if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
     if (this.options.catalogWorker !== false) {
-      // Reuse one worker for sequential reads. While a directory scan and a
-      // session lookup overlap, give each its own FIFO under the shared child limit.
-      const kind = sessionId ? 'session' : 'directory';
-      if (this.foregroundLane.queued === 0 && this.overlappingCatalogLane.queued === 0) this.foregroundKind = kind;
-      const lane = this.foregroundKind === kind ? this.foregroundLane : this.overlappingCatalogLane;
-      return this.runWorker({ cwd: canonical, ...(sessionId ? { sessionId } : {}),
-        ...(scope ? { scope } : {}), ...(transcriptPath ? { transcriptPath } : {}) }, lane).then(parseCatalog);
+      return this.runCatalogWorker({ cwd: canonical, sessionId, scope, transcriptPath }).then(parseCatalog);
     }
     const args = buildBridgeArguments({
       workspace: canonical,
@@ -802,6 +849,21 @@ export class ProjectSessionCatalog {
     return this.runOutput(canonical, args).then((output) => parseCatalog(output));
   }
 
+  private runCatalogWorker(query: CatalogWorkerQuery): Promise<string> {
+    // Reuse sequential reads. If directory discovery overlaps a selection,
+    // give each its own FIFO under the shared child limit.
+    const kind = query.sessionId ? 'session' : 'directory';
+    if (this.foregroundLane.queued === 0 && this.overlappingCatalogLane.queued === 0) {
+      const other = this.overlappingCatalogLane.worker;
+      if (other?.available && other.cwd === query.cwd && this.foregroundLane.worker?.cwd !== query.cwd) {
+        this.foregroundKind = kind === 'session' ? 'directory' : 'session';
+      } else {
+        this.foregroundKind = kind;
+      }
+    }
+    return this.runWorker(query, this.foregroundKind === kind ? this.foregroundLane : this.overlappingCatalogLane);
+  }
+
   private runWorker(query: CatalogWorkerQuery, lane: CatalogWorkerLane): Promise<string> {
     if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
     if (this.catalogQueued >= MAX_QUEUED_CATALOG_OPERATIONS) return Promise.reject(new Error('session catalog is busy; try again shortly'));
@@ -809,7 +871,7 @@ export class ProjectSessionCatalog {
     lane.queued++;
     const operation = lane.tail.then(async () => {
       if (this.disposed) throw new Error('session catalog is disposed');
-      const worker = await this.getWorker(query.cwd, lane);
+      const worker = await this.getWorker(query.cwd, lane, query);
       try {
         return await worker.request(query);
       } catch (error) {
@@ -822,13 +884,13 @@ export class ProjectSessionCatalog {
     return operation.finally(() => { this.catalogQueued--; lane.queued--; });
   }
 
-  private getWorker(canonical: string, lane: CatalogWorkerLane): Promise<CatalogWorker> {
+  private getWorker(canonical: string, lane: CatalogWorkerLane, query: CatalogWorkerQuery): Promise<CatalogWorker> {
     if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
     const bin = resolveServerBin({ serverBin: this.options.serverBin, isPackaged: this.options.isPackaged,
       resourcesPath: this.options.resourcesPath } as Omit<BridgeManagerOptions, 'launchConfig'>);
     const env = this.childEnvironment();
     const key = JSON.stringify([bin, Object.entries(env).sort(([left], [right]) => left.localeCompare(right))]);
-    if (lane.worker?.available && lane.key === key) return Promise.resolve(lane.worker);
+    if (lane.worker?.available && lane.key === key && (!query.prepareOpen || lane.worker.cwd === canonical)) return Promise.resolve(lane.worker);
     if (lane.pending) return lane.pending;
     lane.worker?.retire();
     lane.worker = undefined;
@@ -840,11 +902,12 @@ export class ProjectSessionCatalog {
         cwd: canonical, env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
       });
       return new CatalogWorker(child, canonical, release, this.options.timeoutMs ?? 15_000, this.options.workerIdleMs ?? DEFAULT_WORKER_IDLE_MS);
-    }, this.options.timeoutMs).then((worker) => {
+    }, this.options.timeoutMs, (query.sessionId && !query.historyBefore && query.activityAfter === undefined) || query.workspaceEnvironment
+      ? 'selection' : 'default').then((worker) => {
       if (generation !== this.generation) {
         worker.retire();
         if (lane.pending === operation) lane.pending = undefined;
-        return this.getWorker(canonical, lane);
+        return this.getWorker(canonical, lane, query);
       }
       lane.worker = worker;
       lane.key = key;
@@ -858,7 +921,14 @@ export class ProjectSessionCatalog {
     return { ...buildBridgeEnvironment(process.env), ...(this.options.configHome ? { LINGXI_CONFIG_DIR: this.options.configHome } : {}) };
   }
 
-  private runOutput(canonical: string, args: string[], input?: string, kind: 'default' | 'durable-write' | 'provider-list' = 'default', timeoutMs = this.options.timeoutMs ?? 15_000, admission = catalogChildren): Promise<string> {
+  private runOutput(
+    canonical: string,
+    args: string[],
+    input?: string,
+    kind: 'default' | 'durable-write' | 'provider-list' | 'selection' = 'default',
+    timeoutMs = this.options.timeoutMs ?? 15_000,
+    admission = catalogChildren,
+  ): Promise<string> {
     const bin = resolveServerBin({
       serverBin: this.options.serverBin,
       isPackaged: this.options.isPackaged,
@@ -953,7 +1023,7 @@ export class ProjectSessionCatalog {
           reject(error instanceof Error ? error : new Error(String(error)));
         }
       });
-    }), this.options.timeoutMs);
+    }), this.options.timeoutMs, kind === 'selection' ? 'selection' : 'default');
     return kind === 'provider-list' ? this.readProviderList(JSON.stringify([bin, canonical, env, input]), launch) : launch();
   }
 }

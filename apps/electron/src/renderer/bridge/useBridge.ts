@@ -1041,7 +1041,7 @@ export function useBridge(): UseBridge {
         if (event.type === 'session_resumed') {
           next = {
             ...next,
-            history: initialHistory(event.messages),
+            history: envelope.historyBefore ? { before: envelope.historyBefore, loading: false } : initialHistory(event.messages),
             runtimeCenter: addRuntimeResources(
               next.runtimeCenter,
               resourcesFromRestoredMessages(sessionId, event.messages),

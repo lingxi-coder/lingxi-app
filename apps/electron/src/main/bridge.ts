@@ -3,7 +3,7 @@ import { providerAccountRenewFailureCode } from './provider-accounts.js';
 import { SideChatRecovery } from './sideChatRecovery.js';
 import { replayCheckpointState, RuntimeEventReplay } from './runtimeEventReplay.js';
 import { canResume } from './remoteControl/snapshot.js';
-import { recentTranscript } from '../shared/sessionHistory.js';
+import { initialDisplayPage, recentTranscript } from '../shared/sessionHistory.js';
 import { parseProviderAccountRouting } from '../shared/providerAccounts.js';
 import type { ProviderAccountConfiguration } from './session-catalog.js';
 import { DesktopTelemetry } from './telemetry.js';
@@ -1384,12 +1384,15 @@ export class SessionRuntime {
   }
 
   replaySnapshot(): readonly SequencedRuntimeEventEnvelope<ClientEvent>[] {
-    return Object.freeze(this.replayEvents.snapshot().map((envelope) => Object.freeze({
-      sessionId: envelope.sessionId,
-      sequence: envelope.sequence,
-      ...(envelope.replayFromSequence !== undefined ? { replayFromSequence: envelope.replayFromSequence } : {}),
-      event: structuredClone(envelope.event),
-    })));
+    return Object.freeze(this.replayEvents.snapshot().map((envelope) =>
+      Object.freeze(structuredClone(this.desktopEvent(envelope)))));
+  }
+
+  private desktopEvent(envelope: SequencedRuntimeEventEnvelope<ClientEvent>): SequencedRuntimeEventEnvelope<ClientEvent> {
+    if (envelope.event.type !== 'session_resumed' || !this.ownedTranscriptPath) return envelope;
+    const { messages, before } = initialDisplayPage(envelope.event.messages);
+    if (messages.length === envelope.event.messages.length) return envelope;
+    return { ...envelope, event: { ...envelope.event, messages }, ...(before ? { historyBefore: before } : {}) };
   }
 
   // ── Remote Control ──────────────────────────────────────────────────────────
@@ -1571,7 +1574,7 @@ export class SessionRuntime {
 
   private sendClientEvent(webContents: WebContents, event: ClientEvent, retain: boolean): void {
     const envelope = this.eventEnvelope(event, retain);
-    webContents.send(CH_EVENT, this.opts.envelopeEvents ? envelope : event);
+    webContents.send(CH_EVENT, this.opts.envelopeEvents ? this.desktopEvent(envelope) : event);
   }
 
   private broadcastClientEvent(event: ClientEvent): void {
@@ -1597,9 +1600,10 @@ export class SessionRuntime {
       this.broadcast(CH_EVENT, event);
       return;
     }
+    const desktop = this.desktopEvent(envelope);
     for (const webContents of this.targets.keys()) {
       if (webContents.isDestroyed()) this.targets.delete(webContents);
-      else webContents.send(CH_EVENT, envelope);
+      else webContents.send(CH_EVENT, desktop);
     }
   }
 
@@ -2238,6 +2242,11 @@ export class SessionRuntime {
     const startedAt = Date.now();
     this.startupDiagnostic('bridge_start_started', { generation });
     let audioCapabilitiesReady: Promise<void> | undefined;
+    let launchConfigStartedAt = Date.now();
+    let preparedLaunch = this.ownedTranscriptPath && this.draftSessionMode === undefined
+      ? this.opts.prepareLaunchConfig?.() : undefined;
+    // Reattaching to a live sidecar needs no new launch settings.
+    void preparedLaunch?.catch(() => {});
     const bridgeRoot = this.opts.bridgeRoot;
     if (bridgeRoot && this.projectPath) {
       const ref = { projectPath: this.projectPath, sessionId: this.sessionId };
@@ -2289,18 +2298,23 @@ export class SessionRuntime {
           await this.stopBridge();
           if (!reusable.ownedProcess) throw error;
           generation = ++this.generation;
+          preparedLaunch = undefined;
         }
       }
     }
 
-    const launchConfigStartedAt = Date.now();
-    const launch = await this.opts.launchConfig();
+    const launchConfigWaitStartedAt = Date.now();
+    if (!preparedLaunch) launchConfigStartedAt = launchConfigWaitStartedAt;
+    const applyPrepared = await preparedLaunch;
+    if (this.disposed || generation !== this.generation) throw new Error('bridge launch superseded');
+    const launch = applyPrepared ? applyPrepared() : await this.opts.launchConfig();
     await this.telemetry?.shutdown();
     const telemetryConfig = launch.telemetry ?? resolveDesktopTelemetry({});
     this.telemetry = new DesktopTelemetry({ ...telemetryConfig, enabled: telemetryConfig.enabled && !this.telemetryRevoked
       && !telemetryPrivacyDisabled(launch.settingsEnvironment ?? {}) }, this.opts.appVersion);
     this.startupDiagnostic('bridge_start_phase', {
       durationMs: Date.now() - launchConfigStartedAt,
+      waitMs: Date.now() - launchConfigWaitStartedAt,
       generation,
       phase: 'launch_config',
     });

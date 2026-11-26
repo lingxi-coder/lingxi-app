@@ -1066,18 +1066,12 @@ export class SessionRuntimeManager {
       workspaceSettings,
       ...base
     } = this.opts;
-    return {
-      ...base,
-      sessionId: ref.sessionId,
-      projectPath: ref.projectPath,
-      expectedSessionMode: ref.mode,
-      resumeTranscriptPath: this.sessionTranscriptPaths.get(ref.sessionId),
-      envelopeEvents: true,
-      launchConfig: async () => {
-        const [config, settings] = await Promise.all([
-          launchConfig(ref, this.sessionModelHints.get(ref.sessionId)),
-          workspaceSettings?.(ref.projectPath, ref),
-        ]);
+    const prepareLaunchConfig = async () => {
+      const [config, settings] = await Promise.all([
+        launchConfig(ref, this.sessionModelHints.get(ref.sessionId)),
+        workspaceSettings?.(ref.projectPath, ref),
+      ]);
+      return () => {
         const initialProjectRoot = this.sessionProjectRoots.get(ref.sessionId) ?? config.initialProjectRoot ?? ref.projectPath;
         this.sessionProjectRoots.set(ref.sessionId, initialProjectRoot);
         const environment = settings ? {
@@ -1092,7 +1086,17 @@ export class SessionRuntimeManager {
         return { ...config, ...owner, settingsEnvironment: environment, initialProjectRoot,
           additionalDirectories: this.sessionDirectoryGrants.get(ref.sessionId) ?? settings?.additionalDirectories,
           promptDirectories: this.sessionPromptDirectories.get(ref.sessionId) };
-      },
+      };
+    };
+    return {
+      ...base,
+      sessionId: ref.sessionId,
+      projectPath: ref.projectPath,
+      expectedSessionMode: ref.mode,
+      resumeTranscriptPath: this.sessionTranscriptPaths.get(ref.sessionId),
+      envelopeEvents: true,
+      prepareLaunchConfig,
+      launchConfig: async () => (await prepareLaunchConfig())(),
       ...(onModelSelected ? { onModelSelected: (model: string) => onModelSelected(ref, model) } : {}),
       ...(getSavedModel ? { getSavedModel: () => getSavedModel(ref) } : {}),
       ...(getSavedPermissionMode ? { getSavedPermissionMode: () => getSavedPermissionMode(ref) } : {}),

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 const CHUNK: u64 = 64 * 1024;
 const MAX_PAGE_BYTES: usize = 6 * 1024 * 1024;
 const PAGE_ROWS: usize = 60;
+pub(super) const MAX_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -161,7 +162,7 @@ pub(super) fn read(path: &Path, session_id: uuid::Uuid, cursor: Cursor) -> Resul
     if !metadata.is_file() {
         return Err("History source is not a regular file".into());
     }
-    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let file = File::open(path).map_err(|e| e.to_string())?;
     let opened = file.metadata().map_err(|e| e.to_string())?;
     let source_identity = identity(&opened);
     if source_identity != identity(&metadata)
@@ -172,10 +173,97 @@ pub(super) fn read(path: &Path, session_id: uuid::Uuid, cursor: Cursor) -> Resul
     {
         return Err("History source changed. Reopen this chat to reload history.".into());
     }
-    let mut found = cursor.offset.is_some();
+    read_page(file, opened, session_id, Some(cursor))
+}
+
+/// Hold the very same no-symlink file across scope validation and preview by
+/// reopening from the pinned root. A concurrent append or replacement drops
+/// the speculative view; it never changes the ordinary selected-open path.
+pub(super) struct LatestSource {
+    file: File,
+    home: std::path::PathBuf,
+    relative: std::path::PathBuf,
+    revision: PreviewRevision,
+}
+
+#[derive(PartialEq, Eq)]
+struct PreviewRevision {
+    len: u64,
+    modified: std::time::SystemTime,
+    #[cfg(unix)]
+    changed: (i64, i64),
+}
+
+impl LatestSource {
+    fn open_file(home: &Path, relative: &Path) -> Result<File, String> {
+        use lingxi_core::host::rooted_fs;
+        let root = rooted_fs::root_identity(home).map_err(|error| error.to_string())?;
+        let file = rooted_fs::open_read_file_pinned(home, relative, Some(&root))
+            .map_err(|error| error.to_string())?;
+        rooted_fs::validate_open_file_single_link(&file).map_err(|error| error.to_string())?;
+        Ok(file)
+    }
+
+    pub(super) fn open(home: &Path, source: &Path, id: uuid::Uuid) -> Result<Self, String> {
+        let (home, relative) = super::selected_transcript_location(home, source, id)?;
+        let file = Self::open_file(&home, &relative)?;
+        let revision = Self::revision(&file)?;
+        Ok(Self {
+            file,
+            home,
+            relative,
+            revision,
+        })
+    }
+
+    fn revision(file: &File) -> Result<PreviewRevision, String> {
+        let metadata = file.metadata().map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Ok(PreviewRevision {
+            len: metadata.len(),
+            modified: metadata.modified().map_err(|error| error.to_string())?,
+            #[cfg(unix)]
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        })
+    }
+
+    pub(super) fn read(self, session_id: uuid::Uuid) -> Result<Page, String> {
+        use lingxi_core::host::rooted_fs::opened_file_identity;
+        if Self::revision(&self.file)? != self.revision {
+            return Err("History source changed before preview".into());
+        }
+        let page = read_page(
+            self.file.try_clone().map_err(|error| error.to_string())?,
+            self.file.metadata().map_err(|error| error.to_string())?,
+            session_id,
+            None,
+        )?;
+        let current = Self::open_file(&self.home, &self.relative)?;
+        if opened_file_identity(&current).map_err(|error| error.to_string())?
+            != opened_file_identity(&self.file).map_err(|error| error.to_string())?
+            || Self::revision(&current)? != self.revision
+        {
+            return Err("History source changed during preview".into());
+        }
+        Ok(page)
+    }
+}
+
+fn read_page(
+    mut file: File,
+    opened: std::fs::Metadata,
+    session_id: uuid::Uuid,
+    cursor: Option<Cursor>,
+) -> Result<Page, String> {
+    let source_identity = identity(&opened);
+    let mut found = cursor.as_ref().is_none_or(|cursor| cursor.offset.is_some());
     let mut ancestors = HashSet::new();
     let mut groups = HashSet::new();
-    if let Some(offset) = cursor.offset {
+    if let Some((cursor, offset)) = cursor
+        .as_ref()
+        .and_then(|cursor| cursor.offset.map(|offset| (cursor, offset)))
+    {
         if offset >= opened.len() {
             return Err("History cursor is no longer valid".into());
         }
@@ -196,7 +284,13 @@ pub(super) fn read(path: &Path, session_id: uuid::Uuid, cursor: Cursor) -> Resul
         ancestors.extend(anchor.parent_uuid.iter().cloned());
         groups.extend(assistant_group(anchor));
     }
-    let mut reader = ReverseLines::new(file, cursor.offset.unwrap_or(opened.len()));
+    let mut reader = ReverseLines::new(
+        file,
+        cursor
+            .as_ref()
+            .and_then(|cursor| cursor.offset)
+            .unwrap_or(opened.len()),
+    );
     let mut rows = Vec::new();
     let mut pending_siblings = HashMap::<_, Vec<(u64, session::jsonl::JsonlMessage)>>::new();
     let mut pending_calls = HashSet::new();
@@ -205,6 +299,9 @@ pub(super) fn read(path: &Path, session_id: uuid::Uuid, cursor: Cursor) -> Resul
     let mut bytes = 0;
     let mut before = None;
     while let Some((offset, line)) = reader.next()? {
+        if cursor.is_none() && opened.len().saturating_sub(offset) > MAX_PREVIEW_BYTES as u64 {
+            return Err("Recent history exceeds the preview scan limit".into());
+        }
         let loaded = session::jsonl::route_lines(&line);
         let Some(row) = loaded
             .messages_in_order
@@ -214,7 +311,10 @@ pub(super) fn read(path: &Path, session_id: uuid::Uuid, cursor: Cursor) -> Resul
             continue;
         };
         if !found {
-            if row.uuid == cursor.uuid {
+            if cursor
+                .as_ref()
+                .is_some_and(|cursor| row.uuid == cursor.uuid)
+            {
                 found = true;
                 ancestors.extend(row.parent_uuid.iter().cloned());
                 groups.extend(assistant_group(&row));

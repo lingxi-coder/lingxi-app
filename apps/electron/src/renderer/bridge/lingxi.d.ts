@@ -75,7 +75,10 @@ export interface RuntimeEventEnvelope<T = unknown> {
   sessionId: string;
   event: T;
 }
-export interface SequencedRuntimeEventEnvelope<T = unknown> extends RuntimeEventEnvelope<T> { sequence: number }
+export interface SequencedRuntimeEventEnvelope<T = unknown> extends RuntimeEventEnvelope<T> {
+  sequence: number;
+  historyBefore?: TranscriptHistoryCursor;
+}
 export interface SessionRuntimeSummary {
   projectPath: string;
   sessionId: string;

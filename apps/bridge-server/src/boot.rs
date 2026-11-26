@@ -1306,6 +1306,22 @@ pub(crate) fn capture_selected_transcript_source(
     path: &Path,
     id: uuid::Uuid,
 ) -> Result<(session::jsonl::writer::TranscriptFileAuthority, String), String> {
+    let (canonical_home, relative) = selected_transcript_location(home, path, id)?;
+    let (authority, bytes) =
+        session::jsonl::writer::TranscriptFileAuthority::capture(canonical_home, relative)
+            .map_err(|error| format!("selected transcript is unavailable: {error}"))?;
+    let content = String::from_utf8(bytes).map_err(|_| "selected transcript is not valid UTF-8")?;
+    if content.is_empty() {
+        return Err("selected transcript must be a nonempty JSONL file".into());
+    }
+    Ok((authority, content))
+}
+
+fn selected_transcript_location(
+    home: &Path,
+    path: &Path,
+    id: uuid::Uuid,
+) -> Result<(PathBuf, PathBuf), String> {
     validate_selected_transcript_identity(path, &id.to_string())?;
     let canonical_home =
         std::fs::canonicalize(home).map_err(|_| "selected transcript home is unavailable")?;
@@ -1321,16 +1337,8 @@ pub(crate) fn capture_selected_transcript_source(
     {
         return Err("selected transcript is outside the session catalog".into());
     }
-    let (authority, bytes) = session::jsonl::writer::TranscriptFileAuthority::capture(
-        canonical_home,
-        relative.to_path_buf(),
-    )
-    .map_err(|error| format!("selected transcript is unavailable: {error}"))?;
-    let content = String::from_utf8(bytes).map_err(|_| "selected transcript is not valid UTF-8")?;
-    if content.is_empty() {
-        return Err("selected transcript must be a nonempty JSONL file".into());
-    }
-    Ok((authority, content))
+    let relative = relative.to_path_buf();
+    Ok((canonical_home, relative))
 }
 
 /// Empty scheduled owners must carry the authoritative workspace anchor.
@@ -1506,11 +1514,20 @@ async fn prepare_selected_boot_session_after_capture(
             return Err("selected transcript workspace changed; refresh its metadata and trust before launching".into());
         }
     }
+    // The legacy cost lookup needs only the newest record for this session.
+    // Keep the SDK's durable journal precedence and cost decoding.
+    let cost_record = content.lines().rev().find(|line| {
+        (line.contains("cost-state") || line.contains("\\u"))
+            && lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line).is_ok_and(|row| {
+                row.string_at("/type") == Some("cost-state")
+                    && row.string_at("/sessionId") == Some(id_text.as_str())
+            })
+    });
     let resume_cost = harness_runtime::desktop::session_state::capture_resume_cost(
         &cfg.lingxi_home,
         uuid,
         lease.clone(),
-        &content,
+        cost_record.unwrap_or_default(),
     )
     .await?;
     cfg.session_resume_cost = resume_cost;
@@ -2181,11 +2198,14 @@ pub async fn assemble_with_account_credentials(
     } else {
         prepare_selected_boot_session(&mut cfg).await?;
     }
-    let cold_resume = if cfg.restore_draft {
-        None
-    } else {
-        crate::workspace_commands::ColdBootResume::from_prepared_config(&cfg)?
-    };
+    let cold_resume =
+        (!cfg.restore_draft && !cfg.defer_session_start && cfg.session_resume_snapshot.is_some())
+            .then(|| {
+                let capture = cfg.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::workspace_commands::ColdBootResume::from_prepared_config(&capture)
+                })
+            });
     let provider_credentials_ephemeral = matches!(
         cfg.credential_storage_policy,
         lingxi_core::host::CredentialStoragePolicy::NativeOrMemory
@@ -2492,7 +2512,8 @@ pub async fn assemble_with_account_credentials(
             ));
     }
     let initial_account_snapshot = shared.provider_accounts.clone();
-    let runtime = Arc::new(
+    let assembly_started_at = std::time::Instant::now();
+    let assembly = async {
         // Do not nest the SDK's large assembly future in every transport wrapper.
         // This also keeps cold resume within ordinary worker-thread stack limits.
         Box::pin(harness_runtime::desktop::build_with_host_automation(
@@ -2502,8 +2523,22 @@ pub async fn assemble_with_account_credentials(
             shared,
         ))
         .await
-        .map_err(|e| e.to_string())?,
-    );
+        .map(Arc::new)
+        .map_err(|e| e.to_string())
+    };
+    let proof = async {
+        match cold_resume {
+            Some(task) => task.await.map_err(|error| error.to_string())?,
+            None => Ok(None),
+        }
+    };
+    let (runtime, cold_resume) = tokio::try_join!(assembly, proof)?;
+    if cold_resume.is_some() {
+        tracing::info!(
+            duration_ms = assembly_started_at.elapsed().as_millis(),
+            "cold resume: runtime assembled"
+        );
+    }
     if let Some(writer) = runtime.orchestrator.session_transcript_writer() {
         ask_user_question_broker.bind_inbox(&writer);
     }
@@ -5067,6 +5102,7 @@ mod tests {
 
     // Debug builds retain larger execution futures than optimized Desktop
     // builds. Give both the polling thread and spawned workers a test budget.
+            use tokio_tungstenite::tungstenite::handshake::client::generate_key;
     fn run_runtime_test<F, Fut>(test: F)
     where
         F: FnOnce() -> Fut + Send + 'static,
@@ -5103,7 +5139,6 @@ mod tests {
             use futures_util::{SinkExt, StreamExt};
             use std::sync::atomic::{AtomicBool, Ordering};
             use std::time::Duration;
-            use tokio_tungstenite::tungstenite::handshake::client::generate_key;
             use tokio_tungstenite::tungstenite::Message;
 
             struct InjectFixture(Arc<AtomicBool>);

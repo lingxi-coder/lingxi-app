@@ -2434,6 +2434,12 @@
     <string name="extension_directory_add_mcp">Add MCP server</string>
     <string name="extension_directory_back">Back to directory</string>
     <string name="extension_directory_category_all">All</string>
+    <string name="extension_directory_category_design">UI &amp; Design</string>
+    <string name="extension_directory_category_graphics">3D &amp; Effects</string>
+    <string name="extension_directory_preview_effects">Preview effects</string>
+    <string name="extension_directory_recommended">Recommended</string>
+    <string name="extension_directory_skills_count">Skills · %1$d</string>
+    <string name="extension_directory_review_conflict">Review conflict</string>
     <string name="extension_directory_category_browser">Browser</string>
     <string name="extension_directory_category_development">Development</string>
     <string name="extension_directory_category_database">Database</string>

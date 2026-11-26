@@ -755,6 +755,7 @@ export function SettingsScreen({
       ref={panelRef}
       // Exclude the sidebar/titlebar drag regions still mounted behind settings.
       className="settings-screen no-drag"
+      data-macos={globalThis.window?.lingxi?.platform === 'darwin' || undefined}
       role="dialog"
       aria-modal="true"
       aria-label={tr('settings_title_main')}
@@ -776,7 +777,7 @@ export function SettingsScreen({
           <div className="settings-sidebar-controls">
             <button ref={backRef} type="button" aria-label={tr('desktop_back')} onClick={requestClose}
               className="settings-back-button"
-              style={{ width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9,
+              style={{ minHeight: 36, display: 'flex', alignItems: 'center', gap: 9,
                 marginBottom: 8, padding: '7px 10px', border: 0, borderRadius: 8, background: t.surfaceActive,
                 color: t.text, font: 'inherit', fontSize: 14, textAlign: 'left', cursor: 'pointer' }}>
               <Icon name="arrowLeft" size={17} stroke={1.8} />

@@ -2434,6 +2434,12 @@
     <string name="extension_directory_add_mcp">添加 MCP 服务器</string>
     <string name="extension_directory_back">返回目录</string>
     <string name="extension_directory_category_all">全部</string>
+    <string name="extension_directory_category_design">UI 与设计</string>
+    <string name="extension_directory_category_graphics">3D 与特效</string>
+    <string name="extension_directory_preview_effects">预览特效</string>
+    <string name="extension_directory_recommended">推荐</string>
+    <string name="extension_directory_skills_count">%1$d 个技能</string>
+    <string name="extension_directory_review_conflict">查看冲突</string>
     <string name="extension_directory_category_browser">浏览器</string>
     <string name="extension_directory_category_development">开发</string>
     <string name="extension_directory_category_database">数据库</string>

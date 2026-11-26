@@ -2434,6 +2434,12 @@
     <string name="extension_directory_add_mcp">MCP 서버 추가</string>
     <string name="extension_directory_back">디렉터리로 돌아가기</string>
     <string name="extension_directory_category_all">전체</string>
+    <string name="extension_directory_category_design">UI 디자인</string>
+    <string name="extension_directory_category_graphics">3D 및 효과</string>
+    <string name="extension_directory_preview_effects">효과 미리보기</string>
+    <string name="extension_directory_recommended">추천</string>
+    <string name="extension_directory_skills_count">스킬 %1$d개</string>
+    <string name="extension_directory_review_conflict">충돌 확인</string>
     <string name="extension_directory_category_browser">브라우저</string>
     <string name="extension_directory_category_development">개발</string>
     <string name="extension_directory_category_database">데이터베이스</string>

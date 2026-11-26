@@ -15,7 +15,7 @@ test('public directory links are HTTPS and configuration drafts contain no crede
   for (const item of publicExtensionItems) {
     assert(!ids.has(item.id), `Duplicate directory item: ${item.id}`);
     ids.add(item.id);
-    for (const raw of [item.sourceUrl, item.documentationUrl]) {
+    for (const raw of [item.sourceUrl, item.documentationUrl, ...(item.previewUrl ? [item.previewUrl] : [])]) {
       const url = new URL(raw);
       assert.equal(url.protocol, 'https:');
       assert.equal(url.username, '');
@@ -32,6 +32,18 @@ test('public directory links are HTTPS and configuration drafts contain no crede
       assert.equal(item.mcp.config.disabled, undefined);
       assert(!JSON.stringify(item.mcp.config).includes('@latest'));
     }
+  }
+});
+
+test('design and graphics recommendations resolve to real packages and platform-specific templates', () => {
+  const graphics = publicSkillRecommendations.filter(item => item.category === 'graphics');
+  assert.deepEqual(graphics.map(item => item.marketplace?.plugin).sort(), ['pixelfx', 'threejs-skills']);
+  assert.equal(graphics.find(item => item.id === 'pixelfx')?.previewUrl, 'https://patch-gg.github.io/pixelfx/');
+  assert(publicSkillRecommendations.some(item => item.category === 'design' && item.skills?.includes('accessibility-review')));
+  for (const id of ['shadcn-ui', 'threejs-mcp']) {
+    assert(publicExtensionsForPlatform('macos').some(item => item.id === id && item.mcp));
+    assert(!publicExtensionsForPlatform('ios').some(item => item.id === id));
+    assert(!publicExtensionsForPlatform('android').some(item => item.id === id));
   }
 });
 
@@ -56,7 +68,7 @@ test('desktop process recipes are pinned argument arrays, never shell scripts', 
 
 test('every directory category is one the Desktop, iOS and Android settings pages render', () => {
   // Each client drops an entry whose category it does not know; add a new category to all three first.
-  const rendered = new Set(['browser', 'development', 'database', 'productivity']);
+  const rendered = new Set(['design', 'graphics', 'browser', 'development', 'database', 'productivity']);
   for (const item of publicExtensionItems) assert(rendered.has(item.category), `${item.id} has unknown category ${item.category}`);
   assert(publicExtensionItems.some((item) => item.category === 'database' && item.kind === 'mcp'));
   assert(publicExtensionItems.some((item) => item.category === 'database' && item.kind === 'plugin'));

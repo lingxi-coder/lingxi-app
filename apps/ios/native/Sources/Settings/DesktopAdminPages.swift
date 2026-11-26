@@ -200,7 +200,7 @@ struct DesktopMCPAdminPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Picker(String(localized: "public_extensions_source"), selection: $directoryTab) {
-                Text("public_extensions_public_tab").tag(MCPAdminDirectoryTab.publicDirectory)
+                Text("extension_directory_recommended").tag(MCPAdminDirectoryTab.publicDirectory)
                 Text("public_extensions_personal_tab").tag(MCPAdminDirectoryTab.personal)
             }.pickerStyle(.segmented)
 
@@ -237,6 +237,7 @@ struct DesktopMCPAdminPage: View {
                         }
                     },
                     canAct: { item in item.mcpConfig == nil || (repository.connected && !repository.saving && scopeRow["revision_sha256"] != nil) },
+                    statusTitle: { item in templateMatch(item) == .sameConfiguration ? String(localized: "extension_directory_configured") : nil },
                     removalTitle: { item in templateMatch(item) == .sameConfiguration ? String(localized: "settings_parity_remove_server") : nil },
                     remove: { item in
                         guard templateMatch(item) == .sameConfiguration,

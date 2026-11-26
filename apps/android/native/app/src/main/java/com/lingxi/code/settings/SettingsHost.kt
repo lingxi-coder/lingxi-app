@@ -43,6 +43,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -314,18 +315,18 @@ fun SettingsHost(
                         EngineSettingsPage(SettingsRoutes.PROJECTS, engineBridge)
                     }
                 }
-                page(SettingsRoutes.ENGINE_MCP) { McpDirectoryPage(engineBridge, runtimeMcpServers) }
+                page(SettingsRoutes.ENGINE_MCP, topPadding = 8.dp) { McpDirectoryPage(engineBridge, runtimeMcpServers) }
                 (layeredPageKeys.keys.filter { it != SettingsRoutes.PROJECTS && it != SettingsRoutes.PLUGINS } + SettingsRoutes.DIAGNOSTICS).forEach { engineRoute ->
                     page(engineRoute) { EngineSettingsPage(engineRoute, engineBridge, reconnectSafely, onBrowseSkills = { navController.navigate(SettingsRoutes.SKILL_DIRECTORY) }) }
                 }
-                page(SettingsRoutes.PLUGINS) {
+                page(SettingsRoutes.PLUGINS, topPadding = 8.dp) {
                     PluginsPage(
                         bridge = engineBridge,
                         onDetail = { id -> navController.navigate(SettingsRoutes.pluginDetail(id)) },
                         onAdvanced = { navController.navigate(SettingsRoutes.PLUGINS_ADVANCED) },
                     )
                 }
-                page(SettingsRoutes.SKILL_DIRECTORY) {
+                page(SettingsRoutes.SKILL_DIRECTORY, topPadding = 8.dp) {
                     PluginsPage(
                         bridge = engineBridge,
                         onDetail = { id -> navController.navigate(SettingsRoutes.pluginDetail(id)) },
@@ -333,7 +334,7 @@ fun SettingsHost(
                         skillsOnly = true,
                     )
                 }
-                page(SettingsRoutes.PLUGIN_DETAIL) {
+                page(SettingsRoutes.PLUGIN_DETAIL, topPadding = 8.dp) {
                     PluginDetailPage(
                         bridge = engineBridge,
                         pluginId = it.arguments?.getString("id").orEmpty(),
@@ -341,7 +342,7 @@ fun SettingsHost(
                         onPop = { navController.popBackStack() },
                     )
                 }
-                page(SettingsRoutes.PLUGINS_ADVANCED) { EngineSettingsPage(SettingsRoutes.PLUGINS, engineBridge, reconnectSafely) }
+                page(SettingsRoutes.PLUGINS_ADVANCED, topPadding = 8.dp) { EngineSettingsPage(SettingsRoutes.PLUGINS, engineBridge, reconnectSafely) }
 
                 // Device settings
                 page(SettingsRoutes.APPEARANCE) {
@@ -458,7 +459,7 @@ fun SettingsHost(
                     )
                 }
                 // Mobile capability routes
-                page(SettingsRoutes.SKILLS) {
+                page(SettingsRoutes.SKILLS, topPadding = 8.dp) {
                     SkillsPage(
                         state = state,
                         store = resolvedStore,
@@ -466,11 +467,11 @@ fun SettingsHost(
                         onBrowse = { navController.navigate(SettingsRoutes.SKILL_DIRECTORY) },
                     )
                 }
-                page(SettingsRoutes.SKILL_DETAIL) {
+                page(SettingsRoutes.SKILL_DETAIL, topPadding = 8.dp) {
                     SkillManager(engineBridge, initialId = it.arguments?.getString("id"))
                 }
                 // Preserve the legacy route while directing it to authoritative configuration.
-                page(SettingsRoutes.MCP_LIST) { McpDirectoryPage(engineBridge, runtimeMcpServers) }
+                page(SettingsRoutes.MCP_LIST, topPadding = 8.dp) { McpDirectoryPage(engineBridge, runtimeMcpServers) }
                 page(SettingsRoutes.LINUX_RUNTIME) {
                     LinuxRuntimePage(
                         state = state,
@@ -495,7 +496,7 @@ fun SettingsHost(
                         }
                     })
                 }
-                page(SettingsRoutes.MCP_EDIT) { entry -> McpConfigurationPage(engineBridge, initialName = entry.arguments?.getString("id"), initialScope = entry.arguments?.getString("scope")?.takeUnless { it == "_" }) }
+                page(SettingsRoutes.MCP_EDIT, topPadding = 8.dp) { entry -> McpConfigurationPage(engineBridge, initialName = entry.arguments?.getString("id"), initialScope = entry.arguments?.getString("scope")?.takeUnless { it == "_" }) }
                 page(SettingsRoutes.DREAM) { GeneralSettingsPage(onNavigate = { navController.navigate(it) }, onReplayOnboarding = onReplayOnboarding) }
             }
             }
@@ -515,6 +516,7 @@ fun SettingsHost(
 private fun NavGraphBuilder.page(
     route: String,
     scroll: ScrollState? = null,
+    topPadding: Dp = 16.dp,
     content: @Composable (NavBackStackEntry) -> Unit,
 ) {
     composable(route) { entry ->
@@ -524,7 +526,7 @@ private fun NavGraphBuilder.page(
                 .fillMaxSize()
                 .verticalScroll(scrollState)
                 .padding(horizontal = 16.dp)
-                .padding(top = 16.dp, bottom = 28.dp),
+                .padding(top = topPadding, bottom = 28.dp),
         ) { content(entry) }
     }
 }

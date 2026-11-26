@@ -216,7 +216,7 @@ struct PluginsPage: View {
         VStack(alignment: .leading, spacing: 0) {
             blurb(String(localized: "plugins_blurb"))
             Picker(String(localized: "public_extensions_source"), selection: $directoryTab) {
-                Text("public_extensions_public_tab").tag(PluginDirectoryTab.publicDirectory)
+                Text("extension_directory_recommended").tag(PluginDirectoryTab.publicDirectory)
                 Text("public_extensions_personal_tab").tag(PluginDirectoryTab.personal)
             }
             .pickerStyle(.segmented)
@@ -337,6 +337,11 @@ struct PluginsPage: View {
                             && !marketplace.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     }
                     return URL(string: item.documentationURL)?.scheme?.lowercased() == "https"
+                },
+                statusTitle: { item in
+                    if installedRecommendation(item) != nil { return String(localized: "apps_installed") }
+                    if case .some(.registered(_)) = marketplaceRegistration(for: item) { return String(localized: "extension_directory_marketplace_added") }
+                    return nil
                 },
                 removalTitle: { item in
                     if installedRecommendation(item) != nil { return String(localized: "plugins_action_uninstall") }

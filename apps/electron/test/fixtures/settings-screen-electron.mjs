@@ -307,12 +307,28 @@ async function runWindowChromeScenario(window, webContents) {
     const dragStyle = dragRegion && getComputedStyle(dragRegion);
     const bounds = dragRegion.getBoundingClientRect();
     return {
+      backLeft: document.querySelector('.settings-back-button').getBoundingClientRect().left,
       hasDragRegion: Boolean(dragRegion),
       dragRegionMode: dragStyle?.webkitAppRegion ?? null,
       dragRegionHeight: dragStyle?.height ?? null,
       dragRegionEdges: [bounds.top, bounds.left, window.innerWidth - bounds.right],
     };
   })()`);
+  const extensionHeaders = [];
+  for (const id of ['skills', 'plugins', 'mcp']) {
+    await run(`window.__settingsScreenTest.selectPage(${JSON.stringify(id)})`);
+    await waitFor(webContents, 'Boolean(document.querySelector(".extension-hub-main"))');
+    const header = await run(`(() => {
+      const rect = document.querySelector('.settings-page-header').getBoundingClientRect();
+      const controls = [...document.querySelectorAll('.settings-back-button, .settings-page-header button')].map(button => {
+        const bounds = button.getBoundingClientRect();
+        const target = document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+        return { hit: button.contains(target), mode: getComputedStyle(button).webkitAppRegion };
+      });
+      return { top: rect.top, controls };
+    })()`);
+    extensionHeaders.push({ id, ...header });
+  }
   const measureTop = (selector) => run(`document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect().top`);
   await run('window.__settingsScreenTest.selectPage("computer-use")');
   await waitFor(webContents, 'Boolean(document.querySelector(".computer-use-page-heading"))');
@@ -320,7 +336,7 @@ async function runWindowChromeScenario(window, webContents) {
   await run('document.querySelector(".computer-use-manage").click()');
   await waitFor(webContents, 'Boolean(document.querySelector(".computer-browser-breadcrumb"))');
   const browserTop = await measureTop('.computer-browser-breadcrumb');
-  return { ...chrome, computerTop, browserTop, layout: { top, bottom, switched, returned, narrow } };
+  return { ...chrome, extensionHeaders, computerTop, browserTop, layout: { top, bottom, switched, returned, narrow } };
 }
 
 async function runLayerReseedScenario(webContents) {
@@ -673,8 +689,10 @@ async function runCustomProvidersScenario(window, webContents) {
   await capture('narrow');
   await run('document.querySelector(\'[aria-label="maxAttempts"]\').closest("details").open = true');
   await fill('maxAttempts', '1.5');
-  await click('保存');
-  const retryError = await run('document.querySelector(\'[role="alert"]\')?.textContent');
+  const routingSection = `document.querySelector('[aria-label="maxAttempts"]').closest('details')`;
+  await run(`[...${routingSection}.querySelectorAll('button')].find(button => button.textContent.trim() === '保存').click()`);
+  await waitFor(webContents, `Boolean(${routingSection}.querySelector('[role="alert"]')?.textContent)`);
+  const retryError = await run(`${routingSection}.querySelector('[role="alert"]').textContent`);
   await run(`[...document.querySelector('[aria-label="Profile 名称"]').closest('fieldset').querySelectorAll('button')].find(button => button.textContent.trim() === '取消').click()`);
   await run('window.__settingsScreenTest.setProviderSettings({ providers:{ broken:null }, routing:{} })');
   await delay(35);
@@ -757,7 +775,7 @@ async function runConfigurationNavigation(window, webContents) {
   for (const page of ['skills', 'mcp']) {
     await run(`window.__settingsScreenTest.selectPage(${JSON.stringify(page)})`);
     await delay(80);
-    if (page === 'mcp') await button('个人');
+    await click('[data-catalog-tab="personal"]');
     const initialList = page === 'skills'
       ? await run(`Boolean(document.querySelector('.extension-hub-page')) && !document.querySelector('.extension-detail-dialog')`)
       : await run(`Boolean(document.querySelector('.configuration-list')) && !document.querySelector('.configuration-detail')`);
@@ -773,7 +791,7 @@ async function runConfigurationNavigation(window, webContents) {
     await capture(`${page}-detail`);
     await click(page === 'skills' ? '[aria-label="关闭详情"]' : '.configuration-back');
     const searchRetained = await run(`document.querySelector(${JSON.stringify(`[aria-label="${searchLabel}"]`)}).value === ${JSON.stringify(query)}`);
-    await button('添加');
+    await click('.extension-hub-toolbar-actions .extension-hub-primary');
     await capture(`${page}-create`);
     const nameLabel = page === 'skills' ? '称呼' : 'MCP 服务器名称';
     const createOpened = page === 'skills'
@@ -820,7 +838,9 @@ async function runCustomizeScenario(window, webContents) {
     await delay(40);
   };
   const button = async (text) => {
-    await run(`(() => { const el = [...document.querySelectorAll('button')].find(el => el.textContent.trim() === ${JSON.stringify(text)}); if (!el) throw new Error('missing button ' + ${JSON.stringify(text)}); el.click(); })()`);
+    const target = `[...document.querySelectorAll('button')].find(el => el.textContent.trim() === ${JSON.stringify(text)})`;
+    await waitFor(webContents, `Boolean(${target})`);
+    await run(`${target}.click()`);
     await delay(40);
   };
   const capture = async (name) => {
@@ -955,7 +975,7 @@ async function runCustomizeScenario(window, webContents) {
   await capture('tools');
   shell.mcp = await measureShell('mcp');
   const tools = await run('document.querySelector(".settings-page-title").textContent === "MCP 服务器" && Boolean(document.querySelector(".configuration-entry"))');
-  await button('添加');
+  await click('.extension-hub-toolbar-actions .extension-hub-primary');
   await run('window.__settingsScreenTest.setFieldValue(\'[aria-label="MCP 服务器名称"]\', "draft-mcp")');
   await delay(40);
   await click('[data-nav-page="plugins"]');
@@ -1100,12 +1120,13 @@ async function runMacosEditors(window, webContents) {
   for (const page of ['custom-providers', 'provider-credentials', 'fusion', 'mcp', 'hooks', 'skills']) {
     await run(`window.__settingsScreenTest.selectPage(${JSON.stringify(page)})`);
     await delay(50);
+    if (page === 'skills') await run(`document.querySelector('[data-catalog-tab="personal"]')?.click()`);
     await run(`(() => {
       const page = ${JSON.stringify(page)};
       const target = page === 'custom-providers' ? [...document.querySelectorAll('button')].find(el => el.textContent.includes('新增 Provider'))
         : page === 'provider-credentials' ? document.querySelector('.settings-provider-row')
         : page === 'fusion' ? document.querySelector('.extension-hub-primary')
-        : page === 'mcp' ? document.querySelector('.extension-hub-row-side .extension-hub-icon-button')
+        : page === 'mcp' ? document.querySelector('.extension-collection-card footer button')
         : page === 'skills' ? document.querySelector('.extension-skills-installed .extension-hub-row')
         : [...document.querySelectorAll('button')].find(el => el.textContent.trim() === '添加');
       if (!target) throw new Error('missing editor ' + page);
@@ -1141,6 +1162,11 @@ async function runMacosEditors(window, webContents) {
 
 async function runLocalizationScenario(window, webContents) {
   const run = expression => webContents.executeJavaScript(expression);
+  const openLanguageSettings = async () => {
+    await run('window.__settingsScreenTest.selectPage("general")');
+    await waitFor(webContents, 'Boolean(document.querySelector(".settings-content-inner select"))');
+  };
+  await openLanguageSettings();
   const rows = [];
   const generalLabels = { en: 'General', ja: '一般', ko: '일반', 'zh-Hant': '一般', 'zh-Hans': '通用' };
   window.setContentSize(760, 600);
@@ -1162,6 +1188,7 @@ async function runLocalizationScenario(window, webContents) {
   await waitFor(webContents, 'document.documentElement.lang === "en"');
   await webContents.loadURL(url);
   await waitFor(webContents, 'Boolean(window.__settingsScreenTest?.state().settingsSnapshotReady && document.documentElement.lang === "en")');
+  await openLanguageSettings();
   const restored = await run(`document.querySelector('.settings-content-inner select').value`);
   await run(`(() => { const select = document.querySelector('.settings-content-inner select'); Object.defineProperty(navigator, 'languages', { configurable: true, value: ['fr-FR', 'ja-JP'] }); select.value = ''; select.dispatchEvent(new Event('change', { bubbles: true })); window.dispatchEvent(new Event('languagechange')); })()`);
   await waitFor(webContents, 'document.documentElement.lang === "ja"');
@@ -1169,6 +1196,13 @@ async function runLocalizationScenario(window, webContents) {
   await run(`localStorage.setItem('lingxi.desktop.language', 'ko'); window.dispatchEvent(new StorageEvent('storage', { key: 'lingxi.desktop.language' }));`);
   await waitFor(webContents, 'document.documentElement.lang === "ko"');
   return { rows, localizedSearch, restored, system, synced: await run('document.documentElement.lang') };
+}
+
+async function showRecommendedSkills(webContents) {
+  const run = expression => webContents.executeJavaScript(expression);
+  await run('window.__settingsScreenTest.selectPage("skills")');
+  await waitFor(webContents, `Boolean(document.querySelector('.extension-hub-toolbar-actions [aria-label="Skill 设置"]'))`);
+  await run(`document.querySelector('[data-catalog-tab="public"]').click()`);
 }
 
 async function runExtensionRecommendationsScenario(window, webContents) {
@@ -1184,10 +1218,21 @@ async function runExtensionRecommendationsScenario(window, webContents) {
     await delay(100);
     writeFileSync(join(dir, `${new URL(url).searchParams.get('theme') || 'light'}-recommendations-${name}.png`), (await window.capturePage()).toPNG());
   };
-  await run('window.__settingsScreenTest.selectPage("skills")');
-  await waitFor(webContents, 'document.querySelectorAll(".extension-skills-recommended article").length === 4');
+  await showRecommendedSkills(webContents);
+  await waitFor(webContents, 'document.querySelectorAll(".extension-skills-recommended article").length > 0 && [...document.querySelectorAll(".extension-collection-heading img")].every(img => img.complete && img.naturalWidth > 0)');
   await capture('skills');
-  const initial = await run('({count: document.querySelectorAll(".extension-skills-recommended article").length, overflow: document.querySelector(".settings-content-scroll").scrollWidth > document.querySelector(".settings-content-scroll").clientWidth + 1})');
+  const initial = await run('({groups: [...document.querySelectorAll(".extension-skills-recommended [data-category]")].map(group => [group.dataset.category, group.querySelectorAll("article").length]), overflow: document.querySelector(".settings-content-scroll").scrollWidth > document.querySelector(".settings-content-scroll").clientWidth + 1})');
+  await run(`(() => { const select = document.querySelector('.extension-category-filter select'); select.value = 'graphics'; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await waitFor(webContents, 'document.querySelectorAll(".extension-collection").length === 1 && document.querySelector(".extension-collection").dataset.category === "graphics"');
+  await capture('graphics');
+  await run(`[...document.querySelectorAll('[data-category="graphics"] .extension-card-open')].find(button => button.textContent.includes('PixelFX')).click()`);
+  await waitFor(webContents, 'document.querySelector(".extension-overview h1")?.textContent === "PixelFX"');
+  const pixelGallery = await run('document.querySelector(".extension-overview-actions a")?.href');
+  await capture('pixelfx');
+  await run('document.querySelector(".extension-breadcrumb button").click()');
+  await waitFor(webContents, 'Boolean(document.querySelector(".extension-search-field input"))');
+  await waitFor(webContents, 'document.querySelector(".extension-category-filter select")?.value === "graphics"');
+  await run(`(() => { const select = document.querySelector('.extension-category-filter select'); select.value = 'all'; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
   await run('window.__settingsScreenTest.setFieldValue(".extension-search-field input", "xlsx")');
   await waitFor(webContents, 'document.querySelectorAll(".extension-skills-recommended article").length === 1');
   const search = await run('document.querySelector(".extension-skills-recommended article").textContent.includes("Document Skills")');
@@ -1221,7 +1266,7 @@ async function runExtensionRecommendationsScenario(window, webContents) {
   await waitFor(webContents, 'window.__settingsScreenTest.state().extensionCalls.filter(({command}) => command.action === "apply_operation").length === 2');
   const completed = await run('window.__settingsScreenTest.state().extensionCalls');
   await run(`window.__settingsScreenTest.setExtensionCatalogs({plugins:${JSON.stringify({...catalog,installed:[{id:available[0].id,name:'document-skills'}]})}})`);
-  await run('window.__settingsScreenTest.selectPage("skills")');
+  await showRecommendedSkills(webContents);
   await waitFor(webContents, 'Boolean(document.querySelector(".extension-skills-recommended"))');
   const installed = await run('[...document.querySelectorAll(".extension-skills-recommended article")].find(el => el.textContent.includes("Document Skills"))?.querySelector(".extension-hub-danger")?.textContent.includes("卸载")');
   await run('[...document.querySelectorAll(".extension-skills-recommended article")].find(el => el.textContent.includes("Document Skills")).querySelector(".extension-hub-danger").click()');
@@ -1268,7 +1313,7 @@ async function runExtensionRecommendationsScenario(window, webContents) {
   await run('document.querySelector("[role=alertdialog] .extension-hub-danger").click()');
   await waitFor(webContents, 'window.__settingsScreenTest.state().extensionCalls.some(({command}) => command.action === "remove_server")');
   const removeMcp = await run('window.__settingsScreenTest.state().extensionCalls.find(({command}) => command.action === "remove_server").command');
-  return { initial, search, details, copied, beforePreview, beforeConfirmation, selectedPackage, completed, installed, narrow, mcpTemplate, beforeUninstall, cancelUninstall, uninstall, credentialCleanup, cancelMcp, removeMcp };
+  return { initial, pixelGallery, search, details, copied, beforePreview, beforeConfirmation, selectedPackage, completed, installed, narrow, mcpTemplate, beforeUninstall, cancelUninstall, uninstall, credentialCleanup, cancelMcp, removeMcp };
 }
 
 async function runRecommendationCatalogSafetyScenario(webContents) {
@@ -1278,7 +1323,7 @@ async function runRecommendationCatalogSafetyScenario(webContents) {
     installed: [{ id: 'document-skills@my-skills', name: 'document-skills' }], available: [], revisions: { user: 'a'.repeat(64) },
   };
   await run(`window.__settingsScreenTest.setExtensionCatalogs({plugins:${JSON.stringify(aliasCatalog)}})`);
-  await run('window.__settingsScreenTest.selectPage("skills")');
+  await showRecommendedSkills(webContents);
   await waitFor(webContents, 'Boolean(document.querySelector(".extension-skills-recommended"))');
   const installed = '[...document.querySelectorAll(".extension-skills-recommended article")].find(el => el.textContent.includes("Document Skills"))?.querySelector(".extension-hub-danger")?.textContent.includes("卸载")';
   await waitFor(webContents, installed);
@@ -1304,13 +1349,22 @@ async function runRecommendationCatalogSafetyScenario(webContents) {
 
 async function main() {
   await app.whenReady();
-  const window = new BrowserWindow({ show: false, width: 1000, height: 720, webPreferences: { sandbox: true } });
+  const scenario = process.env.LINGXI_SETTINGS_SCREEN_SCENARIO ?? 'layer-switcher';
+  const withNativeTitlebar = ['window-chrome', 'extension-recommendations', 'back-click'].includes(scenario);
+  const window = new BrowserWindow({
+    show: false, width: 1000, height: 720, webPreferences: { sandbox: true },
+    ...(withNativeTitlebar && process.platform === 'darwin' && {
+      titleBarStyle: 'hiddenInset', titleBarOverlay: true, trafficLightPosition: { x: 14, y: 14 },
+    }),
+  });
   try {
     await window.loadURL(url);
     const { webContents } = window;
     webContents.focus();
     await waitFor(webContents, 'Boolean(window.__settingsScreenTest?.state().settingsSnapshotReady && document.querySelector(\'[role="dialog"]\'))');
-    const scenario = process.env.LINGXI_SETTINGS_SCREEN_SCENARIO ?? 'layer-switcher';
+    if (withNativeTitlebar) await webContents.executeJavaScript(
+      `window.lingxi = { ...window.lingxi, platform: ${JSON.stringify(process.platform)} }; void 0`,
+    );
     const result = scenario === 'recommendation-catalog-safety' ? await runRecommendationCatalogSafetyScenario(webContents)
       : scenario === 'extension-recommendations' ? await runExtensionRecommendationsScenario(window, webContents)
       : scenario === 'localization' ? await runLocalizationScenario(window, webContents)
@@ -1339,8 +1393,10 @@ async function main() {
     await new Promise(resolve => process.stdout.write(`${JSON.stringify(result)}\n`, resolve));
   } finally {
     if (!window.isDestroyed()) window.destroy();
-    if (app.isReady()) await app.quit();
   }
 }
 
-main().catch((error) => { process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`); app.exit(1); });
+// The result is flushed before exit. A hidden fixture has no interactive quit flow.
+main().then(() => app.exit(0), (error) => {
+  process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`, () => app.exit(1));
+});

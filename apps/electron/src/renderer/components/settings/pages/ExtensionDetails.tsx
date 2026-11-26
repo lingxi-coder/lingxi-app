@@ -34,22 +34,30 @@ export function ExtensionDetails({ item, breadcrumb, onBack, actions, status, ch
       setCopyError(true);
     }
   };
-  const category = tr(`desktop_extension_category_${item.category}`);
+  const category = tr(`extension_directory_category_${item.category}`);
   const examples = item.examples ?? [];
   return <section className="extension-overview" aria-labelledby="extension-overview-title" data-extension-id={item.id}>
     <nav className="extension-breadcrumb" aria-label={tr('desktop_extension_details_breadcrumb')}>
-      <button type="button" onClick={onBack}>{breadcrumb}</button>
+      <button type="button" onClick={() => {
+        onBack();
+        requestAnimationFrame(() => document.getElementById(`extension-card-${item.id}`)?.focus());
+      }}>{breadcrumb}</button>
       <ExtensionGlyph name="chevronR" size={14} />
       <span aria-current="page">{item.name}</span>
     </nav>
     <header className="extension-overview-header">
-      <ExtensionIcon kind={kind} large />
+      <ExtensionIcon kind={kind} icon={item.icon} large />
       <div className="extension-overview-heading">
         <h1 id="extension-overview-title" ref={heading} tabIndex={-1}>{item.name}</h1>
         <p>{item.publisher} · {publicExtensionText(item.description, locale)}</p>
         {status && <span className="extension-overview-status"><ExtensionGlyph name="check" size={14} />{status}</span>}
       </div>
-      <div className="extension-overview-actions">{actions}</div>
+      <div className="extension-overview-actions">
+        {item.previewUrl && <a className="extension-hub-icon-text" href={item.previewUrl} target="_blank" rel="noopener noreferrer">
+          {tr('extension_directory_preview_effects')}<ExtensionGlyph name="chevronR" size={14} />
+        </a>}
+        {actions}
+      </div>
     </header>
     {children}
     {examples.length > 0 && <section className="extension-overview-showcase" aria-label={tr('desktop_extension_examples')}>

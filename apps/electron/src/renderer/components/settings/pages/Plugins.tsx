@@ -10,7 +10,7 @@ import { useT } from '../../../theme/ThemeContext';
 import type { EditableLayer, PageContentProps } from '../SettingsScreen';
 import { objectFromLayer } from '../layerFields';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
-import { ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, extensionHubStyle, useExtensionHubDialogFocus, useExtensionHubNavigation } from './ExtensionHub';
+import { ExtensionCatalogTabs, ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, ExtensionRecommendationCard, ExtensionRecommendationGroups, extensionHubStyle, useExtensionHubDialogFocus, useExtensionCategoryFilter, useExtensionHubNavigation } from './ExtensionHub';
 import { ExtensionDetails } from './ExtensionDetails';
 import {
   adminRecordCommand,
@@ -70,18 +70,6 @@ type PluginSelection =
   | { kind: 'policies' };
 
 const DESKTOP_PLATFORMS = new Set(['macos', 'windows', 'linux']);
-const PUBLIC_EXTENSION_CATEGORIES = ['browser', 'development', 'database', 'productivity'] as const;
-
-function publicCategoryLabel(category: string): string {
-  const key = {
-    browser: 'desktop_extension_category_browser',
-    development: 'desktop_extension_category_development',
-    database: 'desktop_extension_category_database',
-    productivity: 'desktop_extension_category_productivity',
-  }[category];
-  return key ? tr(key) : category;
-}
-
 type PublicDirectoryText = (typeof publicExtensionItems)[number]['description'];
 
 function localizedDirectoryText(value?: PublicDirectoryText): string {
@@ -92,7 +80,7 @@ function publicPluginSearchText(item: (typeof publicExtensionItems)[number]): st
   return [
     item.name,
     item.publisher,
-    publicCategoryLabel(item.category),
+    tr(`extension_directory_category_${item.category}`),
     localizedDirectoryText(item.description),
     localizedDirectoryText(item.requirements),
     item.marketplace?.name,
@@ -336,13 +324,11 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
     ? availablePlugins.filter((entry) => `${entry.id} ${entry.name} ${entry.description ?? ''}`.toLowerCase().includes(search.trim().toLowerCase()))
     : availablePlugins;
   const filteredMarketplaces = search.trim() ? marketplaceNames.filter((name) => name.toLowerCase().includes(search.trim().toLowerCase())) : marketplaceNames;
+  const categoryFilter = useExtensionCategoryFilter(publicDirectoryPlugins);
   const filteredPublicDirectory = search.trim()
-    ? publicDirectoryPlugins.filter((entry) => publicPluginSearchText(entry).includes(search.trim().toLowerCase()))
-    : publicDirectoryPlugins;
-  const publicDirectoryGroups = PUBLIC_EXTENSION_CATEGORIES
-    .map((category) => ({ category, entries: filteredPublicDirectory.filter((entry) => entry.category === category) }))
-    .filter((group) => group.entries.length > 0);
-  const hasPublicResults = filteredPublicDirectory.length > 0 || filteredAvailable.length > 0;
+    ? categoryFilter.items.filter((entry) => publicPluginSearchText(entry).includes(search.trim().toLowerCase()))
+    : categoryFilter.items;
+  const hasPublicResults = filteredPublicDirectory.length > 0 || (categoryFilter.value === 'all' && filteredAvailable.length > 0);
 
   const persistPayload = JSON.stringify({
     scope: editingLayer,
@@ -590,7 +576,6 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
           </button>
         )}
       </div>}
-      {pageError && selection.kind === 'list' && <div role="alert">{pageError}</div>}
       {linkRequest?.payload && <p role="status">{tr('desktop_extension_plugin_import')}</p>}
       {!isPluginDetail && <>
         <ExtensionHubHeader title={tr('desktop_extension_plugins')} description={tr('desktop_extension_plugin_description')} search={search} onSearch={setSearch} actions={<>
@@ -607,45 +592,27 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer, onNavig
         {navigationPrompt}
         <DomainOperationBanner t={t} operation={pluginOperation} fallbackDomainLabel={tr('desktop_extension_plugins')} />
         {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
-        <nav className="extension-catalog-tabs" aria-label={tr('desktop_extension_plugin_catalog')}>
-          <button type="button" aria-pressed={catalogTab === 'public'} onClick={() => setCatalogTab('public')}>{tr('desktop_extension_public')}</button>
-          <button type="button" aria-pressed={catalogTab === 'personal'} onClick={() => setCatalogTab('personal')}>{tr('desktop_personal')}</button>
-        </nav>
-        {catalogTab === 'public' && publicDirectoryGroups.map((group) => <section className="extension-catalog-section" key={`featured-${group.category}`}>
-          <h2 className="extension-hub-group-title">{tr('desktop_extension_featured_sources')} · {publicCategoryLabel(group.category)}</h2>
-          <div className="extension-hub-list">
-            {group.entries.map((entry) => {
-              const marketplace = entry.marketplace;
-              const sourceAction = marketplace ? decidePublicMarketplaceSourceAction(marketplace, catalog.marketplaces ?? []) : null;
-              const pluginId = publicMarketplacePluginTargetId(marketplace, sourceAction);
-              const pluginInstalled = pluginId ? (catalog.installed ?? []).some((plugin) => plugin.id === pluginId) : false;
-              const pluginAvailable = pluginId ? availablePlugins.some((available) => available.id === pluginId) : false;
-              const registeredMarketplace = sourceAction?.kind === 'registered';
-              const sourceConflict = sourceAction?.kind === 'source-conflict';
-              return <div key={entry.id} className="extension-hub-row">
-                <ExtensionIcon />
-                <button type="button" className="extension-hub-row-copy extension-hub-row-open" aria-label={tr('desktop_extension_view_details_named', entry.name)} onClick={() => requestSelection({ kind: 'directory', id: entry.id })}>
-                  <span className="extension-hub-row-title">{entry.name}</span>
-                  <span className="extension-hub-row-description">{localizedDirectoryText(entry.description)}</span>
-                  <span className="extension-hub-row-description">{entry.publisher}{sourceConflict ? ` · ${tr('desktop_extension_marketplace_source_conflict_short')}` : registeredMarketplace && !pluginAvailable ? ` · ${tr('desktop_extension_marketplace_added')}` : ''}</span>
-                  {entry.requirements && <span className="extension-hub-row-description">{tr('desktop_extension_requirements')}: {localizedDirectoryText(entry.requirements)}</span>}
-                </button>
-                <div className="extension-hub-row-side">
-                  {marketplace ? <button
-                    type="button"
-                    className="extension-hub-icon-button"
-                    aria-label={tr(sourceConflict ? 'desktop_extension_resolve_marketplace_conflict_named' : pluginInstalled ? 'desktop_extension_manage_named' : pluginAvailable ? 'desktop_extension_install_named' : registeredMarketplace ? 'desktop_extension_browse_marketplace_named' : 'desktop_extension_add_marketplace_named', entry.name)}
-                    onClick={() => openPublicDirectoryItem(entry)}
-                  ><ExtensionGlyph name={sourceConflict || pluginInstalled || (registeredMarketplace && !pluginAvailable) ? 'more' : 'plus'} size={20} /></button> : <>
-                    <a className="extension-hub-icon-button" href={entry.documentationUrl} target="_blank" rel="noopener noreferrer" aria-label={tr('desktop_extension_open_documentation_named', entry.name)} title={tr('desktop_extension_open_documentation')}><ExtensionGlyph name="chevronR" size={16} /></a>
-                    <a className="extension-hub-icon-button" href={entry.sourceUrl} target="_blank" rel="noopener noreferrer" aria-label={tr('desktop_extension_open_source_named', entry.name)} title={tr('desktop_extension_open_source')}><ExtensionGlyph name="plugin" size={16} /></a>
-                  </>}
-                </div>
-              </div>;
-            })}
-          </div>
-        </section>)}
-        {catalogTab === 'public' && publicGroups.map((marketplace) => <section className="extension-catalog-section" key={marketplace}>
+        <ExtensionCatalogTabs filter={categoryFilter} label={tr('desktop_extension_plugin_catalog')} value={catalogTab} onChange={setCatalogTab} />
+        {catalogTab === 'public' && <ExtensionRecommendationGroups items={filteredPublicDirectory}>{(entry) => {
+          const target = publicDirectoryPluginSelection(entry, catalog);
+          const conflict = target.kind === 'marketplace' && Boolean(target.sourceConflict);
+          const status = target.kind === 'plugin' ? tr('apps_installed')
+            : conflict ? tr('desktop_extension_marketplace_source_conflict_short')
+            : target.kind === 'marketplace' || target.kind === 'available' ? tr('desktop_extension_marketplace_added') : undefined;
+          const actionKey = target.kind === 'plugin' ? 'project_page_manage' : target.kind === 'available' ? 'plugins_action_install'
+            : conflict ? 'extension_directory_review_conflict' : target.kind === 'marketplace' ? 'desktop_extension_browse_plugins' : 'extension_directory_add_marketplace';
+          return <ExtensionRecommendationCard key={entry.id} item={entry} status={status}
+            onOpen={() => requestSelection({ kind: 'directory', id: entry.id })}
+            action={entry.marketplace
+              ? <button type="button" className="extension-hub-icon-text" onClick={() => openPublicDirectoryItem(entry)}>
+                <ExtensionGlyph name={target.kind === 'available' || target.kind === 'marketplace-add' ? 'plus' : 'chevronR'} size={14} />
+                {tr(actionKey)}
+              </button>
+              : <a className="extension-hub-icon-text" href={entry.documentationUrl} target="_blank" rel="noopener noreferrer">
+                {tr('extension_directory_documentation')}<ExtensionGlyph name="chevronR" size={14} />
+              </a>} />;
+        }}</ExtensionRecommendationGroups>}
+        {catalogTab === 'public' && categoryFilter.value === 'all' && publicGroups.map((marketplace) => <section className="extension-catalog-section" key={marketplace}>
           <h2 className="extension-hub-group-title">{marketplace} <ExtensionGlyph name="chevronR" size={14} /></h2>
           <div className="extension-hub-list">
             {filteredAvailable.filter((entry) => entry.marketplace === marketplace).map((entry) => <div key={entry.id} className={`extension-hub-row${entry.installed ? ' is-installed' : ''}`}>

@@ -2,18 +2,22 @@ import directory from '../../../../resources/extensions/public-directory.json';
 
 export type PublicExtensionPlatform = 'macos' | 'windows' | 'linux' | 'android' | 'ios';
 export type PublicExtensionText = Readonly<Record<string, string>>;
+export const publicExtensionCategories = ['design', 'graphics', 'development', 'database', 'browser', 'productivity'] as const;
+export type PublicExtensionCategory = typeof publicExtensionCategories[number];
 
 export interface PublicExtensionItem {
   id: string;
   kind: 'mcp' | 'plugin';
   name: string;
   publisher: string;
-  category: 'browser' | 'development' | 'database' | 'productivity';
+  category: PublicExtensionCategory;
+  icon?: 'layout' | 'palette' | 'pencil' | 'cube' | 'pixels';
   platforms: readonly PublicExtensionPlatform[];
   description: PublicExtensionText;
   requirements?: PublicExtensionText;
   sourceUrl: string;
   documentationUrl: string;
+  previewUrl?: string;
   version?: string;
   /** Discoverable skills supplied by the original, complete plugin package. */
   skills?: readonly string[];

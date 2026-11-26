@@ -53,7 +53,7 @@ or `uvx --from <package>==<version> <entry point> …`. Never use `@latest`;
 allow only HTTPS source/documentation links. Do not add secrets, shell scripts,
 automatic installation hooks or provider credentials.
 
-`category` is one of `browser`, `development`, `database` and `productivity`.
+`category` is one of `design`, `graphics`, `browser`, `development`, `database` and `productivity`.
 Desktop, Android and iOS each drop an entry whose category they do not know, so
 a new category needs all three clients and both translation sets first.
 
@@ -70,6 +70,13 @@ requirements ask for a read-only database account. crystaldba/postgres-mcp is
 not listed: every release from 0.1.0rc1 to the current 0.3.0 pins
 `pglast==7.2.0`, which PyPI no longer serves, so `uvx` cannot install it
 (0.1.0, the one release without that pin, documents no restricted access mode).
+
+The UI design and 3D collections were added on 2026-11-25. PixelFX also supplies
+an optional HTTPS `previewUrl` for its [effect gallery](https://patch-gg.github.io/pixelfx/).
+The [shadcn registry server](https://ui.shadcn.com/docs/mcp) and the
+[Three.js MCP Apps example](https://github.com/modelcontextprotocol/ext-apps/tree/main/examples/threejs-server)
+use desktop Node.js templates. The Three.js server exposes documentation tools
+over stdio. Its visual renderer requires an MCP Apps host.
 
 The recommendations were expanded on 2026-11-12 after checking Anthropic's
 published marketplace and skill manifests, Superpowers, and the official Notion,

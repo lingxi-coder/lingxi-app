@@ -7,15 +7,19 @@ enum PublicExtensionKind: String, Hashable {
 }
 
 enum PublicExtensionCategory: String, CaseIterable, Identifiable, Hashable {
-    case browser
+    case design
+    case graphics
     case development
     case database
+    case browser
     case productivity
 
     var id: String { rawValue }
 
     var localizationKey: String {
         switch self {
+        case .design: "extension_directory_category_design"
+        case .graphics: "extension_directory_category_graphics"
         case .browser: "public_extensions_category_browser"
         case .development: "public_extensions_category_development"
         case .database: "public_extensions_category_database"
@@ -244,11 +248,13 @@ struct PublicExtensionItem: Identifiable {
     let name: String
     let publisher: String
     let category: PublicExtensionCategory
+    var icon: String? = nil
     let platforms: [String]
     let description: [String: String]
     let requirements: [String: String]?
     let sourceURL: String
     let documentationURL: String
+    var previewURL: URL? = nil
     let version: String?
     let mcpName: String?
     let mcpConfig: [String: Any]?
@@ -258,6 +264,17 @@ struct PublicExtensionItem: Identifiable {
 
     func localizedExamples(locale: Locale) -> [String] {
         examples.map { localized($0, locale: locale, fallback: "") }.filter { !$0.isEmpty }
+    }
+
+    var symbolName: String? {
+        switch icon {
+        case "layout": "rectangle.split.2x1"
+        case "palette": "paintpalette"
+        case "pencil": "pencil"
+        case "cube": "cube"
+        case "pixels": "square.grid.3x3.fill"
+        default: nil
+        }
     }
 
     func localizedDescription(locale: Locale) -> String {
@@ -335,11 +352,13 @@ struct PublicExtensionDirectory {
             name: name,
             publisher: publisher,
             category: category,
+            icon: value["icon"] as? String,
             platforms: platforms,
             description: description,
             requirements: requirements,
             sourceURL: sourceURL,
             documentationURL: documentationURL,
+            previewURL: (value["previewUrl"] as? String).flatMap { URL(string: $0) }.flatMap { $0.scheme == "https" ? $0 : nil },
             version: version,
             mcpName: mcpName,
             mcpConfig: mcpConfig,
@@ -350,6 +369,24 @@ struct PublicExtensionDirectory {
     }
 }
 
+private struct ExtensionCategoryArtwork: View {
+    let category: PublicExtensionCategory
+    let size: CGFloat
+
+    var body: some View {
+        Group {
+            if let artwork = UIImage(named: "extension_\(category.rawValue).jpg") {
+                Image(uiImage: artwork).renderingMode(.original).resizable()
+            } else {
+                Image(systemName: "square.grid.2x2").foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: size / 4))
+        .accessibilityHidden(true)
+    }
+}
+
 /// Shared search/category list for the public MCP and plugin sources.
 struct PublicExtensionDirectoryList: View {
     let kind: PublicExtensionKind
@@ -357,10 +394,12 @@ struct PublicExtensionDirectoryList: View {
     let actionTitle: (PublicExtensionItem) -> String
     let action: (PublicExtensionItem) -> Void
     let canAct: (PublicExtensionItem) -> Bool
+    let statusTitle: (PublicExtensionItem) -> String?
     let removalTitle: (PublicExtensionItem) -> String?
     let remove: (PublicExtensionItem) -> Void
 
     @Environment(\.theme) private var theme
+    @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(LocalizationManager.self) private var localization
     @State private var directory = PublicExtensionDirectory.load()
     @State private var search = ""
@@ -374,6 +413,7 @@ struct PublicExtensionDirectoryList: View {
         actionTitle: @escaping (PublicExtensionItem) -> String,
         action: @escaping (PublicExtensionItem) -> Void,
         canAct: @escaping (PublicExtensionItem) -> Bool = { _ in true },
+        statusTitle: @escaping (PublicExtensionItem) -> String? = { _ in nil },
         removalTitle: @escaping (PublicExtensionItem) -> String? = { _ in nil },
         remove: @escaping (PublicExtensionItem) -> Void = { _ in }
     ) {
@@ -382,50 +422,70 @@ struct PublicExtensionDirectoryList: View {
         self.actionTitle = actionTitle
         self.action = action
         self.canAct = canAct
+        self.statusTitle = statusTitle
         self.removalTitle = removalTitle
         self.remove = remove
     }
 
     private var locale: Locale { localization.effectiveLocale() }
 
+    private var entries: [PublicExtensionItem] {
+        (directory?.items ?? []).filter { $0.kind == kind && (!skillsOnly || !$0.skills.isEmpty) }
+    }
+
     private var visibleItems: [PublicExtensionItem] {
-        guard let items = directory?.items else { return [] }
-        return items.filter { item in
-            guard item.kind == kind,
-                  !skillsOnly || !item.skills.isEmpty,
-                  category.map({ item.category == $0 }) ?? true else { return false }
-            guard !search.isEmpty else { return true }
-            let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-            return [item.name, item.publisher, item.localizedDescription(locale: locale),
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        return entries.filter { item in
+            guard category == nil || category == item.category else { return false }
+            guard !query.isEmpty else { return true }
+            return [item.name, item.publisher, item.category.displayName, item.localizedDescription(locale: locale),
                     item.localizedRequirements(locale: locale) ?? "", item.skills.joined(separator: " ")]
                 .contains { $0.localizedStandardContains(query) }
         }
-
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            TextField(String(localized: "public_extensions_search"), text: $search)
-                .textFieldStyle(.roundedBorder)
-                .autocorrectionDisabled()
-
-            Picker(String(localized: "public_extensions_category"), selection: $category) {
-                Text("public_extensions_category_all").tag(PublicExtensionCategory?.none)
-                ForEach(PublicExtensionCategory.allCases) { category in
-                    Text(LocalizedStringKey(category.localizationKey)).tag(Optional(category))
+            let toolbar = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading)) : AnyLayout(HStackLayout())
+            toolbar {
+                HStack {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
+                    TextField(String(localized: "public_extensions_search"), text: $search)
+                        .textFieldStyle(.plain).autocorrectionDisabled().textInputAutocapitalization(.never)
+                }
+                .padding(.horizontal, 12).frame(minHeight: 44)
+                .background(theme.surface, in: RoundedRectangle(cornerRadius: 10))
+                Menu {
+                    Picker(String(localized: "public_extensions_category"), selection: $category) {
+                        Text("public_extensions_category_all").tag(PublicExtensionCategory?.none)
+                        ForEach(PublicExtensionCategory.allCases.filter { group in entries.contains { $0.category == group } }) { group in
+                            Text(LocalizedStringKey(group.localizationKey)).tag(Optional(group))
+                        }
+                    }
+                } label: {
+                    Label(category?.displayName ?? String(localized: "public_extensions_category_all"),
+                          systemImage: "line.3.horizontal.decrease").font(.subheadline).frame(minHeight: 44)
                 }
             }
-            .pickerStyle(.menu)
 
+            let grouped = Dictionary(grouping: visibleItems, by: \.category)
             if case nil = directory {
                 Label(String(localized: "public_extensions_unavailable"), systemImage: "exclamationmark.triangle")
                     .font(.footnote).foregroundStyle(.secondary)
-            } else if visibleItems.isEmpty {
+            } else if grouped.isEmpty {
                 Text("public_extensions_empty")
                     .font(.footnote).foregroundStyle(.secondary)
             } else {
-                ForEach(visibleItems) { item in
-                    itemRow(item)
+                ForEach(PublicExtensionCategory.allCases) { group in
+                    if let items = grouped[group] {
+                        HStack(spacing: 10) {
+                            ExtensionCategoryArtwork(category: group, size: 44)
+                            Text(LocalizedStringKey(group.localizationKey)).font(.headline)
+                            Text(items.count, format: .number).font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                        .padding(.top, 8).accessibilityElement(children: .combine).accessibilityAddTraits(.isHeader)
+                        ForEach(items) { item in itemRow(item) }
+                    }
                 }
             }
         }
@@ -449,44 +509,28 @@ struct PublicExtensionDirectoryList: View {
     }
 
     private func itemRow(_ item: PublicExtensionItem) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(alignment: .firstTextBaseline) {
-                Button { selectedItem = item } label: {
-                    HStack {
-                        Text(item.name).font(.body.weight(.medium))
-                        Image(systemName: "chevron.right").font(.caption)
-                    }.foregroundStyle(theme.text)
-                }.buttonStyle(.plain)
-                Spacer(minLength: 8)
-                if let version = item.version, !version.isEmpty {
-                    Text(version).font(.caption.monospaced()).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
+            Button { selectedItem = item } label: {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: item.symbolName ?? (skillsOnly ? "books.vertical" : item.kind == .mcp ? "server.rack" : "puzzlepiece.extension"))
+                        .foregroundStyle(theme.accent).frame(width: 30, height: 30)
+                        .background(theme.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(item.name).font(.headline).foregroundStyle(theme.text)
+                        Text(item.localizedDescription(locale: locale)).font(.subheadline).foregroundStyle(theme.text2)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 }
+                .multilineTextAlignment(.leading).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
             }
-            Text("\(item.publisher) · \(item.category.displayName)")
-                .font(.caption).foregroundStyle(.secondary)
-            if !item.skills.isEmpty {
-                Text(item.skills.joined(separator: ", "))
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Text(item.localizedDescription(locale: locale))
-                .font(.footnote).foregroundStyle(theme.text2)
-                .fixedSize(horizontal: false, vertical: true)
-            if let requirements = item.localizedRequirements(locale: locale), !requirements.isEmpty {
-                Text(String(format: String(localized: "public_extensions_requirements_format"), requirements))
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            HStack {
-                Button(actionTitle(item)) { action(item) }
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(theme.accent)
-                .padding(.top, 2)
-                .disabled(!canAct(item))
-                if let title = removalTitle(item) {
-                    Spacer()
-                    Button(title, role: .destructive) { remove(item) }.disabled(!canAct(item))
-                }
-            }
+            .buttonStyle(.plain)
+            let metadata = [item.publisher, skillsOnly ? String(format: String(localized: "extension_directory_skills_count"), item.skills.count) : item.version, statusTitle(item)]
+                .compactMap { $0 }.joined(separator: " · ")
+            Text(metadata).font(.caption).foregroundStyle(.secondary)
+            Button(actionTitle(item)) { action(item) }
+                .font(.subheadline.weight(.medium)).buttonStyle(.bordered).tint(theme.accent)
+                .frame(minHeight: 44).disabled(!canAct(item))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(13)
@@ -510,9 +554,7 @@ private struct PublicExtensionDetail: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 HStack(alignment: .top, spacing: 16) {
-                    Image(systemName: item.kind == .mcp ? "server.rack" : "puzzlepiece.extension")
-                        .font(.largeTitle).foregroundStyle(theme.accent)
-                        .frame(width: 64, height: 64).background(theme.surface, in: RoundedRectangle(cornerRadius: 16))
+                    ExtensionCategoryArtwork(category: item.category, size: 64)
                     VStack(alignment: .leading, spacing: 6) {
                         Text(item.name).font(.title2.weight(.semibold))
                         Text(item.publisher).font(.subheadline).foregroundStyle(.secondary)
@@ -570,6 +612,9 @@ private struct PublicExtensionDetail: View {
 
     @ViewBuilder private var actions: some View {
         Button(actionTitle, action: action).buttonStyle(.borderedProminent).disabled(!canAct)
+        if let url = item.previewURL {
+            Link(destination: url) { Label("extension_directory_preview_effects", systemImage: "play.rectangle") }
+        }
         if let removalTitle { Button(removalTitle, role: .destructive, action: remove).buttonStyle(.bordered).disabled(!canAct) }
     }
 }

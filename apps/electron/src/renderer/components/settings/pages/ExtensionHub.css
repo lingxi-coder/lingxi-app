@@ -1,7 +1,7 @@
 /* Extension managers share the settings shell, scroll viewport and palette. */
-.extension-hub-main { min-width: 0; margin-top: 18px; color: var(--hub-text); }
+.extension-hub-main { min-width: 0; margin-top: 8px; color: var(--hub-text); }
 .extension-hub-page { width: 100%; min-width: 0; }
-.extension-hub-header { display: flex; flex-direction: column; gap: 18px; margin-bottom: 20px; }
+.extension-hub-header { display: flex; flex-direction: column; gap: 12px; margin-bottom: 12px; }
 .extension-hub-heading { min-width: 0; }
 .extension-hub-heading p { margin: 0; color: var(--hub-muted); font-size: 12.5px; line-height: 1.6; }
 .extension-hub-toolbar { display: flex; align-items: center; justify-content: space-between; width: 100%; min-width: 0; gap: 12px; flex-wrap: wrap; }
@@ -53,9 +53,13 @@
 .extension-hub-primary::-webkit-details-marker { display: none; }
 .extension-hub-primary:disabled, .extension-hub-danger:disabled, .extension-hub-icon-button:disabled { opacity: .4; cursor: default; }
 .extension-catalog-tabs { display: flex; align-items: center; flex-wrap: wrap; width: fit-content; max-width: 100%; gap: 2px; padding: 3px; margin-bottom: 20px; border: 0.5px solid var(--hub-border); border-radius: 9px; background: var(--hub-sidebar); }
-.extension-catalog-tabs button { min-height: 28px; padding: 5px 14px; border: 0; border-radius: 7px; color: var(--hub-muted); background: transparent; font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer; }
+.extension-catalog-tabs button { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 5px 14px; border: 0; border-radius: 7px; color: var(--hub-muted); background: transparent; font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer; }
 .extension-catalog-tabs button:hover { background: var(--hub-hover); }
 .extension-catalog-tabs button[aria-pressed="true"] { background: var(--hub-surface); color: var(--hub-text); font-weight: 600; box-shadow: 0 1px 2px rgb(0 0 0 / 6%); }
+.extension-catalog-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .5rem; margin-block-end: 1.15rem; }
+.extension-catalog-controls .extension-catalog-tabs { margin: 0; }
+.extension-category-filter { display: inline-flex; align-items: center; gap: .4rem; color: var(--hub-muted); font-size: .78rem; }
+.extension-category-filter select { max-inline-size: 100%; min-block-size: 2rem; padding-inline: .45rem; border: 1px solid var(--hub-border); border-radius: .5rem; background: var(--hub-surface); color: var(--hub-text); font: inherit; }
 .extension-catalog-section + .extension-catalog-section { margin-top: 28px; }
 .extension-hub-group-title { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; color: var(--hub-text-secondary); font-size: 13px; font-weight: 600; line-height: 1.5; }
 .extension-hub-group-title > svg { color: var(--hub-muted); }
@@ -78,11 +82,46 @@
 .extension-hub-row-actions { display: flex; align-items: center; gap: 8px; }
 .extension-skill-installed { margin-left: auto; color: var(--hub-subtle); }
 .extension-skills-installed .extension-hub-group-title { margin-bottom: 10px; }
-.extension-recommendations-note { margin: -2px 0 14px; max-width: 64ch; color: var(--hub-muted); font-size: 12.5px; line-height: 1.6; }
-.extension-recommendation-row { align-items: flex-start; }
-.extension-recommendation-row .extension-hub-row-description { white-space: normal; }
-.extension-recommendation-row > .extension-hub-primary { align-self: center; }
-.extension-recommendation-meta { margin-top: 7px; color: var(--hub-muted); font-size: 11.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.extension-collection-heading {
+  display: flex; align-items: center; gap: .65rem; margin: 0 0 .7rem;
+  color: var(--hub-text); font-size: 1.05rem; font-weight: 650; line-height: 1.25; letter-spacing: -.015em;
+}
+.extension-collection-heading img { display: block; border-radius: .7rem; flex: none; }
+.extension-collection-count { font-size: .8rem; font-weight: 500; color: var(--hub-muted); font-variant-numeric: tabular-nums; }
+.extension-collection { container: extension-collection / inline-size; }
+.extension-collection-grid { grid-template-columns: minmax(0, 1fr); gap: .625rem; }
+@container extension-collection (min-width: 37rem) {
+  .extension-collection-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.extension-collection-card {
+  display: flex; flex-direction: column; align-items: stretch; gap: .5rem;
+  min-inline-size: 0; padding: .9rem; border: 1px solid var(--hub-border); border-radius: .875rem;
+}
+.extension-collection-card:hover { background: var(--hub-surface); }
+.extension-card-open {
+  display: flex; align-items: center; gap: .65rem; min-inline-size: 0;
+  padding: 0; border: 0; border-radius: .45rem; background: transparent;
+}
+.extension-card-open .extension-hub-icon { inline-size: 1.85rem; block-size: 1.85rem; border-radius: .5rem; }
+.extension-card-open .extension-hub-icon :is(img, svg) { inline-size: 1.2rem; block-size: 1.2rem; }
+.extension-card-open .extension-hub-row-title {
+  flex: 1; font-size: .94rem; font-weight: 600; line-height: 1.4; white-space: normal; overflow-wrap: anywhere;
+}
+.extension-card-open > svg { flex: none; color: var(--hub-muted); }
+.extension-card-open:hover .extension-hub-row-title { text-decoration: underline; text-underline-offset: .15em; }
+.extension-collection-card p { margin: 0; color: var(--hub-text-secondary); font-size: .84rem; line-height: 1.5; overflow-wrap: anywhere; }
+.extension-collection-card footer {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: .45rem .75rem; margin-block-start: auto; padding-block-start: .4rem;
+}
+.extension-card-meta { display: grid; gap: .15rem; min-inline-size: 0; color: var(--hub-muted); font-size: .75rem; line-height: 1.45; overflow-wrap: anywhere; }
+.extension-card-status { color: var(--hub-text-secondary); font-weight: 550; }
+.extension-collection-card footer :is(button, a) {
+  max-inline-size: 100%; min-block-size: 2rem; padding: .25rem .65rem;
+  border-radius: .6rem; white-space: normal; font-size: .78rem; text-decoration: none;
+}
+.extension-collection-card footer :is(button, a):active { opacity: .72; }
+.extension-collection-card footer a:focus-visible { outline: 2px solid var(--hub-accent); outline-offset: 3px; }
 .extension-recommendation-source { width: fit-content; margin-top: 6px; color: var(--hub-accent); font-size: 11.5px; line-height: 1.5; text-decoration: none; }
 .extension-recommendation-source:hover { text-decoration: underline; }
 .extension-skills-sources .extension-catalog-tabs { margin-bottom: 16px; }

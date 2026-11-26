@@ -2434,6 +2434,12 @@
     <string name="extension_directory_add_mcp">MCP サーバーを追加</string>
     <string name="extension_directory_back">ディレクトリに戻る</string>
     <string name="extension_directory_category_all">すべて</string>
+    <string name="extension_directory_category_design">UI デザイン</string>
+    <string name="extension_directory_category_graphics">3D・エフェクト</string>
+    <string name="extension_directory_preview_effects">エフェクトをプレビュー</string>
+    <string name="extension_directory_recommended">おすすめ</string>
+    <string name="extension_directory_skills_count">スキル %1$d 件</string>
+    <string name="extension_directory_review_conflict">競合を確認</string>
     <string name="extension_directory_category_browser">ブラウザー</string>
     <string name="extension_directory_category_development">開発</string>
     <string name="extension_directory_category_database">データベース</string>

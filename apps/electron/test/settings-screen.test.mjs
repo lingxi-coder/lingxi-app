@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
@@ -83,7 +83,10 @@ async function runScenario(scenario, fixtureTheme = process.env.LINGXI_SETTINGS_
 test('all settings pages fit macOS windows and name their switches', async () => {
   for (const theme of ['light', 'dark']) {
     const states = await runScenario('macos-audit', theme);
-    assert.equal(states.length, 40);
+    const pagesAt = width => states.filter(state => state.width === width).map(state => state.page);
+    const widePages = pagesAt(1000);
+    assert.ok(['skills', 'plugins', 'mcp'].every(page => widePages.includes(page)));
+    assert.deepEqual(pagesAt(760), widePages);
     assert.deepEqual(states.filter(state => state.overflow || state.bottomOverflow || state.unnamedSwitches || state.placeholder), [], `${theme}: layout or accessible names`);
   }
 });
@@ -91,7 +94,11 @@ test('all settings pages fit macOS windows and name their switches', async () =>
 test('recommended skills search, add their source and follow the chosen package before installation', async () => {
   for (const theme of ['light', 'dark']) {
     const result = await runScenario('extension-recommendations', theme);
-    assert.equal(result.initial.count, 4);
+    const { items } = JSON.parse(readFileSync(new URL('../../../resources/extensions/public-directory.json', import.meta.url), 'utf8'));
+    const packs = items.filter(item => item.skills?.length);
+    assert.deepEqual(result.initial.groups, ['design', 'graphics', 'development', 'database', 'productivity'].map(category =>
+      [category, packs.filter(item => item.category === category).length]));
+    assert.equal(result.pixelGallery, 'https://patch-gg.github.io/pixelfx/');
     assert.equal(result.initial.overflow, false);
     assert.equal(result.search, true);
     assert.equal(result.installed, true);
@@ -167,13 +174,18 @@ test('settings preserves content and scroll track insets while scrolling and swi
     assert.equal(result.dragRegionMode, 'drag');
     assert.equal(result.dragRegionHeight, '40px');
     assert.deepEqual(result.dragRegionEdges, [0, 88, 0]);
-    assert.equal(result.computerTop, 52, 'Computer Use starts at the shared top inset');
-    assert.equal(result.browserTop, 52, 'Browser breadcrumb starts at the shared top inset');
+    for (const page of result.extensionHeaders) {
+      assert.equal(page.top, 10, page.id);
+      assert.ok(page.controls.every((control) => control.hit && control.mode === 'no-drag'), page.id);
+    }
+    if (process.platform === 'darwin') assert.ok(result.backLeft >= 88);
+    assert.equal(result.computerTop, 10, 'Computer Use starts at the shared top inset');
+    assert.equal(result.browserTop, 10, 'Browser breadcrumb starts at the shared top inset');
     for (const [position, state] of Object.entries(result.layout)) {
       const context = `${theme} ${position}`;
-      assert.deepEqual(state.viewportInsets, { top: 40, right: 6, bottom: 8 }, `${context}: viewport clears the titlebar and window edges`);
-      assert.deepEqual(state.contentInsets, { top: 12, left: 32, right: 26, bottom: 32 }, `${context}: inner content keeps its padding`);
-      assert.equal(state.backTop, 52, `${context}: Back aligns with the start of the content`);
+      assert.deepEqual(state.viewportInsets, { top: 0, right: 6, bottom: 8 }, `${context}: viewport keeps the window edge insets`);
+      assert.deepEqual(state.contentInsets, { top: 10, left: 32, right: 26, bottom: 32 }, `${context}: inner content keeps its padding`);
+      assert.equal(state.backTop, 10, `${context}: Back aligns with the start of the content`);
       assert.ok(state.contentBottomClearance >= 32, `${context}: final content clears the bottom padding`);
       assert.deepEqual(state.sidebarInsets, { left: 6, right: 6, bottom: 8 }, `${context}: sidebar scroll track remains inset`);
       assert.equal(state.scrollPaddingTop, '0px', context);

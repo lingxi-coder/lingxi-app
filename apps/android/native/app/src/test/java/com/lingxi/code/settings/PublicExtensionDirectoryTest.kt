@@ -10,6 +10,18 @@ import org.json.JSONObject
 
 class PublicExtensionDirectoryTest {
     @Test
+    fun bundledDesignAndGraphicsEntriesSurvivePlatformFiltering() {
+        val json = requireNotNull(javaClass.getResourceAsStream("/public-directory.json")).bufferedReader().use { it.readText() }
+        val entries = parsePublicExtensionDirectory(json)
+        val effects = filterPublicExtensions(entries, "pixelfx", "graphics", "zh-Hans").single()
+        assertEquals("https://patch-gg.github.io/pixelfx/", effects.previewUrl)
+        assertEquals("pixelfx", effects.marketplace?.pluginId)
+        assertTrue(entries.any { it.category == "design" && it.skills.contains("accessibility-review") })
+        assertTrue(entries.any { it.category == "graphics" && it.skills.contains("threejs-lighting") })
+        assertFalse(entries.any { it.id in setOf("shadcn-ui", "threejs-mcp") })
+    }
+
+    @Test
     fun recommendedPluginTargetFollowsVerifiedMarketplaceAliases() {
         val candidate = PublicExtensionMarketplace("anthropics/skills", "anthropic-agent-skills", "document-skills")
         val alias = PluginMarketplace("my-skills", """{"source":"github","repo":"anthropics/skills"}""", null, null)

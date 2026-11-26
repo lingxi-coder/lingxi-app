@@ -71,6 +71,8 @@ targets:
         buildPhase: resources
       - path: ../../../resources/extensions/public-directory.json
         buildPhase: resources
+      - path: ../../../resources/extension-artwork/drawable-nodpi
+        buildPhase: resources
       - path: ../../../resources/mermaid/mermaid.html
         buildPhase: resources
       - path: ../../../resources/team-visualization/assets/team-visualization.html

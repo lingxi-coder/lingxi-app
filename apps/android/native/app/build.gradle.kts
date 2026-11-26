@@ -222,6 +222,8 @@ android {
         // class loader so Android and iOS pass the very same table.
         getByName("test").resources.srcDir(rootProject.file("../../../packages/bridge-client/fixtures"))
         getByName("main").assets.srcDir(rootProject.file("../../../resources/extensions"))
+        getByName("test").resources.srcDir(rootProject.file("../../../resources/extensions"))
+        getByName("main").res.srcDir(rootProject.file("../../../resources/extension-artwork"))
         getByName("main").assets.srcDir(rootProject.file("../../../resources/mermaid"))
         getByName("main").assets.srcDir(rootProject.file("../../../resources/team-visualization/assets"))
         // Native libraries are built independently so the Play artifact never

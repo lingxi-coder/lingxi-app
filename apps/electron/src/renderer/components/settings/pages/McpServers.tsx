@@ -10,7 +10,7 @@ import { parseJsonObjectInput } from '../jsonInput';
 import { publicExtensionItems, publicExtensionText, type PublicExtensionItem } from '../../../../shared/publicExtensionDirectory';
 import { mcpPrepareRequest } from '../../../../shared/mcpPrepare';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
-import { ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, useExtensionHubNavigation } from './ExtensionHub';
+import { ExtensionCatalogTabs, ExtensionHubLayout, ExtensionHubHeader, ExtensionRecommendationCard, ExtensionRecommendationGroups, useExtensionCategoryFilter, useExtensionHubNavigation } from './ExtensionHub';
 import { ExtensionDetails, ExtensionRemovalConfirmation } from './ExtensionDetails';
 import {
   adminRecordCommand,
@@ -56,23 +56,12 @@ const MCP_SCOPE_DESCRIPTIONS: Record<WritableScopeDto, string> = {
 const MCP_SCOPE_VS_LAYERS_NOTE = 'mcp_scope_vs_layers_note';
 
 const DESKTOP_PLATFORMS = new Set(['macos', 'windows', 'linux']);
-const PUBLIC_MCP_CATEGORIES = ['browser', 'development', 'database', 'productivity'] as const;
 const DEFAULT_MCP_CONFIG = { command: 'npx', args: ['-y', 'package-name'] };
 type PublicDirectoryText = (typeof publicExtensionItems)[number]['description'];
 type McpRuntimeStatusDto = McpStatusDto | 'connected' | 'disconnected';
 
 function localizedDirectoryText(value?: PublicDirectoryText): string {
   return value ? publicExtensionText(value, currentLocale()) : '';
-}
-
-function publicMcpCategoryLabel(category: string): string {
-  const key = {
-    browser: 'desktop_extension_category_browser',
-    development: 'desktop_extension_category_development',
-    database: 'desktop_extension_category_database',
-    productivity: 'desktop_extension_category_productivity',
-  }[category];
-  return key ? tr(key) : category;
 }
 
 function mcpScopeLabel(scope: WritableScopeDto): string {
@@ -83,7 +72,7 @@ function directorySearchText(item: (typeof publicExtensionItems)[number]): strin
   return [
     item.name,
     item.publisher,
-    publicMcpCategoryLabel(item.category),
+    tr(`extension_directory_category_${item.category}`),
     localizedDirectoryText(item.description),
     localizedDirectoryText(item.requirements),
     item.sourceUrl,
@@ -471,13 +460,10 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
   const filtered = search.trim()
     ? entries.filter((entry) => `${entry.scope} ${entry.name} ${entry.path}`.toLowerCase().includes(search.trim().toLowerCase()))
     : entries;
+  const categoryFilter = useExtensionCategoryFilter(publicMcpItems);
   const filteredPublicMcpItems = search.trim()
-    ? publicMcpItems.filter((item) => directorySearchText(item).includes(search.trim().toLowerCase()))
-    : publicMcpItems;
-  const publicMcpGroups = PUBLIC_MCP_CATEGORIES
-    .map((category) => ({ category, items: filteredPublicMcpItems.filter((item) => item.category === category) }))
-    .filter((group) => group.items.length > 0);
-
+    ? categoryFilter.items.filter((item) => directorySearchText(item).includes(search.trim().toLowerCase()))
+    : categoryFilter.items;
   const save = async () => {
     if (preparing !== null) return;
     const parsed = parseJsonObjectInput(draftConfigText, tr('mcp_section_configuration'));
@@ -553,16 +539,12 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
     <ExtensionHubLayout>
       {closePrompt}
       {removalDialog}
-      {pageError && selection.kind === 'list' && <div role="alert">{pageError}</div>}
       {linkRequest?.payload && selection.kind === 'create' && <p role="status">{tr('desktop_extension_mcp_import')}</p>}
         <ExtensionHubHeader title={tr('settings_mcp_servers')} description={tr('desktop_extension_mcp_description')} search={search} onSearch={setSearch} actions={<>
           <button type="button" aria-label={tr('desktop_extension_refresh_mcp')} onClick={() => void (adminAvailable ? callMcpAdmin(bridge, adminRecordCommand('get_snapshot')) : bridge.refreshMcpServers()).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_refresh_tools_failed')))} className="extension-hub-icon-button"><ExtensionGlyph name="refresh" size={16} /></button>
-          <button type="button" onClick={() => requestSelection({ kind: 'create', scope: draftScope })} className="extension-hub-primary">{tr('workspace_confirm_add')} <ExtensionGlyph name="plus" size={14} /></button>
+          <button type="button" onClick={() => requestSelection({ kind: 'create', scope: draftScope })} className="extension-hub-primary"><ExtensionGlyph name="plus" size={14} />{tr('extension_directory_add_mcp')}</button>
         </>} />
-        {selection.kind === 'list' && <nav className="extension-catalog-tabs" aria-label={tr('desktop_extension_mcp_catalog')}>
-          <button type="button" aria-pressed={catalogTab === 'public'} onClick={() => setCatalogTab('public')}>{tr('desktop_extension_public')}</button>
-          <button type="button" aria-pressed={catalogTab === 'personal'} onClick={() => setCatalogTab('personal')}>{tr('desktop_personal')}</button>
-        </nav>}
+        {selection.kind === 'list' && <ExtensionCatalogTabs filter={categoryFilter} label={tr('desktop_extension_mcp_catalog')} value={catalogTab} onChange={setCatalogTab} />}
         {/* 同名不同义的提醒放在页首，而不是藏在作用域下拉旁边：读到下拉的时候，
             人已经在拿设置页的「本地」去理解这里的「本地」了。 */}
         <details className="extension-hub-scope-note" data-testid="mcp-scope-vs-layers">
@@ -577,35 +559,22 @@ export function McpServers({ bridge, onNavigate, onRegisterNavigationRequest, on
             {navigationPrompt}
             {pageError && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
             {catalogTab === 'public' ? <>
-              {publicMcpGroups.map((group) => <section className="extension-catalog-section" key={group.category}>
-                <h2 className="extension-hub-group-title">{publicMcpCategoryLabel(group.category)}</h2>
-                <div className="extension-hub-list">
-                  {group.items.map((item) => {
-                    const action = decidePublicMcpDirectoryAction(item, entries, draftScope);
-                    const configured = action.kind === 'configured' ? action.entry : undefined;
-                    const runtime = configured ? snapshot.runtime_servers?.find((server) => server.name === configured.name) : undefined;
-                    return <div key={item.id} className="extension-hub-row">
-                      <ExtensionIcon kind="mcp" />
-                      <button
-                        type="button"
-                        className="extension-hub-row-copy extension-hub-row-open"
-                        onClick={() => requestSelection({ kind: 'directory', id: item.id })}
-                      >
-                        <span className="extension-hub-row-title">{item.name}</span>
-                        <span className="extension-hub-row-description">{localizedDirectoryText(item.description)}</span>
-                        <span className="extension-hub-row-description">{item.publisher}{item.version ? ` · ${item.version}` : ''}</span>
-                      </button>
-                      <div className="extension-hub-row-side">
-                        {configured ? <>
-                          <span className="extension-hub-row-scope">{tr('desktop_extension_configured')}</span>
-                          {runtime && <span className="extension-hub-row-scope">{mcpRuntimeStatusLabel(runtime.status) ?? tr('desktop_extension_mcp_status_unknown')}</span>}
-                          <button type="button" className="extension-hub-icon-button" aria-label={tr('desktop_extension_configure_named', item.name)} onClick={() => requestSelection({ kind: 'server', id: configured.id })}><ExtensionGlyph name="more" size={16} /></button>
-                        </> : action.kind === 'configure' ? <button type="button" className="extension-hub-icon-button" aria-label={tr('desktop_extension_configure_named', item.name)} onClick={() => requestSelection({ kind: 'create', scope: draftScope, directoryItemId: item.id })}><ExtensionGlyph name="plus" size={20} /></button> : <a className="extension-hub-icon-button" href={item.documentationUrl} target="_blank" rel="noopener noreferrer" aria-label={tr('desktop_extension_open_documentation_named', item.name)} title={tr('desktop_extension_open_documentation')}><ExtensionGlyph name="chevronR" size={16} /></a>}
-                      </div>
-                    </div>;
-                  })}
-                </div>
-              </section>)}
+              <ExtensionRecommendationGroups items={filteredPublicMcpItems}>{(item) => {
+                const action = decidePublicMcpDirectoryAction(item, entries, draftScope);
+                const configured = action.kind === 'configured' ? action.entry : undefined;
+                const runtime = configured && snapshot.runtime_servers?.find((server) => server.name === configured.name);
+                const status = configured ? [tr('desktop_extension_configured'), runtime && (mcpRuntimeStatusLabel(runtime.status) ?? tr('desktop_extension_mcp_status_unknown'))].filter(Boolean).join(' · ') : undefined;
+                return <ExtensionRecommendationCard key={item.id} item={item} status={status}
+                  onOpen={() => requestSelection({ kind: 'directory', id: item.id })}
+                  action={action.kind === 'documentation'
+                    ? <a href={item.documentationUrl} target="_blank" rel="noopener noreferrer" className="extension-hub-icon-text">
+                      {tr('extension_directory_documentation')}<ExtensionGlyph name="chevronR" size={14} />
+                    </a>
+                    : <button type="button" className="extension-hub-icon-text" aria-label={tr('desktop_extension_configure_named', item.name)}
+                      onClick={() => requestSelection(configured ? { kind: 'server', id: configured.id } : { kind: 'create', scope: draftScope, directoryItemId: item.id })}>
+                      <ExtensionGlyph name={configured ? 'cog' : 'plus'} size={14} />{tr(configured ? 'desktop_extension_configuration' : 'public_extensions_use_template')}
+                    </button>} />;
+              }}</ExtensionRecommendationGroups>
               {!filteredPublicMcpItems.length && <div className="extension-hub-empty">{tr(search ? 'desktop_extension_no_public_mcp_search' : 'desktop_extension_no_public_mcp')}</div>}
             </> : <>
               <div className="extension-hub-group-title">{tr('desktop_extension_servers')}</div>

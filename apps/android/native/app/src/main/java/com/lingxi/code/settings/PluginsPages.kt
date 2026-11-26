@@ -248,7 +248,7 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
             Tab(
                 selected = selectedDirectoryTab == 0,
                 onClick = { selectedDirectoryTab = 0; mcpEditor = null; focusedRecommendation = null },
-                text = { Text(stringResource(R.string.extension_directory_public)) },
+                text = { Text(stringResource(R.string.extension_directory_recommended)) },
                 modifier = Modifier.testTag("settings.extensions.tab.public"),
             )
             Tab(
@@ -275,6 +275,7 @@ internal fun PluginsPage(bridge: SettingsEngineBridge, onDetail: (String) -> Uni
             } else {
                 PublicExtensionDirectory(
                     entries = if (skillsOnly) entries.filter { it.skills.isNotEmpty() } else entries,
+                    skillsOnly = skillsOnly,
                     installedPluginIds = catalog.installed.map { it.id }.toSet(),
                     mcpBridge = bridge,
                     onRemoveExtension = { entry ->

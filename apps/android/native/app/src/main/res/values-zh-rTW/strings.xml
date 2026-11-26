@@ -2434,6 +2434,12 @@
     <string name="extension_directory_add_mcp">新增 MCP 伺服器</string>
     <string name="extension_directory_back">返回目錄</string>
     <string name="extension_directory_category_all">全部</string>
+    <string name="extension_directory_category_design">UI 與設計</string>
+    <string name="extension_directory_category_graphics">3D 與特效</string>
+    <string name="extension_directory_preview_effects">預覽特效</string>
+    <string name="extension_directory_recommended">推薦</string>
+    <string name="extension_directory_skills_count">%1$d 個技能</string>
+    <string name="extension_directory_review_conflict">檢視衝突</string>
     <string name="extension_directory_category_browser">瀏覽器</string>
     <string name="extension_directory_category_development">開發</string>
     <string name="extension_directory_category_database">資料庫</string>

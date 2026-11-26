@@ -1,6 +1,9 @@
 import { tr } from '../../../i18n/locale';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
+import { publicExtensionCategories, publicExtensionText, type PublicExtensionCategory, type PublicExtensionItem } from '../../../../shared/publicExtensionDirectory';
+import { useI18n } from '../../../i18n/useI18n';
+import { Icon } from '../../Icon';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps, SettingsNavigationRequest } from '../SettingsScreen';
 import { ExtensionGlyph, ExtensionSkillArtwork } from './ExtensionHubIcons';
@@ -100,10 +103,14 @@ export function extensionHubStyle(t: ReturnType<typeof useT>): CSSProperties {
   } as CSSProperties;
 }
 
-/** The runtime catalog does not supply artwork, so use a neutral plugin mark. */
-export function ExtensionIcon({ kind = 'plugin', large = false }: { kind?: 'plugin' | 'skill' | 'mcp'; large?: boolean }) {
+const recommendationSymbols = { layout: 'topbar-inspector-open', palette: 'sliders', pencil: 'pencil', cube: 'box', pixels: 'image' } as const;
+
+export function ExtensionIcon({ kind = 'plugin', icon, large = false }: {
+  kind?: 'plugin' | 'skill' | 'mcp'; icon?: PublicExtensionItem['icon']; large?: boolean;
+}) {
   return <span className={`extension-hub-icon extension-icon-${kind}${large ? ' is-large' : ''}`} aria-hidden="true">
-    {kind === 'skill' ? <ExtensionSkillArtwork /> : <ExtensionGlyph name={kind} size={large ? 32 : 24} />}
+    {icon ? <Icon name={recommendationSymbols[icon]} size={large ? 32 : 22} />
+      : kind === 'skill' ? <ExtensionSkillArtwork /> : <ExtensionGlyph name={kind} size={large ? 32 : 24} />}
   </span>;
 }
 
@@ -134,4 +141,86 @@ export function ExtensionHubHeader({ title, description, search, onSearch, actio
     <div className="extension-hub-heading"><p>{description}</p></div>
     <div className="extension-hub-toolbar"><label className="extension-search-field"><ExtensionGlyph name="search" size={16} /><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder={tr('desktop_shell_search_named', title)} aria-label={tr('desktop_shell_search_named', title)} /></label><div className="extension-hub-toolbar-actions">{actions}</div></div>
   </header>;
+}
+
+export type ExtensionCatalogTab = 'public' | 'personal';
+
+export function useExtensionCategoryFilter(items: readonly PublicExtensionItem[]) {
+  const [value, setValue] = useState<PublicExtensionCategory | 'all'>('all');
+  return {
+    value, setValue,
+    options: publicExtensionCategories.filter(category => items.some(item => item.category === category)),
+    items: value === 'all' ? items : items.filter(item => item.category === value),
+  };
+}
+
+export function ExtensionCatalogTabs({ label, value, onChange, filter, personalLabel = tr('desktop_personal') }: {
+  label: string;
+  value: ExtensionCatalogTab;
+  onChange: (value: ExtensionCatalogTab) => void;
+  filter: ReturnType<typeof useExtensionCategoryFilter>;
+  personalLabel?: string;
+}) {
+  return <div className="extension-catalog-controls"><nav className="extension-catalog-tabs" aria-label={label}>
+    <button type="button" data-catalog-tab="public" aria-pressed={value === 'public'} onClick={() => onChange('public')}>
+      <ExtensionGlyph name="search" size={14} />{tr('extension_directory_recommended')}
+    </button>
+    <button type="button" data-catalog-tab="personal" aria-pressed={value === 'personal'} onClick={() => onChange('personal')}>
+      <ExtensionGlyph name="archive" size={14} />{personalLabel}
+    </button>
+  </nav>
+    {value === 'public' && filter.options.length > 1 && <label className="extension-category-filter">
+      {tr('extension_directory_category')}
+      <select value={filter.value} onChange={(event) => filter.setValue(event.target.value as typeof filter.value)}>
+        <option value="all">{tr('extension_directory_category_all')}</option>
+        {filter.options.map(category => <option key={category} value={category}>{tr(`extension_directory_category_${category}`)}</option>)}
+      </select>
+    </label>}
+  </div>;
+}
+
+export function ExtensionRecommendationGroups({ items, children }: {
+  items: readonly PublicExtensionItem[];
+  children: (item: PublicExtensionItem) => ReactNode;
+}) {
+  return publicExtensionCategories.map((category) => {
+    const group = items.filter((item) => item.category === category);
+    if (!group.length) return null;
+    const title = tr(`extension_directory_category_${category}`);
+    const artwork = new URL(`../../../../../../../resources/extension-artwork/drawable-nodpi/extension_${category}.jpg`, import.meta.url).href;
+    return <section key={category} className="extension-catalog-section extension-collection" aria-label={title} data-category={category}>
+      <h2 className="extension-collection-heading">
+        <img src={artwork} width={46} height={46} alt="" draggable={false} />
+        {title}<span className="extension-collection-count">{group.length}</span>
+      </h2>
+      <div className="extension-hub-list extension-collection-grid">{group.map(children)}</div>
+    </section>;
+  });
+}
+
+export function ExtensionRecommendationCard({ item, kind = item.kind, onOpen, status, action }: {
+  item: PublicExtensionItem;
+  kind?: 'plugin' | 'skill' | 'mcp';
+  onOpen: () => void;
+  status?: string;
+  action: ReactNode;
+}) {
+  const { locale } = useI18n();
+  return <article className="extension-hub-row extension-collection-card">
+    <button type="button" id={`extension-card-${item.id}`} className="extension-hub-row-open extension-card-open" onClick={onOpen}
+      aria-label={tr('desktop_extension_view_details_named', item.name)}>
+      <ExtensionIcon kind={kind} icon={item.icon} />
+      <span className="extension-hub-row-title">{item.name}</span>
+      <ExtensionGlyph name="chevronR" size={14} />
+    </button>
+    <p>{publicExtensionText(item.description, locale)}</p>
+    <footer>
+      <div className="extension-card-meta">
+        <span>{item.publisher}{kind === 'skill' && item.skills?.length
+          ? ` · ${tr('extension_directory_skills_count', item.skills.length)}` : item.version ? ` · ${item.version}` : ''}</span>
+        {status && <span className="extension-card-status">{status}</span>}
+      </div>
+      {action}
+    </footer>
+  </article>;
 }

@@ -6,10 +6,23 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowForwardIos
+import androidx.compose.material.icons.outlined.AutoStories
+import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.Extension
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Dashboard
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.GridOn
+import androidx.compose.material.icons.outlined.Palette
+import androidx.compose.material.icons.outlined.ViewInAr
+import androidx.compose.material3.Icon
 import androidx.compose.material3.AlertDialog
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -17,6 +30,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -39,7 +54,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -71,6 +92,8 @@ internal data class PublicExtensionEntry(
     val mcpConfigJson: String?,
     val skills: List<String> = emptyList(),
     val examples: List<Map<String, String>> = emptyList(),
+    val previewUrl: String? = null,
+    val icon: String? = null,
 )
 
 internal data class PublicExtensionMarketplace(
@@ -88,6 +111,17 @@ internal data class McpEditorTarget(
 
 internal data class ConfiguredMcpEntry(val name: String, val scope: String, val configJson: String)
 
+private data class DirectoryCategory(val label: Int, val artwork: Int)
+
+private val directoryCategories = mapOf(
+    "design" to DirectoryCategory(R.string.extension_directory_category_design, R.drawable.extension_design),
+    "graphics" to DirectoryCategory(R.string.extension_directory_category_graphics, R.drawable.extension_graphics),
+    "development" to DirectoryCategory(R.string.extension_directory_category_development, R.drawable.extension_development),
+    "database" to DirectoryCategory(R.string.extension_directory_category_database, R.drawable.extension_database),
+    "browser" to DirectoryCategory(R.string.extension_directory_category_browser, R.drawable.extension_browser),
+    "productivity" to DirectoryCategory(R.string.extension_directory_category_productivity, R.drawable.extension_productivity),
+)
+
 /** Read the one repository-owned directory asset; do not maintain an Android copy. */
 internal fun readPublicExtensionDirectory(context: Context): List<PublicExtensionEntry> =
     context.assets.open("public-directory.json").bufferedReader().use { input ->
@@ -104,7 +138,7 @@ internal fun parsePublicExtensionDirectory(rawJson: String, platform: String = "
             val kind = row.optString("kind")
             val category = row.optString("category")
             require(kind in setOf("mcp", "plugin"))
-            require(category in setOf("browser", "development", "database", "productivity"))
+            require(category in directoryCategories)
             val platforms = row.optJSONArray("platforms").stringValues().toSet()
             val mcp = row.optJSONObject("mcp")
             val mcpName = mcp?.optString("name")?.takeIf(String::isNotBlank)
@@ -124,11 +158,13 @@ internal fun parsePublicExtensionDirectory(rawJson: String, platform: String = "
                 name = row.optString("name").also { require(it.isNotBlank()) },
                 publisher = row.optString("publisher").also { require(it.isNotBlank()) },
                 category = category,
+                icon = row.optString("icon").takeIf(String::isNotBlank),
                 platforms = platforms,
                 description = row.optJSONObject("description").stringMap(),
                 requirements = row.optJSONObject("requirements").stringMap(),
                 sourceUrl = row.optString("sourceUrl"),
                 documentationUrl = row.optString("documentationUrl"),
+                previewUrl = row.optString("previewUrl").takeIf { it.startsWith("https://") },
                 version = row.optString("version").takeIf(String::isNotBlank),
                 marketplace = marketplace,
                 mcpName = mcpName,
@@ -251,6 +287,7 @@ internal fun filterPublicExtensions(
     query: String,
     category: String,
     languageTag: String,
+    categoryName: (String) -> String = { it },
 ): List<PublicExtensionEntry> {
     val needle = query.trim()
     return entries.filter { entry ->
@@ -259,6 +296,7 @@ internal fun filterPublicExtensions(
                 entry.name,
                 entry.publisher,
                 entry.category,
+                categoryName(entry.category),
                 entry.localizedDescription(languageTag),
                 entry.localizedRequirements(languageTag),
                 entry.skills.joinToString(" "),
@@ -318,6 +356,7 @@ internal fun PublicExtensionDirectory(
     installedPluginIds: Set<String> = emptySet(),
     onRemoveExtension: (PublicExtensionEntry) -> Unit = {},
     mcpBridge: SettingsEngineBridge? = null,
+    skillsOnly: Boolean = false,
 ) {
     val context = LocalContext.current
     val languageTag = context.resources.configuration.locales[0].toLanguageTag()
@@ -364,15 +403,17 @@ internal fun PublicExtensionDirectory(
             dismissButton = { TextButton(enabled = !removing, onClick = { removeMcp = null }) { Text(stringResource(R.string.common_cancel)) } },
         )
     }
-    val categories = listOf(
-        "all" to R.string.extension_directory_category_all,
-        "browser" to R.string.extension_directory_category_browser,
-        "development" to R.string.extension_directory_category_development,
-        "database" to R.string.extension_directory_category_database,
-        "productivity" to R.string.extension_directory_category_productivity,
-    )
+    val categories = remember(entries) {
+        listOf("all" to R.string.extension_directory_category_all) + directoryCategories
+            .filterKeys { key -> entries.any { it.category == key } }
+            .map { (key, presentation) -> key to presentation.label }
+    }
     val visible = remember(entries, query, category, languageTag) {
-        filterPublicExtensions(entries, query, category, languageTag)
+        filterPublicExtensions(entries, query, category, languageTag) { key -> context.getString(directoryCategories.getValue(key).label) }
+    }
+    val groups = if (selectedEntry != null) listOf(listOf(selectedEntry)) else {
+        val matches = visible.groupBy { it.category }
+        directoryCategories.keys.mapNotNull { matches[it] }
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -381,9 +422,10 @@ internal fun PublicExtensionDirectory(
             onValueChange = { query = it },
             label = { Text(stringResource(R.string.extension_directory_search)) },
             singleLine = true,
+            leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
             modifier = Modifier.fillMaxWidth().testTag("settings.extensions.public.search"),
         )
-        if (selectedEntry == null) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (selectedEntry == null && categories.size > 2) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             categories.forEach { (key, label) ->
                 FilterChip(
                     selected = category == key,
@@ -394,49 +436,64 @@ internal fun PublicExtensionDirectory(
             }
         }
         if (linkError) Text(stringResource(R.string.extension_directory_link_unavailable), color = MaterialTheme.colorScheme.error)
-        if (visible.isEmpty()) {
+        if (groups.isEmpty()) {
             Text(stringResource(R.string.extension_directory_empty), color = MaterialTheme.colorScheme.onSurfaceVariant)
         } else {
-            (selectedEntry?.let(::listOf) ?: visible).forEach { entry ->
-                val marketplaceAdded = entry.marketplace?.let { publicMarketplace ->
-                    registeredMarketplaces.any { marketplace -> marketplaceSourceMatches(publicMarketplace.source, marketplace) }
-                } == true
-                val marketplaceNameConflict = !marketplaceAdded && entry.marketplace?.let { publicMarketplace ->
-                    registeredMarketplaces.any { marketplace ->
-                        marketplace.name == publicMarketplace.name && !marketplaceSourceMatches(publicMarketplace.source, marketplace)
-                    }
-                } == true
-                val installed = entry.marketplace?.let { publicMarketplacePluginId(it, registeredMarketplaces) } in installedPluginIds
-                if (selectedEntry != null) {
-                    TextButton(onClick = { selectedId = null }) { Text(stringResource(R.string.extension_directory_back)) }
-                    Text(entry.name, style = MaterialTheme.typography.headlineMedium)
-                }
-                PublicExtensionCard(
-                    entry = entry,
-                    languageTag = languageTag,
-                    configured = isPublicMcpConfigured(entry, configuredMcpServers),
-                    marketplaceAdded = marketplaceAdded,
-                    marketplaceNameConflict = marketplaceNameConflict,
-                    canConfigureMcp = canConfigureMcp,
-                    onConfigureMcp = { onConfigureMcp(entry) },
-                    canAddMarketplace = canAddMarketplace,
-                    onAddMarketplace = { onAddMarketplace(entry) },
-                    onOpenPersonal = { onOpenPersonal(entry) },
-                    onOpenUrl = { url -> linkError = !openPublicExtensionUrl(context, url) },
-                    onDetails = if (selectedEntry == null) ({ selectedId = entry.id }) else null,
-                )
-                if ((installed || marketplaceAdded) && entry.marketplace != null) {
-                    OutlinedButton(onClick = { onRemoveExtension(entry) }, enabled = canAddMarketplace, modifier = Modifier.fillMaxWidth()) {
-                        Text(stringResource(if (installed) R.string.plugins_action_uninstall else R.string.extension_directory_remove_source), color = MaterialTheme.colorScheme.error)
+            groups.forEach { group ->
+                if (selectedEntry == null) {
+                    val presentation = directoryCategories.getValue(group.first().category)
+                    Row(
+                        modifier = Modifier.padding(top = 8.dp).semantics(mergeDescendants = true) { heading() },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Image(painterResource(presentation.artwork), null, Modifier.size(44.dp).clip(RoundedCornerShape(11.dp)))
+                        Text(stringResource(presentation.label), style = MaterialTheme.typography.titleMedium)
+                        Text(group.size.toString(), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
-                val configuredTarget = configuredMcpServers.firstOrNull { it.name == entry.mcpName && mcpConfigurationMatches(entry.mcpConfigJson, it.configJson) }
-                if (configuredTarget != null && mcpBridge != null) {
-                    OutlinedButton(onClick = { operationError = null; removeMcpGeneration = mcpBridge.state.value.generation; removeMcp = configuredTarget }, enabled = canConfigureMcp && !removing, modifier = Modifier.fillMaxWidth()) {
-                        Text(stringResource(R.string.settings_parity_remove_server), color = MaterialTheme.colorScheme.error)
+                group.forEach { entry ->
+                    val marketplaceAdded = entry.marketplace?.let { publicMarketplace ->
+                        registeredMarketplaces.any { marketplace -> marketplaceSourceMatches(publicMarketplace.source, marketplace) }
+                    } == true
+                    val marketplaceNameConflict = !marketplaceAdded && entry.marketplace?.let { publicMarketplace ->
+                        registeredMarketplaces.any { marketplace ->
+                            marketplace.name == publicMarketplace.name && !marketplaceSourceMatches(publicMarketplace.source, marketplace)
+                        }
+                    } == true
+                    val installed = entry.marketplace?.let { publicMarketplacePluginId(it, registeredMarketplaces) } in installedPluginIds
+                    if (selectedEntry != null) {
+                        TextButton(onClick = { selectedId = null }) { Text(stringResource(R.string.extension_directory_back)) }
                     }
+                    PublicExtensionCard(
+                        entry = entry,
+                        languageTag = languageTag,
+                        configured = isPublicMcpConfigured(entry, configuredMcpServers),
+                        marketplaceAdded = marketplaceAdded,
+                        installed = installed,
+                        skillsOnly = skillsOnly,
+                        marketplaceNameConflict = marketplaceNameConflict,
+                        canConfigureMcp = canConfigureMcp,
+                        onConfigureMcp = { onConfigureMcp(entry) },
+                        canAddMarketplace = canAddMarketplace,
+                        onAddMarketplace = { onAddMarketplace(entry) },
+                        onOpenPersonal = { onOpenPersonal(entry) },
+                        onOpenUrl = { url -> linkError = !openPublicExtensionUrl(context, url) },
+                        onDetails = if (selectedEntry == null) ({ selectedId = entry.id }) else null,
+                    )
+                    if (selectedEntry != null && (installed || marketplaceAdded) && entry.marketplace != null) {
+                        OutlinedButton(onClick = { onRemoveExtension(entry) }, enabled = canAddMarketplace, modifier = Modifier.fillMaxWidth()) {
+                            Text(stringResource(if (installed) R.string.plugins_action_uninstall else R.string.extension_directory_remove_source), color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                    val configuredTarget = configuredMcpServers.firstOrNull { it.name == entry.mcpName && mcpConfigurationMatches(entry.mcpConfigJson, it.configJson) }
+                    if (selectedEntry != null && configuredTarget != null && mcpBridge != null) {
+                        OutlinedButton(onClick = { operationError = null; removeMcpGeneration = mcpBridge.state.value.generation; removeMcp = configuredTarget }, enabled = canConfigureMcp && !removing, modifier = Modifier.fillMaxWidth()) {
+                            Text(stringResource(R.string.settings_parity_remove_server), color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                    if (selectedEntry != null) PublicExtensionDetailContent(entry, languageTag)
                 }
-                if (selectedEntry != null) PublicExtensionDetailContent(entry, languageTag)
             }
         }
     }
@@ -448,6 +505,8 @@ private fun PublicExtensionCard(
     languageTag: String,
     configured: Boolean,
     marketplaceAdded: Boolean,
+    installed: Boolean,
+    skillsOnly: Boolean,
     marketplaceNameConflict: Boolean,
     canConfigureMcp: Boolean,
     onConfigureMcp: () -> Unit,
@@ -459,40 +518,52 @@ private fun PublicExtensionCard(
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-        modifier = Modifier.fillMaxWidth().then(if (onDetails != null) Modifier.clickable(onClick = onDetails) else Modifier).testTag("settings.extensions.public.item.${entry.id}"),
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(entry.name, style = MaterialTheme.typography.titleMedium)
-            if (entry.skills.isNotEmpty()) Text(entry.skills.joinToString(", "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(
-                listOfNotNull(entry.publisher, entry.version).joinToString(" · "),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            val open = if (onDetails == null) Modifier else Modifier.clickable(role = Role.Button, onClick = onDetails)
+            Row(
+                Modifier.fillMaxWidth().then(open).heightIn(min = 48.dp).testTag("settings.extensions.public.item.${entry.id}"),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    when (entry.icon) {
+                        "layout" -> Icons.Outlined.Dashboard
+                        "palette" -> Icons.Outlined.Palette
+                        "pencil" -> Icons.Outlined.Edit
+                        "cube" -> Icons.Outlined.ViewInAr
+                        "pixels" -> Icons.Outlined.GridOn
+                        else -> if (skillsOnly) Icons.Outlined.AutoStories else if (entry.kind == "mcp") Icons.Outlined.Dns else Icons.Outlined.Extension
+                    },
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                Column(Modifier.weight(1f)) {
+                    Text(entry.name, style = MaterialTheme.typography.titleMedium)
+                    val metadata = if (skillsOnly) stringResource(R.string.extension_directory_skills_count, entry.skills.size) else entry.version
+                    Text(listOfNotNull(entry.publisher, metadata).joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (onDetails != null) Icon(Icons.AutoMirrored.Outlined.ArrowForwardIos, null, Modifier.size(16.dp))
+            }
             Text(entry.localizedDescription(languageTag), style = MaterialTheme.typography.bodyMedium)
-            entry.localizedRequirements(languageTag).takeIf(String::isNotBlank)?.let {
+            val status = when {
+                installed -> R.string.apps_installed
+                configured -> R.string.extension_directory_configured
+                marketplaceAdded -> R.string.extension_directory_marketplace_added
+                else -> null
+            }
+            status?.let { Text(stringResource(it), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary) }
+            if (onDetails == null) entry.localizedRequirements(languageTag).takeIf(String::isNotBlank)?.let {
                 Text(stringResource(R.string.extension_directory_requirements_fmt, it), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Row {
-                Text(
-                    text = stringResource(if (entry.kind == "mcp") R.string.extension_directory_kind_mcp else R.string.extension_directory_kind_plugin),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(stringResource(categoryLabel(entry.category)), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (configured) {
-                    Spacer(Modifier.width(8.dp))
-                    Text(stringResource(R.string.extension_directory_configured), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.tertiary)
-                }
-            }
             if (entry.mcpName != null) {
-                Text(stringResource(R.string.extension_directory_configured_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (onDetails == null) Text(stringResource(R.string.extension_directory_configured_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Button(
                     enabled = canConfigureMcp,
                     onClick = onConfigureMcp,
                     modifier = Modifier.fillMaxWidth().testTag("settings.extensions.public.configure.${entry.id}"),
-                ) { Text(stringResource(R.string.extension_directory_configure)) }
+                ) { Text(stringResource(if (configured) R.string.extension_directory_configure else R.string.public_extensions_use_template)) }
             }
             if (entry.marketplace != null) {
                 if (marketplaceNameConflict) {
@@ -504,7 +575,6 @@ private fun PublicExtensionCard(
                         Text(stringResource(R.string.extension_directory_manage_personal))
                     }
                 } else if (marketplaceAdded) {
-                    Text(stringResource(R.string.extension_directory_marketplace_added), color = MaterialTheme.colorScheme.tertiary)
                     OutlinedButton(onClick = onAddMarketplace, enabled = canAddMarketplace, modifier = Modifier.fillMaxWidth()) {
                         Text(stringResource(R.string.extension_directory_manage_personal))
                     }
@@ -522,12 +592,17 @@ private fun PublicExtensionCard(
                     modifier = Modifier.fillMaxWidth().testTag("settings.extensions.public.instructions.${entry.id}"),
                 ) { Text(stringResource(R.string.extension_directory_install_instructions)) }
             }
-            if (entry.documentationUrl.isNotBlank() && (entry.mcpName != null || entry.marketplace != null)) {
+            if (onDetails == null) entry.previewUrl?.let { url ->
+                OutlinedButton(onClick = { onOpenUrl(url) }, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.extension_directory_preview_effects))
+                }
+            }
+            if (onDetails == null && entry.documentationUrl.isNotBlank() && (entry.mcpName != null || entry.marketplace != null)) {
                 OutlinedButton(onClick = { onOpenUrl(entry.documentationUrl) }, modifier = Modifier.fillMaxWidth()) {
                     Text(stringResource(R.string.extension_directory_documentation))
                 }
             }
-            if (entry.sourceUrl.isNotBlank()) {
+            if (onDetails == null && entry.sourceUrl.isNotBlank()) {
                 OutlinedButton(onClick = { onOpenUrl(entry.sourceUrl) }, modifier = Modifier.fillMaxWidth()) {
                     Text(stringResource(R.string.extension_directory_source))
                 }
@@ -560,15 +635,8 @@ private fun PublicExtensionDetailContent(entry: PublicExtensionEntry, languageTa
     }
     Text(stringResource(R.string.extension_directory_information), style = MaterialTheme.typography.titleMedium)
     Text("${stringResource(R.string.extension_directory_developer)}: ${entry.publisher}")
-    Text("${stringResource(R.string.extension_directory_category)}: ${stringResource(categoryLabel(entry.category))}")
+    Text("${stringResource(R.string.extension_directory_category)}: ${stringResource(directoryCategories.getValue(entry.category).label)}")
     entry.version?.let { Text("${stringResource(R.string.plugins_detail_version)}: $it") }
-}
-
-private fun categoryLabel(category: String): Int = when (category) {
-    "browser" -> R.string.extension_directory_category_browser
-    "development" -> R.string.extension_directory_category_development
-    "database" -> R.string.extension_directory_category_database
-    else -> R.string.extension_directory_category_productivity
 }
 
 /** Public/Personal MCP directory reached directly from Settings → MCP servers. */
@@ -602,7 +670,7 @@ internal fun McpDirectoryPage(bridge: SettingsEngineBridge, runtimeServers: List
                 Tab(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
-                    text = { Text(stringResource(R.string.extension_directory_public)) },
+                    text = { Text(stringResource(R.string.extension_directory_recommended)) },
                     modifier = Modifier.testTag("settings.mcp.extensions.tab.public"),
                 )
                 Tab(

@@ -87,12 +87,12 @@ test('MCP and plugin public directories render localized tabs and curated entrie
   for (const locale of DESKTOP_LOCALES) {
     const mcpHtml = renderInLocale(locale, React.createElement(McpServers, props));
     assert.ok(mcpHtml.includes(translate('desktop_extension_mcp_catalog', locale)), `MCP tabs: ${locale}`);
-    assert.ok(mcpHtml.includes(translate('desktop_extension_public', locale)), `MCP Public tab: ${locale}`);
+    assert.ok(mcpHtml.includes(translate('extension_directory_recommended', locale)), `MCP recommendations tab: ${locale}`);
     assert.ok(mcpHtml.includes(publicMcp.name), `MCP directory entry: ${locale}`);
     assert.doesNotMatch(mcpHtml, /desktop_extension_[a-z0-9_]+/);
 
     const pluginHtml = renderInLocale(locale, React.createElement(Plugins, props));
-    assert.ok(pluginHtml.includes(translate('desktop_extension_public', locale)), `plugin Public tab: ${locale}`);
+    assert.ok(pluginHtml.includes(translate('extension_directory_recommended', locale)), `plugin recommendations tab: ${locale}`);
     assert.ok(pluginHtml.includes(translate('desktop_personal', locale)), `plugin Personal tab: ${locale}`);
     assert.ok(pluginHtml.includes(publicPlugin.name), `plugin directory entry: ${locale}`);
     assert.doesNotMatch(pluginHtml, /desktop_extension_[a-z0-9_]+/);

@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { authorizeDataBinding, createPinnedDataClient, dataReference, LingxiDataError } from './lingxi-data.mjs';
 import { dataId, generation } from './lingxi-data-sources.mjs';
 import { SharedBotError, SharedBotsStore } from './shared-bots.mjs';
+import { delegationsPerRoot, usedByRoot } from './delegations.mjs';
 import { effectiveScope } from './bot-scope.mjs';
 import { deliverReport, readReport, reviewReport } from './lingxi-data-reports.mjs';
 
@@ -279,6 +280,8 @@ export function createBotDataRecords({ db, endpoint, secret, projectActor, botTo
         if (previous.digest !== digest) deny(409, 'DATA_CONFLICT');
         return previous.result;
       }
+      // A handoff is one of the hops a person's message may start, with the delegations of Bots (B8): they share one count.
+      if (await usedByRoot(tx, team, parent.rootTaskId) >= delegationsPerRoot) deny(429, 'DATA_HANDOFF_LIMIT');
       const cause = {
         kind: 'handoff', rootTaskId: parent.rootTaskId, parentTaskId: parent.taskId,
         quotaOwner: parent.sharedBotId, dailyLimit: senderGrant.handoff.dailyLimit, reference,

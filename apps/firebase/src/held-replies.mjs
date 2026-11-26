@@ -1,4 +1,5 @@
 import { SharedBotError, ownerOf } from './shared-bots.mjs';
+import { handBack, handBackOf } from './delegations.mjs';
 
 /**
  * A Bot's reply that its maintainer wants to read before anyone else does (Bot v3, B6). The Bot runs as it always does; when its result
@@ -103,7 +104,10 @@ export async function approveReply(store, { tx, team, identity, command: { paylo
     catch (error) { if (!(error instanceof SharedBotError && error.code === 'TASK_REVOKED')) throw error; }
   }
   if (!gate) {
+    // The run that waits for this reply (Bot v3 B8) is told the Bot did not finish; it is not left to wait for a reply that will never come.
+    const waiting = await handBackOf(tx, team, task);
     endHeld(tx, team, task, now, 'revoked');
+    if (waiting) handBack(tx, team, waiting, now, 'failed', '');
     return { taskId: task.taskId, state: 'declined', declineReason: 'revoked', replyId: null, artifactId: null };
   }
   const fate = await store.fate(tx, team, task, gate, result);
@@ -117,7 +121,10 @@ export async function approveReply(store, { tx, team, identity, command: { paylo
 /** The maintainer does not let the reply go. Nothing is posted and nobody but them has read it. */
 export async function rejectReply(_store, { tx, team, identity, command: { payload: p }, now }) {
   const { task } = await load(tx, team, identity, p.taskId, now);
+  const waiting = await handBackOf(tx, team, task);
   endHeld(tx, team, task, now, 'approval_rejected', identity);
+  // What the maintainer does not release is not handed to the run that waits for it either: that run is told it may not be shared.
+  if (waiting) handBack(tx, team, waiting, now, 'withheld', '');
   return { taskId: task.taskId, state: 'declined', declineReason: 'approval_rejected' };
 }
 
@@ -131,7 +138,9 @@ export async function expireHeldReply(db, clock, { teamId, taskId }) {
     if (task?.state !== 'awaiting_approval' || !draft) return { ended: false };
     // Cloud Tasks tries again a little later.
     if (draft.expiresAt > now) throw new Error('HELD_REPLY_NOT_DUE');
+    const waiting = await handBackOf(tx, team, task);
     endHeld(tx, team, task, now, 'approval_timeout');
+    if (waiting) handBack(tx, team, waiting, now, 'withheld', '');
     return { ended: true };
   }, { maxAttempts: 20 });
 }

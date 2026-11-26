@@ -14,11 +14,12 @@ import { attachable, cancelUpload, createUpload, finalizeUpload, putUploadPart, 
 import { approvalMs, approvalOutcome, approveReply, endSuperseded, listHeldReplies, rejectReply, supersedable } from './held-replies.mjs';
 import { bidReply, openRound, openRounds, roundState, voidRounds } from './reply-rounds.mjs';
 import { addressedBots } from './bot-address.mjs';
+import { apply as applyCancel, canCancel, delegate, delegationOffers, detach, handBack, handBackOf, plan as planCancel, waitOutcome } from './delegations.mjs';
 
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value !== null && typeof value === 'object'
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
-const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
-const same = (left, right) => hash(left) === hash(right);
+export const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+export const same = (left, right) => hash(left) === hash(right);
 const randomId = () => randomBytes(24).toString('base64url');
 /** Fixed host/backend contract: epoch separation prevents an old worker's permit from becoming valid again. */
 export const deriveGrantPermit = (scopeKind, scopeId, deploymentId, taskId, targetEpoch, nonce) =>
@@ -34,18 +35,19 @@ const transferMs = 7 * 24 * 60 * 60 * 1000, openTransfer = state => state === 'o
 const revisionLimit = 200;
 const byUid = members => [...members].sort((a, b) => a.uid.localeCompare(b.uid));
 /** An interrupted operation of these categories may be sent again: the receiver returns the same receipt. */
-const privateTaskBlocked = new Set(['pauseTask', 'continueTask', 'recordOperation', 'settleOperation',
+const privateTaskBlocked = new Set(['pauseTask', 'continueTask', 'delegateTask', 'detachDelegation', 'recordOperation', 'settleOperation',
   'resolveOperation', 'readTaskList', 'writeTaskList']);
 const replaySafe = new Set(['read', 'store_idempotent', 'provider_idempotent']);
 const operationLimit = 64;
 /** An operation whose outcome nobody has established: it blocks every further model execution of its task. */
 const unverified = operation => !replaySafe.has(operation.category) && (operation.state === 'dispatched' || operation.state === 'unknown');
-const operationIdOf = (task, logicalStepId, category) => hash([task.rootTaskId, task.taskId, logicalStepId, category]);
+// A task's operations are its own, whatever family it belongs to: the Desktop derives the id from the task alone (a task another Bot asked for has its own root).
+const operationIdOf = (task, logicalStepId, category) => hash([task.taskId, task.taskId, logicalStepId, category]);
 const grantsCapability = action => action === 'startTask' || action === 'continueTask';
 const queueMs = 300000, minRunMs = 1000;
 /** A task for a Bot whose Desktop is off waits this long for it: a person mentioned the Bot, and the message is not lost to a closed laptop. */
 const hostWaitMs = 24 * 60 * 60 * 1000;
-const botId = parts => `bot_${hash(parts).slice(0, 60)}`;
+export const botId = parts => `bot_${hash(parts).slice(0, 60)}`;
 const questionIds = (taskId, waitId) => ({ messageId: botId([taskId, waitId, 'question']), changeId: botId([taskId, waitId, 'question-change']) });
 const contains = (audience, identity) => audience.mode === 'team'
   || (audience.mode === 'listed' && audience.members.some(member => same(member, identity)));
@@ -106,7 +108,11 @@ function taskView(task, now) {
     ...(task.cancelRequestedAt ? { cancelRequestedAt: task.cancelRequestedAt } : {}),
     ...(task.unverifiedOperations > 0 ? { unverifiedOperations: task.unverifiedOperations } : {}),
     ...(state === 'waiting' ? { wait: { waitId: task.currentWaitId, kind: task.currentWaitKind ?? 'human_input', recipient: task.requester,
-      expiresAt: task.deadline, messageId: questionIds(task.taskId, task.currentWaitId).messageId } } : {}),
+      // A wait for another Bot's reply is over for the waiting task when its own time is, while the task itself stays a day (`currentWaitUntil`).
+      expiresAt: task.currentWaitUntil ?? task.deadline, messageId: questionIds(task.taskId, task.currentWaitId).messageId,
+      ...(task.currentDelegation ? { delegation: task.currentDelegation } : {}) } } : {}),
+    // A task another Bot asked for says whose work it is part of: `chain` runs from the Bot the person asked to this one.
+    ...(task.delegation ? { delegation: task.delegation } : {}),
     ...(task.replyId ? { replyId: task.replyId } : {}), ...(task.artifactId ? { artifactId: task.artifactId } : {}),
     ...(task.usage ? { usage: task.usage } : {}), ...(task.optional ? { optional: true } : {}),
     // Sent while the Bot's Desktop was off (rule 6): until it first starts, the task waits for the Desktop for a day, and members are told so.
@@ -193,6 +199,8 @@ export class SharedBotsStore {
       else if (action === 'continueTask') response = await this.continueRun(context);
       else if (action === 'pauseTask') response = await this.pauseForWait(context);
       else if (action === 'answerWait' || action === 'decideWait') response = await this.answerWait(context);
+      else if (action === 'delegateTask') response = await this.delegateTask(context);
+      else if (action === 'detachDelegation') response = await detach(this, context);
       else if (action === 'cancelTask') response = await this.cancelTask(context);
       else if (action === 'recordOperation') response = await this.recordOperation(context);
       else if (action === 'settleOperation') response = await this.settleOperation(context);
@@ -244,6 +252,8 @@ export class SharedBotsStore {
     if (service && p.autoReply) deny(400, 'AUTO_REPLY_UNSUPPORTED');
     // Nor does a service's Bot reach its publisher's Local Apps or datasets: whoever enters it is not a member of anything of the publisher's.
     if (service && scopeSize(p.scope) > 0) deny(400, 'SCOPE_UNSUPPORTED');
+    // Nor does a service's Bot take part in Chats with other Bots: its callers each have a session of their own.
+    if (service && (p.delegateTo || (p.acceptDelegation ?? 'none') !== 'none')) deny(400, 'DELEGATION_UNSUPPORTED');
     const ref = team.collection('sharedBots').doc(p.sharedBotId), existing = (await tx.get(ref)).data();
     if (existing && !ownerOf(existing, identity)) deny(403, 'MAINTAINER_REQUIRED');
     if ((existing?.identity.revision ?? 0) !== p.expectedRevision) deny(409, 'BOT_REVISION_CONFLICT');
@@ -283,7 +293,9 @@ export class SharedBotsStore {
     // One data identity per Bot: publishing again never replaces the items.
     const listRef = team.collection('lists').doc(p.sharedBotId), newList = !!p.sharedList && !(await tx.get(listRef)).exists;
     tx.set(ref, { identity: identityRecord, name: p.name, description: p.description, examples: p.examples ?? [], grants, quotas: p.quotas,
-      sharedList: p.sharedList ?? null, autoReply: p.autoReply ?? null, scope, publishedAt: now });
+      sharedList: p.sharedList ?? null, autoReply: p.autoReply ?? null, scope, publishedAt: now,
+      // Which Bots may hand this Bot part of a request, and which it may hand part of one to (Bot v3 B8). Part of the revision, like its scope.
+      acceptDelegation: p.acceptDelegation ?? 'none', acceptFrom: p.acceptFrom ?? [], delegateTo: p.delegateTo ?? [], delegation: p.delegation ?? null });
     if (newList) tx.create(listRef, { schemaVersion: 1, listId: p.sharedBotId, dataRevision: 0, items: [], nextItem: 1, updatedAt: now });
     handover.end('cancelled', now, 'republished');
     tx.set(deploymentRef, { ...d, ready: false, onlineUntil: 0 });
@@ -328,11 +340,13 @@ export class SharedBotsStore {
         permitted: activeOwner && identityPermitted(b, identity), ready, availability, dailyRemaining, quotaResetsAt, examples: b.examples ?? [],
         ...(statusExpiresAt === undefined ? {} : { statusExpiresAt }),
         ...(activeDeployment && typeof d.capabilities?.durableWait === 'boolean' && typeof d.capabilities?.writeOperations === 'boolean'
-          ? { capabilities: { durableWait: d.capabilities.durableWait, writeOperations: d.capabilities.writeOperations } } : {}),
+          ? { capabilities: { durableWait: d.capabilities.durableWait, writeOperations: d.capabilities.writeOperations, delegation: d.capabilities.delegation === true } } : {}),
         maintainer: b.identity.maintainer, usePolicy: b.identity.usePolicy, state: b.identity.state,
         onlineUntil: d?.onlineUntil ?? 0, quotas: b.quotas, ...(b.sharedList ? { sharedList: { title: b.sharedList.title, ...(b.sharedList.approval === 'requester' ? { approval: 'requester' } : {}) } } : {}),
         ...(b.autoReply ? { autoReply: { daily: b.autoReply.daily } } : {}),
         ...(scopeSize(b.scope) ? { scope: b.scope } : {}),
+        ...(b.acceptDelegation && b.acceptDelegation !== 'none' ? { acceptDelegation: b.acceptDelegation, ...(b.acceptFrom?.length ? { acceptFrom: b.acceptFrom } : {}) } : {}),
+        ...(b.delegateTo?.length ? { delegateTo: b.delegateTo, delegation: { daily: b.delegation.daily } } : {}),
         ...(activeOwner && handovers.has(doc.id) ? { transfer: handovers.get(doc.id) } : {}),
         ...(ownerOf(b, identity) && d ? { instanceId: d.instanceId } : {}) }];
     }) };
@@ -526,19 +540,19 @@ export class SharedBotsStore {
     if (!value?.memberUids?.includes(identity.uid) || (mustParticipate && !value.participants.includes(`user:${identity.uid}`))) deny(403, 'CONVERSATION_REQUIRED');
     return { ref, value };
   }
-  async submit({ tx, team, identity, self, command: { payload: p }, now, service, dataCause, datasetShare, fromPage }) {
+  async submit({ tx, team, identity, self, command: { payload: p }, now, service, dataCause, delegation, datasetShare, fromPage }) {
     const { ref, value: c } = await this.conversation(tx, team, p.conversationId, identity, true);
-    if (!dataCause && (p.messageId.startsWith('bot_') || p.changeId.startsWith('bot_'))) deny(400, 'INVALID_INPUT');
+    if (!dataCause && !delegation && (p.messageId.startsWith('bot_') || p.changeId.startsWith('bot_'))) deny(400, 'INVALID_INPUT');
     if (p.targets.some(id => !c.participants.includes(`shared_bot:${id}`))) deny(403, 'BOT_PARTICIPANT_REQUIRED');
     if (c.kind === 'bot_dm' && (p.targets.length !== 1 || p.targets[0] !== c.sharedBotId)) deny(400, 'INVALID_BOT_TARGET');
     if (c.executionPolicy && p.targets.some(id => !c.executionPolicy.targets.includes(id))) deny(403, 'CONVERSATION_POLICY_REQUIRED');
     const [message, change] = await tx.getAll(ref.collection('messages').doc(p.messageId), ref.collection('changes').doc(p.changeId));
     if (datasetShare) {
-      if (c.kind !== 'bot_dm' || p.privateDataSource || dataCause) deny(400, 'INVALID_INPUT');
+      if (c.kind !== 'bot_dm' || p.privateDataSource || dataCause || delegation) deny(400, 'INVALID_INPUT');
       await confirmShareDelivery(tx, team, c, { teamId: team.id, conversationId: p.conversationId,
         messageId: p.messageId, text: p.text }, identity.uid, datasetShare);
     }
-    const digest = hash({ requester: identity, ...p, targets: [...p.targets].sort(), ...(dataCause ? { dataCause } : {}),
+    const digest = hash({ requester: identity, ...p, targets: [...p.targets].sort(), ...(dataCause ? { dataCause } : {}), ...(delegation ? { delegation } : {}),
       ...(datasetShare ? { datasetShare } : {}) });
     if (message.exists || change.exists) {
       if (change.data()?.submissionDigest !== digest) deny(409, 'MESSAGE_ID_CONFLICT');
@@ -580,24 +594,24 @@ export class SharedBotsStore {
     }
     // A message that asks no Bot uses no request quota.
     const day = nowDay(now), quotaKeys = p.targets.length ? [hash([day, 'team']),
-      dataCause ? hash([day, dataCause.kind, dataCause.quotaOwner]) : hash([day, 'member', identity.uid, identity.generation]),
+      dataCause ? hash([day, dataCause.kind, dataCause.quotaOwner]) : delegation ? hash([day, 'delegation', delegation.quotaOwner]) : hash([day, 'member', identity.uid, identity.generation]),
       ...p.targets.map(id => hash([day, 'bot', id]))] : [];
     const quotaRefs = quotaKeys.map(id => team.collection('requestQuotas').doc(id));
     const quotas = await all(quotaRefs);
-    const limits = [Math.min(...bots.map(doc => doc.data().quotas.team)), dataCause?.dailyLimit ?? Math.min(...bots.map(doc => doc.data().quotas.member)),
+    const limits = [Math.min(...bots.map(doc => doc.data().quotas.team)), dataCause?.dailyLimit ?? delegation?.dailyLimit ?? Math.min(...bots.map(doc => doc.data().quotas.member)),
       ...bots.map(doc => doc.data().quotas.bot)];
     const increments = [p.targets.length, p.targets.length, ...p.targets.map(() => 1)];
     // A request queued behind a live lock (running or waiting) must outlive it.
     const locks = await all(p.targets.map(id => team.collection('chatExecutionLocks').doc(hash([id, p.conversationId]))));
     for (const [i, snapshot] of quotas.entries()) if ((snapshot.data()?.used ?? 0) + increments[i] > limits[i]) deny(429, 'REQUEST_QUOTA_EXCEEDED');
     // In a Bot DM every message asks the Bot; with auto-reply on there, the Bot may still decide that one needs no answer.
-    const dmOptional = !p.privateDataSource && !dataCause && !datasetShare && c.kind === 'bot_dm' && !!c.autoReply?.targets.includes(c.sharedBotId) && !!bots[0]?.data().autoReply;
-    const unaskedTasks = p.privateDataSource || dataCause || fromPage ? null : await this.optionalTasks(tx, team, c, p, identity, p.targets, now, replied);
+    const dmOptional = !p.privateDataSource && !dataCause && !delegation && !datasetShare && c.kind === 'bot_dm' && !!c.autoReply?.targets.includes(c.sharedBotId) && !!bots[0]?.data().autoReply;
+    const unaskedTasks = p.privateDataSource || dataCause || delegation || fromPage ? null : await this.optionalTasks(tx, team, c, p, identity, p.targets, now, replied);
     const seq = c.lastSeq + 1, changeSeq = c.lastChangeSeq + 1;
     if (!Number.isSafeInteger(seq) || !Number.isSafeInteger(changeSeq)) deny(409, 'CURSOR_LIMIT');
     const tasks = p.targets.map(sharedBotId => ({ sharedBotId, taskId: admissionId(p.messageId, sharedBotId) }));
     const response = { messageId: p.messageId, changeId: p.changeId, changeSeq, tasks };
-    const author = dataCause?.author ?? { kind: 'user', uid: identity.uid, displayName: self.displayName || 'Member' }, at = new Date(now);
+    const author = dataCause?.author ?? delegation?.author ?? { kind: 'user', uid: identity.uid, displayName: self.displayName || 'Member' }, at = new Date(now);
     const sharedText = p.privateDataSource ? 'Private data preview requested.' : p.text;
     tx.create(ref.collection('messages').doc(p.messageId), { seq, changeSeq, changeId: p.changeId, text: sharedText, kind: 'text', author,
       createdAt: at, ...(tasks.length ? { taskIds: tasks.map(task => task.taskId) } : {}),
@@ -621,7 +635,8 @@ export class SharedBotsStore {
         offline: offlineHost[i], coMentioned: bots.filter((_, j) => j !== i).map(other => other.data().name) });
       tx.create(team.collection('tasks').doc(target.taskId), { ...task, ...privateData, ...(dataCause ? {
         rootTaskId: dataCause.rootTaskId ?? task.taskId, dataCause,
-      } : {}) });
+        // Asked for by another Bot (B8): part of the same root task, and shown in the maintainer's log as addressed to it, which it was.
+      } : delegation ? { rootTaskId: delegation.task.rootTaskId, delegation: delegation.task, triage: { action: 'run', source: 'rule', reason: 'addressed', at: now } } : {}) });
     }
     unaskedTasks?.write(seq);
     for (const [i, quotaRef] of quotaRefs.entries()) tx.set(quotaRef, { day, used: (quotas[i].data()?.used ?? 0) + increments[i], limit: limits[i] });
@@ -719,10 +734,14 @@ export class SharedBotsStore {
       // A newer caller watermark cannot erase an edit/recall after the input actually admitted for this task.
       if (!await this.sourceWatermarkCurrent(tx, conversation, task, Math.min(task.inputLastChangeSeq, p.expectedLastChangeSeq))) deny(409, 'SOURCE_CHANGED');
     }
-    return { task: taskView(task, now), messageId: task.messageId, messageSeq: task.messageSeq,
+    // Read by every context a grant is made from (`prepareTask`, and `validateTask` when a lost answer is reconciled or an attempt is recovered), so each says what the run may ask.
+    const delegates = await delegationOffers(this, { tx, team, task, bot, deployment, conversation });
+    // A task that waited for another Bot's reply is answered by what the service recorded of it: the host keeps that before it asks to continue.
+    const outcome = action === 'prepareTask' && (task.resume?.delegation || task.resume?.refusal) ? await waitOutcome(tx, team, task) : null;
+    return { task: taskView(task, now), messageId: task.messageId, messageSeq: task.messageSeq, ...(outcome ? { wait: outcome } : {}),
       ...(task.privateDataSource ? { privateDataSource: task.privateDataSource } : {}),
       inputs: bot.grants, deployment, sourceLastChangeSeq: conversation.data().lastChangeSeq, conversationKind: conversation.data().kind,
-      physicalDispatchesSpent: task.physicalDispatchesSpent, ...this.listOffer(bot, deployment),
+      physicalDispatchesSpent: task.physicalDispatchesSpent, ...this.listOffer(bot, deployment), ...(delegates.length ? { delegates } : {}),
       // The other Bots the same message asked, so that each can leave to the others what they answer better. Information only.
       ...(task.coMentioned?.length ? { coMentioned: task.coMentioned } : {}),
       scope: effectiveScope(bot.scope, conversation.data().botScopes?.[task.sharedBotId]) };
@@ -830,6 +849,8 @@ export class SharedBotsStore {
     if (task.roundId && !['won', 'promoted'].includes(task.round?.outcome)) deny(409, 'ROUND_OPEN');
     const { lockRef, free, conversation, superseded } = await this.admitRun(tx, team, task, bot, deployment, p.expectedLastChangeSeq, now, true);
     if (!free) return { execute: false, taskId: p.taskId };
+    // The Bots this run may hand part of the request to (B8), read before anything is written.
+    const delegates = await delegationOffers(this, { tx, team, task, bot, deployment, conversation });
     // Unasked runs in groups and channels count against the Bot's own daily limit, not anyone's request quota.
     if (unasked(task, conversation.data())) {
       const day = nowDay(now), quotaRef = team.collection('requestQuotas').doc(hash([day, 'auto', task.sharedBotId]));
@@ -850,7 +871,7 @@ export class SharedBotsStore {
     tx.update(ref, started);
     tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
     return { execute: true, permitId, task: taskView({ ...task, ...started }, now), deployment,
-      inputs: bot.grants, messageId: task.messageId, messageSeq: task.messageSeq,
+      inputs: bot.grants, messageId: task.messageId, messageSeq: task.messageSeq, ...(delegates.length ? { delegates } : {}),
       ...(task.privateDataSource ? { privateDataSource: task.privateDataSource } : this.listOffer(bot, deployment)) };
   }
   async continueRun({ tx, team, identity, command, now }) {
@@ -862,6 +883,8 @@ export class SharedBotsStore {
     if (p.expectedEpoch !== task.epoch || task.cancelRequestedAt) return refused;
     if (!Number.isSafeInteger(task.epoch + 1)) deny(409, 'TASK_EPOCH_EXHAUSTED');
     if (answer ? task.state !== 'queued' || !task.resume : task.state !== 'running' || task.hostId !== p.hostId) return refused;
+    // The wait was for another Bot's reply (B8): what it says is in the service's record, not in a message of the Chat.
+    const delegating = answer && Boolean(task.resume.delegation || task.resume.refusal);
     if (task.deadline <= now) {
       // A queued task past its pick-up limit is expired; a running one stays derived-interrupted.
       if (answer) tx.update(ref, { state: 'expired' });
@@ -882,13 +905,18 @@ export class SharedBotsStore {
       return { ...refused, state: 'needs_reconciliation' };
     }
     if (task.botRevision !== bot.identity.revision) deny(403, 'TASK_REVOKED');
-    const { lockRef, lock, free } = await this.admitRun(tx, team, task, bot, deployment, task.inputLastChangeSeq, now);
-    if (answer) {
+    const { lockRef, lock, free, conversation } = await this.admitRun(tx, team, task, bot, deployment, task.inputLastChangeSeq, now);
+    if (answer && !delegating) {
       const message = (await tx.get(team.collection('conversations').doc(task.conversationId)
         .collection('messages').doc(task.resume.answerMessageId))).data();
       if (!message || message.recalled || message.editedAt || message.seq !== task.resume.answerSeq) deny(409, 'SOURCE_CHANGED');
     }
     if (!free) return refused;
+    const outcome = delegating ? await waitOutcome(tx, team, task) : null;
+    const delegates = await delegationOffers(this, { tx, team, task, bot, deployment, conversation });
+    // The replay of the call the run waited on needs that Bot offered, whatever has changed since.
+    const asked = outcome?.delegation;
+    if (asked && !delegates.some(offer => offer.sharedBotId === asked.targetBotId)) delegates.push({ sharedBotId: asked.targetBotId, name: asked.targetName ?? asked.targetBotId });
     // Waiting is free; a recovered attempt is charged up to now, so the absolute deadline never moves.
     const spent = Math.max(0, Math.min(task.activeBudgetMs, task.activeSpentMs + (answer ? 0 : now - task.attemptStartedAt)));
     const remaining = task.activeBudgetMs - spent, signals = team.collection('signals').doc(task.sharedBotId);
@@ -900,8 +928,8 @@ export class SharedBotsStore {
     }
     const epoch = task.epoch + 1, permitId = grantPermit(command, epoch), deadline = now + remaining;
     const physicalDispatchesSpent = Math.max(task.physicalDispatchesSpent, p.dispatchedRequests);
-    const wait = answer ? { waitId: task.resume.waitId, answerMessageId: task.resume.answerMessageId, answerSeq: task.resume.answerSeq,
-      ...(task.resume.decision ? { decision: task.resume.decision } : {}) } : undefined;
+    const wait = !answer ? undefined : outcome ?? { waitId: task.resume.waitId, answerMessageId: task.resume.answerMessageId, answerSeq: task.resume.answerSeq,
+      ...(task.resume.decision ? { decision: task.resume.decision } : {}) };
     const next = { state: 'running', epoch, attemptStartedAt: now, activeSpentMs: spent, deadline, permitDigest: hash(permitId),
       hostId: p.hostId, accountEpoch: p.accountEpoch, checkpointDigest: p.checkpointDigest, physicalDispatchesSpent };
     tx.update(ref, { ...next, resume: FieldValue.delete() });
@@ -910,7 +938,7 @@ export class SharedBotsStore {
     const { resume: _resume, ...rest } = task;
     return { execute: true, permitId, epoch, task: taskView({ ...rest, ...next }, now), deployment, inputs: bot.grants,
       messageId: task.messageId, messageSeq: task.messageSeq, remainingActiveMs: remaining, physicalDispatchesSpent, ...(wait ? { wait } : {}),
-      ...this.listOffer(bot, deployment) };
+      ...this.listOffer(bot, deployment), ...(delegates.length ? { delegates } : {}) };
   }
   /** The result/question audience gate. A model-produced text enters a shared Chat only when
    * the source is still current and every present reader may see every published input. */
@@ -1016,15 +1044,25 @@ export class SharedBotsStore {
       || base.botRevision !== task.botRevision || !same(byUid(base.readers), byUid(gate.readers)) || base.revision !== p.revises.expectedRevision
       || base.revision >= revisionLimit || base.digest === hash(p.document));
     const allowed = gate.allowed && !stale;
-    return { base, stale, allowed, silent: unasked(task, gate.c) && !(allowed && p.outcome === 'completed') };
+    // The run that asked another Bot for this reply, if it still waits for it: the reply goes to it, not to the Chat (B8).
+    return { base, stale, allowed, silent: unasked(task, gate.c) && !(allowed && p.outcome === 'completed'), handBack: await handBackOf(tx, team, task) };
   }
   /**
    * A finished result enters its Chat: the reply as a message of the Bot, its document as an artifact revision, and the task as what that came to. The one
    * place this happens, for the host's own `completeTask` and for a maintainer's approval of a reply that was held (`approveReply`), which is the same
    * result later and with the maintainer in the host's place. `more` is written to the task with it.
    */
-  async post(tx, team, task, bot, identity, now, gate, { base, stale, allowed, silent }, p, more) {
+  async post(tx, team, task, bot, identity, now, gate, { base, stale, allowed, silent, handBack: handedBack }, p, more) {
     const { readers, sourceCurrent } = gate, ref = team.collection('tasks').doc(task.taskId);
+    if (handedBack) {
+      // What the run that waits for this reply is told: the reply, that it may not be shared here, or that the Bot did not finish. Nothing enters the Chat.
+      const settled = allowed ? p.outcome : stale ? 'failed' : sourceCurrent ? 'authorization_required' : 'failed';
+      const state = task.unverifiedOperations > 0 ? 'needs_reconciliation' : settled;
+      handBack(tx, team, handedBack, now, !allowed ? 'withheld' : p.outcome === 'completed' ? 'done' : 'failed', p.text);
+      tx.update(ref, { state, resultDigest: more.resultDigest, replyId: null, artifactId: null, usage: p.usage, finishedAt: p.finishedAt, deliveredAt: now,
+        handedBack: true, ...(state === settled ? {} : { reconciledState: settled }), ...(more.approval ? { approval: more.approval } : {}) });
+      return { taskId: task.taskId, state, replyId: null, artifactId: null };
+    }
     const replyId = botId([p.taskId, 'reply']), changeId = botId([p.taskId, 'reply-change']);
     // Shown on the reply as its sources, and kept on the task as the record of what the model was given.
     const read = allowed && p.outcome === 'completed' ? await taskFiles(tx, team, task, p.readFiles) : [];
@@ -1061,7 +1099,8 @@ export class SharedBotsStore {
     const { accountEpoch: _accountEpoch, ...stable } = p, pauseDigest = hash(stable);
     if (existing) {
       if (existing.pauseDigest !== pauseDigest) deny(409, 'WAIT_CONFLICT');
-      return { taskId: task.taskId, state: 'waiting', waitId: p.waitId, messageId: existing.messageId, expiresAt: existing.expiresAt };
+      return { taskId: task.taskId, state: 'waiting', waitId: p.waitId, messageId: existing.messageId, expiresAt: existing.expiresAt,
+        ...(existing.holdsUntil ? { holdsUntil: existing.holdsUntil } : {}) };
     }
     if (task.permitDigest !== hash(p.permitId)) deny(403, 'EXECUTION_PERMIT_REQUIRED');
     if (task.resultDigest) {
@@ -1087,6 +1126,7 @@ export class SharedBotsStore {
       if (lock?.taskId === task.taskId) tx.delete(lockRef);
       return { taskId: task.taskId, state, waitId: p.waitId, messageId: null, expiresAt: null };
     }
+    if (p.kind === 'delegation') return this.parkForDelegation({ tx, team, task, ref, waitRef, lockRef, bot, deployment, p, now, pauseDigest });
     const { messageId, changeId } = questionIds(task.taskId, p.waitId), expiresAt = now + p.expiresInMs;
     this.botMessage(tx, gate, task, bot, identity, now, { messageId, changeId, text: proposal?.text ?? p.question,
       fields: { waitId: p.waitId, ...(proposal ? { approval: proposal.view } : {}) } });
@@ -1100,6 +1140,53 @@ export class SharedBotsStore {
       permitDigest: null });
     tx.set(lockRef, { taskId: task.taskId, until: expiresAt });
     return { taskId: task.taskId, state: 'waiting', waitId: p.waitId, messageId, expiresAt };
+  }
+  /**
+   * `pauseTask` of kind `delegation` (B8): the run handed part of the request to another Bot and waits for its reply. The delegation and the wait are made in one
+   * transaction, so the Bot asked cannot answer before the run waits, and a delegation that is refused leaves no Bot asked: the run is queued again at once, with the
+   * reason as the outcome of its wait. The wait lasts `expiresInMs` (about ten minutes); the task itself stays a day, since its Desktop may be off when the reply comes.
+   */
+  async parkForDelegation({ tx, team, task, ref, waitRef, lockRef, bot, deployment, p, now, pauseDigest }) {
+    if (!p.delegation.logicalStepId.startsWith(`${task.taskId}/`)) deny(400, 'INVALID_INPUT');
+    const made = await delegate(this, { tx, team, task, bot, deployment, now, waitId: p.waitId,
+      call: { logicalStepId: p.delegation.logicalStepId, target: p.delegation.target, text: p.delegation.request, expectReply: true } });
+    const spent = Math.max(0, Math.min(task.activeBudgetMs - task.activeSpentMs, p.pausedAt - task.attemptStartedAt)), deadline = now + hostWaitMs;
+    const paused = { activeSpentMs: task.activeSpentMs + spent, currentWaitId: p.waitId, currentWaitKind: 'delegation', checkpointDigest: p.checkpointDigest,
+      physicalDispatchesSpent: Math.max(task.physicalDispatchesSpent, p.dispatchedRequests), permitDigest: null };
+    // `holdsUntil`: the task stays that long, whatever happens to the wait; its Desktop reads it to know how long to keep what it needs to go on.
+    const wait = { schemaVersion: 1, waitId: p.waitId, taskId: task.taskId, conversationId: task.conversationId, sharedBotId: task.sharedBotId, kind: 'delegation',
+      recipient: task.requester, requestDigest: p.requestDigest, checkpointDigest: p.checkpointDigest, createdAt: now, pauseDigest, holdsUntil: deadline };
+    const signals = team.collection('signals').doc(task.sharedBotId);
+    if (!made.ok) {
+      tx.create(waitRef, { ...wait, messageId: null, expiresAt: now, state: 'resolved', resolvedAt: now, delegationId: null, delegationOutcome: 'refused', refusal: made.code });
+      tx.update(ref, { ...paused, state: 'queued', deadline, resume: { waitId: p.waitId, refusal: made.code, target: p.delegation.target } });
+      tx.set(lockRef, { taskId: task.taskId, until: deadline });
+      tx.set(signals, { updatedAt: new Date(now) });
+      return { taskId: task.taskId, state: 'queued', waitId: p.waitId, messageId: null, expiresAt: now, holdsUntil: deadline };
+    }
+    const expiresAt = now + p.expiresInMs;
+    tx.create(waitRef, { ...wait, messageId: made.messageId, expiresAt, state: 'pending', delegationId: made.delegationId });
+    tx.update(ref, { ...paused, state: 'waiting', deadline, currentWaitUntil: expiresAt, currentDelegation: { sharedBotId: p.delegation.target, taskId: made.taskId } });
+    tx.set(lockRef, { taskId: task.taskId, until: deadline });
+    return { taskId: task.taskId, state: 'waiting', waitId: p.waitId, messageId: made.messageId, expiresAt, holdsUntil: deadline };
+  }
+  /**
+   * A running task hands part of the request to another Bot and goes on (B8): its message in the Chat and the other Bot's task are made, and the other Bot answers
+   * in the Chat itself. The request is the Bot's own text entering the Chat, so it is checked like a reply is (`outputGate`). A refusal is an answer, not an error:
+   * `{ sent: false, code }`, which the run tells the model in words.
+   */
+  async delegateTask({ tx, team, identity, command: { payload: p }, now }) {
+    const { deployment, bot } = await this.checkHost(tx, team, identity, p);
+    const ref = team.collection('tasks').doc(p.taskId), task = (await tx.get(ref)).data();
+    if (!task || task.deploymentId !== p.deploymentId) deny(404, 'TASK_REQUIRED');
+    if (task.state !== 'running' || task.permitDigest !== hash(p.permitId)) deny(403, 'EXECUTION_PERMIT_REQUIRED');
+    if (task.cancelRequestedAt) deny(409, 'TASK_CANCELLED');
+    if (task.deadline <= now) deny(409, 'TASK_EXPIRED');
+    if (!p.logicalStepId.startsWith(`${task.taskId}/`)) deny(400, 'INVALID_INPUT');
+    if (!(await this.outputGate(tx, team, task, bot, p)).allowed) return { sent: false, code: 'DELEGATION_WITHHELD' };
+    const made = await delegate(this, { tx, team, task, bot, deployment, now,
+      call: { logicalStepId: p.logicalStepId, target: p.target, text: p.request, expectReply: false } });
+    return made.ok ? { sent: true, delegationId: made.delegationId, taskId: made.taskId, messageId: made.messageId } : { sent: false, code: made.code };
   }
   /** One exact change a run asks to make to its Bot's list, checked and described for the member who has to approve it.
    * The approval is of this operation and these parameters only: `recordOperation` accepts nothing else under it. */
@@ -1124,6 +1211,8 @@ export class SharedBotsStore {
     const waitRef = team.collection('waits').doc(p.waitId), wait = (await tx.get(waitRef)).data();
     if (!wait || wait.conversationId !== p.conversationId) deny(404, 'WAIT_REQUIRED');
     if (!same(wait.recipient, identity)) deny(403, 'WAIT_RECIPIENT_REQUIRED');
+    // A run waiting for another Bot's reply is not waiting for a person.
+    if (wait.kind === 'delegation') deny(409, 'WAIT_KIND_MISMATCH');
     const [message, change] = await tx.getAll(ref.collection('messages').doc(p.messageId), ref.collection('changes').doc(p.changeId));
     if ((wait.kind === 'tool_approval') !== deciding) deny(409, 'WAIT_KIND_MISMATCH');
     const digest = hash({ action, requester: identity, ...p });
@@ -1166,11 +1255,14 @@ export class SharedBotsStore {
     const ref = team.collection('tasks').doc(p.taskId), task = (await tx.get(ref)).data();
     if (!task) deny(404, 'TASK_REQUIRED');
     const bot = (await tx.get(team.collection('sharedBots').doc(task.sharedBotId))).data();
-    if (!same(task.requester, identity) && !ownerOf(bot, identity)) deny(403, 'TASK_CANCEL_FORBIDDEN');
+    // The person who asked and the Bot's maintainer; for a task another Bot asked for (B8), also the maintainer of the Bot that asked.
+    if (!await canCancel(tx, team, task, bot, identity)) deny(403, 'TASK_CANCEL_FORBIDDEN');
     const state = taskView(task, now).state;
     if (!['queued', 'waiting', 'running', 'awaiting_approval'].includes(state)) deny(409, 'TASK_FINISHED');
     const lockRef = team.collection('chatExecutionLocks').doc(hash([task.sharedBotId, task.conversationId]));
     const lock = (await tx.get(lockRef)).data();
+    // What was asked of other Bots under this task is cancelled with it, and the task that waits for this one's reply goes on at once.
+    const planned = await planCancel(tx, team, task);
     const waitRef = state === 'waiting' ? team.collection('waits').doc(task.currentWaitId) : null;
     if (state === 'running') {
       if (!task.cancelRequestedAt) tx.update(ref, { cancelRequestedAt: now });
@@ -1181,6 +1273,7 @@ export class SharedBotsStore {
       if (state === 'awaiting_approval') tx.delete(team.collection('heldReplies').doc(task.taskId));
       if (lock?.taskId === task.taskId) tx.delete(lockRef);
     }
+    applyCancel(tx, team, task, planned, now);
     tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
     return { taskId: task.taskId, state: state === 'running' ? 'running' : 'cancelled' };
   }
@@ -1484,7 +1577,8 @@ export class SharedBotsStore {
     const items = docs.flatMap((doc, i) => {
       const t = doc.data(), chat = chats[i].data(), state = taskView(t, now).state, approval = approvalOutcome(t, state);
       return chat?.memberUids?.includes(identity.uid) ? [{ taskId: t.taskId, conversationId: t.conversationId, messageId: t.messageId, createdAt: t.createdAt,
-        triage: t.triage, state, ...(approval ? { approval } : {}), ...(t.round ? { round: t.round } : {}), ...(chat.title ? { conversationTitle: chat.title } : {}) }] : [];
+        triage: t.triage, state, ...(approval ? { approval } : {}), ...(t.round ? { round: t.round } : {}), ...(t.delegation ? { delegation: t.delegation } : {}),
+        ...(chat.title ? { conversationTitle: chat.title } : {}) }] : [];
     });
     return { items, ...(page.size > limit ? { nextCursor: docs.at(-1).id } : {}) };
   }

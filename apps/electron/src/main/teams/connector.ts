@@ -16,7 +16,7 @@ import { sandboxAvailability } from '../bots/sandboxAvailability.js';
 import type { BotSandboxAvailability } from '../../shared/bots.js';
 import { validateBotManifest } from '../bots/package.js';
 import { TeamPrivateStore, digest, validateTeamModelRoute, type AppCallOutcome, type TeamModelSelection, type TeamPersonaSnapshot, type SharedBotBinding, type PublishedDocument, type SavedExecution, type SavedDelivery, type TeamDataRef, type SavedGrantIntent } from './privateStore.js';
-import { runTeamHost, runResult, LOCAL_APPS_OFFERED, OPERATION_BYTES, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult, type TeamRunResult, type TeamTaskCheckpoint, type TeamTaskWait, type TeamContinuation, type BotChatScope, type TeamOperation, type TeamOperationOutcome } from './process.js';
+import { runTeamHost, runResult, LOCAL_APPS_OFFERED, DELEGATES_OFFERED, DELEGATION_REQUEST_BYTES, OPERATION_BYTES, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult, type TeamRunResult, type TeamTaskCheckpoint, type TeamTaskWait, type TeamContinuation, type BotChatScope, type TeamOperation, type TeamOperationOutcome } from './process.js';
 import type { TeamDataProof, TeamDatasetOffer } from './process.js';
 import type { LocalTeamHost, TeamAccountContext } from './service.js';
 import type { PrivatePreviewLease, PrivatePreviewPage, PrivatePreviewProof } from './dataPreview.js';
@@ -76,12 +76,19 @@ interface Selected { context: TeamAccountContext; instanceId: string; expires: n
 interface HostTask extends TeamTaskView { messageId: string; messageSeq: number;
   /** A task of a reply round (B7): `open` until the service has chosen who answers, then `won` or `promoted` with the tier it was chosen with. Only a chosen task may start. */
   round?: 'open' | 'won' | 'promoted'; roundTier?: BidTier;
-  /** The service saw a person speak to the Bot without asking it: a reply to its message, or its name. */ addressed?: true; resume?: { waitId: string; answerMessageId: string; answerSeq: number; /** The requester's decision, when the wait was an approval. */ decision?: 'approve' | 'deny' } }
+  /** The service saw a person speak to the Bot without asking it: a reply to its message, or its name. */ addressed?: true;
+  resume?: { waitId: string; answerMessageId: string; answerSeq: number; /** The requester's decision, when the wait was an approval. */ decision?: 'approve' | 'deny' }
+    /** The task waited for another Bot's reply and that is over: `delegation` is the service's record of it. */
+    | { waitId: string; delegation: string }
+    /** The request to the other Bot was refused when the task paused, and nothing was asked: `refusal` says why. */
+    | { waitId: string; refusal: string; target: string } }
 interface TaskContext { privateDataSource?: string; sourceLastChangeSeq?: number; task: HostTask & { epoch?: number }; physicalDispatchesSpent?: number; messageId: string; messageSeq: number; inputs: Array<{ grantId: string; resourceId: string; digest: string }>;
   /** `prepareTask` only: what kind of Chat the task is in. */ conversationKind?: string;
   /** `prepareTask` only: the names of the other Bots the same message asked. Information for the run, never an instruction. */ coMentioned?: string[];
   deployment: { deploymentId: string; definitionDigest: string; accountEpoch: number; capabilities?: { durableWait?: boolean } };
-  /** Present when the Bot has a shared list and this deployment records its writes. */ sharedList?: SharedListOffer }
+  /** Present when the Bot has a shared list and this deployment records its writes. */ sharedList?: SharedListOffer;
+  /** The other Bots of the Chat the run may hand part of the request to, as the service offers them for this attempt. */ delegates?: unknown;
+  /** `prepareTask` of a task that waited for another Bot's reply: how that ended. */ wait?: unknown }
 interface ContinueGrant { execute: boolean; state?: string; permitId?: string; epoch?: number; task?: TeamTaskView; physicalDispatchesSpent?: number; sharedList?: SharedListOffer }
 interface SharedListOffer { title: string; description: string; /** The Bot proposes changes and the requester approves each one. */ approval?: 'requester' }
 interface TaskListAnswer { applied?: boolean; error?: string; dataRevision: number; items: SharedListItem[] }
@@ -95,6 +102,73 @@ const runList = (value: unknown, unasked: boolean): SharedListOffer | undefined 
   const offer = listOffer(value);
   return offer && !(unasked && offer.approval === 'requester') ? offer : undefined;
 };
+/** The Bots a run may hand part of its request to, as the worker is told of them. None to a run on private data or on a route that cannot continue: it could not wait for a reply. */
+type RunDelegate = { id: string; name: string; description?: string };
+const runDelegates = (value: unknown, privateData: boolean, continues: boolean): RunDelegate[] | undefined => {
+  if (privateData || !continues || !Array.isArray(value)) return undefined;
+  const offers: RunDelegate[] = [];
+  for (const entry of value.slice(0, DELEGATES_OFFERED)) {
+    const offer = entry as { sharedBotId?: unknown; name?: unknown; description?: unknown } | null;
+    if (!offer || !id(offer.sharedBotId) || typeof offer.name !== 'string' || !offer.name.trim() || offers.some(other => other.id === offer.sharedBotId)) continue;
+    offers.push({ id: offer.sharedBotId, name: offer.name.trim().slice(0, 120),
+      ...(typeof offer.description === 'string' && offer.description.trim() ? { description: offer.description.trim().slice(0, 500) } : {}) });
+  }
+  return offers.length ? offers : undefined;
+};
+/** Why a request to another Bot was not sent, in words for the Bot that made it. */
+const DELEGATION_REFUSALS: Record<string, string> = {
+  DELEGATION_NOT_ALLOWED: 'You are not set up to ask that Bot.',
+  DELEGATION_NOT_ACCEPTED: 'That Bot does not take requests from you.',
+  DELEGATION_UNSUPPORTED: 'This task cannot ask other Bots.',
+  DELEGATION_UNSUPPORTED_TARGET: 'That Bot runs on a computer that cannot take requests from other Bots yet.',
+  DELEGATION_TARGET_UNAVAILABLE: 'That Bot is not available.',
+  DELEGATION_DEPTH: 'Requests are passed on only so far, and this one is at the end of that chain.',
+  DELEGATION_LOOP: 'That Bot is already part of this chain of requests and cannot be asked again.',
+  DELEGATION_LIMIT: 'No more requests to other Bots can be made for this message.',
+  DELEGATION_UNASKED: 'Nobody asked you in this message, so you cannot ask other Bots.',
+  DELEGATION_WITHHELD: 'The request may not be shared in this Chat.',
+  BOT_USE_REQUIRED: 'The person who asked you may not use that Bot.',
+  BOT_PARTICIPANT_REQUIRED: 'That Bot is not in this Chat.',
+  REQUEST_QUOTA_EXCEEDED: 'You have used up the requests you may make to other Bots today.',
+};
+const delegationRefusal = (code: string, name: string): string => `The request to ${name} was not sent.${DELEGATION_REFUSALS[code] ? ` ${DELEGATION_REFUSALS[code]}` : ''}`;
+const cutBytes = (text: string, bytes: number): string => {
+  const buffer = Buffer.from(text, 'utf8');
+  if (buffer.length <= bytes) return text;
+  let end = bytes; while (end > 0 && (buffer[end]! & 0xc0) === 0x80) end -= 1;
+  return buffer.subarray(0, end).toString('utf8');
+};
+/** The call a worker stopped at when it waits for another Bot's reply: the checkpoint's question is that call as JSON. */
+function delegationCall(question: string): { target: string; request: string } | undefined {
+  let call: unknown; try { call = JSON.parse(question); } catch { return undefined; }
+  const value = call as { target?: unknown; request?: unknown; expectReply?: unknown } | null;
+  return !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join(',') === 'expectReply,request,target' && value.expectReply === true
+    && id(value.target) && typeof value.request === 'string' && !!value.request.trim() && Buffer.byteLength(value.request) <= DELEGATION_REQUEST_BYTES && !value.request.includes('\0')
+    ? { target: value.target, request: value.request } : undefined;
+}
+/** What a run is told when its wait for another Bot's reply ends: one text, which is the result of its tool call, and the id that names that delegation.
+ * The service recorded how it ended (and the reply, when there is one) and handed it to the host with the task; a message of the Chat is never the answer. */
+function delegationAnswer(wait: unknown, waitId: string): { messageId: string; text: string } | undefined {
+  const outcome = wait as { waitId?: unknown; delegation?: { delegationId?: unknown; targetName?: unknown; outcome?: unknown; text?: unknown; code?: unknown } } | null | undefined;
+  const d = outcome?.delegation;
+  if (!d || outcome?.waitId !== waitId || typeof d.outcome !== 'string') return undefined;
+  const name = typeof d.targetName === 'string' && d.targetName.trim() ? d.targetName.trim() : 'The other Bot';
+  const messageId = typeof d.delegationId === 'string' && /^[A-Za-z0-9_-]{8,128}$/u.test(d.delegationId) ? d.delegationId : waitId;
+  const said = (text: string) => ({ messageId, text });
+  switch (d.outcome) {
+    case 'done': {
+      if (typeof d.text !== 'string' || !d.text.trim()) return said(`${name} finished but had nothing to hand back.`);
+      const lead = `${name} replied:\n\n`;
+      return said(lead + cutBytes(d.text, 8192 - Buffer.byteLength(lead)));
+    }
+    case 'withheld': return said(`${name} has finished, but what it said cannot be shared in this Chat, so it is not handed to you.`);
+    case 'failed': return said(`${name} could not finish the request.`);
+    case 'detached': return said(`${name} has not finished yet. When it does, it replies in the Chat itself; do not wait for it or answer in its place.`);
+    case 'cancelled': return said(`The request to ${name} was cancelled, so there is no reply.`);
+    case 'refused': return typeof d.code === 'string' ? said(delegationRefusal(d.code, name)) : undefined;
+    default: return undefined;
+  }
+}
 /** A worker result that ends the task: it is delivered as it is, never inspected or continued. */
 const finished = (status: string) => status === 'completed' || status === 'failed' || status === 'declined';
 /** The service's digest of a JSON value: object keys in order, so both sides hash the same bytes. */
@@ -218,6 +292,8 @@ function transferDocuments(bytes: Buffer, manifest: TransferManifestEntry[]): Pu
 }
 /** A question waits for its answer at most this long; an answered task is picked up within the server's queue limit. */
 const WAIT_MS = 24 * 60 * 60 * 1000, QUEUE_MS = 5 * 60 * 1000;
+/** A task waits this long for the reply of a Bot it asked; after that it goes on without it, and the reply is posted in the Chat when it comes. The host asks the service to end the wait, at most this often. */
+const DELEGATION_WAIT_MS = 10 * 60 * 1000, DETACH_RETRY_MS = 30_000;
 /** An unasked task waits this long before it is judged, so that a burst of messages is judged once, on the latest. */
 const SETTLE_MS = 2500;
 /** The Bots one message may ask, and so the names a run is told of the others at most. */
@@ -254,7 +330,7 @@ export class TeamConnector implements LocalTeamHost {
   private readonly active = new Map<string, { taskId: string; instanceId: string; controller: AbortController; promise: Promise<void> }>();
   private readonly selections = new Map<string, Selected>(); private readonly publishing = new Set<string>();
   private readonly activated = new Map<string, string>(); private readonly heartbeats = new Map<string, number>();
-  private readonly deferred = new Map<string, number>(); private readonly deferredCodes = new Map<string, string>();
+  private readonly deferred = new Map<string, number>(); private readonly deferredCodes = new Map<string, string>(); private readonly detached = new Map<string, number>();
   /** The triage verdict of an unasked task not yet started: a start the Bot×Chat lock refuses is tried again every few seconds, and is judged once. */
   private readonly verdicts = new Map<string, TriageVerdict>();
   /** The tasks of an open round this host has bid for. The service says who answers when every Bot has bid or the round's time is up, and wakes the host then; asking again
@@ -378,7 +454,7 @@ export class TeamConnector implements LocalTeamHost {
     this.available(); const context = this.context(uid), key = JSON.stringify([uid, input?.teamId, input?.sharedBotId]);
     if (this.publishing.has(key)) throw new Error('BOT_REVISION_CONFLICT'); this.publishing.add(key);
     try {
-      if (!input || Object.keys(input).some(k => !['teamId','generation','publicationId','sharedBotId','instanceId','expectedRevision','usePolicy','fileTokens','quotas','role','resourceBindings','sharedList','keptResources','replacedResources','examples','autoReply','scope'].includes(k))
+      if (!input || Object.keys(input).some(k => !['teamId','generation','publicationId','sharedBotId','instanceId','expectedRevision','usePolicy','fileTokens','quotas','role','resourceBindings','sharedList','keptResources','replacedResources','examples','autoReply','scope','acceptDelegation','acceptFrom','delegateTo','delegation'].includes(k))
         || ![input.teamId,input.publicationId,input.sharedBotId,input.instanceId].every(id) || !Number.isSafeInteger(input.generation) || input.generation < 1
         || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0 || typeof input.role !== 'string' || !input.role.trim() || input.role.includes('\0') || Buffer.byteLength(input.role) > 64 * 1024
         || !Array.isArray(input.fileTokens) || input.fileTokens.length > 49 || new Set(input.fileTokens).size !== input.fileTokens.length) throw new Error('INVALID_INPUT');
@@ -404,6 +480,12 @@ export class TeamConnector implements LocalTeamHost {
         || !list.title.trim() || list.title.trim().length > 120 || !list.description.trim() || list.description.trim().length > 2000 || `${list.title}${list.description}`.includes('\0'))) throw new Error('INVALID_INPUT');
       const auto = input.autoReply;
       if (auto !== undefined && (!auto || typeof auto !== 'object' || Object.keys(auto).join(',') !== 'daily' || !Number.isSafeInteger(auto.daily) || auto.daily < 1 || auto.daily > 10000)) throw new Error('INVALID_INPUT');
+      // Whether other Bots of a Chat may ask this one for part of a request, and whom this one may ask (Bot v3 B8). Left out, nobody either way.
+      const { acceptDelegation, acceptFrom, delegateTo, delegation } = input;
+      const botIds = (value: unknown): value is string[] => Array.isArray(value) && value.length >= 1 && value.length <= DELEGATES_OFFERED && value.every(id) && new Set(value).size === value.length;
+      if (acceptDelegation !== undefined && !['none','team_bots','listed'].includes(acceptDelegation) || (acceptDelegation === 'listed') !== (acceptFrom !== undefined) || acceptFrom !== undefined && !botIds(acceptFrom)
+        || (delegateTo === undefined) !== (delegation === undefined) || delegateTo !== undefined && (!botIds(delegateTo) || delegateTo.includes(input.sharedBotId))
+        || delegation !== undefined && (!delegation || typeof delegation !== 'object' || Object.keys(delegation).join(',') !== 'daily' || !Number.isSafeInteger(delegation.daily) || delegation.daily < 1 || delegation.daily > 10000)) throw new Error('INVALID_INPUT');
       // Unasked messages are judged by the Decision service of this Desktop: without one, a Bot is not published to answer them.
       if (auto && !(await this.options.decision?.isConfigured().catch(() => false))) throw new Error('DECISION_REQUIRED');
       // What of this Desktop the Bot may use in the Team. Left out, nothing is shared; the service stores only ids, names and flags.
@@ -470,10 +552,12 @@ export class TeamConnector implements LocalTeamHost {
         sharedBotId: input.sharedBotId, expectedRevision: input.expectedRevision, name: bot.name, description: bot.description, usePolicy: input.usePolicy, quotas: input.quotas, examples,
         ...(list ? { sharedList: { title: list.title.trim(), description: list.description.trim(), ...(list.approval === 'requester' ? { approval: 'requester' } : {}) } } : {}),
         ...(auto ? { autoReply: { daily: auto.daily } } : {}),
+        ...(acceptDelegation ? { acceptDelegation, ...(acceptFrom ? { acceptFrom } : {}) } : {}),
+        ...(delegateTo ? { delegateTo, delegation: { daily: delegation!.daily } } : {}),
         ...(shared ? { scope: shared } : {}),
         deployment: { deploymentId: binding.deploymentId, sharedBotId: binding.sharedBotId, revision: binding.revision, hostId: this.options.privateStore.hostId, owner: { uid, generation: input.generation },
           instanceId: input.instanceId, definitionDigest: snapshotId, capabilitySnapshotDigest: digest(JSON.stringify({ executionVersion: 2, documents: documents.map(d => d.digest) })), executionVersion: 2,
-          capabilities: { durableWait: continues, writeOperations: continues, delegation: false }, accountEpoch: binding.accountEpoch, enabled: true },
+          capabilities: { durableWait: continues, writeOperations: continues, delegation: true }, accountEpoch: binding.accountEpoch, enabled: true },
         inputs: documents.map(d => ({ resourceId: d.resourceId, revision: d.revision, digest: d.digest, kind: d.kind, sourceAudience: { mode: 'team' } })),
       };
       await this.options.privateStore.savePublication(uid,{schemaVersion:1,requestDigest,binding,payload}); this.assert(context);
@@ -557,7 +641,7 @@ export class TeamConnector implements LocalTeamHost {
       const payload = { transferId: input.transferId,
         deployment: { deploymentId: binding.deploymentId, sharedBotId: binding.sharedBotId, revision, hostId: this.options.privateStore.hostId, owner: { uid, generation: input.generation },
           instanceId: input.instanceId, definitionDigest: snapshotId, capabilitySnapshotDigest: digest(JSON.stringify({ executionVersion: 2, documents: documents.map(d => d.digest) })), executionVersion: 2,
-          capabilities: { durableWait: continues, writeOperations: continues, delegation: false }, accountEpoch: binding.accountEpoch, enabled: true },
+          capabilities: { durableWait: continues, writeOperations: continues, delegation: true }, accountEpoch: binding.accountEpoch, enabled: true },
         inputs: documents.map(d => ({ resourceId: d.resourceId, revision: d.revision, digest: d.digest, kind: d.kind })) };
       await this.options.privateStore.savePublication(uid, { schemaVersion: 1, requestDigest, binding, payload, action: 'completeTransfer' }); this.assert(context);
       return await this.takeOver(context, binding, payload);
@@ -606,7 +690,7 @@ export class TeamConnector implements LocalTeamHost {
     this.wake();
   }
   /** Account reset or sign-out: every running task loses its authority. A cache or listener flicker never comes here. */
-  revoke() { this.revision++; this.ended.clear(); for (const a of this.active.values()) this.abort(a,'REVOKED'); this.selections.clear(); this.deferred.clear(); this.deferredCodes.clear(); this.verdicts.clear(); this.bids.clear(); this.activated.clear(); this.heartbeats.clear(); this.resultProbes.clear(); this.served.clear(); this.keepServing(); this.wake(); }
+  revoke() { this.revision++; this.ended.clear(); for (const a of this.active.values()) this.abort(a,'REVOKED'); this.selections.clear(); this.deferred.clear(); this.deferredCodes.clear(); this.detached.clear(); this.verdicts.clear(); this.bids.clear(); this.activated.clear(); this.heartbeats.clear(); this.resultProbes.clear(); this.served.clear(); this.keepServing(); this.wake(); }
   private wake() {
     if (this.closed || this.resting || !this.isolated()) return; this.pending = true; if (this.refresh) return;
     this.refresh = (async () => { while (this.pending && !this.closed && !this.resting) { this.pending = false; try { await this.discover(); } catch { /* Retry discovery; a failed authorization never starts work. */ } this.keepServing(); } })()
@@ -750,8 +834,11 @@ export class TeamConnector implements LocalTeamHost {
         continue;
       }
       if (intent.wait) {
+        const holding = intent.wait.delegation;
+        // A task that waits for another Bot's reply stops waiting when its time is up: the service queues it again and it goes on without the reply (`answer`).
+        if (holding && b && !inactive.has(scopeKey(b)) && this.now() >= intent.wait.expiresAt) await this.detach(c,b,intent).catch(() => assert());
         // The task continues only through its answer, as a queued task with `resume` (below). Never answered, cancelled or expired: nothing is left to do for it.
-        if (this.now() > intent.wait.expiresAt + QUEUE_MS + DELIVERY_SKEW_MS) await this.options.privateStore.delivered(c.uid,intent.taskId);
+        else if (this.now() > (holding?.until ?? intent.wait.expiresAt) + QUEUE_MS + DELIVERY_SKEW_MS) await this.options.privateStore.delivered(c.uid,intent.taskId);
         continue;
       }
       if (intent.pause) {
@@ -878,15 +965,16 @@ export class TeamConnector implements LocalTeamHost {
       || JSON.stringify(context.inputs.map(input=>input.grantId).sort())!==JSON.stringify([...b.grantIds].sort())) throw new Error('INVALID_GRANT_CONTEXT');
     const snapshot=await this.options.privateStore.snapshot(c.uid,b.snapshot);
     if(context.inputs.length!==snapshot.documents.length||context.inputs.some(input=>!snapshot.documents.some(document=>document.resourceId===input.resourceId&&document.digest===input.digest)))throw new Error('INPUT_GRANT_REQUIRED');
-    const {pause:_pause,wait:_wait,list:_list,...kept}=record;
+    const {pause:_pause,wait:_wait,list:_list,delegates:_delegates,...kept}=record;
     const list=!record.privateData&&CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol)?runList(context.sharedList,record.unasked===true):undefined;
+    const delegates=runDelegates(context.delegates,!!record.privateData,CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol));
     const next:SavedExecution={...kept,epoch:grant.targetEpoch,deadlineAt:context.task.deadline,
       payload:{...record.payload,...this.hostFields(b),permitId:this.candidate(record)},grant:{...grant,phase:'validated'},
       dispatched:Math.max(record.dispatched,grant.checkpoint?.dispatchesObserved??0,context.physicalDispatchesSpent??0),
       recoveries:record.recoveries+(grant.action==='continueTask'&&grant.payload.reason==='recovery'?1:0),
       // A Bot nobody asked does not ask the member who wrote back: in a group they did not ask it anything.
       ask:!record.privateData&&context.deployment.capabilities?.durableWait===true&&CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol)&&record.unasked!==true,
-      ...(list?{list}:{})};
+      ...(list?{list}:{}),...(delegates?{delegates}:{})};
     return await this.options.privateStore.compareExecution(c.uid,record,next)?next:undefined;
   }
   /** A safe grant receipt never replays a permit. Only its candidate plus the original source/context proves admission. */
@@ -993,13 +1081,24 @@ export class TeamConnector implements LocalTeamHost {
     const environment = { paths: await this.options.privateStore.owner(c.uid), bins: this.options.binaries() }; assert();
     const checkpoint = await this.checkpoint(record,snapshot,environment,assert);
     if (!checkpoint.continuable || checkpoint.wait?.waitId !== resume.waitId) throw new Error('NOT_CONTINUABLE');
-    const read = await this.options.service.hostReadChat(c,{teamId:b.teamId,generation:b.generation,conversationId:task.conversationId,mode:'byId',messageId:resume.answerMessageId}); assert();
-    const message = read.messages.find(candidate => candidate.messageId === resume.answerMessageId);
-    if (!message || message.seq !== resume.answerSeq || message.waitId !== resume.waitId || message.recalled || !message.text.trim() || Buffer.byteLength(message.text) > 8192) throw new Error('SOURCE_CHANGED');
-    // An approval is continued only with a decision, a question only with an answer in words.
-    const approval = checkpoint.wait.kind === 'tool_approval';
-    if (approval !== (resume.decision === 'approve' || resume.decision === 'deny')) throw new Error('SOURCE_CHANGED');
-    const answered={...record,answered:{waitId:resume.waitId,messageId:message.messageId,text:message.text,...(approval ? { approved: resume.decision === 'approve' } : {})}};
+    let answered: SavedExecution;
+    if (checkpoint.wait.kind === 'delegation') {
+      // The wait was for another Bot's reply: how it ended, and the reply, are the service's record, handed to the host with the task. No message of the Chat is the answer.
+      if ('answerMessageId' in resume) throw new Error('SOURCE_CHANGED');
+      const context = await this.command<TaskContext>(c,b,'prepareTask',{...this.hostFields(b),taskId:record.taskId}); assert();
+      const told = delegationAnswer(context.wait,resume.waitId);
+      if (!told) throw new Error('SOURCE_CHANGED');
+      answered={...record,answered:{waitId:resume.waitId,...told}};
+    } else {
+      if (!('answerMessageId' in resume)) throw new Error('SOURCE_CHANGED');
+      const read = await this.options.service.hostReadChat(c,{teamId:b.teamId,generation:b.generation,conversationId:task.conversationId,mode:'byId',messageId:resume.answerMessageId}); assert();
+      const message = read.messages.find(candidate => candidate.messageId === resume.answerMessageId);
+      if (!message || message.seq !== resume.answerSeq || message.waitId !== resume.waitId || message.recalled || !message.text.trim() || Buffer.byteLength(message.text) > 8192) throw new Error('SOURCE_CHANGED');
+      // An approval is continued only with a decision, a question only with an answer in words.
+      const approval = checkpoint.wait.kind === 'tool_approval';
+      if (approval !== (resume.decision === 'approve' || resume.decision === 'deny')) throw new Error('SOURCE_CHANGED');
+      answered={...record,answered:{waitId:resume.waitId,messageId:message.messageId,text:message.text,...(approval ? { approved: resume.decision === 'approve' } : {})}};
+    }
     await this.options.privateStore.saveExecution(c.uid,answered);assert();
     await this.resume(c,b,answered,snapshot,checkpoint,'answer',environment,signal);
   }
@@ -1081,6 +1180,7 @@ export class TeamConnector implements LocalTeamHost {
     let kept = false;
     try {
     assert(); const accounts = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
+    const delegates=runDelegates(prepared.delegates,false,CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol));
     const startPayload={...fields,expectedLastChangeSeq:source.lastChangeSeq};
     const record: SavedExecution = { schemaVersion:2, scope, teamId:b.teamId,generation:b.generation,taskId:task.taskId,
       commandId:digest(JSON.stringify([task.taskId,'delivery'])),deadlineAt:prepared.task.deadline,payload:{...fields,inputGrantIds:b.grantIds},
@@ -1089,7 +1189,8 @@ export class TeamConnector implements LocalTeamHost {
       ...(unasked ? { unasked: true } : {}), ...(mayDecline ? { mayDecline: true } : {}), ...(soft ? { addressed: true as const } : {}), ...(hold ? { hold: true as const } : {}),
       ...(together.length ? { coMentioned: together } : {}),
       ...(files.length ? { files: files.map(({ attachmentId, sha256 }) => ({ attachmentId, sha256 })) } : {}),
-      ...(CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) && runList(prepared.sharedList,unasked) ? { list: runList(prepared.sharedList,unasked)! } : {}) };
+      ...(CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) && runList(prepared.sharedList,unasked) ? { list: runList(prepared.sharedList,unasked)! } : {}),
+      ...(delegates ? { delegates } : {}) };
     const pending=this.grantIntent(b,record,prepared,'startTask',startPayload);
     pending.grant!.cursor={sessionRevision:cursor.sessionRevision,lastMessageSeq:cursor.lastMessageSeq,lastChangeSeq:cursor.lastChangeSeq};
     if(!await this.options.privateStore.compareExecution(c.uid,undefined,pending))return;kept=true;
@@ -1265,7 +1366,7 @@ export class TeamConnector implements LocalTeamHost {
             ...datasetInputs.map(({ resource, content }, index) => ({ id: 'dataset-input-' + (index + 1), title: 'Approved Dataset input',
               text: JSON.stringify({ resource, data: JSON.parse(content) }) })),
           ],deadlineAt:record.deadlineAt,
-          model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),...(continuation ? { continuation } : {}),...(record.ask ? { askRequester: true } : {}),...(record.list ? { sharedList: record.list } : {}),...(record.mayDecline ? { mayDecline: true, ...(record.unasked !== true || record.addressed === true ? { addressed: true } : {}) } : {}),
+          model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),...(continuation ? { continuation } : {}),...(record.ask ? { askRequester: true } : {}),...(record.list ? { sharedList: record.list } : {}),...(record.delegates ? { delegates: record.delegates } : {}),...(record.mayDecline ? { mayDecline: true, ...(record.unasked !== true || record.addressed === true ? { addressed: true } : {}) } : {}),
           ...(offers.length ? { sharedData: offers } : {}),
           ...(localApps.length ? { localApps } : {}),
           limits:{max_turns:20,context_window_tokens:2000000,output_tokens_per_request:4096,physical_dispatches:Math.max(1,DISPATCH_LIMIT-record.dispatched)}},
@@ -1275,6 +1376,7 @@ export class TeamConnector implements LocalTeamHost {
             return this.operateData(c, b, dataProof, operation, frame, assert);
           }
           if (operation.tool === 'local_app_tools' || operation.tool === 'local_app_call') return this.operateLocalApp(c, b, record, operation, () => liveApps, discovered, signal, assert);
+          if (operation.tool === 'delegate') return this.operateDelegate(c,b,record,operation,frame,assert);
           return this.operate(c,b,record,operation,frame,assert);
         },
         accountCredentials:async request => { await frameAuthorize();
@@ -1431,6 +1533,26 @@ export class TeamConnector implements LocalTeamHost {
     if (typeof answer.applied !== 'boolean' || !Number.isSafeInteger(answer.dataRevision) || !Array.isArray(answer.items)) return unknown;
     return answer.applied ? { established: true, succeeded: true, result: view(answer) } : { established: true, succeeded: false, result: { error: answer.error ?? 'ERROR', ...view(answer) } };
   }
+  /** A request to another Bot that waits for no reply: the service makes the message in the Chat and the other Bot's task in one transaction, once for the logical step, so a step sent again
+   * is answered with what the first made. A refusal is an answer that the Bot is told in words. Only a failure to reach the service leaves the outcome open, which ends this worker; the next one names the same step. */
+  private async operateDelegate(c: TeamAccountContext, b: SharedBotBinding, record: SavedExecution, operation: Extract<TeamOperation, { tool: 'delegate' }>, frame: <T>(send: () => Promise<T>) => Promise<T>, assert: () => void): Promise<TeamOperationOutcome> {
+    const { target, request } = operation.arguments, offered = record.delegates?.find(offer => offer.id === target);
+    if (!offered) throw new Error('TEAM_HOST_PROTOCOL');
+    const unknown: TeamOperationOutcome = { established: false, succeeded: false, result: {} };
+    let answer: { sent?: unknown; code?: unknown };
+    try {
+      answer = await frame(() => this.command<{ sent?: unknown; code?: unknown }>(c,b,'delegateTask',{ ...this.hostFields(b), taskId: record.taskId, permitId: record.payload.permitId,
+        logicalStepId: operation.logicalStepId, target, request, inputGrantIds: record.payload.inputGrantIds, outputAudience: { mode: 'published_inputs' } },
+        digest(JSON.stringify(['delegateTask',record.taskId,operation.logicalStepId,record.epoch]))));
+    } catch (error) {
+      if (definitive(error)) throw error;
+      this.log('team_operation_unknown', { taskId: record.taskId, step: 'delegate', code: errorCode(error) }); return unknown;
+    }
+    assert();
+    if (answer.sent === true) return { established: true, succeeded: true, result: { message: `Your request was sent to ${offered.name}. It answers in the Chat itself: you do not get its reply, so do not wait for it or answer in its place.` } };
+    if (answer.sent !== false || typeof answer.code !== 'string') return unknown;
+    return { established: true, succeeded: false, result: { message: delegationRefusal(answer.code, offered.name) } };
+  }
   /** The worker stopped at a question for the requester, or at a list change it proposes to them. The request is saved before it is sent, so every retry is the identical request.
    * A proposal carries the exact change and the ledger id its write will have, so the approval is of that write and no other. */
   private async pause(c: TeamAccountContext, b: SharedBotBinding, record: SavedExecution, stop: { wait: TeamTaskWait; checkpointDigest: string; pausedAt: number; dispatchedRequests: number }) {
@@ -1444,14 +1566,24 @@ export class TeamConnector implements LocalTeamHost {
       asked = { kind: 'tool_approval', approval: { operationId: digest(JSON.stringify([record.taskId, record.taskId, stop.wait.logicalStepId, 'store_idempotent'])),
         logicalStepId: stop.wait.logicalStepId, expectedDataRevision: write.expectedDataRevision, changes: write.changes } };
     }
+    const delegating = stop.wait.kind === 'delegation';
+    if (delegating) {
+      // The worker offers only the Bots it was given, and only a task that may wait pauses: anything else is a protocol breach and ends the task.
+      const call = delegationCall(stop.wait.question);
+      if (!call || !record.ask || !record.delegates?.some(offer => offer.id === call.target)) {
+        this.log('team_task_pause_rejected', { taskId: record.taskId, code: 'INVALID_DELEGATION' });
+        await this.saveResult(c,record,this.failedResult(record),true); return;
+      }
+      asked = { kind: 'delegation', delegation: { logicalStepId: stop.wait.logicalStepId, target: call.target, request: call.request } };
+    }
     const pause = { ...record.payload, waitId: stop.wait.waitId, ...asked, requestDigest: stop.wait.requestDigest, checkpointDigest: stop.checkpointDigest,
-      pausedAt: stop.pausedAt, expiresInMs: WAIT_MS, dispatchedRequests: stop.dispatchedRequests, outputAudience: { mode: 'published_inputs' } };
+      pausedAt: stop.pausedAt, expiresInMs: delegating ? DELEGATION_WAIT_MS : WAIT_MS, dispatchedRequests: stop.dispatchedRequests, outputAudience: { mode: 'published_inputs' } };
     const next: SavedExecution = { ...record, dispatched: Math.max(record.dispatched,stop.dispatchedRequests), pause };
     await this.options.privateStore.saveExecution(c.uid,next); await this.sendPause(c,b,next);
   }
   private async sendPause(c: TeamAccountContext, b: SharedBotBinding, record: SavedExecution) {
     const { pause, ...rest } = record, waitId = pause?.waitId; if (!pause || typeof waitId !== 'string') throw new Error('UNSAFE_TEAM_STORAGE');
-    let answer: { state?: string; expiresAt?: number | null };
+    let answer: { state?: string; expiresAt?: number | null; holdsUntil?: number };
     try { answer = await this.command(c,b,'pauseTask',{...pause,accountEpoch:b.accountEpoch},digest(JSON.stringify(['pauseTask',record.taskId,waitId,b.accountEpoch]))); }
     catch (error) {
       // Kept for the next pass (a host clock ahead of the server answers TASK_EXPIRED until the server catches up), unless the server will never take this question.
@@ -1461,9 +1593,20 @@ export class TeamConnector implements LocalTeamHost {
       await this.saveResult(c,record,this.failedResult(record),true); return;
     }
     // The worker has exited and its slot is free; only the answer brings the task back, as a queued task with `resume`.
-    if (answer.state === 'waiting' && typeof answer.expiresAt === 'number' && Number.isSafeInteger(answer.expiresAt)) await this.options.privateStore.saveExecution(c.uid,{...rest,wait:{waitId,expiresAt:answer.expiresAt}});
+    // A request to another Bot waits for its reply and, however it ends, the task stays until `holdsUntil`; one the service refused is queued again at once, with the reason.
+    const delegating = pause.kind === 'delegation', until = answer.holdsUntil;
+    if ((answer.state === 'waiting' || delegating && answer.state === 'queued') && typeof answer.expiresAt === 'number' && Number.isSafeInteger(answer.expiresAt)
+      && (!delegating || typeof until === 'number' && Number.isSafeInteger(until))) await this.options.privateStore.saveExecution(c.uid,{...rest,wait:{waitId,expiresAt:answer.expiresAt,...(delegating ? { delegation: { until: until! } } : {})}});
     // The audience gate refused the question: the server published its notice and ended the task.
     else await this.options.privateStore.delivered(c.uid,record.taskId);
+  }
+  /** The time a task may wait for another Bot's reply is up. The service decides whether the reply came first: it queues the task again either way (`answer`). Sent again every
+   * `DETACH_RETRY_MS` until it has, and the command is the same each time. */
+  private async detach(c: TeamAccountContext, b: SharedBotBinding, record: SavedExecution) {
+    const waitId = record.wait!.waitId, sent = this.detached.get(record.taskId);
+    if (sent !== undefined && this.now() - sent < DETACH_RETRY_MS) return;
+    this.detached.set(record.taskId,this.now());
+    await this.command(c,b,'detachDelegation',{ ...this.hostFields(b), taskId: record.taskId, waitId },digest(JSON.stringify(['detachDelegation',record.taskId,waitId,b.accountEpoch])));
   }
   /** Bounded retry of one worker-frame operation: only a transient failure, at most FRAME_ATTEMPTS tries, none begun after the window or the task deadline, and the wait ends at once when the run is aborted. */
   private async retrying<T>(signal: AbortSignal, deadlineAt: number, operation: () => Promise<T>): Promise<T> {

@@ -72,7 +72,7 @@ test('directory: examples are pinned to publication, capabilities come from the 
   await execute('heartbeatDeployment', { ...host, ready: true });
   const card = (await execute('listSharedBots', {}, member)).bots[0];
   assert.deepEqual(card.examples, [example]);
-  assert.deepEqual(card.capabilities, { durableWait: true, writeOperations: false });
+  assert.deepEqual(card.capabilities, { durableWait: true, writeOperations: false, delegation: false });
   assert.equal(card.instanceId, undefined); assert.equal(card.availability, 'ready');
   assert.equal(card.statusExpiresAt, now + 90000);
   assert.equal(card.dailyRemaining, 20); assert.equal(card.quotaResetsAt, Date.UTC(2026, 10, 6));

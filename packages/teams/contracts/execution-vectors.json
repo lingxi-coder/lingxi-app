@@ -2231,6 +2231,38 @@
       }
     },
     {
+      "name": "reject-delegateTask-member",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "delegateTask",
+        "payload": {
+          "taskId": "task_0001",
+          "logicalStepId": "task_0001/step_0001",
+          "target": "sharedbot_02",
+          "request": "Find the 2026 figures."
+        }
+      }
+    },
+    {
+      "name": "reject-detachDelegation-member",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "detachDelegation",
+        "payload": {
+          "taskId": "task_0001",
+          "waitId": "wait_0001"
+        }
+      }
+    },
+    {
       "name": "valid-listHeldReplies",
       "valid": true,
       "input": {

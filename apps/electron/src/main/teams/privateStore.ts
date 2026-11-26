@@ -43,11 +43,14 @@ export interface SavedExecution { schemaVersion: 2; scope: BotChatScope; teamId:
   /** The Bot's maintainer reads its reply before it is posted. Decided once, when the task started, from the Bot's own setting: a later change of the setting does not reach a task that is running. */ hold?: true;
   /** The files of Chat messages in the batch: the model was given them, and a finished task says so. */ files?: { attachmentId: string; sha256: string }[];
   /** The Bot's shared list, offered to the worker of this task. Its writes go through the operation ledger. */ list?: { title: string; description: string; approval?: 'requester' };
+  /** The other Bots of the Chat the worker may hand part of the request to: as the service named them when the attempt was granted, so every recovery of that attempt is offered the same. */
+  delegates?: { id: string; name: string; description?: string }[];
   /** Model requests of the attempts so far, as the server counted them. */ dispatched: number;
   /** Attempts continued after an interruption. Bounded, so a task that keeps dying ends. */ recoveries: number;
   /** Usage of the earlier attempts that reported one. */ usage?: TaskUsage;
   /** The exact pauseTask request for a question the worker asked, saved before it is sent so every retry is identical. */ pause?: Record<string, unknown>;
-  /** The server accepted the question: the task continues only through its answer. */ wait?: { waitId: string; expiresAt: number };
+  /** The server accepted the question: the task continues only through its answer. With `delegation` the wait is for another Bot's reply: `expiresAt` is the time it may wait for it, after which the host asks the service to end the wait, and the task stays until `until`. */
+  wait?: { waitId: string; expiresAt: number; delegation?: { until: number } };
   /** The answer the task continued with. A later recovery of that attempt hands the same answer to the worker. */ answered?: { waitId: string; messageId: string; text: string; /** The decision, when the wait was an approval. */ approved?: boolean } }
 /** What a Local App call handed back to the worker: whether the app answered, and exactly what the worker was given. */
 export interface AppCallOutcome { succeeded: boolean; result: Record<string, unknown> }

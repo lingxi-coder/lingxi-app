@@ -25,7 +25,9 @@ test('deployment accepts only execution 2, boolean durable-wait and write-operat
   // The operation ledger (M2 Q04) made writes a capability a host declares.
   deploymentRecord.parse({ ...deployment, capabilities: { ...deployment.capabilities, writeOperations: true } });
   assert.throws(() => deploymentRecord.parse({ ...deployment, capabilities: { ...deployment.capabilities, writeOperations: 'yes' } }));
-  assert.throws(() => deploymentRecord.parse({ ...deployment, capabilities: { ...deployment.capabilities, delegation: true } }));
+  // Delegation (B8) is a capability a Desktop reports once it can run the tool.
+  assert.equal(deploymentRecord.parse({ ...deployment, capabilities: { ...deployment.capabilities, delegation: true } }).capabilities.delegation, true);
+  assert.throws(() => deploymentRecord.parse({ ...deployment, capabilities: { ...deployment.capabilities, delegation: 'yes' } }));
 });
 test('admission identity is stable per message and target with unambiguous framing', () => {
   assert.equal(admissionId('message_0001', 'sharedbot_01'), admissionId('message_0001', 'sharedbot_01'));

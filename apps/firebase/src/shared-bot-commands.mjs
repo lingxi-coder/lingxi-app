@@ -3,6 +3,7 @@ import { mentionEntitiesSchema, validMentionEntities } from './team-mentions.mjs
 import { deploymentRecord, memberRef, usePolicy } from './team-execution-contract.mjs';
 import { attachmentLimits, attachmentTypes } from './team-attachments.mjs';
 import { narrowing, publishedScope } from './bot-scope.mjs';
+import { delegationAccept, delegationBots, delegationRequestBytes } from './delegations.mjs';
 
 export const executionId = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 const positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
@@ -47,6 +48,9 @@ const artifactDocument = z.object({ title: z.string().trim().min(1).max(120), bo
 /** How an interrupted operation may be recovered (detailed design 12.3). */
 export const operationCategory = z.enum(['read', 'store_idempotent', 'provider_idempotent', 'queryable', 'unqueryable']);
 const logicalStepId = z.string().regex(/^[A-Za-z0-9_.:/-]{1,200}$/u);
+/** What a Bot asks another Bot to do: one request of at most `delegationRequestBytes`, never empty. */
+const delegationText = z.string().refine(value => value.trim().length > 0 && Buffer.byteLength(value, 'utf8') <= delegationRequestBytes && !value.includes('\0'));
+const delegationCall = { logicalStepId, target: executionId, request: delegationText };
 const itemText = z.string().refine(value => value.trim().length > 0 && Buffer.byteLength(value, 'utf8') <= 500 && !value.includes('\0'));
 /** The list a Bot shares with its Team: what it is called and what the Bot is told about it. */
 // `approval: 'requester'`: a run's change is saved only after the member it works for has approved exactly that change.
@@ -116,7 +120,15 @@ const payloads = {
     autoReply: z.object({ daily: quota }).strict().optional(),
     // The most of its owner's Local Apps and datasets the Bot may use in this Team. Leaving it out shares none of them.
     scope: publishedScope.optional(),
-  }).strict().refine(value => value.inputs.filter(input => input.kind === 'persona').length === 1, 'Exactly one published persona required'),
+    // Whether other Bots of the Team may hand this Bot part of a request (Bot v3 B8): never (leaving it out), from any Bot of the Team, or from the Bots listed.
+    acceptDelegation: z.enum(delegationAccept).optional(),
+    acceptFrom: z.array(executionId).min(1).max(delegationBots).refine(unique).optional(),
+    // The Bots this Bot may hand part of a request to, and the most delegations it makes a day. Leaving them out delegates to nobody.
+    delegateTo: z.array(executionId).min(1).max(delegationBots).refine(unique).optional(),
+    delegation: z.object({ daily: quota }).strict().optional(),
+  }).strict().refine(value => value.inputs.filter(input => input.kind === 'persona').length === 1, 'Exactly one published persona required')
+    .refine(value => (value.acceptDelegation === 'listed') === (value.acceptFrom !== undefined), 'A list of Bots is for acceptDelegation listed, and only for it')
+    .refine(value => (value.delegateTo === undefined) === (value.delegation === undefined) && !value.delegateTo?.includes(value.sharedBotId), 'delegateTo and delegation go together, and not to itself'),
   // Handover of a Bot to another member (detailed design 18). The package is the published role and files, in parts of at most 700 KiB.
   putTransferPart: z.object({ transferId: executionId, sharedBotId: executionId, index: z.number().int().min(0).max(7),
     data: base64Part }).strict(),
@@ -192,7 +204,13 @@ const payloads = {
       question: z.string().min(1).refine(value => Buffer.byteLength(value, 'utf8') <= 2000) }).strict(),
     z.object({ ...pause, kind: z.literal('tool_approval'),
       approval: z.object({ operationId: digest, logicalStepId, ...listWrite }).strict() }).strict(),
+    // The run delegated part of the request to another Bot and waits for its reply (Bot v3 B8): the delegation is made with the pause, in one transaction.
+    z.object({ ...pause, kind: z.literal('delegation'), delegation: z.object(delegationCall).strict() }).strict(),
   ]),
+  // The run delegates part of the request to another Bot and goes on (Bot v3 B8). The one that waits for the reply is `pauseTask` of kind `delegation`.
+  delegateTask: z.object({ ...host, ...task, permitId: executionId, ...delegationCall, inputGrantIds: grantIds, outputAudience }).strict(),
+  // The run that waited for a reply stops waiting once the time is up; the reply is then posted in the Chat as the Bot's own.
+  detachDelegation: z.object({ ...host, ...task, waitId: executionId }).strict(),
   continueTask: z.object({ ...host, ...task, expectedEpoch: positive.max(Number.MAX_SAFE_INTEGER - 1), checkpointDigest: digest,
     reason: z.enum(['answer', 'recovery']), dispatchedRequests: cursor, permitNonce: permitNonce.optional() }).strict(),
   // The operation ledger (M2 Q04). `operationId` is derived from the task and the durable logical step, never from a provider call id.

@@ -589,6 +589,11 @@ export type TeamsKey =
   | 'tw_back_conversations'
   | 'tw_back_friends'
   | 'tw_back_team'
+  | 'tw_botdir_accept_from'
+  | 'tw_botdir_accept_listed'
+  | 'tw_botdir_accept_none'
+  | 'tw_botdir_accept_question'
+  | 'tw_botdir_accept_team'
   | 'tw_botdir_allowed_memberships'
   | 'tw_botdir_asks_before'
   | 'tw_botdir_audience'
@@ -602,6 +607,11 @@ export type TeamsKey =
   | 'tw_botdir_confirm'
   | 'tw_botdir_consent'
   | 'tw_botdir_consent_scope'
+  | 'tw_botdir_delegate_to'
+  | 'tw_botdir_delegation_daily'
+  | 'tw_botdir_delegation_hint'
+  | 'tw_botdir_delegation_no_bots'
+  | 'tw_botdir_delegation_title'
   | 'tw_botdir_empty'
   | 'tw_botdir_example_fmt'
   | 'tw_botdir_examples_hint'
@@ -639,6 +649,9 @@ export type TeamsKey =
   | 'tw_botdir_replace'
   | 'tw_botdir_replace_fmt'
   | 'tw_botdir_review'
+  | 'tw_botdir_review_accepts_fmt'
+  | 'tw_botdir_review_accepts_team'
+  | 'tw_botdir_review_asks_fmt'
   | 'tw_botdir_revision_fmt'
   | 'tw_botdir_role_hint'
   | 'tw_botdir_scope_hint'
@@ -1551,6 +1564,11 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_back_conversations: { en: '‹ Conversations', 'zh-Hans': '‹ 会话列表', 'zh-Hant': '‹ 會話列表', ja: '‹ 会話一覧', ko: '‹ 대화 목록' },
   tw_back_friends: { en: '‹ Friends', 'zh-Hans': '‹ 好友', 'zh-Hant': '‹ 好友', ja: '‹ 友だち', ko: '‹ 친구' },
   tw_back_team: { en: '‹ Back to the Team', 'zh-Hans': '‹ 返回团队', 'zh-Hant': '‹ 返回團隊', ja: '‹ チームに戻る', ko: '‹ 팀으로 돌아가기' },
+  tw_botdir_accept_from: { en: 'Takes requests from', 'zh-Hans': '接受这些 Bot 的请求', 'zh-Hant': '接受這些 Bot 的請求', ja: '依頼を受ける Bot', ko: '요청을 받을 Bot' },
+  tw_botdir_accept_listed: { en: 'Only from the Bots I choose', 'zh-Hans': '只接受我选择的 Bot', 'zh-Hant': '只接受我選擇的 Bot', ja: '選んだ Bot からだけ受ける', ko: '내가 고른 Bot에게서만 받기' },
+  tw_botdir_accept_none: { en: 'None', 'zh-Hans': '不接受', 'zh-Hant': '不接受', ja: '受けない', ko: '받지 않음' },
+  tw_botdir_accept_question: { en: 'Requests this Bot takes from other Bots', 'zh-Hans': '此 Bot 是否接受其他 Bot 的请求', 'zh-Hant': '此 Bot 是否接受其他 Bot 的請求', ja: 'この Bot が他の Bot から受ける依頼', ko: '이 Bot이 다른 Bot에게서 받는 요청' },
+  tw_botdir_accept_team: { en: 'From any Bot of the Team', 'zh-Hans': '接受团队中任何 Bot 的请求', 'zh-Hant': '接受團隊中任何 Bot 的請求', ja: 'チームのどの Bot からも受ける', ko: '팀의 모든 Bot에게서 받기' },
   tw_botdir_allowed_memberships: { en: 'Allowed memberships', 'zh-Hans': '允许的成员身份', 'zh-Hant': '允許的成員身分', ja: '許可するメンバーシップ', ko: '허용된 멤버십' },
   tw_botdir_asks_before: { en: 'the Bot asks before each change', 'zh-Hans': 'Bot 每次修改前先征得同意', 'zh-Hant': 'Bot 每次修改前先徵得同意', ja: 'Bot は変更のたびに確認します', ko: 'Bot이 변경할 때마다 확인함' },
   tw_botdir_audience: { en: 'Audience', 'zh-Hans': '受众', 'zh-Hant': '受眾', ja: '対象', ko: '대상' },
@@ -1564,6 +1582,11 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_botdir_confirm: { en: 'Confirm publication', 'zh-Hans': '确认发布', 'zh-Hant': '確認發布', ja: '公開を確認', ko: '게시 확인' },
   tw_botdir_consent: { en: 'I have permission to share the role, examples, selected resources and their derived results with this audience, and confirm model costs and quotas.', 'zh-Hans': '我有权向以上受众共享角色、示例、选定资料及其派生结果，并确认模型费用和额度。', 'zh-Hant': '我有權向上述受眾共享角色、範例、選定的資料及其衍生結果，並確認模型費用與額度。', ja: 'このロール、入力例、選択したリソース、およびその派生結果をこの対象と共有する権限があり、モデルの費用と上限を確認しました。', ko: '이 대상과 역할, 예시, 선택한 자료 및 파생 결과를 공유할 권한이 있으며, 모델 비용과 한도를 확인했습니다.' },
   tw_botdir_consent_scope: { en: 'I have permission to share the role, examples, selected resources and their derived results with this audience, to let the Bot use what is shared from this computer, and to confirm model costs and quotas.', 'zh-Hans': '我有权向以上受众共享角色、示例、选定资料及其派生结果，允许 Bot 使用此电脑上所共享的内容，并确认模型费用和额度。', 'zh-Hant': '我有權向上述受眾共享角色、範例、選定的資料及其衍生結果，允許 Bot 使用這台電腦上所共享的內容，並確認模型費用與額度。', ja: 'このロール、入力例、選択したリソース、およびその派生結果をこの対象と共有し、このコンピュータで共有したものを Bot に使わせる権限があり、モデルの費用と上限を確認しました。', ko: '이 대상과 역할, 예시, 선택한 자료 및 파생 결과를 공유하고, 이 컴퓨터에서 공유한 항목을 Bot이 사용하게 할 권한이 있으며, 모델 비용과 한도를 확인했습니다.' },
+  tw_botdir_delegate_to: { en: 'May ask these Bots', 'zh-Hans': '可以向这些 Bot 提出请求', 'zh-Hant': '可以向這些 Bot 提出請求', ja: '依頼してよい Bot', ko: '요청할 수 있는 Bot' },
+  tw_botdir_delegation_daily: { en: 'Requests to other Bots per UTC day', 'zh-Hans': '每个 UTC 日向其他 Bot 提出请求的上限', 'zh-Hant': '每個 UTC 日向其他 Bot 提出請求的上限', ja: 'UTC 1日あたりの他の Bot への依頼の上限', ko: 'UTC 하루당 다른 Bot에 요청하는 횟수 한도' },
+  tw_botdir_delegation_hint: { en: 'In a chat, a Bot can hand part of a request to another Bot. Both Bots must agree. The other Bot works for the person who asked and uses only what it has been given, never what this Bot may use.', 'zh-Hans': '在会话中，Bot 可以把请求的一部分交给另一个 Bot。双方都必须同意。对方 Bot 为提问的人工作，只使用它自己被共享的内容，不会用到这个 Bot 能用的内容。', 'zh-Hant': '在對話中，Bot 可以把請求的一部分交給另一個 Bot。雙方都必須同意。對方 Bot 為提問的人工作，只使用它自己被共享的內容，不會用到這個 Bot 能用的內容。', ja: 'チャットでは、Bot が依頼の一部を別の Bot に渡せます。双方の Bot の同意が必要です。相手の Bot は質問した人のために動き、自分に与えられたものだけを使い、この Bot が使えるものは使いません。', ko: '채팅에서 Bot은 요청의 일부를 다른 Bot에게 넘길 수 있습니다. 두 Bot이 모두 동의해야 합니다. 상대 Bot은 질문한 사람을 위해 일하며 자신에게 주어진 항목만 사용하고, 이 Bot이 쓸 수 있는 항목은 사용하지 않습니다.' },
+  tw_botdir_delegation_no_bots: { en: 'No other Bot of this Team is published yet.', 'zh-Hans': '团队中还没有其他已发布的 Bot。', 'zh-Hant': '團隊中還沒有其他已發布的 Bot。', ja: 'このチームには、ほかに公開された Bot がまだありません。', ko: '이 팀에는 아직 게시된 다른 Bot이 없습니다.' },
+  tw_botdir_delegation_title: { en: 'Bots asking Bots', 'zh-Hans': 'Bot 之间的请求', 'zh-Hant': 'Bot 之間的請求', ja: 'Bot 同士の依頼', ko: 'Bot 간 요청' },
   tw_botdir_empty: { en: 'No Bots are published yet.', 'zh-Hans': '尚未发布 Bot。', 'zh-Hant': '尚未發布 Bot。', ja: 'まだ公開されている Bot はありません。', ko: '아직 게시된 Bot이 없습니다.' },
   tw_botdir_example_fmt: { en: 'Example %1$d', 'zh-Hans': '示例 %1$d', 'zh-Hant': '範例 %1$d', ja: '入力例 %1$d', ko: '예시 %1$d' },
   tw_botdir_examples_hint: { en: 'Review the market defaults or write your own prompts. Members choose an example to fill a draft; it is never sent automatically. Each example allows up to 2,000 UTF-8 bytes.', 'zh-Hans': '请确认市场默认示例，或编辑自己的提示。成员点击示例仅填入草稿，不会自动发送。每条示例最多 2,000 UTF-8 字节。', 'zh-Hant': '請確認市場的預設範例，或自行編寫提示。成員點選範例只會填入草稿，不會自動傳送。每則範例最多 2,000 個 UTF-8 位元組。', ja: 'マーケットの既定の入力例を確認するか、独自のプロンプトを書いてください。メンバーが入力例を選ぶと下書きに入力されるだけで、自動では送信されません。入力例は 1 件あたり最大 2,000 バイト（UTF-8）です。', ko: '마켓의 기본 예시를 확인하거나 직접 프롬프트를 작성하세요. 멤버가 예시를 선택하면 초안에 채워질 뿐 자동으로 전송되지 않습니다. 예시는 하나당 최대 2,000 UTF-8 바이트입니다.' },
@@ -1601,6 +1624,9 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_botdir_replace: { en: 'Replace…', 'zh-Hans': '替换…', 'zh-Hant': '替換…', ja: '置き換える…', ko: '교체…' },
   tw_botdir_replace_fmt: { en: 'Replace %1$s', 'zh-Hans': '替换 %1$s', 'zh-Hant': '替換 %1$s', ja: '%1$s を置き換える', ko: '%1$s 교체' },
   tw_botdir_review: { en: 'Review publication', 'zh-Hans': '检查发布内容', 'zh-Hant': '檢查發布內容', ja: '公開内容を確認', ko: '게시 내용 검토' },
+  tw_botdir_review_accepts_fmt: { en: 'Takes requests from: %1$s', 'zh-Hans': '接受这些 Bot 的请求：%1$s', 'zh-Hant': '接受這些 Bot 的請求：%1$s', ja: '依頼を受ける Bot：%1$s', ko: '요청을 받는 Bot: %1$s' },
+  tw_botdir_review_accepts_team: { en: 'Takes requests from any Bot of the Team.', 'zh-Hans': '接受团队中任何 Bot 的请求。', 'zh-Hant': '接受團隊中任何 Bot 的請求。', ja: 'チームのどの Bot からの依頼も受けます。', ko: '팀의 모든 Bot의 요청을 받습니다.' },
+  tw_botdir_review_asks_fmt: { en: 'May ask: %1$s, at most %2$d requests a day.', 'zh-Hans': '可以向这些 Bot 提出请求：%1$s，每天最多 %2$d 次。', 'zh-Hant': '可以向這些 Bot 提出請求：%1$s，每天最多 %2$d 次。', ja: '依頼してよい Bot：%1$s（1日最大 %2$d 回）', ko: '요청할 수 있는 Bot: %1$s(하루 최대 %2$d회)' },
   tw_botdir_revision_fmt: { en: 'revision %1$s', 'zh-Hans': '版本 %1$s', 'zh-Hant': '版本 %1$s', ja: 'リビジョン %1$s', ko: '리비전 %1$s' },
   tw_botdir_role_hint: { en: 'Only this explicit role is shared. Private memory and conversations are excluded. Only plain-text Skills are supported in this release.', 'zh-Hans': '仅共享此处明确填写的角色；不共享私人记忆和会话。当前仅支持纯文本 Skill。', 'zh-Hant': '僅共享此處明確填寫的角色；不共享私人記憶與對話。目前僅支援純文字 Skill。', ja: 'ここに明記したロールだけが共有されます。個人用のメモリや会話は含まれません。このリリースでは、プレーンテキストの Skill のみ対応しています。', ko: '여기에 명시한 역할만 공유됩니다. 개인 메모리와 대화는 제외됩니다. 이 릴리스에서는 일반 텍스트 Skill만 지원합니다.' },
   tw_botdir_scope_hint: { en: 'Team members can see the names of what you share here.', 'zh-Hans': '团队成员可以看到你在此共享内容的名称。', 'zh-Hant': '團隊成員可以看到你在此共享內容的名稱。', ja: 'ここで共有したものの名前は、チームのメンバーに表示されます。', ko: '여기서 공유한 항목의 이름은 팀원에게 표시됩니다.' },

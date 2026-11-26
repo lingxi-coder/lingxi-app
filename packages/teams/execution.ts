@@ -13,8 +13,8 @@ export interface SharedBotCard {
   quotas: RequestQuotas; instanceId?: string;
   /** Up to three prompts pinned to this publication; selecting one only fills the member's draft. */
   examples?: string[];
-  /** Reported by the active deployment; absence means not yet verified. */
-  capabilities?: { durableWait: boolean; writeOperations: boolean };
+  /** Reported by the active deployment; absence means not yet verified. `delegation`: its Desktop runs `TeamDelegate`, so other Bots may ask it for part of a request. */
+  capabilities?: { durableWait: boolean; writeOperations: boolean; delegation?: boolean };
   availability?: 'ready' | 'paused' | 'offline' | 'maintenance' | 'quota_exhausted' | 'unverified';
   /** Refresh this projected status at this server-computed UTC millisecond deadline, even without a signal. */
   statusExpiresAt?: number;
@@ -26,6 +26,10 @@ export interface SharedBotCard {
   sharedList?: { title: string; approval?: 'requester' };
   /** The Bot may answer messages nobody asked it about, in Chats that turn this on, at most `daily` times a day. */
   autoReply?: { daily: number };
+  /** Whether other Bots of a Chat may hand this Bot part of a request (Bot v3 B8): any Bot of the Team (`team_bots`) or only those in `acceptFrom`, by shared Bot id. Absent: none. */
+  acceptDelegation?: 'none' | 'team_bots' | 'listed'; acceptFrom?: string[];
+  /** The Bots this Bot may hand part of a request to, and the most such requests it makes a day. Absent: it asks nobody. */
+  delegateTo?: string[]; delegation?: { daily: number };
   /** What the maintainer published of their Desktop for this Bot to use in the Team; absent when nothing. A Chat can narrow it (`TeamConversation.botScopes`). */
   scope?: PublishedBotScope;
   /** The maintainer offered the Bot to another member and it is not settled yet. Only those two are told. */
@@ -251,6 +255,10 @@ export interface PublishLocalBotInput extends ExecutionScope {
   sharedList?: { title: string; description: string; approval?: 'none' | 'requester' };
   /** Let the Bot answer messages nobody asked it about, at most `daily` runs a day. Needs a Decision service on this Desktop. */
   autoReply?: { daily: number };
+  /** Whether other Bots may hand this Bot part of a request: `listed` needs `acceptFrom`, the shared ids of those Bots, and only it takes one. Left out, none may. */
+  acceptDelegation?: 'none' | 'team_bots' | 'listed'; acceptFrom?: string[];
+  /** The Bots this Bot may hand part of a request to (shared ids, not itself) and the most such requests it makes a day. The two go together. Left out, it asks nobody. */
+  delegateTo?: string[]; delegation?: { daily: number };
   /** The Local Apps and datasets of this Desktop the Bot may use in the Team: no more than the local Bot's own scope allows. Leaving it out, or publishing again without it, shares none. */
   scope?: PublishedBotScope;
 }

@@ -67,7 +67,7 @@ test('local Bot capabilities follow the actual selected or default route without
  assert.deepEqual(selected.sort(),['anthropic/synthetic','default/chat','future/protocol','invalid/route','missing/route','supported/chat']);assert.deepEqual(providerCalls,[]);assert.deepEqual(f.mock.commands,[]);
  const noDefault=fixture(t);const unselected=noDefault.store.create({name:'No model'});assert.equal((await noDefault.connector.localBots('owner')).find(bot=>bot.instanceId===unselected.bot_id)!.capabilities,undefined);
  // The directory is a preflight projection; normal read-only publication keeps its existing protocol range.
- await f.connector.publishLocalBot('owner',f.input);assert.deepEqual(f.mock.commands.find(command=>command.action==='publishSharedBot').payload.deployment.capabilities,{durableWait:false,writeOperations:false,delegation:false});
+ await f.connector.publishLocalBot('owner',f.input);assert.deepEqual(f.mock.commands.find(command=>command.action==='publishSharedBot').payload.deployment.capabilities,{durableWait:false,writeOperations:false,delegation:true});
 });
 test('local market Bots expose at most three examples from the verified manifest and never private Bot text',async t=>{
  const f=fixture(t),examples=[' First market example ','Second market example','Third market example','Fourth market example'];
@@ -226,7 +226,7 @@ test('all Bots read the service data session, including current ACL and account 
 test('public message boundary rejects retired execution and private host commands',async()=>{
  const service=new TeamsService({snapshot:()=>({user:{uid:'owner'}}),getIdToken:async()=>'',onChanged:()=>()=>{}},{});
  for(const action of ['bindBot','claimBot','startBot','finishBot','botQueue','publishSharedBot','prepareTask','validateTask','startTask','completeTask','pauseTask','continueTask','heartbeatDeployment','activateDeployment','listHostTasks',
-  'readTaskList','recordOperation','writeTaskList','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer','declineTask','recordTriage','holdReply','bidReply'])await assert.rejects(service.messages({schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload:{}} as any,'owner'),/INVALID_INPUT/);service.close();
+  'readTaskList','recordOperation','writeTaskList','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer','declineTask','recordTriage','holdReply','bidReply','delegateTask','detachDelegation'])await assert.rejects(service.messages({schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload:{}} as any,'owner'),/INVALID_INPUT/);service.close();
 });
 test('the real private TeamsService forwards every connector command while rejecting unknown actions and stale accounts',async t=>{
  let uid='owner',epoch=0,notify=()=>{},requests=0;const service=new TeamsService({snapshot:()=>({user:{uid}}),sessionEpoch:()=>epoch,getIdToken:async()=>'synthetic-token',onChanged:cb=>{notify=cb;return()=>{};}},{});t.after(()=>service.close());
@@ -234,7 +234,7 @@ test('the real private TeamsService forwards every connector command while rejec
  const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});let sent:any,moveAccount=false;
  globalThis.fetch=(async(_url,init)=>{requests++;sent=JSON.parse(String(init?.body));if(moveAccount){uid='other';epoch++;notify();}return new Response(JSON.stringify({forwarded:true}),{status:200});}) as typeof fetch;
  const context=service.hostContext()!,actions=['listSharedBots','publishSharedBot','heartbeatDeployment','activateDeployment','listHostTasks','prepareTask','validateTask','startTask','completeTask','pauseTask','continueTask','getTask',
-  'readTaskList','recordOperation','writeTaskList','readAttachmentPart','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer','declineTask','holdReply','recordTriage','listTriage','bidReply'];
+  'readTaskList','recordOperation','writeTaskList','readAttachmentPart','putTransferPart','offerTransfer','acceptTransfer','readTransferPart','completeTransfer','declineTask','holdReply','recordTriage','listTriage','bidReply','delegateTask','detachDelegation'];
  for(const action of actions){const command={schemaVersion:1,commandId:'command001',teamId,generation:1,action,payload:{synthetic:'preserved'}};assert.deepEqual(await service.hostMessages(context,command),{forwarded:true},action);assert.deepEqual(sent,command);}
  assert.equal(requests,actions.length);for(const action of ['submit','answerWait','decideWait','cancelTask','writeList','setCustomClaim','listHeldReplies','approveReply','rejectReply','unknown'])await assert.rejects(service.hostMessages(context,{schemaVersion:1,action}),/INVALID_INPUT/);
  await assert.rejects(service.hostMessages(context,{schemaVersion:2,action:'readTaskList'}),/INVALID_INPUT/);assert.equal(requests,actions.length);
@@ -1054,7 +1054,7 @@ test('a Bot reads its shared list and changes it through the ledger: recorded fi
   outcomes.push(await o.operate!({tool:'list_read'}),await o.operate!({tool:'list_write',logicalStepId:step,arguments:addBread}),
    await o.operate!({tool:'list_write',logicalStepId:'task00001/t1/c0',arguments:{expectedDataRevision:2,changes:[{op:'remove',itemId:'abc'}]}}));return done();});
  await f.connector.publishLocalBot('owner',f.input);const published=f.sent('publishSharedBot')[0].payload;
- assert.deepEqual(published.sharedList,groceries);assert.deepEqual(published.deployment.capabilities,{durableWait:true,writeOperations:true,delegation:false});
+ assert.deepEqual(published.sharedList,groceries);assert.deepEqual(published.deployment.capabilities,{durableWait:true,writeOperations:true,delegation:true});
  f.mock.tasks.push(queued());f.mock.wake();await finished(f);
  const b=(await f.privateStore.bindings('owner'))[0]!,host={deploymentId:b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',permitId:permit(f,1)};
  assert.deepEqual(f.launches[0]!.bootstrap.sharedList,groceries);
@@ -2370,4 +2370,181 @@ test('the private process serves Local App requests only for the apps the run wa
   [boot(),tools,serve({established:true,succeeded:true,result:{tools:'x'.repeat(65*1024)}})],[boot(),request,async()=>{throw new Error('SERVICE_UNAVAILABLE');}],
  ] as const)await assert.rejects(runTeamHost({...base,bootstrap:bootstrap as any,authorize,operate:operate as any,spawnProcess:conversing(JSON.parse(JSON.stringify(frame)),result,false).spawn}),/TEAM_HOST_PROTOCOL/,JSON.stringify(frame));
  assert.equal(calls.length,served+1,'only the valid frame whose answer was too large reached the Desktop; every other one was refused before it');
+});
+
+// B8: a Bot hands part of its request to another Bot of the Chat.
+const betaOffer={sharedBotId:'sharedbot002',name:'Beta',description:'Knows the 2026 figures.'},betaRun={id:'sharedbot002',name:'Beta',description:'Knows the 2026 figures.'};
+const delegationRecord=`delegation_${'a'.repeat(32)}`,delegationStep='task00001/t0/c0',delegationText='Find the 2026 figures.';
+const delegationCall=(request=delegationText)=>JSON.stringify({expectReply:true,request,target:betaOffer.sharedBotId});
+const delegationWait={waitId,kind:'delegation' as const,logicalStepId:delegationStep,question:delegationCall(),requestDigest:'f'.repeat(64)};
+const waitingOnBeta=()=>({...asked(),wait:delegationWait});
+const sentToBeta='Your request was sent to Beta. It answers in the Chat itself: you do not get its reply, so do not wait for it or answer in its place.';
+/** The service offers a run the other Bots of the Chat it may ask, in every context a grant is made from. */
+function offering(f:{mock:{service:TeamHostApi}},offers:unknown[]){
+ const inner=f.mock.service.hostMessages.bind(f.mock.service);
+ f.mock.service.hostMessages=async(c,command)=>{const result:any=await inner(c,command);
+  return offers.length&&['prepareTask','validateTask','startTask','continueTask'].includes(command.action as string)?{...result,delegates:offers}:result;};
+}
+/** A Bot on a continuable route that the service offers `offers` to, and the service's side of a request to another Bot: its answers to commands (`answers`), the pause that waits for
+ * the reply, and how that wait ended, which `prepareTask` hands to the host once the task is queued again (`end`, `refuse`). */
+function delegating(t:any,worker:Run,answers:Record<string,(payload:any)=>unknown>={},offers:unknown[]=[betaOffer]){
+ const f=durable(t,worker);offering(f,offers);const inner=f.mock.service.hostMessages.bind(f.mock.service);let outcome:unknown;
+ f.mock.service.hostMessages=async(c,command)=>{const result:any=await inner(c,command),action=command.action as string,payload=command.payload as any;
+  if(action==='prepareTask'&&outcome)return {...result,wait:outcome};
+  if(answers[action])return answers[action]!(payload) as any;
+  if(action==='pauseTask'&&payload.kind==='delegation')return {...result,holdsUntil:Date.now()+86400000};
+  return result;};
+ const queuedAgain=(resume:Record<string,unknown>,how:unknown,wake:boolean)=>{outcome=how;Object.assign(f.mock.tasks.find(task=>task.taskId==='task00001'),{state:'queued',resume});if(wake)f.mock.wake();};
+ /** The service ended the wait: the task is queued again, and `prepareTask` says how it ended. */
+ const end=(how:Record<string,unknown>,wake=true)=>queuedAgain({waitId,delegation:delegationRecord},{waitId,delegation:{delegationId:delegationRecord,targetBotId:betaOffer.sharedBotId,targetName:'Beta',...how}},wake);
+ /** The service refused the request when the task paused: it was queued again at once, and nothing was asked. */
+ const refuse=(code:string,wake=true)=>queuedAgain({waitId,refusal:code,target:betaOffer.sharedBotId},{waitId,delegation:{outcome:'refused',code,targetBotId:betaOffer.sharedBotId,targetName:'Beta'}},wake);
+ return {...f,end,refuse};
+}
+/** The task has paused and its host has kept the wait. */
+async function paused(f:ReturnType<typeof delegating>){
+ await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await settle(()=>f.sent('pauseTask').length===1);await f.connector.idle();
+ for(let n=0;n<100&&!(await f.privateStore.executions('owner'))[0]?.wait;n++)await new Promise(resolve=>setTimeout(resolve,5));
+ return (await f.privateStore.executions('owner'))[0]!;
+}
+test('a Bot is published with what it takes from other Bots and whom it may ask, and this computer says it runs the tool on every route',async t=>{
+ const f=fixture(t),publish=(fields:Record<string,unknown>)=>f.connector.publishLocalBot('owner',{...f.input,...fields} as PublishLocalBotInput);
+ await publish({acceptDelegation:'listed',acceptFrom:['sharedbot002'],delegateTo:['sharedbot002','sharedbot003'],delegation:{daily:5}});
+ const published=f.mock.commands.find(c=>c.action==='publishSharedBot').payload;
+ assert.deepEqual([published.acceptDelegation,published.acceptFrom,published.delegateTo,published.delegation],['listed',['sharedbot002'],['sharedbot002','sharedbot003'],{daily:5}]);
+ assert.equal(published.deployment.capabilities.delegation,true);
+ // Left out, a Bot takes no requests from other Bots and asks none.
+ const plain=fixture(t);await plain.connector.publishLocalBot('owner',plain.input);const bare=plain.mock.commands.find(c=>c.action==='publishSharedBot').payload;
+ assert.deepEqual([bare.acceptDelegation,bare.acceptFrom,bare.delegateTo,bare.delegation],[undefined,undefined,undefined,undefined]);assert.equal(bare.deployment.capabilities.delegation,true);
+ const open=fixture(t);await open.connector.publishLocalBot('owner',{...open.input,acceptDelegation:'team_bots'});const taking=open.mock.commands.find(c=>c.action==='publishSharedBot').payload;
+ assert.deepEqual([taking.acceptDelegation,taking.acceptFrom],['team_bots',undefined]);
+ const sent=f.mock.commands.length;
+ for(const fields of [
+  {acceptDelegation:'everyone'},{acceptDelegation:'listed'},{acceptDelegation:'team_bots',acceptFrom:['sharedbot002']},{acceptDelegation:'none',acceptFrom:['sharedbot002']},
+  {acceptDelegation:'listed',acceptFrom:[]},{acceptDelegation:'listed',acceptFrom:['sharedbot002','sharedbot002']},{acceptDelegation:'listed',acceptFrom:['x']},
+  {delegateTo:['sharedbot002']},{delegation:{daily:5}},{delegateTo:[],delegation:{daily:5}},{delegateTo:[sharedBotId],delegation:{daily:5}},{delegateTo:['sharedbot002','sharedbot002'],delegation:{daily:5}},
+  {delegateTo:['sharedbot002'],delegation:{daily:0}},{delegateTo:['sharedbot002'],delegation:{daily:10001}},{delegateTo:['sharedbot002'],delegation:{daily:1.5}},{delegateTo:['sharedbot002'],delegation:{daily:5,more:1}},
+  {delegateTo:Array.from({length:21},(_,n)=>`sharedbot${100+n}`),delegation:{daily:5}},
+ ])await assert.rejects(publish(fields),/INVALID_INPUT/,JSON.stringify(fields));
+ assert.equal(f.mock.commands.length,sent,'nothing invalid reached the service');
+});
+test('a run is told which Bots it may ask as the service offered them, tidied, and only on a route that continues',async t=>{
+ const offers=[{sharedBotId:'sharedbot002',name:'  Beta ',description:'  Knows the 2026 figures.  '},{sharedBotId:'sharedbot002',name:'Same Bot twice'},{sharedBotId:'short',name:'Short id'},
+  {sharedBotId:'sharedbot003',name:'   '},{sharedBotId:'sharedbot004',name:'Gamma'},{name:'No id'},null,'sharedbot005'];
+ const f=delegating(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint():done(),{},offers);
+ await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await finished(f);
+ assert.deepEqual(f.launches[0]!.bootstrap.delegates,[betaRun,{id:'sharedbot004',name:'Gamma'}]);
+ // A route that cannot continue cannot wait for a reply, so it is offered nobody; the worker is not told of a tool it cannot use.
+ const seen:unknown[]=[];
+ const g=fixture(t,async o=>o.bootstrap.type==='inspect_scope'?{status:'inspected',cursor}:o.bootstrap.type==='inspect_result'?{status:'not_found',cursor}:(seen.push(o.bootstrap.delegates),done()));
+ offering(g,[betaOffer]);await g.connector.publishLocalBot('owner',g.input);g.mock.tasks.push(queued());g.mock.wake();await finished(g);
+ assert.deepEqual(seen,[undefined]);
+});
+test('a request that waits for no reply is sent once under the id of its step, a refusal is read in words, and a Bot that was not offered cannot be asked',async t=>{
+ const outcomes:any[]=[];
+ const f=delegating(t,async o=>{if(o.bootstrap.type==='inspect_task')return checkpoint();
+  const ask=(logicalStepId:string,target:string,request:string)=>o.operate!({tool:'delegate',logicalStepId,arguments:{target,request}});
+  outcomes.push(await ask(delegationStep,'sharedbot002',delegationText),await ask('task00001/t0/c1','sharedbot002','And the 2027 plan.'),await ask('task00001/t0/c2','sharedbot002','Again.'));
+  outcomes.push(await ask('task00001/t0/c3','sharedbot009','Not offered.').catch(error=>String(error)));return done();},
+  {delegateTask:p=>p.logicalStepId.endsWith('/c0')?{sent:true,delegationId:delegationRecord,taskId:'task00002',messageId:'bot_message01'}:p.logicalStepId.endsWith('/c1')?{sent:false,code:'DELEGATION_NOT_ACCEPTED'}:{sent:'maybe'}});
+ await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await finished(f);
+ assert.deepEqual(outcomes.slice(0,3),[{established:true,succeeded:true,result:{message:sentToBeta}},
+  {established:true,succeeded:false,result:{message:'The request to Beta was not sent. That Bot does not take requests from you.'}},{established:false,succeeded:false,result:{}}]);
+ assert.match(outcomes[3],/TEAM_HOST_PROTOCOL/);
+ const b=(await f.privateStore.bindings('owner'))[0]!,sent=f.sent('delegateTask'),requests=[delegationText,'And the 2027 plan.','Again.'];
+ assert.deepEqual(sent.map(c=>c.payload),requests.map((request,n)=>({deploymentId:b.deploymentId,hostId:f.privateStore.hostId,accountEpoch:b.accountEpoch,taskId:'task00001',permitId:permit(f,1),
+  logicalStepId:`task00001/t0/c${n}`,target:'sharedbot002',request,inputGrantIds:b.grantIds,outputAudience:{mode:'published_inputs'}})));
+ assert.equal(sent[0]!.commandId,digest(JSON.stringify(['delegateTask','task00001',delegationStep,1])));
+ assert.equal(f.sent('pauseTask').length,0);assert.equal(completions(f)[0].payload.outcome,'completed');
+});
+test('the private process serves a request to another Bot only to a run that was offered that Bot, for a stable step, and reads a wait for its reply',async()=>{
+ const scope={teamId,sharedBotId,conversationId,sessionEpoch:1},live={scope,sessionRevision:1,lastMessageSeq:2,lastChangeSeq:2,bootstrapFromSeq:0};
+ const result={version:3,type:'result',status:'completed',cursor:live,text:'Done',finishedAt:1,dispatchedRequests:2,attemptDispatchedRequests:1,deniedTools:0,usage:{status:'missing'}};
+ const base={executable:'/mock',home:'/private-home',tmp:'/private-tmp',signal:new AbortController().signal,assertCurrent:()=>{}};
+ const boot=(extra:Record<string,unknown>={delegates:[betaRun]})=>({version:3 as const,type:'run' as const,storageRoot:'/private-root',workerExecutable:'/worker',scope,taskId:'task00001',...extra});
+ const request={version:3,type:'operation',id:'operation-1',tool:'delegate',logicalStepId:delegationStep,arguments:{target:'sharedbot002',request:delegationText}};
+ const calls:any[]=[];let authorized=0;const authorize=async()=>{authorized++;};
+ const serve=(outcome:any)=>async(operation:any)=>{calls.push(operation);return outcome;},fine=serve({established:true,succeeded:true,result:{message:'Sent'}});
+ const f=conversing(request,result);
+ assert.equal((await runTeamHost({...base,bootstrap:boot(),authorize,operate:fine,spawnProcess:f.spawn})).status,'completed');
+ assert.deepEqual(f.written[1],{version:3,type:'operation_result',id:'operation-1',established:true,succeeded:true,result:{message:'Sent'}});
+ assert.deepEqual(calls,[{tool:'delegate',logicalStepId:delegationStep,arguments:{target:'sharedbot002',request:delegationText}}]);assert.equal(authorized,1);
+ const served=calls.length;
+ for(const [bootstrap,frame] of [
+  [boot({}),request],[boot({delegates:[{id:'sharedbot009',name:'Other'}]}),request],[{...boot(),type:'run_private' as const},request],
+  [boot(),{...request,logicalStepId:undefined}],[boot(),{...request,logicalStepId:'task00002/t0/c0'}],[boot(),{...request,logicalStepId:'task00001/t0'}],[boot(),{...request,approvalRef:waitId}],
+  [boot(),{...request,arguments:{target:'sharedbot002'}}],[boot(),{...request,arguments:{...request.arguments,extra:1}}],[boot(),{...request,arguments:{target:7,request:delegationText}}],
+  [boot(),{...request,arguments:{target:'sharedbot002',request:'  '}}],[boot(),{...request,arguments:{target:'sharedbot002',request:'x'.repeat(2001)}}],[boot(),{...request,arguments:{target:'sharedbot002',request:'a\0b'}}],
+  [boot(),{...request,id:'read_chat-1'}],[boot(),{...request,retry:true}],
+ ] as const)await assert.rejects(runTeamHost({...base,bootstrap:bootstrap as any,authorize,operate:fine,spawnProcess:conversing(JSON.parse(JSON.stringify(frame)),result,false).spawn}),/TEAM_HOST_PROTOCOL/,JSON.stringify(frame));
+ assert.equal(calls.length,served,'every one of them was refused before it reached the Desktop');
+ // The wait for a reply is a result like any wait, with the call as its question.
+ const live2={scope,sessionRevision:1,lastMessageSeq:2,lastChangeSeq:2,bootstrapFromSeq:0};
+ const waiting={version:3,type:'result',status:'waiting',cursor:live2,wait:delegationWait,checkpointDigest,pausedAt:1731300000000,dispatchedRequests:1,attemptDispatchedRequests:1,deniedTools:0,usage:{status:'missing'}};
+ const ended=await runTeamHost({...base,bootstrap:boot({delegates:[betaRun],askRequester:true}),spawnProcess:frames([waiting])});
+ assert.equal(ended.status,'waiting');assert.deepEqual((ended as any).wait,delegationWait);
+ await assert.rejects(runTeamHost({...base,bootstrap:boot({delegates:[betaRun],askRequester:true}),spawnProcess:frames([{...waiting,wait:{...delegationWait,kind:'conversation'}}])}),/TEAM_HOST_PROTOCOL/);
+});
+test('a request that waits for the reply pauses the task with the call, and the run goes on with how it ended as the result of its call',async t=>{
+ const f=delegating(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint({wait:delegationWait}):o.bootstrap.type==='run'?waitingOnBeta():done('Per Beta, revenue was 12.4 million.'));
+ const record=await paused(f),pause=f.sent('pauseTask')[0].payload;
+ assert.deepEqual([pause.kind,pause.delegation,pause.waitId,pause.expiresInMs,pause.question,pause.permitId],
+  ['delegation',{logicalStepId:delegationStep,target:'sharedbot002',request:delegationText},waitId,600000,undefined,permit(f,1)]);
+ assert.deepEqual(f.launches[0]!.bootstrap.delegates,[betaRun]);
+ // The task stays as long as the service says, whatever the wait does; nothing was run or delivered meanwhile.
+ assert.equal(record.wait!.waitId,waitId);assert.ok(record.wait!.delegation!.until>Date.now());assert.equal(f.launches.length,1);assert.equal(completions(f).length,0);
+ // Nobody types into it: the answer is what the service recorded of how it ended, and the reply.
+ f.end({outcome:'done',text:'Revenue was 12.4 million.'});await finished(f);
+ assert.deepEqual(f.sent('continueTask').map(c=>[c.payload.reason,c.payload.expectedEpoch]),[['answer',1]]);
+ assert.deepEqual(f.launches[1]!.bootstrap.continuation,{epoch:2,expected_checkpoint_digest:checkpointDigest,answer:{wait_id:waitId,message_id:delegationRecord,text:'Beta replied:\n\nRevenue was 12.4 million.'}});
+ assert.deepEqual(f.launches[1]!.bootstrap.delegates,[betaRun],'the replay of the call needs the tool');
+ assert.ok(f.mock.reads.every(read=>read.mode!=='byId'),'no message of the Chat was read as the answer');
+ assert.equal(completions(f)[0].payload.text,'Per Beta, revenue was 12.4 million.');
+});
+test('what a run is told of how its request ended is one text for each outcome, cut to what a continuation carries',async t=>{
+ const told=async(how:Record<string,unknown>)=>{
+  const f=delegating(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint({wait:delegationWait}):o.bootstrap.type==='run'?waitingOnBeta():done());
+  await paused(f);f.end(how);await finished(f);return f.launches[1]!.bootstrap.continuation!.answer!;
+ };
+ const lead='Beta replied:\n\n';
+ assert.equal((await told({outcome:'done',text:'Short.'})).text,`${lead}Short.`);
+ assert.equal((await told({outcome:'done',text:'  '})).text,'Beta finished but had nothing to hand back.');
+ const long=await told({outcome:'done',text:'x'.repeat(9000)});assert.equal(Buffer.byteLength(long.text),8192);assert.ok(long.text.startsWith(lead));
+ const wide=await told({outcome:'done',text:'界'.repeat(4000)});assert.ok(Buffer.byteLength(wide.text)<=8192);assert.ok(!wide.text.includes('�'),'a character is never cut in the middle');assert.ok(wide.text.startsWith(`${lead}界`));
+ assert.equal((await told({outcome:'withheld'})).text,'Beta has finished, but what it said cannot be shared in this Chat, so it is not handed to you.');
+ assert.equal((await told({outcome:'failed'})).text,'Beta could not finish the request.');
+ assert.equal((await told({outcome:'cancelled'})).text,'The request to Beta was cancelled, so there is no reply.');
+ assert.deepEqual(await told({outcome:'done',text:'Short.'}),{wait_id:waitId,message_id:delegationRecord,text:`${lead}Short.`});
+});
+test('a request the service refuses when the task pauses is told to the run in words, and nothing waits for a reply',async t=>{
+ const f=delegating(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint({wait:delegationWait}):o.bootstrap.type==='run'?waitingOnBeta():done('Beta will not take it, so this is my own answer.'),
+  {pauseTask:p=>({taskId:p.taskId,state:'queued',waitId:p.waitId,messageId:null,expiresAt:Date.now(),holdsUntil:Date.now()+86400000})});
+ const record=await paused(f);assert.equal(record.wait!.waitId,waitId);
+ f.refuse('DELEGATION_NOT_ACCEPTED');await finished(f);
+ assert.deepEqual(f.launches[1]!.bootstrap.continuation!.answer,{wait_id:waitId,message_id:waitId,text:'The request to Beta was not sent. That Bot does not take requests from you.'});
+ assert.equal(completions(f)[0].payload.text,'Beta will not take it, so this is my own answer.');
+});
+test('after ten minutes the host asks the service to stop the wait, sends that again only every thirty seconds, and the run goes on told the reply has not come',async t=>{
+ let clock=Date.now(),early=true;
+ const f=delegating(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint({wait:delegationWait}):o.bootstrap.type==='run'?waitingOnBeta():done('Without Beta.'),
+  {detachDelegation:()=>{if(early){early=false;throw new TeamsApiError('DELEGATION_WAIT_ACTIVE',409);}f.end({outcome:'detached'});return {taskId:'task00001',state:'queued',outcome:'detached'};}});
+ (f.connector as any).options.now=()=>clock;
+ const record=await paused(f);
+ // Inside the time nothing is sent. The service decides whether the time is up; a host that asks early is refused and asks again later.
+ clock=record.wait!.expiresAt-1000;await quiet(f);assert.equal(f.sent('detachDelegation').length,0);
+ clock=record.wait!.expiresAt;await quiet(f);assert.equal(f.sent('detachDelegation').length,1);
+ clock+=29000;await quiet(f);assert.equal(f.sent('detachDelegation').length,1,'not again within thirty seconds');
+ clock+=2000;await quiet(f);await finished(f);
+ const sent=f.sent('detachDelegation');assert.equal(sent.length,2);assert.deepEqual(sent[1]!.payload,{...sent[0]!.payload});assert.equal(sent[1]!.commandId,sent[0]!.commandId,'the same command each time');
+ assert.deepEqual([sent[0]!.payload.taskId,sent[0]!.payload.waitId],['task00001',waitId]);
+ assert.equal(f.launches[1]!.bootstrap.continuation!.answer!.text,'Beta has not finished yet. When it does, it replies in the Chat itself; do not wait for it or answer in its place.');
+ assert.equal(completions(f)[0].payload.text,'Without Beta.');
+});
+test('a wait for a reply from a Bot the run was not offered, or with a call that is not one, is a breach: nothing is paused and the task fails',async t=>{
+ for(const question of [delegationCall().replace('sharedbot002','sharedbot009'),'Which city?',JSON.stringify({target:'sharedbot002',request:delegationText}),
+  JSON.stringify({target:'sharedbot002',request:' ',expectReply:true}),JSON.stringify({target:'sharedbot002',request:delegationText,expectReply:false})]){
+  const f=delegating(t,async o=>o.bootstrap.type==='inspect_task'?checkpoint():{...asked(),wait:{...delegationWait,question}});
+  await f.connector.publishLocalBot('owner',f.input);f.mock.tasks.push(queued());f.mock.wake();await finished(f);
+  assert.equal(f.sent('pauseTask').length,0,question);assert.equal(completions(f)[0].payload.outcome,'failed',question);
+ }
 });

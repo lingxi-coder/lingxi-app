@@ -40,7 +40,8 @@ export async function projectTask(store, { uid, ref, taskId }, enqueue) {
       previous = (await tx.get(marker)).data();
     const live = await taskAllowed(tx, db, acl, task, uid);
     const wait =
-      live && task.state === 'waiting' && task.deadline > now
+      // A task that waits for another Bot's reply waits for no person: nothing is asked of anyone.
+      live && task.state === 'waiting' && task.deadline > now && task.currentWaitKind !== 'delegation'
         ? (await tx.get(acl.root.collection('waits').doc(task.currentWaitId))).data()
         : null;
     let kind;

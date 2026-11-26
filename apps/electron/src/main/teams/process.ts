@@ -29,6 +29,9 @@ export interface TeamHostBootstrap {
   /** The Local Apps of this Desktop the run may use (`run` and `continue`), by id: at most `LOCAL_APPS_OFFERED`, and left out when there are none.
    * Their tools are asked for and called through the `local_app_tools` and `local_app_call` operations, and for no other app. */
   localApps?: Array<{ id: string; name: string; description?: string }>;
+  /** The other Bots of the Chat this run may hand part of the request to (`run` and `continue`), by shared Bot id: at most `DELEGATES_OFFERED`, and left out when there are none.
+   * A request to one that waits for no reply goes through the `delegate` operation; one that waits is the run's pause (`wait.kind` `delegation`). */
+  delegates?: Array<{ id: string; name: string; description?: string }>;
   /** Nobody asked the Bot for this task (`run` and `continue`): offer it the tool that leaves the message unanswered. */
   mayDecline?: boolean;
   /** With `mayDecline` only: the member wrote this message to the Bot directly (a Bot DM), so the Bot answers unless it plainly needs no answer. */
@@ -37,8 +40,9 @@ export interface TeamHostBootstrap {
   deadlineAt?: number; model?: Omit<TeamModelRoute, 'credential_id'>; credentials?: ProviderAccountEnvelope;
   limits?: { max_turns: number; context_window_tokens: number; output_tokens_per_request: number; physical_dispatches: number };
 }
-/** What a paused task is blocked on, as the runtime's durable checkpoint names it: a question, or (`tool_approval`) a proposed list change, whose `question` is that change as JSON. */
-export interface TeamTaskWait { waitId: string; kind: 'human_input' | 'tool_approval'; logicalStepId: string; question: string; requestDigest: string }
+/** What a paused task is blocked on, as the runtime's durable checkpoint names it: a question, or (`tool_approval`) a proposed list change, whose `question` is that change as JSON,
+ * or (`delegation`) a request to another Bot whose reply the task waits for, whose `question` is that call (`target`, `request`, `expectReply`) as JSON. */
+export interface TeamTaskWait { waitId: string; kind: 'human_input' | 'tool_approval' | 'delegation'; logicalStepId: string; question: string; requestDigest: string }
 export interface TeamRunResult {
   /** `declined`: the Bot chose not to answer; `text` is empty and there is no document. */
   status: 'inspected' | 'not_found' | 'completed' | 'failed' | 'waiting' | 'declined'; cursor: BotChatCursor; text?: string; finishedAt?: number;
@@ -63,7 +67,7 @@ function wait(value: unknown): value is TeamTaskWait {
   if (!object(value)) return false;
   exact(value, ['waitId', 'kind', 'logicalStepId', 'question', 'requestDigest']);
   return typeof value.waitId === 'string' && WAIT_ID.test(value.waitId) && typeof value.logicalStepId === 'string' && value.logicalStepId.length <= 256
-    && (value.kind === 'human_input' || value.kind === 'tool_approval')
+    && (value.kind === 'human_input' || value.kind === 'tool_approval' || value.kind === 'delegation')
     && typeof value.question === 'string' && !!value.question.trim() && Buffer.byteLength(value.question) <= (value.kind === 'human_input' ? 2000 : OPERATION_BYTES) && typeof value.requestDigest === 'string' && DIGEST.test(value.requestDigest);
 }
 /** One request of the running Bot to its shared list. A write names the durable step it belongs to, which is its identity in the operation ledger,
@@ -76,13 +80,18 @@ export type TeamOperation = { tool: 'list_read' }
   /** The tools of one offered Local App, as its MCP server lists them now. */
   | { tool: 'local_app_tools'; arguments: { app: string } }
   /** One call of a tool of an offered Local App. Its step is its identity: a process that continues the task sends the same step again and is given the recorded result, not a second call. */
-  | { tool: 'local_app_call'; logicalStepId: string; arguments: { app: string; tool: string; arguments: Record<string, unknown> } };
+  | { tool: 'local_app_call'; logicalStepId: string; arguments: { app: string; tool: string; arguments: Record<string, unknown> } }
+  /** A request to one offered Bot that does not wait for its reply. Its step is its identity: a process that continues the task sends the same step again and is given the recorded result. */
+  | { tool: 'delegate'; logicalStepId: string; arguments: { target: string; request: string } };
 /** `established: false` says nobody knows whether the write happened: the worker then stops with the call unfinished instead of telling the model a guess. */
 export interface TeamOperationOutcome { established: boolean; succeeded: boolean; result: Record<string, unknown> }
 /** What one operation's result may carry back to the worker, as JSON. */
 export const OPERATION_BYTES = 64 * 1024;
 /** The most Local Apps one run is offered. */
 export const LOCAL_APPS_OFFERED = 16;
+/** The most Bots one run is offered to delegate to, and the most a request to one may say. */
+export const DELEGATES_OFFERED = 20;
+export const DELEGATION_REQUEST_BYTES = 2000;
 export class TeamHostFailure extends Error { constructor(readonly code: string) { super('TEAM_HOST_FAILED'); } }
 export interface TeamHostProcessOptions {
   executable: string; home: string; tmp: string; bootstrap: TeamHostBootstrap; signal: AbortSignal;
@@ -196,6 +205,13 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
                 if (typeof named !== 'string' || !named || named.length > 200 || !object(given)) throw new Error('TEAM_HOST_PROTOCOL');
                 operation = { tool, logicalStepId: stableStep, arguments: { app, tool: named, arguments: given } };
               } else throw new Error('TEAM_HOST_PROTOCOL');
+            } else if (tool === 'delegate') {
+              // Only the Bots this run was offered, and only a request that waits for no reply: the other kind is the run's pause.
+              exact(args, ['target', 'request']);
+              const { target, request: text } = args;
+              if (!stableStep || approval !== undefined || typeof target !== 'string' || !options.bootstrap.delegates?.some(offered => offered.id === target)
+                || typeof text !== 'string' || !text.trim() || Buffer.byteLength(text) > DELEGATION_REQUEST_BYTES || text.includes('\0')) throw new Error('TEAM_HOST_PROTOCOL');
+              operation = { tool, logicalStepId: stableStep, arguments: { target, request: text } };
             } else if (tool === 'list_write' && sharedList && stableStep
               && (sharedList.approval === 'requester' ? typeof approval === 'string' && WAIT_ID.test(approval) : approval === undefined)) {
               operation = { tool, logicalStepId: stableStep, ...(typeof approval === 'string' ? { approvalRef: approval } : {}), arguments: args };

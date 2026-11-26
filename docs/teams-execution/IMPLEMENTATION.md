@@ -913,6 +913,100 @@ field, `hostWait`, on the task view. All text is in `resources/translations/*.js
   and unit tested, not run on a simulator or a device. The Desktop's own Bot editor still says a Bot that is replied to or called by name "always
   answers" (`bots_reply_mention_note`), where rule 4 lets it stay silent when the message plainly needs no answer.
 
+## Bots delegating to Bots (Bot v3 B8)
+
+A Bot that is running for a person can hand part of the request to another Bot of the same Chat, and either go on with that Bot's reply or let it answer in the
+Chat itself. This is B8a: the service (`delegations.mjs` and the commands in `shared-bots.mjs`), the runtime's team worker (H, the tool `TeamDelegate`) and the
+Desktop connector, and the four publication controls of the Desktop publish wizard (`BotDirectory`). The other screens (the chain on a task, the wait on it, the
+capability shown on a card, on every client) are B8b; the fields they need are on the task view and the card.
+
+- Only a tool call delegates. The model calls `TeamDelegate {target, request, expectReply}`; an @ it writes in its text triggers nothing. With
+  `expectReply: false` the worker asks its host for the operation `delegate`, which the connector sends as `delegateTask`; the answer is `{sent: true, ...}` or
+  `{sent: false, code}`, and a refusal is an answer the Bot is told in words, never an error. With `expectReply: true` the worker does not call the host: it parks
+  through the same arbiter as `AskUser` and the list proposal (`ask_tool::Wait::Delegation`), the checkpoint reports a wait of the new kind `delegation` whose
+  `question` is the call as JSON, and the host sends `pauseTask` of kind `delegation` with `delegation {logicalStepId, target, request}`. The delegation is made in
+  the same transaction as the pause (`parkForDelegation`), so the other Bot cannot answer before the run waits, and a delegation the service refuses leaves a
+  task that is queued again at once with `resume {waitId, refusal, target}`. Both paths end in `delegate()`, which is idempotent by the logical step
+  (`delegations/{hash(parentTaskId, logicalStepId)}`): the same step again answers what it made, another request under it is `DELEGATION_CONFLICT`.
+- Both Bots have to agree. The target publishes `acceptDelegation` (`none`, the default; `team_bots`; or `listed` with `acceptFrom`, the shared ids it takes
+  requests from), the delegating Bot publishes `delegateTo` with `delegation {daily}` (the two go together, never the Bot itself). The target must be a
+  participant of the Chat and in its execution policy. It runs as the person who asked the first Bot: `BOT_USE_REQUIRED` unless that person may use it (its
+  `usePolicy` and every grant), exactly as for a message they sent. Scope is not inherited; the target's own scope narrowed by the Chat applies. Both deployments
+  must report `capabilities.delegation` (now a boolean, true on this Desktop whatever the route); a hosted service never delegates (`DELEGATION_UNSUPPORTED`
+  at publication). `directory()` cards carry `capabilities.delegation`, `acceptDelegation`, `acceptFrom`, `delegateTo` and `delegation {daily}`.
+- What one delegation makes, through `submit` (new parameter `delegation`, beside `dataCause`): a message of the delegating Bot, "@Target request", a reply to
+  the message that started the run (`bot_` ids); a task of the target asked in that message, with `rootTaskId` (the family's first task), `delegation
+  {delegationId, rootTaskId, parentTaskId, parentBotId, depth, chain [{sharedBotId, name}], expectReply}` and a stamped triage (`run`, `rule`, `addressed`) so
+  `listTriage` shows it; and the server-only record `teams/{team}/delegations/{id}` (`parentTaskId`, `parentBotId`, `rootTaskId`, `targetBotId`,
+  `targetTaskId`, `conversationId`, `messageId`, `expectReply`, `digest`, `depth`, `state`, `waitId`, `createdAt`; later `result.text`, `doneAt`). No rule
+  matches it, so the default deny covers it and a reply kept for a waiting run is never readable before that run has used it. The message opens no reply
+  round and no auto-reply (`submit` skips `dmOptional` and `unaskedTasks` for it), a target whose Desktop is off queues the task for a day (`hostWait`), and
+  the quota is the delegating Bot's own: `delegation.daily`, counted under the day and that Bot (`hash([day, 'delegation', botId])`).
+- Limits. A chain is at most two hops from the person's message (person -> A -> B -> C, and C cannot delegate); a Bot already on the chain cannot be asked again
+  (`DELEGATION_LOOP`); one root task makes at most three delegations and data handoffs together (`usedByRoot`, a count over `tasks where rootTaskId ==`, a
+  single-field query, so no index; `DATA_HANDOFF_LIMIT` in the handoff transaction, `DELEGATION_LIMIT` here). A handoff counts as one hop. A request is at
+  most 2000 bytes. Nobody asked a Bot that only judges a message (`DELEGATION_UNASKED`), and a run on private data never delegates. The Bots a run may ask
+  are computed by `delegationOffers` and returned as `delegates [{sharedBotId, name, description?}]` by `prepareTask`, `validateTask` (the context a lost answer or a recovery is reconciled from), `startTask` and `continueTask`; the list is
+  empty when the Bot has none, its deployment cannot, the chain is at its end, the root's count is used up or none of the targets would accept. The host passes it
+  to the worker as `delegates` and keeps it with the attempt; the worker refuses a call to a Bot that is not in it, and the host checks the same before it
+  sends anything. A continuation that answers a delegation is always offered the Bot it asked, whatever has changed since, because the replay of that call
+  needs it.
+- The reply. A delegation that waits sets the target's task `expectReply`. When that task finishes, `fate()` reads the record and the waiter, and `post()` hands
+  the reply to the waiting run instead of posting it: the record is `done` (with the text, cut to 7 KiB, since a continuation carries 8 KiB), `withheld` (the
+  audience gate refused it for this Chat: only the fact is handed over) or `failed`; the target's task ends with `handedBack` and no reply message, and the
+  waiting task is queued again with `resume {waitId, delegation}`, the wait `resolved` and the Chat lock kept. The same code serves a reply the target's
+  maintainer held (B6): approving it hands back the text the maintainer approved, rejecting it or letting the hold run out hands back `withheld`, and an approval
+  that was revoked in the meantime hands back `failed`, so the waiting run never waits for a reply that will not come (`held-replies.mjs`). A task whose waiter has
+  gone posts its reply in the Chat as any reply does: the waiter detached, was cancelled or expired, or its Bot was published again or moved to another deployment.
+  That is a new revision, which refuses every earlier task of the Bot at its next step (`TASK_REVOKED`), for a wait on another Bot as for a wait on a person; the new
+  deployment is not given the run (a task is bound to the deployment and the revision it was admitted under, and `listHostTasks` lists a deployment's own tasks), so
+  `waiterOf` does not count such a run as waiting. The other Bot moving is the same as ever: its earlier deployment's result is refused (`DEPLOYMENT_REQUIRED`), and
+  the run goes on after its ten minutes, told the reply has not come.
+  `prepareTask` and `continueTask` give the resumed run the outcome (`wait {waitId, delegation {delegationId, targetBotId, targetName, outcome, text? | code?}}`);
+  the host keeps it before it asks to continue, writes one sentence for it ("<Bot> replied: ...", "<Bot> has not finished yet", "The request to <Bot> was
+  cancelled", the reason a request was not sent) and passes that as the continuation's answer, with the delegation id as `message_id`. The replayed tool call
+  returns it. `answerWait` and `decideWait` refuse such a wait (`WAIT_KIND_MISMATCH`); nobody types into it.
+- The time. A run waits ten minutes (`expiresInMs` of the pause, the wait's `expiresAt`, shown as `wait.expiresAt`); the task itself stays a day
+  (`holdsUntil`, since its Desktop may be off when the reply comes). After the ten minutes the host sends `detachDelegation` (the command is the same each
+  time, repeated at most every 30 seconds); the service refuses it before the time (`DELEGATION_WAIT_ACTIVE`) and otherwise releases the task with the outcome
+  `detached`, "<Bot> has not finished yet", and the target's reply is posted in the Chat when it comes. The timer is the host's because a waiting task is not in
+  `listHostTasks`, so only the host's own private record knows it is waiting; no job was added to Cloud Tasks.
+- Cancelling. The person who asked, the target's maintainer and the delegating Bot's maintainer can cancel the target's task (`canCancel`); the cancellation
+  covers the family by `rootTaskId`: unfinished tasks made under it are cancelled (a running one is asked to stop), open delegations they made are
+  `cancelled`, and the task that waits for it goes on at once with `cancelled`. Cancelling the waiting task itself does the same downward.
+- Where it is shown. `taskView` carries `delegation` (the chain, "A -> B") on the target's task and, on a waiting task, `wait.kind: 'delegation'` with
+  `wait.delegation {sharedBotId, taskId}`; the inbox skips such waits (nobody is asked anything); `listTriage` rows carry `delegation`. Existing clients
+  parse a wait by `messageId`, which stays, and ignore a kind they do not know.
+- Runtime (H). `TeamDelegate` is registered only with an offer, on a route that continues; `TeamWaitKind::Delegation`; `Bootstrap.delegates` (strict, at most 20,
+  absent for private data); `TeamOperationTool::Delegate`; `verify_continuation` accepts a delegation answer only with the tool present and no approval flag.
+  The host's request carries `delegates` for `run` and `continue` and nothing else.
+- Desktop. `process.ts` validates the `delegate` operation (a stable step, exactly `target` and `request`, a Bot that was offered) and the new wait kind;
+  `connector.ts` offers and keeps `delegates`, sends `delegateTask`, pauses with `delegation`, resumes from the recorded outcome, sends `detachDelegation`,
+  reports `capabilities.delegation: true`, and accepts `acceptDelegation`, `acceptFrom`, `delegateTo` and `delegation` in `publishLocalBot`; `service.ts`
+  allows the two commands. `hosted-bot-service.mjs` is deliberately not extended: a hosted service never delegates. The publish wizard (`packages/teams/BotDirectory.tsx`,
+  Desktop only) has a fieldset "Bots asking Bots" (not for a friendship's Bots): what the Bot takes from other Bots (none, any Bot of the Team, or the Bots ticked, at
+  least one), the Bots it may ask, and its daily limit when there is one. Choosing a Bot brings back what it is published with, so publishing again keeps it; what was
+  ticked of a Bot that is gone is not sent; the review names them and a change after it asks for the review again. The text is `tw_botdir_delegation_*`,
+  `tw_botdir_accept_*`, `tw_botdir_delegate_to` and `tw_botdir_review_{accepts,asks}_*` in the catalog (five locales, Desktop and Web only).
+- Operation ids. `operationIdOf` is now `hash([taskId, taskId, logicalStepId, category])`: the Desktop derives the id of a ledger write from the task alone,
+  and the root task of a delegated task is another task. For every task that is its own root (all but the tasks another Bot asked for, by this phase or by a data
+  handoff) the id is the same as it was; for those the id now agrees with what the Desktop derives.
+- Local router delegation (`accept_from` in the Bot's own `bot.json`) is unchanged and independent.
+- Codes a Bot may be told (as words): `DELEGATION_NOT_ALLOWED`, `_NOT_ACCEPTED`, `_UNSUPPORTED`, `_UNSUPPORTED_TARGET`, `_TARGET_UNAVAILABLE`, `_DEPTH`,
+  `_LOOP`, `_LIMIT`, `_UNASKED`, `_WITHHELD`, and what `submit` says (`BOT_USE_REQUIRED`, `BOT_PARTICIPANT_REQUIRED`, `REQUEST_QUOTA_EXCEEDED`, ...).
+- Tests: `apps/firebase/test/delegation.emulator.test.mjs`, registered in `scripts/test-teams.mjs` after `reply-rounds.emulator.test.mjs` (both-sided
+  agreement and the person's own rights, depth and loops, the per-root count with a handoff, the daily limit, the wait and the hand-back, the ten minutes and
+  `detachDelegation`, a refusal at the pause, an offline target, cancelling by each of the three parties and the cascade, cancelling the waiting run itself, the waiting Bot or the other Bot moving to another deployment, no round and no auto-reply, a Bot
+  nobody asked, a held reply approved, rejected and run out, the directory); `shared-bot-commands.test.mjs` and `team-execution-contract.test.mjs` (the commands and
+  the boolean capability); `teams.rules.emulator.test.mjs` (the record is server-only); `contracts/execution-vectors.json` (`delegateTask` and `detachDelegation`
+  are host commands a member may not send); Web `teams-delegation-ui.test.ts` (the wizard's controls).
+- Not here, or not verified. Not here: the chain "A -> B" on a task, the wait on it and the capability on a card, in Web, iOS and Android (B8b; the fields they read are
+  listed above); a hosted service never delegates; no Cloud Tasks job ends a wait (the host does, and the service holds it to the time). Not verified: a run on two
+  real Desktops with a real model (the tests use the emulator, a fake service and a scripted provider, never a signed package); the iOS and Android vector tests,
+  which decode `contracts/execution-vectors.json` and are expected to take the two rejected commands as they take the others (not run here). A known gap: a run that
+  is still marked waiting after its own 24 hours (its Desktop was off all that time) is queued again by a reply that comes late, with a new deadline, instead of the
+  reply being posted in the Chat; `waiterOf` does not read the deadline.
+
 ## What a Bot may use of its maintainer's Desktop (Bot scope)
 
 What a shared Bot reaches of its maintainer's Desktop in a Team is four layers that each only narrow: the local Bot's own upper bound

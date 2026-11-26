@@ -124,7 +124,7 @@ internal data class TeamMessageCache(val uid: String, val teamId: String, val ge
         }
     }
 }
-internal class TeamMessageFailure(val code: String, val status: Int? = null) : Exception(code)
+internal class TeamMessageFailure(val code: String, val status: Int? = null, val retryAfterMs: Long? = null) : Exception(code)
 internal fun JSONArray.objects() = (0 until length()).map { getJSONObject(it) }
 internal fun JSONArray.strings() = (0 until length()).map { getString(it) }
 internal fun JSONObject.stringOrNull(key: String) = if (isNull(key)) null else getString(key)

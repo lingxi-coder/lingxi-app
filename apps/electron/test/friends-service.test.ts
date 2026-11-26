@@ -49,6 +49,7 @@ test('the profile and every action go to /v1/friends with the account\'s token a
   const { service } = fixture(context);
   await service.profile('alice');
   await service.execute('alice', { action: 'lookup', handle: 'sam' });
+  await service.execute('alice', { action: 'searchHandles', query: 'sam' });
   await service.execute('alice', { action: 'request', via: 'handle', handle: 'sam', requestId: 'request-id-1', note: 'hi' });
   await service.execute('alice', { action: 'offerTeam', teamId: 'team-alpha', friendUid: 'bob', requestId: 'request-id-2' });
   await service.execute('alice', { action: 'acceptOffer', offerId: 'team-alpha', requestId: 'request-id-3' });
@@ -56,11 +57,28 @@ test('the profile and every action go to /v1/friends with the account\'s token a
   assert.deepEqual(calls, [
     { url: 'https://lingxios.net/v1/friends/profile', method: 'GET', authorization: 'Bearer synthetic-token' },
     { url: 'https://lingxios.net/v1/friends', method: 'POST', authorization: 'Bearer synthetic-token', body: { action: 'lookup', handle: 'sam' } },
+    { url: 'https://lingxios.net/v1/friends', method: 'POST', authorization: 'Bearer synthetic-token', body: { action: 'searchHandles', query: 'sam' } },
     { url: 'https://lingxios.net/v1/friends', method: 'POST', authorization: 'Bearer synthetic-token', body: { action: 'request', via: 'handle', handle: 'sam', requestId: 'request-id-1', note: 'hi' } },
     { url: 'https://lingxios.net/v1/friends', method: 'POST', authorization: 'Bearer synthetic-token', body: { action: 'offerTeam', teamId: 'team-alpha', friendUid: 'bob', requestId: 'request-id-2' } },
     { url: 'https://lingxios.net/v1/friends', method: 'POST', authorization: 'Bearer synthetic-token', body: { action: 'acceptOffer', offerId: 'team-alpha', requestId: 'request-id-3' } },
     { url: 'https://lingxios.net/v1/friends', method: 'POST', authorization: 'Bearer synthetic-token', body: { action: 'declineOffer', offerId: 'team-beta' } },
   ]);
+});
+
+test('the main process shares a search cooldown across renderer calls and clears it on account change', async context => {
+  let sent = 0;
+  context.mock.method(globalThis, 'fetch', async () => {
+    sent++;
+    return sent === 1 ? Response.json({ error: { code: 'RATE_LIMITED', retryAfterMs: 5_000 } }, { status: 429 })
+      : Response.json({ results: [] });
+  });
+  const { service, signIn } = fixture(context);
+  await assert.rejects(service.execute('alice', { action: 'searchHandles', query: 'sam' }), /RATE_LIMITED/u);
+  await assert.rejects(service.execute('alice', { action: 'searchHandles', query: 'alice' }), /RATE_LIMITED/u);
+  assert.equal(sent, 1);
+  signIn('bob');
+  assert.deepEqual(await service.execute('bob', { action: 'searchHandles', query: 'sam' }), { results: [] });
+  assert.equal(sent, 2);
 });
 
 test('an action the service does not know is refused before anything is sent, and a server error arrives as its code', async context => {

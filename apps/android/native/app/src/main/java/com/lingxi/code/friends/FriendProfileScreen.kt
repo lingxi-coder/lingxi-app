@@ -20,6 +20,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -48,7 +49,7 @@ internal fun FriendProfileScreen(
     Column(modifier.fillMaxSize().testTag(FriendsTags.PROFILE_SCREEN)) {
         FriendsPageHeader(stringResource(R.string.friends_profile_title), showBack, onClose)
         when {
-            profile != null -> ProfileFields(state, profile, onSave)
+            profile != null -> key(profile.uid) { ProfileFields(state, profile, onSave) }
             error != null -> TeamsMessageState(
                 stringResource(friendsErrorRes(error)), Modifier.testTag(FriendsTags.PROFILE_ERROR),
                 action = { Button(onClick = onLoad) { Text(stringResource(R.string.common_retry)) } },
@@ -60,29 +61,58 @@ internal fun FriendProfileScreen(
 
 @Composable
 private fun ProfileFields(state: FriendsState, profile: FriendProfile, onSave: (ProfileForm) -> Unit) {
-    var name by rememberSaveable(profile.uid) { mutableStateOf(profile.displayName) }
-    var handle by rememberSaveable(profile.uid) { mutableStateOf(profile.handle.orEmpty()) }
-    var findByHandle by rememberSaveable(profile.uid) { mutableStateOf(profile.findByHandle) }
-    var findByEmail by rememberSaveable(profile.uid) { mutableStateOf(profile.findByEmail) }
-    val form = ProfileForm(name, handle, findByHandle, findByEmail)
+    var nameEdit by rememberSaveable(profile.uid) { mutableStateOf<String?>(null) }
+    var handleEdit by rememberSaveable(profile.uid) { mutableStateOf<String?>(null) }
+    var handleDiscoveryEdit by rememberSaveable(profile.uid) { mutableStateOf<Boolean?>(null) }
+    var emailDiscoveryEdit by rememberSaveable(profile.uid) { mutableStateOf<Boolean?>(null) }
+    var partialDiscoveryEdit by rememberSaveable(profile.uid) { mutableStateOf<Boolean?>(null) }
+    val name = nameEdit ?: profile.displayName
+    val handle = handleEdit ?: profile.handle.orEmpty()
+    val findByHandle = handleDiscoveryEdit ?: profile.findByHandle
+    val findByEmail = emailDiscoveryEdit ?: profile.findByEmail
+    val findByHandlePart = partialDiscoveryEdit ?: profile.findByHandlePart
+    val form = ProfileForm(name, handle, findByHandle, findByEmail, findByHandlePart, editedFields = buildSet {
+        if (nameEdit != null) add("displayName")
+        if (handleEdit != null) add("handle")
+        if (handleDiscoveryEdit != null) add("findByHandle")
+        if (partialDiscoveryEdit != null) add("findByHandlePart")
+        if (emailDiscoveryEdit != null) add("findByEmail")
+    })
     val save = state.saveOp
     val handleTaken = save.error == FriendsError.HandleTaken
+    var savedRevision by rememberSaveable(profile.uid) { mutableStateOf(state.profileSaveRevision) }
+    LaunchedEffect(state.profileSaveRevision) {
+        if (savedRevision != state.profileSaveRevision) {
+            savedRevision = state.profileSaveRevision
+            nameEdit = null
+            handleEdit = null
+            handleDiscoveryEdit = null
+            partialDiscoveryEdit = null
+            emailDiscoveryEdit = null
+        }
+    }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         OutlinedTextField(
-            value = name, onValueChange = { name = it }, singleLine = true, enabled = !save.busy,
+            value = name, onValueChange = { nameEdit = it }, singleLine = true, enabled = !save.busy,
             label = { Text(stringResource(R.string.friends_profile_name)) }, isError = !FriendsLogic.validDisplayName(name),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
             modifier = Modifier.fillMaxWidth().testTag(FriendsTags.PROFILE_NAME),
         )
         OutlinedTextField(
-            value = handle, onValueChange = { handle = it }, singleLine = true, enabled = !save.busy,
+            value = handle, onValueChange = { handleEdit = it }, singleLine = true, enabled = !save.busy,
             label = { Text(stringResource(R.string.friends_profile_handle)) }, isError = handleTaken || !form.handleValid,
             supportingText = { Text(stringResource(if (handleTaken) R.string.friends_error_handle_taken else R.string.friends_profile_handle_hint)) },
             keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, imeAction = ImeAction.Done),
             modifier = Modifier.fillMaxWidth().testTag(FriendsTags.PROFILE_HANDLE),
         )
-        SwitchRow(R.string.friends_profile_find_handle, findByHandle, !save.busy) { findByHandle = it }
-        SwitchRow(R.string.friends_profile_find_email, findByEmail, !save.busy) { findByEmail = it }
+        SwitchRow(R.string.friends_profile_find_handle, findByHandle, !save.busy) {
+            handleDiscoveryEdit = it
+            if (!it) partialDiscoveryEdit = false
+        }
+        SwitchRow(R.string.friends_profile_find_handle_part, findByHandlePart, !save.busy && findByHandle && FriendsLogic.validHandle(FriendsLogic.jsTrim(handle))) {
+            partialDiscoveryEdit = it
+        }
+        SwitchRow(R.string.friends_profile_find_email, findByEmail, !save.busy) { emailDiscoveryEdit = it }
         Text(stringResource(R.string.friends_profile_find_footer), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         save.error?.takeIf { !handleTaken }?.let { FriendsErrorText(it) }
         Button(

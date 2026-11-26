@@ -118,16 +118,20 @@ text, never Markdown or links).
   everyone; otherwise a card matches when `fold(displayName)` or `fold(handle)` contains the needle.
 
 **D6 Add friend screen**, top to bottom.
-1. *My friend link* (`friends_link_title`): `profile.friendCode.link`, selectable, one line, middle-truncated.
+1. *Find someone* (`friends_search_title`): one text field (`friends_search_placeholder`; no autocapitalisation or
+   autocorrect; Return looks up) and `friends_search_action`. The text is classified by D7; `invalid` shows
+   `friends_search_hint` and keeps the button disabled. For a handle or handle fragment of at least three characters,
+   search after a 350 ms typing pause or immediately on submit. Display username results above the link controls.
+   Only accept responses for the current input. The user can submit the same username again after an empty result.
+   Keep the search cooldown in the account workspace so it survives leaving the page. Email and friend links require submit.
+2. *Result card* after selecting a username result or executing an exact email or link lookup: avatar, name,
+   @handle if any, and one action by relation.
+3. *My friend link* (`friends_link_title`): `profile.friendCode.link`, selectable, one line, middle-truncated.
    `friends_link_copy` copies it and answers `friends_link_copied`. `friends_link_share` opens the native share sheet
    with `friends_link_share_message` + space + link (mobile; Web only when `navigator.share` exists; Desktop has none).
    `friends_link_reset` (`rotateCode`) and `friends_link_off` (`revokeCode`) each ask first
    (`friends_link_reset_title` / `_body`, `friends_link_off_title` / `_body`). With `friendCode == null` show `friends_link_is_off`
    and `friends_link_create` (`rotateCode`, no confirmation). `friends_link_disclosure` always sits under the card.
-2. *Find someone* (`friends_search_title`): one text field (`friends_search_placeholder`; no autocapitalisation or
-   autocorrect; Return looks up) and `friends_search_action`. The text is classified by D7; `invalid` shows
-   `friends_search_hint` and keeps the button disabled. Never look up while typing (lookups are rate limited).
-3. *Result card* after a lookup: avatar, name, @handle if any, one action by relation.
 
 | relation | action |
 | --- | --- |
@@ -147,8 +151,9 @@ Lookup errors appear under the field (D18); a new lookup replaces the card; edit
    otherwise invalid;
 4. an optional leading `@` and then `^[A-Za-z0-9_]{3,24}$`: **handle** (without the `@`); otherwise invalid.
 
-The first call is `lookup` with that one proof (`{handle}`, `{email}` or `{code}`); its result only fills the card.
-The confirming tap sends handle: `request {via:'handle', handle, requestId, note?}`; email:
+Username search calls `searchHandles {query}`. Selection fills the card. Email or code uses `lookup` with that
+one proof and fills the card directly. The confirming tap sends handle:
+`request {via:'handle', handle, expectedUid, requestId, note?}`; email:
 `request {via:'email', email, requestId, note?}`; code: `redeem {code, requestId}`. On a handle or email lookup whose
 relation is `incoming`, send `accept {otherUid}` instead; a code always redeems (the link is the owner's standing
 consent and replaces a pending request). A bare uid is never a proof. A `request` that answers `friends` (a mutual

@@ -81,6 +81,7 @@ class FriendsScreensUiTest {
 
     private val events = mutableListOf<String>()
     private val lookups = mutableListOf<FriendProof>()
+    private val searches = mutableListOf<Pair<String, Boolean>>()
     private val notes = mutableListOf<String>()
     private val forms = mutableListOf<ProfileForm>()
     private var state by mutableStateOf(FriendsState())
@@ -145,7 +146,8 @@ class FriendsScreensUiTest {
             AddFriendScreen(
                 state = state, lookup = lookup, showBack = showBack, onClose = { events += "close" }, onOpenChat = { events += "chat:$it" },
                 onLoadProfile = { events += "load" }, onRotateCode = { events += "rotate" }, onRevokeCode = { events += "revoke" },
-                onLookup = { lookups += it }, onConfirm = { notes += it }, onClear = { events += "clear" },
+                onLookup = { lookups += it }, onSearchHandles = { query, debounce -> searches += query to debounce },
+                onBackToResults = { events += "backToResults" }, onSelect = { events += "select:${it.uid}" }, onConfirm = { notes += it }, onClear = { events += "clear" },
             )
         }
     }
@@ -500,13 +502,14 @@ class FriendsScreensUiTest {
         rule.onNodeWithTag(FriendsTags.BACK).assert(hasContentDescription(text(R.string.common_close)))
     }
 
-    @Test fun oneFieldTakesAUsernameAnEmailAddressOrAFriendLinkAndNothingIsLookedUpWhileTyping() {
+    @Test fun typingSearchesUsernamesAndEmailOrLinksRequireSubmission() {
         showAdd()
         rule.onNodeWithTag(FriendsTags.SEARCH_ACTION).assertIsNotEnabled()
 
         rule.onNodeWithTag(FriendsTags.SEARCH_INPUT).performTextInput("@ann_1")
         rule.waitForIdle()
-        assertTrue("typing looks nothing up: $lookups", lookups.isEmpty())
+        assertEquals(listOf("ann_1" to true), searches)
+        assertTrue(lookups.isEmpty())
         assertTrue("editing the field drops the card: $events", "clear" in events)
         rule.onNodeWithTag(FriendsTags.SEARCH_ACTION).assertIsEnabled().performClick()
 
@@ -516,14 +519,15 @@ class FriendsScreensUiTest {
         rule.onNodeWithTag(FriendsTags.SEARCH_INPUT).performTextReplacement("https://lingxios.net/open/friend/add?code=$code")
         rule.onNodeWithTag(FriendsTags.SEARCH_ACTION).performClick()
 
-        assertEquals(listOf(FriendProof.Handle("ann_1"), FriendProof.Email("ann@example.com"), FriendProof.Code(code)), lookups)
+        assertEquals(listOf(FriendProof.Email("ann@example.com"), FriendProof.Code(code)), lookups)
+        assertTrue(("ann_1" to false) in searches)
     }
 
     @Test fun theKeyboardsSearchKeyLooksUpLikeTheButton() {
         showAdd()
         rule.onNodeWithTag(FriendsTags.SEARCH_INPUT).performTextInput("ann_1")
         rule.onNodeWithTag(FriendsTags.SEARCH_INPUT).performImeAction()
-        assertEquals(listOf<FriendProof>(FriendProof.Handle("ann_1")), lookups)
+        assertTrue(("ann_1" to false) in searches)
     }
 
     @Test fun textThatIsNoneOfTheThreeKindsShowsTheHintAndCannotBeLookedUp() {

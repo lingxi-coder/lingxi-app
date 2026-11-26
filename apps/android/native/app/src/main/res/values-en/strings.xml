@@ -2911,7 +2911,7 @@
     <string name="friends_link_create">Create link</string>
     <string name="friends_search_title">Find someone</string>
     <string name="friends_search_placeholder">@username, email or friend link</string>
-    <string name="friends_search_hint">Enter an exact @username, an email address or a friend link.</string>
+    <string name="friends_search_hint">Enter at least 3 username characters, an email address or a friend link.</string>
     <string name="friends_search_action">Look up</string>
     <string name="friends_relation_friends">Already friends</string>
     <string name="friends_open_chat">Open chat</string>
@@ -2932,6 +2932,7 @@
     <string name="friends_profile_find_footer">Only people who type your exact username or verified email can find you. Your email address is never shown.</string>
     <string name="friends_name_prompt">Set your name so friends recognize you.</string>
     <string name="friends_name_prompt_action">Set name</string>
+    <string name="friends_search_back">Back to results</string>
     <string name="friends_blocked_title">Blocked people</string>
     <string name="friends_blocked_empty_title">No blocked people</string>
     <string name="friends_blocked_empty_body">People you block can’t find you or send you requests. They will appear here.</string>
@@ -2947,6 +2948,7 @@
     <string name="friends_error_session">Your session expired. Sign in again.</string>
     <string name="friends_error_network">Can\'t reach the server. Check your connection and try again.</string>
     <string name="friends_error_invalid_input">Check what you entered and try again.</string>
+    <string name="friends_profile_find_handle_part">Let people find me by part of my username</string>
     <string name="friends_error_generic">Something went wrong. Try again.</string>
     <string name="friends_show_all_fmt">Show all (%1$d)</string>
     <string name="friends_now_friends_fmt">You and %1$s are now friends</string>
@@ -2959,6 +2961,7 @@
     <string name="friends_offer_invited_by_fmt">Invited by %1$s</string>
     <string name="friends_offer_expires_fmt">Expires %1$s</string>
     <string name="friends_offer_expired">Expired</string>
+    <string name="friends_error_recipient_request_limit">This person has too many pending friend requests. Try again later.</string>
     <string name="friends_offer_join">Join</string>
     <string name="friends_offer_dismiss">Dismiss</string>
     <string name="friends_offer_joined_fmt">You joined “%1$s”</string>

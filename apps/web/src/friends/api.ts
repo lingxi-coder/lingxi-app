@@ -13,9 +13,9 @@ export function webFriendsApi(user: User, db: Firestore, currentUid: () => strin
   const stops = new Set<() => void>();
   const live = () => !closed && currentUid() === user.uid;
   const request = friendsTransport('', async () => { if (!live()) throw new Error('INVALID_SESSION'); const token = await user.getIdToken(); if (!live()) throw new Error('INVALID_SESSION'); return token; });
-  const checked = async <T>(path = '', body?: unknown): Promise<T> => {
+  const checked = async <T>(path = '', body?: unknown, signal?: AbortSignal): Promise<T> => {
     if (!live()) throw new Error('INVALID_SESSION');
-    const result = await request<T>(path, body);
+    const result = await request<T>(path, body, signal);
     if (!live()) throw new Error('INVALID_SESSION');
     return result;
   };
@@ -29,7 +29,7 @@ export function webFriendsApi(user: User, db: Firestore, currentUid: () => strin
   };
   return {
     profile: () => checked<FriendProfile>('/profile'),
-    execute: <C extends FriendsCommand>(command: C) => checked('', command),
+    execute: <C extends FriendsCommand>(command: C, signal?: AbortSignal) => checked('', command, signal),
     watchCards: (next, failed) => watch<FriendCard>('friends', firestoreFriendCard, next, failed),
     watchBlocks: (next, failed) => watch<BlockEntry>('blocks', firestoreBlock, next, failed),
     watchOffers: (next, failed) => watch<TeamOffer>('teamOffers', firestoreTeamOffer, next, failed),

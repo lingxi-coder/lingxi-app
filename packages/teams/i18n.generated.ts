@@ -53,6 +53,7 @@ export type TeamsKey =
   | 'friends_error_offer_team_gone'
   | 'friends_error_offer_unavailable'
   | 'friends_error_rate_limited'
+  | 'friends_error_recipient_request_limit'
   | 'friends_error_request_limit'
   | 'friends_error_request_unavailable'
   | 'friends_error_session'
@@ -101,6 +102,7 @@ export type TeamsKey =
   | 'friends_profile_find_email'
   | 'friends_profile_find_footer'
   | 'friends_profile_find_handle'
+  | 'friends_profile_find_handle_part'
   | 'friends_profile_handle'
   | 'friends_profile_handle_hint'
   | 'friends_profile_name'
@@ -116,6 +118,7 @@ export type TeamsKey =
   | 'friends_requests_received'
   | 'friends_requests_sent'
   | 'friends_search_action'
+  | 'friends_search_back'
   | 'friends_search_hint'
   | 'friends_search_placeholder'
   | 'friends_search_title'
@@ -936,6 +939,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   friends_error_offer_team_gone: { en: 'You are no longer a member of this team.', 'zh-Hans': '你已不在此团队中。', 'zh-Hant': '你已不在此團隊中。', ja: 'あなたはもうこのチームのメンバーではありません。', ko: '더 이상 이 팀의 구성원이 아닙니다.' },
   friends_error_offer_unavailable: { en: 'This invitation is no longer available.', 'zh-Hans': '此邀请已失效。', 'zh-Hant': '此邀請已失效。', ja: 'この招待は利用できなくなりました。', ko: '이 초대는 더 이상 사용할 수 없습니다.' },
   friends_error_rate_limited: { en: 'Too many lookups or requests. Try again in a few minutes.', 'zh-Hans': '查找或添加过于频繁，请几分钟后再试。', 'zh-Hant': '尋找或新增過於頻繁，請幾分鐘後再試。', ja: '検索やリクエストが多すぎます。数分後にもう一度お試しください。', ko: '검색 또는 요청이 너무 많습니다. 몇 분 후에 다시 시도하세요.' },
+  friends_error_recipient_request_limit: { en: 'This person has too many pending friend requests. Try again later.', 'zh-Hans': '对方待处理的好友请求已达上限，请稍后再试。', 'zh-Hant': '對方待處理的好友請求已達上限，請稍後再試。', ja: '相手の保留中のフレンドリクエストが上限に達しています。時間をおいてもう一度お試しください。', ko: '상대방의 대기 중인 친구 요청이 한도에 도달했습니다. 나중에 다시 시도하세요.' },
   friends_error_request_limit: { en: 'You have 50 requests waiting. Cancel one first.', 'zh-Hans': '待处理的请求已达 50 个，请先撤销一个。', 'zh-Hant': '待處理的請求已達 50 個，請先取消一個。', ja: '保留中のリクエストが50件あります。先に1件取り消してください。', ko: '대기 중인 요청이 50개입니다. 먼저 하나를 취소하세요.' },
   friends_error_request_unavailable: { en: 'That request is no longer available.', 'zh-Hans': '该请求已不存在。', 'zh-Hant': '該請求已不存在。', ja: 'このリクエストはもう利用できません。', ko: '이 요청은 더 이상 사용할 수 없습니다.' },
   friends_error_session: { en: 'Your session expired. Sign in again.', 'zh-Hans': '登录已过期，请重新登录。', 'zh-Hant': '登入已過期，請重新登入。', ja: 'セッションの期限が切れました。もう一度サインインしてください。', ko: '세션이 만료되었습니다. 다시 로그인하세요.' },
@@ -984,6 +988,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   friends_profile_find_email: { en: 'Let people find me by email', 'zh-Hans': '允许通过邮箱找到我', 'zh-Hant': '允許透過電子郵件找到我', ja: 'メールアドレスで見つけられるようにする', ko: '이메일로 나를 찾을 수 있게 하기' },
   friends_profile_find_footer: { en: 'Only people who type your exact username or verified email can find you. Your email address is never shown.', 'zh-Hans': '只有输入你完整用户名或已验证邮箱的人才能找到你，你的邮箱地址不会被显示。', 'zh-Hant': '只有輸入你完整使用者名稱或已驗證電子郵件的人才能找到你，你的電子郵件地址不會被顯示。', ja: '正確なユーザー名または確認済みのメールアドレスを入力した人だけがあなたを見つけられます。メールアドレスは表示されません。', ko: '정확한 사용자 이름이나 인증된 이메일을 입력한 사람만 나를 찾을 수 있습니다. 이메일 주소는 표시되지 않습니다.' },
   friends_profile_find_handle: { en: 'Let people find me by username', 'zh-Hans': '允许通过用户名找到我', 'zh-Hant': '允許透過使用者名稱找到我', ja: 'ユーザー名で見つけられるようにする', ko: '사용자 이름으로 나를 찾을 수 있게 하기' },
+  friends_profile_find_handle_part: { en: 'Let people find me by part of my username', 'zh-Hans': '允许通过部分用户名找到我', 'zh-Hant': '允許透過部分使用者名稱找到我', ja: 'ユーザー名の一部で見つけられるようにする', ko: '사용자 이름의 일부로 나를 찾을 수 있게 하기' },
   friends_profile_handle: { en: 'Username', 'zh-Hans': '用户名', 'zh-Hant': '使用者名稱', ja: 'ユーザー名', ko: '사용자 이름' },
   friends_profile_handle_hint: { en: '3–24 letters, numbers or underscores. Once set, it can be changed but not removed.', 'zh-Hans': '3–24 位字母、数字或下划线。设置后可以修改，但不能移除。', 'zh-Hant': '3–24 個字母、數字或底線。設定後可以修改，但無法移除。', ja: '3〜24文字の英数字またはアンダースコア。設定後は変更できますが、削除はできません。', ko: '영문, 숫자, 밑줄 3~24자. 설정한 뒤에는 바꿀 수 있지만 삭제할 수는 없습니다.' },
   friends_profile_name: { en: 'Display name', 'zh-Hans': '显示名称', 'zh-Hant': '顯示名稱', ja: '表示名', ko: '표시 이름' },
@@ -999,7 +1004,8 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   friends_requests_received: { en: 'Received', 'zh-Hans': '收到的请求', 'zh-Hant': '收到的請求', ja: '受信したリクエスト', ko: '받은 요청' },
   friends_requests_sent: { en: 'Sent', 'zh-Hans': '已发送的请求', 'zh-Hant': '已傳送的請求', ja: '送信したリクエスト', ko: '보낸 요청' },
   friends_search_action: { en: 'Look up', 'zh-Hans': '查找', 'zh-Hant': '尋找', ja: '検索', ko: '찾기' },
-  friends_search_hint: { en: 'Enter an exact @username, an email address or a friend link.', 'zh-Hans': '请输入完整的 @用户名、邮箱地址或好友链接。', 'zh-Hant': '請輸入完整的 @使用者名稱、電子郵件地址或好友連結。', ja: '正確な @ユーザー名、メールアドレス、または友だちリンクを入力してください。', ko: '정확한 @사용자 이름, 이메일 주소 또는 친구 링크를 입력하세요.' },
+  friends_search_back: { en: 'Back to results', 'zh-Hans': '返回搜索结果', 'zh-Hant': '返回搜尋結果', ja: '検索結果に戻る', ko: '검색 결과로 돌아가기' },
+  friends_search_hint: { en: 'Enter at least 3 username characters, an email address or a friend link.', 'zh-Hans': '请输入至少 3 个用户名字符、邮箱地址或好友链接。', 'zh-Hant': '請輸入至少 3 個使用者名稱字元、電子郵件地址或好友連結。', ja: 'ユーザー名を3文字以上、メールアドレス、または友だちリンクを入力してください。', ko: '사용자 이름을 3자 이상 입력하거나 이메일 주소 또는 친구 링크를 입력하세요.' },
   friends_search_placeholder: { en: '@username, email or friend link', 'zh-Hans': '@用户名、邮箱或好友链接', 'zh-Hant': '@使用者名稱、電子郵件或好友連結', ja: '@ユーザー名、メールアドレス、友だちリンク', ko: '@사용자 이름, 이메일 또는 친구 링크' },
   friends_search_title: { en: 'Find someone', 'zh-Hans': '查找好友', 'zh-Hant': '尋找好友', ja: '友だちを探す', ko: '친구 찾기' },
   friends_section_offers: { en: 'Team invitations', 'zh-Hans': '团队邀请', 'zh-Hant': '團隊邀請', ja: 'チームへの招待', ko: '팀 초대' },

@@ -19,7 +19,7 @@ test('summary triggers: only a friend chat costs a read — other ids and unusab
   await mirrorFriendRead({ db: untouched, teamId: pair, conversationId: 'friend_chat', uid: undefined, after: { lastReadSeq: 1, generation: 1 } });
 });
 
-test('summary triggers: wired next to onTeamMessage — same region, service account and database — on the literal friend_chat path, without retry', () => {
+test('summary triggers: wired next to onTeamMessage — same region, service account and database — on the literal friend_chat path, with retry', () => {
   const base = onTeamMessage.__endpoint;
   for (const [trigger, type, document] of [[onFriendChatUpdated, 'updated', 'teams/{teamId}/conversations/friend_chat'],
     [onFriendChatRead, 'written', 'teams/{teamId}/conversations/friend_chat/reads/{uid}']]) {
@@ -29,6 +29,6 @@ test('summary triggers: wired next to onTeamMessage — same region, service acc
     assert.deepEqual(endpoint.eventTrigger.eventFilters, { database: '(default)', namespace: '(default)' });
     // The conversation id is literal, so a conversation of an ordinary Team never starts the function.
     assert.deepEqual(endpoint.eventTrigger.eventFilterPathPatterns, { document });
-    assert.equal(endpoint.eventTrigger.retry, false);
+    assert.equal(endpoint.eventTrigger.retry, true);
   }
 });

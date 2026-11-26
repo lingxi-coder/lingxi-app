@@ -135,7 +135,9 @@ export function App() {
   // A friend link waits here, in memory only (D8), until the Friends workspace of a signed-in account can take it.
   const [friendTarget, setFriendTarget] = useState<FriendLink>();
   const [teamLink, setTeamLink] = useState<TeamLinkRequest>();
-  const handledFriendCode = useCallback(() => setFriendTarget(undefined), []);
+  const handledFriendCode = useCallback((code: string) => {
+    setFriendTarget(current => current?.kind === 'add' && current.code === code ? undefined : current);
+  }, []);
   const [theme, setTheme] = useState<ThemeMode>('dark');
   const [settingsRoute, setSettingsRoute] = useState<SettingsRoute | null>(null);
   const [sessionPicker, setSessionPicker] = useState<SessionPickerRequest | null>(null);

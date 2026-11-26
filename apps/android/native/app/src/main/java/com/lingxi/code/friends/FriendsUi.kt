@@ -112,6 +112,7 @@ internal fun friendsErrorRes(error: FriendsError): Int = when (error) {
     FriendsError.RateLimited -> R.string.friends_error_rate_limited
     FriendsError.FriendLimit -> R.string.friends_error_friend_limit
     FriendsError.RequestLimit -> R.string.friends_error_request_limit
+    FriendsError.RecipientRequestLimit -> R.string.friends_error_recipient_request_limit
     FriendsError.HandleTaken -> R.string.friends_error_handle_taken
     FriendsError.RequestUnavailable -> R.string.friends_error_request_unavailable
     FriendsError.StaleRequest -> R.string.friends_error_stale_request

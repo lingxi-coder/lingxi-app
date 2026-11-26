@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, type TestContext } from 'node:test';
 import { createElement } from 'react';
+import { FriendApiError } from '../../../packages/teams/friends';
 import { friendsErrorText, offerErrorText } from '../../../packages/teams/errors';
 import type { TeamMember } from '../../../packages/teams';
 import type { MessageCommand } from '../../../packages/teams/messages';
@@ -121,6 +122,20 @@ scenario('loading, a failed load with Retry, and no friends yet', async context 
   const empty = page.byClass('tw-empty-actions')[0]!;
   await page.click(empty.findAll((node: any) => node.type === 'button')[0]);
   assert.equal(snapshot().page, 'add');
+});
+
+scenario('a pending chat shows Retry and Back after its first cards listener fails', async context => {
+  const { fake, workspace, snapshot } = friendsFixture(f => { f.quiet = true; });
+  context.after(() => workspace.close());
+  const page = await mount(workspace, view(workspace, FriendsMain)); context.after(() => page.unmount());
+  await page.during(() => workspace.openChat('bob'));
+  await page.during(() => fake.failCards('SERVICE_UNAVAILABLE'));
+  assert.ok(page.has('Retry'));
+  await page.click(page.button('Retry'));
+  assert.equal(fake.cardWatches.length, 2);
+  await page.during(() => fake.failCards('SERVICE_UNAVAILABLE'));
+  await page.click(page.button('Back'));
+  assert.equal(snapshot().page, 'home');
 });
 
 scenario('the header: Add friend, a menu with exactly Profile settings and Blocked people, and the name banner for "Member"', async context => {
@@ -262,14 +277,15 @@ const addPage = async (context: TestContext, setup: Parameters<typeof friendsFix
 
 scenario('Add friend: one field accepts a username, an email or a friend link, and anything else cannot be looked up', async context => {
   const { fake, page, field } = await addPage(context);
-  fake.lookup({ uid: 'sam', handle: 'sam' });
+  fake.searchHandles({ uid: 'sam', handle: 'sam' });
+  fake.lookup({ uid: 'sam' });
   assert.equal(page.button('Look up').props.disabled, true, 'nothing to look up');
   await page.type(field(), 'not a person!');
-  assert.equal(page.button('Look up').props.disabled, true); assert.ok(page.text().includes('Enter an exact @username, an email address or a friend link.'));
+  assert.equal(page.button('Look up').props.disabled, true); assert.ok(page.text().includes('Enter at least 3 username characters, an email address or a friend link.'));
   await page.type(field(), '@sam');
   assert.equal(page.button('Look up').props.disabled, false);
   await page.submit(page.find(node => node.type === 'form')[0]);
-  assert.deepEqual(fake.commands, [{ action: 'lookup', handle: 'sam' }]);
+  assert.deepEqual(fake.commands, [{ action: 'searchHandles', query: 'sam' }]);
   await page.type(field(), '  Sam@Example.com ');
   await page.submit(page.find(node => node.type === 'form')[0]);
   const code = 'aB0_aB0_aB0_aB0_aB0_aB0_aB0_aB0-';
@@ -278,33 +294,131 @@ scenario('Add friend: one field accepts a username, an email or a friend link, a
   assert.deepEqual(fake.commands.slice(1), [{ action: 'lookup', email: 'sam@example.com' }, { action: 'lookup', code }]);
 });
 
+scenario('username search runs after typing and drops results for a superseded query', async context => {
+  const { fake, page, field } = await addPage(context);
+  let resolveOld!: (result: unknown) => void;
+  let obsoleteSignal: AbortSignal | undefined;
+  fake.replies.set('searchHandles', (_command: unknown, signal: AbortSignal) => new Promise(resolve => {
+    resolveOld = resolve; obsoleteSignal = signal;
+  }));
+  await page.type(field(), '@lic');
+  await page.during(() => until(() => fake.commands.length === 1, 'debounced username search'));
+  assert.deepEqual(fake.commands, [{ action: 'searchHandles', query: 'lic' }]);
+
+  await page.type(field(), '@smi');
+  assert.equal(obsoleteSignal?.aborted, true);
+  fake.searchHandles({ uid: 'will', handle: 'willsmith' });
+  await page.submit(page.find(node => node.type === 'form')[0]);
+  await page.during(() => resolveOld({ results: [{ uid: 'alice', displayName: 'Alice', handle: 'alice', relation: 'none' }] }));
+  assert.ok(page.text().includes('@willsmith'));
+  assert.ok(!page.text().includes('@alice'));
+});
+
+scenario('equivalent username edits, Enter, and returning to results reuse the current result list', async context => {
+  const { fake, page, field } = await addPage(context);
+  fake.searchHandles({ uid: 'sam', handle: 'sami' }, { uid: 'sam2', handle: 'sam_2' });
+  const submit = () => page.submit(page.find(node => node.type === 'form')[0]);
+  await page.type(field(), 'sam'); await submit();
+  await page.type(field(), ' @SAM '); await submit();
+  assert.equal(page.button('Look up').props.disabled, true);
+  await page.click(page.byClass('tw-lookup-who').find(node => node.type === 'button')!);
+  await page.click(page.button('Back to results'));
+  assert.ok(page.text().includes('@sami') && page.text().includes('@sam_2'));
+  assert.equal(fake.executed('searchHandles').length, 1);
+});
+
+scenario('live search waits for the rate-limit cooldown before auto-searching new input', async context => {
+  const { fake, page, field, snapshot } = await addPage(context);
+  fake.replies.set('searchHandles', new FriendApiError('RATE_LIMITED', 429, 700));
+  await page.type(field(), 'sam'); await page.submit(page.find(node => node.type === 'form')[0]);
+  await page.type(field(), 'alex');
+  assert.equal(page.button('Look up').props.disabled, true);
+  fake.searchHandles({ uid: 'alex', handle: 'alex' });
+  await page.during(() => new Promise(resolve => setTimeout(resolve, 420)));
+  assert.equal(fake.executed('searchHandles').length, 1);
+  await page.during(() => until(() => !snapshot().handleSearchRetryUntil, 'the cooldown'));
+  await page.during(() => until(() => fake.executed('searchHandles').length === 2, 'the debounce'));
+  assert.ok(page.text().includes('@alex'));
+});
+
+scenario('an empty result can be submitted again without changing the username', async context => {
+  const { fake, page, field } = await addPage(context);
+  fake.searchHandles();
+  await page.type(field(), 'alice'); await page.submit(page.find(node => node.type === 'form')[0]);
+  assert.equal(page.button('Look up').props.disabled, false);
+  fake.searchHandles({ uid: 'alice', handle: 'alice' });
+  await page.submit(page.find(node => node.type === 'form')[0]);
+  assert.ok(page.text().includes('@alice'));
+  assert.equal(fake.executed('searchHandles').length, 2);
+});
+
+scenario('reopening Add Friend in one account preserves the search cooldown', async context => {
+  const { fake, workspace, snapshot } = friendsFixture();
+  context.after(() => workspace.close());
+  await ready(snapshot);
+  workspace.show('add');
+  const page = await mount(workspace, view(workspace, FriendsMain)); context.after(() => page.unmount());
+  const field = () => page.find(node => node.type === 'input' && node.props['aria-label'] === 'Find someone')[0];
+  fake.replies.set('searchHandles', new FriendApiError('RATE_LIMITED', 429, 5_000));
+  await page.type(field(), 'sam'); await page.submit(page.find(node => node.type === 'form')[0]);
+  await page.during(() => workspace.show('profile'));
+  await page.during(() => workspace.show('add'));
+  await page.type(field(), 'alice');
+  assert.equal(page.button('Look up').props.disabled, true);
+  await page.during(() => new Promise(resolve => setTimeout(resolve, 420)));
+  assert.equal(fake.executed('searchHandles').length, 1);
+});
+
+scenario('a pending friend confirmation keeps the selected search from being replaced', async context => {
+  const { fake, page, field } = await addPage(context);
+  fake.searchHandles({ uid: 'sam', handle: 'sam' });
+  await page.type(field(), 'sam');
+  await page.submit(page.find(node => node.type === 'form')[0]);
+  await page.click(page.byClass('tw-lookup-who').find(node => node.type === 'button')!);
+
+  let complete!: (result: unknown) => void;
+  fake.replies.set('request', () => new Promise(resolve => { complete = resolve; }));
+  await page.click(page.button('Add friend'));
+  assert.equal(field().props.disabled, true);
+  assert.equal(page.button('Back to results').props.disabled, true);
+  await page.type(field(), 'alice');
+  assert.equal(field().props.value, 'sam');
+  await page.during(() => complete({ state: 'outgoing', uid: 'sam' }));
+  assert.equal(field().props.disabled, false);
+});
+
 scenario('the result card offers the one action of the relation: add with a note, accept, request sent, or open the chat', async context => {
   const { fake, workspace, snapshot, page, field } = await addPage(context);
-  const search = async (query: string) => { await page.type(field(), query); await page.submit(page.find(node => node.type === 'form')[0]); };
+  const search = async (query: string) => {
+    await page.type(field(), '');
+    await page.type(field(), query);
+    await page.submit(page.find(node => node.type === 'form')[0]);
+    await page.click(page.byClass('tw-lookup-who').find(node => node.type === 'button')!);
+  };
   const card_ = () => page.oneByLabel('Sam');
 
-  fake.lookup({ uid: 'sam', handle: 'sam', relation: 'none' });
+  fake.searchHandles({ uid: 'sam', handle: 'sam', relation: 'none' });
   await search('@sam');
   assert.ok(textOf(card_()).includes('@sam'));
   assert.equal(page.find(node => node.type === 'textarea').length, 1, 'a note can ride a request');
   await page.type(page.find(node => node.type === 'textarea')[0], '  Met at the meetup ');
   await page.click(page.button('Add friend'));
-  const request = fake.executed('request')[0] as { via: string; handle: string; note: string; requestId: string };
-  assert.deepEqual([request.via, request.handle, request.note], ['handle', 'sam', 'Met at the meetup']); assert.ok(request.requestId);
+  const request = fake.executed('request')[0] as { via: string; handle: string; expectedUid: string; note: string; requestId: string };
+  assert.deepEqual([request.via, request.handle, request.expectedUid, request.note], ['handle', 'sam', 'sam', 'Met at the meetup']); assert.ok(request.requestId);
   assert.ok(page.text().includes('Friend request sent to Sam')); assert.equal(page.find(node => node.props.role === 'group').length, 0, 'the card is done');
   assert.equal(page.find(node => node.type === 'input' && node.props['aria-label'] === 'Find someone')[0].props.value, '', 'and the field is clear');
 
-  fake.lookup({ uid: 'sam', relation: 'outgoing' });
+  fake.searchHandles({ uid: 'sam', handle: 'sam', relation: 'outgoing' });
   await search('@sam');
   const sent = page.button('Request sent'); assert.equal(sent.props.disabled, true);
 
-  fake.lookup({ uid: 'sam', relation: 'incoming' });
+  fake.searchHandles({ uid: 'sam', handle: 'sam', relation: 'incoming' });
   await search('@sam');
   await page.click(page.button('Accept'));
   assert.equal(fake.commands.at(-1)!.action, 'accept'); assert.equal(snapshot().page, 'chat'); assert.equal(snapshot().chat?.uid, 'sam', 'accepting opens the chat');
 
   workspace.show('add'); await page.during(() => undefined);
-  fake.lookup({ uid: 'sam', relation: 'friends' });
+  fake.searchHandles({ uid: 'sam', handle: 'sam', relation: 'friends' });
   await search('@sam');
   assert.ok(page.text().includes('Already friends'));
   await page.click(page.button('Open chat'));
@@ -321,7 +435,7 @@ scenario('a friend link adds without a note; a lookup that finds nothing says so
   const redeem = fake.executed('redeem')[0] as { code: string; requestId: string };
   assert.equal(redeem.code, code); assert.ok(redeem.requestId); assert.ok(!('note' in redeem));
 
-  fake.fail('lookup', 'NOT_FOUND', 404);
+  fake.fail('searchHandles', 'NOT_FOUND', 404);
   await page.type(field(), '@nobody'); await page.submit(page.find(node => node.type === 'form')[0]);
   assert.ok(page.text().includes(friendsErrorText('NOT_FOUND', 'en')));
   await page.type(field(), '@nobody2');
@@ -330,8 +444,9 @@ scenario('a friend link adds without a note; a lookup that finds nothing says so
 
 scenario('a failed confirmation is told on the card, which stays, and retrying an unknown outcome reuses the request id', async context => {
   const { fake, page, field } = await addPage(context);
-  fake.lookup({ uid: 'sam' });
+  fake.searchHandles({ uid: 'sam', handle: 'sam' });
   await page.type(field(), '@sam'); await page.submit(page.find(node => node.type === 'form')[0]);
+  await page.click(page.byClass('tw-lookup-who').find(node => node.type === 'button')!);
   fake.fail('request', 'SERVICE_UNAVAILABLE', 503);
   await page.click(page.button('Add friend'));
   assert.ok(textOf(page.oneByLabel('Sam')).includes(friendsErrorText('SERVICE_UNAVAILABLE', 'en')));
@@ -386,7 +501,7 @@ scenario('profile settings send only what changed, keep an unset username as it 
   const inputs = () => page.find(node => node.type === 'input');
   assert.equal(save().props.disabled, true, 'nothing changed');
   assert.equal(inputs()[0].props.value, 'Alice'); assert.equal(inputs()[1].props.value, '');
-  assert.equal(inputs().filter(node => node.props.type === 'checkbox').map(node => node.props.checked).join(), 'true,false');
+  assert.equal(inputs().filter(node => node.props.type === 'checkbox').map(node => node.props.checked).join(), 'true,false,false');
 
   await page.type(inputs()[0], '   '); assert.equal(save().props.disabled, true, 'a name cannot be blank');
   await page.type(inputs()[0], 'x'.repeat(81)); assert.equal(save().props.disabled, true, 'or longer than 80');
@@ -394,14 +509,32 @@ scenario('profile settings send only what changed, keep an unset username as it 
   await page.type(inputs()[1], 'ab'); assert.equal(save().props.disabled, true, 'a username needs 3 to 24 letters, digits or underscores');
   await page.type(inputs()[1], 'ally_w');
   await page.check(inputs().filter(node => node.props.type === 'checkbox')[1], true);
+  await page.check(inputs().filter(node => node.props.type === 'checkbox')[2], true);
   fake.fail('profile', 'HANDLE_TAKEN');
   await page.submit();
-  assert.deepEqual(fake.commands, [{ action: 'profile', displayName: 'Ally', handle: 'ally_w', findByEmail: true }]);
+  assert.deepEqual(fake.commands, [{ action: 'profile', displayName: 'Ally', handle: 'ally_w', findByHandlePart: true, findByEmail: true }]);
   assert.ok(page.find(node => node.props.role === 'alert' && textOf(node) === friendsErrorText('HANDLE_TAKEN', 'en')).length === 1, 'told next to the username');
-  fake.replies.delete('profile'); fake.profile = profile({ displayName: 'Ally', handle: 'ally_w', findByEmail: true });
+  fake.replies.delete('profile'); fake.profile = profile({ displayName: 'Ally', handle: 'ally_w', findByHandlePart: true, findByEmail: true });
   await page.submit();
   assert.equal(fake.commands.length, 2); assert.equal(snapshot().profile?.displayName, 'Ally');
   assert.equal(page.find(node => node.props.role === 'alert').length, 0);
+});
+
+scenario('saving a name after a profile refresh preserves untouched discovery switches', async context => {
+  const { fake, workspace, snapshot } = friendsFixture(f => {
+    f.profile = profile({ displayName: 'Alice', findByEmail: true, findByHandlePart: true });
+  });
+  context.after(() => workspace.close());
+  await ready(snapshot);
+  const page = await mount(workspace, view(workspace, FriendProfileSettings)); context.after(() => page.unmount());
+  const inputs = () => page.find(node => node.type === 'input');
+  await page.type(inputs()[0], 'Ally');
+  fake.profile = profile({ displayName: 'Alice', findByEmail: false, findByHandlePart: false });
+  await page.during(() => workspace.refreshProfile());
+  assert.equal(inputs()[0].props.value, 'Ally');
+  assert.deepEqual(inputs().filter(node => node.props.type === 'checkbox').map(node => node.props.checked), [true, false, false]);
+  await page.submit();
+  assert.deepEqual(fake.executed('profile'), [{ action: 'profile', displayName: 'Ally' }]);
 });
 
 scenario('blocked people: newest first with Unblock, the list follows the listener, and nothing blocked says so', async context => {
@@ -532,9 +665,33 @@ scenario('a friend link is looked up, never redeemed on open, and confirmed in a
   assert.ok(textOf(dialogs(page)[0]).includes('Add “Sam” as a friend?')); assert.ok(textOf(dialogs(page)[0]).includes('Adding them makes you friends right away.'));
   assert.equal(fake.executed('redeem').length, 0, 'opening is not adding');
   await page.click(page.button('Cancel')); assert.equal(closed, 1); assert.equal(fake.executed('redeem').length, 0);
-  await page.click(page.button('Add friend'));
+  await page.unmount();
+  const reopened = await mount(workspace, view(workspace, FriendLinkDialog, { code, onClose: () => { closed++; } }));
+  context.after(() => reopened.unmount());
+  await until(() => fake.commands.length === 2, 'the second lookup');
+  await reopened.during(() => undefined);
+  await reopened.click(reopened.button('Add friend'));
   assert.equal(fake.executed('redeem').length, 1); assert.equal((fake.executed('redeem')[0] as { code: string }).code, code);
-  assert.equal(closed, 2); assert.equal(snapshot().page, 'chat', 'the new friend\'s chat opens');
+  assert.equal(closed, 2); assert.equal(snapshot().page, 'chat');
+});
+
+scenario('dismissing a pending friend link keeps its completion from opening a chat', async context => {
+  const { fake, workspace, snapshot } = friendsFixture();
+  context.after(() => workspace.close());
+  await ready(snapshot);
+  fake.lookup({ uid: 'sam', displayName: 'Sam', relation: 'none' });
+  let finish!: (result: unknown) => void;
+  fake.replies.set('redeem', () => new Promise(resolve => { finish = resolve; }));
+  let closed = 0;
+  const page = await mount(workspace, view(workspace, FriendLinkDialog, {
+    code: 'f'.repeat(32), onClose: () => { closed++; },
+  }));
+  context.after(() => page.unmount());
+  await page.click(page.button('Add friend'));
+  await page.click(page.button('Cancel'));
+  await page.during(() => finish({ uid: 'sam', state: 'friends', teamId: pairTeamId('sam') }));
+  assert.equal(closed, 1);
+  assert.equal(snapshot().page, 'home');
 });
 
 scenario('a friend link that no longer works says so; one for an existing friend offers the chat', async context => {
@@ -653,7 +810,10 @@ scenario('Join says so once and leaves the row to the listener; a failure is tol
   assert.equal(joins[0]!.requestId === joins[1]!.requestId, false, 'a definitive answer ended the id');
 
   await page.click(buttonOf(row('Beta'), 'Decline')); await page.click(buttonOf(row('Gamma'), 'Dismiss'));
-  assert.deepEqual(fake.executed('declineOffer'), [{ action: 'declineOffer', offerId: 't-2' }, { action: 'declineOffer', offerId: 't-3' }]);
+  assert.deepEqual(fake.executed('declineOffer'), [
+    { action: 'declineOffer', offerId: 't-2', expectedVersion: 'legacy-v1' },
+    { action: 'declineOffer', offerId: 't-3', expectedVersion: 'legacy-v1' },
+  ]);
   fake.emitOffers([]); await page.during(() => undefined);
   assert.ok(!page.has('Join') && !page.text().includes('Team invitations'), 'no offers, no section');
 });

@@ -16,6 +16,8 @@ final class FriendLookup {
 
     private(set) var proof: FriendProof?
     private(set) var result: FriendLookupResult?
+    private(set) var matches: [FriendLookupResult]?
+    @ObservationIgnored private var selectedFromSearch = false
     private(set) var looking = false
     private(set) var confirming = false
     /// Code of the last failed lookup or confirmation; empty when none.
@@ -48,12 +50,43 @@ final class FriendLookup {
         defer { if current == round { looking = false } }
         do {
             let found = try await friends.lookup(proof)
-            guard current == round else { return }
+            guard current == round, !Task.isCancelled else { return }
             result = found
         } catch {
-            guard current == round else { return }
+            guard current == round, !Task.isCancelled else { return }
             self.error = FriendsWorkspace.code(error)
         }
+    }
+
+    func searchHandles(_ handle: String, in friends: FriendsWorkspace) async {
+        guard !Task.isCancelled, !looking, !confirming, matches?.isEmpty != false else { return }
+        clear()
+        let current = round
+        looking = true
+        defer { if current == round { looking = false } }
+        do {
+            let found = try await friends.searchHandles(handle)
+            guard current == round, !Task.isCancelled else { return }
+            matches = found
+        } catch {
+            guard current == round, !Task.isCancelled else { return }
+            let code = FriendsWorkspace.code(error)
+            if code != "RATE_LIMITED" { self.error = code }
+        }
+    }
+
+    func select(_ found: FriendLookupResult) {
+        guard let handle = found.handle, matches?.contains(found) == true, !confirming else { return }
+        clearSelection()
+        selectedFromSearch = true
+        proof = .handle(handle)
+        result = found
+    }
+
+    func clearSelection() {
+        guard !confirming else { return }
+        selectedFromSearch = false
+        proof = nil; result = nil; error = ""; outcome = nil; note = ""; attempt = nil
     }
 
     /// The confirming tap (D7): `redeem` for a code, `accept` for someone who asked first, else `request`. Its request id
@@ -64,7 +97,8 @@ final class FriendLookup {
         let text = isCode ? "" : JSText.trim(note)
         let id = attempt.flatMap { $0.proof == proof && $0.note == text ? $0.id : nil } ?? FriendsLogic.newRequestID()
         attempt = Attempt(id: id, proof: proof, note: text)
-        let body = FriendsLogic.confirmBody(proof, lookup: result, requestId: id, note: text)
+        var body = FriendsLogic.confirmBody(proof, lookup: result, requestId: id, note: text)
+        if selectedFromSearch && body["action"] == "request" { body["expectedUid"] = result.uid }
         confirming = true; error = ""
         defer { if current == round { confirming = false } }
         do {
@@ -72,7 +106,14 @@ final class FriendLookup {
             guard current == round else { return }
             attempt = nil
             let friendsNow = body["action"] != "request" || answer.becameFriends
-            if friendsNow { friends.expectFriend(result.uid) }
+            if friendsNow {
+                friends.expectFriend(result.uid)
+            } else if selectedFromSearch {
+                matches = matches?.map { peer in
+                    peer.uid == result.uid ? FriendLookupResult(uid: peer.uid, displayName: peer.displayName,
+                                                              handle: peer.handle, relation: .outgoing) : peer
+                }
+            }
             outcome = friendsNow ? .friends : .requested
         } catch {
             guard current == round else { return }
@@ -85,6 +126,7 @@ final class FriendLookup {
     /// Editing the field, a new account or leaving the screen: everything is forgotten.
     func clear() {
         round += 1
+        matches = nil; selectedFromSearch = false
         proof = nil; result = nil; looking = false; confirming = false
         error = ""; outcome = nil; note = ""; attempt = nil
     }

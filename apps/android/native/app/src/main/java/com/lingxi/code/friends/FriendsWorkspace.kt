@@ -74,6 +74,7 @@ internal data class FriendsState(
     val profileOp: FriendsOp = FriendsOp(),
     /** The `profile` action behind the Save button. */
     val saveOp: FriendsOp = FriendsOp(),
+    val profileSaveRevision: Int = 0,
     /** `rotateCode` and `revokeCode` of the friend link card. */
     val linkOp: FriendsOp = FriendsOp(),
     /** The row actions (accept, decline, cancel, remove, block, unblock) in flight or failed, by the other person's uid. */
@@ -163,7 +164,7 @@ internal class FriendsWorkspace(
         session.cancel(); session = newSession()
         expiry = null; attempts.clear()
         listeners.values.forEach { it.remove() }; listeners.clear()
-        search.clear(); link.clear(); member.clear()
+        search.reset(); link.clear(); member.clear()
         mutable.value = FriendsState(uid = uid, nowMs = clock())
         if (uid != null) { listenCards(uid); listenBlocks(uid); listenOffers(uid) }
     }
@@ -298,7 +299,7 @@ internal class FriendsWorkspace(
         session.launch {
             try {
                 val saved = FriendProfile.parse(post(changes + ("action" to "profile")))
-                mutable.update { it.copy(profile = saved, saveOp = FriendsOp()) }
+                mutable.update { it.copy(profile = saved, saveOp = FriendsOp(), profileSaveRevision = it.profileSaveRevision + 1) }
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { mutable.update { it.copy(saveOp = FriendsOp(error = FriendsError.of(error))) } }
         }
@@ -325,17 +326,17 @@ internal class FriendsWorkspace(
     // --- request rows, the friend menu and the blocked list (D4, D10, D12) -----------------------------------
 
     /** Accept shows "now friends" once and stays on the list (D4). */
-    fun accept(otherUid: String) {
+    fun accept(otherUid: String, expectedVersion: String? = null) {
         val name = mutable.value.card(otherUid)?.displayName.orEmpty()
-        act(otherUid, "accept") { it.copy(notice = FriendsNotice.NowFriends(name)) }
+        act(otherUid, "accept", expectedVersion = expectedVersion) { it.copy(notice = FriendsNotice.NowFriends(name)) }
     }
 
-    fun decline(otherUid: String) = act(otherUid, "decline")
+    fun decline(otherUid: String, expectedVersion: String? = null) = act(otherUid, "decline", expectedVersion = expectedVersion)
 
-    fun cancel(otherUid: String) = act(otherUid, "cancel")
+    fun cancel(otherUid: String, expectedVersion: String? = null) = act(otherUid, "cancel", expectedVersion = expectedVersion)
 
     /** [onDone] runs on success: the chat of the removed friend closes. */
-    fun remove(otherUid: String, onDone: () -> Unit) = act(otherUid, "remove", onDone)
+    fun remove(otherUid: String, expectedVersion: String? = null, onDone: () -> Unit) = act(otherUid, "remove", onDone, expectedVersion)
 
     fun block(otherUid: String, onDone: () -> Unit) = act(otherUid, "block", onDone)
 
@@ -344,12 +345,16 @@ internal class FriendsWorkspace(
     fun clearRowError(otherUid: String) { mutable.update { state -> state.copy(rowOps = if (state.rowOps[otherUid]?.busy == false) state.rowOps - otherUid else state.rowOps) } }
 
     /** `{action, otherUid}`: the listeners show the result, so only the call itself is tracked, per person (a row is disabled while its action is in flight). */
-    private fun act(otherUid: String, action: String, onDone: () -> Unit = {}, success: (FriendsState) -> FriendsState = { it }) {
+    private fun act(otherUid: String, action: String, onDone: () -> Unit = {}, expectedVersion: String? = null, success: (FriendsState) -> FriendsState = { it }) {
         if (mutable.value.uid == null || mutable.value.rowOps[otherUid]?.busy == true) return
         mutable.update { it.copy(rowOps = it.rowOps + (otherUid to FriendsOp(busy = true))) }
         session.launch {
             try {
-                post(mapOf("action" to action, "otherUid" to otherUid))
+                post(buildMap {
+                    put("action", action)
+                    put("otherUid", otherUid)
+                    expectedVersion?.let { put("expectedVersion", it) }
+                })
                 mutable.update { success(it).let { state -> state.copy(rowOps = state.rowOps - otherUid) } }
                 onDone()
             } catch (error: CancellationException) { throw error }
@@ -365,16 +370,21 @@ internal class FriendsWorkspace(
      * after an unknown outcome (D18, D30). [onJoined] runs on success, with the replay of an earlier join (`alreadyMember`) counting as one:
      * the Friends tab refreshes the Teams list there, as a link join does.
      */
-    fun acceptOffer(teamId: String, onJoined: () -> Unit = {}) {
+    fun acceptOffer(teamId: String, expectedVersion: String? = null, onJoined: () -> Unit = {}) {
         val current = mutable.value
         val offer = current.offers.firstOrNull { it.teamId == teamId } ?: return
         if (current.uid == null || current.offerOps[teamId]?.busy == true || FriendsLogic.offerExpiry(offer.expiresAtMs, clock()) == OfferExpiry.Expired) return
-        val attempt = "accept:$teamId"
+        val attempt = "accept:$teamId:${expectedVersion.orEmpty()}"
         val requestId = attempts.getOrPut(attempt) { FriendsLogic.newRequestId() }
         setOfferOp(teamId, FriendsOp(busy = true))
         session.launch {
             try {
-                post(mapOf("action" to OfferAction.AcceptOffer.wire, "offerId" to teamId, "requestId" to requestId))
+                post(buildMap {
+                    put("action", OfferAction.AcceptOffer.wire)
+                    put("offerId", teamId)
+                    put("requestId", requestId)
+                    expectedVersion?.let { put("expectedVersion", it) }
+                })
                 attempts.remove(attempt)
                 mutable.update { it.copy(offerOps = it.offerOps - teamId, notice = FriendsNotice.OfferJoined(offer.teamName)) }
                 onJoined()
@@ -388,13 +398,17 @@ internal class FriendsWorkspace(
     }
 
     /** Declines an invitation, or dismisses an expired one (D27): no confirmation and no request id, and safe to repeat. The listener drops the row. */
-    fun declineOffer(teamId: String) {
+    fun declineOffer(teamId: String, expectedVersion: String? = null) {
         val current = mutable.value
         if (current.uid == null || current.offers.none { it.teamId == teamId } || current.offerOps[teamId]?.busy == true) return
         setOfferOp(teamId, FriendsOp(busy = true))
         session.launch {
             try {
-                post(mapOf("action" to OfferAction.DeclineOffer.wire, "offerId" to teamId))
+                post(buildMap {
+                    put("action", OfferAction.DeclineOffer.wire)
+                    put("offerId", teamId)
+                    expectedVersion?.let { put("expectedVersion", it) }
+                })
                 mutable.update { it.copy(offerOps = it.offerOps - teamId) }
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { setOfferOp(teamId, FriendsOp(error = FriendsError.ofOffer(OfferAction.DeclineOffer, error))) }

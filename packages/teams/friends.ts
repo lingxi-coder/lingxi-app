@@ -9,7 +9,9 @@ export type CardState = 'friends' | 'incoming' | 'outgoing';
 export type Pointer = NonNullable<TeamConversation['lastMessage']>;
 
 /** `users/{uid}/friends/{other}` as plain values: `since` in epoch milliseconds, `lastMessage` the whole Teams conversation pointer. */
+export const LEGACY_FRIEND_VERSION = 'legacy-v1';
 export interface FriendCard {
+  version?: string;
   uid: string; state: CardState; displayName: string; handle?: string; note?: string; since: number;
   /** Both only when `friends`; the generation is read from the card, never assumed. */
   teamId?: string; generation?: number;
@@ -19,31 +21,36 @@ export interface FriendCard {
 /** `users/{uid}/blocks/{other}`; `at` in epoch milliseconds. The name is the one the person had when blocked. */
 export interface BlockEntry { uid: string; at: number; displayName: string; handle?: string }
 /** `users/{uid}/teamOffers/{teamId}` as plain values: `expiresAt` in epoch milliseconds, `teamId` the document id. The names are snapshots from offer time. */
-export interface TeamOffer { teamId: string; teamName: string; fromUid: string; fromName: string; role: 'member'; expiresAt: number }
-export interface FriendProfile { uid: string; displayName: string; handle?: string; findByHandle: boolean; findByEmail: boolean; friendCode: { code: string; link: string } | null }
+export interface TeamOffer { teamId: string; teamName: string; fromUid: string; fromName: string; role: 'member'; expiresAt: number; version?: string }
+export interface FriendProfile { uid: string; displayName: string; handle?: string; findByHandle: boolean; findByEmail: boolean; findByHandlePart?: boolean; friendCode: { code: string; link: string } | null }
 /**
  * The name the backend gives an account that has none (`displayName()` in apps/firebase/src/teams.mjs), whatever the language. The server has
  * no "unnamed" flag, so this one value is the whole contract: the workspace turns it into `FriendsSnapshot.profileNameUnset` and the views
  * read that, never the text.
  */
 export const DEFAULT_MEMBER_NAME = 'Member';
-export interface LookupResult { uid: string; displayName: string; handle?: string; relation: Relation }
+export interface LookupResult { uid: string; displayName: string; handle?: string; relation: Relation; version?: string }
+export class FriendApiError extends TeamsApiError {
+  constructor(code: string, status: number, readonly retryAfterMs?: number) { super(code, status); }
+}
 
 export type FriendsCommand =
-  | { action: 'profile'; displayName?: string; handle?: string; findByHandle?: boolean; findByEmail?: boolean }
+  | { action: 'profile'; displayName?: string; handle?: string; findByHandle?: boolean; findByEmail?: boolean; findByHandlePart?: boolean }
   | { action: 'lookup'; handle: string } | { action: 'lookup'; email: string } | { action: 'lookup'; code: string } | { action: 'lookup'; teamId: string; uid: string }
-  | { action: 'request'; via: 'handle'; handle: string; requestId: string; note?: string }
+  | { action: 'searchHandles'; query: string }
+  | { action: 'request'; via: 'handle'; handle: string; expectedUid?: string; requestId: string; note?: string }
   | { action: 'request'; via: 'email'; email: string; requestId: string; note?: string }
   | { action: 'request'; via: 'team'; teamId: string; uid: string; requestId: string; note?: string }
   | { action: 'redeem'; code: string; requestId: string }
-  | { action: 'accept' | 'decline' | 'cancel' | 'remove' | 'block' | 'unblock'; otherUid: string }
+  | { action: 'accept' | 'decline' | 'cancel' | 'remove'; otherUid: string; expectedVersion?: string }
+  | { action: 'block' | 'unblock'; otherUid: string }
   | { action: 'rotateCode' | 'revokeCode' }
   | { action: 'offerTeam'; teamId: string; friendUid: string; requestId: string }
-  | { action: 'acceptOffer'; offerId: string; requestId: string }
-  | { action: 'declineOffer'; offerId: string };
+  | { action: 'acceptOffer'; offerId: string; requestId: string; expectedVersion?: string }
+  | { action: 'declineOffer'; offerId: string; expectedVersion?: string };
 interface Ok { ok: true }
 export interface FriendsResults {
-  profile: FriendProfile; lookup: LookupResult;
+  profile: FriendProfile; lookup: LookupResult; searchHandles: { results: LookupResult[] };
   request: { uid: string; state: 'outgoing' } | { uid: string; state: 'friends'; teamId: string };
   redeem: { state: 'friends'; uid: string; teamId: string };
   accept: { state: 'friends'; teamId: string };
@@ -63,7 +70,7 @@ export type FriendsResult<C extends FriendsCommand> = FriendsResults[C['action']
 export interface FriendsApi {
   /** `GET /v1/friends/profile`: creates the profile and the first friend code on first use. */
   profile(): Promise<FriendProfile>;
-  execute<C extends FriendsCommand>(command: C): Promise<FriendsResult<C>>;
+  execute<C extends FriendsCommand>(command: C, signal?: AbortSignal): Promise<FriendsResult<C>>;
   /** The whole `users/{uid}/friends` collection on every change. `failed` (an error code) ends the watch. Returns the stop function. */
   watchCards(next: (cards: FriendCard[]) => void, failed: (code: string) => void): () => void;
   watchBlocks(next: (blocks: BlockEntry[]) => void, failed: (code: string) => void): () => void;
@@ -76,6 +83,8 @@ export interface FriendsApi {
 export interface DesktopFriendsApi {
   profile(uid: string): Promise<FriendProfile>;
   execute<C extends FriendsCommand>(uid: string, command: C): Promise<FriendsResult<C>>;
+  searchHandles?(uid: string, query: string, requestId: string): Promise<{ value?: FriendsResults['searchHandles']; error?: string; retryAfterMs?: number }>;
+  cancelSearch?(uid: string, requestId: string): Promise<void>;
   watchCards(uid: string, next: (cards: FriendCard[]) => void, failed: (code: string) => void): () => void;
   watchBlocks(uid: string, next: (blocks: BlockEntry[]) => void, failed: (code: string) => void): () => void;
   watchOffers(uid: string, next: (offers: TeamOffer[]) => void, failed: (code: string) => void): () => void;
@@ -84,13 +93,17 @@ export interface DesktopFriendsApi {
 
 /** `teamsTransport` for `/v1/friends`: the profile is `friends('/profile')`, every action is `friends('', command)`. */
 export function friendsTransport(base: string, token: () => Promise<string>, fetcher: typeof fetch = fetch) {
-  return async <T>(path = '', body?: unknown): Promise<T> => {
+  return async <T>(path = '', body?: unknown, signal?: AbortSignal): Promise<T> => {
+    signal?.throwIfAborted();
     const credential = await token();
+    signal?.throwIfAborted();
+    const timeout = AbortSignal.timeout(20000);
     const response = await fetcher(`${base}/v1/friends${path}`, { method: body === undefined ? 'GET' : 'POST',
       headers: { Authorization: `Bearer ${credential}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }), cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(20000) });
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }), cache: 'no-store', redirect: 'error', signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
     const value = await response.json();
-    if (!response.ok) throw new TeamsApiError(value?.error?.code ?? 'SERVICE_UNAVAILABLE', response.status);
+    if (!response.ok) throw new FriendApiError(value?.error?.code ?? 'SERVICE_UNAVAILABLE', response.status,
+      Number.isFinite(value?.error?.retryAfterMs) ? value.error.retryAfterMs : undefined);
     return value as T;
   };
 }
@@ -200,7 +213,7 @@ export const invitePicker = <T extends FriendCard>(cards: readonly T[], memberUi
 
 // ─── One field, three kinds (D6, D7) ────────────────────────────────────────
 
-export type Proof = { kind: 'handle'; handle: string } | { kind: 'email'; email: string } | { kind: 'code'; code: string } | { kind: 'team'; teamId: string; uid: string };
+export type Proof = { kind: 'handle'; handle: string; expectedUid?: string } | { kind: 'email'; email: string } | { kind: 'code'; code: string } | { kind: 'team'; teamId: string; uid: string };
 export type Query = Exclude<Proof, { kind: 'team' }> | { kind: 'invalid' };
 
 /** The friend code of a bare code or of a friend link, or null. A link has exactly the one `code` parameter. */
@@ -245,7 +258,7 @@ export function lookupBody(proof: Proof): LookupBody {
 export function confirmBody(proof: Proof, requestId: string, note = ''): ConfirmBody {
   const extra = note.trim() ? { note: note.trim() } : {};
   switch (proof.kind) {
-    case 'handle': return { action: 'request', via: 'handle', handle: proof.handle, requestId, ...extra };
+    case 'handle': return { action: 'request', via: 'handle', handle: proof.handle, ...(proof.expectedUid ? { expectedUid: proof.expectedUid } : {}), requestId, ...extra };
     case 'email': return { action: 'request', via: 'email', email: proof.email, requestId, ...extra };
     case 'team': return { action: 'request', via: 'team', teamId: proof.teamId, uid: proof.uid, requestId, ...extra };
     case 'code': return { action: 'redeem', code: proof.code, requestId };
@@ -258,6 +271,7 @@ export const relationAction = (relation: Relation): 'add' | 'accept' | 'sent' | 
 
 const ERROR_KEYS = new Map<string, TeamsKey>([
   ['NOT_FOUND', 'friends_error_not_found'], ['RATE_LIMITED', 'friends_error_rate_limited'], ['FRIEND_LIMIT', 'friends_error_friend_limit'],
+  ['RECIPIENT_REQUEST_LIMIT', 'friends_error_recipient_request_limit'],
   ['REQUEST_LIMIT', 'friends_error_request_limit'], ['HANDLE_TAKEN', 'friends_error_handle_taken'], ['REQUEST_UNAVAILABLE', 'friends_error_request_unavailable'],
   ['STALE_REQUEST', 'friends_error_stale_request'], ['SIGN_IN_REQUIRED', 'friends_error_session'], ['INVALID_SESSION', 'friends_error_session'],
   ['SERVICE_UNAVAILABLE', 'friends_error_network'], ['INVALID_INPUT', 'friends_error_invalid_input'], ['INVALID_JSON', 'friends_error_invalid_input'],

@@ -138,7 +138,7 @@ message of every Team). The handlers still require a `teamId` starting `f_`, a t
 event (two distinct member uids, whole-number counters), and return before any read otherwise. A message costs one
 invocation (three reads, at most two writes); a read mark costs one (three reads, at most one write).
 
-Events are at-least-once and unordered, and neither function sets `retry`. Each write is a transaction that reads the card
+Events are at-least-once and unordered, and both functions retry failed writes. Each write is a transaction that reads the card
 first, which keeps it correct:
 
 - It writes only while the card is still this friendship: `state: 'friends'` with `teamId` equal to the event's team. After
@@ -160,9 +160,10 @@ before the catalog rewrite.
 
 | Action | Body | Result |
 | --- | --- | --- |
-| `profile` | `{displayName?, handle?, findByHandle?, findByEmail?}`; empty reads (and on first use creates) | `{uid, displayName, handle?, findByHandle, findByEmail, friendCode: {code, link} \| null}` |
+| `profile` | `{displayName?, handle?, findByHandle?, findByEmail?, findByHandlePart?}`; empty reads (and on first use creates) | `{uid, displayName, handle?, findByHandle, findByEmail, findByHandlePart, friendCode: {code, link} \| null}` |
 | `lookup` | exactly one of `handle`, `email`, `code`, or `teamId` with `uid` | `{uid, displayName, handle?, relation: none\|friends\|incoming\|outgoing}` |
-| `request` | `{requestId, note?, via: handle\|email\|team}` plus the proof for `via`: `handle`, `email`, or `teamId` with `uid` | `{uid, state: 'outgoing'}` or `{uid, state: 'friends', teamId}` (`uid` is who the proof resolved to) |
+| `searchHandles` | `{query}`, 3–24 username characters | `{results}`, up to 10 lookup cards |
+| `request` | `{requestId, note?, via: handle\|email\|team}` plus the proof for `via`: `handle`, `email`, or `teamId` with `uid`. Handle requests can also send `expectedUid` to bind the proof to the selected account | `{uid, state: 'outgoing'}` or `{uid, state: 'friends', teamId}` (`uid` is who the proof resolved to) |
 | `accept` | `{otherUid}` | `{state: 'friends', teamId}` |
 | `decline`, `cancel` | `{otherUid}` | `{ok: true}` |
 | `redeem` | `{code, requestId}` | `{state: 'friends', uid, teamId}` |
@@ -199,9 +200,12 @@ none ──request──▶ pending(requester) ──accept (receiver)──▶ 
   retry; asking again uses a new id.
 - `accept`, a mutual `request` and `redeem` create the pair team (`epoch + 1`), both cards and the friendship in one
   transaction. A repeated accept returns the existing `teamId`.
+- Request and offer rows carry an opaque version. Clients send it as `expectedVersion` when accepting, declining,
+  cancelling or dismissing a row. Removal uses the pair team ID as `expectedVersion`. Older clients may omit the field
+  during rollout. An accepted request's version still works for an idempotent repeat of that acceptance.
 - `block` writes `users/{uid}/blocks/{other}` as `{at, displayName, handle?}` (once; a repeat keeps the first entry), ends
-  the friendship or pending request in both directions and deletes the pair team in the same transaction. The name is the
-  person's profile, else the name already on the caller's card for them, else `Member`, as every transition reads it, so
+  the friendship or pending request in both directions and deletes the pair team in the same transaction. The name comes from
+  a current friend's profile, the caller's existing request card, or the generic `Member` fallback, so
   a Blocked list can show names on any device. `unblock` only deletes the block; it restores nothing and either side may
   ask again.
 
@@ -281,6 +285,10 @@ offer to oneself) and 429 `RATE_LIMITED`:
   - `code`: the code is the consent and the owner's profile exists; the flags are ignored;
   - `teamId` + `uid`: both must be current members of the same active team, with or without a profile; the flags are
     ignored.
+- **Username search** looks up the full handle first, scans the indexed prefix range, and fills any remaining slots from ordered substring matches. It checks visibility in bounded batches and keeps a small substring budget when prefix matches consume the regular candidate limit. If the substring index is unavailable, already validated results can still be returned.
+  Partial matches require `findByHandlePart`, which defaults to false. Disabling exact handle discovery also turns off
+  partial discovery. The service updates the case-folded substring index with the profile and rechecks discoverability
+  and both directions of blocking before returning any card. Search has its own per-account budget of 60 calls per minute. A 429 search response includes `error.retryAfterMs`.
 - **A request carries the same proof**, never a bare uid: `{via: 'handle', handle}`, `{via: 'email', email}` or
   `{via: 'team', teamId, uid}`, and any other combination (a `targetUid`, a `uid` without a `teamId`, two proofs) is
   `INVALID_INPUT`. The server resolves the owner as `lookup` does, with one shared rule: the handle lock is read inside
@@ -301,7 +309,7 @@ offer to oneself) and 429 `RATE_LIMITED`:
 ## Limits
 
 500 friends per user (checked for both sides on accept, mutual request and redeem: `FRIEND_LIMIT`), 50 outgoing
-requests per user (`REQUEST_LIMIT`; incoming requests are not capped, the receiver can block), display name 80
+requests per sender (`REQUEST_LIMIT`) and 500 incoming requests per recipient (`RECIPIENT_REQUEST_LIMIT`), display name 80
 characters. `lookup` is limited to 30 per rolling 10 minutes per user; `request` and `redeem` (which push to the other
 user, and resolve a proof) share a separate 30 per 10 minutes, so discovery through `request` is limited too. Misses
 count, a refused call is not recorded, and a window closes by itself (`friendLimits` documents are also pruned daily).
@@ -377,7 +385,7 @@ push), `friends.rules.emulator.test.mjs` (client access, offers, unfriend closin
 `teams.members.emulator.test.mjs`) and `friend-summary.emulator.test.mjs`
 (summary create/edit/recall, duplicate and out-of-order events, read marks, unfriend and re-friend, non-pair data) are
 part of the first `test:teams` command. `friend-summary.test.mjs` runs without the emulator: it checks that other team
-and conversation ids cost no read and the trigger wiring (paths, region, service account, no retry).
+and conversation ids cost no read and the trigger wiring (paths, region, service account, retry).
 
 Not built: client UI (see [FRIENDS-CLIENTS.md](FRIENDS-CLIENTS.md)), account-deletion cleanup of friendships and offers,
 cleanup of offers when their team is deleted, and rename fan-out.

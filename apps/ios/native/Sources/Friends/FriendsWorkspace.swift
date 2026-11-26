@@ -91,6 +91,7 @@ final class FriendsWorkspace {
     private(set) var notice: String?
     /// Increments whenever the account changes or the workspace stops; views drop open confirmations.
     private(set) var authority = 0
+    private(set) var handleSearchRetryAt: ContinuousClock.Instant?
     /// The open friend chat, `nil` when none is open or it is not available.
     private(set) var chat: Chat?
     /// The friend whose chat the Friends tab has on its stack.
@@ -126,7 +127,7 @@ final class FriendsWorkspace {
     @ObservationIgnored private var expiryTask: Task<Void, Never>?
     /// The `requestId` of each `acceptOffer` whose outcome is unknown, by team id (D30): reused by the retry, dropped by any verdict,
     /// never written anywhere.
-    @ObservationIgnored private var offerAttempts: [String: String] = [:]
+    @ObservationIgnored private var offerAttempts: [String: (version: String, id: String)] = [:]
     /// The unsent text of each friendship's chat by pair team id, kept while the chat is closed (in memory, as the Teams drafts
     /// are). A re-friend gets a new pair team and so a fresh composer.
     @ObservationIgnored private var chatDrafts: [String: TeamComposerDraft] = [:]
@@ -204,6 +205,7 @@ final class FriendsWorkspace {
     /// D19: the listeners, the timer and the open chat stop, and cards, offers, profile, name overrides and notices are forgotten.
     private func reset() {
         authority += 1
+        handleSearchRetryAt = nil
         cardsListener?.remove(); cardsListener = nil
         blocksListener?.remove(); blocksListener = nil
         offersListener?.remove(); offersListener = nil
@@ -396,14 +398,17 @@ final class FriendsWorkspace {
 
     /// Accept, decline or cancel one request (D4). The row is disabled meanwhile; the listener removes it.
     func respond(_ action: RequestAction, to card: FriendCard) async {
-        let done = await perform(["action": action.rawValue, "otherUid": card.uid], on: card.uid)
+        let done = await perform(["action": action.rawValue, "otherUid": card.uid,
+                                  "expectedVersion": card.version ?? FriendsLogic.legacyVersion], on: card.uid)
         if done, action == .accept { show(notice: String(localized: "friends_now_friends \(card.displayName)")) }
     }
 
     /// `remove`, `block` or `unblock` (D10, D12). `true` when it was applied.
     @discardableResult
-    func end(_ action: String, with otherUID: String) async -> Bool {
-        await perform(["action": action, "otherUid": otherUID], on: otherUID)
+    func end(_ action: String, with otherUID: String, pairID: String? = nil) async -> Bool {
+        var body = ["action": action, "otherUid": otherUID]
+        if action == "remove" { body["expectedVersion"] = pairID }
+        return await perform(body, on: otherUID)
     }
 
     private func perform(_ body: [String: String], on key: String) async -> Bool {
@@ -445,12 +450,15 @@ final class FriendsWorkspace {
     func acceptOffer(_ offer: TeamOffer) async -> Bool {
         guard started, uid != nil, !offerBusy.contains(offer.teamId) else { return false }
         let life = lifecycle, key = offer.teamId
-        let requestID = offerAttempts[key] ?? FriendsLogic.newRequestID()
-        offerAttempts[key] = requestID
+        let version = offer.version ?? FriendsLogic.legacyVersion
+        let requestID = offerAttempts[key].flatMap { $0.version == version ? $0.id : nil } ?? FriendsLogic.newRequestID()
+        offerAttempts[key] = (version, requestID)
         offerBusy.insert(key); offerFailures[key] = nil
         defer { if life == lifecycle { offerBusy.remove(key) } }
         do {
-            let _: FriendCommandResult = try await call(body: FriendsLogic.acceptOfferBody(offerID: key, requestID: requestID))
+            var body = FriendsLogic.acceptOfferBody(offerID: key, requestID: requestID)
+            body["expectedVersion"] = version
+            let _: FriendCommandResult = try await call(body: body)
             guard life == lifecycle else { return false }
             offerAttempts[key] = nil
             return true
@@ -471,7 +479,9 @@ final class FriendsWorkspace {
         offerBusy.insert(key); offerFailures[key] = nil
         defer { if life == lifecycle { offerBusy.remove(key) } }
         do {
-            let _: FriendCommandResult = try await call(body: FriendsLogic.declineOfferBody(offerID: key))
+            var body = FriendsLogic.declineOfferBody(offerID: key)
+            body["expectedVersion"] = offer.version ?? FriendsLogic.legacyVersion
+            let _: FriendCommandResult = try await call(body: body)
         } catch {
             if life == lifecycle { offerFailures[key] = OfferFailure(action: .declineOffer, code: Self.code(error)) }
         }
@@ -481,6 +491,31 @@ final class FriendsWorkspace {
 
     func lookup(_ proof: FriendProof) async throws -> FriendLookupResult {
         try await call(body: FriendsLogic.lookupBody(proof))
+    }
+
+    func searchHandles(_ query: String) async throws -> [FriendLookupResult] {
+        struct Response: Decodable { let results: [FriendLookupResult] }
+        if let deadline = handleSearchRetryAt, ContinuousClock.now < deadline {
+            throw TeamMessageFailure(code: "RATE_LIMITED")
+        }
+        let life = lifecycle
+        do {
+            let response: Response = try await call(body: ["action": "searchHandles", "query": query])
+            return response.results
+        } catch let failure as TeamMessageFailure where failure.code == "RATE_LIMITED" {
+            if life == lifecycle {
+                let wait = min(60_000, max(1, failure.retryAfterMs ?? 60_000))
+                let deadline = ContinuousClock.now + .milliseconds(wait)
+                handleSearchRetryAt = max(handleSearchRetryAt ?? deadline, deadline)
+            }
+            throw failure
+        }
+    }
+
+    func endHandleSearchCooldown(at deadline: ContinuousClock.Instant) -> Bool {
+        guard handleSearchRetryAt == deadline, deadline <= ContinuousClock.now else { return false }
+        handleSearchRetryAt = nil
+        return true
     }
 
     func command(_ body: [String: String]) async throws -> FriendCommandResult {
@@ -594,7 +629,9 @@ final class FriendsWorkspace {
         guard auth.currentUser?.uid == uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            throw TeamMessageFailure(code: (object?["error"] as? [String: Any])?["code"] as? String ?? "SERVICE_UNAVAILABLE")
+            let failure = object?["error"] as? [String: Any]
+            throw TeamMessageFailure(code: failure?["code"] as? String ?? "SERVICE_UNAVAILABLE",
+                                     retryAfterMs: failure?["retryAfterMs"] as? Int)
         }
         return try JSONDecoder().decode(T.self, from: data)
     }

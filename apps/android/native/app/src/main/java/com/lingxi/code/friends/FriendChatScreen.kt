@@ -77,6 +77,13 @@ internal fun FriendChatScreen(
     val card = state.friendCard(friendUid)
     val pair = card?.pair
     when {
+        state.cardsFailed && pair == null -> TeamsMessageState(
+            stringResource(R.string.friends_chat_unavailable), modifier,
+            action = {
+                Button(onClick = workspace::retry) { Text(stringResource(R.string.common_retry)) }
+                TextButton(onClick = onBack) { Text(stringResource(R.string.remote_back)) }
+            },
+        )
         !state.cardsLoaded -> Box(modifier.fillMaxSize().testTag(FriendsTags.LOADING), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         card == null || pair == null -> ChatUnavailable(showBack, onBack, modifier)
         else -> FriendChat(workspace, state, uid, card, pair, showBack, onBack, modifier, initialConversation)
@@ -167,7 +174,7 @@ private fun FriendChat(
                 block = block, name = card.displayName.ifEmpty { stringResource(R.string.teams_member) }, op = state.rowOps[friendUid],
                 onConfirm = {
                     val done = { dialog = ""; onBack() }
-                    if (block) workspace.block(friendUid, done) else workspace.remove(friendUid, done)
+                    if (block) workspace.block(friendUid, done) else workspace.remove(friendUid, pair.teamId, done)
                 },
                 onDismiss = { dialog = ""; workspace.clearRowError(friendUid) },
             )

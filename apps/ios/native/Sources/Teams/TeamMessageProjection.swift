@@ -243,7 +243,15 @@ struct TeamMessageProjection: Codable, Equatable, Sendable {
     var commands: [TeamExecutionIntent]? = nil
 
 }
-struct TeamMessageFailure: Error { let code: String }
+struct TeamMessageFailure: Error {
+    let code: String
+    let retryAfterMs: Int?
+
+    init(code: String, retryAfterMs: Int? = nil) {
+        self.code = code
+        self.retryAfterMs = retryAfterMs
+    }
+}
 
 /// Only pending HTTP commands survive restart. Firestore owns the message cache.
 actor TeamCommandFiles {

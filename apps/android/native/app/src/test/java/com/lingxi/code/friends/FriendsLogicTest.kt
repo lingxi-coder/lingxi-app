@@ -437,7 +437,7 @@ class FriendsLogicTest {
 
     @Test fun errorCodesMapToKeysAndKnownOutcomes() {
         val rows = FriendsVectors.rows("errors")
-        assertEquals(21, rows.size)
+        assertEquals(22, rows.size)
         for (row in rows) {
             val code = row.getString("code")
             val error = FriendsError.of(code)

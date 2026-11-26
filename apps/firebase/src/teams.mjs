@@ -375,7 +375,9 @@ export function createTeamsHandler({ store, friends, inbox, data, datasets, data
       if (error instanceof SharedBotError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof HostedBotServiceError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof LingxiDataError) return reply({ error: { code: error.code } }, error.status);
-      if (error instanceof TeamsError) return reply({ error: { code: error.code } }, error.status);
+      if (error instanceof TeamsError) return reply({ error: {
+        code: error.code, ...(error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}),
+      } }, error.status);
       if (error instanceof TeamConversationError) return reply({ error: { code: error.code } }, error.status);
       return reply({ error: { code: 'SERVICE_UNAVAILABLE' } }, 503);
     }

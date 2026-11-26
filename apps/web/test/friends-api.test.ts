@@ -92,6 +92,8 @@ test('one bad card never fails the list: a pointer that is not whole counts as a
   assert.equal(firestoreFriendCard('bob', { ...base, lastMessage: { id: 'm1', seq: 4 } })!.lastMessage, undefined, 'a half pointer is no message');
   assert.equal(firestoreFriendCard('bob', { ...base, lastMessage: 'text' })!.lastMessage, undefined);
   assert.equal(firestoreFriendCard('bob', { ...base, lastMessage: { ...pointer, at: null } })!.lastMessage?.at, null, 'a pointer the server has not stamped yet');
+  assert.equal(firestoreFriendCard('bob', { ...base, unreadCount: 3 })!.unreadCount, undefined);
+  assert.equal(firestoreFriendCard('bob', { ...base, unreadCount: 2, unreadConversationId: 'friend_chat' })!.unreadCount, 2);
   for (const counter of [-1, 1.5, '3', null, Number.NaN, 2 ** 60]) {
     const value = firestoreFriendCard('bob', { ...base, lastSeq: counter, lastReadSeq: counter, lastChangeSeq: counter })!;
     assert.deepEqual([value.lastSeq, value.lastReadSeq, value.lastChangeSeq], [undefined, undefined, undefined], String(counter));

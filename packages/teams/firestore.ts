@@ -4,7 +4,7 @@ import { parseDataRef } from './lingxi-data.js';
 import { parseVisualization } from './visualization.js';
 import type { DocumentData, Firestore, FirestoreError } from 'firebase/firestore';
 import { ATTACHMENT_TYPES, type MessageAttachment } from './attachments.js';
-import type { BlockEntry, FriendCard, TeamOffer } from './friends.js';
+import { FRIEND_CHAT, type BlockEntry, type FriendCard, type TeamOffer } from './friends.js';
 import type { ListApproval, ListApprovalChange, MessageScope, MessageSnapshot, TeamConversation, TeamMessage } from './messages.js';
 
 function timestamp(value: unknown): string | null {
@@ -52,9 +52,11 @@ export function firestoreFriendCard(uid: string, value: DocumentData): FriendCar
   if (!['friends', 'incoming', 'outgoing'].includes(value.state) || typeof value.displayName !== 'string') return undefined;
   let lastMessage: TeamConversation['lastMessage'];
   try { lastMessage = firestoreLastMessage(value.lastMessage ?? null); } catch { /* Not the whole pointer: the card has no message. */ }
-  return defined({ uid, state: value.state, displayName: value.displayName, handle: nonEmpty(value.handle), note: nonEmpty(value.note), since: millis(value.since),
+  return defined({ uid, state: value.state, displayName: value.displayName, handle: nonEmpty(value.handle), note: nonEmpty(value.note), since: millis(value.since), version: nonEmpty(value.version),
     teamId: nonEmpty(value.teamId), generation: count(value.generation) || undefined, lastSeq: count(value.lastSeq), lastReadSeq: count(value.lastReadSeq),
-    lastChangeSeq: count(value.lastChangeSeq), unreadCount: count(value.unreadCount), lastMessage });
+    lastChangeSeq: count(value.lastChangeSeq),
+    // Older counts may have come from a Bot DM. The chat's own sequence and read mark are the fallback.
+    unreadCount: value.unreadConversationId === FRIEND_CHAT ? count(value.unreadCount) : undefined, lastMessage });
 }
 
 /** `users/{uid}/blocks/{other}` -> entry. The name may be missing on an entry made before names were kept. */
@@ -69,7 +71,7 @@ export function firestoreBlock(uid: string, value: DocumentData): BlockEntry {
 export function firestoreTeamOffer(id: string, value: DocumentData): TeamOffer | undefined {
   const { teamId, teamName, fromUid, fromName } = value, expires = timestamp(value.expiresAt);
   if (![teamId, teamName, fromUid, fromName].every(field => typeof field === 'string') || !expires) return undefined;
-  return { teamId: id, teamName, fromUid, fromName, role: 'member', expiresAt: Date.parse(expires) };
+  return defined<TeamOffer>({ teamId: id, teamName, fromUid, fromName, role: 'member', expiresAt: Date.parse(expires), version: nonEmpty(value.version) });
 }
 
 /** `profiles/{uid}` -> the two fields a friend can change (D10), or `null` when the profile cannot be read. */

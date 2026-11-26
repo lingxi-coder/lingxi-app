@@ -19,6 +19,7 @@ struct FriendChatView: View {
     }
 
     @State private var pending: Pending?
+    @State private var removePairID: String?
     @State private var viewing = false
     /// The Teams layer found no `friend_chat` for the viewer any more: the friendship is over.
     @State private var gone = false
@@ -57,6 +58,7 @@ struct FriendChatView: View {
     private enum Phase {
         case chat(FriendCard, FriendsWorkspace.Chat)
         case loading
+        case failed
         case unavailable
     }
 
@@ -65,6 +67,7 @@ struct FriendChatView: View {
         let chat = friends.chat(for: uid)
         if gone || chat?.ended == true { return .unavailable }
         if let friend, let chat { return .chat(friend, chat) }
+        if friends.cardsFailed { return .failed }
         // The card is there but the chat is not open yet, or the new friendship's card has not arrived.
         return friend != nil || friends.expecting.contains(uid) ? .loading : .unavailable
     }
@@ -80,6 +83,11 @@ struct FriendChatView: View {
         case .loading:
             FriendChatLoadingView()
                 .navigationTitle(friends.friend(uid)?.displayName ?? "")
+        case .failed:
+            TeamsStateView(systemImage: "exclamationmark.triangle", title: "friends_load_error") {
+                Button("common_retry") { friends.reload() }
+                Button("remote_back", action: onClose)
+            }
         case .unavailable:
             FriendChatUnavailableView(onClose: onClose)
         }
@@ -98,7 +106,7 @@ struct FriendChatView: View {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 Button("friends_menu_view_profile", systemImage: "person.text.rectangle") { viewing = true }
-                Button("friends_menu_remove", systemImage: "person.badge.minus", role: .destructive) { pending = .remove }
+                Button("friends_menu_remove", systemImage: "person.badge.minus", role: .destructive) { removePairID = friend.teamId; pending = .remove }
                 Button("friends_menu_block", systemImage: "hand.raised", role: .destructive) { pending = .block }
             } label: {
                 Image(systemName: "person.crop.circle")
@@ -117,8 +125,9 @@ struct FriendChatView: View {
     }
 
     private func confirm(_ action: Pending) {
+        let pairID = removePairID
         Task {
-            if await friends.end(action == .remove ? "remove" : "block", with: uid) { onClose() }
+            if await friends.end(action == .remove ? "remove" : "block", with: uid, pairID: pairID) { onClose() }
         }
     }
 

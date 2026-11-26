@@ -271,7 +271,7 @@ final class FriendsLogicTests: XCTestCase {
 
     func testErrorCodesMapToKeysAndKnownOutcomes() throws {
         let rows = try FriendsVectors.rows("errors")
-        XCTAssertEqual(rows.count, 21)
+        XCTAssertEqual(rows.count, 22)
         for row in rows {
             let code = try XCTUnwrap(row["code"] as? String)
             XCTAssertEqual(FriendsLogic.errorKey(code), row["key"] as? String, "'\(code)'")

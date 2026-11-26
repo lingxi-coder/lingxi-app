@@ -35816,6 +35816,40 @@
         }
       }
     },
+    "friends_error_recipient_request_limit": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "对方待处理的好友请求已达上限，请稍后再试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "對方待處理的好友請求已達上限，請稍後再試。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This person has too many pending friend requests. Try again later."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "相手の保留中のフレンドリクエストが上限に達しています。時間をおいてもう一度お試しください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "상대방의 대기 중인 친구 요청이 한도에 도달했습니다. 나중에 다시 시도하세요."
+          }
+        }
+      }
+    },
     "friends_error_request_limit": {
       "localizations": {
         "zh-Hans": {
@@ -37652,6 +37686,40 @@
         }
       }
     },
+    "friends_profile_find_handle_part": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许通过部分用户名找到我"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允許透過部分使用者名稱找到我"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Let people find me by part of my username"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ユーザー名の一部で見つけられるようにする"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "사용자 이름의 일부로 나를 찾을 수 있게 하기"
+          }
+        }
+      }
+    },
     "friends_profile_handle": {
       "localizations": {
         "zh-Hans": {
@@ -38230,36 +38298,70 @@
         }
       }
     },
-    "friends_search_hint": {
+    "friends_search_back": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请输入完整的 @用户名、邮箱地址或好友链接。"
+            "value": "返回搜索结果"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "請輸入完整的 @使用者名稱、電子郵件地址或好友連結。"
+            "value": "返回搜尋結果"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Enter an exact @username, an email address or a friend link."
+            "value": "Back to results"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "正確な @ユーザー名、メールアドレス、または友だちリンクを入力してください。"
+            "value": "検索結果に戻る"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "정확한 @사용자 이름, 이메일 주소 또는 친구 링크를 입력하세요."
+            "value": "검색 결과로 돌아가기"
+          }
+        }
+      }
+    },
+    "friends_search_hint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请输入至少 3 个用户名字符、邮箱地址或好友链接。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "請輸入至少 3 個使用者名稱字元、電子郵件地址或好友連結。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter at least 3 username characters, an email address or a friend link."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ユーザー名を3文字以上、メールアドレス、または友だちリンクを入力してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "사용자 이름을 3자 이상 입력하거나 이메일 주소 또는 친구 링크를 입력하세요."
           }
         }
       }

@@ -78,7 +78,7 @@ struct FriendsTab: View {
                 if uid != nil { consume() }
             }
             .onChange(of: friends.cardsLoaded) { _, _ in consume(); consumeInbox() }
-            .onChange(of: friends.cardsFailed) { _, _ in consume() }
+            .onChange(of: friends.cardsFailed) { _, _ in consume(); consumeInbox() }
             .onChange(of: path) { _, _ in
                 reportDepth()
                 syncChat()
@@ -144,13 +144,17 @@ struct FriendsTab: View {
 
     @ViewBuilder
     private func destination(_ route: FriendsRoute) -> some View {
+        let authority = friends.authority
+        let closeIfCurrent = { if isCurrent(route, authority: authority) { close() } }
         switch route {
         case let .chat(uid):
-            FriendChatView(uid: uid, onClose: close, onBots: { push(.bots(uid)) })
+            FriendChatView(uid: uid, onClose: closeIfCurrent, onBots: { push(.bots(uid)) })
         case let .bots(uid):
-            FriendBotsView(uid: uid, onOpenBot: { openBotChat(uid, $0) }, onBack: { open(.chat(uid)) }, onClose: close)
+            FriendBotsView(uid: uid, onOpenBot: { conversationID in
+                if isCurrent(route, authority: authority) { openBotChat(uid, conversationID) }
+            }, onBack: { open(.chat(uid)) }, onClose: closeIfCurrent)
         case let .botChat(uid, conversationID):
-            FriendBotChatView(uid: uid, conversationID: conversationID, onBack: { open(.chat(uid)) }, onClose: close)
+            FriendBotChatView(uid: uid, conversationID: conversationID, onBack: { open(.chat(uid)) }, onClose: closeIfCurrent)
         case .add:
             AddFriendView(onOpenChat: { open(.chat($0)) })
         case .profile:
@@ -185,7 +189,7 @@ struct FriendsTab: View {
     // MARK: Navigation
 
     private func open(_ route: FriendsRoute) {
-        if wide { pane = route } else { path = [route] }
+        if wide { pane = route } else { path = route.stack }
     }
 
     /// A screen over the friend's chat (its Bots): pushed on phones, the pane's content on wide layouts.
@@ -209,6 +213,10 @@ struct FriendsTab: View {
     private func joined(_ offer: TeamOffer) {
         friends.show(notice: String(localized: "friends_offer_joined \(offer.teamName)"))
         teams.scheduleRefresh()
+    }
+
+    private func isCurrent(_ route: FriendsRoute, authority: Int) -> Bool {
+        friends.authority == authority && (wide ? pane : path.last) == route
     }
 
     private func close() {
@@ -246,9 +254,9 @@ struct FriendsTab: View {
     /// A `friend/*` link or push, once someone is signed in (D8, D16). It never redeems by itself: `friend/add` only
     /// opens the confirmation.
     private func consumeInbox() {
-        guard friends.uid != nil, friends.cardsLoaded, let request = tabs.friendsInboxRequest else { return }
+        guard friends.uid != nil, friends.cardsLoaded || friends.cardsFailed, let request = tabs.friendsInboxRequest else { return }
         tabs.friendsInboxRequest = nil
-        guard let card = friends.friend(request.peer), card.teamId == request.ref.sourceId,
+        guard friends.cardsLoaded, let card = friends.friend(request.peer), card.teamId == request.ref.sourceId,
               card.generation == request.ref.generation else {
             friends.show(notice: String(localized: "friends_chat_unavailable"))
             return

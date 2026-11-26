@@ -533,6 +533,7 @@
 .tw-link-tail { flex: none; white-space: nowrap; }
 .tw-lookup { padding: 12px; }
 .tw-lookup-who { display: flex; align-items: center; gap: 10px; }
+button.tw-lookup-who { text-align: start; }
 .tw-lookup-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .tw-lookup-note textarea { resize: vertical; }
 .tw-friends-chat { position: relative; display: flex; height: 100%; min-height: 0; container: friend-chat / inline-size; }

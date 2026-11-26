@@ -34,6 +34,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -49,11 +50,11 @@ import com.lingxi.code.teams.TeamsSheet
 import com.lingxi.code.teams.rememberCopyToClipboard
 import com.lingxi.code.theme.ConfirmDialog
 import com.lingxi.code.theme.PersonAvatar
+import java.util.Locale
 import kotlinx.coroutines.delay
 
 /**
- * Add friend (docs/FRIENDS-CLIENTS.md D6): my friend link, then one field that finds somebody by username, email address or
- * another person's friend link. Asking for the profile on every open also creates the first friend code (D2).
+ * Add friend (docs/FRIENDS-CLIENTS.md D6): live username search, exact email or link lookup, and my friend link.
  */
 @Composable
 internal fun AddFriendScreen(
@@ -66,6 +67,9 @@ internal fun AddFriendScreen(
     onRotateCode: () -> Unit,
     onRevokeCode: () -> Unit,
     onLookup: (FriendProof) -> Unit,
+    onSearchHandles: (String, Boolean) -> Unit,
+    onSelect: (LookupResult) -> Unit,
+    onBackToResults: () -> Unit,
     onConfirm: (note: String) -> Unit,
     onClear: () -> Unit,
     modifier: Modifier = Modifier,
@@ -73,7 +77,11 @@ internal fun AddFriendScreen(
     LaunchedEffect(Unit) { onLoadProfile() }
     // Leaving the screen drops the card, the code and any request id (D8, D18).
     DisposableEffect(Unit) { onDispose { onClear() } }
-    var query by rememberSaveable { mutableStateOf("") }
+    var query by remember(state.uid) { mutableStateOf("") }
+    val proof = searchProof(query)
+    LaunchedEffect(state.uid, proof, lookup.coolingDown) {
+        if (proof is FriendProof.Handle && !lookup.coolingDown) onSearchHandles(proof.handle, true)
+    }
     // A friendship made here (redeem, accept, a mutual request) opens the chat (D7).
     LaunchedEffect(lookup.outcome) {
         val outcome = lookup.outcome
@@ -86,8 +94,13 @@ internal fun AddFriendScreen(
             Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            FindSomeone(lookup = lookup, query = query, proof = proof, onQuery = {
+                if (proof == null || searchProof(it) != proof) onClear()
+                query = it
+            }, onLookup = { proof ->
+                if (proof is FriendProof.Handle) onSearchHandles(proof.handle, false) else onLookup(proof)
+            }, onSelect = onSelect, onBackToResults = onBackToResults, onConfirm = onConfirm, onOpenChat = onOpenChat)
             MyFriendLink(state, onRetry = onLoadProfile, onRotate = onRotateCode, onRevoke = onRevokeCode)
-            FindSomeone(lookup = lookup, query = query, onQuery = { query = it; onClear() }, onLookup = onLookup, onConfirm = onConfirm, onOpenChat = onOpenChat)
         }
     }
 }
@@ -158,16 +171,23 @@ private fun MyFriendLink(state: FriendsState, onRetry: () -> Unit, onRotate: () 
 }
 
 /**
- * *Find someone* (D6, D7): one field for a username, an email address or a friend link. Return or the button looks up; nothing is looked up
- * while typing (lookups are rate limited), and editing the field drops the card.
+ * *Find someone* (D6, D7): usernames search while typing. Email and link lookup run on submit.
  */
+private fun searchProof(query: String): FriendProof? = when (val proof = FriendsLogic.classifyQuery(query)) {
+    is FriendProof.Handle -> proof.copy(handle = proof.handle.lowercase(Locale.ROOT))
+    else -> proof
+}
+
 @Composable
 private fun FindSomeone(
-    lookup: LookupState, query: String, onQuery: (String) -> Unit, onLookup: (FriendProof) -> Unit, onConfirm: (String) -> Unit, onOpenChat: (String) -> Unit,
+    lookup: LookupState, query: String, proof: FriendProof?, onQuery: (String) -> Unit,
+    onLookup: (FriendProof) -> Unit, onSelect: (LookupResult) -> Unit, onBackToResults: () -> Unit,
+    onConfirm: (String) -> Unit, onOpenChat: (String) -> Unit,
 ) {
-    val proof = FriendsLogic.classifyQuery(query)
+    val focusManager = LocalFocusManager.current
     val invalid = query.isNotBlank() && proof == null
     val busy = lookup.looking || lookup.confirming
+    val canSearch = !busy && (proof !is FriendProof.Handle || (lookup.matches.isNullOrEmpty() && !lookup.coolingDown))
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(stringResource(R.string.friends_search_title), style = MaterialTheme.typography.titleSmall)
         OutlinedTextField(
@@ -175,13 +195,34 @@ private fun FindSomeone(
             placeholder = { Text(stringResource(R.string.friends_search_placeholder)) },
             supportingText = if (invalid) ({ Text(stringResource(R.string.friends_search_hint)) }) else null,
             keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, keyboardType = KeyboardType.Uri, imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = { if (proof != null && !busy) onLookup(proof) }),
+            keyboardActions = KeyboardActions(onSearch = { if (proof != null && canSearch) onLookup(proof) }),
             modifier = Modifier.fillMaxWidth().testTag(FriendsTags.SEARCH_INPUT),
         )
-        Button(onClick = { proof?.let(onLookup) }, enabled = proof != null && !busy, modifier = Modifier.testTag(FriendsTags.SEARCH_ACTION)) {
+        Button(onClick = { proof?.let(onLookup) }, enabled = proof != null && canSearch, modifier = Modifier.testTag(FriendsTags.SEARCH_ACTION)) {
             if (lookup.looking) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) else Text(stringResource(R.string.friends_search_action))
         }
-        if (lookup.result == null) lookup.error?.let { FriendsErrorText(it, tag = FriendsTags.SEARCH_ERROR) }
+        val error = if (proof is FriendProof.Handle && lookup.coolingDown) FriendsError.RateLimited else lookup.error
+        if (lookup.result == null) error?.let { FriendsErrorText(it, tag = FriendsTags.SEARCH_ERROR) }
+        if (lookup.result != null && lookup.matches != null) {
+            TextButton(onClick = onBackToResults, enabled = !lookup.confirming) { Text(stringResource(R.string.friends_search_back)) }
+        }
+        lookup.matches?.takeIf { lookup.result == null }?.let { matches ->
+            if (matches.isEmpty()) Text(stringResource(R.string.friends_error_not_found))
+            matches.forEach { result ->
+                TextButton(onClick = {
+                    focusManager.clearFocus()
+                    onSelect(result)
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        PersonAvatar(result.uid, result.displayName, 32.dp)
+                        Column {
+                            Text(result.displayName, color = MaterialTheme.colorScheme.onSurface)
+                            result.handle?.let { Text("@$it", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        }
+                    }
+                }
+            }
+        }
         FriendResultCard(lookup, onConfirm, onOpenChat)
     }
 }

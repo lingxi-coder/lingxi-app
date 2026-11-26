@@ -2911,7 +2911,7 @@
     <string name="friends_link_create">링크 만들기</string>
     <string name="friends_search_title">친구 찾기</string>
     <string name="friends_search_placeholder">@사용자 이름, 이메일 또는 친구 링크</string>
-    <string name="friends_search_hint">정확한 @사용자 이름, 이메일 주소 또는 친구 링크를 입력하세요.</string>
+    <string name="friends_search_hint">사용자 이름을 3자 이상 입력하거나 이메일 주소 또는 친구 링크를 입력하세요.</string>
     <string name="friends_search_action">찾기</string>
     <string name="friends_relation_friends">이미 친구입니다</string>
     <string name="friends_open_chat">채팅 열기</string>
@@ -2932,6 +2932,7 @@
     <string name="friends_profile_find_footer">정확한 사용자 이름이나 인증된 이메일을 입력한 사람만 나를 찾을 수 있습니다. 이메일 주소는 표시되지 않습니다.</string>
     <string name="friends_name_prompt">친구가 알아볼 수 있도록 이름을 설정하세요.</string>
     <string name="friends_name_prompt_action">이름 설정</string>
+    <string name="friends_search_back">검색 결과로 돌아가기</string>
     <string name="friends_blocked_title">차단한 사람</string>
     <string name="friends_blocked_empty_title">차단한 사람이 없습니다</string>
     <string name="friends_blocked_empty_body">차단한 사람은 나를 찾거나 요청을 보낼 수 없습니다. 차단한 사람이 여기에 표시됩니다.</string>
@@ -2947,6 +2948,7 @@
     <string name="friends_error_session">세션이 만료되었습니다. 다시 로그인하세요.</string>
     <string name="friends_error_network">서버에 연결할 수 없습니다. 연결을 확인하고 다시 시도하세요.</string>
     <string name="friends_error_invalid_input">입력한 내용을 확인하고 다시 시도하세요.</string>
+    <string name="friends_profile_find_handle_part">사용자 이름의 일부로 나를 찾을 수 있게 하기</string>
     <string name="friends_error_generic">문제가 발생했습니다. 다시 시도하세요.</string>
     <string name="friends_show_all_fmt">모두 보기(%1$d)</string>
     <string name="friends_now_friends_fmt">%1$s 님과 친구가 되었습니다</string>
@@ -2959,6 +2961,7 @@
     <string name="friends_offer_invited_by_fmt">%1$s 님의 초대</string>
     <string name="friends_offer_expires_fmt">%1$s까지 유효</string>
     <string name="friends_offer_expired">만료됨</string>
+    <string name="friends_error_recipient_request_limit">상대방의 대기 중인 친구 요청이 한도에 도달했습니다. 나중에 다시 시도하세요.</string>
     <string name="friends_offer_join">참가</string>
     <string name="friends_offer_dismiss">삭제</string>
     <string name="friends_offer_joined_fmt">“%1$s” 팀에 참가했습니다</string>

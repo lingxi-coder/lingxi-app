@@ -1153,6 +1153,11 @@
       "definitive": true
     },
     {
+      "code": "RECIPIENT_REQUEST_LIMIT",
+      "key": "friends_error_recipient_request_limit",
+      "definitive": true
+    },
+    {
       "code": "HANDLE_TAKEN",
       "key": "friends_error_handle_taken",
       "definitive": true

@@ -65,7 +65,8 @@ after(async () => {
   await db?.terminate();
   if (app) await deleteApp(app);
 });
-async function seed(n, foldInitial = true, fields = () => ({})) {
+async function seed(n, foldInitial = true, fields = () => ({}), target = ref) {
+  const thread = team + '/conversations/' + target.conversationId;
   const batch = db.batch();
   for (let i = 1; i <= n; i++) {
     const id = 'message_' + String(i).padStart(4, '0'),
@@ -93,7 +94,7 @@ async function seed(n, foldInitial = true, fields = () => ({})) {
     lastMessage: { at: new Date(now), preview: 'synthetic' }
   });
   await batch.commit();
-  if (foldInitial) while (await store.fold('me', ref)) {}
+  if (foldInitial) while (await store.fold('me', target)) {}
 }
 const get = async () => (await store.execute('me', { action: 'get', key })).item;
 test('ordered fold, duplicates, 99+ partial reads, frozen manual revision, and legacy healing', options, async () => {
@@ -493,18 +494,27 @@ test('friend card uses incoming projection count and pair key with consent-gated
   await db.doc(team).update({ kind: 'pair' });
   await db.doc('users/me/friends/peer').set({ teamId: tid, state: 'friends', displayName: 'Friend', generation: 1 });
   await db.doc('users/peer/friends/me').set({ teamId: tid, state: 'friends', displayName: 'Me', generation: 1 });
-  await seed(2);
-  const row = await get();
+  const human = { ...ref, conversationId: 'friend_chat' };
+  const humanKey = 'team:' + tid + ':' + human.conversationId;
+  const humanThread = team + '/conversations/' + human.conversationId;
+  await db.doc(humanThread).set((await db.doc(thread).get()).data());
+  await db.doc(thread).update({ kind: 'bot_dm' });
+  await seed(2, true, undefined, human);
+  const row = (await store.execute('me', { action: 'get', key: humanKey })).item;
   assert.equal(row.peerUid, 'peer');
   assert.equal(row.title, 'Friend');
   assert.equal(row.category, 'friend');
-  assert.equal(row.key, key);
+  assert.equal(row.key, humanKey);
   assert.equal(row.conversationKind, 'dm', 'rows say what kind of conversation they are');
+  await seed(3);
+  assert.equal((await get()).unreadCount, 3, 'the Bot DM has its own Inbox count');
   assert.equal((await db.doc('users/me/friends/peer').get()).data().unreadCount, 2);
-  await store.fold('peer', ref);
+  await store.execute('me', read(3));
+  assert.equal((await db.doc('users/me/friends/peer').get()).data().unreadCount, 2);
+  await store.fold('peer', human);
   assert.equal((await db.doc('users/peer/friends/me').get()).data().unreadCount, 0);
-  assert.equal((await db.doc(thread + '/reads/peer').get()).exists, false);
-  await store.execute('me', read(1));
+  assert.equal((await db.doc(humanThread + '/reads/peer').get()).exists, false);
+  await store.execute('me', { ...read(1), key: humanKey });
   assert.equal((await db.doc('users/me/friends/peer').get()).data().unreadCount, 1);
 });
 test(

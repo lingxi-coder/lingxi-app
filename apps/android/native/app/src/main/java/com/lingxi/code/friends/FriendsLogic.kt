@@ -35,6 +35,7 @@ internal data class PairRef(val teamId: String, val generation: Long)
 internal data class FriendCard(
     val uid: String, val state: FriendState, val displayName: String, val handle: String?, val note: String?, val sinceMs: Long,
     val pair: PairRef? = null, val lastSeq: Long = 0, val lastReadSeq: Long = 0, val lastMessage: TeamLastMessage? = null,
+    val version: String? = null,
 ) {
     /** `lastMessage.at` in whole epoch milliseconds; a pointer whose time is not stamped counts as no message for the order (D5). */
     val lastAtMs: Long? get() = lastMessage?.atMs
@@ -56,7 +57,7 @@ internal data class FriendCard(
             return FriendCard(
                 uid, state, data["displayName"] as? String ?: "", (data["handle"] as? String)?.takeIf { it.isNotEmpty() },
                 (data["note"] as? String)?.takeIf { it.isNotEmpty() }, data["since"]?.let(millis) ?: 0,
-                pair, counter("lastSeq"), counter("lastReadSeq"), lastMessage,
+                pair, counter("lastSeq"), counter("lastReadSeq"), lastMessage, data["version"] as? String,
             )
         }
     }
@@ -76,7 +77,7 @@ internal data class BlockEntry(val uid: String, val atMs: Long, val displayName:
  * [teamId] is the document id, which is also what `acceptOffer` and `declineOffer` call the offer; [teamName] and [fromName] are
  * snapshots from when the offer was made; [expiresAtMs] is whole epoch milliseconds. The role is always `member` and is not kept.
  */
-internal data class TeamOffer(val teamId: String, val teamName: String, val fromUid: String, val fromName: String, val expiresAtMs: Long) {
+internal data class TeamOffer(val teamId: String, val teamName: String, val fromUid: String, val fromName: String, val expiresAtMs: Long, val version: String? = null) {
     companion object {
         /**
          * null for a document that is not a whole offer: one without the four strings (`teamId`, `teamName`, `fromUid`, `fromName`) or without
@@ -87,7 +88,7 @@ internal data class TeamOffer(val teamId: String, val teamName: String, val from
             if (id.isEmpty() || data["teamId"] !is String) return null
             return TeamOffer(
                 id, data["teamName"] as? String ?: return null, data["fromUid"] as? String ?: return null, data["fromName"] as? String ?: return null,
-                data["expiresAt"]?.let(millis) ?: return null,
+                data["expiresAt"]?.let(millis) ?: return null, data["version"] as? String,
             )
         }
     }
@@ -116,12 +117,13 @@ internal data class FriendCode(val code: String, val link: String)
 
 /** The caller's own profile (`GET /v1/friends/profile` and the `profile` action). */
 internal data class FriendProfile(
-    val uid: String, val displayName: String, val handle: String?, val findByHandle: Boolean, val findByEmail: Boolean, val friendCode: FriendCode?,
+    val uid: String, val displayName: String, val handle: String?, val findByHandle: Boolean, val findByEmail: Boolean, val friendCode: FriendCode?, val findByHandlePart: Boolean = false,
 ) {
     companion object {
         fun parse(json: JSONObject) = FriendProfile(
             json.getString("uid"), json.getString("displayName"), json.stringOrNull("handle"), json.getBoolean("findByHandle"), json.getBoolean("findByEmail"),
             json.optJSONObject("friendCode")?.let { FriendCode(it.getString("code"), it.getString("link")) },
+            json.optBoolean("findByHandlePart"),
         )
     }
 }
@@ -137,9 +139,9 @@ internal enum class FriendRelation(val wire: String) {
 /** What the result card offers for a relation (D6); [key] is the name the shared vectors use. */
 internal enum class RelationAction(val key: String) { Add("add"), Accept("accept"), Sent("sent"), Friends("friends") }
 
-internal data class LookupResult(val uid: String, val displayName: String, val handle: String?, val relation: FriendRelation) {
+internal data class LookupResult(val uid: String, val displayName: String, val handle: String?, val relation: FriendRelation, val version: String? = null) {
     companion object {
-        fun parse(json: JSONObject) = LookupResult(json.getString("uid"), json.getString("displayName"), json.stringOrNull("handle"), FriendRelation.of(json.getString("relation")))
+        fun parse(json: JSONObject) = LookupResult(json.getString("uid"), json.getString("displayName"), json.stringOrNull("handle"), FriendRelation.of(json.getString("relation")), json.stringOrNull("version"))
     }
 }
 
@@ -148,7 +150,7 @@ internal data class LookupResult(val uid: String, val displayName: String, val h
  * people belong to (D15).
  */
 internal sealed interface FriendProof {
-    data class Handle(val handle: String) : FriendProof
+    data class Handle(val handle: String, val expectedUid: String? = null) : FriendProof
     data class Email(val email: String) : FriendProof
     data class Code(val code: String) : FriendProof
     data class Team(val teamId: String, val uid: String) : FriendProof
@@ -163,6 +165,7 @@ internal enum class FriendsError(val key: String, val definitive: Boolean = true
     RateLimited("friends_error_rate_limited"),
     FriendLimit("friends_error_friend_limit"),
     RequestLimit("friends_error_request_limit"),
+    RecipientRequestLimit("friends_error_recipient_request_limit"),
     HandleTaken("friends_error_handle_taken"),
     RequestUnavailable("friends_error_request_unavailable"),
     StaleRequest("friends_error_stale_request"),
@@ -226,6 +229,7 @@ internal enum class FriendsError(val key: String, val definitive: Boolean = true
             "RATE_LIMITED" -> RateLimited
             "FRIEND_LIMIT" -> FriendLimit
             "REQUEST_LIMIT" -> RequestLimit
+            "RECIPIENT_REQUEST_LIMIT" -> RecipientRequestLimit
             "HANDLE_TAKEN" -> HandleTaken
             "REQUEST_UNAVAILABLE" -> RequestUnavailable
             "STALE_REQUEST" -> StaleRequest
@@ -239,7 +243,7 @@ internal enum class FriendsError(val key: String, val definitive: Boolean = true
 }
 
 /** The profile form of D11, as typed. An empty username means "leave as is": once set it can be changed but not removed. */
-internal data class ProfileForm(val name: String, val handle: String, val findByHandle: Boolean, val findByEmail: Boolean) {
+internal data class ProfileForm(val name: String, val handle: String, val findByHandle: Boolean, val findByEmail: Boolean, val findByHandlePart: Boolean = false, val editedFields: Set<String>? = null) {
     private val trimmedName get() = FriendsLogic.jsTrim(name)
     private val trimmedHandle get() = FriendsLogic.jsTrim(handle)
 
@@ -253,17 +257,19 @@ internal data class ProfileForm(val name: String, val handle: String, val findBy
         if (trimmedName != profile.displayName) put("displayName", trimmedName)
         if (trimmedHandle.isNotEmpty() && trimmedHandle != profile.handle) put("handle", trimmedHandle)
         if (findByHandle != profile.findByHandle) put("findByHandle", findByHandle)
+        if (findByHandlePart != profile.findByHandlePart) put("findByHandlePart", findByHandlePart)
         if (findByEmail != profile.findByEmail) put("findByEmail", findByEmail)
-    }
+    }.filterKeys { editedFields?.contains(it) ?: true }
 
     companion object {
-        fun of(profile: FriendProfile) = ProfileForm(profile.displayName, profile.handle.orEmpty(), profile.findByHandle, profile.findByEmail)
+        fun of(profile: FriendProfile) = ProfileForm(profile.displayName, profile.handle.orEmpty(), profile.findByHandle, profile.findByEmail, profile.findByHandlePart)
     }
 }
 
 /** The Friends rules of docs/FRIENDS-CLIENTS.md, one function per section of the shared vectors; no Compose, no Android, no Firebase. */
 internal object FriendsLogic {
     const val CHAT_CONVERSATION_ID = "friend_chat"
+    const val LEGACY_VERSION = "legacy-v1"
     /** Rows a Requests group shows before "Show all" (D4). */
     const val SECTION_ROWS = 20
     const val DISPLAY_NAME_MAX = 80
@@ -466,6 +472,7 @@ internal object FriendsLogic {
             put("action", "request")
             put("via", when (proof) { is FriendProof.Handle -> "handle"; is FriendProof.Email -> "email"; else -> "team" })
             putAll(proofFields(proof))
+            (proof as? FriendProof.Handle)?.expectedUid?.let { put("expectedUid", it) }
             put("requestId", requestId)
             jsTrim(note).takeIf { it.isNotEmpty() }?.let { put("note", it) }
         }

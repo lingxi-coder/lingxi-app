@@ -23,6 +23,29 @@ test('friends: a pair key and team id are symmetric, per-epoch and exactly sha25
   assert.equal(friendLink(code), `https://lingxios.net/open/friend/add?code=${code}`);
 });
 
+test('handle search preserves a verified exact match when the substring index is unavailable', async () => {
+  const snapshot = data => ({ exists: data !== undefined, data: () => data });
+  const unavailable = Object.assign(new Error('index is not ready'), { code: 9 });
+  const failed = { where() { return this; }, limit() { return this; }, async get() { throw unavailable; } };
+  const index = {
+    orderBy() { return this; }, select() { return this; }, startAt() { return this; }, endBefore() { return this; },
+    limit() { return this; }, async get() { return { docs: [] }; }, where() { return failed; },
+  };
+  const profile = { displayName: 'Bob', handle: 'bob', handleLower: 'bob', findByHandle: true };
+  const store = new FriendsStore({
+    collection: () => index,
+    doc: path => ({ path, get: async () => snapshot(path === 'handles/bob' ? { uid: 'bob' } : undefined) }),
+    getAll: async (...refs) => refs.filter(ref => ref.path).map(ref => snapshot(ref.path === 'profiles/bob' ? profile : undefined)),
+  });
+  store.take = async () => {};
+  assert.deepEqual(await store.searchHandles(caller, 'bob'), {
+    results: [{ uid: 'bob', displayName: 'Bob', handle: 'bob', relation: 'none' }],
+  });
+  await assert.rejects(store.searchHandles(caller, 'nobody'), error => error === unavailable);
+  profile.findByHandle = false;
+  await assert.rejects(store.searchHandles(caller, 'bob'), error => error === unavailable);
+});
+
 test('friends: strict commands reject unknown fields, malformed identities and ambiguous lookups before any read', async () => {
   const store = new FriendsStore({ doc() { throw new Error('the database must not be touched'); }, runTransaction() { throw new Error('the database must not be touched'); } });
   const invalid = [

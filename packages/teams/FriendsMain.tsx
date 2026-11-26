@@ -14,7 +14,7 @@ export function FriendsMain(props: FriendChatViewProps): ReactElement {
   const t = useTeamsText(locale);
   switch (snapshot.page) {
     case 'chat': return <FriendChatView {...props} />;
-    case 'add': return <AddFriendView {...props} />;
+    case 'add': return <AddFriendView key={snapshot.uid} {...props} />;
     case 'profile': return <FriendProfileSettings {...props} />;
     case 'blocked': return <BlockedList {...props} />;
     default: return <section className="tw-scope tw-conv tw-conv-empty">

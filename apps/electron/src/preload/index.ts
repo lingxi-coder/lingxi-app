@@ -584,6 +584,8 @@ const api: LingxiApi = {
     watchOffers: (uid, next, failed) => watchFriends(uid, 'teamOffers', next, failed),
     readProfile: (uid, friendUid) => friendsRequest({ type: 'readProfile', uid, friendUid }),
   },
+    searchHandles: (uid, query, requestId) => ipcRenderer.invoke('lingxi:friends', { type: 'searchHandles', uid, query, requestId }),
+    cancelSearch: (uid, requestId) => friendsRequest({ type: 'cancelSearch', uid, requestId }),
   scheduled: {
     context: (scopeId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'context', scopeId }),
     scopes: () => ipcRenderer.invoke(CH_SCHEDULED, { action: 'scopes' }),

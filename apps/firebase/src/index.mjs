@@ -310,9 +310,9 @@ export const onInboxTeamPolicy = scopePolicyTrigger('teams', 'team');
 
 // Friend list summaries: a pair team's chat pointer and the owner's read mark are copied onto the friend cards, so clients
 // need no per-friend listener. The document paths name the pair chat itself, so ordinary Team conversations never invoke
-// these; the handlers still check the team (docs/FRIENDS.md). They are idempotent and monotonic, and the next event heals a lost one.
+// these; the handlers still check the team (docs/FRIENDS.md). Idempotent, monotonic updates allow event retry.
 const friendChat = `teams/{teamId}/conversations/${PAIR_CONVERSATION_ID}`;
-const friendTrigger = { database: '(default)', region: 'us-central1', memory: '256MiB', maxInstances: 2, serviceAccount: pushServiceAccount };
+const friendTrigger = { retry: true, database: '(default)', region: 'us-central1', memory: '256MiB', maxInstances: 2, serviceAccount: pushServiceAccount };
 export const onFriendChatUpdated = onDocumentUpdated({ document: friendChat, ...friendTrigger },
   event => mirrorFriendChat({ db: getFirestore(app), teamId: event.params.teamId, conversationId: PAIR_CONVERSATION_ID, after: event.data?.after.data() }));
 export const onFriendChatRead = onDocumentWritten({ document: `${friendChat}/reads/{uid}`, ...friendTrigger },

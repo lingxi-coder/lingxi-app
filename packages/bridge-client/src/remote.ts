@@ -442,3 +442,4 @@ export type * from './remote/messages.js';
 export * from './remote/files.js';
 
 export * from './remote/localApps.js';
+export { CancellableImageRequests } from './remote/imageRequests.js';

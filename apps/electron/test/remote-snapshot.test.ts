@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ManualClock } from '@lingxi/bridge-client/remote';
+import { ManualClock, MESSAGE_MAX_BYTES } from '@lingxi/bridge-client/remote';
 
 import {
   EVENT_MAX_BYTES,
@@ -54,8 +54,49 @@ test('remote history exposes a reference and sends an original only in requested
   assert.equal(first.next_offset, 1024 * 1024);
   assert.equal(rest.next_offset, undefined);
   assert.equal(first.base64 + rest.base64, original);
-  assert.deepEqual(calls, ['thumbnail', 'original', 'original']);
+  assert.deepEqual(calls, ['thumbnail', 'original']);
   assert.throws(() => commands.imageGet(runtime, { ref: remoteRef, size: 'original', offset: 3 }), /invalid image offset/);
+});
+
+test('two interleaved 20 MiB originals each read storage once', async () => {
+  const runtime = new FakeRuntime();
+  const refs = [0, 1, 2].map(index => 'lingxi-history-image:' + SESSION_A + ':' + index + ':png');
+  runtime.resume([{ ...userText('attached'), images: refs.map(url => ({ media_type: 'image/png', url })) }]);
+  const clock = new ManualClock();
+  const reads: string[] = [];
+  const originals = [0x39, 0x62, 0x24].map(byte => Buffer.alloc(20 * 1024 * 1024, byte).toString('base64'));
+  const commands = new RemoteCommands({
+    clock, allowAlwaysAllow: () => false, echo: () => {},
+    readHistoryImage: async (_runtime, reference) => {
+      reads.push(reference);
+      return { mediaType: 'image/png', base64: originals[refs.indexOf(reference)]! };
+    },
+  });
+  const owners = [{}, {}, {}];
+  const read = (index: number, offset: number) => commands.imageGet(runtime,
+    { ref: baseImageRef(runtime.sessionId, 0, index), size: 'original', offset }, undefined, owners[index]);
+  let offsets: Array<number | undefined> = [0, 0];
+  let parts = 0;
+  while (offsets.some(offset => offset !== undefined)) {
+    if (parts === 2) await assert.rejects(async () => read(2, 0), { code: 'capacity' });
+    offsets = await Promise.all(offsets.map(async (offset, index) => {
+      if (offset === undefined) return undefined;
+      const reply = await read(index, offset);
+      assert.equal(reply.base64, originals[index]!.slice(offset, offset + 1024 * 1024));
+      parts++;
+      return reply.next_offset;
+    }));
+  }
+  assert.equal(parts, 54);
+  assert.deepEqual(reads, refs.slice(0, 2));
+  assert.equal(clock.pending, 0);
+  await read(2, 0);
+  assert.equal(clock.pending, 1);
+  commands.clearImageTransfers(owners[2]!);
+  assert.equal(clock.pending, 0);
+  await read(2, 0);
+  clock.advance(15_000);
+  assert.equal(clock.pending, 0);
 });
 
 test('a snapshot is begin, every messages page, every records page, then end', () => {
@@ -195,7 +236,7 @@ test('prompt images are refs while the journal holds the bytes, and the ref roun
   for (const bad of ['', 'nope', `${SESSION_A}:x:1:0`, `${SESSION_A}:p:-1:0`, `${SESSION_A}:p:1`, `../${SESSION_A}:p:1:0`]) assert.equal(parseImageRef(bad), undefined, bad);
 });
 
-test('a conversation above 4 MiB sends its last 200 messages and says where they start; history pages go back', () => {
+test('a long conversation sends a bounded tail with absolute image references and pages backward', () => {
   const runtime = new FakeRuntime();
   const messages = Array.from({ length: 700 }, (_, i) => text(`${i}:${'x'.repeat(8_000)}`));
   const oldestBlocks = messages[0].blocks;
@@ -204,21 +245,22 @@ test('a conversation above 4 MiB sends its last 200 messages and says where they
     oldestReads += 1;
     return oldestBlocks;
   } });
-  messages[500].images = [{ media_type: 'image/png', url: `data:image/png;base64,${PNG_BASE64}` }];
+  const first = 700 - INITIAL_HISTORY_TAIL_MESSAGES;
+  messages[first].images = [{ media_type: 'image/png', url: `data:image/png;base64,${PNG_BASE64}` }];
   runtime.resume(messages);
   const all = frames(runtime) as any[];
   const begin = all[0];
-  assert.equal(begin.first_message_index, 700 - INITIAL_HISTORY_TAIL_MESSAGES);
+  assert.equal(begin.first_message_index, first);
   const sent = all.filter((frame) => frame.phase === 'messages').flatMap((frame) => frame.messages);
   assert.equal(sent.length, INITIAL_HISTORY_TAIL_MESSAGES);
-  assert.ok(sent[0].blocks[0].text.startsWith('500:'));
-  assert.equal(sent[0].images[0].url, baseImageRef(SESSION_A, 500, 0));
+  assert.ok(sent[0].blocks[0].text.startsWith(String(first) + ':'));
+  assert.equal(sent[0].images[0].url, baseImageRef(SESSION_A, first, 0));
   assert.equal(oldestReads, 0, 'initial resume can leave the oldest message unprojected');
-  const page = historyPage(runtime.remoteView(), 500, 100);
-  assert.equal(page.first_index, 400);
+  const page = historyPage(runtime.remoteView(), first, 100);
+  assert.equal(page.first_index, first - 100);
   assert.equal(page.has_more, true);
   assert.equal(page.messages.length, 100);
-  assert.ok((page.messages[0] as any).blocks[0].text.startsWith('400:'));
+  assert.ok((page.messages[0] as any).blocks[0].text.startsWith(String(first - 100) + ':'));
   const oldest = historyPage(runtime.remoteView(), 50, 100);
   assert.equal(oldest.has_more, false);
   assert.deepEqual(oldest.messages[0]?.blocks, oldestBlocks);
@@ -228,7 +270,7 @@ test('a conversation above 4 MiB sends its last 200 messages and says where they
 
 test('the initial history cutoff uses exact projected UTF-8 array bytes', () => {
   const runtime = new FakeRuntime();
-  const messages = Array.from({ length: INITIAL_HISTORY_TAIL_MESSAGES + 1 }, () => text(''));
+  const messages = Array.from({ length: INITIAL_HISTORY_TAIL_MESSAGES }, () => text(''));
   const oldest = messages[0].blocks[0];
   oldest.text = '雪"';
   oldest.text += 'x'.repeat(INITIAL_HISTORY_MAX_BYTES - Buffer.byteLength(JSON.stringify(messages)));
@@ -242,11 +284,98 @@ test('the initial history cutoff uses exact projected UTF-8 array bytes', () => 
   assert.equal(above?.phase === 'begin' && above.first_message_index, 1);
 });
 
-test('a small conversation is sent whole', () => {
+test('a message larger than the initial history byte budget remains available on demand', () => {
   const runtime = new FakeRuntime();
-  runtime.resume(Array.from({ length: 300 }, (_, i) => text(`m${i}`)));
+  const large = text('x'.repeat(INITIAL_HISTORY_MAX_BYTES));
+  runtime.resume([userText('older'), large]);
+  const snapshot = frames(runtime);
+  assert.equal(snapshot[0]?.phase === 'begin' && snapshot[0].first_message_index, 2);
+  assert.equal(snapshot.some(frame => frame.phase === 'messages'), false);
+  assert.deepEqual(historyPage(runtime.remoteView(), 2, 1), { messages: [large], first_index: 1, has_more: true });
+});
+
+test('large earlier pages stay within the RPC limit and follow a gapless cursor', () => {
+  const runtime = new FakeRuntime();
+  const messages = Array.from({ length: 50 }, (_, index) => text(`${index}:${'x'.repeat(512 * 1024)}`));
+  runtime.resume(messages);
+  const received: number[] = [];
+  let before = messages.length;
+  while (before > 0) {
+    const page = historyPage(runtime.remoteView(), before, 50);
+    assert.ok(Buffer.byteLength(JSON.stringify(page)) < MESSAGE_MAX_BYTES);
+    assert.equal(page.first_index + page.messages.length, before);
+    assert.ok(page.first_index < before);
+    received.unshift(...page.messages.map((row: any) => Number(row.blocks[0].text.split(':', 1)[0])));
+    before = page.first_index;
+  }
+  assert.deepEqual(received, messages.map((_, index) => index));
+});
+
+test('compact history continues on disk and its historical image references expire at a new base', async () => {
+  const anchor = '44444444-4444-4444-8444-444444444444';
+  const older = '55555555-5555-4555-8555-555555555555';
+  const oldest = '66666666-6666-4666-8666-666666666666';
+  const reference = `lingxi-history-image:${older}:0:png:73:YWJj`;
+  class ArchivedRuntime extends FakeRuntime {
+    override remoteView() { return { ...super.remoteView(), historyBefore: { uuid: anchor } }; }
+  }
+  const runtime = new ArchivedRuntime();
+  runtime.resume([{ ...text('current'), transcript_uuid: anchor }]);
+  const begin = frames(runtime)[0];
+  assert.equal(begin?.phase, 'begin');
+  if (!begin || begin.phase !== 'begin') return;
+  const reads: string[] = [];
+  const commands = new RemoteCommands({
+    clock: new ManualClock(), allowAlwaysAllow: () => false, echo: () => {},
+    readHistory: async (_runtime, cursor) => {
+      reads.push(cursor.uuid);
+      return cursor.uuid === anchor
+        ? { messages: [{ ...text('oldest'), transcript_uuid: oldest },
+          { ...userText('older'), transcript_uuid: older, images: [{ media_type: 'image/png', url: reference }] }], before: null }
+        : { messages: [{ ...text('oldest'), transcript_uuid: oldest }], before: null };
+    },
+    readHistoryImage: async (_runtime, ref) => {
+      assert.equal(ref, reference);
+      return { mediaType: 'image/png', base64: PNG_BASE64 };
+    },
+  });
+  const first = await commands.history(runtime, { before_index: begin.first_message_index, limit: 1 });
+  assert.equal(first.has_more, true);
+  assert.equal(first.first_index, begin.first_message_index - 1);
+  assert.equal(first.messages[0]?.transcript_uuid, older);
+  const image = first.messages[0]?.images?.[0]?.url;
+  assert.ok(image);
+  assert.equal((await commands.imageGet(runtime, { ref: image, size: 'thumbnail' })).base64, PNG_BASE64);
+  assert.throws(() => commands.imageGet(runtime, { ref: image.slice(0, -4) + 'AAAA' }), /no longer available/);
+  const last = await commands.history(runtime, { before_index: first.first_index, limit: 1 });
+  assert.deepEqual([last.first_index, last.has_more, last.messages[0]?.transcript_uuid],
+    [first.first_index - 1, false, oldest]);
+  assert.deepEqual(reads, [anchor, older]);
+  runtime.resume();
+  assert.throws(() => commands.imageGet(runtime, { ref: image }), /no longer available/);
+});
+
+test('a conversation smaller than a page is sent whole', () => {
+  const runtime = new FakeRuntime();
+  runtime.resume(Array.from({ length: 30 }, (_, i) => text(`m${i}`)));
   const begin = (frames(runtime) as any[])[0];
   assert.equal(begin.first_message_index, 0);
+});
+
+test('100 and 600 short history rows send exactly the same first page', () => {
+  const results = [100, 600].map(count => {
+    const runtime = new FakeRuntime();
+    const tail = Array.from({ length: INITIAL_HISTORY_TAIL_MESSAGES }, (_, index) => userText('visible ' + index));
+    const older = Array.from({ length: count - tail.length }, (_, index) => userText('older ' + index));
+    runtime.resume([...older, ...tail]);
+    const snapshot = frames(runtime);
+    const first = snapshot[0];
+    assert.equal(first?.phase === 'begin' && first.first_message_index, older.length);
+    const olderPage = historyPage(runtime.remoteView(), older.length, tail.length);
+    assert.deepEqual(olderPage.messages, older.slice(-tail.length));
+    return JSON.stringify(snapshot.filter(frame => frame.phase === 'messages'));
+  });
+  assert.equal(results[0], results[1]);
 });
 
 test('pages hold at most 256 KiB each, and an oversized item gets a page of its own', () => {

@@ -7,6 +7,14 @@ struct SessionImageLoader: Sendable {
     let cacheKey: String
     let sessionID: String
     let load: @Sendable (String, Bool) async throws -> Data
+
+    func request(for image: MessageImage, thumbnail: Bool) -> Nuke.ImageRequest? {
+        let reference = image.url
+        guard reference.hasPrefix(sessionID + ":") else { return nil }
+        return Nuke.ImageRequest(id: "\(cacheKey):\(thumbnail):\(reference)", data: {
+            try await load(reference, thumbnail)
+        }, options: [.disableDiskCache])
+    }
 }
 
 private struct SessionImageLoaderKey: EnvironmentKey {
@@ -26,6 +34,7 @@ private struct MessageImages: View {
     let images: [MessageImage]
     let rowKey: UUID
     @State private var selectedImage: MessageImage?
+    @State private var visible = false
 
     var body: some View {
         ScrollView(.horizontal) {
@@ -40,20 +49,19 @@ private struct MessageImages: View {
         }
         .scrollIndicators(.hidden)
         .frame(maxWidth: 320, alignment: .trailing)
+        .onScrollVisibilityChange(threshold: 0.01) { visible = $0 }
         .fullScreenCover(item: $selectedImage) { image in
             NativeImagePreview(source: image.url, mediaType: image.mediaType,
-                               originalRequest: remoteRequest(image, thumbnail: false))
+                               originalRequest: loader?.request(for: image, thumbnail: false))
         }
     }
 
     private func imageView(_ image: MessageImage, index: Int) -> some View {
-        LazyImage(request: thumbnailRequest(image, index: index)) { state in
+        LazyImage(request: SessionThumbnailRequests.request(for: image, rowKey: rowKey, index: index, loader: loader)) { state in
             if let content = state.image {
                 content.resizable().scaledToFill()
             } else {
-                Text(String(localized: "chat_image_placeholder"))
-                    .font(.caption)
-                    .foregroundStyle(t.text3)
+                SessionThumbnailPlaceholder(showProgress: visible && state.isLoading)
             }
         }
         .frame(width: 116, height: 116)
@@ -64,29 +72,32 @@ private struct MessageImages: View {
         .accessibilityLabel(String(localized: "chat_attached_image"))
     }
 
-    private func thumbnailRequest(_ image: MessageImage, index: Int) -> Nuke.ImageRequest? {
-        if let request = remoteRequest(image, thumbnail: true) { return request }
-        let source = image.url
-        let options: [Nuke.ImageRequest.UserInfoKey: Any] = [.thumbnailKey: Nuke.ImageRequest.ThumbnailOptions(maxPixelSize: 348)]
-        if source.hasPrefix("data:") {
-            return Nuke.ImageRequest(id: "inline:(rowKey):(index)", data: {
-                guard let comma = source.firstIndex(of: ","),
-                      let data = Data(base64Encoded: String(source[source.index(after: comma)...]), options: .ignoreUnknownCharacters)
-                else { throw CocoaError(.fileReadCorruptFile) }
-                return data
-            }, options: [.disableDiskCache], userInfo: options)
-        }
-        guard let url = URL(string: source), let scheme = url.scheme,
-              ["https", "http", "file"].contains(scheme.lowercased()) else { return nil }
-        return Nuke.ImageRequest(url: url, userInfo: options)
-    }
+}
 
-    private func remoteRequest(_ image: MessageImage, thumbnail: Bool) -> Nuke.ImageRequest? {
-        guard let loader, image.url.hasPrefix(loader.sessionID + ":") else { return nil }
-        let reference = image.url
-        return Nuke.ImageRequest(id: "(loader.cacheKey):(thumbnail):(reference)", data: {
-            try await loader.load(reference, thumbnail)
-        }, options: [.disableDiskCache])
+private struct SessionThumbnailPlaceholder: View {
+    @Environment(\.theme) private var t
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var spinning = false
+    let showProgress: Bool
+
+    private var animate: Bool { showProgress && !reduceMotion }
+
+    var body: some View {
+        Group {
+            if animate && spinning {
+                ProgressView().controlSize(.small).tint(t.text3)
+            } else {
+                Text(String(localized: "chat_image_placeholder"))
+                    .font(.caption)
+                    .foregroundStyle(t.text3)
+            }
+        }
+        .task(id: animate) {
+            spinning = false
+            guard animate else { return }
+            do { try await Task.sleep(for: .milliseconds(140)) } catch { return }
+            if !Task.isCancelled { spinning = true }
+        }
     }
 }
 

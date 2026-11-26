@@ -37,9 +37,9 @@ export function SessionView({ locale, client, sessionId, hostId, connection, dev
   const controller = useMemo(() => client.session(sessionId), [client, sessionId]);
   const state = useStore(controller)!;
   const imageEpoch = state.status === 'live' ? controller.imageEpoch : undefined;
-  const fetchImage = useCallback((ref: string, size?: ImageGetParams['size']) => {
+  const fetchImage = useCallback((ref: string, size?: ImageGetParams['size'], signal?: AbortSignal) => {
     if (imageEpoch === undefined) return Promise.reject(new Error('image session unavailable'));
-    return controller.fetchImage(ref, size);
+    return controller.fetchImage(ref, size, signal);
   }, [controller, imageEpoch]);
   const list = useStore(client)!;
   // A Bot's chat is in its Bot's list, not in the sessions': the page that opened it said which Bot that is.
@@ -138,6 +138,7 @@ export function SessionView({ locale, client, sessionId, hostId, connection, dev
 
       <div
         className="rc-scroll"
+        data-session-image-scroll
         ref={scroller}
         onScroll={(event) => {
           const element = event.currentTarget;

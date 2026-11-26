@@ -90,14 +90,14 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen, sessi
         </span>
       )}
       {images.length > 0 && (
-        <div role="group" aria-label={tr('desktop_stage_images')} style={{ display: 'grid', gridTemplateColumns: images.length > 1 ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap: 7, marginBottom: item.text ? 8 : 0 }}>
+        <div role="group" aria-label={tr('desktop_stage_images')} style={{ display: 'grid', inlineSize: images.length > 1 ? 392 : 320, maxInlineSize: '100%', gridTemplateColumns: images.length > 1 ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap: 7, marginBottom: item.text ? 8 : 0 }}>
           {images.map((image, index) => (
             <div key={`${image.media_type}-${index}`} style={{ overflow: 'hidden', minWidth: 0, borderRadius: 11, background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 12%, transparent)` }}>
               <ImagePreview
                 src={image.url}
                 sessionId={sessionId}
                 alt={tr('desktop_stage_image', index + 1)}
-                imageStyle={{ display: 'block', width: '100%', maxHeight: 260, aspectRatio: images.length > 1 ? '4 / 3' : 'auto', objectFit: 'contain', background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 8%, transparent)`, outlineOffset: -1 }}
+                imageStyle={{ aspectRatio: images.length > 1 ? '4 / 3' : undefined, background: t.surfaceActive, outline: `1px solid color-mix(in oklab, ${t.text} 8%, transparent)`, outlineOffset: -1 }}
               />
             </div>
           ))}
@@ -815,7 +815,7 @@ export function Stage({ history = EMPTY_TRANSCRIPT_HISTORY, onLoadMoreHistory, m
 
   return (
     <TranscriptLeafWindowScope.Provider value={leafScope}>
-    <div ref={stageRef} className={activityView ? "desktop-stage activity-view" : "desktop-stage"} tabIndex={windowing.enabled ? 0 : -1} onPointerDown={() => { pointerHeld.current = true; }} onKeyDown={(event) => {
+    <div ref={stageRef} data-session-image-scroll className={activityView ? "desktop-stage activity-view" : "desktop-stage"} tabIndex={windowing.enabled ? 0 : -1} onPointerDown={() => { pointerHeld.current = true; }} onKeyDown={(event) => {
       if (event.target === event.currentTarget && historyTailSpace.current?.offsetHeight
         && (event.key === 'End' || event.key === 'ArrowDown' && (event.metaKey || event.ctrlKey))) {
         event.preventDefault();

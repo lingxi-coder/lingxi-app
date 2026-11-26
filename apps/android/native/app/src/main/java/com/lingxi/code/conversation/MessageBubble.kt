@@ -28,6 +28,7 @@ import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -44,6 +45,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.onVisibilityChanged
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.res.stringResource
@@ -61,15 +64,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
-import coil3.ImageLoader
 import coil3.compose.AsyncImage
-import coil3.decode.DataSource
-import coil3.decode.ImageSource
-import coil3.fetch.Fetcher
-import coil3.fetch.SourceFetchResult
-import coil3.request.CachePolicy
-import coil3.request.ImageRequest
-import coil3.request.Options
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.Pill
@@ -77,8 +72,6 @@ import com.lingxi.code.components.UiTags
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.Role
 import com.lingxi.code.theme.LingXiTheme
-import okio.Buffer
-import okio.FileSystem
 
 /**
  * A single conversation turn — ported from the iOS `MessageBubble`.
@@ -264,19 +257,6 @@ fun MessageBubble(
 
 /** Render user media before the prompt, matching the CLI's UserImage → UserText order. */
 @OptIn(ExperimentalLayoutApi::class)
-private class ThumbnailSource(val mediaType: String, val read: suspend () -> ByteArray)
-
-private object ThumbnailFetcherFactory : Fetcher.Factory<ThumbnailSource> {
-    override fun create(data: ThumbnailSource, options: Options, imageLoader: ImageLoader): Fetcher =
-        object : Fetcher {
-            override suspend fun fetch() = SourceFetchResult(
-                ImageSource(Buffer().write(data.read()), FileSystem.SYSTEM),
-                data.mediaType,
-                DataSource.MEMORY,
-            )
-        }
-}
-
 @Composable
 private fun AttachedImages(
     message: Message,
@@ -285,6 +265,7 @@ private fun AttachedImages(
 ) {
     val t = LingXiTheme.palette
     val context = LocalContext.current
+    val sizePx = with(LocalDensity.current) { chatThumbnailSize.roundToPx() }
     var selectedImage by remember(remoteImageCacheKey) { mutableStateOf<ImagePreviewSource?>(null) }
     selectedImage?.let { ImagePreviewDialog(it, onDismiss = { selectedImage = null }) }
     FlowRow(
@@ -293,45 +274,39 @@ private fun AttachedImages(
         modifier = Modifier.widthIn(max = 300.dp),
     ) {
         val images = remember(message.id, message.images, message.remoteImages, remoteImageCacheKey, loadRemoteImage) {
-            message.images.mapIndexed { index, image ->
-                Triple(
-                    "inline:${message.transcriptUuid ?: message.id}:$index",
-                    ThumbnailSource(image.mediaType) { android.util.Base64.decode(image.base64, android.util.Base64.DEFAULT) },
-                    ImagePreviewSource.Encoded(image.base64, image.mediaType),
-                )
-            } + if (loadRemoteImage == null) emptyList() else message.remoteImages.map { image ->
-                Triple(
-                    "remote:$remoteImageCacheKey:${image.url}",
-                    ThumbnailSource(image.mediaType) { loadRemoteImage(image.url, true) },
-                    ImagePreviewSource.Remote(image.url, image.mediaType) { loadRemoteImage(image.url, false) },
-                )
-            }
+            chatImageThumbnails(message, remoteImageCacheKey, loadRemoteImage).toList()
         }
-        images.forEachIndexed { index, (cacheKey, thumbnail, preview) ->
-            val request = remember(context, cacheKey, thumbnail) {
-                ImageRequest.Builder(context)
-                    .data(thumbnail)
-                    .fetcherFactory(ThumbnailFetcherFactory, ThumbnailSource::class)
-                    .memoryCacheKey(cacheKey)
-                    .diskCachePolicy(CachePolicy.DISABLED)
-                    .build()
-            }
+        images.forEachIndexed { index, thumbnail ->
+            val request = remember(context, thumbnail, sizePx) { thumbnail.request(context, sizePx) }
+            var loading by remember(thumbnail.key) { mutableStateOf(false) }
+            var painted by remember(thumbnail.key) { mutableStateOf(false) }
+            var visibleForProgress by remember(thumbnail.key) { mutableStateOf(false) }
             val label = stringResource(R.string.chat_attached_image_fmt, index + 1)
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
-                    .size(116.dp)
+                    .size(chatThumbnailSize)
+                    .onVisibilityChanged(minDurationMs = 140, minFractionVisible = 0.01f) { visibleForProgress = it }
                     .clip(RoundedCornerShape(11.dp))
-                    .clickable(role = androidx.compose.ui.semantics.Role.Button) { selectedImage = preview }
+                    .clickable(role = androidx.compose.ui.semantics.Role.Button) { selectedImage = thumbnail.preview }
                     .background(t.surfaceActive)
                     .border(0.5.dp, t.border, RoundedCornerShape(11.dp)),
             ) {
-                Icon(Icons.Outlined.Image, contentDescription = null, tint = t.text3, modifier = Modifier.size(20.dp))
+                if (!painted) {
+                    if (loading && visibleForProgress && android.animation.ValueAnimator.areAnimatorsEnabled()) {
+                        CircularProgressIndicator(Modifier.size(20.dp), color = t.text3, strokeWidth = 1.5.dp)
+                    } else {
+                        Icon(Icons.Outlined.Image, contentDescription = null, tint = t.text3, modifier = Modifier.size(20.dp))
+                    }
+                }
                 AsyncImage(
                     model = request,
                     contentDescription = label,
                     contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                     modifier = Modifier.matchParentSize(),
+                    onLoading = { loading = true; painted = false },
+                    onSuccess = { loading = false; painted = true },
+                    onError = { loading = false; painted = false },
                 )
             }
         }

@@ -69,7 +69,7 @@ import { BotStore } from './bots/store.js';
 import { TaskChangeAnnouncer } from './bots/taskChanges.js';
 import { BotTasks } from './bots/taskService.js';
 import { SessionGateway } from './remoteControl/sessionGateway.js';
-import { activityPreview } from './remoteControl/snapshot.js';
+import { activityPreview, historyTail } from './remoteControl/snapshot.js';
 import { LocalAppsGateway } from './remoteControl/localAppsGateway.js';
 import { createRemoteLocalAppsDelegate } from './remoteControl/localAppsBindings.js';
 import { LocalAppRtc } from './local-apps/remoteRtc.js';
@@ -603,6 +603,8 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     broker: credentialBroker ?? systemDecisionCredentials(userData), accounts: accountId => providerAccounts?.launchApiKeyAccount(accountId, 'openai', 'openai') ?? Promise.resolve(undefined),
     changed: snapshot => host?.sendToWindows(CH_DECISION_CHANGED, snapshot),
   });
+  const resolveSavedTranscript = (ref: SessionRef) => bots?.ownsWorkspace(ref.projectPath)
+    ? bots.resolveSavedTranscript(ref) : resolveSavedConversationTranscript(settings, sessionCatalog, ref);
   bridge = new SessionRuntimeManager({
     getTelemetryConfig: () => settings.getTelemetryConfig(),
     // A Bot's working directory is not a project: it has its own configuration home and grants.
@@ -624,8 +626,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       if (bots?.ownsWorkspace(ref.projectPath)) return bots.resolveSavedTranscript(ref);
       return undefined;
     },
-    resolveSavedTranscript: (ref) => bots?.ownsWorkspace(ref.projectPath)
-      ? bots.resolveSavedTranscript(ref) : resolveSavedConversationTranscript(settings, sessionCatalog, ref),
+    resolveSavedTranscript,
     captureSessionSource: async (ref, runtime, scheduled) => {
       if (bots?.ownsWorkspace(ref.projectPath)) return bots.captureSessionSource(ref, runtime);
       if (!host) throw new Error('Desktop host is unavailable.');
@@ -921,18 +922,34 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     runtimes,
     policy,
     bots: () => bots,
+    previewOf: async ref => {
+      const source = await resolveSavedTranscript(ref);
+      if (!source) return undefined;
+      const page = await sessionCatalog.readLatestHistory(ref.projectPath, ref.sessionId, source.path, source.mode);
+      if (!page || !page.messages.length) return undefined;
+      // A preview is display only. Its image slots have no downloadable refs
+      // until the authoritative runtime snapshot replaces the preview.
+      const messages = historyTail(page.messages, page.messages.length, 0,
+        (row, image) => [ref.sessionId, 'v', row, image].join(':'));
+      return { session_id: ref.sessionId, session_mode: source.mode, messages };
+    },
     commands: new RemoteCommands({
       providerAccounts,
       authorizeProviderAccounts: viewer => remoteControlOn() && policy.allows() && account.snapshot().user?.uid === viewer.account_uid,
       allowAlwaysAllow: () => policy.allowAlwaysAllow(),
       echo: (echo) => remoteUi?.echo(echo),
       codec: nativeImageCodec,
-      readHistoryImage: async (runtime, reference, size) => {
+      readHistory: async (runtime, before) => {
+        const owner = runtimes.get(runtime.sessionId);
+        if (!owner || owner !== runtime) throw new Error('The transcript owner is unavailable');
+        const workspace = await owner.getWorkspaceState();
+        if (runtimes.get(runtime.sessionId) !== owner || !workspace.transcript_path) throw new Error('The transcript owner changed');
+        return sessionCatalog.readHistory(owner.projectPath, owner.sessionId, workspace.transcript_path, before);
+      },
+      readHistoryImage: async (runtime, reference, size, signal) => {
         const owner = runtimes.get(runtime.sessionId);
         if (!owner || owner !== runtime) throw new Error('The image session is unavailable');
-        const workspace = await owner.getWorkspaceState();
-        if (!workspace.transcript_path) throw new Error('History image source is unavailable');
-        return sessionCatalog.readImage(owner.projectPath, owner.sessionId, workspace.transcript_path, reference, size);
+        return sessionCatalog.readRuntimeImage(owner, reference, size, signal);
       },
       clock: systemClock,
     }),

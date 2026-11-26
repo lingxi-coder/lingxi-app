@@ -17,10 +17,13 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import coil3.ImageLoader
+import coil3.SingletonImageLoader
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.installations.FirebaseInstallations
 import com.lingxi.code.BuildConfig
+import com.lingxi.code.conversation.ChatThumbnailInterceptor
 import com.lingxi.code.settings.NotificationPrefsStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -35,7 +38,11 @@ import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-class LingxiApplication : Application() {
+class LingxiApplication : Application(), SingletonImageLoader.Factory {
+    override fun newImageLoader(context: Context): ImageLoader = ImageLoader.Builder(context)
+        .components { add(ChatThumbnailInterceptor()) }
+        .build()
+
     override fun onCreate() {
         super.onCreate()
         com.lingxi.code.diagnostics.CrashReporting.initialize()

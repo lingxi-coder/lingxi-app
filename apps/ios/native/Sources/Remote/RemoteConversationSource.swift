@@ -56,6 +56,7 @@ final class RemoteConversationSource: ConversationSource {
     let sessionID: String
     let uid: String
     var sessionMode: SessionMode { model.sessionMode }
+    private(set) var previewMode: SessionMode?
     var isApprovalCapability: Bool { RemoteApprovalCapability.accepts(sessionID) }
     let isTemporaryConversation = true
     var model: ConversationModel { projection.model }
@@ -163,6 +164,16 @@ final class RemoteConversationSource: ConversationSource {
 
     func receive(_ update: RemoteSessionUpdateFfi) {
         guard valid, update.sessionId == sessionID else { return }
+        if !isApprovalCapability, !model.sessionModeKnown, update.phase == .loading, update.replace {
+            previewMode = update.messages.isEmpty ? nil : update.sessionMode.map { SessionMode(dto: $0) }
+            projection.replaceRemoteTranscript(previewMode == nil ? [] : update.messages, sessionID: sessionID)
+            setPhase(.loading)
+            return
+        }
+        if previewMode != nil, update.phase != .loading {
+            previewMode = nil
+            if !update.replace { projection.replaceRemoteTranscript([], sessionID: sessionID) }
+        }
         if let code = update.error?.code,
            code == "SESSION_MODE_OVERFLOW" || code == "SESSION_MODE_MISMATCH" {
             // The native client may reject while withholding Loading records;
@@ -306,7 +317,7 @@ final class RemoteConversationSource: ConversationSource {
 
     var sessionImageLoader: SessionImageLoader {
         let epoch = imageEpoch
-        return SessionImageLoader(cacheKey: "(imageScope):(epoch)", sessionID: sessionID) { [weak self] reference, thumbnail in
+        return SessionImageLoader(cacheKey: "\(imageScope):\(epoch)", sessionID: sessionID) { [weak self] reference, thumbnail in
             guard let self else { throw RemoteFfiError.NotConnected }
             return try await self.loadSessionImage(reference, thumbnail: thumbnail, epoch: epoch)
         }

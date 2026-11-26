@@ -12,6 +12,7 @@ import type {
   SessionModeDto,
 } from '@lingxi/bridge-client';
 import {
+  CancellableImageRequests,
   RemoteRpcError,
   randomId,
   systemClock,
@@ -25,6 +26,7 @@ import {
   type RemoteSeqRecord,
   type RemoteSessionSummary,
   type RemoteTurnState,
+  type SessionPreviewParams,
   type SessionSnapshotParams,
 } from '@lingxi/bridge-client/remote';
 import { emptyTranscript, TranscriptBuilder, type Transcript } from './sessionModel';
@@ -197,14 +199,14 @@ export class SessionController {
   private snapshotFinishedDuringAttach = false;
   private droppedThroughSeq: number | undefined;
   private awaitingAttach = false;
+  private previewShown = false;
   private resetTimer: unknown;
   private readonly seenTurns = new Set<number>();
-  private readonly images = new LRUCache<string, string, ImageGetParams>({
+  private readonly images = new CancellableImageRequests<string>(new LRUCache<string, string>({
     max: 128,
     maxSize: 32 * 1024 * 1024,
     sizeCalculation: (url) => url.length,
-    fetchMethod: (_key, _previous, { context, signal }) => this.readImage(context, signal),
-  });
+  }));
 
   constructor(
     readonly sessionId: string,
@@ -245,6 +247,7 @@ export class SessionController {
   }
 
   private rejectMode(code = 'SESSION_MODE_MISMATCH'): void {
+    this.clearPreview();
     this.modeRejected = true;
     this.attachId += 1;
     this.awaitingAttach = false;
@@ -304,6 +307,7 @@ export class SessionController {
     if (!this.active) return;
     this.active = false;
     this.attachId += 1;
+    this.clearPreview();
     this.invalidateHistory();
     this.io.clock.clearTimeout(this.resetTimer);
     if (this.connected()) void this.io.request('session.detach', { session_id: this.sessionId }).catch(() => undefined);
@@ -320,11 +324,13 @@ export class SessionController {
     this.assembly = undefined;
     this.pendingSnapshot = undefined;
     this.awaitingAttach = false;
+    this.clearPreview();
     if (this.current.status === 'loading' || this.current.status === 'live') this.commit({ status: 'offline' });
   }
 
   private async attach(): Promise<void> {
     if (this.modeRejected || !this.active || !this.connected()) return;
+    this.clearPreview();
     const id = ++this.attachId;
     this.invalidateHistory();
     this.io.clock.clearTimeout(this.resetTimer);
@@ -342,7 +348,9 @@ export class SessionController {
     try {
       const result = await this.io.request(
         'session.attach',
-        resume === undefined ? { session_id: this.sessionId } : { session_id: this.sessionId, resume },
+        resume !== undefined ? { session_id: this.sessionId, resume }
+          : isTeamApproval(this.sessionId) || this.current.sessionMode !== undefined ? { session_id: this.sessionId }
+          : { session_id: this.sessionId, preview: true },
         { timeoutMs: ATTACH_TIMEOUT_MS },
       );
       if (id !== this.attachId) return;
@@ -372,6 +380,7 @@ export class SessionController {
     } catch (error) {
       if (id !== this.attachId) return;
       this.awaitingAttach = false;
+      this.clearPreview();
       const failure = errorMessage(error);
       if (failure.code === 'closed') this.commit({ status: 'offline' });
       else this.commit({ status: 'error', error: failure });
@@ -394,6 +403,23 @@ export class SessionController {
   // ───────────────────────────────────────────────────────────────────────────
   // From the desktop
   // ───────────────────────────────────────────────────────────────────────────
+
+  private clearPreview(): void {
+    if (!this.previewShown) return;
+    this.previewShown = false;
+    this.commit({ transcript: this.builder.snapshot() });
+  }
+
+  handlePreview(params: SessionPreviewParams): void {
+    if (this.modeRejected || !this.active || !this.awaitingAttach || this.cursor || this.assembly
+      || this.pendingSnapshot || this.previewShown || this.current.status !== 'loading'
+      || isTeamApproval(this.sessionId) || params.session_id !== this.sessionId
+      || (params.session_mode !== 'code' && params.session_mode !== 'chat')
+      || (this.current.sessionMode !== undefined && this.current.sessionMode !== params.session_mode)
+      || !Array.isArray(params.messages) || params.messages.length === 0 || params.messages.length > 200) return;
+    this.previewShown = true;
+    this.commit({ transcript: TranscriptBuilder.from(params.messages, []).snapshot(), hasOlder: false });
+  }
 
   handleSnapshot(params: SessionSnapshotParams): void {
     if (this.modeRejected || params.session_id !== this.sessionId) return;
@@ -454,6 +480,7 @@ export class SessionController {
       || end.turn.turn_id !== undefined || end.controls !== undefined)) { this.rejectMode(); return; }
     if (mode === undefined && !approval) return;
     this.pendingSnapshot = undefined;
+    this.previewShown = false;
     this.modeWaitUpdates = 0;
     this.modeWaitBytes = 0;
     if (this.cursor?.epoch !== end.cursor.epoch) this.images.clear();
@@ -559,6 +586,7 @@ export class SessionController {
 
   handleReset(): void {
     if (this.modeRejected) return;
+    this.previewShown = false;
     this.invalidateHistory();
     this.cursor = undefined;
     this.baseMessages = [];
@@ -585,6 +613,7 @@ export class SessionController {
   handleClosed(): void {
     if (this.modeRejected) return;
     this.attachId += 1;
+    this.clearPreview();
     this.invalidateHistory();
     this.commit({ status: 'closed' });
   }
@@ -758,14 +787,12 @@ export class SessionController {
   }
 
   /** Fetch key includes the variant so a preview cannot serve as an original. */
-  fetchImage = async (ref: string, size?: ImageGetParams['size']): Promise<string> => {
+  fetchImage = async (ref: string, size?: ImageGetParams['size'], signal?: AbortSignal): Promise<string> => {
     this.requireConversation();
     if (!ref.startsWith(`${this.sessionId}:`)) {
       throw new RemoteRpcError('forbidden', 'The image belongs to a different remote session.');
     }
-    const result = await this.images.fetch(JSON.stringify([ref, size]), { context: { ref, size } });
-    if (!result) throw new Error('image is unavailable');
-    return result;
+    return this.images.fetch(JSON.stringify([ref, size]), loadSignal => this.readImage({ ref, size }, loadSignal), signal);
   };
 
   private async readImage(params: ImageGetParams, signal: AbortSignal): Promise<string> {
@@ -774,7 +801,9 @@ export class SessionController {
     let mediaType: string | undefined;
     let offset = 0;
     for (;;) {
-      const result = await this.io.request('image.get', offset ? { ...params, offset } : params);
+      signal.throwIfAborted();
+      const result = await this.io.request('image.get', offset ? { ...params, offset } : params,
+        params.size === 'thumbnail' ? { signal } : undefined);
       this.requireConversation();
       if (signal.aborted || this.cursor?.epoch !== epoch) throw new RemoteRpcError('closed', 'The remote session changed.');
       if (!isSupportedImageMediaType(result.media_type) || (mediaType && mediaType !== result.media_type)
@@ -1147,6 +1176,9 @@ export class RemoteClient {
     const controller = typeof sessionId === 'string' ? this.controllers.get(sessionId) : undefined;
     if (controller === undefined) return;
     switch (method) {
+      case 'session.preview':
+        controller.handlePreview(body as unknown as SessionPreviewParams);
+        break;
       case 'session.snapshot':
         controller.handleSnapshot(body as unknown as SessionSnapshotParams);
         break;

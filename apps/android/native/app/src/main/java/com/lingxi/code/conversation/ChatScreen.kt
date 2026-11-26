@@ -247,6 +247,7 @@ fun ChatScreen(
     onInboxVisibleMessages: (suspend (Set<String>) -> Unit)? = null,
     onInboxJumpLatest: () -> Unit = {},
     inboxActivityCursor: Long = 0,
+    readOnly: Boolean = false,
 ) {
     val suggestionLifecycle = LocalLifecycleOwner.current.lifecycle
     val suggestionInputEmpty = draft.isEmpty() && attachment == null && state.visualizationChip == null
@@ -291,6 +292,7 @@ fun ChatScreen(
     // place (see ChatRenderItem.kt).
     var retainedMessageAnchor by remember(state.session.id) { mutableStateOf<String?>(null) }
     val renderItems = buildChatRenderItems(state, linkedMessageUuid ?: retainedMessageAnchor)
+    PrefetchChatThumbnails(renderItems, listState, remoteImageCacheKey, loadRemoteImage)
     val slackPx = with(LocalDensity.current) { TranscriptFollow.BOTTOM_SLACK.roundToPx() }
     // Whether the reader is parked at the tail, measured from the real layout.
     // Only the FINAL row's end says anything about the end of the content: the
@@ -316,7 +318,7 @@ fun ChatScreen(
     val rearmTail: () -> Unit = { followState = followState.resume() }
     val currentBottomAnchor by rememberUpdatedState(renderItems.size)
     val currentCanFollow by rememberUpdatedState(
-        state.sessionReady && !state.sessionTransitioning && linkedMessageUuid == null,
+        (state.sessionReady || readOnly) && !state.sessionTransitioning && linkedMessageUuid == null,
     )
     val transcriptGestures = remember(listState) {
         object : NestedScrollConnection {
@@ -548,7 +550,7 @@ fun ChatScreen(
                     modeSelectionEnabled = modeSelectionEnabled,
                 )
             }
-            if (hasUnsentDraft) {
+            if (hasUnsentDraft && !readOnly) {
                 TextButton(onClick = onRestoreUnsentDraft, enabled = canRestoreUnsentDraft) {
                     Text(stringResource(R.string.chat_restore_unsent_message))
                 }
@@ -556,7 +558,7 @@ fun ChatScreen(
             onRetryAuthoring?.let { retry ->
                 TextButton(onClick = retry) { Text(stringResource(R.string.common_retry)) }
             }
-            Composer(
+            if (!readOnly) Composer(
                 text = draft,
                 historySessionKey = state.session.id,
                 historyMessages = if (state.sessionTransitioning) emptyList() else state.messages

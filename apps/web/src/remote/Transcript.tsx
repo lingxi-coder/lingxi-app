@@ -1,7 +1,8 @@
 import { fileTypeIcon, transcriptRowUuids } from './reuse';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { SessionAgentSummaryDto, StructuredDiffDto } from '@lingxi/bridge-client';
+import { SessionThumbnail } from '../../../../packages/chat-ui/SessionThumbnail';
 import type { Locale } from '../utils/locale';
 import { Markdown } from './markdown';
 import { imageRefOf, itemsWithExtras, type ExtraRow, type PromptMeta, type Transcript } from './sessionModel';
@@ -13,7 +14,7 @@ function FileTypeIcon({ path }: { path: string }) {
   return <img src={fileTypeIcon(path)} alt="" aria-hidden="true" width={18} height={18} style={{ flex: 'none' }} />;
 }
 
-type FetchImage = (ref: string, size?: 'thumbnail' | 'original') => Promise<string>;
+type FetchImage = (ref: string, size?: 'thumbnail' | 'original', signal?: AbortSignal) => Promise<string>;
 
 interface TranscriptViewProps {
   locale: Locale;
@@ -154,41 +155,35 @@ function Images({ images, locale, fetchImage }: { images: readonly { media_type:
   );
 }
 
-function useRemoteImage(url: string, fetchImage: FetchImage, size: 'thumbnail' | 'original', enabled: boolean) {
+function useRemoteOriginal(url: string, fetchImage: FetchImage) {
   const reference = imageRefOf(url);
   const [result, setResult] = useState<{ source: string | null; reference: string; loader: FetchImage }>();
   useEffect(() => {
-    if (!reference || !enabled) return;
+    if (!reference) return;
     let cancelled = false;
-    void fetchImage(reference, size).then(
+    void fetchImage(reference, 'original').then(
       (image) => { if (!cancelled) setResult({ source: image, reference, loader: fetchImage }); },
       () => { if (!cancelled) setResult({ source: null, reference, loader: fetchImage }); },
     );
     return () => { cancelled = true; };
-  }, [enabled, fetchImage, reference, size]);
+  }, [fetchImage, reference]);
   return reference ? (result?.reference === reference && result.loader === fetchImage ? result.source : undefined) : url;
 }
 
 function RemoteImage({ url, locale, fetchImage }: { url: string; locale: Locale; fetchImage: FetchImage }) {
-  const button = useRef<HTMLButtonElement>(null);
-  const [nearViewport, setNearViewport] = useState(false);
   const [open, setOpen] = useState(false);
-  const source = useRemoteImage(url, fetchImage, 'thumbnail', nearViewport);
-  useEffect(() => {
-    if (nearViewport || !button.current || !imageRefOf(url)) return;
-    const observer = new IntersectionObserver(([entry]) => {
-      if (entry?.isIntersecting) setNearViewport(true);
-    }, { rootMargin: '120px' });
-    observer.observe(button.current);
-    return () => observer.disconnect();
-  }, [nearViewport, url]);
+  const reference = imageRefOf(url);
+  const provisional = reference?.split(':')[1] === 'v';
+  const load = useCallback((signal: AbortSignal) => fetchImage(reference!, 'thumbnail', signal), [fetchImage, reference]);
 
   return (
     <>
-      <button ref={button} type="button" className="rc-image-ref" aria-haspopup="dialog"
+      <button type="button" className="rc-image-ref" aria-haspopup="dialog" disabled={provisional}
         aria-label={t(locale, 'imageLoad')} onClick={() => setOpen(true)}>
-        {source ? <img className="rc-image" src={source} alt={t(locale, 'imageAlt')} loading="lazy" decoding="async" />
-          : t(locale, source === null ? 'imageFailed' : nearViewport ? 'imageLoading' : 'imageLoad')}
+        <SessionThumbnail src={reference ? undefined : url} load={reference && !provisional ? load : undefined}
+          alt={t(locale, 'imageAlt')} placeholder={<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor">
+            <rect x="1.5" y="2" width="13" height="12" rx="2" /><circle cx="5.5" cy="5.5" r="1" /><path d="m2 12 3.5-3.5 2.1 2.1 3.1-4 3.8 3.4" />
+          </svg>} loadingLabel={t(locale, 'imageLoading')} failedLabel={t(locale, 'imageFailed')} />
       </button>
       {open && createPortal(<RemoteImageDialog url={url} locale={locale} fetchImage={fetchImage} onClose={() => setOpen(false)} />, document.body)}
     </>
@@ -197,13 +192,21 @@ function RemoteImage({ url, locale, fetchImage }: { url: string; locale: Locale;
 
 function RemoteImageDialog({ url, locale, fetchImage, onClose }: { url: string; locale: Locale; fetchImage: FetchImage; onClose(): void }) {
   const dialog = useRef<HTMLDialogElement>(null);
-  const source = useRemoteImage(url, fetchImage, 'original', true);
+  const source = useRemoteOriginal(url, fetchImage);
+  const [paint, setPaint] = useState<{ url: string; failed: boolean }>();
+  const painted = source && paint?.url === source ? paint : undefined;
+  const failed = source === null || painted?.failed;
+  const ready = painted && !painted.failed;
   useEffect(() => { dialog.current?.showModal(); }, []);
   return <dialog ref={dialog} className="rc-image-preview" aria-label={t(locale, 'imageAlt')} onClose={onClose}>
     <button autoFocus type="button" className="rc-image-preview-close"
       aria-label={t(locale, 'closeImagePreview')} onClick={() => dialog.current?.close()}>×</button>
-    {source ? <img src={source} alt={t(locale, 'imageAlt')} decoding="async" />
-      : <p role={source === null ? 'alert' : 'status'}>{t(locale, source === null ? 'imageFailed' : 'imageLoading')}</p>}
+    <div className="rc-image-preview-media">
+      {source && !failed && <img src={source} alt={t(locale, 'imageAlt')} decoding="async" style={{ opacity: ready ? 1 : 0 }}
+        onLoad={() => setPaint({ url: source, failed: false })} onError={() => setPaint({ url: source, failed: true })} />}
+      {!ready && <p className={failed ? undefined : 'session-image-loading-status'}
+        role={failed ? 'alert' : 'status'}>{t(locale, failed ? 'imageFailed' : 'imageLoading')}</p>}
+    </div>
   </dialog>;
 }
 

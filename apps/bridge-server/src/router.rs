@@ -2101,15 +2101,29 @@ impl CommandRouter for EngineCommandRouter {
         if self.handle.conversation_mode().await.mode != expected_mode {
             return Err("session_mode_mismatch: expected mode differs from the runtime".into());
         }
+        let page_display = request.at_pointer("/page_display").and_then(|value| value.as_bool()) == Some(true);
         if let Some(workspace) = &self.workspace_commands {
             if let Some(proof) = workspace
-                .complete_cold_resume(id, &path, expected_mode)
+                .complete_cold_resume(id, &path, expected_mode, page_display)
                 .await?
             {
                 self.emit_resumed_session(id, proof.messages, proof.current_usage, None, sink)
                     .await;
-                return Utf16JsonProjection::parse(r#"{"status":"ok"}"#)
-                    .map_err(|error| error.to_string());
+                return if page_display {
+                    #[derive(serde::Serialize)]
+                    struct Receipt {
+                        status: &'static str,
+                        history_before: Option<String>,
+                        history_overview: Vec<client::protocol::message::MessageDto>,
+                    }
+                    let value = serde_json::to_string(&Receipt {
+                        status: "ok", history_before: proof.history_before,
+                        history_overview: proof.history_overview,
+                    }).map_err(|error| error.to_string())?;
+                    Utf16JsonProjection::parse(&value)
+                } else {
+                    Utf16JsonProjection::parse(r#"{"status":"ok"}"#)
+                }.map_err(|error| error.to_string());
             }
         }
         let store = self

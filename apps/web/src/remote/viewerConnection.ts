@@ -408,11 +408,14 @@ export class ViewerConnection {
   request<K extends keyof ViewerRequests>(
     method: K,
     params: ViewerRequests[K]['params'],
-    options?: { timeoutMs?: number },
+    options?: { timeoutMs?: number; signal?: AbortSignal },
   ): Promise<ViewerRequests[K]['result']> {
     const rpc = this.live?.rpc;
     if (rpc === undefined || rpc.closed) return Promise.reject(new RemoteRpcError('closed', 'not connected'));
-    return rpc.request<ViewerRequests[K]['result']>(method, params, options);
+    const requestOptions = options?.signal && this.current.host?.cancel_image_requests !== true
+      ? { timeoutMs: options.timeoutMs }
+      : options;
+    return rpc.request<ViewerRequests[K]['result']>(method, params, requestOptions);
   }
 
   /** Send a notification on the ready link; dropped when there is none. */

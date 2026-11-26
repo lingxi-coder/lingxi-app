@@ -8,6 +8,7 @@ import { basename, isAbsolute } from 'node:path';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import type { SessionRowDto } from '@lingxi/bridge-client';
 import { validateClientEvent } from '@lingxi/bridge-client';
+import { CancellableImageRequests } from '@lingxi/bridge-client/remote';
 import { historyCursor, isHistoryImageReference, type SessionImagePayload, type SessionImageSize, type TranscriptHistoryCursor, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
 import { lstat } from 'node:fs/promises';
 import { LRUCache } from 'lru-cache';
@@ -281,6 +282,8 @@ class CatalogWorker {
     if (!this.current) this.stop();
   }
 
+  cancel(): void { if (this.current) this.fail(new Error('thumbnail request cancelled')); }
+
   private stop(): void {
     this.retiring = true;
     if (this.idleTimer) clearTimeout(this.idleTimer);
@@ -367,6 +370,12 @@ interface CatalogWorkerLane {
   pending?: Promise<CatalogWorker>;
   tail: Promise<void>;
   queued: number;
+}
+
+interface SessionImageRuntime {
+  projectPath: string;
+  sessionId: string;
+  getWorkspaceState(): Promise<{ transcript_path?: string | null }>;
 }
 
 function boundedOutput(value: string): string {
@@ -460,20 +469,13 @@ export class ProjectSessionCatalog {
   private readonly overlappingCatalogLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
   private readonly historyLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
   private readonly imageLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
-  private readonly images = new LRUCache<string, SessionImagePayload, CatalogWorkerQuery>({
+  private readonly imageSources = new WeakMap<SessionImageRuntime, ReturnType<SessionImageRuntime['getWorkspaceState']>>();
+  private readonly images = new CancellableImageRequests<SessionImagePayload>(new LRUCache<string, SessionImagePayload>({
     max: 128,
     maxSize: 64 * 1024 * 1024,
     sizeCalculation: image => image.base64.length * 2,
     ttl: 10 * 60_000,
-    fetchMethod: async (_key, _previous, { context }) => {
-      const output = await this.runWorker(context, this.imageLane);
-      const image = JSON.parse(output) as SessionImagePayload;
-      if (!isSupportedImageMediaType(image.mediaType) || typeof image.base64 !== 'string' || !image.base64.length) {
-        throw new Error('Invalid history image response');
-      }
-      return image;
-    },
-  });
+  }));
   private foregroundKind: 'directory' | 'session' = 'directory';
   private catalogQueued = 0;
   private disposed = false;
@@ -731,27 +733,34 @@ export class ProjectSessionCatalog {
       if (!session || session.empty_session || generation !== this.generation) return { session };
       // Let startup claim the now-idle settings reader before a preview
       // worker can reclaim its process slot.
-      const preview = nextTurn().then(async () => {
-        if (generation !== this.generation) return undefined;
-        const output = await this.runWorker({
-          cwd: query.cwd, sessionId: session.uuid, transcriptPath: session.path, historyLatest: true,
-        }, this.historyLane);
-        if (generation !== this.generation) return undefined;
-        const page = JSON.parse(output) as Partial<TranscriptHistoryPage>;
-        const event = validateClientEvent({ type: 'session_resumed', mode: session.mode, session_id: session.uuid, messages: page.messages });
-        if (event.type === 'session_resumed' && event.messages.length && event.messages.every(message =>
-          message && typeof message.role === 'string' && Array.isArray(message.blocks)
-            && message.blocks.every(block => block && typeof block.type === 'string'))) {
-          return { messages: event.messages, before: page.before == null ? null : historyCursor(page.before) };
-        }
-        return undefined;
-      }).catch(() => undefined);
+      const preview = nextTurn().then(() => generation === this.generation
+        ? this.readLatestHistory(query.cwd, session.uuid, session.path, session.mode) : undefined);
       return { session, preview };
     });
     this.pendingOpen.set(key, operation);
     const cleanup = () => { if (this.pendingOpen.get(key) === operation) this.pendingOpen.delete(key); };
     void operation.then(result => result.preview).then(cleanup, cleanup);
     return operation;
+  }
+
+  /** The display tail of a source the caller has already selected and validated. */
+  async readLatestHistory(projectPath: string, sessionId: string, transcriptPath: string,
+    mode: 'chat' | 'code'): Promise<TranscriptHistoryPage | undefined> {
+    if (this.options.catalogWorker === false) return undefined;
+    const generation = this.generation;
+    try {
+      const { cwd } = this.selectionQuery(projectPath, sessionId, { scope: 'current', transcriptPath });
+      const output = await this.runWorker({ cwd, sessionId, transcriptPath, historyLatest: true }, this.historyLane);
+      if (generation !== this.generation) return undefined;
+      const page = JSON.parse(output) as Partial<TranscriptHistoryPage>;
+      const event = validateClientEvent({ type: 'session_resumed', mode, session_id: sessionId, messages: page.messages });
+      if (event.type !== 'session_resumed' || !event.messages.length || !event.messages.every(message =>
+        message && typeof message.role === 'string' && Array.isArray(message.blocks)
+          && message.blocks.every(block => block && typeof block.type === 'string'))) return undefined;
+      return { messages: event.messages, before: page.before == null ? null : historyCursor(page.before) };
+    } catch {
+      return undefined;
+    }
   }
 
   private selectionQuery(projectPath: string, sessionId: string, selection: SessionOpenSelection): CatalogWorkerQuery & { sessionId: string } {
@@ -786,20 +795,47 @@ export class ProjectSessionCatalog {
     return operation;
   }
 
-  async readImage(projectPath: string, sessionId: string, transcriptPath: string, reference: string, size: SessionImageSize): Promise<SessionImagePayload> {
+  async readRuntimeImage(runtime: SessionImageRuntime, reference: string, size: SessionImageSize, signal?: AbortSignal): Promise<SessionImagePayload> {
+    signal?.throwIfAborted();
+    let state = this.imageSources.get(runtime);
+    if (!state) {
+      state = runtime.getWorkspaceState().finally(() => this.imageSources.delete(runtime));
+      this.imageSources.set(runtime, state);
+    }
+    // Other thumbnails may still need the workspace lookup after this caller scrolls away.
+    const workspace = await (signal ? new Promise<Awaited<typeof state>>((resolve, reject) => {
+      const abort = () => reject(signal.reason);
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) {
+        signal.removeEventListener('abort', abort);
+        abort();
+      }
+      void state.then(resolve, reject).then(() => signal.removeEventListener('abort', abort));
+    }) : state);
+    if (!workspace?.transcript_path) throw new Error('History image source is unavailable');
+    return this.readImage(runtime.projectPath, runtime.sessionId, workspace.transcript_path, reference, size, signal);
+  }
+
+  async readImage(projectPath: string, sessionId: string, transcriptPath: string, reference: string, size: SessionImageSize, signal?: AbortSignal): Promise<SessionImagePayload> {
     if (!isSessionId(sessionId) || !isAbsolute(transcriptPath) || transcriptPath.includes('\0')
       || basename(transcriptPath).toLowerCase() !== `${sessionId.toLowerCase()}.jsonl`
       || !isHistoryImageReference(reference) || (size !== 'thumbnail' && size !== 'original')) {
       throw new Error('Invalid history image request');
     }
+    signal?.throwIfAborted();
     const source = await lstat(transcriptPath);
     if (!source.isFile()) throw new Error('History image source is unavailable');
     const query = { cwd: realpathSync.native(projectPath), sessionId: sessionId.toLowerCase(), transcriptPath,
       historyImage: { reference, size } };
     const key = JSON.stringify([query, source.dev, source.ino, source.mtimeMs, source.size]);
-    const image = await this.images.fetch(key, { context: query });
-    if (!image) throw new Error('History image is unavailable');
-    return image;
+    return this.images.fetch(key, async loadSignal => {
+      const output = await this.runWorker(query, this.imageLane, size === 'thumbnail' ? loadSignal : undefined);
+      const image = JSON.parse(output) as SessionImagePayload;
+      if (!isSupportedImageMediaType(image.mediaType) || typeof image.base64 !== 'string' || !image.base64.length) {
+        throw new Error('Invalid history image response');
+      }
+      return image;
+    }, signal);
   }
 
   private async loadHistory(query: CatalogWorkerQuery & { sessionId: string; historyBefore: TranscriptHistoryCursor }): Promise<TranscriptHistoryPage> {
@@ -910,27 +946,45 @@ export class ProjectSessionCatalog {
     return this.runWorker(query, this.foregroundKind === kind ? this.foregroundLane : this.overlappingCatalogLane);
   }
 
-  private runWorker(query: CatalogWorkerQuery, lane: CatalogWorkerLane): Promise<string> {
+  private runWorker(query: CatalogWorkerQuery, lane: CatalogWorkerLane, signal?: AbortSignal): Promise<string> {
     if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
+    if (signal?.aborted) return Promise.reject(signal.reason);
     if (this.catalogQueued >= MAX_QUEUED_CATALOG_OPERATIONS) return Promise.reject(new Error('session catalog is busy; try again shortly'));
     this.catalogQueued++;
     lane.queued++;
+    let removeQueuedAbort: (() => void) | undefined;
+    const queuedAbort = signal && new Promise<never>((_resolve, reject) => {
+      const abort = () => reject(signal.reason);
+      signal.addEventListener('abort', abort, { once: true });
+      removeQueuedAbort = () => signal.removeEventListener('abort', abort);
+    });
     const operation = lane.tail.then(async () => {
+      removeQueuedAbort?.();
+      signal?.throwIfAborted();
       if (this.disposed) throw new Error('session catalog is disposed');
       const candidate = this.getWorker(query.cwd, lane, query);
       // Start a reused worker in this turn, before another lane can reclaim
       // its idle process slot while the request is waiting in a microtask.
       const worker = candidate instanceof CatalogWorker ? candidate : await candidate;
+      const abort = () => worker.cancel();
       try {
+        signal?.throwIfAborted();
+        signal?.addEventListener('abort', abort, { once: true });
         return await worker.request(query);
       } catch (error) {
         worker.retire();
         if (lane.worker === worker) lane.worker = undefined;
         throw error;
+      } finally {
+        signal?.removeEventListener('abort', abort);
       }
     });
     lane.tail = operation.then(() => undefined, () => undefined);
-    return operation.finally(() => { this.catalogQueued--; lane.queued--; });
+    return (queuedAbort ? Promise.race([operation, queuedAbort]) : operation).finally(() => {
+      removeQueuedAbort?.();
+      this.catalogQueued--;
+      lane.queued--;
+    });
   }
 
   private getWorker(canonical: string, lane: CatalogWorkerLane, query: CatalogWorkerQuery): CatalogWorker | Promise<CatalogWorker> {

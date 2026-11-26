@@ -35,6 +35,8 @@ struct ReverseLines {
     file: File,
     /// File offset of the current chunk, or the exclusive read bound initially.
     start: u64,
+    floor: u64,
+    reached_scan_limit: bool,
     chunk: Vec<u8>,
     end: usize,
     skip_final_newline: bool,
@@ -49,6 +51,8 @@ impl ReverseLines {
         Self {
             file,
             start,
+            floor: 0,
+            reached_scan_limit: false,
             chunk: Vec::new(),
             end: 0,
             skip_final_newline: true,
@@ -59,14 +63,19 @@ impl ReverseLines {
         }
     }
 
+    fn with_scan_limit(mut self, bytes: u64) -> Self {
+        self.floor = self.start.saturating_sub(bytes);
+        self
+    }
+
     fn next(&mut self) -> Result<Option<(u64, String)>, String> {
         // Chunks are moved here in reverse file order. Scan only unread bytes
         // and assemble a completed row once, even when it spans many chunks.
         let mut fragments = Vec::<Vec<u8>>::new();
         let mut bytes = 0;
         loop {
-            if self.end == 0 && self.start > 0 {
-                let start = self.start.saturating_sub(CHUNK);
+            if self.end == 0 && self.start > self.floor {
+                let start = self.start.saturating_sub(CHUNK).max(self.floor);
                 self.chunk = vec![0; (self.start - start) as usize];
                 self.file
                     .seek(SeekFrom::Start(start))
@@ -103,6 +112,12 @@ impl ReverseLines {
                 let line = self.assemble(0, bytes, fragments)?;
                 self.end = 0;
                 return Ok(Some((0, line)));
+            }
+            if self.start == self.floor {
+                // The start of this row lies outside the preview window.
+                self.reached_scan_limit = true;
+                self.end = 0;
+                return Ok(None);
             }
             bytes += self.end;
             if bytes > MAX_RAW_ROW_BYTES {
@@ -176,7 +191,7 @@ pub(super) fn read(path: &Path, session_id: uuid::Uuid, cursor: Cursor) -> Resul
     {
         return Err("History source changed. Reopen this chat to reload history.".into());
     }
-    read_page(file, opened, session_id, Some(cursor))
+    read_page(file, opened, session_id, Some(cursor), None)
 }
 
 /// Hold the very same no-symlink file across scope validation and preview by
@@ -241,6 +256,7 @@ impl LatestSource {
             self.file.metadata().map_err(|error| error.to_string())?,
             session_id,
             None,
+            Some(MAX_PREVIEW_SCAN_BYTES),
         )?;
         let current = Self::open_file(&self.home, &self.relative)?;
         if opened_file_identity(&current).map_err(|error| error.to_string())?
@@ -252,27 +268,72 @@ impl LatestSource {
         Ok(page)
     }
 
-    pub(super) fn read_message(self, id: uuid::Uuid) -> Result<session::jsonl::JsonlMessage, String> {
+    pub(super) fn read_message(
+        self,
+        id: uuid::Uuid,
+        location: Option<(u64, String)>,
+    ) -> Result<session::jsonl::JsonlMessage, String> {
         use lingxi_core::host::rooted_fs::opened_file_identity;
         let id = id.to_string();
-        let mut reader = ReverseLines::new(self.file.try_clone().map_err(|error| error.to_string())?, self.revision.len);
-        while let Some((_, line)) = reader.next()? {
-            if !line.contains(&id) {
-                continue;
+        let find = |line: &str| {
+            line.contains(&id)
+                .then(|| {
+                    session::jsonl::route_lines(line)
+                        .messages_in_order
+                        .into_iter()
+                        .find(|row| {
+                            row.uuid == id && row.message_type == "user" && !row.is_sidechain
+                        })
+                })
+                .flatten()
+        };
+        let mut file = self.file.try_clone().map_err(|error| error.to_string())?;
+        let row = if let Some((offset, expected)) = location {
+            let metadata = self.file.metadata().map_err(|error| error.to_string())?;
+            if offset >= self.revision.len || identity(&metadata) != expected {
+                return Err("History image source changed".into());
             }
-            if let Some(row) = session::jsonl::route_lines(&line).messages_in_order.into_iter()
-                .find(|row| row.uuid == id && row.message_type == "user" && !row.is_sidechain)
-            {
-                let current = Self::open_file(&self.home, &self.relative)?;
-                if opened_file_identity(&current).map_err(|error| error.to_string())?
-                    != opened_file_identity(&self.file).map_err(|error| error.to_string())?
-                {
-                    return Err("History image source changed".into());
+            if offset > 0 {
+                file.seek(SeekFrom::Start(offset - 1))
+                    .map_err(|error| error.to_string())?;
+                let mut delimiter = [0];
+                file.read_exact(&mut delimiter)
+                    .map_err(|error| error.to_string())?;
+                if delimiter != [b'\n'] {
+                    return Err("History image record changed".into());
                 }
-                return Ok(row);
+            } else {
+                file.seek(SeekFrom::Start(0))
+                    .map_err(|error| error.to_string())?;
             }
+            let mut line = Vec::new();
+            BufReader::new(&mut file)
+                .take((MAX_RAW_ROW_BYTES + 1) as u64)
+                .read_until(b'\n', &mut line)
+                .map_err(|error| error.to_string())?;
+            if line.len() > MAX_RAW_ROW_BYTES {
+                return Err("History image record exceeds the row size limit".into());
+            }
+            find(std::str::from_utf8(&line).map_err(|_| "Invalid history image record")?)
+        } else {
+            let mut reader = ReverseLines::new(file, self.revision.len);
+            let mut row = None;
+            while let Some((_, line)) = reader.next()? {
+                row = find(&line);
+                if row.is_some() {
+                    break;
+                }
+            }
+            row
+        };
+        let row = row.ok_or("History image is unavailable")?;
+        let current = Self::open_file(&self.home, &self.relative)?;
+        if opened_file_identity(&current).map_err(|error| error.to_string())?
+            != opened_file_identity(&self.file).map_err(|error| error.to_string())?
+        {
+            return Err("History image source changed".into());
         }
-        Err("History image is unavailable".into())
+        Ok(row)
     }
 }
 
@@ -281,6 +342,7 @@ fn read_page(
     opened: std::fs::Metadata,
     session_id: uuid::Uuid,
     cursor: Option<Cursor>,
+    scan_limit: Option<u64>,
 ) -> Result<Page, String> {
     let source_identity = identity(&opened);
     let mut found = cursor.as_ref().is_none_or(|cursor| cursor.offset.is_some());
@@ -317,17 +379,17 @@ fn read_page(
             .and_then(|cursor| cursor.offset)
             .unwrap_or(opened.len()),
     );
+    if let Some(bytes) = scan_limit {
+        reader = reader.with_scan_limit(bytes);
+    }
     let mut rows = Vec::new();
     let mut pending_siblings = HashMap::<_, Vec<(u64, session::jsonl::JsonlMessage)>>::new();
     let mut pending_calls = HashSet::new();
     let mut pending_summary = false;
     let mut safe_offsets = Vec::new();
     let mut bytes = 0;
-    let mut before = None;
+    let page_budget = if scan_limit.is_some() { MAX_PREVIEW_BYTES } else { MAX_PAGE_BYTES };
     while let Some((offset, line)) = reader.next()? {
-        if cursor.is_none() && opened.len().saturating_sub(offset) > MAX_PREVIEW_SCAN_BYTES {
-            return Err("Recent history exceeds the preview scan limit".into());
-        }
         let loaded = session::jsonl::route_lines(&line);
         let Some(mut row) = loaded
             .messages_in_order
@@ -347,8 +409,8 @@ fn read_page(
             }
             continue;
         }
-        let projected_image = super::history_image::project_images(&mut row)?;
-        if line.len() > MAX_PAGE_BYTES {
+        let projected_image = super::history_image::project_images(&mut row, offset, &source_identity)?;
+        if line.len() > page_budget {
             // Full pre-edit files and raw image tool results are omitted by the
             // canonical display lowerer. Avoid spending the page budget on them.
             if let Some(result) = row.tool_use_result_projection.as_mut() {
@@ -358,12 +420,12 @@ fn read_page(
                 }
             }
         }
-        let weight = if projected_image || line.len() > MAX_PAGE_BYTES {
+        let weight = if projected_image || line.len() > page_budget {
             serde_json::to_vec(&row).map_err(|error| error.to_string())?.len()
         } else {
             line.len()
         };
-        if bytes + weight > MAX_PAGE_BYTES {
+        if bytes + weight > page_budget {
             if !truncate_complete_page(&mut rows, &safe_offsets, &pending_siblings) {
                 return Err("One history activity exceeds the page size limit".into());
             }
@@ -421,30 +483,43 @@ fn read_page(
     if !found {
         return Err("History anchor is unavailable. Reopen this chat.".into());
     }
-    if let Some((offset, row)) = rows.last() {
-        before = Some(Cursor {
-            uuid: row.uuid.clone(),
+    if reader.reached_scan_limit
+        && !truncate_complete_page(&mut rows, &safe_offsets, &pending_siblings)
+    {
+        return Err("Recent history exceeds the preview scan limit".into());
+    }
+    let (offsets, rows): (Vec<_>, Vec<_>) = rows.into_iter().rev().unzip();
+    let mut first = 0;
+    loop {
+        let before = offsets.get(first).filter(|offset| **offset > 0).map(|offset| Cursor {
+            uuid: rows[first].uuid.clone(),
             offset: Some(*offset),
             identity: Some(source_identity.clone()),
         });
+        let page = Page { messages: lower_history_rows(session_id, &rows[first..]), before };
+        if scan_limit.is_none() || serde_json::to_vec(&page).map_err(|e| e.to_string())?.len() <= page_budget {
+            return Ok(page);
+        }
+        // The display DTO can grow while lowering structured results. Retry
+        // with a smaller complete tail and keep its exclusive physical cursor.
+        let target = first + (rows.len() - first).div_ceil(2);
+        let pending_offset = latest_pending_offset(&pending_siblings);
+        first = ((first + 1)..rows.len())
+            .filter(|index| safe_offsets.contains(&offsets[*index])
+                && pending_offset.is_none_or(|pending| offsets[*index] > pending))
+            .min_by_key(|index| index.abs_diff(target))
+            .ok_or("One history activity exceeds the preview output limit")?;
     }
-    if before
-        .as_ref()
-        .is_some_and(|cursor| cursor.offset == Some(0))
-        || rows.is_empty()
-    {
-        before = None;
-    }
-    rows.reverse();
-    let rows = rows.into_iter().map(|(_, row)| row).collect::<Vec<_>>();
-    let state = orchestrator::resume::state_from_messages(session_id, &rows);
-    let results = orchestrator::resume::client_state_tool_results_from_messages(&rows);
+}
+
+fn lower_history_rows(session_id: uuid::Uuid, rows: &[session::jsonl::JsonlMessage]) -> Vec<MessageDto> {
+    let state = orchestrator::resume::state_from_messages(session_id, rows);
+    let results = orchestrator::resume::client_state_tool_results_from_messages(rows);
     let timestamps = rows
         .iter()
         .map(|row| (row.uuid.as_str(), &row.timestamp))
         .collect::<std::collections::HashMap<_, _>>();
-    let messages =
-        client::adapter::lowering::lower_transcript_with_identities(&state.history, &results)
+    client::adapter::lowering::lower_transcript_with_identities(&state.history, &results)
             .into_iter()
             .map(|(id, mut message)| {
                 let uuid = id.as_uuid().to_string();
@@ -456,8 +531,7 @@ fn read_page(
                 super::history_image::reference_images(&mut message);
                 message
             })
-            .collect();
-    Ok(Page { messages, before })
+            .collect()
 }
 
 type AssistantGroup = (String, String, String);
@@ -468,11 +542,7 @@ fn truncate_complete_page(
     safe_offsets: &[u64],
     pending_siblings: &HashMap<AssistantGroup, Vec<HistoryRow>>,
 ) -> bool {
-    let pending_offset = pending_siblings
-        .values()
-        .flatten()
-        .map(|(offset, _)| *offset)
-        .max();
+    let pending_offset = latest_pending_offset(pending_siblings);
     let Some(cut) = safe_offsets
         .iter()
         .rev()
@@ -484,6 +554,10 @@ fn truncate_complete_page(
     // next page can still discover its ancestor and recover it.
     rows.retain(|(offset, _)| offset >= cut);
     true
+}
+
+fn latest_pending_offset(pending: &HashMap<AssistantGroup, Vec<HistoryRow>>) -> Option<u64> {
+    pending.values().flatten().map(|(offset, _)| *offset).max()
 }
 
 fn assistant_group(row: &session::jsonl::JsonlMessage) -> Option<AssistantGroup> {
@@ -807,6 +881,114 @@ mod tests {
         }
         std::fs::write(&path, source).unwrap();
         (root, path, id, ids)
+    }
+
+    #[test]
+    fn preview_scan_limit_keeps_the_complete_tail_and_an_exclusive_cursor() {
+        let (_root, path, id, ids) = transcript(5);
+        let source = std::fs::read(&path).unwrap();
+        let newlines: Vec<_> = source
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, byte)| (*byte == b'\n').then_some(offset))
+            .collect();
+        let read_preview = |scan_limit| {
+            let file = File::open(&path).unwrap();
+            let metadata = file.metadata().unwrap();
+            read_page(file, metadata, id, None, Some(scan_limit))
+        };
+        // Stop in the middle of row 2, after consuming complete rows 3 and 4.
+        let scan_limit = source.len() - newlines[2] + 12;
+        let preview = read_preview(scan_limit as u64).unwrap();
+        let message_ids = |page: &Page| {
+            page.messages
+                .iter()
+                .filter_map(|message| message.transcript_uuid.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(message_ids(&preview), ids[3..]);
+        let cursor = preview.before.unwrap();
+        assert_eq!(cursor.offset, Some(newlines[2] as u64 + 1));
+        let older = read(&path, id, cursor).unwrap();
+        assert_eq!(message_ids(&older), ids[..3]);
+        assert!(older.before.is_none());
+        assert_eq!(
+            read_preview(12).err().as_deref(),
+            Some("Recent history exceeds the preview scan limit")
+        );
+    }
+
+    #[test]
+    fn preview_with_large_text_keeps_a_byte_bounded_tail() {
+        let id = uuid::Uuid::new_v4();
+        let value = "x".repeat(40 * 1024);
+        let (_root, path, tip) = saved_rows((0..60).map(|_| text_row(&value)).collect(), id);
+        let file = File::open(&path).unwrap();
+        let metadata = file.metadata().unwrap();
+        let page = read_page(file, metadata, id, None, Some(MAX_PREVIEW_SCAN_BYTES)).unwrap();
+        assert!(!page.messages.is_empty());
+        assert!(page.messages.len() < 60);
+        assert!(serde_json::to_vec(&page).unwrap().len() <= MAX_PREVIEW_BYTES);
+        assert_eq!(
+            page.messages.last().unwrap().transcript_uuid.as_deref(),
+            Some(tip.uuid.as_str())
+        );
+        let previous = read(&path, id, page.before.unwrap()).unwrap();
+        assert_eq!(previous.messages.len() + page.messages.len(), 60);
+    }
+
+    #[test]
+    fn legacy_image_locator_checks_offset_and_keeps_the_uuid_only_fallback() {
+        use base64::Engine as _;
+
+        let id = uuid::Uuid::new_v4();
+        let image = uuid::Uuid::new_v4();
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(640, 480)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let original = base64::engine::general_purpose::STANDARD.encode(encoded.into_inner());
+        let row = serde_json::json!({"uuid":image,"type":"user","message":{"role":"user","content":[
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":original}}
+        ]}});
+        let (root, path, tip) = saved_rows(vec![row, text_row("newer")], id);
+        let folder = root.path().join("projects").join("workspace");
+        std::fs::create_dir_all(&folder).unwrap();
+        let selected = folder.join(path.file_name().unwrap());
+        std::fs::rename(path, &selected).unwrap();
+        let open = || LatestSource::open(root.path(), &selected, id).unwrap();
+        let page = read(&selected, id, tip).unwrap();
+        let image_ref = &page.messages[0].images[0].url;
+        assert!(image_ref.starts_with(&format!("lingxi-history-image:{image}:0:png:0:")));
+        let identity = identity(&std::fs::metadata(&selected).unwrap());
+        let located = open()
+            .read_message(image, Some((0, identity.clone())))
+            .unwrap();
+        let legacy = open().read_message(image, None).unwrap();
+        assert_eq!(located.uuid, image.to_string());
+        assert_eq!(legacy.uuid, located.uuid);
+        assert!(open().read_message(image, Some((1, identity))).is_err());
+        assert!(
+            open()
+                .read_message(image, Some((0, "different".into())))
+                .is_err()
+        );
+        let read_image = |reference: &str, size: &str| {
+            let request = serde_json::from_value(serde_json::json!({
+                "reference": reference, "size": size,
+            }))
+            .unwrap();
+            serde_json::to_value(super::super::history_image::read(open(), request).unwrap())
+                .unwrap()
+        };
+        let legacy_ref = format!("lingxi-history-image:{image}:0:png");
+        assert_eq!(read_image(&legacy_ref, "original")["base64"], original);
+        let thumbnail = read_image(image_ref, "thumbnail");
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(thumbnail["base64"].as_str().unwrap())
+            .unwrap();
+        let image = image::load_from_memory(&data).unwrap();
+        assert_eq!((image.width(), image.height()), (320, 240));
     }
 
     #[test]

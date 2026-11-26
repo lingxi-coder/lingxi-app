@@ -1,11 +1,14 @@
 import SwiftUI
+import Nuke
 
 /// Desktop-style compact transcript. Disclosure state is owned by the session
 /// model so recycled rows retain the user's choices. Historical reasoning stays
 /// in the execution ledger; only its current Thinking status enters this view.
 struct ConversationTimelineView: View {
     @Environment(\.theme) private var t
+    @Environment(\.sessionImageLoader) private var imageLoader
     @ScaledMetric(relativeTo: .body) private var spacingScale: CGFloat = 1
+    @State private var imagePrefetcher = SessionThumbnailPrefetcher()
 
     let groups: [ConversationTimelineGroup]
     var liveToolIDs: Set<String>? = nil
@@ -27,6 +30,7 @@ struct ConversationTimelineView: View {
 
     var body: some View {
         let segments = timelineSegments
+        let thumbnails = Self.thumbnailLayout(segments)
         LazyVStack(alignment: .leading, spacing: 0) {
             ForEach(Array(segments.enumerated()), id: \.element.id) { index, segment in
                 visibleSegment(segment)
@@ -35,6 +39,14 @@ struct ConversationTimelineView: View {
             }
         }
         .scrollTargetLayout()
+        .onChange(of: thumbnails, initial: true) { _, layout in
+            updateThumbnails(layout)
+        }
+        .onChange(of: imageLoader?.cacheKey) { _, _ in
+            imagePrefetcher.stopRequests()
+            updateThumbnails(thumbnails)
+        }
+        .onDisappear { imagePrefetcher.reset() }
     }
 
     /// Keep related rows close on iPhone without depending on activity visibility.
@@ -72,18 +84,50 @@ struct ConversationTimelineView: View {
         )
     }
 
-    @ViewBuilder
     private func visibleSegment(_ segment: Segment) -> some View {
-        if let onResultVisibility, case let .message(_, message) = segment, message.role == .ai,
-           let uuid = message.transcriptUUID {
-            segmentView(segment)
-                .onScrollVisibilityChange(threshold: 0.01) { visible in
-                    onResultVisibility(segment.id, uuid, visible)
-                }
-                .onDisappear { onResultVisibility(segment.id, uuid, false) }
-        } else {
-            segmentView(segment)
+        func visibilityChanged(_ visible: Bool) {
+            if let onResultVisibility, case let .message(_, message) = segment, message.role == .ai,
+               let uuid = message.transcriptUUID {
+                onResultVisibility(segment.id, uuid, visible)
+            }
+            imagePrefetcher.setVisible(segment.id, visible)
         }
+        return segmentView(segment)
+            .onScrollVisibilityChange(threshold: 0.01, visibilityChanged)
+            .onDisappear { visibilityChanged(false) }
+    }
+
+    private static func thumbnailLayout(_ segments: [Segment]) -> SessionThumbnailLayout? {
+        var images: [Int: SessionThumbnailLayout.ImageRow] = [:]
+        for (index, segment) in segments.enumerated() {
+            if let message = segment.attachmentMessage {
+                images[index] = .init(key: message.transcriptUUID ?? message.id, images: message.images)
+            }
+        }
+        guard !images.isEmpty else { return nil }
+        let indexes = Dictionary(segments.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
+        return SessionThumbnailLayout(indexesByID: indexes, imagesByIndex: images)
+    }
+
+    private func updateThumbnails(_ layout: SessionThumbnailLayout?) {
+        let loader = imageLoader
+        imagePrefetcher.updateLookup(layout.map { layout in
+            { visible in Self.nearbyThumbnails(layout.rows(near: visible), loader: loader) }
+        })
+    }
+
+    private static func nearbyThumbnails(_ rows: [SessionThumbnailLayout.ImageRow], loader: SessionImageLoader?) -> [Nuke.ImageRequest] {
+        var requests: [Nuke.ImageRequest] = []
+        for row in rows {
+            for (imageIndex, image) in row.images.enumerated() {
+                guard let request = SessionThumbnailRequests.request(
+                    for: image, rowKey: row.key, index: imageIndex, loader: loader
+                ), !requests.contains(where: { $0.imageId == request.imageId }) else { continue }
+                requests.append(request)
+                if requests.count == 2 { return requests }
+            }
+        }
+        return requests
     }
 
     @ViewBuilder
@@ -352,6 +396,11 @@ struct ConversationTimelineView: View {
         case toolBatch(id: String, tools: [ConversationToolTrace])
         case notice(id: String, notice: ConversationExecutionNotice)
         case agents(id: String, agents: [ConversationAgentSummary])
+
+        var attachmentMessage: Message? {
+            guard case let .message(_, message) = self, message.visualization == nil, !message.images.isEmpty else { return nil }
+            return message
+        }
 
         var isUser: Bool {
             if case let .message(_, message) = self { return message.role == .user }

@@ -676,6 +676,7 @@ fn state_with(status: SessionStatus, first: u64, messages: usize, seqs: &[u64]) 
     SessionState {
         session_id: "s1".into(),
         session_mode: Some(SessionModeDto::Chat),
+        preview: None,
         status,
         error: None,
         messages: (0..messages).map(|i| message(&i.to_string())).collect(),

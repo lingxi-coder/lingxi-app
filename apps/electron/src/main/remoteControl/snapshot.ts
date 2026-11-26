@@ -23,6 +23,7 @@ import type {
   SessionActivityPreviewResult,
   SessionSnapshotParams,
 } from '@lingxi/bridge-client/remote';
+import { MESSAGE_MAX_BYTES } from '@lingxi/bridge-client/remote';
 
 import { CLIENT_EVENT_REMOTE_DISPOSITIONS, type RemoteEventDisposition } from '../../shared/clientCommands.js';
 import { isHistoryImageReference } from '../../shared/sessionHistory.js';
@@ -30,10 +31,10 @@ import type { InteractionRecord, PromptJournalEntry, RemoteRuntimeView, Sequence
 
 /** One page of messages or records. */
 export const PAGE_MAX_BYTES = 256 * 1024;
-/** The base conversation is sent whole up to this size (images not counted), else only its tail. */
+/** JSON byte budget for the initial page. Larger messages remain pageable. */
 export const INITIAL_HISTORY_MAX_BYTES = 4 * 1024 * 1024;
-/** How many messages of a large conversation the snapshot keeps. */
-export const INITIAL_HISTORY_TAIL_MESSAGES = 200;
+/** Maximum number of base messages projected for the first screen. */
+export const INITIAL_HISTORY_TAIL_MESSAGES = 60;
 /** `input_json` and `result_json` longer than this are cut. */
 export const TOOL_FIELD_MAX_BYTES = 64 * 1024;
 /** An event larger than this is not sent. */
@@ -42,6 +43,11 @@ export const EVENT_MAX_BYTES = 1024 * 1024;
 type Message = MessageDto;
 
 const jsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), 'utf8');
+
+/** Leave room before the live base for older pages without changing the wire cursor. */
+export function remoteBaseOffset(view: RemoteRuntimeView): number {
+  return view.historyBefore ? 1_000_000_000 : 0;
+}
 
 export function eventDisposition(type: string): RemoteEventDisposition {
   return (CLIENT_EVENT_REMOTE_DISPOSITIONS as Record<string, RemoteEventDisposition | undefined>)[type] ?? 'withheld';
@@ -64,9 +70,12 @@ export type ParsedImageRef = { sessionId: string } & (
   | { kind: 'prompt'; sequence: number; index: number }
   | { kind: 'base'; message: number; index: number }
   | { kind: 'event'; sequence: number; index: number }
+  | { kind: 'history'; token: string; signature: string }
 );
 
 export function parseImageRef(ref: string): ParsedImageRef | undefined {
+  const history = /^([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}):h:([A-Za-z0-9_-]{1,360}):([A-Za-z0-9_-]{22})$/u.exec(ref);
+  if (history) return { sessionId: history[1]!, kind: 'history', token: history[2]!, signature: history[3]! };
   const match = /^([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}):([pme]):(\d{1,16}):(\d{1,4})$/i.exec(ref);
   if (!match) return undefined;
   const sessionId = match[1]!;
@@ -306,28 +315,26 @@ function snapshotMessages(view: RemoteRuntimeView): { first: number; pages: Mess
   const base = view.base?.event;
   if (base?.type !== 'session_resumed') return { first: 0, pages: [] };
 
-  const firstTail = base.messages.length - INITIAL_HISTORY_TAIL_MESSAGES;
+  const firstTail = Math.max(0, base.messages.length - INITIAL_HISTORY_TAIL_MESSAGES);
+  const offset = remoteBaseOffset(view);
   const messages: Message[] = [];
   const sizes: number[] = [];
   const cuts = { any: false };
-  let first = 0;
   let arrayBytes = 2; // Opening and closing brackets.
-  // When the projected JSON crosses the limit, older messages can wait for historyPage.
-  for (let index = base.messages.length - 1; index >= 0; index -= 1) {
-    const message = mapMessage(base.messages[index]!, image => baseImageRef(view.sessionId, index, image), cuts);
+  for (let index = base.messages.length - 1; index >= firstTail; index -= 1) {
+    const message = mapMessage(base.messages[index]!, image => baseImageRef(view.sessionId, offset + index, image), cuts);
     const bytes = jsonBytes(message);
-    arrayBytes += bytes + (messages.length > 0 ? 1 : 0); // Include the comma between items.
+    const nextBytes = arrayBytes + bytes + (messages.length > 0 ? 1 : 0);
+    if (nextBytes > INITIAL_HISTORY_MAX_BYTES) break;
+    arrayBytes = nextBytes;
     messages.push(message);
     sizes.push(bytes);
-    if (firstTail > 0 && index <= firstTail && arrayBytes > INITIAL_HISTORY_MAX_BYTES) {
-      first = firstTail;
-      messages.length = INITIAL_HISTORY_TAIL_MESSAGES;
-      sizes.length = INITIAL_HISTORY_TAIL_MESSAGES;
-      break;
-    }
   }
   sizes.reverse();
-  return { first, pages: pageBySize(messages.reverse(), PAGE_MAX_BYTES, (_message, index) => sizes[index]!) };
+  return {
+    first: offset + base.messages.length - messages.length,
+    pages: pageBySize(messages.reverse(), PAGE_MAX_BYTES, (_message, index) => sizes[index]!),
+  };
 }
 
 /** A snapshot as the frames it is sent in, in order: `begin`, the `messages` pages, the `records` pages, `end`. */
@@ -360,11 +367,36 @@ export function buildSnapshot(view: RemoteRuntimeView, botAware = false): Sessio
 export function historyPage(view: RemoteRuntimeView, beforeIndex: number, limit: number): SessionHistoryResult {
   const base = view.base?.event;
   const source = base?.type === 'session_resumed' ? base.messages : [];
-  const end = Math.max(0, Math.min(beforeIndex, source.length));
-  const start = Math.max(0, end - limit);
-  const cuts = { any: false };
-  const messages = source.slice(start, end).map((message, offset) => mapMessage(message, (index) => baseImageRef(view.sessionId, start + offset, index), cuts));
+  const offset = remoteBaseOffset(view);
+  const end = Math.max(0, Math.min(beforeIndex - offset, source.length));
+  const minimum = Math.max(0, end - limit);
+  const messages = historyTail(source, end, minimum, (row, image) => baseImageRef(view.sessionId, offset + row, image));
+  const start = offset + end - messages.length;
   return { messages, first_index: start, has_more: start > 0 };
+}
+
+/** Keep the next cursor reachable even when a single message exceeds one page. */
+export function historyTail(source: readonly Message[], end: number, minimum: number,
+  imageRef: (row: number, image: number) => string): Message[] {
+  const messages: Message[] = [];
+  const cuts = { any: false };
+  let bytes = 2;
+  for (let row = end - 1; row >= minimum; row--) {
+    const message = mapMessage(source[row]!, image => imageRef(row, image), cuts);
+    const size = jsonBytes(message) + (messages.length ? 1 : 0);
+    if (bytes + size > INITIAL_HISTORY_MAX_BYTES) {
+      if (messages.length) break;
+      // Allow a single larger row if it can still fit the RPC envelope.
+      messages.push(size < MESSAGE_MAX_BYTES - 1024 ? message : {
+        role: message.role, transcript_uuid: message.transcript_uuid,
+        blocks: [{ type: 'text', text: 'This message exceeds the remote display limit. Open the chat on its Host to view it.' }],
+      });
+      break;
+    }
+    messages.push(message);
+    bytes += size;
+  }
+  return messages.reverse();
 }
 
 /** An exact semantic result from the already attached source, with no history replay. */
@@ -407,11 +439,14 @@ export function resolveImage(
   const parsed = parseImageRef(ref);
   if (parsed === undefined || parsed.sessionId !== view.sessionId) return undefined;
   switch (parsed.kind) {
+    case 'history':
+      return undefined; // Archive tokens are verified by RemoteCommands.
     case 'prompt':
       return promptImage(parsed.sequence, parsed.index);
     case 'base': {
       const base = view.base?.event;
-      const url = base?.type === 'session_resumed' ? base.messages[parsed.message]?.images?.[parsed.index]?.url : undefined;
+      const index = parsed.message - remoteBaseOffset(view);
+      const url = base?.type === 'session_resumed' ? base.messages[index]?.images?.[parsed.index]?.url : undefined;
       return localImage(url);
     }
     case 'event': {

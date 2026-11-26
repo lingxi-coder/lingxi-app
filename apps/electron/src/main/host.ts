@@ -1,7 +1,7 @@
 import { CH_DECISION } from '../shared/decision.js';
 import type { DecisionHost } from './decision.js';
 import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
-import { CH_SESSION_HISTORY, CH_SESSION_IMAGE, CH_SESSION_RESUME_PREVIEW, historyCursor, isHistoryImageReference, type SessionResumePreview, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
+import { CH_SESSION_HISTORY, CH_SESSION_IMAGE, CH_SESSION_IMAGE_CANCEL, CH_SESSION_RESUME_PREVIEW, historyCursor, isHistoryImageReference, type SessionResumePreview, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
 import { CH_PROVIDER_ACCOUNTS, CH_PROVIDER_ACCOUNTS_CANCEL, type ProviderAccountCommand } from '../shared/providerAccounts.js';
 import type { DesktopProviderAccounts } from './provider-accounts.js';
 import { ProviderVaultClient, ProviderVaultError, vaultIdForAccount, vaultInstallPlan, vaultUpsertFor } from './provider-vault.js';
@@ -1436,32 +1436,48 @@ export class HostController {
       if (this.bridge.get(sessionId) !== runtime || this.settings.getPublic().activeSession?.sessionId !== sessionId) throw new Error('This chat is no longer active');
       return page;
     });
-    this.ipc.handle(CH_SESSION_IMAGE, async (event: IpcMainInvokeEvent, sessionId: unknown, reference: unknown, size: unknown) => {
+    const thumbnailRequests = new Map<string, AbortController>();
+    this.ipc.handle(CH_SESSION_IMAGE_CANCEL, (event: IpcMainInvokeEvent, requestId: unknown) => {
+      this.assertSender(event);
+      if (!isSessionId(requestId)) throw new Error('Invalid thumbnail request');
+      thumbnailRequests.get(`${event.sender.id}:${requestId}`)?.abort();
+    });
+    this.ipc.handle(CH_SESSION_IMAGE, async (event: IpcMainInvokeEvent, sessionId: unknown, reference: unknown, size: unknown, requestId?: unknown) => {
       this.assertSender(event);
       if (!isSessionId(sessionId) || !isHistoryImageReference(reference) || (size !== 'thumbnail' && size !== 'original')) {
         throw new Error('Invalid history image request');
       }
-      const preview = this.previewImageSource;
-      if (preview?.sessionId === sessionId && preview.references.has(reference) && preview.current()) {
-        const image = await this.sessionCatalog.readImage(preview.projectPath, sessionId, preview.transcriptPath, reference, size);
+      if (requestId !== undefined && (size !== 'thumbnail' || !isSessionId(requestId))) throw new Error('Invalid thumbnail request');
+      const key = requestId === undefined ? undefined : `${event.sender.id}:${requestId}`;
+      const controller = key === undefined ? undefined : new AbortController();
+      if (key !== undefined && controller) {
+        if (thumbnailRequests.has(key)) throw new Error('Duplicate thumbnail request');
+        thumbnailRequests.set(key, controller);
+      }
+      const signal = controller?.signal;
+      try {
+        const preview = this.previewImageSource;
+        if (preview?.sessionId === sessionId && preview.references.has(reference) && preview.current()) {
+          const image = await this.sessionCatalog.readImage(preview.projectPath, sessionId, preview.transcriptPath, reference, size, signal);
+          this.assertSender(event);
+          if (!preview.current()) throw new Error('This chat is no longer active');
+          return image;
+        }
+        const ref = this.settings.getPublic().activeSession;
+        const runtime = this.bridge.get(sessionId);
+        if (!ref || ref.sessionId !== sessionId || !runtime || runtime.projectPath !== ref.projectPath) {
+          throw new Error('This chat is no longer active');
+        }
+        const image = await this.sessionCatalog.readRuntimeImage(runtime, reference, size, signal);
         this.assertSender(event);
-        if (!preview.current()) throw new Error('This chat is no longer active');
+        const active = this.settings.getPublic().activeSession;
+        if (this.bridge.get(sessionId) !== runtime || active?.sessionId !== sessionId || active.projectPath !== ref.projectPath) {
+          throw new Error('This chat is no longer active');
+        }
         return image;
+      } finally {
+        if (key !== undefined) thumbnailRequests.delete(key);
       }
-      const ref = this.settings.getPublic().activeSession;
-      const runtime = this.bridge.get(sessionId);
-      if (!ref || ref.sessionId !== sessionId || !runtime || runtime.projectPath !== ref.projectPath) {
-        throw new Error('This chat is no longer active');
-      }
-      const state = await runtime.getWorkspaceState();
-      if (!state.transcript_path) throw new Error('History image source is unavailable');
-      const image = await this.sessionCatalog.readImage(ref.projectPath, sessionId, state.transcript_path, reference, size);
-      this.assertSender(event);
-      const active = this.settings.getPublic().activeSession;
-      if (this.bridge.get(sessionId) !== runtime || active?.sessionId !== sessionId || active.projectPath !== ref.projectPath) {
-        throw new Error('This chat is no longer active');
-      }
-      return image;
     });
     this.ipc.handle(CH_SESSION_WORKSPACE, async (event: IpcMainInvokeEvent, sessionId: unknown, operation: unknown) => {
       this.assertSender(event);
@@ -3389,13 +3405,12 @@ export class HostController {
         if (sourceWasCurrent && !archived()) {
           if (catalogPreview) {
             void catalogPreview.then(page => { if (page) sendPreview(page.messages); });
-          } else {
-            onPreview = event => {
-              if (event.session_id !== canonical.sessionId || event.mode !== canonical.mode
-                || this.bridge.get(canonical.sessionId)?.projectPath !== canonical.projectPath) return;
-              sendPreview(event.messages);
-            };
           }
+          onPreview = event => {
+            if (event.session_id !== canonical.sessionId || event.mode !== canonical.mode
+              || this.bridge.get(canonical.sessionId)?.projectPath !== canonical.projectPath) return;
+            sendPreview(event.messages);
+          };
         }
       }
       const openArgs = [canonical, session?.empty_session === true, session?.resume_model, false, selection ? session?.path : undefined] as const;
@@ -3874,7 +3889,7 @@ export class HostController {
       CH_DECISION, CH_APPLICATION_ICON, CH_IMAGE_SAVE,
       CH_GIT_REQUEST, CH_TERMINAL_REQUEST, CH_BOOTSTRAP, CH_SETTINGS_GET, CH_SETTINGS_UPDATE, CH_SETTINGS_FILE_OPEN, CH_WORKSPACE_PICK, CH_WORKSPACE_SET,
       CH_PROJECT_FOLDER_PICK, CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE,
-      CH_PROJECT_REMOVE, CH_SESSION_PIN_SET, CH_CONVERSATION_SPACE, CH_SESSION_HANDOFF, CH_SESSION_HANDOFF_CANCEL, CH_SESSION_HISTORY, CH_SESSION_IMAGE,
+      CH_PROJECT_REMOVE, CH_SESSION_PIN_SET, CH_CONVERSATION_SPACE, CH_SESSION_HANDOFF, CH_SESSION_HANDOFF_CANCEL, CH_SESSION_HISTORY, CH_SESSION_IMAGE, CH_SESSION_IMAGE_CANCEL,
       CH_PROJECT_OPEN, CH_PROJECT_SESSIONS_LIST, CH_SESSION_NEW, CH_SESSION_OPEN, CH_SESSION_CLEAR, CH_SESSION_ARCHIVE, CH_SESSION_ARCHIVE_PREFLIGHT,
       CH_SESSION_METADATA_CAPTURE, CH_SESSION_METADATA_RELEASE, CH_SESSION_TOUCH, CH_SESSION_RENAME,
       CH_SESSION_WORKSPACE, CH_NATIVE_AUDIO_FLOW_LEASE,

@@ -396,24 +396,26 @@ struct RemoteSessionView: View {
             if !source.model.sessionModeKnown {
                 RemoteSessionLoadingError(model: source.model)
             }
-            if source.model.sessionModeKnown {
+            if source.model.sessionModeKnown || source.previewMode != nil {
                 let owner = draft
                 ChatView(session: SessionRef(id: source.sessionID, title: title),
                     draft: Binding(get: { owner.draft.text }, set: { owner.draft.text = $0 }),
                     voiceInteraction: voice, source: source, draftRevision: { owner.draftRevision },
                     draftSourceCodeUnits: Binding(get: { owner.draft.sourceCodeUnits }, set: { owner.draft.sourceCodeUnits = $0 }),
                     attachmentBinding: Binding(get: { owner.draft.attachment }, set: { owner.draft.attachment = $0 }),
-                    sessionMode: source.sessionMode, workspaceName: title,
+                    sessionMode: source.previewMode ?? source.sessionMode, workspaceName: title,
                     workspaceKey: ConversationScope.remote(hostID: source.hostID, sessionID: source.sessionID).workspaceKey,
                     onInboxResultVisibility: { rowID, uuid, visible in
+                        guard source.phase == .live else { return }
                         if visible { visibleResults[rowID] = uuid }
                         else if visibleResults[rowID] == uuid { visibleResults.removeValue(forKey: rowID) }
                     },
                     onInboxJumpToLatest: {
+                        guard source.phase == .live else { return }
                         inbox.dismissNotificationPreview()
                         if let ref = activeRef, let row = inbox.row(ref) { inbox.markRead([row]) }
                     })
-                    .environment(\.sessionImageLoader, source.sessionImageLoader)
+                    .environment(\.sessionImageLoader, source.previewMode == nil ? source.sessionImageLoader : nil)
                     .disabled(source.phase != .live || !source.hasReadyConnection)
                     .background {
                         if source.phase == .live && source.hasReadyConnection {

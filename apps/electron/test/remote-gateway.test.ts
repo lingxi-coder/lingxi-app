@@ -32,6 +32,38 @@ async function attached(options: Parameters<typeof gatewayFixture>[0] = {}, sess
   return { f, runtime };
 }
 
+test('a cold attach can display a saved page while the engine still holds prompt admission', async () => {
+  const f = gatewayFixture();
+  f.enable(SESSION_A);
+  const messages = [{ role: 'user', blocks: [{ type: 'text' as const, text: 'Saved during startup' }] }];
+  const gateway = new SessionGateway({
+    runtimes: f.runtimes, policy: f.policy, clock: f.clock,
+    commands: new RemoteCommands({ allowAlwaysAllow: () => false, echo: () => undefined, clock: f.clock }),
+    previewOf: async ref => ({ session_id: ref.sessionId, session_mode: 'code', messages }),
+    titleOf: async () => undefined, diagnostics: () => undefined,
+  });
+  let engineReady!: () => void;
+  f.runtimes.openDelay = new Promise<void>(resolve => { engineReady = resolve; });
+  const call = (method: string, params: unknown) => gateway.handle(f.phone, method, params, f.channel);
+  const attach = call('session.attach', { session_id: SESSION_A, preview: true });
+  try {
+    await flush();
+    assert.deepEqual(f.channel.sent.filter(item => item.method.startsWith('session.')),
+      [{ method: 'session.preview', params: { session_id: SESSION_A, session_mode: 'code', messages } }]);
+    await assert.rejects(call('prompt.send', { session_id: SESSION_A, text: 'too early' }), /attach to the session first/);
+    engineReady();
+    await attach;
+    assert.ok(f.channel.sent.some(item => item.method === 'session.snapshot' && item.params.phase === 'end'));
+    assert.ok((await call('prompt.send',
+      { session_id: SESSION_A, text: 'ready', client_request_id: 'preview-ready' }) as { turn_id: number }).turn_id > 0);
+  } finally {
+    engineReady();
+    await attach.catch(() => undefined);
+    gateway.dispose();
+    f.gateway.dispose();
+  }
+});
+
 test('only a declared native media handler registers a route and receives correlated offer/control replies', async () => {
   const f = gatewayFixture();
   f.phone = viewer({

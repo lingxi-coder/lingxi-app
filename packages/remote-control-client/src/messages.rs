@@ -35,6 +35,8 @@ pub mod methods {
     pub const SESSIONS_CHANGED: &str = "sessions.changed";
     /// Viewer request: attach to a session.
     pub const SESSION_ATTACH: &str = "session.attach";
+    /// Host notification: an optional, read-only first page before attachment.
+    pub const SESSION_PREVIEW: &str = "session.preview";
     /// Host notification: a snapshot page.
     pub const SESSION_SNAPSHOT: &str = "session.snapshot";
     /// Host notification: the next record.
@@ -514,6 +516,17 @@ pub struct SessionAttachParams {
     /// Resume point.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<ResumeCursor>,
+}
+
+/// A saved tail shown while the engine completes a fresh attach.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionPreviewParams {
+    /// Session id.
+    pub session_id: String,
+    /// A provisional display mode.
+    pub session_mode: SessionModeDto,
+    /// Recent history for display.
+    pub messages: Vec<MessageDto>,
 }
 
 /// Answer to `session.attach`. `delta`: the viewer's state is still valid; records

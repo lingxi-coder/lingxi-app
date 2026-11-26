@@ -144,10 +144,10 @@ test('manager close and project removal preserve an owner with admitted audio', 
   assert.equal(manager.get(sessionId), undefined);
 });
 
-function selectedResumeRuntime(t: TestContext, timeoutMs = 1500) {
+function selectedResumeRuntime(t: TestContext, timeoutMs = 1500, envelopeEvents = false) {
   const runtime = new SessionRuntime({ sessionId, projectPath: '/project', sessionResumeTimeoutMs: timeoutMs,
-    launchConfig: () => ({ workspace: '/project', trusted: true, sessionId }) });
-  const acknowledgement = deferred<void>(), restored: string[] = [];
+    envelopeEvents, launchConfig: () => ({ workspace: '/project', trusted: true, sessionId }) });
+  const acknowledgement = deferred<void | { historyBefore?: string }>(), restored: string[] = [];
   const client = Object.assign(new WorkspaceClient(), {
     resumeSessionFromTranscript: (id: string, path: string) => {
       client.calls.push(['resume-selected', id, path]);
@@ -172,6 +172,20 @@ function resumeProof(client: WorkspaceClient, id = sessionId) {
   client.emit('event', { type: 'session_resumed', mode: 'code', session_id: id, messages: [] });
   client.emit('event', { type: 'model_changed', model: 'anthropic/restored-model' });
 }
+
+test('selected resume installs its native display cursor before publishing the replay base', async t => {
+  const { runtime, client, acknowledgement } = selectedResumeRuntime(t, 1500, true);
+  const uuid = '11111111-2222-4333-8444-555555555556';
+  const opening = runtime.resumeOwnedSession('/saved/session.jsonl');
+  resumeProof(client);
+  assert.equal(runtime.needsSessionResume, true);
+  assert.equal(runtime.replaySnapshot().some(row => row.event.type === 'session_resumed'), false);
+  acknowledgement.resolve({ historyBefore: uuid });
+  await opening;
+  assert.equal(runtime.needsSessionResume, false);
+  assert.deepEqual(runtime.replaySnapshot().find(row => row.event.type === 'session_resumed')?.historyBefore, { uuid });
+  assert.deepEqual(runtime.remoteView().historyBefore, { uuid });
+});
 
 test('cold resume publishes display history while the action gate and selected resume are still pending', async t => {
   const f = selectedResumeRuntime(t);

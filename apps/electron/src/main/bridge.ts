@@ -3,7 +3,8 @@ import { providerAccountRenewFailureCode } from './provider-accounts.js';
 import { SideChatRecovery } from './sideChatRecovery.js';
 import { replayCheckpointState, RuntimeEventReplay } from './runtimeEventReplay.js';
 import { canResume } from './remoteControl/snapshot.js';
-import { historyOverview, initialDisplayPage, recentTranscript } from '../shared/sessionHistory.js';
+import { historyOverview, initialDisplayPage, initialHistory, recentTranscript } from '../shared/sessionHistory.js';
+import type { TranscriptHistoryCursor } from '../shared/sessionHistory.js';
 import { parseProviderAccountRouting } from '../shared/providerAccounts.js';
 import type { ProviderAccountConfiguration } from './session-catalog.js';
 import { DesktopTelemetry } from './telemetry.js';
@@ -161,6 +162,9 @@ interface PendingSessionResume {
   client: BridgeClient;
   sessionResumed: boolean;
   responseReceived: boolean;
+  historyBefore?: TranscriptHistoryCursor;
+  historyOverview?: Extract<ClientEvent, { type: 'session_resumed' }>['messages'];
+  replayAfterResponse?: () => void;
   controller: AbortController;
   activeTools: Set<string>;
   model?: string;
@@ -1393,7 +1397,7 @@ export class SessionRuntime {
     const { messages, before } = initialDisplayPage(envelope.event.messages);
     if (messages.length === envelope.event.messages.length) return envelope;
     const recent = recentTranscript(envelope.event.messages);
-    const overview = historyOverview(recent.slice(0, recent.length - messages.length));
+    const overview = [...(envelope.historyOverview ?? []), ...historyOverview(recent.slice(0, recent.length - messages.length))];
     return { ...envelope, event: { ...envelope.event, messages }, ...(before ? { historyBefore: before } : {}),
       ...(overview.length ? { historyOverview: overview } : {}) };
   }
@@ -1424,13 +1428,17 @@ export class SessionRuntime {
       lastSequence: this.eventSequence,
     };
     const controlsEvent = this.latestState.get('conversation_controls_changed')?.event;
+    const base = this.replayEvents.baseEnvelope;
+    const historyBefore = this.ownedTranscriptPath && base?.event.type === 'session_resumed'
+      ? base.historyBefore ?? initialHistory(base.event.messages).before : undefined;
     return {
       sessionId: this.sessionId,
       ...(!this.draftModeRestorationRequired && !this.ownedSessionResumeRequired && this.sessionMode
         ? { sessionMode: this.sessionMode } : {}),
       runtimeId: this.runtimeId,
       ...position,
-      base: this.replayEvents.baseEnvelope,
+      base,
+      ...(historyBefore ? { historyBefore } : {}),
       events: this.replayEvents.snapshotEvents(canResume(position, resume) ? resume.after_seq : undefined),
       state: [...this.latestState.values()],
       prompts: this.promptJournal,
@@ -1546,11 +1554,14 @@ export class SessionRuntime {
     if (command.type === 'run_slash_command' && slashRequestEchoes(command.raw)) this.journalPrompt(command.raw.trim(), command.images, command.turn_id ?? 0, source);
   }
 
-  private eventEnvelope(event: ClientEvent, retain: boolean): SequencedRuntimeEventEnvelope<ClientEvent> {
+  private eventEnvelope(event: ClientEvent, retain: boolean,
+    history?: Pick<PendingSessionResume, 'historyBefore' | 'historyOverview'>): SequencedRuntimeEventEnvelope<ClientEvent> {
     const envelope = Object.freeze({
       sessionId: this.sessionId,
       sequence: ++this.eventSequence,
       event: structuredClone(event),
+      ...(history?.historyBefore ? { historyBefore: history.historyBefore } : {}),
+      ...(history?.historyOverview?.length ? { historyOverview: history.historyOverview } : {}),
     });
     if (TRANSCRIPT_REPLAY_BASE_EVENTS.has(event.type)) {
       this.replayEvents.reset(envelope);
@@ -1580,11 +1591,12 @@ export class SessionRuntime {
     webContents.send(CH_EVENT, this.opts.envelopeEvents ? this.desktopEvent(envelope) : event);
   }
 
-  private broadcastClientEvent(event: ClientEvent): void {
+  private broadcastClientEvent(event: ClientEvent,
+    history?: Pick<PendingSessionResume, 'historyBefore' | 'historyOverview'>): void {
     // SideChat events use the sequenced renderer channel. On reconnect the
     // renderer reconciles child state through side_chat_list / side_chat_get;
     // useBridge filters these events before parent conversation reducers.
-    const envelope = this.eventEnvelope(event, true);
+    const envelope = this.eventEnvelope(event, true, history);
     this.noteRemoteEvent(envelope);
     if (event.type === 'turn_started') {
       if (!this.replayStartedTurn || this.replayStartedTurn.turnId !== event.turn_id) {
@@ -2758,10 +2770,33 @@ export class SessionRuntime {
     }
     // Restored usage is explicitly marked by the engine and may be separated
     // from SessionResumed by other connection events. Live deltas still need a turn.
-    client.on('event', async (event: ClientEvent) => {
+    let deferred: { owner: PendingSessionResume; events: ClientEvent[] } | undefined;
+    const onEvent = (event: ClientEvent) => {
       if (generation !== this.generation || client !== this.client || this.disposed) return;
       if (event.type === 'decision_request' || event.type === 'decision_cancel') {
         this.decisionToolBridge?.handle(event);
+        return;
+      }
+      const pending = this.currentResumeOwner();
+      if (deferred?.owner !== pending) deferred = undefined;
+      // The selected response carries the native display cursor. Hold the
+      // activation bundle together, including the controls that follow it.
+      if (this.opts.envelopeEvents && pending && !pending.responseReceived
+        && (event.type === 'session_resumed' || deferred)) {
+        if (!deferred) {
+          const events: ClientEvent[] = [];
+          deferred = { owner: pending, events };
+          pending.replayAfterResponse = () => {
+            deferred = undefined;
+            for (const queued of events) onEvent(queued);
+          };
+        }
+        if (deferred.events.length === 128) {
+          deferred = undefined;
+          this.rejectPendingSessionResume(new Error('selected resume produced too many pending activation events'), pending);
+        } else {
+          deferred.events.push(event);
+        }
         return;
       }
       // Attachment binding metadata is host-private and is not a renderer event.
@@ -3197,11 +3232,12 @@ export class SessionRuntime {
         || event.type === 'coordinator_status'
       ) this.notifyActivityChanged();
       this.updateNotifier(event);
-      this.broadcastClientEvent(event);
+      this.broadcastClientEvent(event, event.type === 'session_resumed' ? pending ?? undefined : undefined);
       // Renderer terminal cleanup is foreground-scoped. Re-deliver retained
       // background gates after that boundary using the existing permission IPC.
       if (event.type === 'turn_ended') this.replayBackgroundPermissions();
-    });
+    };
+    client.on('event', onEvent);
     client.on('mediaDeviceRequest', (request: MediaDeviceRequestEnvelopeDto) => {
       void this.dispatchMediaDeviceRequest(client, generation, request);
     });
@@ -4130,7 +4166,7 @@ export class SessionRuntime {
     const client = this.requireClient();
     const generation = this.generation;
     const selectedPath = transcriptPath ?? this.ownedTranscriptPath;
-    let selectedResponse: Promise<void> | undefined;
+    let selectedResponse: ReturnType<BridgeClient['resumeSessionFromTranscript']> | undefined;
     this.resumeOperationInProgress = true;
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -4168,13 +4204,17 @@ export class SessionRuntime {
                   && event.session_id === pending.sessionId && event.mode === this.sessionMode) onPreview(event);
               }).catch(() => undefined);
           }
-          selectedResponse = client.resumeSessionFromTranscript(this.sessionId, selectedPath, this.sessionMode, pending.controller.signal);
-          void selectedResponse.then(() => {
+          selectedResponse = client.resumeSessionFromTranscript(this.sessionId, selectedPath, this.sessionMode,
+            pending.controller.signal, this.opts.envelopeEvents === true);
+          void selectedResponse.then(result => {
             if (this.currentResumeOwner() !== pending) return;
+            if (result?.historyBefore) pending.historyBefore = { uuid: result.historyBefore };
+            if (result?.historyOverview) pending.historyOverview = historyOverview(result.historyOverview);
             pending.responseReceived = true;
+            pending.replayAfterResponse?.();
+            pending.replayAfterResponse = undefined;
             this.completePendingSessionResumeIfReady();
-          }, () => undefined);
-          void selectedResponse.catch((error: unknown) => {
+          }).catch((error: unknown) => {
             this.rejectPendingSessionResume(error instanceof Error ? error : new Error(String(error)), pending);
           });
         } else {

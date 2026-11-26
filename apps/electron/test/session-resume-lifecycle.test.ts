@@ -3,6 +3,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
+import type { MessageDto } from '@lingxi/bridge-client';
 import { SettingsStore } from '../src/main/settings';
 import { HostController, CH_SESSION_ARCHIVE, CH_SESSION_METADATA_CAPTURE, CH_SESSION_NEW, CH_SESSION_OPEN } from '../src/main/host';
 import type { ResumePreviewListener } from '../src/main/sessionRuntimeManager.js';
@@ -12,6 +13,7 @@ import { DiagnosticBuffer } from '../src/main/host-utils';
 
 const sessionId = '11111111-2222-4333-8444-555555555555';
 const otherId = '22222222-3333-4444-8555-666666666666';
+const previewMessages: MessageDto[] = [{ role: 'user', blocks: [{ type: 'text', text: 'Saved history' }] }];
 function gate() {
   let resolve!: () => void;
   const promise = new Promise<void>(yes => { resolve = yes; });
@@ -99,9 +101,9 @@ test('an exact picker open previews only to its initiating document before commi
   try {
     await entered.promise;
     assert.equal(f.settings.getPublic().activeSession?.sessionId, otherId);
-    preview?.({ type: 'session_resumed', session_id: sessionId, mode: 'code', messages: [] });
+    preview?.({ type: 'session_resumed', session_id: sessionId, mode: 'code', messages: previewMessages });
     assert.deepEqual(f.sent, [{ channel: CH_SESSION_RESUME_PREVIEW,
-      payload: { requestId, session: { ...f.ref, mode: 'code' }, messages: [] } }]);
+      payload: { requestId, session: { ...f.ref, mode: 'code' }, messages: previewMessages } }]);
     assert.deepEqual(otherMessages, []);
     assert.equal(f.settings.getPublic().activeSession?.sessionId, otherId);
   } finally { finish.resolve(); await opening; }
@@ -121,7 +123,7 @@ test('a plain cold open previews its remembered exact transcript and original ca
     const runtime = await open();
     const preview = args[7] as ResumePreviewListener | undefined;
     assert.ok(preview);
-    preview({ type: 'session_resumed', session_id: sessionId, mode: 'code', messages: [] });
+    preview({ type: 'session_resumed', session_id: sessionId, mode: 'code', messages: previewMessages });
     assert.equal(f.settings.getPublic().activeSession?.sessionId, otherId);
     return runtime;
   };
@@ -131,7 +133,7 @@ test('a plain cold open previews its remembered exact transcript and original ca
 
   assert.deepEqual(reads, [[catalogProjectPath, sessionId, { scope: 'all', transcriptPath: f.path }]]);
   assert.deepEqual(f.sent, [{ channel: CH_SESSION_RESUME_PREVIEW,
-    payload: { requestId: 'saved-source-open', session: { ...f.ref, mode: 'code' }, messages: [] } }]);
+    payload: { requestId: 'saved-source-open', session: { ...f.ref, mode: 'code' }, messages: previewMessages } }]);
   assert.equal(f.settings.getPublic().activeSession?.sessionId, sessionId);
 });
 
@@ -154,7 +156,7 @@ for (const timing of ['before capture', 'before delivery']) {
         const preview = args[7] as ResumePreviewListener | undefined;
         assert.ok(preview);
         changeScope();
-        preview({ type: 'session_resumed', session_id: sessionId, mode: 'code', messages: [] });
+        preview({ type: 'session_resumed', session_id: sessionId, mode: 'code', messages: previewMessages });
         return runtime;
       };
     }
@@ -187,7 +189,7 @@ test('a picker preview from a superseded navigation is dropped', async t => {
     await entered.promise;
     await f.handlers.get(CH_SESSION_NEW)!(f.event, f.ref.projectPath);
     assert.ok(preview, 'the exact open requested a preview from its runtime');
-    preview({ type: 'session_resumed', session_id: sessionId, mode: 'code', messages: [] });
+    preview({ type: 'session_resumed', session_id: sessionId, mode: 'code', messages: previewMessages });
     assert.equal(f.sent.some(({ channel }) => channel === CH_SESSION_RESUME_PREVIEW), false);
   } finally { finish.resolve(); await opening; }
   assert.equal(f.settings.getPublic().activeSession?.sessionId, otherId);

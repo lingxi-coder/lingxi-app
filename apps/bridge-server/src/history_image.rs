@@ -1,6 +1,7 @@
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{Engine, engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}};
 use client::protocol::message::MessageDto;
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
+use lingxi_core::types::{ContentBlock, ConversationMessage, ImageSource};
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 
@@ -41,7 +42,14 @@ fn image_ref(message: uuid::Uuid, index: usize, media_type: &str) -> Option<Stri
     Some(format!("{PREFIX}{message}:{index}:{suffix}"))
 }
 
-fn parse_ref(reference: &str) -> Option<(uuid::Uuid, usize, &'static str)> {
+struct ImageReference {
+    message: uuid::Uuid,
+    index: usize,
+    media_type: &'static str,
+    location: Option<(u64, String)>,
+}
+
+fn parse_ref(reference: &str) -> Option<ImageReference> {
     let mut parts = reference.strip_prefix(PREFIX)?.split(':');
     let message = uuid::Uuid::parse_str(parts.next()?).ok()?;
     let index = parts.next()?.parse::<usize>().ok()?;
@@ -52,7 +60,34 @@ fn parse_ref(reference: &str) -> Option<(uuid::Uuid, usize, &'static str)> {
         "webp" => "image/webp",
         _ => return None,
     };
-    (parts.next().is_none() && index < 32).then_some((message, index, media_type))
+    let location = match (parts.next(), parts.next()) {
+        (None, None) => None,
+        (Some(offset), Some(identity)) if identity.len() <= 172 => Some((
+            offset.parse().ok()?,
+            String::from_utf8(URL_SAFE_NO_PAD.decode(identity).ok()?).ok()?,
+        )),
+        _ => return None,
+    };
+    (parts.next().is_none() && index < 32).then_some(ImageReference { message, index, media_type, location })
+}
+
+/// Convert the cold capture's private display copy before the lowerer builds
+/// image URLs. The engine's separate model history retains the original data.
+pub(crate) fn reference_captured_images(row: &mut ConversationMessage) {
+    let ConversationMessage::User { id, content, .. } = row else {
+        return;
+    };
+    let images = content.iter_mut().filter_map(|block| match block {
+        ContentBlock::Image { source } => Some(source),
+        _ => None,
+    });
+    for (index, source) in images.enumerate() {
+        if let ImageSource::Base64 { media_type, .. } = source {
+            if let Some(url) = image_ref(id.as_uuid(), index, media_type) {
+                *source = ImageSource::Url { url };
+            }
+        }
+    }
 }
 
 /// The image reference belongs to the durable message, so it is unchanged by
@@ -60,8 +95,8 @@ fn parse_ref(reference: &str) -> Option<(uuid::Uuid, usize, &'static str)> {
 pub(crate) fn reference_images(message: &mut MessageDto) {
     let id = message.transcript_uuid.as_deref().and_then(|id| uuid::Uuid::parse_str(id).ok());
     for (index, image) in message.images.iter_mut().enumerate() {
-        if let Some((_, _, media_type)) = parse_ref(&image.url) {
-            image.media_type = media_type.into();
+        if let Some(reference) = parse_ref(&image.url) {
+            image.media_type = reference.media_type.into();
         } else if image.url.starts_with("data:") {
             if let Some(reference) = id.and_then(|id| image_ref(id, index, &image.media_type)) {
                 image.url = reference;
@@ -72,7 +107,7 @@ pub(crate) fn reference_images(message: &mut MessageDto) {
 
 /// Replace embedded binary strings before retaining a page of routed rows.
 /// Exact UTF-16 transcript text stays in the native projection.
-pub(super) fn project_images(row: &mut session::jsonl::JsonlMessage) -> Result<bool, String> {
+pub(super) fn project_images(row: &mut session::jsonl::JsonlMessage, offset: u64, identity: &str) -> Result<bool, String> {
     let Some(id) = uuid::Uuid::parse_str(&row.uuid).ok() else { return Ok(false) };
     if row.message_type != "user" {
         return Ok(false);
@@ -81,7 +116,7 @@ pub(super) fn project_images(row: &mut session::jsonl::JsonlMessage) -> Result<b
     let replacements: Vec<_> = image_sources(&row.message).enumerate().filter_map(|(index, (pointer, source))| {
         if source.get_property("type")?.as_str()? != "base64" { return None; }
         let reference = image_ref(id, index, source.get_property("media_type")?.as_str()?)?;
-        Some((pointer, reference))
+        Some((pointer, format!("{reference}:{offset}:{}", URL_SAFE_NO_PAD.encode(identity))))
     }).collect();
     for (pointer, reference) in replacements {
         let projected = Utf16JsonProjection::from_serde_value(&serde_json::json!({
@@ -110,8 +145,9 @@ pub(super) fn read(
     source: super::history_page::LatestSource,
     request: ImageRequest,
 ) -> Result<ImagePayload, String> {
-    let (id, index, media_type) = parse_ref(&request.reference).ok_or("Invalid history image reference")?;
-    let row = source.read_message(id)?;
+    let ImageReference { message, index, media_type, location } =
+        parse_ref(&request.reference).ok_or("Invalid history image reference")?;
+    let row = source.read_message(message, location)?;
     let (_, image) = image_sources(&row.message).nth(index).ok_or("History image is unavailable")?;
     if image.get_property("type").and_then(|value| value.as_str()) != Some("base64")
         || image.get_property("media_type").and_then(|value| value.as_str()) != Some(media_type)

@@ -3,6 +3,7 @@ import { isHistoryImageReference, type SessionImageSize } from '../../shared/ses
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { ComposerImageThumbnail } from '../../../../../packages/chat-ui/ComposerSurface';
+import { SessionThumbnail } from '../../../../../packages/chat-ui/SessionThumbnail';
 import { useI18n } from '../i18n/useI18n';
 import { Icon } from './Icon';
 
@@ -15,45 +16,45 @@ interface ImagePreviewProps {
   composerAttachment?: boolean;
 }
 
-function useImageSource(src: string, sessionId: string | undefined, size: SessionImageSize, enabled: boolean) {
+async function loadHistoryImage(sessionId: string, reference: string, size: SessionImageSize, signal?: AbortSignal) {
+  const bridge = window[DESKTOP_BRIDGE_GLOBAL];
+  if (!bridge?.loadSessionImage) throw new Error('History image is unavailable');
+  signal?.throwIfAborted();
+  const requestId = signal && typeof bridge.cancelSessionImage === 'function' ? crypto.randomUUID() : undefined;
+  const cancel = () => { if (requestId) void bridge.cancelSessionImage(requestId).catch(() => undefined); };
+  signal?.addEventListener('abort', cancel, { once: true });
+  try {
+    const { mediaType, base64 } = await bridge.loadSessionImage(sessionId, reference, size, requestId);
+    signal?.throwIfAborted();
+    return `data:${mediaType};base64,${base64}`;
+  } finally {
+    signal?.removeEventListener('abort', cancel);
+  }
+}
+
+function useOriginalImageSource(src: string, sessionId: string | undefined) {
   const [result, setResult] = useState<{ key: string; url: string | null }>();
   const historical = isHistoryImageReference(src);
-  const key = historical ? JSON.stringify([sessionId, src, size]) : '';
+  const key = historical ? JSON.stringify([sessionId, src]) : '';
   useEffect(() => {
-    if (!historical || !sessionId || !enabled) return;
-    const bridge = window[DESKTOP_BRIDGE_GLOBAL];
-    if (!bridge) return;
+    if (!historical || !sessionId) return;
     let cancelled = false;
-    void bridge.loadSessionImage(sessionId, src, size).then(
-      ({ mediaType, base64 }) => {
-        if (!cancelled) setResult({ key, url: `data:${mediaType};base64,${base64}` });
-      },
+    void loadHistoryImage(sessionId, src, 'original').then(
+      (url) => { if (!cancelled) setResult({ key, url }); },
       () => { if (!cancelled) setResult({ key, url: null }); },
     );
     return () => { cancelled = true; };
-  }, [enabled, historical, key, sessionId, size, src]);
+  }, [historical, key, sessionId, src]);
   return historical ? (result?.key === key ? result.url : undefined) : src;
 }
 
 export function SessionImageThumbnail({ src, alt, sessionId, style }: Pick<ImagePreviewProps, 'src' | 'alt' | 'sessionId' | 'style'>) {
   const { tr } = useI18n();
-  const placeholder = useRef<HTMLSpanElement>(null);
-  const [nearViewport, setNearViewport] = useState(false);
-  const url = useImageSource(src, sessionId, 'thumbnail', nearViewport);
-  useEffect(() => {
-    const target = placeholder.current;
-    if (!target || nearViewport) return;
-    const observer = new IntersectionObserver(([entry]) => {
-      if (entry?.isIntersecting) setNearViewport(true);
-    }, { rootMargin: '120px' });
-    observer.observe(target);
-    return () => observer.disconnect();
-  }, [nearViewport]);
-
-  return url
-    ? <img src={url} alt={alt} style={style} loading="lazy" decoding="async" draggable={false} />
-    : <span ref={placeholder} aria-hidden="true" title={tr(url === null ? 'desktop_image_failed' : 'desktop_image_loading')}
-        style={{ ...style, display: 'grid', minWidth: 23, minHeight: 23, placeItems: 'center' }}><Icon name="image" size={16} /></span>;
+  const historical = isHistoryImageReference(src);
+  const load = useCallback((signal: AbortSignal) => loadHistoryImage(sessionId!, src, 'thumbnail', signal), [sessionId, src]);
+  return <SessionThumbnail src={historical ? undefined : src} load={historical && sessionId ? load : undefined}
+    alt={alt} style={style} placeholder={<Icon name="image" size={16} />}
+    loadingLabel={tr('desktop_image_loading')} failedLabel={tr('desktop_image_failed')} />;
 }
 
 /** Mount the modal only while viewing; transcript thumbnails stay inexpensive. */
@@ -84,7 +85,7 @@ function downloadName(src: string, alt: string): string {
 
 function ImageViewer({ source, sessionId, alt, onClose }: { source: string; sessionId?: string; alt: string; onClose(): void }) {
   const { tr } = useI18n();
-  const src = useImageSource(source, sessionId, 'original', true);
+  const src = useOriginalImageSource(source, sessionId);
   const dialog = useRef<HTMLDialogElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const viewport = useRef<HTMLDivElement>(null);
@@ -231,7 +232,8 @@ function ImageViewer({ source, sessionId, alt, onClose }: { source: string; sess
           zoom(fit < 1 ? 1 : 2, { x: event.clientX - rect.left - rect.width / 2, y: event.clientY - rect.top - rect.height / 2 });
         }
       }}>
-      {!ready && <div className="image-viewer-status" role={failed || src === null ? 'alert' : 'status'}>{tr(failed || src === null ? 'desktop_image_failed' : 'desktop_image_loading')}</div>}
+      {!ready && <div className={failed || src === null ? 'image-viewer-status' : 'image-viewer-status session-image-loading-status'}
+        role={failed || src === null ? 'alert' : 'status'}>{tr(failed || src === null ? 'desktop_image_failed' : 'desktop_image_loading')}</div>}
       {src && <img className="image-viewer-image" src={src} alt={alt} decoding="async" draggable={false}
         onLoad={(event) => { setNatural({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight }); }}
         onError={() => setFailed(true)}

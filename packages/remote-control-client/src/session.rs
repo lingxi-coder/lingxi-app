@@ -35,8 +35,8 @@ use crate::encoding::random_id;
 use crate::messages::{
     methods, ImageGetParams, ImageGetResult, ModelsListResult, PermissionModeId, PromptSendResult, RemoteCursor,
     RemotePending, RemotePromptOrigin, RemoteRecord, RemoteSeqRecord, RemoteSessionSummary,
-    RemoteTurnState, SessionAttachResult, SessionHistoryResult, SessionImageSize, SessionSnapshotParams,
-    SessionsChangedParams, SessionsListResult,
+    RemoteTurnState, SessionAttachResult, SessionHistoryResult, SessionImageSize, SessionPreviewParams,
+    SessionSnapshotParams, SessionsChangedParams, SessionsListResult,
 };
 use crate::rpc::{RemoteErrorCode, RpcError};
 use crate::text::display_text;
@@ -170,6 +170,8 @@ pub struct SessionState {
     pub session_id: String,
     /// Conversation mode from the authoritative snapshot or later live events.
     pub session_mode: Option<SessionModeDto>,
+    /// Provisional history for display while a fresh attach is loading.
+    pub preview: Option<SessionPreviewParams>,
     /// Where it stands.
     pub status: SessionStatus,
     /// Why the attach failed.
@@ -201,6 +203,7 @@ impl SessionState {
         Self {
             session_id: session_id.to_owned(),
             session_mode: None,
+            preview: None,
             status: SessionStatus::Loading,
             error: None,
             messages: Vec::new(),
@@ -272,6 +275,7 @@ impl Core {
             let mut state = SessionState::new(&self.state.session_id);
             state.status = self.state.status;
             state.error = self.state.error.clone();
+            state.preview = self.state.preview.clone();
             state
         } else {
             self.state.clone()
@@ -440,6 +444,9 @@ impl SessionController {
             }
             core.active = false;
             core.attach_id += 1;
+            if core.state.preview.is_some() {
+                self.inner.commit(&mut core, |s| s.preview = None);
+            }
             if let Some(timer) = core.reset_timer.take() {
                 timer.abort();
             }
@@ -502,6 +509,27 @@ impl SessionController {
     // -----------------------------------------------------------------------
     // From the desktop (called by `RemoteClient`, public for custom routing)
     // -----------------------------------------------------------------------
+
+    /// A read-only saved tail. Admission still requires a complete snapshot.
+    pub fn handle_preview(&self, preview: SessionPreviewParams) {
+        let mut core = self.inner.core.lock().expect("core");
+        if preview.session_id != self.inner.session_id
+            || is_team_approval(&preview.session_id)
+            || !core.active
+            || !core.awaiting_attach
+            || core.mode_conflicted
+            || core.cursor.is_some()
+            || core.assembly.is_some()
+            || core.state.preview.is_some()
+            || core.state.status != SessionStatus::Loading
+            || core.state.session_mode.is_some_and(|mode| mode != preview.session_mode)
+            || preview.messages.is_empty()
+            || preview.messages.len() > 200
+        {
+            return;
+        }
+        self.inner.commit(&mut core, |s| s.preview = Some(preview));
+    }
 
     /// A `session.snapshot` notification.
     pub fn handle_snapshot(&self, params: SessionSnapshotParams) {
@@ -789,6 +817,7 @@ impl SessionController {
         }
         self.inner.commit(&mut core, |s| {
             s.status = SessionStatus::Loading;
+            s.preview = None;
             s.messages.clear();
             s.records.clear();
             s.first_message_index = 0;
@@ -1479,6 +1508,9 @@ impl SessionInner {
     /// so listener order is the order of changes.
     fn commit(&self, core: &mut Core, change: impl FnOnce(&mut SessionState)) {
         change(&mut core.state);
+        if core.state.status != SessionStatus::Loading {
+            core.state.preview = None;
+        }
         if core.approval_response == ApprovalResponse::Consumed {
             core.state.pending.permissions.clear();
         }
@@ -1519,7 +1551,7 @@ impl SessionInner {
 
     /// One attach; `true` asks for another one without resuming.
     async fn attach_once(self: &Arc<Self>) -> bool {
-        let (id, resume) = {
+        let (id, resume, preview) = {
             let mut core = self.core.lock().expect("core");
             if !core.active || core.mode_conflicted || !self.io.connected() {
                 return false;
@@ -1537,17 +1569,21 @@ impl SessionInner {
             core.snapshot_finished_during_attach = false;
             self.commit(&mut core, |s| {
                 s.status = SessionStatus::Loading;
+                s.preview = None;
                 s.error = None;
             });
             let resume = core
                 .cursor
                 .as_ref()
                 .map(|c| json!({ "epoch": c.0.epoch, "after_seq": c.0.seq }));
-            (core.attach_id, resume)
+            let preview = core.state.session_mode.is_none() && !is_team_approval(&self.session_id);
+            (core.attach_id, resume, preview)
         };
         let mut params = json!({ "session_id": self.session_id });
         if let Some(resume) = resume {
             params["resume"] = resume;
+        } else if preview {
+            params["preview"] = json!(true);
         }
         let result = self
             .io
@@ -2264,6 +2300,11 @@ impl RemoteClient {
             .cloned();
         let Some(controller) = controller else { return };
         match method {
+            methods::SESSION_PREVIEW => {
+                if let Ok(preview) = serde_json::from_value(params.clone()) {
+                    controller.handle_preview(preview);
+                }
+            }
             methods::SESSION_SNAPSHOT => {
                 if let Ok(snapshot) = serde_json::from_value(params.clone()) {
                     controller.handle_snapshot(snapshot);

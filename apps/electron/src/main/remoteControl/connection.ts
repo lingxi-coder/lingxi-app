@@ -469,7 +469,7 @@ export class HostConnection {
     this.kind = kind;
     const transport = new MessageTransport(link);
     const rpc = new RpcPeer(transport, { clock: this.deps.clock });
-    rpc.onRequest((method, params) => this.onRequest(method, params));
+    rpc.onRequest((method, params, signal) => this.onRequest(method, params, signal));
     rpc.onNotification((method, params) => this.onNotification(method, params));
     transport.onClose((reason) => this.close(reason));
     this.rpc = rpc;
@@ -529,13 +529,13 @@ export class HostConnection {
   // The handshake and what follows
   // ───────────────────────────────────────────────────────────────────────────
 
-  private onRequest(method: string, params: unknown): Promise<unknown> | unknown {
+  private onRequest(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> | unknown {
     if (this.closed || this.disconnecting) throw new RemoteRpcError('closed', 'the connection is closing');
     if (method === 'initialize') return this.initialize(params);
     if (method === 'ping') return {};
     const { viewer } = this;
     if (!this.approved || viewer === undefined) throw new RemoteRpcError('not_approved', 'this device has not been approved yet');
-    return this.deps.gateway.handle(viewer, method, params, this.channel).catch((error: unknown) => {
+    return this.deps.gateway.handle(viewer, method, params, this.channel, signal).catch((error: unknown) => {
       if (!(error instanceof RemoteRpcError)) this.deps.diagnostics('warn', `a remote request failed (${method}: ${describeError(error)})`);
       throw error;
     });

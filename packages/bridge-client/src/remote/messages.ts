@@ -62,6 +62,8 @@ export interface RemoteHostInfo {
   /** Operating-system family; the same value as `HostRecord.platform`. */
   platform: string;
   app_version: string;
+  /** The host accepts cancellation for an in-flight thumbnail RPC. */
+  cancel_image_requests?: true;
 }
 
 /** `initialize`: the first request on every connection. */
@@ -221,6 +223,14 @@ export interface SessionAttachParams {
   session_id: string;
   /** What the viewer already has; lets the host answer with a delta instead of a snapshot. */
   resume?: { epoch: string; after_seq: number };
+  /** Accept a read-only transcript tail while a cold session opens. */
+  preview?: true;
+}
+
+export interface SessionPreviewParams {
+  session_id: string;
+  session_mode: SessionModeDto;
+  messages: MessageDto[];
 }
 
 /**
@@ -531,6 +541,7 @@ export interface HostNotifications {
   'sessions.changed': SessionsChangedParams;
   'bots.changed': BotsChangedParams;
   'session.snapshot': SessionSnapshotParams;
+  'session.preview': SessionPreviewParams;
   'session.event': SessionEventParams;
   'session.pending': SessionPendingParams;
   'session.reset': SessionResetParams;

@@ -333,6 +333,8 @@ export interface RemoteRuntimeView {
   /** Sequence of the base event; 0 while the runtime has none. */
   baseSequence: number;
   base: SequencedRuntimeEventEnvelope<ClientEvent> | undefined;
+  /** Exact transcript cursor preceding the retained display base. */
+  historyBefore?: TranscriptHistoryCursor;
   /** The retained transcript events after the base, in sequence order. */
   events: readonly SequencedRuntimeEventEnvelope<ClientEvent>[];
   /** The latest `model_changed`, `permission_mode_changed`, `conversation_controls_changed`, `fast_mode_changed` and `slash_command_catalog`. */

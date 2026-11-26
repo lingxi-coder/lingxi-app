@@ -65,6 +65,38 @@ function processes() {
   return { calls, spawnProcess, get live() { return live; }, get peak() { return peak; } };
 }
 
+test('abandoning thumbnails cancels queued reads and retires a busy worker', { timeout: 5000 }, async t => {
+  const cwd = project(t), children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const transcript = join(cwd, `${uuid}.jsonl`);
+  writeFileSync(transcript, '');
+  const read = (index: number, signal?: AbortSignal) =>
+    catalog.readImage(cwd, uuid, transcript, `lingxi-history-image:${uuid}:${index}:png`, 'thumbnail', signal);
+
+  const busy = new AbortController(), queued = new AbortController();
+  const first = assert.rejects(read(0, busy.signal), /cancelled/);
+  while (!children.calls[0]?.queries.length) await nextTurn();
+  const second = assert.rejects(read(1, queued.signal), { name: 'AbortError' });
+  for (let turn = 0; turn < 5; turn++) await nextTurn();
+  queued.abort();
+  await second;
+  assert.equal(children.calls[0].queries.length, 1);
+
+  busy.abort();
+  await first;
+  const visible = read(2);
+  while (!children.calls[1]?.queries.length) await nextTurn();
+  assert.equal(children.calls[0].kills, 1);
+  assert.equal(children.calls[0].queries.length, 1);
+  assert.equal(children.calls[1].queries[0].historyImage.reference, `lingxi-history-image:${uuid}:2:png`);
+  const image = { mediaType: 'image/png', base64: 'AQID' };
+  children.calls[1].reply(JSON.stringify(image));
+  assert.deepEqual(await visible, image);
+  assert.deepEqual(await read(2), image);
+  assert.equal(children.calls[1].queries.length, 1);
+});
+
 test('an exact cold selection shares its in-flight read and validates the page separately', async t => {
   const cwd = project(t), children = processes();
   const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
@@ -96,6 +128,36 @@ test('an exact cold selection shares its in-flight read and validates the page s
   history.reply(JSON.stringify({ messages, before: { uuid: 'invalid' } }));
   assert.equal(next.session?.path, selection.transcriptPath);
   assert.equal(await next.preview, undefined);
+});
+
+test('exact cold open lets startup reuse the selected reader before preview takes a process slot', async t => {
+  const cwd = project(t), other = project(t), children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const open = catalog.selectForOpen(cwd, uuid, { scope: 'current', transcriptPath: row().path });
+  await nextTurn();
+  const selected = children.calls[0];
+  const listing = catalog.listComplete(other);
+  await nextTurn();
+  const directory = children.calls[1];
+  selected.reply();
+  const { preview } = await open;
+  const startup = catalog.workspaceSettings(cwd);
+  await nextTurn();
+  assert.equal(selected.queries.at(-1)?.workspaceEnvironment, true);
+  assert.equal(selected.kills, 0);
+  assert.equal(children.calls.length, 2);
+  const settings = { version: 1, config_home: cwd, environment: { FROM_DISK: 'one' } };
+  selected.reply(JSON.stringify(settings));
+  assert.deepEqual((await startup).environment, settings.environment);
+  directory.reply();
+  await listing;
+  await nextTurn();
+  const history = children.calls.find(call => call.queries.at(-1)?.historyLatest);
+  assert.ok(history);
+  const messages = [{ role: 'user', transcript_uuid: uuid, blocks: [{ type: 'text', text: 'recent' }] }];
+  history.reply(JSON.stringify({ messages, before: null }));
+  assert.deepEqual((await preview)?.messages, messages);
 });
 
 test('history images share an in-flight thumbnail and cache each variant separately', { timeout: 5_000 }, async t => {

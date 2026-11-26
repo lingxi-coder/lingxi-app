@@ -255,7 +255,8 @@ export interface LingxiApi {
   openSessionWithPreview?(projectPath: string, sessionId: string, selection: SessionOpenSelection | undefined, linkedMode: ConversationSpace | undefined, requestId: string): Promise<BootstrapState>;
   onSessionResumePreview?(callback: (preview: SessionResumePreview) => void): Unsubscribe;
   loadSessionHistory(sessionId: string, before: TranscriptHistoryCursor): Promise<TranscriptHistoryPage>;
-  loadSessionImage(sessionId: string, reference: string, size: SessionImageSize): Promise<SessionImagePayload>;
+  loadSessionImage(sessionId: string, reference: string, size: SessionImageSize, requestId?: string): Promise<SessionImagePayload>;
+  cancelSessionImage(requestId: string): Promise<void>;
   prepareSessionMetadata(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionMetadataSelection>;
   releaseSessionMetadata(selection: SessionMetadataSelection): Promise<void>;
   preflightSessionArchive(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<CronJobDto[]>;

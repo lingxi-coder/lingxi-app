@@ -711,14 +711,27 @@ export class BridgeClient extends EventEmitter {
     return event;
   }
 
-  async resumeSessionFromTranscript(sessionId: string, transcriptPath: string, expectedMode: 'chat' | 'code', signal?: AbortSignal): Promise<void> {
+  async resumeSessionFromTranscript(sessionId: string, transcriptPath: string, expectedMode: 'chat' | 'code',
+    signal?: AbortSignal, pageDisplay = false): Promise<{ historyBefore?: string; historyOverview?: Extract<ClientEvent, { type: 'session_resumed' }>['messages'] } | void> {
     // The Desktop resume owner pauses its deadline for live tool interactions.
     // Its signal replaces the fixed request deadline only for that owner.
-    const result = await this.request('resume_selected_session', { session_id: sessionId, transcript_path: transcriptPath, expected_mode: expectedMode },
+    const result = await this.request('resume_selected_session', {
+      session_id: sessionId, transcript_path: transcriptPath, expected_mode: expectedMode,
+      ...(pageDisplay ? { page_display: true } : {}),
+    },
       signal ? null : 30_000, undefined, signal);
     if (!result || typeof result !== 'object' || (result as { status?: unknown }).status !== 'ok') {
       throw new Error('invalid selected session resume response');
     }
+    const { history_before: before, history_overview: overview } = result as { history_before?: unknown; history_overview?: unknown };
+    if (before == null && overview === undefined) return;
+    if (!pageDisplay || (before != null && (typeof before !== 'string' || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/iu.test(before)))) {
+      throw new Error('invalid selected session resume history cursor');
+    }
+    const historyOverview = overview === undefined ? undefined
+      : validateClientEvent({ type: 'session_resumed', session_id: sessionId, mode: expectedMode, messages: overview });
+    if (historyOverview && historyOverview.type !== 'session_resumed') throw new Error('invalid selected session overview');
+    return { historyBefore: before ?? undefined, historyOverview: historyOverview?.messages };
   }
 
   /** Read immutable SDK ownership while this permission ask is still pending. */

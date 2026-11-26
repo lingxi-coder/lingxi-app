@@ -21,6 +21,7 @@ import com.lingxi.code.bindings.client.PermissionKindDto
 import com.lingxi.code.bindings.client.PermissionResponseDto
 import com.lingxi.code.bindings.client.ReasoningSelectionDto
 import com.lingxi.code.model.SessionMode
+import com.lingxi.code.model.Message
 import com.lingxi.code.model.toUi
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.ReasoningControl
@@ -70,6 +71,8 @@ interface RemoteSessionPort {
 }
 
 /** The parts of a followed session the screen shows besides the transcript. */
+data class RemoteTranscriptPreview(val mode: SessionMode, val messages: List<Message>)
+
 data class RemoteSessionMeta(
     val phase: RemoteSessionPhaseFfi = RemoteSessionPhaseFfi.LOADING,
     val error: RemoteSessionErrorFfi? = null,
@@ -78,6 +81,7 @@ data class RemoteSessionMeta(
     val controls: ConversationControlsDto? = null,
     val sessionMode: SessionMode? = null,
     val imageRevision: Long = 0,
+    val preview: RemoteTranscriptPreview? = null,
 )
 
 /** Largest picture and most pictures the desktop accepts in a prompt. */
@@ -129,6 +133,14 @@ class RemoteConversationSource(
         var modelsRequested = false
         port.follow().collect { incoming ->
             if (incoming.sessionId != sessionId) return@collect
+            if (!approvalOnly && mapper.ownerMode == null && incoming.phase == RemoteSessionPhaseFfi.LOADING && incoming.replace) {
+                val preview = incoming.sessionMode?.toUi()?.takeIf { incoming.messages.isNotEmpty() }
+                    ?.let { RemoteTranscriptPreview(it, transcriptFromDtos(incoming.messages, strings)) }
+                synchronized(accountAdmissionLock) {
+                    mutableMeta.value = mutableMeta.value.copy(phase = RemoteSessionPhaseFfi.LOADING, preview = preview)
+                }
+                return@collect
+            }
             val projected = mapper.map(incoming)
             val accepted = mapper.takeAcceptedUpdates()
             val lastAccepted = accepted.lastOrNull()
@@ -143,6 +155,7 @@ class RemoteConversationSource(
                         loadingOlder = false,
                         controls = null,
                         sessionMode = mapper.ownerMode,
+                        preview = null,
                     )
                 } else if (lastAccepted != null) {
                     RemoteSessionMeta(
@@ -160,6 +173,7 @@ class RemoteConversationSource(
                         } else RemoteSessionPhaseFfi.OFFLINE,
                         error = if (mapper.ownerMode == null && !approvalOnly) incoming.error else null,
                         sessionMode = mapper.ownerMode,
+                        preview = previous.preview.takeIf { incoming.phase == RemoteSessionPhaseFfi.LOADING },
                     )
                 }
                 if (previous.phase == RemoteSessionPhaseFfi.LIVE && next.phase != RemoteSessionPhaseFfi.LIVE) {

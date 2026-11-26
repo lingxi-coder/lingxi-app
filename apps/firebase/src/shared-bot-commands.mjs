@@ -70,6 +70,16 @@ export const triageReasons = ['quiet_hours', 'cooldown', 'keyword', 'addressed',
 /** The most rows of the auto-reply log one page carries. */
 export const triageLogPage = 50;
 /**
+ * What a host bids for an optional task of a reply round (`reply-rounds.mjs`), best first, and what became of a task in a round: the codes of
+ * `packages/teams/execution.ts` (`BID_TIERS`, `ROUND_OUTCOMES`), which `test/reply-rounds.test.mjs` checks against. `addressed` is the service's own tier: a host
+ * only sends it for a task the service itself marked as spoken to. `decline` is an abstention.
+ */
+export const bidTiers = ['addressed', 'rule', 'run', 'may_decline', 'decline'];
+export const roundOutcomes = ['won', 'lost', 'abstained', 'promoted', 'superseded'];
+/** How many Bots of one message a Chat may let answer, and what a message that mentions only people does to its Bots: nothing (`quiet`), or what any message does (`judge`). */
+export const maxRepliesLimit = 5;
+export const humanMentionModes = ['quiet', 'judge'];
+/**
  * What became of a reply the maintainer was asked to approve before it was posted, as the auto-reply log says it: the codes of `packages/teams/execution.ts`
  * (`APPROVAL_OUTCOMES`), which `test/held-replies.test.mjs` checks against. `held` is the reply still waiting.
  */
@@ -170,6 +180,9 @@ const payloads = {
   // The host says what it decided about an optional task, before it acts on it: the maintainer reads these in the auto-reply log.
   recordTriage: z.object({ ...host, ...task, action: z.enum(triageActions), source: z.enum(triageSources), reason: z.enum(triageReasons).optional(),
     probability: z.number().min(0).max(1).optional() }).strict(),
+  // The host's bid for an optional task of a reply round, after judging it (B5): its tier and, when the Decision service judged, the probability. The service
+  // settles the round; the host starts the task only once the round has said it won.
+  bidReply: z.object({ ...host, ...task, tier: z.enum(bidTiers), score: z.number().min(0).max(1).optional(), source: z.enum(triageSources) }).strict(),
   // The maintainer reads that log for one of their Bots, newest verdict first, optionally for one Chat. `cursor` is the `nextCursor` of the page before.
   listTriage: z.object({ sharedBotId: executionId, conversationId: executionId.optional(), cursor: executionId.optional(),
     limit: z.number().int().min(1).max(triageLogPage).optional() }).strict(),
@@ -210,9 +223,10 @@ const payloads = {
   reviseArtifact: z.object({ artifactId: executionId, expectedRevision: positive, operationId: executionId, document: artifactDocument }).strict(),
   setConversationPolicy: z.object({ ...thread, expectedRevision: cursor,
     targets: z.array(executionId).max(8).refine(unique) }).strict(),
-  // The Bots of this Chat that may answer messages nobody asked them about. Each must allow it itself.
-  setConversationAutoReply: z.object({ ...thread, expectedRevision: cursor,
-    targets: z.array(executionId).max(8).refine(unique) }).strict(),
+  // The Bots of this Chat that may answer messages nobody asked them about. Each must allow it itself. `maxReplies` is how many of them may answer one
+  // message (1 when never set) and `humanMentions` what a message that mentions only people does to them; a field left out keeps its value.
+  setConversationAutoReply: z.object({ ...thread, expectedRevision: cursor, targets: z.array(executionId).max(8).refine(unique),
+    maxReplies: z.number().int().min(1).max(maxRepliesLimit).optional(), humanMentions: z.enum(humanMentionModes).optional() }).strict(),
   // What one Bot of this Chat may use here, within what it published: `scope: null` lifts the narrowing.
   setConversationBotScope: z.object({ ...thread, sharedBotId: executionId, expectedRevision: cursor, scope: narrowing.nullable() }).strict(),
 };

@@ -3558,6 +3558,11 @@
     <string name="teams_triage_state_waiting">진행 중</string>
     <string name="teams_triage_approval_timeout">시간 내에 승인되지 않음</string>
     <string name="teams_triage_approval_superseded">새 메시지로 인해 폐기됨</string>
+    <string name="teams_triage_round_won">답장 담당으로 선택됨</string>
+    <string name="teams_triage_round_lost">다른 Bot이 선택됨</string>
+    <string name="teams_triage_round_abstained">참여하지 않음</string>
+    <string name="teams_triage_round_promoted">다른 Bot을 대신함</string>
+    <string name="teams_triage_round_superseded">새 메시지로 인해 중단됨</string>
     <string name="teams_triage_probability_fmt">확률 %1$d%%</string>
     <string name="teams_held_title">내 승인 대기 중</string>
     <string name="teams_held_expires_fmt">승인하지 않으면 %1$s 폐기됩니다</string>

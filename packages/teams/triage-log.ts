@@ -1,4 +1,4 @@
-import { APPROVAL_OUTCOMES, executionCommand, TRIAGE_ACTIONS, TRIAGE_REASONS, TRIAGE_SOURCES, type ApprovalOutcome, type ExecutionScope, type SharedBotCard, type TaskState, type TriageAction, type TriageLogItem, type TriageLogPage, type TriageReason } from './execution.js';
+import { APPROVAL_OUTCOMES, BID_TIERS, executionCommand, ROUND_OUTCOMES, TRIAGE_ACTIONS, TRIAGE_REASONS, TRIAGE_SOURCES, type ApprovalOutcome, type ExecutionScope, type RoundOutcome, type SharedBotCard, type TaskRound, type TaskState, type TriageAction, type TriageLogItem, type TriageLogPage, type TriageReason } from './execution.js';
 import { TRIAGE_LOG_LIMIT } from './execution-validation.js';
 import type { TeamsApi } from './index.js';
 import type { TeamConversation } from './messages.js';
@@ -49,7 +49,14 @@ const OUTCOME_TEXT: Record<TriageOutcome, TeamsKey> = {
 const APPROVAL_TEXT: Partial<Record<ApprovalOutcome, TeamsKey>> = {
   approved: tk('teams_approval_reply_approved'), rejected: tk('teams_approval_reply_declined'), timeout: tk('teams_triage_approval_timeout'), superseded: tk('teams_triage_approval_superseded'),
 };
+/** What became of the message when several Bots could answer it: this Bot's own part in the round, never the other Bots' bids. */
+const ROUND_TEXT: Record<RoundOutcome, TeamsKey> = {
+  won: tk('teams_triage_round_won'), lost: tk('teams_triage_round_lost'), abstained: tk('teams_triage_round_abstained'),
+  promoted: tk('teams_triage_round_promoted'), superseded: tk('teams_triage_round_superseded'),
+};
 export const triageActionText = (t: TeamsText, action: TriageAction): string => t(ACTION_TEXT[action]);
+/** What became of the Bot in the round of several Bots, in words: nothing for a message that was not one, or an outcome this version does not know. */
+export const triageRoundText = (t: TeamsText, round: TaskRound | undefined): string => round !== undefined && Object.prototype.hasOwnProperty.call(ROUND_TEXT, round.outcome) ? t(ROUND_TEXT[round.outcome]) : '';
 /** Why, in words; nothing for a reason this version does not know. */
 export const triageReasonText = (t: TeamsText, reason: TriageReason | undefined): string => reason !== undefined && Object.prototype.hasOwnProperty.call(REASON_TEXT, reason) ? t(REASON_TEXT[reason]) : '';
 export const triageOutcomeText = (t: TeamsText, outcome: TriageOutcome): string => t(OUTCOME_TEXT[outcome]);
@@ -69,7 +76,7 @@ const oneOf = <T extends string>(values: readonly T[], value: unknown): value is
 
 /**
  * One row of the log as the service sent it, or nothing when this version cannot read it: a row is never half shown, and one row that is not
- * understood does not hide the page it came in. A reason, a probability or an approval it does not know is left out of the row; the decision is kept.
+ * understood does not hide the page it came in. A reason, a probability, an approval or a round outcome it does not know is left out of the row; the decision is kept.
  */
 export function triageItem(value: unknown): TriageLogItem | undefined {
   if (!record(value) || !record(value.triage)) return undefined;
@@ -86,6 +93,7 @@ export function triageItem(value: unknown): TriageLogItem | undefined {
     },
     ...(word(value.conversationTitle) ? { conversationTitle: value.conversationTitle } : {}),
     ...(oneOf(APPROVAL_OUTCOMES, value.approval) ? { approval: value.approval } : {}),
+    ...(record(value.round) && oneOf(ROUND_OUTCOMES, value.round.outcome) ? { round: { outcome: value.round.outcome, ...(oneOf(BID_TIERS, value.round.tier) ? { tier: value.round.tier } : {}) } } : {}),
   };
 }
 /** A page as the service sent it. An answer that is not a page at all is `INVALID_DATA`, never an empty log. */

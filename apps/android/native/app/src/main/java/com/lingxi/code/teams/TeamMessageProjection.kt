@@ -14,8 +14,11 @@ import java.security.MessageDigest
  */
 internal data class TeamLastMessage(val id: String, val seq: Long, val atMs: Long?, val authorKind: String, val authorUid: String, val authorSharedBotId: String?, val preview: String, val recalled: Boolean = false, val authorTaskName: String? = null)
 
-/** The Bots of a Chat that judge for themselves whether to answer its messages. */
-internal data class TeamConversationAutoReply(val revision: Long, val targets: List<String>)
+/**
+ * The Bots of a Chat that judge for themselves whether to answer its messages. [maxReplies] (1 to 5) is how many of them may answer one message nobody asked them about,
+ * and [humanMentions] (`quiet` or `judge`) whether a message that mentions only people is judged like any other; both are null until someone sets them, which reads as 1 and `quiet`.
+ */
+internal data class TeamConversationAutoReply(val revision: Long, val targets: List<String>, val maxReplies: Int? = null, val humanMentions: String? = null)
 internal data class TeamMessageConversation(val id: String, val kind: String, val title: String, val participants: List<String>, val lastSeq: Long, val lastChangeSeq: Long, val lastReadSeq: Long, val sharedBotIds: List<String> = emptyList(), val lastMessage: TeamLastMessage? = null,
     /** Who can read it, as written when it was made: its people and the maintainers its Bots had then. Null when the source does not say. */
     val readers: List<String>? = null,
@@ -42,7 +45,10 @@ internal data class TeamMessageConversation(val id: String, val kind: String, va
                 // An unreadable setting reads as off: it must not hide the conversation.
                 (data["autoReply"] as? Map<*, *>)?.let { auto ->
                     val revision = (auto["revision"] as? Number)?.toLong(); val targets = (auto["targets"] as? List<*>)?.takeIf { list -> list.all { it is String } }?.map { it as String }
-                    if (revision != null && targets != null) TeamConversationAutoReply(revision, targets) else null
+                    // A setting this version cannot read is left out, and the Chat reads as if it had never been set.
+                    val most = (auto["maxReplies"] as? Number)?.toDouble()?.takeIf { it == Math.rint(it) && it >= 1 && it <= TeamExecutionContract.MAX_REPLIES_LIMIT }?.toInt()
+                    val mode = (auto["humanMentions"] as? String)?.takeIf { it in TeamExecutionContract.humanMentionModes }
+                    if (revision != null && targets != null) TeamConversationAutoReply(revision, targets, most, mode) else null
                 },
                 // The same: an entry that cannot be read is no narrowing, and never a reason to hide the conversation.
                 TeamBotScopeRules.decode(data["botScopes"]))

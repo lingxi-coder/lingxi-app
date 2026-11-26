@@ -211,7 +211,7 @@ test('teams: unimplemented App, task, invite and epoch writes remain denied', op
   const alice = user('alice');
   for (const path of ['appGrants/example_alice', 'appOpens/example01', 'tasks/example01', 'invites/example01', 'membershipEpochs/alice',
     'sharedBots/example01', 'deployments/example01', 'executionReceipts/example01', 'requestQuotas/example01', 'chatExecutionLocks/example01', 'artifacts/example01', 'waits/example01', 'operations/example01', 'lists/example01', 'lists/example01/operations/task_example01',
-    'transfers/example01', 'sharedBots/example01/transferParts/example01', 'uploads/example01', 'uploads/example01/parts/0', 'heldReplies/example01']) {
+    'transfers/example01', 'sharedBots/example01/transferParts/example01', 'uploads/example01', 'uploads/example01/parts/0', 'heldReplies/example01', 'replyRounds/example01']) {
     await assertFails(setDoc(ref(alice, path), { uid: 'alice' }));
     await assertFails(getDoc(ref(alice, path)));
   }
@@ -248,6 +248,22 @@ test('teams: a reply held for approval is server-only, even for the Bot maintain
   }
   assert.equal((await admin.doc('teams/team-test/heldReplies/task_0001').get()).data().result.text, 'A reply nobody has read yet.');
   assert.equal((await admin.doc('teams/team-test/heldReplies/task_0002').get()).exists, false);
+});
+test('teams: a reply round and the bids in it are server-only, even for the maintainers whose Bots bid', options, async () => {
+  const round = { schemaVersion: 1, roundId: 'message_0001', conversationId: 'bot-chat', state: 'open', createdAt: Date.now(), deadlineAt: Date.now() + 6000, maxReplies: 1,
+    candidates: [{ taskId: 'task_0001', sharedBotId }], bids: { task_0001: { tier: 'run', score: 0.9, source: 'decision', at: Date.now() } } };
+  await admin.doc('teams/team-test/replyRounds/message_0001').set(round);
+  for (const uid of ['alice', 'bob', 'owner']) {
+    const db = user(uid);
+    await assertFails(getDoc(ref(db, 'replyRounds/message_0001')));
+    await assertFails(getDocs(collection(db, 'teams/team-test/replyRounds')));
+    await assertFails(getDocs(query(collection(db, 'teams/team-test/replyRounds'), where('conversationId', '==', 'bot-chat'))));
+    await assertFails(setDoc(ref(db, 'replyRounds/message_0002'), round));
+    await assertFails(updateDoc(ref(db, 'replyRounds/message_0001'), { 'bids.task_0001.tier': 'addressed' }));
+    await assertFails(deleteDoc(ref(db, 'replyRounds/message_0001')));
+  }
+  assert.equal((await admin.doc('teams/team-test/replyRounds/message_0001').get()).data().bids.task_0001.tier, 'run');
+  assert.equal((await admin.doc('teams/team-test/replyRounds/message_0002').get()).exists, false);
 });
 test('teams: both configured non-Team rule files compile and deny client access', options, async () => {
   const config = JSON.parse(readFileSync(new URL('../../../firebase.json', import.meta.url), 'utf8'));

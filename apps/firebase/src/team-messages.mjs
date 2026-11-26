@@ -9,6 +9,7 @@ import { messagePreview } from './team-message-preview.mjs';
 import { recallAttachments } from './team-attachments.mjs';
 import { mentionEntitiesSchema, mentionFields, mentionMemberRefs, preserveMentionEntities, validMentionEntities } from './team-mentions.mjs';
 import { serviceMessageActions, serviceScope } from './hosted-bot-service.mjs';
+import { recalled } from './reply-rounds.mjs';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
 const uid = z.string().min(1).max(128).regex(/^[^/\u0000-\u001f\u007f]+$/u);
@@ -43,7 +44,9 @@ function conversation(snapshot, read, generation) {
   const value = snapshot.data();
   return { id: snapshot.id, kind: value.kind, title: value.title, participants: value.participants,
     lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq,
-    ...(value.autoReply ? { autoReply: { revision: value.autoReply.revision, targets: value.autoReply.targets } } : {}),
+    ...(value.autoReply ? { autoReply: { revision: value.autoReply.revision, targets: value.autoReply.targets,
+      ...(value.autoReply.maxReplies !== undefined ? { maxReplies: value.autoReply.maxReplies } : {}),
+      ...(value.autoReply.humanMentions !== undefined ? { humanMentions: value.autoReply.humanMentions } : {}) } } : {}),
     ...(value.botScopes ? { botScopes: value.botScopes } : {}),
     lastReadSeq: read?.generation === generation ? read.lastReadSeq : 0 };
 }
@@ -147,16 +150,20 @@ export class TeamMessagesStore {
       const memberRefs = mentionMemberRefs(teamRef, c, newMentions, user.uid);
       if (!memberRefs) fail(409, 'MENTION_TARGET_REQUIRED');
       const replyRefs = input.replyTo ? [ref.collection('messages').doc(input.replyTo)] : [];
+      let replied;
       if (replyRefs.length || memberRefs.length) {
         const reads = await tx.getAll(...replyRefs, ...memberRefs);
         if (replyRefs.length && !reads[0].exists) fail(400, 'REPLY_REQUIRED');
         if (reads.slice(replyRefs.length).some(member => !member.exists)) fail(409, 'MENTION_TARGET_REQUIRED');
+        replied = replyRefs.length ? reads[0].data() : undefined;
       }
       const clock = this.clock();
       const releaseFiles = input.operation === 'recall' ? await recallAttachments(tx, teamRef, m, clock) : () => {};
+      // A recalled message takes its round and its waiting tasks with it.
+      const recall = input.operation === 'recall' ? await recalled(tx, teamRef, input.messageId, m) : { write() {} };
       // A new message also goes to the Chat's Bots that answer unasked; each one's host decides whether it does.
       const unasked = input.operation === 'create' ? await new SharedBotsStore(this.db, this.clock).optionalTasks(tx, teamRef, c,
-        input, { uid: user.uid, generation: input.generation }, [], clock) : { write() {} };
+        input, { uid: user.uid, generation: input.generation }, [], clock, replied) : { write() {} };
       const changeSeq = c.lastChangeSeq + 1, seq = input.operation === 'create' ? c.lastSeq + 1 : m.seq;
       if (!Number.isSafeInteger(changeSeq) || !Number.isSafeInteger(seq)) fail(409, 'CURSOR_LIMIT');
       const now = new Date(clock);
@@ -185,7 +192,7 @@ export class TeamMessagesStore {
             ...(input.operation === 'recall' ? { recalled: true } : {}) };
         }
       }
-      tx.update(ref, update); tx.create(changeRef, change); releaseFiles();
+      tx.update(ref, update); tx.create(changeRef, change); releaseFiles(); recall.write(clock);
       return { messageId: input.messageId, changeId: input.changeId, changeSeq };
     });
   }

@@ -350,7 +350,7 @@ export class TeamsService {
       'listSharedBots', 'publishSharedBot', 'heartbeatDeployment', 'activateDeployment', 'listHostTasks',
       'prepareTask', 'validateTask', 'startTask', 'completeTask', 'holdReply', 'pauseTask', 'continueTask', 'getTask',
       'readTaskList', 'recordOperation', 'writeTaskList', 'readAttachmentPart',
-      'putTransferPart', 'offerTransfer', 'acceptTransfer', 'readTransferPart', 'completeTransfer', 'declineTask', 'recordTriage', 'listTriage',
+      'putTransferPart', 'offerTransfer', 'acceptTransfer', 'readTransferPart', 'completeTransfer', 'declineTask', 'recordTriage', 'listTriage', 'bidReply',
     ].includes(command.action as string)) throw new Error('INVALID_INPUT');
     const session = await this.connect(context.uid); this.assertHostContext(context);
     const { collection, onSnapshot } = this.sdk!;

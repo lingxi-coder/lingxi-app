@@ -546,6 +546,11 @@ export type TeamsKey =
   | 'teams_triage_reason_keyword'
   | 'teams_triage_reason_message_unavailable'
   | 'teams_triage_reason_quiet_hours'
+  | 'teams_triage_round_abstained'
+  | 'teams_triage_round_lost'
+  | 'teams_triage_round_promoted'
+  | 'teams_triage_round_superseded'
+  | 'teams_triage_round_won'
   | 'teams_triage_state_failed'
   | 'teams_triage_state_replied'
   | 'teams_triage_state_silent'
@@ -1497,6 +1502,11 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_triage_reason_keyword: { en: 'A keyword matched', 'zh-Hans': '命中关键词', 'zh-Hant': '符合關鍵字', ja: 'キーワードに一致', ko: '키워드 일치' },
   teams_triage_reason_message_unavailable: { en: 'The message could not be read', 'zh-Hans': '无法读取这条消息', 'zh-Hant': '無法讀取這則訊息', ja: 'メッセージを読み取れなかった', ko: '메시지를 읽을 수 없음' },
   teams_triage_reason_quiet_hours: { en: 'In quiet hours', 'zh-Hans': '处于安静时段', 'zh-Hant': '處於安靜時段', ja: '静かな時間帯', ko: '방해 금지 시간 중' },
+  teams_triage_round_abstained: { en: 'Did not take part', 'zh-Hans': '未参与', 'zh-Hant': '未參與', ja: '参加せず', ko: '참여하지 않음' },
+  teams_triage_round_lost: { en: 'Another Bot was chosen', 'zh-Hans': '已选择其他 Bot', 'zh-Hant': '已選擇其他 Bot', ja: '別の Bot が選ばれた', ko: '다른 Bot이 선택됨' },
+  teams_triage_round_promoted: { en: 'Took over for another Bot', 'zh-Hans': '递补其他 Bot', 'zh-Hant': '遞補其他 Bot', ja: '別の Bot に代わって担当', ko: '다른 Bot을 대신함' },
+  teams_triage_round_superseded: { en: 'Ended by a newer message', 'zh-Hans': '因新消息而放弃', 'zh-Hant': '因新訊息而放棄', ja: '新しいメッセージのため中止', ko: '새 메시지로 인해 중단됨' },
+  teams_triage_round_won: { en: 'Chosen to answer', 'zh-Hans': '被选中回复', 'zh-Hant': '被選中回覆', ja: '返信役に選ばれた', ko: '답장 담당으로 선택됨' },
   teams_triage_state_failed: { en: 'Failed', 'zh-Hans': '失败', 'zh-Hant': '失敗', ja: '失敗', ko: '실패' },
   teams_triage_state_replied: { en: 'Replied', 'zh-Hans': '已回复', 'zh-Hant': '已回覆', ja: '返信した', ko: '답장함' },
   teams_triage_state_silent: { en: 'Stayed silent', 'zh-Hans': '未回复', 'zh-Hant': '未回覆', ja: '返信せず', ko: '조용히 있음' },

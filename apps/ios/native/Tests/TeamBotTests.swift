@@ -33,6 +33,11 @@ final class TeamBotTests: XCTestCase {
         }
         XCTAssertEqual(Set(TeamTriageRules.outcomes.keys), Set(states), "the log reads every state the contract lists, and no other")
         XCTAssertEqual(TeamTriageRules.approvals, Set(try XCTUnwrap(value["approvalOutcomes"] as? [String])))
+        // Bot v3 B7: the rounds of several Bots: what became of a Bot, the tiers it bids, and the two settings of a Chat.
+        XCTAssertEqual(TeamTriageRules.roundOutcomes, Set(try XCTUnwrap(value["roundOutcomes"] as? [String])))
+        XCTAssertEqual(TeamTriageRules.bidTiers, Set(try XCTUnwrap(value["bidTiers"] as? [String])))
+        XCTAssertEqual(TeamExecutionContract.humanMentionModes, Set(try XCTUnwrap(value["humanMentionModes"] as? [String])))
+        XCTAssertEqual(TeamExecutionContract.maxRepliesLimit, try XCTUnwrap(value["maxRepliesLimit"] as? Int))
     }
     /// A reply that waits for its maintainer can still change and can be taken back by the one who asked; no worker is changing it.
     func testATaskWhoseReplyAwaitsApprovalIsNeitherFinishedNorBeingWorkedOn() throws {

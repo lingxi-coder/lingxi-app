@@ -592,8 +592,9 @@ for that Chat with the member command `setConversationAutoReply { conversationId
   optional tasks of the same Bot and Chat are declined as `superseded`. Before `startTask` each Bot is judged by its own settings
   (`autoReply` of its `bot.json`: `policy`, `keywords`, `quietHours`, `cooldownSec`, `thresholds`; `approval` does not judge: it holds a finished reply, see "Replies the maintainer reads first"),
   and the first step that fits decides:
-  1. a reply to the Bot or its name (case and width folded, whole words where the script has words) → run, source `rule`, reason
-     `addressed`: a person talking to the Bot is answered even in quiet hours or the cooldown;
+  1. the service marked the task `addressed` (a reply to the Bot's message, or its name in the text: decided once by the service when it admits
+     the message, not by the host; see "Several Bots answering one message") → run, source `rule`, reason `addressed`: a person talking to the
+     Bot is answered even in quiet hours or the cooldown;
   2. quiet hours: the window is read in the zone the maintainer stored, at the message's service time → `declineTask`, source `quiet`;
   3. cooldown: the Bot posted in the Chat less than `cooldownSec` before the message, both times the service's `createdAt` and never this
      computer's clock (`0` turns it off; the 13 messages read are widened once, by at most 200, when they begin inside the window) →
@@ -771,6 +772,111 @@ is shown any of it; every other member keeps seeing a task that "Waits for appro
 - Tests: `apps/web/test/teams-held-replies-ui.test.ts` (the board, the card, the Chat, the Bot card and the list, the words), iOS
   `TeamHeldRepliesTests` (Foundation-only, run with the macOS logic runner), Android `TeamHeldRepliesTest`. The screens were not run on a
   simulator or a device.
+
+## Several Bots answering one message (reply rounds, Bot v3 B7a)
+
+Until B7 every Bot with auto-reply on judged an unasked group or channel message on its own Desktop, so three Bots could answer one message. Now the
+service decides who answers, because no Desktop can referee the others: the message that admits the optional tasks (B5) also opens a **round**, the
+Desktops bid, and the service picks the best bids, as many as the Chat allows (`maxReplies`, 1 to 5, default 1). This phase is the service, the
+Desktop host and the clients' decoding; the Chat settings screen, the offline line (rule 6) and the edit hint (rule 8) are B7b.
+
+- Round (`apps/firebase/src/reply-rounds.mjs`). `teams/{team}/replyRounds/{messageId}` is written by `optionalTasks` in the transaction that writes
+  the message and its tasks (`openRound`): `{ state: 'open', deadlineAt: now + 15 s, maxReplies, candidates: [{ taskId, sharedBotId, addressed? }],
+  bids: {} }`. `maxReplies` is copied from the Chat then, so a later change does not move an open round. Only the service's clock is used (`now`
+  of the transaction; a Desktop's is never sent). No rule matches the path: members, maintainers and hosts cannot read it
+  (`teams.rules.emulator.test.mjs`), so a Bot's bid is seen by nobody but the service and, through `listTriage`, its own maintainer.
+  States: `open` collects bids; `resolved` has chosen (`winners`, `standby`, `resolvedAt`, `startBy = resolvedAt + 20 s`); `voided` ended before
+  anyone was chosen. A task of a round carries `roundId`, `addressed?`, `coMentioned?` and, once decided, `round: { outcome, tier? }`.
+- `bidReply { deploymentId, hostId, accountEpoch, taskId, tier, score?, source }` (host command, `checkHost`; a member's envelope for it is
+  refused, vector `reject-bidReply-member`; a hosted Bot service takes none: its tasks are asked for and have no round). Tiers, best first:
+  `addressed`, `rule`, `run`, `may_decline`, `decline` (an abstention: the host judged "no"); `score` is the Decision probability in 0..1, rounded to
+  three decimals, absent for rules. The bid must come from the deployment that holds the task (`TASK_REQUIRED` 404 otherwise), for an optional task
+  of a round (`TASK_NOT_OPTIONAL`, `ROUND_REQUIRED`), still queued and never started (`TASK_ALREADY_STARTED`), within its deadline (`TASK_EXPIRED`),
+  whose requester may still ask (`TASK_REVOKED`), and `addressed` only for a task the service marked so (`BID_TIER_INVALID`). The first bid of a
+  task stays whatever is sent again (a restarted Desktop judges and bids again), a task already decided answers with its outcome, and a bid for a
+  round that is not open is refused `ROUND_CLOSED`. Answer: `{ taskId, round }`, `round` being `open` or the task's outcome.
+- Settlement (`resolveRound`). When every candidate that is still waiting has bid, the bid that completes the set settles the round in its own
+  transaction; otherwise the queued job does at the deadline. Order: the tier (an `addressed` task counts as `addressed` whatever its host bid, but
+  it must have bid), then the score, then a fixed hash of the task id, so every settlement of the same round gives the same answer. A candidate
+  that never bid, or bid `decline`, cannot win. The first `maxReplies` win (`round.outcome: 'won'`); the other bidders end `declined` with
+  `declineReason: 'coordination'` (`round.outcome: 'lost'`); a Bot that bid `decline` ends `declined` as `triage`, as its own host would have done,
+  and one that did not bid in time ends `declined` as `coordination`, both `abstained`; no quota is charged, since quota is charged at `startTask`.
+  Every Bot of the round is woken through its `signals/{sharedBotId}` doc.
+- Timers (`reply-round-jobs.mjs`, `index.mjs`). The task trigger calls `becameCandidate` for the first write of a task with a `roundId`, which enqueues
+  a `replyRound` job (`phase: 'bids'`, due one second after `deadlineAt`) on the existing `inboxWork` queue, and `becameWinner` for a task that has just
+  won, which enqueues `phase: 'start'` at `startBy`. Job ids come from the team, the round and the phase, so a replayed trigger or a task of the
+  same round enqueues once. A job that runs early throws `REPLY_ROUND_NOT_DUE` and is retried; one that finds nothing to do ends quietly.
+- Promotion (`promote`). At `startBy`, winners that have not started (`startedAt` unset) end `declined` as `coordination` (`lost`) and give their seat
+  once to the next-ranked bidders whose deployment is still enabled, ready and online (`round.outcome: 'promoted'`, the task is queued again); the
+  round never promotes twice, so a failure cannot chain. A winner that started keeps its seat even if it then waits in approval (B6, `awaiting_approval`): that Bot owns the round. A winner
+  that started and then failed is not replaced.
+- Starting. `startTask` is refused `ROUND_OPEN` for a round task whose outcome is not `won` or `promoted`; `listHostTasks` rows carry `round`
+  (`open`, `won`, `promoted`), `roundTier` and `addressed`, so a restarted Desktop knows where its task stands and how sure its Bot was without
+  judging again.
+- Voiding. A newer human message in the Chat voids the Chat's open rounds (`openRounds`/`voidRounds` in the transaction that writes it), and
+  `answerWait` does too; the tasks of a round that have not started end `declined` as `superseded` (`round.outcome: 'superseded'`). The recall of a
+  message voids its own round and cancels the queued tasks that asked a Bot (`recalled`, in `team-messages.mjs`); an edit never creates or changes
+  a task. Messages by Bots never create tasks or rounds.
+
+Whom a message speaks to is decided by the service once, when it admits the message (`submit` and `optionalTasks` in `shared-bots.mjs`,
+`bot-address.mjs`), so every Desktop agrees. The numbers are the plan's:
+
+1. **It asked a Bot (`targets`):** that Bot has its own asked task and answers; no round, and no other Bot joins in whatever its settings say
+   (`optionalTasks` admits nobody when the message asked someone).
+2. **It asked several Bots:** each answers, with no coordination; each task carries `coMentioned`, the names of the others, which `prepareTask`
+   returns and the connector appends to the run's instructions as quoted data ("they answer it too, each in its own role"), at most eight names of
+   forty characters on one line.
+3. **It mentions only people (`mentionEntities`, no Bot):** no round and no Bot task, unless the Chat's `humanMentions` is `judge` (default `quiet`).
+4. **It answers a Bot's message, without an @:** a soft mention. The round holds only that Bot (every Bot spoken to, if several), its tier is forced
+   to `addressed`, `maxReplies` is as many as were spoken to, and the task is `addressed: true`. The Bot may still stay silent: the run offers
+   `TeamNoReply` and the Bot is told to answer unless the message plainly needs no answer. A Bot spoken to that may not answer unasked still keeps
+   the others out.
+5. **It calls a Bot by name in its text, without an @:** the same as 4. Name matching moved here from the host (`calledBy`: NFKC and lowercase
+   folding, whole words where the script has words, at least two code points); `replyTriage.ts` no longer looks for names, its `addressed` check
+   and that check's tests and text are deleted, and a task with `addressed: true` is judged `run`, source `rule`, reason `addressed`.
+6. **A mentioned Bot whose Desktop is offline:** the message still posts and its task queues for 24 hours (`offlineHost` in `submit`; a Bot DM or a
+   hosted service still refuses with `HOST_UNAVAILABLE`). The sender's "X is offline, will reply when online" line is B7b.
+7. **Settings against an @:** quiet hours, the cooldown and the Bot's policy are part of the unasked judgement only, so they never apply to an asked
+   task; approval `always` holds the reply of an asked task too, `uncertain` only that of an unasked one (B6); an asked Bot in a group cannot choose
+   silence (`mayDecline` belongs to optional tasks: unasked ones, soft mentions included, and a Bot DM's).
+8. **Edit and recall:** an edit never creates a task, and so never triggers a Bot (its hint in the UI is B7b); a recall voids the message's open round
+   and cancels its queued asked tasks (`recalled` in `reply-rounds.mjs`, called from `team-messages.mjs`).
+9. **A message written by a Bot** (a reply, a status message, an @ it wrote) never creates a task or a round.
+10. **A new human message** voids every unsettled round of the Chat and ends its unasked held replies (`end()` in `optionalTasks`, in the same
+    transaction that writes the message); so does the answer to a wait (`answerWait`).
+
+Settings. `setConversationAutoReply { conversationId, expectedRevision, targets, maxReplies?, humanMentions? }` (`maxReplies` an integer 1 to 5,
+`humanMentions` `quiet` or `judge`; what is left out is left as it is, `null` is refused). The Chat document's `autoReply` carries them back, and
+`team-messages.mjs` projects them to the clients.
+
+- Desktop host (`teams/connector.ts`, `teams/replyTriage.ts`). An unasked task of a group or channel is judged as before (settle 2.5 s, B5 verdict,
+  `recordTriage`), and then, instead of `declineTask`/`startTask`, the verdict becomes a bid: `bidOf` maps a decline to `decline`, `addressed` to
+  `addressed`, a rule (a keyword) to `rule`, `run` to `run` and `run_may_decline` to `may_decline` with the Decision probability as the score. The
+  host sends `bidReply` (command id from the task, tier, score and source, so a repeat is one request), remembers that it has bid (`bids`, memory
+  only) and does not start the worker: the service wakes it when the round is settled. The answer, and later the row's `round`, decide: `won` or
+  `promoted` starts it (a Bot DM task never has a round and keeps the direct `declineTask`), anything else ends it with nothing left to do. A Bot
+  DM's optional task keeps the direct path and gets the service's `addressed`. After a restart the verdict is not asked of the model again: the row's
+  `roundTier` says how sure the Bot was (`may_decline` offers `TeamNoReply`), and the first bid of a task stays the one the service kept. Tasks of
+  a round are never superseded locally (the service ends them). `bidReply` is on the host allow-list of `service.ts`.
+- What the maintainer sees. A row of `listTriage` carries `round: { outcome: 'won' | 'lost' | 'abstained' | 'promoted' | 'superseded', tier? }`
+  for the maintainer's own Bot only; other Bots' bids and scores are never in any answer. Web and Desktop (`triage-log.ts`, `TriageLogDialog.tsx`,
+  `BotAutoReplyField.tsx`), iOS (`TeamTriageLog.swift`) and Android (`TeamTriageLog.kt`) decode it and say it in words (`teams_triage_round_*`
+  in `resources/translations/*.json`); a row with an outcome a client does not know is still a row, and no decoding fails on the new fields.
+- Contract. `execution-vectors.json` lists `bidTiers`, `roundOutcomes`, `humanMentionModes` and `maxRepliesLimit` and has 14 new rows for
+  `setConversationAutoReply` and the member's `bidReply`; the validators of Web and Desktop (`execution-validation.ts`), iOS
+  (`TeamExecutionContract`) and Android (`TeamExecutionContract`) read the same rows. The member commands builder (`executionCommand`) accepts
+  the two settings; the screens for them are B7b.
+- Index. None: the round is read by id, and `openRounds` queries `replyRounds` on two equality fields (`conversationId`, `state`), which Firestore
+  serves without a composite index.
+- Tests: `apps/firebase/test/reply-rounds.test.mjs` (codes, schemas, name matching, trigger rules), `reply-rounds.emulator.test.mjs` (the state
+  machine: bids, settlement by tier, score and hash, deadline job, promotion, voiding, recall, the mention rules, offline, quota, visibility,
+  replays), the adapted `shared-bots`, `bot-triage` and `held-replies` emulator suites and `teams.rules.emulator.test.mjs`;
+  `apps/electron/test/teams-reply-triage.test.ts` and `teams-host.test.ts` (the bid flow, restart, `coMentioned`); `apps/web/test/teams-reply-rounds.test.ts`
+  and `teams-triage-log-ui.test.ts`; iOS `TeamTriageLogTests`, `TeamsPointerParserTests`, `TeamBotTests`; Android `TeamTriageLogTest`, `TeamBotsTest`.
+- Not here, or not verified. The Chat settings screen, the offline line (rule 6) and the edit hint (rule 8): B7b. Nothing was run against a signed Desktop package or a real Desktop restart. The
+  bids window (15 s) covers the host's 2.5 s burst wait and a Decision call of up to 10 s (`TRIAGE_TIMEOUT_MS`); a Desktop slower than that bids late and
+  the round settles without it. A name or a reply in an earlier message of a burst no longer makes a later message `addressed` (the service judges each message
+  itself, and each has its own round), where the old local check read the burst. Round documents are not deleted yet (no TTL).
 
 ## What a Bot may use of its maintainer's Desktop (Bot scope)
 

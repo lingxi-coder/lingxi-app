@@ -95,6 +95,25 @@ final class TeamTriageLogTests: XCTestCase {
         for none in [nil, "held", "a_new_outcome"] as [String?] { XCTAssertNil(TeamTriageRules.approvalKey(none), "\(none ?? "nil")") }
     }
 
+    // MARK: A message of several Bots
+
+    func testARoundSaysWhatBecameOfTheBotAndOneThisVersionDoesNotKnowIsLeftOut() throws {
+        for outcome in ["won", "lost", "abstained", "promoted", "superseded"] {
+            XCTAssertEqual(try decode(TeamTriageItem.self, row(3, extra: ["round": ["outcome": outcome, "tier": "may_decline"]])).round, TeamTriageRound(outcome: outcome, tier: "may_decline"), outcome)
+        }
+        XCTAssertEqual(try decode(TeamTriageItem.self, row(3, extra: ["round": ["outcome": "abstained"]])).round, TeamTriageRound(outcome: "abstained"), "no tier when its computer did not bid")
+        XCTAssertEqual(try decode(TeamTriageItem.self, row(3, extra: ["round": ["outcome": "lost", "tier": "a_new_tier"]])).round, TeamTriageRound(outcome: "lost"), "a tier it does not know is left out, the outcome kept")
+        for round: Any in [["outcome": "a_new_outcome"], ["outcome": 7], ["tier": "run"], [String: Any](), "won", 7, NSNull(), [Any]()] {
+            let read = try decode(TeamTriageItem.self, row(3, extra: ["round": round]))
+            XCTAssertNil(read.round, "\(round)"); XCTAssertEqual(read.taskId, "task-0003", "the row is still a row")
+        }
+        XCTAssertNil(try item(4).round, "a message that was no round says nothing")
+        // The words: the Bot's own part, in every language; nothing for a message that was no round, or an outcome this version does not know.
+        XCTAssertEqual(["won", "lost", "abstained", "promoted", "superseded"].map { TeamTriageRules.roundKey(TeamTriageRound(outcome: $0)) },
+                       ["teams_triage_round_won", "teams_triage_round_lost", "teams_triage_round_abstained", "teams_triage_round_promoted", "teams_triage_round_superseded"])
+        XCTAssertNil(TeamTriageRules.roundKey(nil)); XCTAssertNil(TeamTriageRules.roundKey(TeamTriageRound(outcome: "a_new_outcome")))
+    }
+
     // MARK: The words
 
     func testEveryVerdictReasonAndOutcomeHasWordsInEveryLanguage() throws {
@@ -105,6 +124,7 @@ final class TeamTriageLogTests: XCTestCase {
         for reason in TeamTriageRules.reasons.sorted() { keys.append(try XCTUnwrap(TeamTriageRules.reasonKey(reason), reason)) }
         for outcome in [TeamTriageOutcome.replied, .silent, .failed, .waiting, .approval] { keys.append(TeamTriageRules.outcomeKey(outcome)) }
         for approval in TeamTriageRules.approvals.sorted() { if let key = TeamTriageRules.approvalKey(approval) { keys.append(key) } }
+        for outcome in TeamTriageRules.roundOutcomes.sorted() { keys.append(try XCTUnwrap(TeamTriageRules.roundKey(TeamTriageRound(outcome: outcome)), outcome)) }
         for key in Set(keys) {
             let values = languages.map { catalogue.value(key, $0) }
             for (language, value) in zip(languages, values) { XCTAssertFalse((value ?? "").isEmpty, "\(key) has no text in \(language)") }

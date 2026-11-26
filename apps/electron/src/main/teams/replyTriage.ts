@@ -2,15 +2,16 @@ import { BOT_REPLY_POLICY_USED_CHARS } from '../../shared/bots.js';
 import type { DecisionInput } from '../../shared/decision.js';
 import type { DesktopDecisionService } from '../decisionToolBridge.js';
 import type { ChatSourceMessage } from '../../../../../packages/teams/chat-source.js';
-import type { TriageAction, TriageReason, TriageVerdict } from '../../../../../packages/teams/execution.js';
+import type { BidTier, TriageAction, TriageReason, TriageVerdict } from '../../../../../packages/teams/execution.js';
 import type { BotAutoReply, BotQuietHours } from '../bots/store.js';
 
 /**
  * Whether a Bot answers a Chat message nobody asked it about (an optional task), judged by the Bot's own auto-reply settings in this order:
- * its quiet hours and its cooldown, which decline; a keyword of its own, or a call to it, which answer; then the maintainer's Decision service,
- * which gives the probability that a reply is wanted by the maintainer's policy. Below the Bot's `decline` threshold the task is declined before
- * any model runs, from its `run` threshold on the Bot answers, and in between the Bot's own model decides while it answers and may stay silent.
- * Every verdict says why in a code: nothing a model said is kept.
+ * a call to it, which the service decided and sends with the task, answers; its quiet hours and its cooldown decline; a keyword of its own answers;
+ * then the maintainer's Decision service, which gives the probability that a reply is wanted by the maintainer's policy. Below the Bot's `decline`
+ * threshold the task is declined before any model runs, from its `run` threshold on the Bot answers, and in between the Bot's own model decides while
+ * it answers and may stay silent. Every verdict says why in a code: nothing a model said is kept. Where several Bots may answer the same message the verdict
+ * is only each Bot's bid (`bidOf`): the service chooses among them.
  */
 /** How long a Decision call may take before the task falls back. */
 export const TRIAGE_TIMEOUT_MS = 10_000;
@@ -30,8 +31,10 @@ export interface TriageInput {
   /** The Chat up to and including the message, oldest first. The cooldown may need more than the Decision service is shown: it looks back to the Bot's last message. */
   messages: readonly ChatSourceMessage[];
   messageId: string;
-  /** Earlier messages of a burst whose own tasks were superseded before anyone judged them: a call to the Bot in one of them asks it too. */
+  /** Earlier messages of a burst whose own tasks were superseded before anyone judged them: a keyword in one of them asks the Bot too. */
   earlier?: readonly string[];
+  /** The service saw a person speak to the Bot (a reply to its message, or its name) and says so with the task: every Desktop agrees, so the host does not look for it itself. */
+  addressed?: boolean;
   decision?: ReplyDecision;
   signal: AbortSignal;
 }
@@ -101,16 +104,6 @@ export function cooldownUnseen(input: Pick<TriageInput, 'bot' | 'settings' | 'co
 const considered = (input: Pick<TriageInput, 'messages' | 'messageId' | 'earlier'>) =>
   [input.messageId, ...input.earlier ?? []].flatMap(id => input.messages.filter(message => message.messageId === id));
 
-/** A message that answers the Bot, or calls it by name, asks it: the latest one, or one of the burst passed over before it. */
-export function addressed(input: Pick<TriageInput, 'bot' | 'messages' | 'messageId' | 'earlier'>): boolean {
-  const name = fold(input.bot.name.trim());
-  return considered(input).some(message => {
-    const repliedTo = message.replyTo ? input.messages.find(candidate => candidate.messageId === message.replyTo) : undefined;
-    if (repliedTo?.author.kind === 'shared_bot' && repliedTo.author.sharedBotId === input.bot.sharedBotId) return true;
-    // At least two characters (not UTF-16 units): one letter, or one emoji, would match far too much.
-    return [...name].length >= 2 && names(fold(message.text), name);
-  });
-}
 /** A keyword of the maintainer's in the latest message or the burst, folded for case and width and matched as a name is. */
 function keyworded(input: Pick<TriageInput, 'settings' | 'messages' | 'messageId' | 'earlier'>): boolean {
   const keywords = input.settings.keywords.map(keyword => fold(keyword.trim())).filter(keyword => keyword.length > 0);
@@ -143,12 +136,24 @@ export function decisionInput(input: Pick<TriageInput, 'bot' | 'conversation' | 
   };
 }
 
+/**
+ * What a Bot bids for a message of a round, from its own verdict: the best tier it can claim and, for the Decision service's, the probability behind it.
+ * Probabilities of different maintainers' Decision services are not comparable, so the service looks at the tier first. A host sends `addressed` only
+ * for a task the service marked so; a verdict that declines is an abstention.
+ */
+export function bidOf(verdict: TriageVerdict): { tier: BidTier; score?: number } {
+  if (verdict.action === 'decline') return { tier: 'decline' };
+  if (verdict.reason === 'addressed') return { tier: 'addressed' };
+  if (verdict.source === 'rule') return { tier: 'rule' };
+  return { tier: verdict.action === 'run' ? 'run' : 'may_decline', ...(verdict.probability !== undefined ? { score: verdict.probability } : {}) };
+}
+
 export async function triageReply(input: TriageInput): Promise<TriageVerdict> {
   const { kind } = input.conversation, latest = input.messages.find(message => message.messageId === input.messageId);
   if (!latest) return fallback(kind, 'message_unavailable');
   // A Bot DM message asks the Bot by its nature: the quiet hours and the cooldown are for the Chats the Bot joins.
   // A reply to the Bot, or a call by its name, is a person talking to it: quiet hours and the cooldown only keep it from joining in unasked.
-  if (addressed(input)) return { action: 'run', source: 'rule', reason: 'addressed' };
+  if (input.addressed) return { action: 'run', source: 'rule', reason: 'addressed' };
   if (kind !== 'bot_dm' && inQuietHours(input.settings.quietHours, latest.createdAt)) return { action: 'decline', source: 'quiet', reason: 'quiet_hours' };
   if (coolingDown(input, latest)) return { action: 'decline', source: 'cooldown', reason: 'cooldown' };
   if (keyworded(input)) return { action: 'run', source: 'rule', reason: 'keyword' };

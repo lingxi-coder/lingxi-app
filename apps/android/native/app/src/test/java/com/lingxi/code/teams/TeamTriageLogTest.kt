@@ -8,6 +8,7 @@ import kotlinx.coroutines.yield
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -111,6 +112,27 @@ class TeamTriageLogTest {
         assertEquals(setOf("held", "approved", "rejected", "timeout", "superseded"), TeamTriageRules.approvals)
     }
 
+    /** Bot v3 B7: what became of the Bot when several could answer the message; its own tier only, and an outcome this version does not know is no round. */
+    @Test fun aRoundSaysWhatBecameOfTheBotAndOneThisVersionDoesNotKnowIsLeftOut() {
+        for (outcome in listOf("won", "lost", "abstained", "promoted", "superseded")) {
+            assertEquals(outcome, TeamTriageRound(outcome, "may_decline"), TeamTriageItem.parse(row(3).put("round", JSONObject().put("outcome", outcome).put("tier", "may_decline")))?.round)
+        }
+        assertEquals("no tier when its computer did not bid", TeamTriageRound("abstained"), TeamTriageItem.parse(row(3).put("round", JSONObject().put("outcome", "abstained")))?.round)
+        assertEquals("a tier it does not know is left out, the outcome kept", TeamTriageRound("lost"), TeamTriageItem.parse(row(3).put("round", JSONObject().put("outcome", "lost").put("tier", "a_new_tier")))?.round)
+        for (round in listOf<Any>(JSONObject().put("outcome", "a_new_outcome"), JSONObject().put("outcome", 7), JSONObject().put("tier", "run"), JSONObject(), "won", 7, JSONObject.NULL, org.json.JSONArray())) {
+            val parsed = TeamTriageItem.parse(row(3).put("round", round))
+            assertNotNull("$round: the row is still a row", parsed); assertNull("$round", parsed?.round); assertEquals("task-0003", parsed?.taskId)
+        }
+        assertNull("a message that was no round says nothing", item(4).round)
+        // The words: the Bot's own part, in every language (the languages test below); nothing for a message that was no round or an outcome this version does not know.
+        assertEquals(listOf(R.string.teams_triage_round_won, R.string.teams_triage_round_lost, R.string.teams_triage_round_abstained, R.string.teams_triage_round_promoted, R.string.teams_triage_round_superseded),
+            listOf("won", "lost", "abstained", "promoted", "superseded").map { TeamTriageRules.roundLabel(TeamTriageRound(it)) })
+        assertNull(TeamTriageRules.roundLabel(null)); assertNull(TeamTriageRules.roundLabel(TeamTriageRound("a_new_outcome")))
+        // Every code the service sends is one this version lists, and no other.
+        assertEquals(setOf("won", "lost", "abstained", "promoted", "superseded"), TeamTriageRules.roundOutcomes)
+        assertEquals(setOf("addressed", "rule", "run", "may_decline", "decline"), TeamTriageRules.bidTiers)
+    }
+
     @Test fun aRowThisVersionCannotReadIsNotOne() {
         assertNull(TeamTriageItem.parse(null))
         assertNull("an action it does not know", TeamTriageItem.parse(row(1, action = "explode")))
@@ -153,6 +175,16 @@ class TeamTriageLogTest {
             assertTrue("$directory: the probability keeps its number", names.getValue("teams_triage_probability_fmt").contains("%1\$d"))
             // The words are for the Bot's maintainer: a Bot is never called an assistant.
             for (name in TeamTriageRules.stringNames.filter { it.startsWith("teams_triage_") }) assertFalse("$directory $name", names.getValue(name).contains("assistant", ignoreCase = true))
+        }
+        // The words the round adds are not the Simplified Chinese they were written from, in any other language.
+        fun words(directory: String): Map<String, String> {
+            val file = listOf("src/main/res/$directory/strings.xml", "app/src/main/res/$directory/strings.xml", "apps/android/native/app/src/main/res/$directory/strings.xml").map(::File).first { it.exists() }
+            return Regex("<string\\s+name=\"([^\"]+)\"[^>]*>(.+?)</string>", RegexOption.DOT_MATCHES_ALL).findAll(file.readText()).associate { it.groupValues[1] to it.groupValues[2] }
+        }
+        val hans = words("values")
+        for (directory in listOf("values-zh-rTW", "values-en", "values-ja", "values-ko")) {
+            val other = words(directory)
+            for (name in TeamTriageRules.stringNames.filter { it.startsWith("teams_triage_round_") }) assertNotEquals("$directory $name", hans.getValue(name), other.getValue(name))
         }
     }
 

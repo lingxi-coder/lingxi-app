@@ -2,7 +2,7 @@ import type { MentionEntity } from './mentions.js';
 import type { ResourceRef } from './dataset-resource.js';
 import { parseDataRef, type DataRef } from './lingxi-data.js';
 import { isMemberExecutionCommand } from './execution-validation.js';
-import { executionCommand, type MemberExecutionCommand } from './execution.js';
+import { executionCommand, type HumanMentionMode, type MemberExecutionCommand } from './execution.js';
 import { ATTACHMENT_MESSAGE_FILES, type MessageAttachment } from './attachments.js';
 import { sameBotScopes, type BotScopeEntry } from './bot-scope.js';
 export type MessageAuthor = { kind: 'user'; uid: string; displayName?: string } | { kind: 'shared_bot'; sharedBotId: string; displayName: string }
@@ -25,8 +25,8 @@ export interface TeamConversation {
   lastSeq: number; lastChangeSeq: number; lastReadSeq: number;
   /** Newest message for conversation lists. Absent until the conversation has a message; then always the full pointer. */
   lastMessage?: { id: string; seq: number; at: string | null; author: MessageAuthor; preview: string; recalled?: true };
-  /** The Bots that judge for themselves whether to answer this Chat's messages. Absent until a member first sets it. */
-  autoReply?: { revision: number; targets: string[] };
+  /** The Bots that judge for themselves whether to answer this Chat's messages. Absent until a member first sets it. `maxReplies` and `humanMentions` are absent until set: 1 Bot answers a message nobody asked them about, and a message that mentions only people is for them (`quiet`). */
+  autoReply?: { revision: number; targets: string[]; maxReplies?: number; humanMentions?: HumanMentionMode };
   /** What this Chat narrowed each of its Bots to use here, by shared Bot id, within what the Bot published (`effectiveBotScope`). A Bot with no entry is not narrowed. */
   botScopes?: Record<string, BotScopeEntry>;
 }
@@ -118,6 +118,7 @@ export function mergeConversation(old: TeamConversation | undefined, value: Team
     && old.participants.length === merged.participants.length && old.participants.every((value, index) => value === merged.participants[index])
     && (old.readers ?? []).join('\n') === (merged.readers ?? []).join('\n')
     && old.autoReply?.revision === merged.autoReply?.revision && (old.autoReply?.targets ?? []).join('\n') === (merged.autoReply?.targets ?? []).join('\n')
+    && old.autoReply?.maxReplies === merged.autoReply?.maxReplies && old.autoReply?.humanMentions === merged.autoReply?.humanMentions
     && sameBotScopes(old.botScopes, merged.botScopes)) return old;
   return merged;
 }

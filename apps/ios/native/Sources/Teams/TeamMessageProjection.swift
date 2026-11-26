@@ -19,7 +19,9 @@ struct TeamLastMessage: Equatable, Sendable {
     var authorTaskName: String? = nil
 }
 
-struct TeamConversationAutoReply: Equatable, Sendable { let revision: Int; let targets: [String] }
+/// The Bots of a Chat that judge for themselves whether to answer it. `maxReplies` (1 to 5) is how many of them may answer one message nobody asked them about, and
+/// `humanMentions` (`quiet` or `judge`) whether a message that mentions only people is judged like any other; both are `nil` until someone sets them, which reads as 1 and `quiet`.
+struct TeamConversationAutoReply: Equatable, Sendable { let revision: Int; let targets: [String]; var maxReplies: Int? = nil; var humanMentions: String? = nil }
 struct TeamMessageConversation: Equatable, Identifiable, Sendable {
     let id: String
     let kind: String

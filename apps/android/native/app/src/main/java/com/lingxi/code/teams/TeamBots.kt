@@ -147,6 +147,9 @@ internal object TeamExecutionContract {
     const val LIST_CHANGES = 20
     /** The most rows one page of a Bot's auto-reply log has. */
     const val TRIAGE_LIMIT = 50
+    /** The most Bots of a Chat that may answer one message nobody asked them about, and what a message that mentions only people does to them ([TeamConversationAutoReply]). */
+    const val MAX_REPLIES_LIMIT = 5
+    val humanMentionModes = setOf("quiet", "judge")
     /** The longest reply a maintainer may approve with their own text, trimmed, in UTF-8 bytes. */
     const val HELD_REPLY_BYTES = 8192
     fun validate(v: JSONObject) {
@@ -230,7 +233,14 @@ internal object TeamExecutionContract {
             }
             "rejectReply" -> { shape(setOf("taskId")); requireId("taskId") }
             "pauseSharedBot" -> { shape(setOf("sharedBotId", "expectedRevision")); requireId("sharedBotId"); if (!integer(p.opt("expectedRevision"), 1)) fail() }
-            "setConversationPolicy", "setConversationAutoReply" -> { shape(setOf("conversationId", "expectedRevision", "targets")); requireId("conversationId"); ids("targets", 0); if (!integer(p.opt("expectedRevision"), 0)) fail() }
+            "setConversationPolicy" -> { shape(setOf("conversationId", "expectedRevision", "targets")); requireId("conversationId"); ids("targets", 0); if (!integer(p.opt("expectedRevision"), 0)) fail() }
+            // The two settings of the Chat's auto-reply are left out by a caller that does not change them; present, each is whole and known.
+            "setConversationAutoReply" -> {
+                shape(setOf("conversationId", "expectedRevision", "targets"), setOf("maxReplies", "humanMentions")); requireId("conversationId"); ids("targets", 0)
+                if (!integer(p.opt("expectedRevision"), 0)) fail()
+                if (p.has("maxReplies") && (!integer(p.opt("maxReplies"), 1) || (p.opt("maxReplies") as Number).toLong() > MAX_REPLIES_LIMIT)) fail()
+                if (p.has("humanMentions") && (p.opt("humanMentions") as? String) !in humanMentionModes) fail()
+            }
             // The scope is the whole narrowing or null; a key that is left out is not a lifted narrowing.
             "setConversationBotScope" -> {
                 shape(setOf("conversationId", "sharedBotId", "expectedRevision", "scope")); requireId("conversationId"); requireId("sharedBotId")

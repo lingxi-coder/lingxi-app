@@ -36,7 +36,12 @@ const say = (actor, chat, n, text = asking) => messages.execute(actor, { action:
 const record = (chat, n, verdict, { actor = owner, deploymentHost = host, sharedBotId = botId, commandId } = {}) =>
   execute('recordTriage', { ...deploymentHost, taskId: taskOf(chat, n, sharedBotId), ...verdict }, actor, commandId);
 const log = (more = {}, actor = owner, sharedBotId = botId) => execute('listTriage', { sharedBotId, ...more }, actor);
-const start = async (chat, n) => execute('startTask', { ...host, taskId: taskOf(chat, n), expectedLastChangeSeq: (await chatRef(chat).get()).data().lastChangeSeq });
+/** The round of message `n` is settled: the owner's Bot bids `tier` and the member's abstains (a task already decided is left as it is). */
+const settle = async (chat, n, tier = 'run') => {
+  await execute('bidReply', { ...host, taskId: taskOf(chat, n), tier, source: 'rule' });
+  await execute('bidReply', { ...memberHost, taskId: taskOf(chat, n, otherBotId), tier: 'decline', source: 'quiet' }, member);
+};
+const start = async (chat, n) => { await settle(chat, n); return execute('startTask', { ...host, taskId: taskOf(chat, n), expectedLastChangeSeq: (await chatRef(chat).get()).data().lastChangeSeq }); };
 const complete = (started, more = {}) => execute('completeTask', { ...host, taskId: started.task.taskId, permitId: started.permitId, outcome: 'completed', text: 'The Station Inn is quiet.',
   finishedAt: now, inputGrantIds: started.inputs.map(grant => grant.grantId), outputAudience: { mode: 'published_inputs' }, usage: { status: 'missing' }, ...more });
 const decline = (chat, n) => execute('declineTask', { ...host, taskId: taskOf(chat, n), reason: 'triage' });
@@ -75,9 +80,11 @@ test('recordTriage: the verdict is kept on the task in codes and the service clo
   assert.deepEqual(await record(trip, 1, judged), { taskId });
   assert.deepEqual((await taskData(taskId)).triage, { ...judged, at: now });
   // Only what the host decided is kept, as codes: a probability is rounded to three decimals, and a verdict without a reason or a probability has neither.
-  await say(member, trip, 2); await say(member, trip, 3);
+  // A newer message ends the round of the one before it, so each is judged before the next is written.
+  await say(member, trip, 2);
   await record(trip, 2, { action: 'run', source: 'decision', reason: 'above_threshold', probability: 0.123456 });
   assert.equal((await taskData(taskOf(trip, 2))).triage.probability, 0.123);
+  await say(member, trip, 3);
   await record(trip, 3, { action: 'run', source: 'fallback' });
   assert.deepEqual((await taskData(taskOf(trip, 3))).triage, { action: 'run', source: 'fallback', at: now });
   // The task a member can read says nothing of it, and a task nobody was shown is still not theirs to list.
@@ -119,12 +126,13 @@ test('recordTriage: the same verdict again changes nothing, a later one replaces
 });
 
 test('recordTriage: a task that started or ended with no verdict is not given one, and a declined one keeps what it was declined with', options, async () => {
-  await say(member, trip, 1); await say(member, trip, 2);
+  await say(member, trip, 1);
   // Started without a verdict: the host records before it acts, so there is nothing to say afterwards.
   await start(trip, 1);
   await assert.rejects(record(trip, 1, ran), { code: 'TASK_ALREADY_STARTED' });
   assert.equal((await taskData(taskOf(trip, 1))).triage, undefined);
   // The host declines after it records.
+  await say(member, trip, 2);
   await record(trip, 2, silent);
   assert.deepEqual(await decline(trip, 2), { taskId: taskOf(trip, 2), state: 'declined' });
   assert.deepEqual(await record(trip, 2, silent), { taskId: taskOf(trip, 2) });
@@ -156,23 +164,24 @@ test('recordTriage: only the Bot\'s current deployment records, and only for an 
 });
 
 test('listTriage: the maintainer reads their Bot\'s verdicts newest first with where each task stands, hidden ones included and no message text', options, async () => {
-  for (const [chat, n] of [[trip, 1], [lunch, 2], [lunch, 3], [trip, 4], [trip, 5]]) { await say(member, chat, n); now += 1000; }
-  // Trip 1 waits, lunch 2 was declined, lunch 3 was answered, trip 4 waits, trip 5 was never judged.
-  await record(trip, 1, ran); now += 1000;
-  await record(lunch, 2, silent); await decline(lunch, 2); now += 1000;
-  await record(lunch, 3, { action: 'run', source: 'decision', reason: 'above_threshold', probability: 0.9 }); await complete(await start(lunch, 3)); now += 1000;
-  await record(trip, 4, judged);
+  // A newer message of a Chat ends the round of the one before it unless that round has chosen: so each is judged, and settled, before the next is written.
+  // Trip 1 waits (its round chose it), lunch 2 was declined, lunch 3 was answered, trip 4 waits, trip 5 was never judged.
+  await say(member, trip, 1); now += 1000; await record(trip, 1, ran);
+  await record(trip, 1, ran, { actor: member, deploymentHost: memberHost, sharedBotId: otherBotId }); await settle(trip, 1); now += 1000;
+  await say(member, lunch, 2); now += 1000; await record(lunch, 2, silent); await settle(lunch, 2, 'decline'); now += 1000;
+  await say(member, lunch, 3); now += 1000; await record(lunch, 3, { action: 'run', source: 'decision', reason: 'above_threshold', probability: 0.9 }); await complete(await start(lunch, 3)); now += 1000;
+  await say(member, trip, 4); now += 1000; await record(trip, 4, judged); await settle(trip, 4, 'may_decline');
+  await say(member, trip, 5); now += 1000;
   const page = await log();
   assert.deepEqual(page.items.map(item => item.taskId), [taskOf(trip, 4), taskOf(lunch, 3), taskOf(lunch, 2), taskOf(trip, 1)]);
   assert.deepEqual(page.items.map(item => item.state), ['queued', 'completed', 'declined', 'queued']);
   assert.deepEqual(page.items.map(item => item.conversationTitle), ['Trip', 'Lunch', 'Lunch', 'Trip']);
   assert.equal(page.nextCursor, undefined);
   assert.deepEqual(page.items[0], { taskId: taskOf(trip, 4), conversationId: trip, messageId: messageId(trip, 4), createdAt: (await taskData(taskOf(trip, 4))).createdAt,
-    triage: { ...judged, at: now }, state: 'queued', conversationTitle: 'Trip' });
+    triage: { ...judged, at: (await taskData(taskOf(trip, 4))).triage.at }, state: 'queued', round: { outcome: 'won', tier: 'may_decline' }, conversationTitle: 'Trip' });
   assert.equal((await taskData(taskOf(trip, 1))).visibility, 'hidden', 'a task nobody was shown is in the maintainer\'s log');
   assert.doesNotMatch(JSON.stringify(page), /hotel|station|Station Inn/iu, 'the log holds codes and ids, not what anyone wrote');
   // The other Bot\'s tasks are not in it, and its verdicts are its maintainer\'s.
-  await record(trip, 1, ran, { actor: member, deploymentHost: memberHost, sharedBotId: otherBotId });
   assert.equal((await log()).items.length, 4);
   assert.deepEqual((await log({}, member, otherBotId)).items.map(item => item.taskId), [taskOf(trip, 1, otherBotId)]);
 });
@@ -193,9 +202,8 @@ test('listTriage: only the Bot\'s maintainer reads it, and reading it leaves no 
 test('listTriage: pages follow the cursor without gaps or repeats, a Chat can be asked for alone, and a cursor must be one of the log\'s own', options, async () => {
   // Seven verdicts, the last three at the same instant: the order of equals is fixed, so no page repeats or skips one.
   for (const n of [1, 2, 3, 4]) { await say(member, trip, n); now += 1000; await record(trip, n, ran); }
-  for (const n of [5, 6, 7]) await say(member, lunch, n);
   now += 1000;
-  for (const n of [5, 6, 7]) await record(lunch, n, silent);
+  for (const n of [5, 6, 7]) { await say(member, lunch, n); await record(lunch, n, silent); }
   const all = [];
   let cursor;
   for (let pages = 0; pages < 4; pages += 1) {

@@ -24,6 +24,25 @@
     "timeout",
     "superseded"
   ],
+  "bidTiers": [
+    "addressed",
+    "rule",
+    "run",
+    "may_decline",
+    "decline"
+  ],
+  "roundOutcomes": [
+    "won",
+    "lost",
+    "abstained",
+    "promoted",
+    "superseded"
+  ],
+  "humanMentionModes": [
+    "quiet",
+    "judge"
+  ],
+  "maxRepliesLimit": 5,
   "commands": [
     {
       "name": "valid-listSharedBots",
@@ -255,6 +274,254 @@
             "sharedbot_01"
           ],
           "daily": 5
+        }
+      }
+    },
+    {
+      "name": "valid-setConversationAutoReply-max-replies",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationAutoReply",
+        "payload": {
+          "conversationId": "chat_0001",
+          "expectedRevision": 2,
+          "targets": [
+            "sharedbot_01"
+          ],
+          "maxReplies": 3
+        }
+      }
+    },
+    {
+      "name": "valid-setConversationAutoReply-max-replies-min",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationAutoReply",
+        "payload": {
+          "conversationId": "chat_0001",
+          "expectedRevision": 2,
+          "targets": [
+            "sharedbot_01"
+          ],
+          "maxReplies": 1
+        }
+      }
+    },
+    {
+      "name": "valid-setConversationAutoReply-max-replies-max",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationAutoReply",
+        "payload": {
+          "conversationId": "chat_0001",
+          "expectedRevision": 2,
+          "targets": [
+            "sharedbot_01"
+          ],
+          "maxReplies": 5
+        }
+      }
+    },
+    {
+      "name": "valid-setConversationAutoReply-human-mentions-judge",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationAutoReply",
+        "payload": {
+          "conversationId": "chat_0001",
+          "expectedRevision": 2,
+          "targets": [
+            "sharedbot_01"
+          ],
+          "humanMentions": "judge"
+        }
+      }
+    },
+    {
+      "name": "valid-setConversationAutoReply-human-mentions-quiet",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationAutoReply",
+        "payload": {
+          "conversationId": "chat_0001",
+          "expectedRevision": 2,
+          "targets": [
+            "sharedbot_01"
+          ],
+          "humanMentions": "quiet"
+        }
+      }
+    },
+    {
+      "name": "valid-setConversationAutoReply-both-settings",
+      "valid": true,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationAutoReply",
+        "payload": {
+          "conversationId": "chat_0001",
+          "expectedRevision": 2,
+          "targets": [
+            "sharedbot_01"
+          ],
+          "maxReplies": 2,
+          "humanMentions": "judge"
+        }
+      }
+    },
+    {
+      "name": "reject-setConversationAutoReply-max-replies-zero",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationAutoReply",
+        "payload": {
+          "conversationId": "chat_0001",
+          "expectedRevision": 2,
+          "targets": [
+            "sharedbot_01"
+          ],
+          "maxReplies": 0
+        }
+      }
+    },
+    {
+      "name": "reject-setConversationAutoReply-max-replies-too-many",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationAutoReply",
+        "payload": {
+          "conversationId": "chat_0001",
+          "expectedRevision": 2,
+          "targets": [
+            "sharedbot_01"
+          ],
+          "maxReplies": 6
+        }
+      }
+    },
+    {
+      "name": "reject-setConversationAutoReply-max-replies-fraction",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationAutoReply",
+        "payload": {
+          "conversationId": "chat_0001",
+          "expectedRevision": 2,
+          "targets": [
+            "sharedbot_01"
+          ],
+          "maxReplies": 1.5
+        }
+      }
+    },
+    {
+      "name": "reject-setConversationAutoReply-max-replies-text",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationAutoReply",
+        "payload": {
+          "conversationId": "chat_0001",
+          "expectedRevision": 2,
+          "targets": [
+            "sharedbot_01"
+          ],
+          "maxReplies": "2"
+        }
+      }
+    },
+    {
+      "name": "reject-setConversationAutoReply-max-replies-null",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationAutoReply",
+        "payload": {
+          "conversationId": "chat_0001",
+          "expectedRevision": 2,
+          "targets": [
+            "sharedbot_01"
+          ],
+          "maxReplies": null
+        }
+      }
+    },
+    {
+      "name": "reject-setConversationAutoReply-human-mentions-unknown",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationAutoReply",
+        "payload": {
+          "conversationId": "chat_0001",
+          "expectedRevision": 2,
+          "targets": [
+            "sharedbot_01"
+          ],
+          "humanMentions": "ignore"
+        }
+      }
+    },
+    {
+      "name": "reject-setConversationAutoReply-human-mentions-null",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "setConversationAutoReply",
+        "payload": {
+          "conversationId": "chat_0001",
+          "expectedRevision": 2,
+          "targets": [
+            "sharedbot_01"
+          ],
+          "humanMentions": null
         }
       }
     },
@@ -1942,6 +2209,23 @@
         "payload": {
           "taskId": "task_0001",
           "action": "decline",
+          "source": "decision"
+        }
+      }
+    },
+    {
+      "name": "reject-bidReply-member",
+      "valid": false,
+      "input": {
+        "schemaVersion": 1,
+        "commandId": "command_0001",
+        "teamId": "team_0001",
+        "generation": 1,
+        "action": "bidReply",
+        "payload": {
+          "taskId": "task_0001",
+          "tier": "run",
+          "score": 0.9,
           "source": "decision"
         }
       }

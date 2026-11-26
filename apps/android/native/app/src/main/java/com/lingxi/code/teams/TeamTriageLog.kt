@@ -33,12 +33,28 @@ internal data class TeamTriageVerdict(val action: String, val source: String, va
 }
 
 /**
+ * What became of the Bot when several could answer the message (a round of Bots, possibly on other computers): `won`, `lost`, `abstained`, `promoted` or `superseded`,
+ * and the [tier] the Bot bid when its computer did. Other Bots' bids are never in it. A tier this version does not know is left out; the outcome is kept.
+ */
+internal data class TeamTriageRound(val outcome: String, val tier: String? = null) {
+    companion object {
+        /** Null for what is no round, or an outcome this version does not know: the row is still a row. */
+        fun parse(v: Any?): TeamTriageRound? {
+            val round = v as? JSONObject ?: return null
+            val outcome = (round.opt("outcome") as? String)?.takeIf { it in TeamTriageRules.roundOutcomes } ?: return null
+            return TeamTriageRound(outcome, (round.opt("tier") as? String)?.takeIf { it in TeamTriageRules.bidTiers })
+        }
+    }
+}
+
+/**
  * One message the Bot's host judged, as its maintainer reads the log. [state] is where the task stands now: it settles after the verdict. [approval] is what became of a
- * reply held for approval (`held`, `approved`, `rejected`, `timeout`, `superseded`); a code this version does not know is left out.
+ * reply held for approval (`held`, `approved`, `rejected`, `timeout`, `superseded`); a code this version does not know is left out. [round] is what became of the Bot
+ * among several that could answer; a message that was no such round, or an outcome this version does not know, has none.
  */
 internal data class TeamTriageItem(
     val taskId: String, val conversationId: String, val messageId: String, val createdAt: Long, val triage: TeamTriageVerdict, val state: String, val conversationTitle: String? = null,
-    val approval: String? = null,
+    val approval: String? = null, val round: TeamTriageRound? = null,
 ) {
     companion object {
         /** A row is never half read: what this version needs of it is there and known, or the row is not one (null). */
@@ -51,7 +67,7 @@ internal data class TeamTriageItem(
             val createdAt = TeamTriageRules.moment(v.opt("createdAt")) ?: return null
             val triage = TeamTriageVerdict.parse(v.optJSONObject("triage")) ?: return null
             val state = text("state")?.takeIf { it in TeamTriageRules.outcomes } ?: return null
-            return TeamTriageItem(taskId, conversationId, messageId, createdAt, triage, state, text("conversationTitle"), text("approval")?.takeIf { it in TeamTriageRules.approvals })
+            return TeamTriageItem(taskId, conversationId, messageId, createdAt, triage, state, text("conversationTitle"), text("approval")?.takeIf { it in TeamTriageRules.approvals }, TeamTriageRound.parse(v.opt("round")))
         }
     }
 }
@@ -82,6 +98,9 @@ internal object TeamTriageRules {
     val reasons = setOf("quiet_hours", "cooldown", "keyword", "addressed", "below_threshold", "between_thresholds", "above_threshold", "decision_unavailable", "message_unavailable")
     /** What became of a reply held for approval: still waiting, posted, dropped by the maintainer, dropped when its time ran out, dropped for a newer message. */
     val approvals = setOf("held", "approved", "rejected", "timeout", "superseded")
+    /** What became of a Bot among several that could answer one message, and the tiers a Bot bids (best first in the contract); the service's lists, in `execution-vectors.json`. */
+    val roundOutcomes = setOf("won", "lost", "abstained", "promoted", "superseded")
+    val bidTiers = setOf("addressed", "rule", "run", "may_decline", "decline")
     /** Every state a task can be in, and where it leaves the judged message. A state this table does not have is a row this version cannot read. */
     val outcomes: Map<String, TeamTriageOutcome> = mapOf(
         "completed" to TeamTriageOutcome.Replied, "declined" to TeamTriageOutcome.Silent, "cancelled" to TeamTriageOutcome.Silent,
@@ -130,6 +149,15 @@ internal object TeamTriageRules {
         "superseded" -> R.string.teams_triage_approval_superseded
         else -> null
     }
+    /** What became of the Bot in a round of several, in words; nothing for a message that was not one, or an outcome this version does not know. */
+    @StringRes fun roundLabel(round: TeamTriageRound?): Int? = when (round?.outcome) {
+        "won" -> R.string.teams_triage_round_won
+        "lost" -> R.string.teams_triage_round_lost
+        "abstained" -> R.string.teams_triage_round_abstained
+        "promoted" -> R.string.teams_triage_round_promoted
+        "superseded" -> R.string.teams_triage_round_superseded
+        else -> null
+    }
     /** The names of every string the log says anything with: each has text in every language (the `strings.xml` of each `values` folder). */
     val stringNames = listOf(
         "teams_triage_title", "teams_triage_intro", "teams_triage_loading", "teams_triage_empty", "teams_triage_more", "teams_triage_chat_untitled",
@@ -138,6 +166,7 @@ internal object TeamTriageRules {
         "teams_triage_reason_between_thresholds", "teams_triage_reason_above_threshold", "teams_triage_reason_decision_unavailable", "teams_triage_reason_message_unavailable",
         "teams_triage_state_replied", "teams_triage_state_silent", "teams_triage_state_failed", "teams_triage_state_waiting", "teams_triage_probability_fmt",
         "teams_task_waiting_approval", "teams_approval_reply_approved", "teams_approval_reply_declined", "teams_triage_approval_timeout", "teams_triage_approval_superseded",
+        "teams_triage_round_won", "teams_triage_round_lost", "teams_triage_round_abstained", "teams_triage_round_promoted", "teams_triage_round_superseded",
         "teams_list_refresh", "common_retry", "common_close",
     )
 

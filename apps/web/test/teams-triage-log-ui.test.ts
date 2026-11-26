@@ -3,7 +3,7 @@ import test from 'node:test';
 import vectors from '../../../packages/teams/contracts/execution-vectors.json';
 import { createElement } from 'react';
 import { TeamsWorkspace } from '../../../packages/teams/workspace';
-import type { SharedBotCard, TaskState, TaskTriage, TriageLogItem, TriageLogPage } from '../../../packages/teams/execution';
+import { ROUND_OUTCOMES, type SharedBotCard, type TaskState, type TaskTriage, type TriageLogItem, type TriageLogPage } from '../../../packages/teams/execution';
 import type { MessageCommand, TeamConversation } from '../../../packages/teams/messages';
 import { FakeTeams, botCard, conversation, memoryStorage, team, until } from './support/fakeTeams';
 import { loadTeamsModule } from './support/loadTeamsModule';
@@ -61,6 +61,7 @@ test('every verdict, reason and outcome has words in every language, and a reaso
   assert.equal(log.triageOutcomeText(en, 'silent'), 'Stayed silent'); assert.equal(log.triageProbabilityText(en, 0.124), '12% likely');
   assert.equal(log.triageOutcomeText(en, 'approval'), 'Waiting for approval');
   assert.deepEqual((['approved', 'rejected', 'timeout', 'superseded'] as const).map(approval => log.triageApprovalText(en, approval)), ['Approved', 'Declined', 'Not approved in time', 'Dropped for a newer message']);
+  assert.deepEqual(ROUND_OUTCOMES.map(outcome => log.triageRoundText(en, { outcome, tier: 'run' })), ['Chosen to answer', 'Another Bot was chosen', 'Did not take part', 'Took over for another Bot', 'Ended by a newer message']);
   assert.equal(log.triageReasonText(en, undefined), ''); assert.equal(log.triageReasonText(en, 'a_new_reason' as never), '');
   for (const locale of locales) {
     const t = teamsText(locale), seen = new Set<string>();
@@ -69,7 +70,10 @@ test('every verdict, reason and outcome has words in every language, and a reaso
     for (const outcome of ['replied', 'silent', 'failed', 'waiting', 'approval'] as const) seen.add(log.triageOutcomeText(t, outcome));
     // How a reply that was held came out; one that still waits says so as its outcome, and a reply that never was held, or a code this version does not know, says nothing.
     for (const approval of ['approved', 'rejected', 'timeout', 'superseded'] as const) seen.add(log.triageApprovalText(t, approval));
-    assert.equal(seen.size, 21, `${locale}: every one reads differently and none is empty`); assert.ok(!seen.has(''), locale);
+    // What became of the Bot when several could answer: its own part in the round.
+    for (const outcome of ROUND_OUTCOMES) seen.add(log.triageRoundText(t, { outcome }));
+    assert.equal(seen.size, 26, `${locale}: every one reads differently and none is empty`); assert.ok(!seen.has(''), locale);
+    assert.equal(log.triageRoundText(t, undefined), ''); assert.equal(log.triageRoundText(t, { outcome: 'a_new_outcome' as never }), '');
     assert.equal(log.triageApprovalText(t, 'held'), ''); assert.equal(log.triageApprovalText(t, undefined), ''); assert.equal(log.triageApprovalText(t, 'a_new_outcome' as never), '');
     assert.match(log.triageProbabilityText(t, 0.5), /50/, locale);
     if (locale !== 'en') assert.notEqual(log.triageProbabilityText(t, 0.5), log.triageProbabilityText(en, 0.5), locale);
@@ -86,6 +90,12 @@ test('a row of the log is read as the service sent it; a row this version cannot
   for (const approval of ['held', 'approved', 'rejected', 'timeout', 'superseded'] as const) assert.equal(log.triageItem({ ...row(3), state: 'awaiting_approval', approval })!.approval, approval, approval);
   assert.equal(log.triageItem({ ...row(3), state: 'awaiting_approval' })!.state, 'awaiting_approval'); assert.equal('approval' in log.triageItem(row(3))!, false);
   for (const approval of ['a_new_outcome', 7, null, '']) assert.equal('approval' in log.triageItem({ ...row(3), approval })!, false, String(approval));
+  // What became of the Bot in a round of several: its outcome, and the tier it bid when it did. A code this version does not know is left out, as the approval is.
+  for (const outcome of ROUND_OUTCOMES) assert.deepEqual(log.triageItem({ ...row(3), round: { outcome, tier: 'may_decline' } })!.round, { outcome, tier: 'may_decline' }, outcome);
+  assert.deepEqual(log.triageItem({ ...row(3), round: { outcome: 'abstained' } })!.round, { outcome: 'abstained' }, 'no tier when its Desktop did not bid');
+  assert.deepEqual(log.triageItem({ ...row(3), round: { outcome: 'lost', tier: 'a_new_tier' } })!.round, { outcome: 'lost' }, 'a tier it does not know is left out; the outcome is kept');
+  for (const round of [{ outcome: 'a_new_outcome' }, { outcome: 7 }, { tier: 'run' }, {}, 'won', 7, null, []]) assert.equal('round' in log.triageItem({ ...row(3), round })!, false, JSON.stringify(round));
+  assert.equal('round' in log.triageItem(row(3))!, false);
   // What it does not know is left out of the row; what it needs is the row.
   assert.equal(log.triageItem({ ...row(4), triage: { ...row(4).triage, reason: 'a_new_reason' } })!.triage.reason, undefined);
   for (const probability of [-0.1, 1.2, '0.5', Number.NaN]) assert.equal(log.triageItem({ ...row(5), triage: { ...row(5).triage, probability } })!.triage.probability, undefined, String(probability));
@@ -275,6 +285,8 @@ scenario('Opening the log shows the newest verdicts first: what was decided, why
   all[3] = row(22, { state: 'running', conversationTitle: undefined });
   all[4] = row(21, { state: 'awaiting_approval', approval: 'held' }); all[5] = row(20, { state: 'completed', approval: 'approved' }); all[6] = row(19, { state: 'declined', approval: 'timeout' });
   all[7] = row(18, { state: 'declined', approval: 'rejected' }); all[8] = row(17, { state: 'declined', approval: 'superseded' });
+  all[9] = row(16, { state: 'declined', round: { outcome: 'lost', tier: 'run' } }); all[10] = row(15, { state: 'completed', round: { outcome: 'won', tier: 'run' } });
+  all[11] = row(14, { state: 'declined', approval: 'rejected', round: { outcome: 'promoted', tier: 'may_decline' } });
   const service = serve(all), calls = wire(fake, service);
   const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
   await until(() => entries(page).length === 1, 'the entry');
@@ -297,6 +309,9 @@ scenario('Opening the log shows the newest verdicts first: what was decided, why
   const held = textOf(items()[4]!); assert.match(held, /Waiting for approval$/); assert.doesNotMatch(held, /Approved|Declined|Not approved|Dropped/);
   const approved = textOf(items()[5]!); assert.match(approved, /· ApprovedReplied$/); const timeout = textOf(items()[6]!); assert.match(timeout, /· Not approved in timeStayed silent$/);
   assert.match(textOf(items()[7]!), /· DeclinedStayed silent$/); assert.match(textOf(items()[8]!), /· Dropped for a newer messageStayed silent$/);
+  // A message several Bots could answer says what became of this one, and never what the others bid.
+  assert.match(textOf(items()[9]!), /· Another Bot was chosenStayed silent$/); assert.match(textOf(items()[10]!), /· Chosen to answerReplied$/);
+  assert.match(textOf(items()[11]!), /· Declined · Took over for another BotStayed silent$/); assert.doesNotMatch(textOf(items()[9]!), /\brun\b|bid|tier/i);
   assert.match(dialogText(page), /Only the decision and the reason are kept/, 'it says what is kept');
   assert.equal(page.has('Load more'), true);
   await page.click(page.button('Load more'));

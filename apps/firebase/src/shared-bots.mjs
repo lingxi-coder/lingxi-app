@@ -12,6 +12,8 @@ import { prepareSharedConversation } from './team-conversations.mjs';
 import { effectiveScope, emptyScope, scopeSize, withinPublished } from './bot-scope.mjs';
 import { attachable, cancelUpload, createUpload, finalizeUpload, putUploadPart, readAttachmentPart, revokeAttachment, taskFiles } from './team-attachments.mjs';
 import { approvalMs, approvalOutcome, approveReply, endSuperseded, listHeldReplies, rejectReply, supersedable } from './held-replies.mjs';
+import { bidReply, openRound, openRounds, roundState, voidRounds } from './reply-rounds.mjs';
+import { addressedBots } from './bot-address.mjs';
 
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value !== null && typeof value === 'object'
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
@@ -41,6 +43,8 @@ const unverified = operation => !replaySafe.has(operation.category) && (operatio
 const operationIdOf = (task, logicalStepId, category) => hash([task.rootTaskId, task.taskId, logicalStepId, category]);
 const grantsCapability = action => action === 'startTask' || action === 'continueTask';
 const queueMs = 300000, minRunMs = 1000;
+/** A task for a Bot whose Desktop is off waits this long for it: a person mentioned the Bot, and the message is not lost to a closed laptop. */
+const hostWaitMs = 24 * 60 * 60 * 1000;
 const botId = parts => `bot_${hash(parts).slice(0, 60)}`;
 const questionIds = (taskId, waitId) => ({ messageId: botId([taskId, waitId, 'question']), changeId: botId([taskId, waitId, 'question-change']) });
 const contains = (audience, identity) => audience.mode === 'team'
@@ -111,12 +115,14 @@ function taskView(task, now) {
  * Who lists a task, stored so `listTasks` can query it: `asked` (anyone asked the Bot: its Chat and its requester list it), `hidden` (an
  * unasked run in a group or channel, listed by nobody) and `shown` (such a run that posted a reply or needs checking: its Chat lists it).
  */
-function queuedTask({ sharedBotId, taskId, conversationId, messageId, changeId, seq, requester, bot, lockUntil, now, optional, visibility }) {
+function queuedTask({ sharedBotId, taskId, conversationId, messageId, changeId, seq, requester, bot, lockUntil, now, optional, visibility, offline, roundId, addressed, coMentioned }) {
   return { schemaVersion: 1, executionVersion: 2, sharedBotId, taskId, conversationId, messageId, changeId, messageSeq: seq,
     requester, botRevision: bot.identity.revision, deploymentId: bot.identity.activeDeploymentId, maintainer: bot.identity.maintainer,
-    state: 'queued', createdAt: now, deadline: Math.max(now, lockUntil) + queueMs, inputGrantIds: bot.grants.map(g => g.grantId),
+    state: 'queued', createdAt: now, deadline: Math.max(now, lockUntil) + (offline ? hostWaitMs : queueMs), inputGrantIds: bot.grants.map(g => g.grantId),
     epoch: 0, attemptStartedAt: 0, activeBudgetMs: 300000, activeSpentMs: 0, physicalDispatchesSpent: 0,
-    rootTaskId: taskId, operationCount: 0, unverifiedOperations: 0, ...(optional ? { optional: true } : {}), visibility };
+    rootTaskId: taskId, operationCount: 0, unverifiedOperations: 0, ...(optional ? { optional: true } : {}), visibility,
+    // The round it is a candidate of; whether a person spoke to the Bot in it (a reply to it, its name); the other Bots a message asked beside it.
+    ...(roundId ? { roundId } : {}), ...(addressed ? { addressed: true } : {}), ...(coMentioned?.length ? { coMentioned } : {}) };
 }
 /** A hidden task that now has a reply in its Chat, or an action someone has to check, is listed from then on. */
 const shown = (task, replyId, state) => task.visibility === 'hidden' && (replyId || state === 'needs_reconciliation') ? { visibility: 'shown' } : {};
@@ -210,6 +216,7 @@ export class SharedBotsStore {
       else if (action === 'setConversationBotScope') response = await this.conversationBotScope(context);
       else if (action === 'declineTask') response = await this.decline(context);
       else if (action === 'recordTriage') response = await this.recordTriage(context);
+      else if (action === 'bidReply') response = await bidReply(this, context);
       else if (action === 'listTriage') response = await this.triageLog(context);
       else if (action === 'createUpload') response = await createUpload(this, context);
       else if (action === 'putUploadPart') response = await putUploadPart(this, context);
@@ -553,9 +560,11 @@ export class SharedBotsStore {
     if (replyRefs.length && !reads[0].exists) deny(400, 'REPLY_REQUIRED');
     const botStart = replyRefs.length + memberRefs.length;
     if (reads.slice(replyRefs.length, botStart).some(member => !member.exists)) deny(409, 'MENTION_TARGET_REQUIRED');
-    const bots = reads.slice(botStart);
+    const bots = reads.slice(botStart), replied = replyRefs.length ? reads[0].data() : undefined;
     const owners = await all(bots.map(doc => team.collection('members').doc(doc.data()?.identity.maintainer.uid ?? '_missing')));
     const deployments = await all(bots.map(doc => team.collection('deployments').doc(doc.data()?.identity.activeDeploymentId ?? '_missing')));
+    // Whose Desktop is off. In a group or channel the message is still sent and the task waits for it; a Bot DM or a service says so at once.
+    const offlineHost = [];
     for (const [index, snapshot] of bots.entries()) {
       const bot = snapshot.data(), d = deployments[index].data();
       if (!identityPermitted(bot, identity) || owners[index].data()?.generation !== bot.identity.maintainer.generation) deny(403, 'BOT_USE_REQUIRED');
@@ -563,7 +572,8 @@ export class SharedBotsStore {
       // already reads. A Bot DM was created for one member and one maintainer, so after a handover a new one is opened.
       const maintainer = bot.identity.maintainer.uid;
       if (!c.memberUids.includes(maintainer) || (c.kind === 'bot_dm' && c.memberUids.some(uid => uid !== maintainer && uid !== identity.uid))) deny(409, 'BOT_MAINTAINER_CHANGED');
-      if (!d?.enabled || (!dataCause && (!d.ready || d.onlineUntil <= now))) deny(409, 'HOST_UNAVAILABLE');
+      offlineHost[index] = !dataCause && (!d?.ready || d.onlineUntil <= now);
+      if (!d?.enabled || (offlineHost[index] && (service || c.kind === 'bot_dm'))) deny(409, 'HOST_UNAVAILABLE');
       if (bot.grants.some(grant => !this.grantPermits(grant, identity))) deny(403, 'INPUT_GRANT_REQUIRED');
     }
     // A message that asks no Bot uses no request quota.
@@ -580,7 +590,7 @@ export class SharedBotsStore {
     for (const [i, snapshot] of quotas.entries()) if ((snapshot.data()?.used ?? 0) + increments[i] > limits[i]) deny(429, 'REQUEST_QUOTA_EXCEEDED');
     // In a Bot DM every message asks the Bot; with auto-reply on there, the Bot may still decide that one needs no answer.
     const dmOptional = !p.privateDataSource && !dataCause && !datasetShare && c.kind === 'bot_dm' && !!c.autoReply?.targets.includes(c.sharedBotId) && !!bots[0]?.data().autoReply;
-    const unaskedTasks = p.privateDataSource || dataCause || fromPage ? null : await this.optionalTasks(tx, team, c, p, identity, p.targets, now);
+    const unaskedTasks = p.privateDataSource || dataCause || fromPage ? null : await this.optionalTasks(tx, team, c, p, identity, p.targets, now, replied);
     const seq = c.lastSeq + 1, changeSeq = c.lastChangeSeq + 1;
     if (!Number.isSafeInteger(seq) || !Number.isSafeInteger(changeSeq)) deny(409, 'CURSOR_LIMIT');
     const tasks = p.targets.map(sharedBotId => ({ sharedBotId, taskId: admissionId(p.messageId, sharedBotId) }));
@@ -603,7 +613,10 @@ export class SharedBotsStore {
       lastMessage: { id: p.messageId, seq, at, author, preview: messagePreview(sharedText || files.attachments.map(file => file.name).join(', ')) } });
     for (const [i, target] of tasks.entries()) {
       const task = queuedTask({ ...target, conversationId: p.conversationId, messageId: p.messageId,
-        changeId: p.changeId, seq, requester: identity, bot: bots[i].data(), lockUntil: locks[i].data()?.until ?? 0, now, optional: dmOptional, visibility: 'asked' });
+        changeId: p.changeId, seq, requester: identity, bot: bots[i].data(), lockUntil: locks[i].data()?.until ?? 0, now, optional: dmOptional, visibility: 'asked',
+        // In a Bot DM a reply to the Bot's message, or its name, is a person speaking to it: the host does not judge that itself.
+        addressed: dmOptional && addressedBots([{ sharedBotId: target.sharedBotId, name: bots[i].data().name }], { text: p.text, replied }).length > 0,
+        offline: offlineHost[i], coMentioned: bots.filter((_, j) => j !== i).map(other => other.data().name) });
       tx.create(team.collection('tasks').doc(target.taskId), { ...task, ...privateData, ...(dataCause ? {
         rootTaskId: dataCause.rootTaskId ?? task.taskId, dataCause,
       } : {}) });
@@ -613,38 +626,57 @@ export class SharedBotsStore {
     return response;
   }
   /**
-   * A member's new message in a group or channel also goes to each Bot of the Chat with auto-reply on that it did not
-   * ask: as an optional task, whose host decides whether the Bot answers. It is checked like an asked task, but a Bot that
-   * fails a check is left out instead of refusing the message. Nothing is charged here; a run is charged when it starts.
-   * A new message also ends the replies the Chat's Bots hold for their maintainers that nobody asked for: the Chat has moved on (`held-replies.mjs`).
-   * Reads only, so it runs before the message is written; `write` creates the tasks in the same transaction.
+   * A member's new message in a group or channel also goes to the Bots of the Chat with auto-reply on, as optional tasks whose hosts decide whether each
+   * Bot answers; the tasks are the candidates of a reply round (`reply-rounds.mjs`), opened by the same transaction. It is checked like an asked task, but a
+   * Bot that fails a check is left out instead of refusing the message. Nothing is charged here; a run is charged when it starts.
+   *
+   * Whom the message is for is decided here, once, so that every Desktop agrees:
+   * - it asked a Bot (`asked`): that Bot has its own task and no other Bot joins in, whatever it says;
+   * - it mentions only people: nobody else answers, unless the Chat's `humanMentions` is `judge`;
+   * - it answers a Bot's message, or calls a Bot by name (`bot-address.mjs`): only that Bot is a candidate, and it is `addressed`, the best tier a bid has.
+   * A Bot that was spoken to but may not answer unasked still keeps the others out.
+   *
+   * A new message also ends what the Chat's Bots were still doing about the earlier ones: the replies held for their maintainers that nobody asked for
+   * (`held-replies.mjs`) and the rounds that have not been settled. Reads only, so it runs before the message is written; `write` creates the tasks in the same transaction.
    */
-  async optionalTasks(tx, team, c, { conversationId, messageId, changeId }, identity, asked, now) {
-    const held = await supersedable(tx, team, c, conversationId);
-    const ids = ['group', 'channel'].includes(c.kind) ? (c.autoReply?.targets ?? []).filter(id => !asked.includes(id)
-      && c.participants.includes(`shared_bot:${id}`) && (!c.executionPolicy || c.executionPolicy.targets.includes(id))) : [];
-    if (!ids.length) return { write() { endSuperseded(tx, team, held, now); } };
+  async optionalTasks(tx, team, c, { conversationId, messageId, changeId, text, mentionEntities }, identity, asked, now, replied) {
+    const held = await supersedable(tx, team, c, conversationId), open = await openRounds(tx, team, c, conversationId);
+    const end = () => { endSuperseded(tx, team, held, now); voidRounds(tx, team, open, now); };
+    const settings = c.autoReply, forPeople = !asked.length && mentionEntities?.length && (settings?.humanMentions ?? 'quiet') === 'quiet';
+    const ids = !asked.length && !forPeople && ['group', 'channel'].includes(c.kind) ? (settings?.targets ?? []).filter(id => c.participants.includes(`shared_bot:${id}`)
+      && (!c.executionPolicy || c.executionPolicy.targets.includes(id))) : [];
+    if (!ids.length) return { write() { end(); } };
     const all = refs => tx.getAll(...refs);
-    const bots = await all(ids.map(id => team.collection('sharedBots').doc(id)));
+    // Every Bot of the Chat is read: whom the message is spoken to does not depend on whether that Bot may answer unasked.
+    const everyone = c.participants.filter(id => id.startsWith('shared_bot:')).map(id => id.slice('shared_bot:'.length));
+    const docs = new Map((await all(everyone.map(id => team.collection('sharedBots').doc(id)))).map(doc => [doc.id, doc]));
+    const spokenTo = addressedBots(everyone.map(sharedBotId => ({ sharedBotId, name: docs.get(sharedBotId).data()?.name })), { text, replied });
+    const candidates = spokenTo.length ? ids.filter(id => spokenTo.includes(id)) : ids;
+    if (!candidates.length) return { write() { end(); } };
+    const bots = candidates.map(id => docs.get(id));
     const owners = await all(bots.map(doc => team.collection('members').doc(doc.data()?.identity.maintainer.uid ?? '_missing')));
     const deployments = await all(bots.map(doc => team.collection('deployments').doc(doc.data()?.identity.activeDeploymentId ?? '_missing')));
-    const locks = await all(ids.map(id => team.collection('chatExecutionLocks').doc(hash([id, conversationId]))));
+    const locks = await all(candidates.map(id => team.collection('chatExecutionLocks').doc(hash([id, conversationId]))));
     // A Bot that has spent today's unasked runs is not offered the message: its host would only judge it to be told the limit is reached.
-    const day = nowDay(now), spent = await all(ids.map(id => team.collection('requestQuotas').doc(hash([day, 'auto', id]))));
-    const admitted = ids.filter((_, i) => {
+    const day = nowDay(now), spent = await all(candidates.map(id => team.collection('requestQuotas').doc(hash([day, 'auto', id]))));
+    const admitted = candidates.filter((_, i) => {
       const bot = bots[i].data(), d = deployments[i].data();
       return !!bot?.autoReply && (spent[i].data()?.used ?? 0) < bot.autoReply.daily && bot.identity.state === 'published' && identityPermitted(bot, identity)
         && owners[i].data()?.generation === bot.identity.maintainer.generation && c.memberUids.includes(bot.identity.maintainer.uid)
         && !!d?.enabled && d.ready && d.onlineUntil > now && bot.grants.every(grant => this.grantPermits(grant, identity));
     });
+    const addressed = spokenTo.length > 0;
     return { write: seq => {
-      endSuperseded(tx, team, held, now);
-      for (const sharedBotId of admitted) {
-        const i = ids.indexOf(sharedBotId), taskId = admissionId(messageId, sharedBotId);
+      end();
+      const made = admitted.map(sharedBotId => {
+        const i = candidates.indexOf(sharedBotId), taskId = admissionId(messageId, sharedBotId);
         tx.create(team.collection('tasks').doc(taskId), queuedTask({ sharedBotId, taskId, conversationId, messageId, changeId, seq,
-          requester: identity, bot: bots[i].data(), lockUntil: locks[i].data()?.until ?? 0, now, optional: true, visibility: 'hidden' }));
+          requester: identity, bot: bots[i].data(), lockUntil: locks[i].data()?.until ?? 0, now, optional: true, visibility: 'hidden', roundId: messageId, addressed }));
         tx.set(team.collection('signals').doc(sharedBotId), { updatedAt: new Date(now) });
-      }
+        return { taskId, sharedBotId, addressed };
+      });
+      // A person spoke to these Bots: each answers, however many the Chat lets answer a message nobody spoke to.
+      if (made.length) openRound(tx, team, { roundId: messageId, conversationId, candidates: made, maxReplies: addressed ? made.length : settings.maxReplies ?? 1, now });
     } };
   }
   grantPermits(grant, identity) {
@@ -661,8 +693,12 @@ export class SharedBotsStore {
       .where('state', 'in', ['queued', 'running']).orderBy('__name__');
     if (p.after) query = query.startAfter(p.after);
     const tasks = await tx.get(query.limit(100));
+    // A task of a reply round says where its round stands (`open` until it has said, then `won` or `promoted`) and the tier it was chosen with, so a restarted
+    // host knows how sure its Bot was without judging again; only a chosen task may be started.
     return { tasks: tasks.docs.filter(doc => doc.data().state === 'running' || doc.data().deadline > now).map(doc => ({ ...taskView(doc.data(), now),
-      messageId: doc.data().messageId, messageSeq: doc.data().messageSeq, ...(doc.data().resume ? { resume: doc.data().resume } : {}) })).sort((a, b) => a.messageSeq - b.messageSeq),
+      messageId: doc.data().messageId, messageSeq: doc.data().messageSeq, ...(doc.data().resume ? { resume: doc.data().resume } : {}),
+      ...(doc.data().roundId ? { round: roundState(doc.data()) } : {}), ...(doc.data().round?.tier ? { roundTier: doc.data().round.tier } : {}),
+      ...(doc.data().addressed ? { addressed: true } : {}) })).sort((a, b) => a.messageSeq - b.messageSeq),
       nextCursor: tasks.size === 100 ? tasks.docs.at(-1).id : null };
   }
   async taskContext({ tx, team, identity, command: { action, payload: p }, now, storedPermitDigest }) {
@@ -685,6 +721,8 @@ export class SharedBotsStore {
       ...(task.privateDataSource ? { privateDataSource: task.privateDataSource } : {}),
       inputs: bot.grants, deployment, sourceLastChangeSeq: conversation.data().lastChangeSeq, conversationKind: conversation.data().kind,
       physicalDispatchesSpent: task.physicalDispatchesSpent, ...this.listOffer(bot, deployment),
+      // The other Bots the same message asked, so that each can leave to the others what they answer better. Information only.
+      ...(task.coMentioned?.length ? { coMentioned: task.coMentioned } : {}),
       scope: effectiveScope(bot.scope, conversation.data().botScopes?.[task.sharedBotId]) };
   }
   async checkPrivateSource(tx, team, task) {
@@ -786,6 +824,8 @@ export class SharedBotsStore {
     if (task.state !== 'queued' || task.epoch >= 1) return { execute: false, taskId: p.taskId };
     if (task.deadline <= now) { tx.update(ref, { state: 'expired' }); return { execute: false, taskId: p.taskId }; }
     if (task.botRevision !== bot.identity.revision) deny(403, 'TASK_REVOKED');
+    // The task of a reply round starts only once its round has chosen it.
+    if (task.roundId && !['won', 'promoted'].includes(task.round?.outcome)) deny(409, 'ROUND_OPEN');
     const { lockRef, free, conversation, superseded } = await this.admitRun(tx, team, task, bot, deployment, p.expectedLastChangeSeq, now, true);
     if (!free) return { execute: false, taskId: p.taskId };
     // Unasked runs in groups and channels count against the Bot's own daily limit, not anyone's request quota.
@@ -1096,7 +1136,7 @@ export class SharedBotsStore {
     await this.validateTask(tx, team, task);
     const lockRef = team.collection('chatExecutionLocks').doc(hash([task.sharedBotId, task.conversationId]));
     const lock = (await tx.get(lockRef)).data();
-    const held = await supersedable(tx, team, c, p.conversationId);
+    const held = await supersedable(tx, team, c, p.conversationId), rounds = await openRounds(tx, team, c, p.conversationId);
     const seq = c.lastSeq + 1, changeSeq = c.lastChangeSeq + 1;
     if (!Number.isSafeInteger(seq) || !Number.isSafeInteger(changeSeq)) deny(409, 'CURSOR_LIMIT');
     const response = { messageId: p.messageId, changeId: p.changeId, changeSeq, taskId: task.taskId };
@@ -1117,6 +1157,7 @@ export class SharedBotsStore {
     if (!lock || lock.until <= now || lock.taskId === task.taskId) tx.set(lockRef, { taskId: task.taskId, until: deadline });
     tx.set(team.collection('signals').doc(task.sharedBotId), { updatedAt: new Date(now) });
     endSuperseded(tx, team, held, now);
+    voidRounds(tx, team, rounds, now);
     return response;
   }
   async cancelTask({ tx, team, identity, command: { payload: p }, now }) {
@@ -1441,7 +1482,7 @@ export class SharedBotsStore {
     const items = docs.flatMap((doc, i) => {
       const t = doc.data(), chat = chats[i].data(), state = taskView(t, now).state, approval = approvalOutcome(t, state);
       return chat?.memberUids?.includes(identity.uid) ? [{ taskId: t.taskId, conversationId: t.conversationId, messageId: t.messageId, createdAt: t.createdAt,
-        triage: t.triage, state, ...(approval ? { approval } : {}), ...(chat.title ? { conversationTitle: chat.title } : {}) }] : [];
+        triage: t.triage, state, ...(approval ? { approval } : {}), ...(t.round ? { round: t.round } : {}), ...(chat.title ? { conversationTitle: chat.title } : {}) }] : [];
     });
     return { items, ...(page.size > limit ? { nextCursor: docs.at(-1).id } : {}) };
   }
@@ -1456,7 +1497,9 @@ export class SharedBotsStore {
     const bots = added.length ? await tx.getAll(...added.map(id => team.collection('sharedBots').doc(id))) : [];
     if (bots.some(doc => !doc.data()?.autoReply || doc.data().identity.state !== 'published')) deny(409, 'AUTO_REPLY_UNAVAILABLE');
     const revision = p.expectedRevision + 1;
-    tx.update(ref, { autoReply: { revision, targets: p.targets } });
+    // The two settings a Chat may add keep their value when a caller that does not know them (or does not mean to change them) leaves them out.
+    const keep = field => (p[field] ?? value.autoReply?.[field]) === undefined ? {} : { [field]: p[field] ?? value.autoReply[field] };
+    tx.update(ref, { autoReply: { revision, targets: p.targets, ...keep('maxReplies'), ...keep('humanMentions') } });
     return { revision };
   }
   /**

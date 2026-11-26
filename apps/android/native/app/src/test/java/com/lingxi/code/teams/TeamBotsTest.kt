@@ -31,6 +31,42 @@ class TeamBotsTest {
         }
         assertEquals("the log reads every state the contract lists, and no other", states.toSet(), TeamTriageRules.outcomes.keys)
         assertEquals(root.getJSONArray("approvalOutcomes").let { array -> (0 until array.length()).map { array.getString(it) } }.toSet(), TeamTriageRules.approvals)
+        // Bot v3 B7: the rounds of several Bots: what became of a Bot, the tiers it bids, and the two settings of a Chat.
+        fun codes(name: String) = root.getJSONArray(name).let { array -> (0 until array.length()).map { array.getString(it) } }
+        assertEquals(codes("roundOutcomes").toSet(), TeamTriageRules.roundOutcomes)
+        assertEquals(codes("bidTiers").toSet(), TeamTriageRules.bidTiers)
+        assertEquals(codes("humanMentionModes").toSet(), TeamExecutionContract.humanMentionModes)
+        assertEquals(root.getInt("maxRepliesLimit"), TeamExecutionContract.MAX_REPLIES_LIMIT)
+    }
+    /** Bot v3 B7: a member sets how many Bots answer and what a message that mentions only people does, with the Bots of the Chat, or leaves both as they are. */
+    @Test fun theAutoReplyCommandCarriesTheTwoSettingsOfTheChatOnlyWhenWholeAndKnown() {
+        fun send(more: Map<String, Any?> = emptyMap()) = JSONObject().put("schemaVersion", 1).put("commandId", "command_0001").put("teamId", "team_0001").put("generation", 7).put("action", "setConversationAutoReply")
+            .put("payload", JSONObject().put("conversationId", "chat_0001").put("expectedRevision", 2).put("targets", JSONArray(listOf("sharedbot_01"))).also { payload -> more.forEach { (key, value) -> payload.put(key, value) } })
+        fun valid(more: Map<String, Any?>) = runCatching { TeamExecutionContract.validate(send(more)) }.isSuccess
+        assertTrue("a caller that changes neither leaves them as they are", valid(emptyMap()))
+        for (most in 1..TeamExecutionContract.MAX_REPLIES_LIMIT) assertTrue("$most", valid(mapOf("maxReplies" to most)))
+        for (mode in listOf("quiet", "judge")) assertTrue(mode, valid(mapOf("humanMentions" to mode)))
+        assertTrue(valid(mapOf("maxReplies" to 3, "humanMentions" to "judge")))
+        for (most in listOf<Any>(0, TeamExecutionContract.MAX_REPLIES_LIMIT + 1, -1, 1.5, "2", JSONObject.NULL)) assertFalse("$most", valid(mapOf("maxReplies" to most)))
+        for (mode in listOf<Any>("ignore", "Quiet", "", 7, JSONObject.NULL)) assertFalse("$mode", valid(mapOf("humanMentions" to mode)))
+        assertFalse("nothing else comes with them", valid(mapOf("extra" to true)))
+        // A bid is the host's command: a member's session never sends one.
+        assertTrue(vectors().getJSONArray("commands").objects().first { it.getString("name") == "reject-bidReply-member" }.let { !it.getBoolean("valid") })
+        val rows = vectors().getJSONArray("commands").objects().filter { it.getJSONObject("input").optString("action") == "setConversationAutoReply" }
+        assertTrue(rows.size >= 17 && rows.any { it.getBoolean("valid") } && rows.any { !it.getBoolean("valid") })
+    }
+    /** Bot v3 B7: how many Bots answer one message, and what a message that mentions only people does: kept when whole and known, left out when not, and the Chat still read. */
+    @Test fun theTwoSettingsOfTheAutoReplyAreKeptWhenKnownAndLeftOutWhenNot() {
+        fun auto(extra: Map<String, Any?>) = TeamMessageConversation.fromDocument("chat_0001", mapOf("kind" to "group", "title" to "Trip", "participants" to listOf("user:alice", "shared_bot:sharedbot_helper"),
+            "lastSeq" to 0L, "lastChangeSeq" to 0L, "lastMessage" to null, "autoReply" to (mapOf("revision" to 2L, "targets" to listOf("sharedbot_helper")) + extra)), 0) { null }.autoReply
+        assertEquals(TeamConversationAutoReply(2, listOf("sharedbot_helper"), 3, "judge"), auto(mapOf("maxReplies" to 3L, "humanMentions" to "judge")))
+        assertEquals(TeamConversationAutoReply(2, listOf("sharedbot_helper"), 1, "quiet"), auto(mapOf("maxReplies" to 1L, "humanMentions" to "quiet")))
+        assertEquals(5, auto(mapOf("maxReplies" to 5L))?.maxReplies)
+        assertEquals("a whole number that came as a double is still whole", 2, auto(mapOf("maxReplies" to 2.0))?.maxReplies)
+        assertEquals("never set: the Chat reads as the default", TeamConversationAutoReply(2, listOf("sharedbot_helper")), auto(emptyMap()))
+        for (most in listOf<Any?>(0L, 6L, -1L, 1.5, "2", null, true)) assertNull("$most", auto(mapOf("maxReplies" to most))?.maxReplies)
+        for (mode in listOf<Any?>("ignore", "Quiet", "", 7L, null)) assertNull("$mode", auto(mapOf("humanMentions" to mode))?.humanMentions)
+        assertEquals("the targets are still read", TeamConversationAutoReply(2, listOf("sharedbot_helper")), auto(mapOf("maxReplies" to 99L, "humanMentions" to "a_new_mode")))
     }
     /** A reply that waits for its maintainer can still change and can be taken back by the one who asked; no worker is changing it. */
     @Test fun aTaskWhoseReplyAwaitsApprovalIsNeitherFinishedNorBeingWorkedOn() {

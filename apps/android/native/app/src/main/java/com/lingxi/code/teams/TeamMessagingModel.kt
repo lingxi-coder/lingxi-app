@@ -399,9 +399,16 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         val task = TeamTask.parse(execute("getTask", JSONObject().put("taskId", taskId), lifecycle))
         mutable.update { if (it.selected == selection) it.copy(tasks = if (it.tasks.any { old -> old.taskId == taskId }) it.tasks.map { old -> if (old.taskId == taskId) task else old } else it.tasks + task) else it }
     }
-    /** Sets which Bots of a Chat judge for themselves whether to answer it. The listener brings the new setting. */
-    fun setConversationAutoReply(conversationId: String, expectedRevision: Long, targets: List<String>, onFailed: () -> Unit = {}) = launchOperation {
-        try { execute("setConversationAutoReply", JSONObject().put("conversationId", conversationId).put("expectedRevision", expectedRevision).put("targets", JSONArray(targets)), lifecycle) }
+    /**
+     * Sets which Bots of a Chat judge for themselves whether to answer it, and, when given, how many of them answer one message nobody asked them about (1 to 5)
+     * and whether a message that mentions only people is judged like any other (`judge`) or is for them alone (`quiet`); what is left out is left as it is.
+     * The listener brings the new setting.
+     */
+    fun setConversationAutoReply(conversationId: String, expectedRevision: Long, targets: List<String>, maxReplies: Int? = null, humanMentions: String? = null, onFailed: () -> Unit = {}) = launchOperation {
+        val payload = JSONObject().put("conversationId", conversationId).put("expectedRevision", expectedRevision).put("targets", JSONArray(targets))
+        if (maxReplies != null) payload.put("maxReplies", maxReplies)
+        if (humanMentions != null) payload.put("humanMentions", humanMentions)
+        try { execute("setConversationAutoReply", payload, lifecycle) }
         catch (error: Exception) { if (error !is CancellationException) onFailed(); throw error }
     }
     /**

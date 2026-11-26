@@ -38,6 +38,8 @@ export interface SavedExecution { schemaVersion: 2; scope: BotChatScope; teamId:
   /** The Bot may ask its requester a question (the deployment publishes durable waits). */ ask: boolean;
   /** Nobody asked the Bot in a group or channel: it never asks the member a question back. */ unasked?: boolean;
   /** Nobody asked the Bot and its triage was unsure: the Bot may leave the message unanswered. Every attempt is offered the same. */ mayDecline?: boolean;
+  /** A person spoke to the Bot in a group without asking it (a reply to its message, its name): it answers, unless the message plainly needs no answer. Only with `mayDecline`. */ addressed?: true;
+  /** The names of the other Bots the message that asked this one asked too: given to the run as information, so that each Bot answers its own part. */ coMentioned?: string[];
   /** The Bot's maintainer reads its reply before it is posted. Decided once, when the task started, from the Bot's own setting: a later change of the setting does not reach a task that is running. */ hold?: true;
   /** The files of Chat messages in the batch: the model was given them, and a finished task says so. */ files?: { attachmentId: string; sha256: string }[];
   /** The Bot's shared list, offered to the worker of this task. Its writes go through the operation ledger. */ list?: { title: string; description: string; approval?: 'requester' };

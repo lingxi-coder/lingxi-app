@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { cooldownUnseen, decisionInput, inQuietHours, triageReply, type ReplyDecision, type TriageInput, type TriageSettings } from '../src/main/teams/replyTriage.ts';
+import { bidOf, cooldownUnseen, decisionInput, inQuietHours, triageReply, type ReplyDecision, type TriageInput, type TriageSettings } from '../src/main/teams/replyTriage.ts';
 import type { ChatSourceMessage } from '../../../packages/teams/chat-source.ts';
-import { TRIAGE_REASONS, type TriageVerdict } from '../../../packages/teams/execution.ts';
+import { BID_TIERS, TRIAGE_REASONS, type TriageVerdict } from '../../../packages/teams/execution.ts';
 import type { DecisionInput, DecisionResult } from '../src/shared/decision.ts';
 
 /** Nov 2023 on the service's clock, nowhere near this computer's: a verdict that reads the local clock cannot pass these tests. */
@@ -29,29 +29,36 @@ const rule = (reason: 'addressed' | 'keyword'): TriageVerdict => ({ action: 'run
 const stays = (reason: 'decision_unavailable' | 'message_unavailable'): TriageVerdict => ({ action: 'decline', source: 'fallback', reason });
 const runs = (reason: 'decision_unavailable' | 'message_unavailable'): TriageVerdict => ({ action: 'run', source: 'fallback', reason });
 
-test('reply triage: a reply to the Bot or its name asks it, without the Decision service', async () => {
+test('reply triage: a call to the Bot is what the service says it is: the host asks it without the Decision service, and never looks for one itself', async () => {
   const seen: DecisionInput[] = [];
   const earlier = message(1, 'Here are three hotels.', botAuthor);
-  assert.deepEqual(await judge([earlier, message(2, 'Which is quietest?', undefined, { replyTo: earlier.messageId })], answering(0, seen)), rule('addressed'));
-  assert.deepEqual(await judge([message(1, 'travel helper, any ideas for Lisbon?')], answering(0, seen)), rule('addressed'));
+  assert.deepEqual(await judge([earlier, message(2, 'Which is quietest?', undefined, { replyTo: earlier.messageId })], answering(0, seen), 'group', { addressed: true }), rule('addressed'));
+  assert.deepEqual(await judge([message(1, 'travel helper, any ideas for Lisbon?')], answering(0, seen), 'group', { addressed: true }), rule('addressed'));
   assert.equal(seen.length, 0);
+  // Without the service's word a reply to the Bot, and the Bot's name, are only text: the Decision service judges them like any other.
+  const judged = decided('decline', 'below_threshold', 0);
+  assert.deepEqual(await judge([earlier, message(2, 'Which is quietest?', undefined, { replyTo: earlier.messageId })], answering(0, seen)), judged);
+  assert.deepEqual(await judge([message(1, 'travel helper, any ideas for Lisbon?')], answering(0, seen), 'group', { addressed: false }), judged);
+  assert.equal(seen.length, 2);
 });
-test('reply triage: a name calls the Bot as a whole word, and a burst passed over counts as asking', async () => {
-  const at = (text: string, name: string, extra: Partial<TriageInput> = {}) => {
-    const latest = message(9, text);
-    return triageReply({ bot: { ...bot, name }, settings: settings(), conversation: { kind: 'group' }, messages: [latest], messageId: latest.messageId, decision: answering(0.1), signal: new AbortController().signal, ...extra });
-  };
+test('reply triage: a verdict is a bid: the best tier its host may claim, and a probability only from the Decision service', () => {
+  const bids = [
+    [rule('addressed'), { tier: 'addressed' }], [rule('keyword'), { tier: 'rule' }],
+    [decided('run', 'above_threshold', 0.9), { tier: 'run', score: 0.9 }], [decided('run_may_decline', 'between_thresholds', 0.5), { tier: 'may_decline', score: 0.5 }],
+    // Every way of declining is an abstention, with no score.
+    [decided('decline', 'below_threshold', 0.1), { tier: 'decline' }], [{ action: 'decline', source: 'quiet', reason: 'quiet_hours' }, { tier: 'decline' }],
+    [{ action: 'decline', source: 'cooldown', reason: 'cooldown' }, { tier: 'decline' }], [stays('decision_unavailable'), { tier: 'decline' }], [stays('message_unavailable'), { tier: 'decline' }],
+    // A Bot DM with no verdict answers; it has no round, but the mapping is whole.
+    [runs('decision_unavailable'), { tier: 'run' }],
+  ] as const;
+  for (const [verdict, bid] of bids) { assert.deepEqual(bidOf(verdict), bid, JSON.stringify(verdict)); assert.ok((BID_TIERS as readonly string[]).includes(bidOf(verdict).tier)); }
+});
+test('reply triage: a request in a burst passed over is judged with the message that ended it, and a keyword in it asks as the latest does', async () => {
   const called = rule('addressed'), judged = decided('decline', 'below_threshold', 0.1);
-  assert.deepEqual(await at('Al, any ideas for Lisbon?', 'Al'), called);
-  assert.deepEqual(await at('what do you think, @al?', 'Al'), called);
-  assert.deepEqual(await at('Also, lunch at noon?', 'Al'), judged, 'letters inside another word');
-  assert.deepEqual(await at('the maximum is 3', 'Max'), judged);
-  assert.deepEqual(await at('小助手帮我订个酒店', '小助手'), called, 'a script without spaces matches anywhere');
-  assert.deepEqual(await at('Max帮我看看', 'Max'), called);
-  assert.deepEqual(await at('😀 nice', '😀'), judged, 'one character is not a name');
-  const asked = message(7, 'Travel Helper, which hotel is quietest?'), chatter = message(8, 'thanks!');
-  assert.deepEqual(await judge([asked, chatter], answering(0.1), 'group', { earlier: [asked.messageId] }), called);
-  assert.deepEqual(await judge([asked, chatter], answering(0.1)), judged);
+  const asked = message(7, 'I need a refund, which hotel is quietest?'), chatter = message(8, 'thanks!');
+  assert.deepEqual(await judge([asked, chatter], answering(0.1), 'group', { settings: settings({ keywords: ['refund'] }), earlier: [asked.messageId] }), rule('keyword'));
+  assert.deepEqual(await judge([asked, chatter], answering(0.1), 'group', { settings: settings({ keywords: ['refund'] }) }), judged);
+  assert.deepEqual(await judge([asked, chatter], answering(0.1), 'group', { addressed: true }), called);
   // A request passed over without the Bot's name is judged with the message that ended the burst.
   const seen: DecisionInput[] = [], request = message(7, 'how do I rotate the API key?');
   await judge([message(6, 'morning'), request, chatter], answering(0.9, seen), 'group', { earlier: [request.messageId] });
@@ -112,7 +119,7 @@ test('reply triage: every reason a verdict gives is a code of the contract, and 
     await judge(chat, answering(0.1)), await judge(chat, answering(0.5)), await judge(chat, answering(0.9)), await judge(chat, undefined),
     await judge(chat, undefined, 'group', { messageId: 'message_missing' }), await judge(chat, answering(0), 'group', { settings: settings({ quietHours: quiet }) }),
     await judge([message(1, 'Hmm.', botAuthor), message(2, 'anyone around?')], undefined, 'group', { settings: settings({ cooldownSec: 60 }) }),
-    await judge([message(1, 'travel helper?')], undefined), await judge([message(1, 'refund?')], undefined, 'group', { settings: settings({ keywords: ['refund'] }) }),
+    await judge([message(1, 'travel helper?')], undefined, 'group', { addressed: true }), await judge([message(1, 'refund?')], undefined, 'group', { settings: settings({ keywords: ['refund'] }) }),
   ]) {
     assert.ok(verdict.reason, JSON.stringify(verdict));
     gave.add(verdict.reason!);
@@ -154,7 +161,7 @@ test('reply triage: the maintainer\'s policy reaches the Decision service as the
   // The policy is the maintainer's criterion for what the Decision service judges; messages cannot add to it.
   assert.doesNotMatch(JSON.stringify(seen[0]!.state), /Ignore the maintainer/u);
 });
-test('reply triage: a keyword asks the Bot as a name does, folded for case and width, without the Decision service', async () => {
+test('reply triage: a keyword asks the Bot, folded for case and width and matched as a whole word, without the Decision service', async () => {
   const seen: DecisionInput[] = [], decision = answering(0, seen);
   const withWords = (text: string, keywords: string[], more: Partial<TriageInput> = {}) => judge([message(1, text)], decision, 'group', { settings: settings({ keywords }), ...more });
   assert.deepEqual(await withWords('I need a REFUND for this order', ['refund']), rule('keyword'));
@@ -173,7 +180,8 @@ test('reply triage: a keyword asks the Bot as a name does, folded for case and w
   assert.deepEqual(await withWords('no keywords here', []), judged);
   assert.deepEqual(await withWords('a refund?', ['refund']), rule('keyword'), 'punctuation ends a word');
   // A call to the Bot is what asked it when both did; a keyword in the burst passed over asks it as well.
-  assert.deepEqual(await withWords('travel helper, a refund?', ['refund']), rule('addressed'));
+  assert.deepEqual(await withWords('travel helper, a refund?', ['refund'], { addressed: true }), rule('addressed'));
+  assert.deepEqual(await withWords('travel helper, a refund?', ['refund']), rule('keyword'), 'the name alone is not a call: the service says so');
   const asked = message(7, 'I want a refund'), chatter = message(8, 'thanks!');
   assert.deepEqual(await judge([asked, chatter], decision, 'group', { settings: settings({ keywords: ['refund'] }), earlier: [asked.messageId] }), rule('keyword'));
   assert.deepEqual(await judge([asked, chatter], decision, 'group', { settings: settings({ keywords: ['refund'] }) }), judged, 'not a message that was judged on its own already');
@@ -214,7 +222,7 @@ test('reply triage: a call to the Bot is answered in quiet hours and the cooldow
   // A reply to the Bot in the maintainer's night, right after the Bot spoke: a person talking to it, so it answers.
   const call = message(2, 'travel helper, a refund?', undefined, { createdAt: Date.parse('2026-11-24T15:00:00Z'), replyTo: own.messageId });
   const night = settings({ quietHours: quiet, keywords: ['refund'], cooldownSec: 60 });
-  assert.deepEqual(await judge([own, call], answering(0.9, seen), 'group', { settings: night }), rule('addressed'));
+  assert.deepEqual(await judge([own, call], answering(0.9, seen), 'group', { settings: night, addressed: true }), rule('addressed'));
   // A keyword is not a call: the night wins over it, and by day the cooldown does.
   const keyword = { ...call, replyTo: undefined, text: 'a refund?' };
   assert.deepEqual(await judge([own, keyword], answering(0.9, seen), 'group', { settings: night }), { action: 'decline', source: 'quiet', reason: 'quiet_hours' });

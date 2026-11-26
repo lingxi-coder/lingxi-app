@@ -35,8 +35,16 @@ struct TeamTriageVerdict: Decodable, Equatable, Sendable {
     }
 }
 
+/// What became of the Bot when several could answer the message (a round of Bots, possibly on other computers): `won`, `lost`, `abstained`, `promoted` or
+/// `superseded`, and the tier the Bot bid when its computer did. Other Bots' bids are never in it. A tier this version does not know is left out; the outcome is kept.
+struct TeamTriageRound: Equatable, Sendable {
+    let outcome: String
+    var tier: String? = nil
+}
+
 /// One message the Bot's host judged, as its maintainer reads the log. `state` is where the task stands now: it settles after the verdict.
 /// `approval` is what became of a reply held for approval: `held`, `approved`, `rejected`, `timeout` or `superseded`; a code this version does not know is left out.
+/// `round` is what became of the Bot among several that could answer; a message that was no such round, or an outcome this version does not know, has none.
 struct TeamTriageItem: Decodable, Equatable, Identifiable, Sendable {
     let taskId: String
     let conversationId: String
@@ -46,13 +54,15 @@ struct TeamTriageItem: Decodable, Equatable, Identifiable, Sendable {
     let state: String
     var conversationTitle: String? = nil
     var approval: String? = nil
+    var round: TeamTriageRound? = nil
     var id: String { taskId }
 
-    init(taskId: String, conversationId: String, messageId: String, createdAt: Double, triage: TeamTriageVerdict, state: String, conversationTitle: String? = nil, approval: String? = nil) {
+    init(taskId: String, conversationId: String, messageId: String, createdAt: Double, triage: TeamTriageVerdict, state: String, conversationTitle: String? = nil, approval: String? = nil, round: TeamTriageRound? = nil) {
         self.taskId = taskId; self.conversationId = conversationId; self.messageId = messageId; self.createdAt = createdAt
-        self.triage = triage; self.state = state; self.conversationTitle = conversationTitle; self.approval = approval
+        self.triage = triage; self.state = state; self.conversationTitle = conversationTitle; self.approval = approval; self.round = round
     }
-    private enum CodingKeys: String, CodingKey { case taskId, conversationId, messageId, createdAt, triage, state, conversationTitle, approval }
+    private enum CodingKeys: String, CodingKey { case taskId, conversationId, messageId, createdAt, triage, state, conversationTitle, approval, round }
+    private enum RoundKeys: String, CodingKey { case outcome, tier }
     /// A row is never half read: what this version needs of it is there and known, or the row is not one.
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -64,7 +74,12 @@ struct TeamTriageItem: Decodable, Equatable, Identifiable, Sendable {
         }
         let title = (try? values.decodeIfPresent(String.self, forKey: .conversationTitle)).flatMap { $0.isEmpty ? nil : $0 }
         let approval = (try? values.decodeIfPresent(String.self, forKey: .approval)).flatMap { TeamTriageRules.approvals.contains($0) ? $0 : nil }
-        self.init(taskId: taskId, conversationId: conversationId, messageId: messageId, createdAt: createdAt, triage: triage, state: state, conversationTitle: title, approval: approval)
+        // A round is its outcome and, when the Bot's computer bid, its tier: what cannot be read as that is no round, and never a reason to drop the row.
+        let round = (try? values.nestedContainer(keyedBy: RoundKeys.self, forKey: .round)).flatMap { inner -> TeamTriageRound? in
+            guard let outcome = try? inner.decode(String.self, forKey: .outcome), TeamTriageRules.roundOutcomes.contains(outcome) else { return nil }
+            return TeamTriageRound(outcome: outcome, tier: (try? inner.decodeIfPresent(String.self, forKey: .tier)).flatMap { TeamTriageRules.bidTiers.contains($0) ? $0 : nil })
+        }
+        self.init(taskId: taskId, conversationId: conversationId, messageId: messageId, createdAt: createdAt, triage: triage, state: state, conversationTitle: title, approval: approval, round: round)
     }
 }
 
@@ -100,6 +115,9 @@ enum TeamTriageRules {
     static let reasons: Set<String> = ["quiet_hours", "cooldown", "keyword", "addressed", "below_threshold", "between_thresholds", "above_threshold", "decision_unavailable", "message_unavailable"]
     /// What became of a reply held for approval: still waiting, posted, dropped by the maintainer, dropped when its time ran out, dropped for a newer message.
     static let approvals: Set<String> = ["held", "approved", "rejected", "timeout", "superseded"]
+    /// What became of a Bot among several that could answer one message, and the tiers a Bot bids (best first in the contract); the service's lists, in `execution-vectors.json`.
+    static let roundOutcomes: Set<String> = ["won", "lost", "abstained", "promoted", "superseded"]
+    static let bidTiers: Set<String> = ["addressed", "rule", "run", "may_decline", "decline"]
     /// Every state a task can be in, and where it leaves the judged message. A state this table does not have is a row this version cannot read.
     static let outcomes: [String: TeamTriageOutcome] = [
         "completed": .replied, "declined": .silent, "cancelled": .silent, "queued": .waiting, "running": .waiting, "waiting": .waiting, "awaiting_approval": .approval,
@@ -144,6 +162,11 @@ enum TeamTriageRules {
         default: nil
         }
     }
+    /// What became of the Bot in a round of several, in words; nothing for a message that was not one, or an outcome this version does not know.
+    static func roundKey(_ round: TeamTriageRound?) -> String? {
+        guard let round, roundOutcomes.contains(round.outcome) else { return nil }
+        return "teams_triage_round_" + round.outcome
+    }
     /// The SF Symbol of a verdict: stay silent, answer, or leave it to the Bot.
     static func symbol(_ action: String) -> String {
         switch action {
@@ -160,6 +183,7 @@ enum TeamTriageRules {
         "teams_triage_reason_between_thresholds", "teams_triage_reason_above_threshold", "teams_triage_reason_decision_unavailable", "teams_triage_reason_message_unavailable",
         "teams_triage_state_replied", "teams_triage_state_silent", "teams_triage_state_failed", "teams_triage_state_waiting", "teams_task_waiting_approval",
         "teams_approval_reply_approved", "teams_approval_reply_declined", "teams_triage_approval_timeout", "teams_triage_approval_superseded",
+        "teams_triage_round_won", "teams_triage_round_lost", "teams_triage_round_abstained", "teams_triage_round_promoted", "teams_triage_round_superseded",
         "teams_triage_probability %lld", "teams_list_refresh", "common_retry", "common_close",
     ]
 

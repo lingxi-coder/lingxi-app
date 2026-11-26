@@ -269,6 +269,9 @@ enum TeamExecutionContract {
     static let listItemBytes = 500, listChanges = 20
     /// The most rows one page of a Bot's auto-reply log has.
     static let triageLimit = 50
+    /// The most Bots of a Chat that may answer one message nobody asked them about, and what a message that mentions only people does to them (`TeamConversationAutoReply`).
+    static let maxRepliesLimit = 5
+    static let humanMentionModes: Set<String> = ["quiet", "judge"]
     /// The longest reply a maintainer may approve with their own text, trimmed, in UTF-8 bytes.
     static let heldReplyBytes = 8192
     /// One change of a shared-list write exactly as the service accepts it.
@@ -361,8 +364,12 @@ enum TeamExecutionContract {
             try shape(["sharedBotId", "expectedRevision"]); try id("sharedBotId")
             guard integer(payload["expectedRevision"], minimum: 1) != nil else { try fail() }
         case "setConversationPolicy", "setConversationAutoReply":
-            try shape(["conversationId", "expectedRevision", "targets"]); try id("conversationId"); try ids("targets", minimum: 0)
+            // The two settings of the Chat's auto-reply are left out by a caller that does not change them; present, each is whole and known.
+            let autoReply = action == "setConversationAutoReply"
+            try shape(["conversationId", "expectedRevision", "targets"], autoReply ? ["maxReplies", "humanMentions"] : []); try id("conversationId"); try ids("targets", minimum: 0)
             guard integer(payload["expectedRevision"], minimum: 0) != nil else { try fail() }
+            if payload["maxReplies"] != nil { guard let most = integer(payload["maxReplies"], minimum: 1), most <= Double(maxRepliesLimit) else { try fail() } }
+            if payload["humanMentions"] != nil { guard let mode = payload["humanMentions"] as? String, humanMentionModes.contains(mode) else { try fail() } }
         case "setConversationBotScope":
             // The scope is the whole narrowing or `null`; a key that is left out is not a lifted narrowing.
             try shape(["conversationId", "sharedBotId", "expectedRevision", "scope"]); try id("conversationId"); try id("sharedBotId")

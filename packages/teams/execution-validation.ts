@@ -21,6 +21,9 @@ export const DOCUMENT_BYTES = 256 * 1024;
 export const LIST_ITEM_BYTES = 500, LIST_CHANGES = 20;
 /** The most rows one page of a Bot's auto-reply log has. */
 export const TRIAGE_LOG_LIMIT = 50;
+/** How many Bots of a Chat may answer one message nobody asked them about (1 to `MAX_REPLIES_LIMIT`, 1 when never set), and what a message that mentions only people does to them. Here, with the checks that use them, so that `execution.ts` re-exports. */
+export const MAX_REPLIES_LIMIT = 5;
+export const HUMAN_MENTION_MODES = ['quiet', 'judge'] as const;
 /** The longest reply a maintainer may approve with their own text, as the service accepts it: trimmed, with something in it, in UTF-8 bytes. */
 export const HELD_REPLY_BYTES = 8192;
 const itemText: Check = v => typeof v === 'string' && v.trim().length > 0 && bytes(v) <= LIST_ITEM_BYTES && !v.includes('\0');
@@ -81,7 +84,9 @@ const payloads: Record<string, Check> = {
   listHistory: shape({ sharedBotId: id, beforeRevision: optional(positive) }),
   resolveOperation: shape({ taskId: id, operationId: v => typeof v === 'string' && /^[a-f0-9]{64}$/u.test(v), resolution: oneOf('succeeded', 'failed') }),
   setConversationPolicy: shape({ conversationId: id, expectedRevision: integer, targets: list(id, 0, 8) }),
-  setConversationAutoReply: shape({ conversationId: id, expectedRevision: integer, targets: list(id, 0, 8) }),
+  // `maxReplies` and `humanMentions` are left out by a caller that does not change them.
+  setConversationAutoReply: shape({ conversationId: id, expectedRevision: integer, targets: list(id, 0, 8),
+    maxReplies: optional(v => integer(v) && (v as number) >= 1 && (v as number) <= MAX_REPLIES_LIMIT), humanMentions: optional(oneOf(...HUMAN_MENTION_MODES)) }),
   setConversationBotScope: shape({ conversationId: id, sharedBotId: id, expectedRevision: integer, scope: v => v === null || isBotScopeNarrowing(v) }),
   endTransfer: shape({ transferId: id }),
 };

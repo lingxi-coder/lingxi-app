@@ -1,4 +1,5 @@
-import { isMemberExecutionCommand } from './execution-validation.js';
+import { HUMAN_MENTION_MODES, isMemberExecutionCommand } from './execution-validation.js';
+export { HUMAN_MENTION_MODES, MAX_REPLIES_LIMIT } from './execution-validation.js';
 import type { BotScopeNarrowing, PublishedBotScope } from './bot-scope.js';
 export type { BotScopeEntry, BotScopeNarrowing, PublishedBotScope } from './bot-scope.js';
 /** Execution 2 contracts. No retired Bot keys or execution request adapters. */
@@ -75,12 +76,26 @@ export interface TaskTriage extends TriageVerdict { at: number }
  */
 export const APPROVAL_OUTCOMES = ['held', 'approved', 'rejected', 'timeout', 'superseded'] as const;
 export type ApprovalOutcome = typeof APPROVAL_OUTCOMES[number];
+/**
+ * What a Bot's host bids for a message of a reply round (B7), best first, and what became of a task in a round. `addressed` is the service's own tier (a person
+ * spoke to the Bot: a reply to it, or its name), which a host only sends for a task the service marked so; `decline` is an abstention. The service's `bidTiers` and
+ * `roundOutcomes` (`shared-bot-commands.mjs`) are the same lists.
+ */
+export const BID_TIERS = ['addressed', 'rule', 'run', 'may_decline', 'decline'] as const;
+export const ROUND_OUTCOMES = ['won', 'lost', 'abstained', 'promoted', 'superseded'] as const;
+export type BidTier = typeof BID_TIERS[number];
+export type RoundOutcome = typeof ROUND_OUTCOMES[number];
+/** What became of one Bot's task in the round of its message, for its maintainer's log: its own tier is shown, other Bots' bids never are. No `tier` when its Desktop did not bid. */
+export interface TaskRound { outcome: RoundOutcome; tier?: BidTier }
+export type HumanMentionMode = typeof HUMAN_MENTION_MODES[number];
 /** One message the Bot's host judged, as its maintainer reads the log. `state` is where the task stands now: it settles after the verdict. */
 export interface TriageLogItem {
   taskId: string; conversationId: string; messageId: string; createdAt: number; triage: TaskTriage; state: TaskState;
   conversationTitle?: string;
   /** Only when the Bot's reply was held for approval. */
   approval?: ApprovalOutcome;
+  /** Only when the message was a round of several Bots and it has been settled. */
+  round?: TaskRound;
 }
 /** A page of the log, newest verdict first; pass `nextCursor` back for the page after. */
 export interface TriageLogPage { items: TriageLogItem[]; nextCursor?: string }
@@ -180,7 +195,7 @@ export interface MemberExecutionPayloads {
   listHistory: { sharedBotId: string; beforeRevision?: number };
   setConversationPolicy: { conversationId: string; expectedRevision: number; targets: string[] };
   /** The Bots of this Chat that judge for themselves whether to answer its messages: each must be in the Chat and published to do so. */
-  setConversationAutoReply: { conversationId: string; expectedRevision: number; targets: string[] };
+  setConversationAutoReply: { conversationId: string; expectedRevision: number; targets: string[]; maxReplies?: number; humanMentions?: HumanMentionMode };
   /** What one Bot of this Chat may use here, within what it published; `null` lifts the narrowing. `expectedRevision` is the revision of that Bot's entry in `TeamConversation.botScopes` (0 when it has none). */
   setConversationBotScope: { conversationId: string; sharedBotId: string; expectedRevision: number; scope: BotScopeNarrowing | null };
   /** The maintainer takes an offered Bot back, or the member it was offered to declines it. */

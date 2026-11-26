@@ -1425,7 +1425,9 @@ const say = (actor, n, text = 'Does anyone know a quiet hotel near the station?'
   { action: 'mutate', teamId, generation: 1, conversationId: autoChat, messageId: `auto_msg_${n}`, changeId: `auto_chg_${n}`, operation: 'create', text });
 const autoTask = n => admissionId(`auto_msg_${n}`, 'sharedbot_01');
 const autoWatermark = async () => (await autoChatRef().get()).data().lastChangeSeq;
-const startAuto = async n => execute('startTask', { ...host, taskId: autoTask(n), expectedLastChangeSeq: await autoWatermark() });
+/** The Bot's host judged the message and bids to answer it; the Chat has one Bot, so its round is settled by that bid. */
+const bidAuto = (n, tier = 'run') => execute('bidReply', { ...host, taskId: autoTask(n), tier, source: 'decision' });
+const startAuto = async n => { await bidAuto(n); return execute('startTask', { ...host, taskId: autoTask(n), expectedLastChangeSeq: await autoWatermark() }); };
 const declined = started => ({ ...host, taskId: started.task.taskId, permitId: started.permitId, outcome: 'declined', text: '', finishedAt: now,
   inputGrantIds: started.inputs.map(g => g.grantId), outputAudience: { mode: 'published_inputs' }, usage: { status: 'missing' } });
 
@@ -1481,7 +1483,7 @@ test('auto-reply: the host declines a queued optional task once, and never an as
   const decline = { ...host, taskId: autoTask(1), reason: 'triage' };
   assert.deepEqual(await execute('declineTask', decline), { taskId: autoTask(1), state: 'declined' });
   assert.deepEqual(await execute('declineTask', decline), { taskId: autoTask(1), state: 'declined' }, 'a new command id finds it declined');
-  assert.equal((await startAuto(1)).execute, false);
+  assert.equal((await execute('startTask', { ...host, taskId: autoTask(1), expectedLastChangeSeq: await autoWatermark() })).execute, false);
   assert.equal((await taskData(autoTask(1))).declineReason, 'triage');
   const asked = await execute('submit', { conversationId: autoChat, messageId: 'asked_msg_1', changeId: 'asked_chg_1', text: 'Hotel?',
     targets: ['sharedbot_01'] }, member);
@@ -1490,8 +1492,8 @@ test('auto-reply: the host declines a queued optional task once, and never an as
 });
 test('auto-reply: a run that stays silent posts nothing and counts against the Bot daily limit', options, async () => {
   await autoGroup({ daily: 1 });
-  // Both are admitted before either runs: the limit is checked again when a run starts.
-  await say(member, 1); await say(other, 2);
+  // Both are admitted before either runs: the limit is checked again when a run starts. Each message's round is settled before the next one is written.
+  await say(member, 1); await bidAuto(1); await say(other, 2); await bidAuto(2);
   const started = await startAuto(1);
   assert.equal(started.execute, true); assert.equal(started.task.optional, true);
   await assert.rejects(execute('completeTask', { ...declined(started), text: 'I would rather not.' }));
@@ -1511,15 +1513,16 @@ test('auto-reply: a run that stays silent posts nothing and counts against the B
 });
 test('auto-reply: a later unasked task ends the earlier ones when it starts or is judged, never when it is revoked', options, async () => {
   await autoGroup();
-  await say(member, 1); await say(other, 2);
+  // Two chosen tasks wait for their starts (a round that has chosen is not ended by a newer message).
+  await say(member, 1); await bidAuto(1); await say(other, 2); await bidAuto(2);
   const later = await startAuto(2);
   assert.equal(later.execute, true, 'an earlier unasked task does not hold a later one back');
   assert.deepEqual([(await taskData(autoTask(1))).state, (await taskData(autoTask(1))).declineReason], ['declined', 'superseded']);
   await execute('completeTask', declined(later));
-  await say(member, 3); await say(other, 4);
+  await say(member, 3); await bidAuto(3); await say(other, 4); await bidAuto(4);
   await execute('declineTask', { ...host, taskId: autoTask(4), reason: 'revoked' });
   assert.equal((await taskData(autoTask(3))).state, 'queued', 'nothing judged message 3 with message 4: it is judged itself');
-  await say(member, 5);
+  await say(member, 5); await bidAuto(5);
   await execute('declineTask', { ...host, taskId: autoTask(5), reason: 'triage' });
   assert.deepEqual([(await taskData(autoTask(3))).state, (await taskData(autoTask(3))).declineReason], ['declined', 'superseded']);
 });

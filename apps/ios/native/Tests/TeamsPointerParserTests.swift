@@ -116,6 +116,20 @@ final class TeamsPointerParserTests: XCTestCase {
         XCTAssertNil(try TeamsPointerParser.parseConversation(id: "c1", data: document(), lastReadSeq: 0, millis: millis).autoReply)
     }
 
+    /// Bot v3 B7: how many Bots answer one message, and what a message that mentions only people does: kept when whole and known, left out when not, and the Chat still read.
+    func testTheTwoSettingsOfTheAutoReplyAreKeptWhenKnownAndLeftOutWhenNot() throws {
+        func auto(_ extra: [String: Any]) throws -> TeamConversationAutoReply? {
+            try TeamsPointerParser.parseConversation(id: "c1", data: document(["autoReply": ["revision": 2, "targets": ["sharedbot_helper"]].merging(extra) { _, new in new }]), lastReadSeq: 0, millis: millis).autoReply
+        }
+        XCTAssertEqual(try auto(["maxReplies": 3, "humanMentions": "judge"]), TeamConversationAutoReply(revision: 2, targets: ["sharedbot_helper"], maxReplies: 3, humanMentions: "judge"))
+        XCTAssertEqual(try auto(["maxReplies": 1, "humanMentions": "quiet"]), TeamConversationAutoReply(revision: 2, targets: ["sharedbot_helper"], maxReplies: 1, humanMentions: "quiet"))
+        XCTAssertEqual(try auto(["maxReplies": 5])?.maxReplies, 5)
+        XCTAssertEqual(try auto([:]), TeamConversationAutoReply(revision: 2, targets: ["sharedbot_helper"]), "never set: the Chat reads as the default")
+        for maxReplies: Any in [0, 6, -1, 1.5, "2", NSNull(), true] { XCTAssertNil(try auto(["maxReplies": maxReplies])?.maxReplies, "\(maxReplies)") }
+        for humanMentions: Any in ["ignore", "Quiet", "", 7, NSNull()] { XCTAssertNil(try auto(["humanMentions": humanMentions])?.humanMentions, "\(humanMentions)") }
+        XCTAssertEqual(try auto(["maxReplies": 99, "humanMentions": "a_new_mode"]), TeamConversationAutoReply(revision: 2, targets: ["sharedbot_helper"]), "the targets are still read")
+    }
+
     func testAWholeDocumentBecomesTheAppConversation() throws {
         let value = try TeamsPointerParser.parseConversation(id: "c1", data: document(), lastReadSeq: 2, millis: millis)
         XCTAssertEqual(value, TeamMessageConversation(

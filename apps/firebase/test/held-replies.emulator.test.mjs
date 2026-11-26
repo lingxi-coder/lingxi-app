@@ -43,8 +43,18 @@ const say = (actor, chat, n, text = asking) => messages.execute(actor, { action:
 /** A member asks the Bot by name: a task somebody asked for. */
 const ask = (actor, chat, n, sharedBotId = botId) => execute('submit', { conversationId: chat, messageId: messageId(chat, n), changeId: `chg_${chat.slice(-4)}_${String(n).padStart(4, '0')}`,
   text: asking, targets: [sharedBotId] }, actor).then(receipt => receipt.tasks[0].taskId);
-const start = async (chat, taskId, actor = owner, deploymentHost = host) => execute('startTask', { ...deploymentHost, taskId,
-  expectedLastChangeSeq: (await chatRef(chat).get()).data().lastChangeSeq }, actor);
+/** A task nobody asked for starts only once its round has chosen it: its Bot bids `run` and every other Bot of the round abstains (a task already decided is left as it is). */
+const win = async taskId => {
+  const task = await taskData(taskId);
+  if (!task.roundId || task.round) return;
+  const round = (await db.doc(`teams/${teamId}/replyRounds/${task.roundId}`).get()).data();
+  for (const candidate of round.candidates) {
+    const mine = candidate.sharedBotId === botId;
+    await execute('bidReply', { ...(mine ? host : memberHost), taskId: candidate.taskId, tier: candidate.taskId === taskId ? 'run' : 'decline', source: 'rule' }, mine ? owner : member);
+  }
+};
+const start = async (chat, taskId, actor = owner, deploymentHost = host) => { await win(taskId); return execute('startTask', { ...deploymentHost, taskId,
+  expectedLastChangeSeq: (await chatRef(chat).get()).data().lastChangeSeq }, actor); };
 const result = (started, more = {}, deploymentHost = host) => ({ ...deploymentHost, taskId: started.task.taskId, permitId: started.permitId, outcome: 'completed', text: draft,
   finishedAt: now, inputGrantIds: started.inputs.map(grant => grant.grantId), outputAudience: { mode: 'published_inputs' }, usage: { status: 'missing' }, ...more });
 const hold = (started, more = {}, actor = owner, commandId) => execute('holdReply', result(started, more), actor, commandId);
@@ -310,7 +320,13 @@ test('supersede: a new message of the Chat ends a held reply nobody asked for; a
 });
 
 test('supersede: a Bot\'s own message and a message of another Chat leave it; a member asking a Bot ends it', options, async () => {
-  const held = await heldUnasked(1);
+  // The Chat lets both Bots answer, and both bid to.
+  await execute('setConversationAutoReply', { conversationId: trip, expectedRevision: 1, targets: [botId, otherBotId], maxReplies: 2 }, member);
+  await say(member, trip, 1);
+  await execute('bidReply', { ...host, taskId: taskOf(trip, 1), tier: 'run', source: 'rule' });
+  await execute('bidReply', { ...memberHost, taskId: taskOf(trip, 1, otherBotId), tier: 'run', source: 'rule' }, member);
+  const held = { taskId: taskOf(trip, 1) };
+  await hold(await start(trip, held.taskId));
   // The other Bot answers the Chat, and the member writes to the Bot DM: neither is a new message of this Chat by a member.
   const otherStarted = await start(trip, taskOf(trip, 1, otherBotId), member, memberHost);
   await execute('completeTask', result(otherStarted, { text: 'Lunch is at noon.' }, memberHost), member);

@@ -3558,6 +3558,11 @@
     <string name="teams_triage_state_waiting">処理中</string>
     <string name="teams_triage_approval_timeout">時間内に承認されず</string>
     <string name="teams_triage_approval_superseded">新しいメッセージのため破棄</string>
+    <string name="teams_triage_round_won">返信役に選ばれた</string>
+    <string name="teams_triage_round_lost">別の Bot が選ばれた</string>
+    <string name="teams_triage_round_abstained">参加せず</string>
+    <string name="teams_triage_round_promoted">別の Bot に代わって担当</string>
+    <string name="teams_triage_round_superseded">新しいメッセージのため中止</string>
     <string name="teams_triage_probability_fmt">確率 %1$d%%</string>
     <string name="teams_held_title">あなたの承認待ち</string>
     <string name="teams_held_expires_fmt">%1$sに承認されていない場合は破棄されます</string>

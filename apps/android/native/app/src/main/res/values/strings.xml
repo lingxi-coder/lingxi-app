@@ -3558,6 +3558,11 @@
     <string name="teams_triage_state_waiting">进行中</string>
     <string name="teams_triage_approval_timeout">超时未批准</string>
     <string name="teams_triage_approval_superseded">因新消息而丢弃</string>
+    <string name="teams_triage_round_won">被选中回复</string>
+    <string name="teams_triage_round_lost">已选择其他 Bot</string>
+    <string name="teams_triage_round_abstained">未参与</string>
+    <string name="teams_triage_round_promoted">递补其他 Bot</string>
+    <string name="teams_triage_round_superseded">因新消息而放弃</string>
     <string name="teams_triage_probability_fmt">概率 %1$d%%</string>
     <string name="teams_held_title">等待你批准</string>
     <string name="teams_held_expires_fmt">若未批准，%1$s丢弃</string>

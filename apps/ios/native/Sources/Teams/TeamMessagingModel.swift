@@ -496,9 +496,14 @@ final class TeamMessagingModel {
         guard selected == selection else { return }
         if let index = tasks.firstIndex(where: { $0.taskId == taskId }) { tasks[index] = result } else { tasks.append(result) }
     }
-    /// Sets which Bots of a Chat judge for themselves whether to answer it. The listener brings the new setting.
-    func setConversationAutoReply(_ conversationId: String, expectedRevision: Int, targets: [String]) async throws {
-        let _: TeamAutoReplyAck = try await execute("setConversationAutoReply", payload: ["conversationId": conversationId, "expectedRevision": expectedRevision, "targets": targets], life: lifecycle)
+    /// Sets which Bots of a Chat judge for themselves whether to answer it, and, when given, how many of them answer one message nobody asked them about (1 to 5)
+    /// and whether a message that mentions only people is judged like any other (`judge`) or is for them alone (`quiet`); what is left out is left as it is.
+    /// The listener brings the new setting.
+    func setConversationAutoReply(_ conversationId: String, expectedRevision: Int, targets: [String], maxReplies: Int? = nil, humanMentions: String? = nil) async throws {
+        var payload: [String: Any] = ["conversationId": conversationId, "expectedRevision": expectedRevision, "targets": targets]
+        if let maxReplies { payload["maxReplies"] = maxReplies }
+        if let humanMentions { payload["humanMentions"] = humanMentions }
+        let _: TeamAutoReplyAck = try await execute("setConversationAutoReply", payload: payload, life: lifecycle)
     }
     /// Sets what one Bot of a Chat may use here, within what it published: `scope` is the whole narrowing, `nil` lifts it. `expectedRevision` is the revision
     /// of that Bot's entry in the Chat (0 when it has none), so a change someone else made meanwhile is not written over. The listener brings the new setting.

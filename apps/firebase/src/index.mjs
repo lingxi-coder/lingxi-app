@@ -18,6 +18,7 @@ import { InboxStore } from './inbox-store.mjs';
 import { InboxDelivery } from './inbox-delivery.mjs';
 import { InboxJobs } from './inbox-jobs.mjs';
 import { HeldReplyJobs, becameHeld } from './held-reply-jobs.mjs';
+import { ReplyRoundJobs, becameCandidate, becameWinner } from './reply-round-jobs.mjs';
 import { mirrorFriendChat, mirrorFriendRead } from './friend-summary.mjs';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { defineSecret } from 'firebase-functions/params';
@@ -151,7 +152,8 @@ const enqueue = async (payload, id, delay = 0) => {
 const inbox = new InboxStore(teamsDb,Date.now,enqueue,cost=>info('inbox.fanout',cost));
 const delivery = new InboxDelivery({ db: teamsDb, pushStore, messaging: getMessaging(app), enqueue });
 const heldReplies = new HeldReplyJobs({ db: teamsDb, pushStore, messaging: getMessaging(app), enqueue });
-const jobs = new InboxJobs(inbox, delivery, enqueue, heldReplies);
+const replyRounds = new ReplyRoundJobs({ db: teamsDb, enqueue });
+const jobs = new InboxJobs(inbox, delivery, enqueue, heldReplies, replyRounds);
 const triggerOpts = {
   database: '(default)',
   region: 'us-central1',
@@ -272,6 +274,9 @@ const taskTrigger = (collection, kind) =>
     const work = [jobs.run({ type: 'task', uid: task.requester.uid, ref, taskId: e.params.taskId })];
     // A reply just held for its Bot's maintainer: its time limit and the maintainer's push. Only a Team holds replies.
     if (kind === 'team' && becameHeld(e.data.before.data(), e.data.after.data())) work.push(heldReplies.held(e.params.sourceId, e.params.taskId));
+    // A task that opens a reply round, and one that wins it: the round's two timers (`reply-round-jobs.mjs`). Only a Team has rounds.
+    if (kind === 'team' && becameCandidate(e.data.before.data(), e.data.after.data())) work.push(replyRounds.candidate(e.params.sourceId, e.params.taskId));
+    if (kind === 'team' && becameWinner(e.data.before.data(), e.data.after.data())) work.push(replyRounds.winner(e.params.sourceId, e.params.taskId));
     const results = await Promise.allSettled(work), failure = results.find(r => r.status === 'rejected');
     if (failure) throw failure.reason;
   });

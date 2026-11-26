@@ -4,6 +4,7 @@ import { parseDataRef } from './lingxi-data.js';
 import type { DocumentData, Firestore, FirestoreError } from 'firebase/firestore';
 import { ATTACHMENT_TYPES, type MessageAttachment } from './attachments.js';
 import { decodeBotScopes } from './bot-scope.js';
+import { HUMAN_MENTION_MODES, MAX_REPLIES_LIMIT } from './execution-validation.js';
 import type { BlockEntry, FriendCard, TeamOffer } from './friends.js';
 import type { ListApproval, ListApprovalChange, MessageScope, MessageSnapshot, TeamConversation, TeamMessage } from './messages.js';
 
@@ -270,7 +271,10 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
           if (value.kind === 'bot_dm' && value.participants.filter((principal: string) => principal.startsWith('shared_bot:')).length !== 1) throw invalidData();
           const readers = Array.isArray(value.memberUids) && value.memberUids.every((reader: unknown) => typeof reader === 'string') ? { readers: value.memberUids as string[] } : {};
           const auto = value.autoReply, autoReply = auto && Number.isSafeInteger(auto.revision) && Array.isArray(auto.targets) && auto.targets.every((target: unknown) => typeof target === 'string')
-            ? { autoReply: { revision: auto.revision as number, targets: auto.targets as string[] } } : {};
+            // A setting this version cannot read is left out, never a reason to hide the Chat: the Chat then reads as if it had never been set.
+            ? { autoReply: { revision: auto.revision as number, targets: auto.targets as string[],
+              ...(Number.isSafeInteger(auto.maxReplies) && auto.maxReplies >= 1 && auto.maxReplies <= MAX_REPLIES_LIMIT ? { maxReplies: auto.maxReplies as number } : {}),
+              ...((HUMAN_MENTION_MODES as readonly unknown[]).includes(auto.humanMentions) ? { humanMentions: auto.humanMentions as typeof HUMAN_MENTION_MODES[number] } : {}) } } : {};
           const botScopes = decodeBotScopes(value.botScopes);
           return { id: id, kind: value.kind, title: value.title, participants: value.participants, ...readers, ...autoReply, ...(botScopes ? { botScopes } : {}), lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq, lastReadSeq: readSeq.get(id) ?? 0, ...(!readSeq.has(id)?{unreadCount:0}:{}), ...(lastMessage ? { lastMessage } : {}) };
   }

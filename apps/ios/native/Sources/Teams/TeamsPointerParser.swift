@@ -91,7 +91,10 @@ enum TeamsPointerParser {
         // An unreadable setting reads as off: it must not hide the conversation.
         let auto = (data["autoReply"] as? [String: Any]).flatMap { value -> TeamConversationAutoReply? in
             guard let revision = safeInteger(value["revision"]), let targets = value["targets"] as? [String] else { return nil }
-            return TeamConversationAutoReply(revision: revision, targets: targets)
+            // A setting this version cannot read is left out, and the Chat reads as if it had never been set.
+            let most = safeInteger(value["maxReplies"]).flatMap { (1...TeamExecutionContract.maxRepliesLimit).contains($0) ? $0 : nil }
+            let mode = (value["humanMentions"] as? String).flatMap { TeamExecutionContract.humanMentionModes.contains($0) ? $0 : nil }
+            return TeamConversationAutoReply(revision: revision, targets: targets, maxReplies: most, humanMentions: mode)
         }
         return TeamMessageConversation(id: id, kind: kind, title: title, participants: participants, lastSeq: lastSeq, lastChangeSeq: lastChangeSeq,
                                        lastReadSeq: lastReadSeq, sharedBotId: sharedBotId, lastMessage: last, readers: data["memberUids"] as? [String], autoReply: auto,

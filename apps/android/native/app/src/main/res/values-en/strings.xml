@@ -3558,6 +3558,11 @@
     <string name="teams_triage_state_waiting">In progress</string>
     <string name="teams_triage_approval_timeout">Not approved in time</string>
     <string name="teams_triage_approval_superseded">Dropped for a newer message</string>
+    <string name="teams_triage_round_won">Chosen to answer</string>
+    <string name="teams_triage_round_lost">Another Bot was chosen</string>
+    <string name="teams_triage_round_abstained">Did not take part</string>
+    <string name="teams_triage_round_promoted">Took over for another Bot</string>
+    <string name="teams_triage_round_superseded">Ended by a newer message</string>
     <string name="teams_triage_probability_fmt">%1$d%% likely</string>
     <string name="teams_held_title">Waiting for your approval</string>
     <string name="teams_held_expires_fmt">Dropped %1$s if not approved</string>

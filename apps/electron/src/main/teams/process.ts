@@ -213,10 +213,8 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
         }
         // A result recorded by an earlier runtime has no per-attempt count.
         else exact(value,['version','type','status','cursor','text','finishedAt','dispatchedRequests','deniedTools','usage'],['document','attemptDispatchedRequests','visualization']);
-        const visualization = parseVisualizationArtifact(value.visualization);
-        if (value.visualization !== undefined && (!visualization || value.status !== 'completed'
-          || kind === 'run_private' || visualization.artifactId !== options.bootstrap.taskId
-          || Buffer.byteLength(visualization.parts[0].data.bundle.html) > 48 * 1024)) throw new Error('TEAM_HOST_PROTOCOL');
+        if (value.visualization !== undefined && (value.status !== 'completed' || kind === 'run_private')) throw new Error('TEAM_HOST_PROTOCOL');
+        const visualization = parseVisualizationArtifact(value.visualization, options.bootstrap.taskId);
         if (!cursor(value.cursor)
           || (['completed','failed','declined'].includes(value.status) && (typeof value.text !== 'string' || Buffer.byteLength(value.text) > 8192 || !Number.isSafeInteger(value.finishedAt)))
           || (value.status === 'declined' && (value.text !== '' || value.document !== undefined))

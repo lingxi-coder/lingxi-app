@@ -637,7 +637,10 @@ private fun MessageCell(
                         Modifier.semantics(mergeDescendants = true) {
                             if (canAct) customActions = buildList {
                                 add(CustomAccessibilityAction(reply) { onReply(message); true })
-                                if (editable) { add(CustomAccessibilityAction(edit) { onEdit(message); true }); add(CustomAccessibilityAction(recall) { onRecall(message); true }) }
+                                if (editable) {
+                                    if (message.visualization == null) add(CustomAccessibilityAction(edit) { onEdit(message); true })
+                                    add(CustomAccessibilityAction(recall) { onRecall(message); true })
+                                }
                                 if (message.text.isNotEmpty()) add(CustomAccessibilityAction(copy) { onCopy(message); true })
                             }
                         },
@@ -751,7 +754,7 @@ private fun MessageCell(
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
             DropdownMenuItem(text = { Text(reply) }, onClick = { menu = false; onReply(message) })
             if (editable) {
-                DropdownMenuItem(text = { Text(edit) }, onClick = { menu = false; onEdit(message) })
+                if (message.visualization == null) DropdownMenuItem(text = { Text(edit) }, onClick = { menu = false; onEdit(message) })
                 DropdownMenuItem(text = { Text(recall, color = MaterialTheme.colorScheme.error) }, onClick = { menu = false; onRecall(message) })
             }
             if (message.text.isNotEmpty()) DropdownMenuItem(text = { Text(copy) }, onClick = { menu = false; onCopy(message) })

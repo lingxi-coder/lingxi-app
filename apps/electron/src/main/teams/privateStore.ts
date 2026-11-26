@@ -3,6 +3,7 @@ import { constants, closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openS
 import { link, lstat, mkdir, open, readdir, rename, unlink } from 'node:fs/promises';
 import type { TeamRunResult, BotChatScope, TeamTaskCheckpoint } from './process.js';
 import type { TaskUsage } from '../../../../../packages/teams/execution.js';
+import { parseVisualizationArtifact } from '../../../../../packages/teams/visualization.js';
 import { dirname, join } from 'node:path';
 import { withProviderAccountLock } from '../provider-accounts.js';
 
@@ -336,7 +337,9 @@ export class TeamPrivateStore {
       if (!result || result.version !== 3 || result.type !== 'result' || !['completed','failed','declined'].includes(result.status)
         || result.status === 'declined' && (result.text !== '' || result.document !== undefined)
         || typeof result.text !== 'string' || Buffer.byteLength(result.text)>8192 || !Number.isSafeInteger(result.finishedAt) || !result.usage || !['missing','partial','complete'].includes(result.usage.status)) throw new Error('UNSAFE_TEAM_STORAGE');
-      return result as TeamRunResult;
+      const { visualization: rawVisualization, ...delivery } = result;
+      const visualization = result.status === 'completed' && parseVisualizationArtifact(rawVisualization, taskId);
+      return { ...delivery, ...(visualization ? { visualization } : {}) } as TeamRunResult;
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
   }
   saveDelivery(uid: string, value: SavedDelivery, expected?: SavedExecution): Promise<boolean> { return this.executionSerial(uid,value.taskId,async () => {

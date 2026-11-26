@@ -109,6 +109,9 @@ const teamVisualizations = process.env.LINGXI_DATASET_PAGES_BUCKET ? createTeamV
   db: teamsDb, bucket: getStorage(app).bucket(process.env.LINGXI_DATASET_PAGES_BUCKET),
   core: datasetGateway?.command, channels: process.env.LINGXI_TEAM_VISUALIZATION_CHANNELS,
 }) : undefined;
+export const pruneTeamVisualizations = onSchedule({ schedule: 'every 5 minutes', timeZone: 'Etc/UTC',
+  region: 'us-central1', memory: '256MiB', timeoutSeconds: 240, maxInstances: 1,
+  serviceAccount: pushServiceAccount }, async () => { await teamVisualizations?.sweep(); });
 const renderOrigin = process.env.LINGXI_DATASET_RENDER_ORIGIN;
 const useRenderSecret = datasetStaging || !!renderOrigin;
 const renderKey = defineSecret('LINGXI_DATASET_RENDER_KEY');

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TeamsApi } from './index.js';
 import { type SurfaceRequest, type SurfaceValue, VisualizationSurface } from './VisualizationSurface.js';
 import { VisualizationComposer } from './VisualizationComposer.js';
-import { type TeamVisualization, type VisualizationBundle, type VisualizationScope, visualizationLabels, visualizationRequest } from './visualization.js';
+import { type TeamVisualization, type VisualizationBundle, type VisualizationScope, observeVisualization, visualizationAccessLost, visualizationLabels, visualizationRequest } from './visualization.js';
 
 interface PageData {
   data: { records?: { reference: { revision: number; schemaVersion: number }; value: Record<string, unknown>; partition: string; archived: boolean }[] };
@@ -12,15 +12,13 @@ interface PageData {
 }
 type Patch = { record: string; changes: Record<string, unknown> };
 type Pending = { alias: string; patch: Patch; previous: Record<string, unknown>; changed: boolean; resolve(answer: boolean): void };
-const authorizationErrors = new Set(['DATA_ACCESS_REQUIRED', 'STALE_MEMBERSHIP', 'INVALID_SESSION', 'SIGN_IN_REQUIRED', 'DATA_NOT_FOUND']);
 const code = (error: unknown) => error instanceof Error ? error.message : 'DATA_UNAVAILABLE';
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 
-export function VisualizationMessage({ api, scope, visualization, online, locale, forwardTargets, participantName, onDraft }: {
+export function VisualizationMessage({ api, scope, visualization, online, locale, forwardTargets, participantName }: {
   api: TeamsApi; scope: VisualizationScope; visualization: TeamVisualization; online: boolean; locale: string;
   forwardTargets?: { id: string; title: string }[];
   participantName?(uid: string): string;
-  onDraft?(text: string): void;
 }) {
   const labels = visualizationLabels(locale);
   const { teamId, conversationId, generation } = scope;
@@ -35,9 +33,9 @@ export function VisualizationMessage({ api, scope, visualization, online, locale
   const root = useRef<HTMLDivElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const channel = useRef<(message: SurfaceValue) => void>();
-  const active = useRef(false);
+  const viewer = useRef<symbol>();
   const proposal = useRef<Pending>();
-  const watches = useRef(new Map<string, { snapshot: PageData; refreshSoon?: boolean }>());
+  const watches = useRef(new Map<string, { subscription: number; snapshot?: PageData; next: number }>());
   const aliases = useMemo(() => visualization.bindings.map(binding => binding.alias), [visualization.bindings]);
   const call = useCallback(<T,>(body: Record<string, unknown>) => visualizationRequest<T>(api, { teamId, conversationId, generation },
     { ...body, message, version }), [api, teamId, conversationId, generation, message, version]);
@@ -55,14 +53,14 @@ export function VisualizationMessage({ api, scope, visualization, online, locale
   }, []);
   useEffect(() => {
     if (!visible || !online) { setOpen(undefined); return; }
-    let live = true;
-    active.current = true;
+    const mounted = Symbol();
+    viewer.current = mounted;
     setError('');
-    void call<{ bundle: VisualizationBundle; state: unknown }>({ action: 'open' }).then(value => { if (live) setOpen(value); },
-      failure => { if (live) setError(code(failure)); });
+    void call<{ bundle: VisualizationBundle; state: unknown }>({ action: 'open' }).then(value => {
+      if (viewer.current === mounted) setOpen(value);
+    }, failure => { if (viewer.current === mounted) setError(code(failure)); });
     return () => {
-      live = false;
-      active.current = false;
+      viewer.current = undefined;
       watches.current.clear();
       proposal.current?.resolve(false);
       proposal.current = undefined;
@@ -71,6 +69,20 @@ export function VisualizationMessage({ api, scope, visualization, online, locale
     };
   }, [attempt, visible, online, call]);
 
+  const closeCard = useCallback((error: string) => {
+    viewer.current = undefined;
+    proposal.current?.resolve(false);
+    proposal.current = undefined;
+    setPending(undefined);
+    watches.current.clear();
+    setOpen(undefined);
+    setError(error);
+  }, []);
+  useEffect(() => {
+    if (!open) return;
+    return observeVisualization(api, { teamId, conversationId, generation }, { message, version, close: closeCard });
+  }, [open, api, teamId, conversationId, generation, message, version, closeCard]);
+
   useEffect(() => {
     if (!open) return;
     let alive = true, polling = false;
@@ -78,44 +90,57 @@ export function VisualizationMessage({ api, scope, visualization, online, locale
       if (polling || document.hidden) return;
       polling = true;
       try {
-        await call({ action: 'check' });
-        for (const [alias, watch] of watches.current) {
+        const due = [...watches.current].filter(([, watch]) => watch.next <= performance.now());
+        for (const [alias, watch] of due) {
           if (!alive) return;
-          const cursors = watch.snapshot.cursors;
-          if (cursors && !watch.refreshSoon) {
+          const previous = watch.snapshot;
+          if (!previous || watches.current.get(alias) !== watch) continue;
+          const cursors = previous.cursors;
+          if (cursors && watch.next !== 0) {
             try {
               const result = await data<{ cursors: string[]; changed: boolean; schemaVersion: number }>(alias, { action: 'changes', cursors });
-              if (!result.changed && result.schemaVersion === watch.snapshot.schemaVersion) {
-                watch.snapshot.cursors = result.cursors;
+              if (!alive) return;
+              if (watches.current.get(alias) !== watch) continue;
+              if (!result.changed && result.schemaVersion === previous.schemaVersion) {
+                previous.cursors = result.cursors;
+                watch.next = performance.now() + 12000;
                 continue;
               }
             } catch (failure) {
+              if (watches.current.get(alias) !== watch) continue;
               if (!['DATA_BACKFILL_REQUIRED', 'INVALID_DATA_REQUEST'].includes(code(failure))) throw failure;
             }
           }
-          const fresh = await data<PageData>(alias, { action: 'read', watch: true });
+          const fresh = await data<PageData>(alias, { action: 'read', watch: true }).catch(failure => {
+            if (watches.current.get(alias) === watch) throw failure;
+          });
+          if (!fresh) continue;
           if (!alive) return;
-          watch.refreshSoon = false;
-          if (JSON.stringify(fresh.data) !== JSON.stringify(watch.snapshot.data) || fresh.access !== watch.snapshot.access) {
-            channel.current?.({ type: 'data', value: { alias, value: fresh.data } });
+          if (watches.current.get(alias) !== watch) continue;
+          if (JSON.stringify(fresh.data) !== JSON.stringify(previous.data) || fresh.access !== previous.access) {
+            channel.current?.({ type: 'data', value: { alias, subscription: watch.subscription, value: fresh.data } });
           }
           watch.snapshot = fresh;
+          watch.next = performance.now() + (fresh.cursors ? 3000 : 30000);
         }
       } catch (failure) {
-        if (alive && authorizationErrors.has(code(failure))) {
-          active.current = false;
-          proposal.current?.resolve(false);
-          watches.current.clear();
-          setOpen(undefined);
-          setError(code(failure));
-        }
+        if (alive && visualizationAccessLost(failure)) closeCard(code(failure));
       } finally { polling = false; }
     }
-    const interval = window.setInterval(() => void tick(), 3000);
-    const refresh = () => { if (!document.hidden) void tick(); };
+    let timer: number;
+    async function schedule() {
+      await tick();
+      if (alive) timer = window.setTimeout(() => void schedule(), 3000 + Math.random() * 500);
+    }
+    timer = window.setTimeout(() => void schedule(), 3000 + Math.random() * 500);
+    const refresh = () => {
+      if (document.hidden) return;
+      for (const watch of watches.current.values()) watch.next = Math.min(watch.next, performance.now());
+      void tick();
+    };
     document.addEventListener('visibilitychange', refresh);
-    return () => { alive = false; window.clearInterval(interval); document.removeEventListener('visibilitychange', refresh); };
-  }, [open, data, call]);
+    return () => { alive = false; window.clearTimeout(timer); document.removeEventListener('visibilitychange', refresh); };
+  }, [open, data, closeCard]);
 
   useEffect(() => {
     if (pending && !dialog.current?.open) dialog.current?.showModal();
@@ -128,7 +153,7 @@ export function VisualizationMessage({ api, scope, visualization, online, locale
     setPending(undefined);
   }
 
-  async function patch(alias: string, raw: unknown): Promise<unknown> {
+  async function patch(alias: string, raw: unknown, mounted: symbol): Promise<unknown> {
     if (visualization.bindings.find(binding => binding.alias === alias)?.mode !== 'edit' || proposal.current
         || !object(raw) || typeof raw.record !== 'string' || !object(raw.changes) || !Object.keys(raw.changes).length) {
       throw new Error('DATA_ACCESS_REQUIRED');
@@ -137,18 +162,18 @@ export function VisualizationMessage({ api, scope, visualization, online, locale
     for (let attempt = 0; attempt < 2; attempt++) {
         const current = await data<PageData>(alias, { action: 'read', record: patch.record });
         const row = current.data.records?.[0];
-        if (!active.current || proposal.current || !row || row.archived || current.access !== 'edit') throw new Error('DATA_ACCESS_REQUIRED');
+      if (viewer.current !== mounted || proposal.current || !row || row.archived || current.access !== 'edit') throw new Error('DATA_ACCESS_REQUIRED');
         const accepted = await new Promise<boolean>(resolve => {
           const value = { alias, patch, previous: row.value, changed: attempt > 0, resolve };
           proposal.current = value;
           setPending(value);
         });
-        if (!accepted || !active.current) throw new Error('DATA_CANCELLED');
+        if (!accepted || viewer.current !== mounted) throw new Error('DATA_CANCELLED');
         try {
           const result = await data(alias, { action: 'patch', ...patch, partition: row.partition,
             expectedRevision: row.reference.revision, schemaVersion: current.schemaVersion }, crypto.randomUUID());
           const watch = watches.current.get(alias);
-          if (watch) watch.refreshSoon = true;
+          if (watch) watch.next = 0;
           return result;
         } catch (failure) {
           if (code(failure) !== 'DATA_CONFLICT' || attempt === 1) throw failure;
@@ -158,25 +183,40 @@ export function VisualizationMessage({ api, scope, visualization, online, locale
   }
 
   async function request(message: SurfaceRequest) {
-    if (!active.current) throw new Error('VISUALIZATION_UNAVAILABLE');
+    const mounted = viewer.current;
+    if (!mounted) throw new Error('VISUALIZATION_UNAVAILABLE');
     if (message.action === 'expand') { setExpanded(true); return; }
-    if (message.action === 'draft' && typeof message.text === 'string') { onDraft?.(message.text.slice(0, 2000)); return; }
     if (message.action === 'state' && Number.isSafeInteger(message.expected) && object(message.state)) {
       return call({ action: 'state', expected: message.expected, state: message.state });
     }
     const alias = message.alias;
     if (typeof alias !== 'string' || !aliases.includes(alias)) throw new Error('DATA_ACCESS_REQUIRED');
-    if (message.action === 'patch') return patch(alias, message.changes);
+    if (message.action === 'patch') return patch(alias, message.changes, mounted);
     if (message.action === 'read') {
       const result = await data<PageData>(alias, { action: 'read', after: message.after, block: message.block });
       return result.data;
     }
-    if (message.action === 'watch') {
+    const subscription = message.subscription;
+    if ((message.action === 'watch' || message.action === 'unwatch') && typeof subscription === 'number' && Number.isSafeInteger(subscription)) {
       const existing = watches.current.get(alias);
-      if (existing) return existing.snapshot.data;
-      const result = await data<PageData>(alias, { action: 'read', watch: true });
-      if (active.current) watches.current.set(alias, { snapshot: result });
-      return result.data;
+      if (message.action === 'unwatch') {
+        if (existing?.subscription === subscription) watches.current.delete(alias);
+        return;
+      }
+      if (existing?.subscription === subscription && existing.snapshot) return existing.snapshot.data;
+      const watch: { subscription: number; snapshot?: PageData; next: number } = { subscription, next: Infinity };
+      watches.current.set(alias, watch);
+      try {
+        const result = await data<PageData>(alias, { action: 'read', watch: true });
+        if (viewer.current === mounted && watches.current.get(alias) === watch) {
+          watch.snapshot = result;
+          watch.next = performance.now() + (result.cursors ? 3000 : 30000);
+        }
+        return result.data;
+      } catch (failure) {
+        if (watches.current.get(alias) === watch) watches.current.delete(alias);
+        throw failure;
+      }
     }
     throw new Error('INVALID_DATA_REQUEST');
   }
@@ -191,7 +231,7 @@ export function VisualizationMessage({ api, scope, visualization, online, locale
     </div>
     {error && <p role="status">{labels.unavailable} <button type="button" className="tw-link" onClick={() => setAttempt(value => value + 1)}>{labels.retry}</button></p>}
     {open && !error && <VisualizationSurface bundle={open.bundle} aliases={aliases} locale={locale} expanded={expanded}
-      initialState={open.state} channel={channel} request={request} onFailure={setError} />}
+      initialState={open.state} channel={channel} request={request} onFailure={closeCard} />}
     {open && forward && forwardTargets && <VisualizationComposer api={api} scope={scope} locale={locale}
       source={open.bundle} participantName={participantName ?? (uid => uid)}
       forward={{ targets: forwardTargets, close: () => setForward(false) }} />}

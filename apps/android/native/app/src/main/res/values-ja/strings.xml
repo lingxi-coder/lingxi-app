@@ -2955,13 +2955,13 @@
     <string name="friends_request_sent_to_fmt">%1$s さんに友だちリクエストを送信しました</string>
     <string name="friends_confirm_title_fmt">「%1$s」さんを友だちに追加しますか？</string>
     <string name="friends_remove_title_fmt">「%1$s」さんを友だちから削除しますか？</string>
+    <string name="friends_error_recipient_request_limit">相手の保留中のフレンドリクエストが上限に達しています。時間をおいてもう一度お試しください。</string>
     <string name="friends_block_title_fmt">「%1$s」さんをブロックしますか？</string>
     <string name="friends_since_fmt">%1$s から友だち</string>
     <string name="friends_section_offers">チームへの招待</string>
     <string name="friends_offer_invited_by_fmt">%1$s さんからの招待</string>
     <string name="friends_offer_expires_fmt">%1$sまで有効</string>
     <string name="friends_offer_expired">期限切れ</string>
-    <string name="friends_error_recipient_request_limit">相手の保留中のフレンドリクエストが上限に達しています。時間をおいてもう一度お試しください。</string>
     <string name="friends_offer_join">参加</string>
     <string name="friends_offer_dismiss">削除</string>
     <string name="friends_offer_joined_fmt">「%1$s」に参加しました</string>
@@ -3530,7 +3530,6 @@
     <string name="teams_visualization_add">可視化を追加</string>
     <string name="teams_visualization_alias">バインディング名</string>
     <string name="teams_visualization_apply">変更を適用</string>
-    <string name="teams_visualization_audience">共有先：%1$s</string>
     <string name="teams_visualization_building">固定スナップショットを作成中…</string>
     <string name="teams_visualization_collapse">折りたたむ</string>
     <string name="teams_visualization_confirm">データの変更を確認</string>
@@ -3551,4 +3550,7 @@
     <string name="teams_visualization_title">タイトル</string>
     <string name="teams_visualization_forward">可視化を転送</string>
     <string name="teams_visualization_destination">転送先のチャンネル</string>
+    <string name="teams_visualization_more">さらに表示</string>
+    <string name="teams_visualization_audience">共有先</string>
+    <string name="teams_visualization_audience_fmt">共有先：%1$s</string>
 </resources>

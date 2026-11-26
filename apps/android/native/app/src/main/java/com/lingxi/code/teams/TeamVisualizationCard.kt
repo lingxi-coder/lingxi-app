@@ -19,6 +19,9 @@ import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -37,6 +40,8 @@ import androidx.webkit.WebViewFeature
 import com.lingxi.code.R
 import java.util.Locale
 import java.util.UUID
+import kotlin.random.Random
+import kotlin.time.TimeSource
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.currentCoroutineContext
@@ -140,12 +145,15 @@ private fun send(reply: JavaScriptReplyProxy, packet: JSONObject) {
 
 private data class PatchProposal(val alias: String, val record: String, val previous: JSONObject, val updates: JSONObject,
     val conflict: Boolean, val answer: CompletableDeferred<Boolean>)
+private class WatchSubscription(val guestId: Long)
 
 @Composable
 internal fun TeamVisualizationCard(reference: TeamVisualizationReference, conversation: String, model: TeamMessagingModel,
     online: Boolean, destinations: List<TeamMessageConversation>, person: (String) -> String) {
     val dark = isSystemInDarkTheme()
     val coroutines = rememberCoroutineScope()
+    val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
+    val foreground = lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
     var opened by remember(reference) { mutableStateOf<JSONObject?>(null) }
     var height by remember(reference) { mutableIntStateOf(44) }
     var attempt by remember(reference) { mutableIntStateOf(0) }
@@ -159,6 +167,8 @@ internal fun TeamVisualizationCard(reference: TeamVisualizationReference, conver
     var proposal by remember(reference) { mutableStateOf<PatchProposal?>(null) }
     var submitting by remember(reference) { mutableStateOf(false) }
     val watches = remember(reference) { linkedMapOf<String, JSONObject>() }
+    val subscriptions = remember(reference) { mutableMapOf<String, WatchSubscription>() }
+    val refreshRequested = remember(reference) { mutableSetOf<String>() }
 
     fun approve(value: Boolean) {
         proposal?.answer?.complete(value)
@@ -170,6 +180,7 @@ internal fun TeamVisualizationCard(reference: TeamVisualizationReference, conver
         request("data", objectOf("alias" to alias, "request" to fields.put("action", action), "operation" to operation))
 
     suspend fun approvePatch(alias: String, raw: JSONObject): JSONObject {
+        val viewer = opened ?: throw TeamMessageFailure("DATA_ACCESS_REQUIRED")
         val record = raw.getString("record")
         val changes = raw.getJSONObject("changes")
         if (reference.bindings[alias] != "edit" || submitting || changes.length() == 0) throw TeamMessageFailure("DATA_ACCESS_REQUIRED")
@@ -178,14 +189,16 @@ internal fun TeamVisualizationCard(reference: TeamVisualizationReference, conver
             repeat(2) { retry ->
                 val now = data(alias, "read", objectOf("record" to record))
                 val row = now.getJSONObject("data").getJSONArray("records").getJSONObject(0)
-                if (opened == null || now.optString("access") != "edit" || row.optBoolean("archived")) throw TeamMessageFailure("DATA_ACCESS_REQUIRED")
+                if (opened !== viewer || now.optString("access") != "edit" || row.optBoolean("archived")) throw TeamMessageFailure("DATA_ACCESS_REQUIRED")
                 val answer = CompletableDeferred<Boolean>()
                 proposal = PatchProposal(alias, record, row.getJSONObject("value"), changes, retry != 0, answer)
-                if (!answer.await() || opened == null) throw TeamMessageFailure("DATA_CANCELLED")
+                if (!answer.await() || opened !== viewer) throw TeamMessageFailure("DATA_CANCELLED")
                 try {
-                    return data(alias, "patch", objectOf("record" to record, "changes" to changes,
+                    val result = data(alias, "patch", objectOf("record" to record, "changes" to changes,
                         "schemaVersion" to now.getLong("schemaVersion"), "expectedRevision" to row.getJSONObject("reference").getLong("revision"),
                         "partition" to row.getString("partition")), UUID.randomUUID().toString())
+                    if (alias in watches) refreshRequested.add(alias)
+                    return result
                 } catch (error: TeamMessageFailure) {
                     if (error.code != "DATA_CONFLICT" || retry != 0) throw error
                 }
@@ -205,51 +218,99 @@ internal fun TeamVisualizationCard(reference: TeamVisualizationReference, conver
             "read" -> data(alias, "read", objectOf("after" to packet.stringOrNull("after"),
                 "block" to packet.opt("block")?.takeUnless { it == JSONObject.NULL })).get("data")
             "watch" -> {
-                val snapshot = watches[alias] ?: data(alias, "read", objectOf("watch" to true))
-                watches[alias] = snapshot
-                snapshot.get("data")
+                val guestId = packet.getLong("subscription")
+                val existing = watches[alias]?.takeIf { subscriptions[alias]?.guestId == guestId }
+                if (existing != null) return existing.get("data")
+                val subscription = WatchSubscription(guestId)
+                subscriptions[alias] = subscription
+                watches.remove(alias)
+                try {
+                    val snapshot = data(alias, "read", objectOf("watch" to true))
+                    if (subscriptions[alias] == subscription) {
+                        watches[alias] = snapshot
+                        refreshRequested.add(alias)
+                    }
+                    snapshot.get("data")
+                } catch (error: Exception) {
+                    if (subscriptions[alias] == subscription) subscriptions.remove(alias)
+                    throw error
+                }
+            }
+            "unwatch" -> {
+                if (subscriptions[alias]?.guestId == packet.getLong("subscription")) {
+                    subscriptions.remove(alias)
+                    watches.remove(alias)
+                    refreshRequested.remove(alias)
+                }
+                JSONObject.NULL
             }
             "patch" -> approvePatch(alias, packet.getJSONObject("changes"))
             else -> throw TeamMessageFailure("INVALID_DATA_REQUEST")
         }
     }
 
-    LaunchedEffect(reference, online, attempt) {
+    LaunchedEffect(reference, online, foreground, attempt) {
         failed = false
-        if (!online) { opened = null; approve(false); return@LaunchedEffect }
+        if (!online || !foreground) { opened = null; approve(false); return@LaunchedEffect }
+        var detach: (() -> Unit)? = null
         try {
-            opened = request("open")
-            while (currentCoroutineContext().isActive) {
-                delay(3000)
-                request("check")
-                for ((alias, last) in watches.toList()) {
+            val mounted = request("open")
+            opened = mounted
+            detach = model.observeVisualization(conversation, reference.page, reference.version)
+            val clock = TimeSource.Monotonic.markNow()
+            val nextPoll = mutableMapOf<String, Long>()
+            while (currentCoroutineContext().isActive && opened === mounted) {
+                delay(Random.nextLong(3000, 3501))
+                if (opened !== mounted) break
+                model.checkVisualization(conversation, reference.page, reference.version)
+                val due = watches.mapNotNull { (alias, last) ->
+                    subscriptions[alias]?.takeIf {
+                        alias in refreshRequested || (nextPoll[alias] ?: 0) <= clock.elapsedNow().inWholeMilliseconds
+                    }?.let { Triple(alias, last, it) }
+                }
+                for ((alias, last, subscription) in due) {
+                    if (subscriptions[alias] != subscription) continue
+                    refreshRequested.remove(alias)
                     val cursors = last.optJSONArray("cursors")
                     if (cursors != null) {
                         val changes = try { data(alias, "changes", objectOf("cursors" to cursors)) }
                         catch (error: TeamMessageFailure) {
+                            if (subscriptions[alias] != subscription) continue
                             if (error.code !in setOf("DATA_BACKFILL_REQUIRED", "INVALID_DATA_REQUEST")) throw error
                             null
                         }
+                        if (subscriptions[alias] != subscription) continue
                         if (changes != null && !changes.getBoolean("changed")
                             && changes.optLong("schemaVersion") == last.optLong("schemaVersion")) {
                             last.put("cursors", changes.getJSONArray("cursors"))
+                            nextPoll[alias] = clock.elapsedNow().inWholeMilliseconds + 12000
                             continue
                         }
                     }
-                    val fresh = data(alias, "read", objectOf("watch" to true))
+                    val fresh = try { data(alias, "read", objectOf("watch" to true)) }
+                    catch (error: TeamMessageFailure) {
+                        if (subscriptions[alias] != subscription) continue
+                        throw error
+                    }
+                    if (subscriptions[alias] != subscription) continue
                     if (fresh.get("data").toString() != last.get("data").toString()) {
-                        emit?.invoke(surfacePacket("data", objectOf("alias" to alias, "value" to fresh.get("data"))))
+                        emit?.invoke(surfacePacket("data", objectOf("alias" to alias, "subscription" to subscription.guestId, "value" to fresh.get("data"))))
                     }
                     watches[alias] = fresh
+                    nextPoll[alias] = clock.elapsedNow().inWholeMilliseconds +
+                        if (fresh.optJSONArray("cursors") != null) 3000 else 30000
                 }
             }
         } catch (error: CancellationException) { throw error }
         catch (_: Exception) { failed = true }
         finally {
+            detach?.invoke()
             opened = null
             emit?.invoke(surfacePacket("suspend"))
             emit = null
             watches.clear()
+            subscriptions.clear()
+            refreshRequested.clear()
             approve(false)
         }
     }
@@ -277,18 +338,19 @@ internal fun TeamVisualizationCard(reference: TeamVisualizationReference, conver
                 TeamVisualizationSurface(load, height.coerceIn(32, if (expanded) 880 else 520), { emit = it }) { packet ->
                     when (packet.optString("type")) {
                         "height" -> height = packet.optInt("height", 44)
-                        "error" -> failed = true
+                        "error" -> { failed = true; opened = null }
                         "request" -> {
                             val id = packet.optLong("id", -1)
                             if (id >= 0) coroutines.launch {
+                                if (opened !== value) return@launch
                                 val result = try { objectOf("id" to id, "value" to handle(packet)) }
                                 catch (cancel: CancellationException) { throw cancel }
                                 catch (error: Exception) {
                                     val code = (error as? TeamMessageFailure)?.code ?: "DATA_UNAVAILABLE"
-                                    if (code in authorizationErrors) { failed = true; opened = null }
+                                    if (opened === value && code in authorizationErrors) { failed = true; opened = null }
                                     objectOf("id" to id, "error" to code)
                                 }
-                                emit?.invoke(surfacePacket("result", result))
+                                if (opened === value) emit?.invoke(surfacePacket("result", result))
                             }
                         }
                     }
@@ -301,7 +363,7 @@ internal fun TeamVisualizationCard(reference: TeamVisualizationReference, conver
         val selected = forwardTarget
         val audience = forwardAudience
         if (selected != null && audience != null) {
-            TeamVisualizationComposer(selected.id, model, person, audience, source = bundle, close = {
+            TeamVisualizationComposer(selected.id, model, person, audience, source = bundle, from = conversation, close = {
                 forwarding = false; forwardTarget = null; forwardAudience = null
             })
         } else {
@@ -316,7 +378,7 @@ internal fun TeamVisualizationCard(reference: TeamVisualizationReference, conver
                 confirmButton = {})
             LaunchedEffect(selected) {
                 if (selected != null) try {
-                    forwardAudience = model.visualization(selected.id, objectOf("action" to "audience"))
+                    forwardAudience = model.visualization(selected.id, objectOf("action" to "audience"), from = conversation)
                 } catch (cancel: CancellationException) { throw cancel }
                 catch (_: Exception) { forwardFailed = true; forwardTarget = null }
             }

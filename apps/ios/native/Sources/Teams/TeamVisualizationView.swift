@@ -34,14 +34,18 @@ struct TeamVisualizationView: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.locale) private var locale
+    @Environment(\.scenePhase) private var scenePhase
     @State private var payload: [String: Any]?
     @State private var height: CGFloat = 44
     @State private var expanded = false
     @State private var forward = false
     @State private var error: String?
     @State private var attempt = 0
+    @State private var mountID = UUID()
     @State private var ship: (([String: Any]) -> Void)?
     @State private var watches: [String: [String: Any]] = [:]
+    @State private var watchSubscriptions: [String: WatchSubscription] = [:]
+    @State private var refreshRequested: Set<String> = []
     @State private var edit: Edit?
     @State private var handlingEdit = false
 
@@ -81,7 +85,7 @@ struct TeamVisualizationView: View {
         }
         .visualizationPanel()
         .accessibilityIdentifier("teams.visualization." + (reference.page?.id ?? "unavailable"))
-        .task(id: TaskKey(offline: model.offline, attempt: attempt)) { await mount() }
+        .task(id: TaskKey(offline: model.offline, attempt: attempt, foreground: scenePhase == .active)) { await mount() }
         .onChange(of: expanded) { _, value in ship?(["type": "layout", "value": ["expanded": value]]) }
         .onChange(of: colorScheme) { _, _ in ship?(["type": "layout", "value": ["theme": theme]]) }
         .onDisappear { retire() }
@@ -93,13 +97,20 @@ struct TeamVisualizationView: View {
         .sheet(item: $edit) { proposal in editSheet(proposal).interactiveDismissDisabled() }
     }
 
-    private struct TaskKey: Equatable { let offline: Bool; let attempt: Int }
+    private struct TaskKey: Equatable { let offline: Bool; let attempt: Int; let foreground: Bool }
+    private struct WatchSubscription: Equatable {
+        let guestID: Int
+        let token = UUID()
+    }
 
     private func retire() {
+        mountID = UUID()
         ship?(["type": "suspend"])
         ship = nil
         payload = nil
         watches.removeAll()
+        watchSubscriptions.removeAll()
+        refreshRequested.removeAll()
         cancelEdit()
     }
 
@@ -125,24 +136,46 @@ struct TeamVisualizationView: View {
 
     private func mount() async {
         retire()
-        guard !model.offline else { return }
+        guard !model.offline, scenePhase == .active, let page = reference.page else { return }
+        let mounted = mountID
         error = nil
         do {
             let opened = try await request("open")
             try Task.checkCancellation()
+            guard mountID == mounted else { return }
             guard let bundle = opened["bundle"], let state = opened["state"] else {
                 throw TeamMessageFailure(code: "INVALID_DATA")
             }
+            let detach = model.observeVisualization(conversation: conversation, message: page.id, version: page.version)
+            defer { detach() }
             payload = ["bundle": bundle, "aliases": reference.bindings.map(\.alias),
-                       "state": state, "theme": theme, "locale": locale.identifier]
-            while !Task.isCancelled {
-                try await Task.sleep(for: .seconds(3))
-                _ = try await request("check")
-                for (alias, snapshot) in watches {
-                    let next = try await refresh(alias: alias, previous: snapshot)
-                    try Task.checkCancellation()
-                    guard watches[alias] != nil else { continue }
-                    watches[alias] = next
+                       "state": state, "theme": theme, "locale": locale.identifier(.bcp47), "expanded": expanded]
+            let clock = ContinuousClock()
+            var nextPoll: [String: ContinuousClock.Instant] = [:]
+            while !Task.isCancelled && mountID == mounted {
+                try await Task.sleep(for: .milliseconds(Int.random(in: 3_000...3_500)))
+                guard mountID == mounted else { return }
+                try await model.checkVisualization(conversation: conversation, message: page.id, version: page.version)
+                let due = watches.compactMap { alias, snapshot -> (String, [String: Any], WatchSubscription)? in
+                    guard let subscription = watchSubscriptions[alias],
+                          refreshRequested.contains(alias) || (nextPoll[alias].map { $0 <= clock.now } ?? true) else { return nil }
+                    return (alias, snapshot, subscription)
+                }
+                for (alias, snapshot, subscription) in due {
+                    guard watchSubscriptions[alias] == subscription else { continue }
+                    refreshRequested.remove(alias)
+                    do {
+                        let (next, changed) = try await refresh(alias: alias, previous: snapshot)
+                        try Task.checkCancellation()
+                        guard watchSubscriptions[alias] == subscription else { continue }
+                        if changed, let values = next["data"] as? NSDictionary, !values.isEqual(snapshot["data"]) {
+                            ship?(["type": "data", "value": ["alias": alias, "subscription": subscription.guestID, "value": values]])
+                        }
+                        watches[alias] = next
+                        nextPoll[alias] = clock.now.advanced(by: .seconds(next["cursors"] is [String] ? changed ? 3 : 12 : 30))
+                    } catch {
+                        if watchSubscriptions[alias] == subscription { throw error }
+                    }
                 }
             }
         } catch is CancellationError {
@@ -154,24 +187,20 @@ struct TeamVisualizationView: View {
         }
     }
 
-    private func refresh(alias: String, previous: [String: Any]) async throws -> [String: Any] {
+    private func refresh(alias: String, previous: [String: Any]) async throws -> ([String: Any], Bool) {
         if let cursors = previous["cursors"] as? [String] {
             do {
                 let response = try await data(alias, "changes", fields: ["cursors": cursors])
                 if response["changed"] as? Bool == false && response["schemaVersion"] as? Int == previous["schemaVersion"] as? Int {
                     var snapshot = previous
                     snapshot["cursors"] = response["cursors"]
-                    return snapshot
+                    return (snapshot, false)
                 }
             } catch let failure as TeamMessageFailure where ["DATA_BACKFILL_REQUIRED", "INVALID_DATA_REQUEST"].contains(failure.code) {
                 // The next read establishes a new cursor under the current grant.
             }
         }
-        let snapshot = try await data(alias, "read", fields: ["watch": true])
-        if let values = snapshot["data"] as? NSDictionary, !values.isEqual(previous["data"]) {
-            ship?(["type": "data", "value": ["alias": alias, "value": values]])
-        }
-        return snapshot
+        return (try await data(alias, "read", fields: ["watch": true]), true)
     }
 
     private func handle(_ packet: [String: Any]) {
@@ -179,14 +208,19 @@ struct TeamVisualizationView: View {
         case "height":
             if let value = packet["height"] as? Double, value.isFinite { height = CGFloat(min(4096, max(32, value))) }
         case "error":
+            retire()
             error = String(localized: "teams_data_unavailable")
         case "request":
             guard let id = packet["id"] as? Int else { return }
+            let receiver = mountID
             Task { @MainActor in
+                guard mountID == receiver else { return }
                 do {
                     let result = try await respond(packet)
+                    guard mountID == receiver else { return }
                     ship?(["type": "result", "value": ["id": id, "value": result]])
                 } catch {
+                    guard mountID == receiver else { return }
                     ship?(["type": "result", "value": ["id": id, "error": (error as? TeamMessageFailure)?.code ?? "DATA_UNAVAILABLE"]])
                 }
             }
@@ -203,11 +237,30 @@ struct TeamVisualizationView: View {
         guard let alias = packet["alias"] as? String, reference.bindings.contains(where: { $0.alias == alias }) else {
             throw TeamMessageFailure(code: "DATA_ACCESS_REQUIRED")
         }
-        if action == "watch" {
-            if let saved = watches[alias]?["data"] { return saved }
-            let snapshot = try await data(alias, "read", fields: ["watch": true])
-            watches[alias] = snapshot
-            return snapshot["data"] ?? NSNull()
+        if (action == "watch" || action == "unwatch"), let guestID = packet["subscription"] as? Int {
+            if action == "unwatch" {
+                if watchSubscriptions[alias]?.guestID == guestID {
+                    watchSubscriptions[alias] = nil
+                    watches[alias] = nil
+                    refreshRequested.remove(alias)
+                }
+                return NSNull()
+            }
+            if watchSubscriptions[alias]?.guestID == guestID, let saved = watches[alias]?["data"] { return saved }
+            let subscription = WatchSubscription(guestID: guestID)
+            watchSubscriptions[alias] = subscription
+            watches[alias] = nil
+            do {
+                let snapshot = try await data(alias, "read", fields: ["watch": true])
+                if watchSubscriptions[alias] == subscription {
+                    watches[alias] = snapshot
+                    refreshRequested.insert(alias)
+                }
+                return snapshot["data"] ?? NSNull()
+            } catch {
+                if watchSubscriptions[alias] == subscription { watchSubscriptions[alias] = nil }
+                throw error
+            }
         }
         if action == "read" {
             let fields = packet.filter { ["after", "block"].contains($0.key) && !($0.value is NSNull) }
@@ -224,9 +277,10 @@ struct TeamVisualizationView: View {
     }
 
     private func confirmPatch(alias: String, record: String, updates: [String: Any]) async throws -> [String: Any] {
+        let receiver = mountID
         for attempt in 0..<2 {
             let snapshot = try await data(alias, "read", fields: ["record": record])
-            guard payload != nil, snapshot["access"] as? String == "edit",
+            guard mountID == receiver, payload != nil, snapshot["access"] as? String == "edit",
                   let records = (snapshot["data"] as? [String: Any])?["records"] as? [[String: Any]],
                   let recordData = records.first, recordData["archived"] as? Bool != true,
                   let revision = (recordData["reference"] as? [String: Any])?["revision"],
@@ -238,10 +292,11 @@ struct TeamVisualizationView: View {
                 edit = Edit(alias: alias, record: record, before: value, changes: updates,
                             confirmed: { continuation.resume(returning: $0) }, conflict: attempt != 0)
             }
-            guard accepted, payload != nil else { throw TeamMessageFailure(code: "DATA_CANCELLED") }
+            guard accepted, mountID == receiver, payload != nil else { throw TeamMessageFailure(code: "DATA_CANCELLED") }
             do {
                 let result = try await data(alias, "patch", fields: ["record": record, "changes": updates,
                     "expectedRevision": revision, "schemaVersion": schema, "partition": partition], operation: UUID().uuidString)
+                if watches[alias] != nil { refreshRequested.insert(alias) }
                 return result
             } catch let failure as TeamMessageFailure where failure.code == "DATA_CONFLICT" && attempt == 0 {
                 continue

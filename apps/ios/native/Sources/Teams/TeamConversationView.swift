@@ -423,7 +423,7 @@ struct TeamConversationView: View {
                             TeamMessageCell(
                                 message: message, grouped: grouped, context: context, quote: quote(of: message, byID: byID, context: context),
                                 onReply: locked ? nil : { startReply($0) },
-                                onEdit: context.isMine(message) && context.participant && message.decision == nil ? { beginEdit($0) } : nil,
+                                onEdit: context.isMine(message) && context.participant && message.decision == nil && message.kind != "visualization" ? { beginEdit($0) } : nil,
                                 onRecall: context.isMine(message) && context.participant && message.decision == nil ? { recalling = $0 } : nil)
                             .id(row.key)
                         }

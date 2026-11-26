@@ -1,5 +1,6 @@
 import { isResourceRef, type ResourceRef } from './dataset-resource.js';
 import type { TeamsApi } from './index.js';
+import { teamsText } from './i18n.js';
 
 type Page = Extract<ResourceRef, { kind: 'pageVersion' }>;
 export type VisualizationDataRef = Exclude<ResourceRef, Page>;
@@ -34,6 +35,7 @@ export type VisualizationAudience = { audience: Record<string, number>; audience
 const id = /^[A-Za-z0-9_-]{1,64}$/u;
 const validMode = (value: unknown): value is VisualizationMode => value === 'pinned' || value === 'live' || value === 'edit';
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+const fields = (value: Record<string, unknown>, ...allowed: string[]) => Object.keys(value).every(key => allowed.includes(key));
 
 export function parseVisualization(value: unknown, messageId: string): TeamVisualization | undefined {
   if (!object(value) || !isResourceRef(value.reference) || value.reference.kind !== 'pageVersion'
@@ -63,36 +65,103 @@ export type VisualizationArtifact = {
     bindings: { alias: string; messageId: string; sourceAlias?: string }[] } }];
 };
 
-export function parseVisualizationArtifact(value: unknown): VisualizationArtifact | undefined {
+export function parseVisualizationArtifact(value: unknown, taskId?: string): VisualizationArtifact | undefined {
   if (!object(value) || typeof value.artifactId !== 'string' || !id.test(value.artifactId)
-      || typeof value.name !== 'string' || !Array.isArray(value.parts) || value.parts.length !== 1) return undefined;
+      || (taskId !== undefined && value.artifactId !== taskId) || typeof value.name !== 'string'
+      || !value.name.trim() || value.name !== value.name.trim() || value.name.length > 80
+      || !fields(value, 'artifactId', 'name', 'parts') || !Array.isArray(value.parts) || value.parts.length !== 1) return undefined;
   const part = value.parts[0];
-  if (!object(part) || part.mediaType !== 'application/json' || !object(part.data) || part.data.version !== 1
-      || !object(part.data.bundle) || typeof part.data.bundle.title !== 'string' || value.name !== part.data.bundle.title
-      || typeof part.data.bundle.html !== 'string' || !Array.isArray(part.data.bindings) || part.data.bindings.length > 4) return undefined;
-  const bindings = part.data.bindings;
+  if (!object(part) || part.mediaType !== 'application/json' || !fields(part, 'mediaType', 'data')
+      || !object(part.data) || part.data.version !== 1 || !fields(part.data, 'version', 'bundle', 'bindings')) return undefined;
+  const { bundle, bindings } = part.data;
+  const encoder = new TextEncoder();
+  if (!object(bundle) || value.name !== bundle.title || typeof bundle.html !== 'string' || !bundle.html.trim()
+      || encoder.encode(bundle.html).byteLength > 48 * 1024 || !fields(bundle, 'title', 'html', 'assets')
+      || !Array.isArray(bindings) || bindings.length > 4) return undefined;
+  if (bundle.assets !== undefined) {
+    const mimes = ['image/png', 'image/jpeg', 'image/webp', 'text/css', 'text/javascript'];
+    if (!object(bundle.assets) || Object.keys(bundle.assets).length > 32
+        || Object.entries(bundle.assets).some(([key, asset]) => !/^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63}$/u.test(key)
+          || !object(asset) || typeof asset.mime !== 'string' || !mimes.includes(asset.mime)
+          || typeof asset.data !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/u.test(asset.data) || !fields(asset, 'mime', 'data'))
+        || encoder.encode(JSON.stringify(bundle)).byteLength > 2 * 1024 * 1024) return undefined;
+  }
   if (bindings.some(entry => !object(entry) || typeof entry.alias !== 'string' || !id.test(entry.alias)
       || typeof entry.messageId !== 'string' || !id.test(entry.messageId)
+      || !fields(entry, 'alias', 'messageId', 'sourceAlias')
       || (entry.sourceAlias !== undefined && (typeof entry.sourceAlias !== 'string' || !id.test(entry.sourceAlias))))) return undefined;
+  if (new Set(bindings.map(entry => entry.alias)).size !== bindings.length) return undefined;
   return value as unknown as VisualizationArtifact;
 }
 
 export function visualizationLabels(locale: string) {
-  const lang = locale.toLowerCase();
-  if (lang.startsWith('zh')) return {
-    add: '添加可视化', forward: '转发可视化', destination: '目标频道', preview: '预览', title: '标题', import: '导入 HTML', source: 'HTML', send: '发送', close: '关闭',
-    cancel: '取消', audience: '分享给', alias: '绑定名', choose: '选择数据', selected: '已选数据', retry: '重试',
-    expand: '展开', collapse: '收起', unavailable: '可视化无法打开', confirm: '确认数据更改', change: '提交更改',
-    conflict: '记录已更新。请核对当前值后提交。', current: '当前值', next: '新值', field: '字段',
-    none: '纯 HTML', mine: '个人数据', team: '团队数据', shared: '频道已共享', fields: '可见字段', partitions: '可见分区',
-    pinned: '固定快照', live: '查看最新', edit: '共同编辑', remove: '移除', building: '正在生成固定快照…',
-  };
+  const t = teamsText(locale);
   return {
-    add: 'Add visualization', forward: 'Forward visualization', destination: 'Destination channel', preview: 'Preview', title: 'Title', import: 'Import HTML', source: 'HTML', send: 'Send', close: 'Close',
-    cancel: 'Cancel', audience: 'Share with', alias: 'Binding name', choose: 'Choose data', selected: 'Selected data', retry: 'Retry',
-    expand: 'Expand', collapse: 'Collapse', unavailable: 'Visualization unavailable', confirm: 'Confirm data changes', change: 'Apply changes',
-    conflict: 'This record changed. Review the current values before applying.', current: 'Current value', next: 'New value', field: 'Field',
-    none: 'HTML only', mine: 'Personal data', team: 'Team data', shared: 'Shared in this channel', fields: 'Visible fields', partitions: 'Visible partitions',
-    pinned: 'Fixed snapshot', live: 'View latest', edit: 'Edit together', remove: 'Remove', building: 'Preparing a fixed snapshot…',
+    add: t('teams_visualization_add'), forward: t('teams_visualization_forward'), destination: t('teams_visualization_destination'),
+    preview: t('teams_visualization_preview'), title: t('teams_visualization_title'), import: t('teams_visualization_import'),
+    source: 'HTML', send: t('teams_visualization_send'), close: t('common_close'), cancel: t('common_cancel'),
+    audience: (names: string) => t('tw_dataset_audience_fmt', names), alias: t('teams_visualization_alias'),
+    choose: t('tw_dataset_add'), selected: t('teams_visualization_source'), retry: t('teams_visualization_retry'),
+    expand: t('teams_visualization_expand'), collapse: t('teams_visualization_collapse'), unavailable: t('tw_visualization_unavailable'),
+    confirm: t('teams_visualization_confirm'), change: t('teams_visualization_apply'), conflict: t('teams_visualization_conflict'),
+    current: t('tw_visualization_current'), next: t('tw_visualization_next'), field: t('tw_visualization_field'),
+    none: t('tw_visualization_html_only'), mine: t('teams_visualization_personal'), team: t('teams_visualization_team'),
+    shared: t('teams_visualization_shared'), fields: t('teams_visualization_fields'), partitions: t('teams_visualization_partitions'),
+    pinned: t('tw_dataset_fixed'), live: t('tw_dataset_live'), edit: t('teams_visualization_edit'),
+    remove: t('teams_visualization_remove'), building: t('teams_visualization_building'), more: t('tw_dataset_more'),
   };
+}
+
+const visualScopes = new WeakMap<Pick<TeamsApi, 'datasets'>, Map<string, (card: CardObserver) => () => void>>();
+const authErrors = new Set(['DATA_ACCESS_REQUIRED', 'STALE_MEMBERSHIP', 'INVALID_SESSION', 'SIGN_IN_REQUIRED', 'DATA_NOT_FOUND']);
+export const visualizationAccessLost = (error: unknown) => error instanceof Error && authErrors.has(error.message);
+type CardObserver = { message: string; version: string; close(error: string): void };
+
+/** One membership check per group of visible cards, with no requests while the tab is hidden. */
+export function observeVisualization(api: Pick<TeamsApi, 'datasets'>, scope: VisualizationScope, card: CardObserver) {
+  const scopes = visualScopes.get(api) ?? new Map();
+  visualScopes.set(api, scopes);
+  const key = JSON.stringify([scope.teamId, scope.conversationId, scope.generation]);
+  const existing = scopes.get(key);
+  if (existing) return existing(card);
+  const observers = new Set<CardObserver>();
+  let running = false;
+  async function refresh() {
+    if (running || document.hidden) return;
+    running = true;
+    const all = [...observers];
+    try {
+      for (let start = 0; observers.size && start < all.length; start += 40) {
+        const group = all.slice(start, start + 40).filter(item => observers.has(item));
+        if (!group.length) continue;
+        try {
+          const { active } = await visualizationRequest<{ active: boolean[] }>(api, scope, {
+            action: 'checkBatch', cards: group.map(({ message, version }) => ({ message, version })),
+          });
+          group.forEach((item, index) => {
+            if (active[index] === false && observers.has(item)) item.close('DATA_ACCESS_REQUIRED');
+          });
+        } catch (failure) {
+          if (visualizationAccessLost(failure)) group.forEach(item => {
+            if (observers.has(item)) item.close((failure as Error).message);
+          });
+        }
+      }
+    } finally { running = false; }
+  }
+  const timer = window.setInterval(() => void refresh(), 12000);
+  const visibility = () => { if (!document.hidden) void refresh(); };
+  document.addEventListener('visibilitychange', visibility);
+  function add(observer: CardObserver) {
+    observers.add(observer);
+    return () => {
+      observers.delete(observer);
+      if (observers.size) return;
+      scopes.delete(key);
+      document.removeEventListener('visibilitychange', visibility);
+      window.clearInterval(timer);
+    };
+  }
+  scopes.set(key, add);
+  return add(card);
 }

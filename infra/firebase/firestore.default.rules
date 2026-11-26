@@ -186,6 +186,7 @@ service cloud.firestore {
           allow get, list: if inConversation(tid, cid);
           allow create: if maySpeak(tid, cid) && isNewMessage(tid, cid, mid);
           allow update: if maySpeak(tid, cid) && request.auth.uid == resource.data.author.uid
+            && resource.data.kind != 'visualization'
             && (isEdit(tid, cid, mid) || isRecall(tid, cid, mid));
         }
         match /changes/{id} {

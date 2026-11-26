@@ -1015,6 +1015,24 @@ test('a result its own run is delivering is not sent a second time by a discover
 });
 function frames(lines:unknown[]){const child=new EventEmitter() as ChildProcessWithoutNullStreams;Object.assign(child,{stdin:new PassThrough(),stdout:new PassThrough(),stderr:new PassThrough(),exitCode:null,kill:()=>{}});
  child.stdin.once('data',()=>{setImmediate(()=>{for(const line of lines)child.stdout.emit('data',Buffer.from(JSON.stringify(line)+'\n'));child.emit('close',0);});});return ()=>child;}
+test('an invalid visualization binding leaves a completed Bot reply deliverable as text', async () => {
+ const taskId = 'task00001', scope = { teamId, sharedBotId, conversationId, sessionEpoch: 1 };
+ for (const alias of ['order_rows', 'order rows']) {
+  const visualization = { artifactId: taskId, name: 'Orders', parts: [{ mediaType: 'application/json',
+   data: { version: 1, bundle: { title: 'Orders', html: '<p>Orders</p>' }, bindings: [{ alias, messageId: 'orders-msg' }] },
+  }] };
+  const result = await runTeamHost({ executable: '/mock', home: '/private-home', tmp: '/private-tmp',
+   signal: new AbortController().signal, assertCurrent: () => {},
+   bootstrap: { version: 3, type: 'inspect_result', storageRoot: '/private-root', workerExecutable: '/worker', scope, taskId },
+   spawnProcess: frames([{ version: 3, type: 'result', status: 'completed', cursor, text: 'Orders ready', finishedAt: 1,
+    dispatchedRequests: 1, deniedTools: 0, usage: { status: 'missing' }, visualization }]),
+  });
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') return;
+  assert.equal(result.text, 'Orders ready');
+  assert.deepEqual(result.visualization, alias === 'order_rows' ? visualization : undefined);
+ }
+});
 test('the private process reads a checkpoint and a waiting result only for the bootstrap that may produce them',async()=>{
  const scope={teamId,sharedBotId,conversationId,sessionEpoch:1},base={executable:'/mock',home:'/private-home',tmp:'/private-tmp',signal:new AbortController().signal,assertCurrent:()=>{}};
  const boot=(type:any,extra:Record<string,unknown>={})=>({version:3 as const,type,storageRoot:'/private-root',workerExecutable:'/worker',scope,taskId:'task00001',...extra});

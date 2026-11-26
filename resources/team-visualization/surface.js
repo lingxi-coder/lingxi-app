@@ -1,10 +1,14 @@
+import { maxCardImagePixels, rasterPixels } from './raster.js';
+
 const root = document.querySelector('#surface');
 const byId = new Map(), metadata = new WeakMap(), canvasRevisions = new WeakMap();
+const selectSelections = new WeakMap();
+const maxCanvases = 8, maxCanvasPixels = 8 * 1024 * 1024, maxDrawCommands = 6000;
 const htmlTags = new Set('div span section article header footer aside h1 h2 h3 h4 h5 h6 p pre code strong em b i small u s mark sub sup br hr ul ol li dl dt dd table thead tbody tfoot tr th td caption colgroup col form fieldset legend label input button select option optgroup textarea output progress meter details summary canvas img figure figcaption style'.split(' '));
 const svgTags = new Map('svg g path line circle rect ellipse polyline polygon text tspan title desc defs symbol use clipPath mask linearGradient radialGradient stop pattern'.split(' ').map(tag => [tag.toLowerCase(), tag]));
 const namespaces = { svg: 'http://www.w3.org/2000/svg', html: 'http://www.w3.org/1999/xhtml' };
 const formTypes = new Set(['text', 'search', 'number', 'range', 'checkbox', 'radio', 'date', 'time', 'color', 'email', 'tel', 'button', 'submit']);
-const allowedAttributes = new Set('id class style title role tabindex name type placeholder autocomplete spellcheck min max step minlength maxlength size rows cols width height disabled hidden selected for open multiple required readonly colspan rowspan scope align lang dir value checked alt viewbox preserveaspectratio x y x1 x2 y1 y2 cx cy r rx ry d points transform fill fill-opacity fill-rule stroke stroke-width stroke-linecap stroke-linejoin stroke-dasharray stroke-opacity opacity text-anchor dominant-baseline font-size font-family font-weight offset stop-color stop-opacity gradientunits gradienttransform fx fy clip-path mask'.split(' '));
+const allowedAttributes = new Set('id class style title role tabindex name type placeholder autocomplete spellcheck min max step minlength maxlength size rows cols width height disabled hidden selected for open multiple required readonly form colspan rowspan scope align lang dir value checked alt viewbox preserveaspectratio x y x1 x2 y1 y2 cx cy r rx ry d points transform fill fill-opacity fill-rule stroke stroke-width stroke-linecap stroke-linejoin stroke-dasharray stroke-opacity opacity text-anchor dominant-baseline font-size font-family font-weight offset stop-color stop-opacity gradientunits gradienttransform fx fy clip-path mask'.split(' '));
 const svgAttributes = new Map([['viewbox', 'viewBox'], ['preserveaspectratio', 'preserveAspectRatio'],
   ['gradientunits', 'gradientUnits'], ['gradienttransform', 'gradientTransform']]);
 const drawMethods = new Set('clearRect fillRect strokeRect fillText strokeText beginPath closePath moveTo lineTo arc arcTo ellipse rect roundRect bezierCurveTo quadraticCurveTo fill stroke clip save restore translate rotate scale setTransform resetTransform setLineDash'.split(' '));
@@ -12,24 +16,44 @@ const drawProperties = new Set('fillStyle strokeStyle lineWidth font textAlign t
 let send;
 let worker;
 let images = {};
+const imagePixels = new Map();
+let admittedImagePixels = 0;
+
+function imageSource(value, budget) {
+  const source = Object.hasOwn(images, value) ? images[value] : value;
+  if (!source.startsWith('data:image/') || budget.imageCount >= 16) return;
+  let pixels = imagePixels.get(source);
+  if (pixels === undefined) {
+    if (imagePixels.size >= 32 || budget.imageProbes >= 16) return;
+    budget.imageProbes++;
+    pixels = rasterPixels(source);
+    if (admittedImagePixels + pixels > maxCardImagePixels) pixels = 0;
+    imagePixels.set(source, pixels);
+    admittedImagePixels += pixels;
+  }
+  if (!pixels || budget.imagePixels + pixels > maxCardImagePixels) return;
+  budget.imageCount++;
+  budget.imagePixels += pixels;
+  return source;
+}
 let frameSeen = false;
 let lastHeight = 0;
+let budgetedCanvases = new Map();
 
 function styleSafe(text) {
   return !/@import|@font-face|\\|url\(\s*['"]?\s*(?!#)/iu.test(text);
 }
-function safeAttribute(element, name, value) {
+function safeAttribute(element, name, value, budget) {
   const lower = name.toLowerCase();
-  if (value.length > 32_768 || lower.startsWith('on')) return;
+  if (typeof value !== 'string' || value.length > 32_768 || lower.startsWith('on')) return;
   if (lower === 'style' && !styleSafe(value)) return;
   if (lower === 'type' && element.localName === 'input' && !formTypes.has(value.toLowerCase())) return;
   if (lower === 'autocomplete') return;
-  if (element.localName === 'canvas' && ['width', 'height'].includes(lower)) {
-    value = String(Math.max(1, Math.min(2048, Number.parseInt(value, 10) || 1)));
-  }
+  if (element.localName === 'canvas' && ['width', 'height'].includes(lower)) return;
   if (lower === 'src' && element.localName === 'img') {
-    if (Object.hasOwn(images, value)) element.setAttribute('src', images[value]);
-    else if (/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+=*$/u.test(value)) element.setAttribute('src', value);
+    const source = imageSource(value, budget);
+    if (!source) element.removeAttribute('src');
+    else if (element.getAttribute('src') !== source) element.setAttribute('src', source);
     return;
   }
   if (element.localName === 'use' && (lower === 'href' || lower === 'xlink:href') && /^#[A-Za-z0-9_-]+$/u.test(value)) {
@@ -43,19 +67,56 @@ function safeAttribute(element, name, value) {
   }
 }
 
-function paint(canvas, drawing) {
-  if (!drawing || canvasRevisions.get(canvas) === drawing.revision || !Array.isArray(drawing.commands)) return;
+function canvasSize(attributes) {
+  const dimension = (value, fallback) => value === undefined ? fallback :
+    Math.max(1, Math.min(2048, Number.parseInt(value, 10) || 1));
+  return [dimension(attributes.width, 300), dimension(attributes.height, 150)];
+}
+function planCanvases(nodes, sizes, budget) {
+  for (const item of nodes) {
+    if (!item) continue;
+    if (item.tag === 'canvas' && !sizes.has(item.id) && sizes.size < maxCanvases) {
+      const size = canvasSize(item.attributes ?? {});
+      const pixels = size[0] * size[1];
+      if (budget.pixels + pixels <= maxCanvasPixels) {
+        sizes.set(item.id, size);
+        budget.pixels += pixels;
+      }
+    }
+    if (item.children) planCanvases(item.children, sizes, budget);
+  }
+}
+function paint(canvas, item, budget) {
+  const size = budget.sizes.get(item.id);
+  if (!size) {
+    if (canvas.width !== 1) canvas.width = 1;
+    if (canvas.height !== 1) canvas.height = 1;
+    canvasRevisions.delete(canvas);
+    return;
+  }
+  budget.canvases.set(item.id, canvas);
+  const [width, height] = size, drawing = item.canvas, commands = drawing?.commands;
+  const sized = canvas.width === width && canvas.height === height;
+  const current = sized && canvasRevisions.get(canvas) === drawing?.revision;
+  const redraw = Array.isArray(commands) && !current;
+  const work = redraw ? commands.length : 0;
+  if (!sized) {
+    canvas.width = 1;
+    canvas.height = height;
+    canvas.width = width;
+  }
+  if (!redraw || budget.commands + work > maxDrawCommands) return;
+  budget.commands += work;
   canvasRevisions.set(canvas, drawing.revision);
-  const width = Math.min(2048, canvas.width), height = Math.min(2048, canvas.height);
-  if (width !== canvas.width || height !== canvas.height) { canvas.width = width; canvas.height = height; }
+  canvas.width = width; // Reset the accumulated transform and clip.
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
-  canvas.width = width; // Reset the accumulated transform and clip.
-  for (const item of drawing.commands.slice(0, 6000)) {
+  for (const item of commands) {
     if (!Array.isArray(item)) continue;
     const [method, ...args] = item;
     try {
-      if (method === 'set' && drawProperties.has(args[0]) && ['number', 'string'].includes(typeof args[1])) {
+      if (method === 'set' && drawProperties.has(args[0]) &&
+          (Number.isFinite(args[1]) || typeof args[1] === 'string' && args[1].length <= 2048)) {
         ctx[args[0]] = args[1];
       } else if (drawMethods.has(method) && args.length <= 9 && args.every(value =>
         typeof value === 'number' || typeof value === 'boolean' || typeof value === 'string' && value.length <= 2048
@@ -66,7 +127,7 @@ function paint(canvas, drawing) {
   }
 }
 
-function reconcile(parent, nodes, seen, svg = false) {
+function reconcile(parent, nodes, seen, budget, svg = false) {
   let next = parent.firstChild;
   for (const item of nodes) {
     if (!item || !Number.isSafeInteger(item.id) || seen.has(item.id)) continue;
@@ -88,16 +149,28 @@ function reconcile(parent, nodes, seen, svg = false) {
       const css = (item.children ?? []).map(child => child.text ?? '').join('');
       if (element.textContent !== css) element.textContent = styleSafe(css) ? css : '';
     } else {
+      const attributes = item.attributes ?? {};
       for (const attribute of Array.from(element.attributes)) {
-        if (!Object.keys(item.attributes ?? {}).some(key => key.toLowerCase() === attribute.name.toLowerCase())
+        if (!(tag === 'canvas' && ['width', 'height'].includes(attribute.name)) && !Object.keys(attributes).some(key => key.toLowerCase() === attribute.name.toLowerCase())
             && !['autocomplete', 'href'].includes(attribute.name)) element.removeAttribute(attribute.name);
       }
-      for (const [key, value] of Object.entries(item.attributes ?? {})) safeAttribute(element, key, value);
+      for (const [key, value] of Object.entries(attributes)) safeAttribute(element, key, value, budget);
       if (tag === 'input') element.autocomplete = 'off';
-      reconcile(element, item.children ?? [], seen, childSvg);
+      reconcile(element, item.children ?? [], seen, budget, childSvg);
+      if (tag === 'select' && Array.isArray(item.selected)) {
+        const options = Array.from(element.options);
+        const selection = JSON.stringify([item.selected, options.map(option => metadata.get(option))]);
+        if (selectSelections.get(element) !== selection) {
+          if (element.multiple) {
+            const selected = new Set(item.selected);
+            options.forEach((option, index) => { option.selected = selected.has(index); });
+          } else element.selectedIndex = item.selected[0] ?? -1;
+          selectSelections.set(element, selection);
+        }
+      }
       if (item.value !== undefined && element.value !== item.value && element !== document.activeElement) element.value = item.value;
       if (item.checked !== undefined && element.checked !== item.checked) element.checked = item.checked;
-      if (tag === 'canvas') paint(element, item.canvas);
+      if (tag === 'canvas') paint(element, item, budget);
     }
     if (element === next) next = next.nextSibling;
     else parent.insertBefore(element, next);
@@ -115,7 +188,7 @@ function measure() {
 function receive(message) {
   if (!message || typeof message !== 'object') return;
   if (message.type === 'initialize' && !worker) {
-    const { bundle, aliases, state, theme, locale } = message.value;
+    const { bundle, aliases, state, theme, locale, expanded } = message.value;
     const assets = Object.entries(bundle.assets ?? {});
     const scripts = Object.fromEntries(assets.filter(([, asset]) => asset.mime === 'text/javascript')
       .map(([key, asset]) => [key, textAsset(asset)]));
@@ -129,15 +202,29 @@ function receive(message) {
     worker.onmessage = ({ data }) => {
       if (data.type === 'frame' && Array.isArray(data.nodes)) {
         const seen = new Set();
-        reconcile(root, data.nodes, seen);
+        const nextCanvasSizes = new Map();
+        planCanvases(data.nodes, nextCanvasSizes, { pixels: 0 });
+        // Release the previous frame's backing stores before allocating new ones.
+        for (const [id, canvas] of budgetedCanvases) {
+          const size = nextCanvasSizes.get(id);
+          if (size && size[0] === canvas.width && size[1] === canvas.height) continue;
+          canvas.width = 1;
+          canvas.height = 1;
+          canvasRevisions.delete(canvas);
+        }
+        const canvases = new Map();
+        reconcile(root, data.nodes, seen, {
+          sizes: nextCanvasSizes, canvases, commands: 0, imageCount: 0, imagePixels: 0, imageProbes: 0,
+        });
+        budgetedCanvases = canvases;
         for (const id of byId.keys()) if (!seen.has(id)) byId.delete(id);
         if (!frameSeen) { frameSeen = true; send?.({ type: 'rendered' }); }
         measure();
       } else if (data.type === 'request' || data.type === 'error') send?.(data);
     };
     document.documentElement.dataset.theme = theme.mode;
-    worker.postMessage({ type: 'initialize', value: { html: (css && styleSafe(css) ? '<style>' + css + '</style>' : '') + bundle.html,
-      aliases, scripts, state, theme, locale, width: root.clientWidth } });
+    worker.postMessage({ type: 'initialize', value: { html: bundle.html, css: styleSafe(css) ? css : '',
+      aliases, scripts, state, theme, locale, expanded, width: root.clientWidth } });
   } else if (worker && ['result', 'data', 'layout', 'suspend'].includes(message.type)) {
     if (message.type === 'layout' && message.value.theme) document.documentElement.dataset.theme = message.value.theme.mode;
     worker.postMessage(message);
@@ -159,8 +246,10 @@ for (const kind of ['click', 'input', 'change', 'submit', 'keydown', 'keyup', 'p
       event.preventDefault();
     }
     const value = typeof node.value === 'string' ? node.value.slice(0, 32_768) : undefined;
+    const selected = node.localName === 'select' && ['input', 'change'].includes(kind) ?
+      Array.from(node.options).flatMap((option, index) => option.selected ? [index] : []) : undefined;
     const rect = node.getBoundingClientRect();
-    worker?.postMessage({ type: 'event', value: { id, kind, value, checked: node.checked,
+    worker?.postMessage({ type: 'event', value: { id, kind, value, selected, checked: node.checked,
       key: event.key, code: event.code, button: event.button, buttons: event.buttons,
       clientX: event.clientX, clientY: event.clientY, offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top } });
   });

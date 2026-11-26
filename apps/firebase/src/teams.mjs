@@ -1,4 +1,5 @@
 import { LingxiDataError } from './lingxi-data.mjs';
+import { retireTeamVisualizations } from './team-visualization-storage.mjs';
 import { FieldValue } from 'firebase-admin/firestore';
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
@@ -208,6 +209,7 @@ export class TeamsStore {
         if (role !== 'owner') fail(403, 'OWNER_REQUIRED');
         const members = await tx.get(ref.collection('members').limit(TEAM_MEMBER_LIMIT));
         endTeam(tx, ref, members.docs.map(member => member.ref), now);
+        retireTeamVisualizations(tx, ref, now.getTime());
         for (const member of members.docs) tx.delete(this.index(member.id, ref.id));
         return { ok: true };
       }

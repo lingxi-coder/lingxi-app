@@ -1,5 +1,6 @@
 import { confirmShareDelivery } from './dataset-message-grant.mjs';
 import { confirmVisualizationDelivery } from './team-visualization-contract.mjs';
+import { recallVisualization } from './team-visualization-storage.mjs';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { mirrorHttpRead } from './inbox-store.mjs';
@@ -144,8 +145,9 @@ export class TeamMessagesStore {
       if (input.operation !== 'create' && (!m || m.author.kind !== 'user' || m.author.uid !== user.uid)) fail(403, 'MESSAGE_AUTHOR_REQUIRED');
       if (m?.recalled) fail(409, 'MESSAGE_RECALLED');
       if (input.operation === 'edit' && m.kind === 'visualization') fail(409, 'MESSAGE_IMMUTABLE');
+      const clock = this.clock();
       const activateVisualization = visualization
-        ? await confirmVisualizationDelivery(tx, teamRef, c, input, user.uid, visualization)
+        ? await confirmVisualizationDelivery(tx, teamRef, c, input, user.uid, visualization, clock)
         : undefined;
       const priorTargets = new Set(input.operation === 'edit' ? m.mentionEntities?.map(({ userId }) => userId) : []);
       const newMentions = input.mentionEntities?.filter(({ userId }) => !priorTargets.has(userId));
@@ -157,7 +159,6 @@ export class TeamMessagesStore {
         if (replyRefs.length && !reads[0].exists) fail(400, 'REPLY_REQUIRED');
         if (reads.slice(replyRefs.length).some(member => !member.exists)) fail(409, 'MENTION_TARGET_REQUIRED');
       }
-      const clock = this.clock();
       const releaseFiles = input.operation === 'recall' ? await recallAttachments(tx, teamRef, m, clock) : () => {};
       // A new message also goes to the Chat's Bots that answer unasked; each one's host decides whether it does.
       const unasked = input.operation === 'create' ? await new SharedBotsStore(this.db, this.clock).optionalTasks(tx, teamRef, c,
@@ -180,6 +181,7 @@ export class TeamMessagesStore {
         activateVisualization?.();
         unasked.write(seq);
       } else {
+        if (input.operation === 'recall' && m.visualization) recallVisualization(tx, teamRef, m.visualization.reference, clock);
         const entities = input.operation === 'recall' ? []
           : input.mentionEntities ?? preserveMentionEntities(m.text, input.text, m.mentionEntities);
         // Delivery recipients belong to the original send. Editing only changes the inline ranges.

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, beforeEach, test } from 'node:test';
 import { initializeApp, deleteApp } from 'firebase-admin/app';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { TeamsStore, createTeamsHandler } from '../src/teams.mjs';
 import { SharedBotsStore, deriveGrantPermit } from '../src/shared-bots.mjs';
@@ -59,7 +59,7 @@ beforeEach(async () => {
 after(async () => { await db?.terminate(); if (app) await deleteApp(app); });
 
 test('channel visualization Bot publishes a typed artifact through its completion permit', options, async () => {
-  const channel = 'bot_visuals';
+  const channel = 'viz_' + randomUUID();
   await execute('createConversation', { conversationId: channel, kind: 'channel', title: 'Bot charts',
     participantUids: [owner.uid, member.uid], sharedBotIds: ['sharedbot_01'] }, member);
   const channelRef = db.doc(`teams/${teamId}/conversations/${channel}`);
@@ -97,7 +97,47 @@ test('channel visualization Bot publishes a typed artifact through its completio
   assert.equal(fallback.state, 'completed');
   assert.deepEqual(await service.execute(owner, 'fixture', second), fallback);
   assert.equal((await channelRef.collection('messages').doc(fallback.replyId).get()).data().visualization, undefined);
-  assert.equal(files.size, 1);
+  const task = { taskKey: 'orders_task', permit: 'orders_permit', task: 'orders', logicalRun: 'run-orders' };
+  const reference = { kind: 'dataset', dataset: 'orders' };
+  const source = await execute('submit', { ...submit('task_source'), conversationId: channel }, member);
+  const sourceId = source.messageId;
+  const sourceRef = channelRef.collection('messages').doc(sourceId);
+  await sourceRef.update({ resourceRef: reference, resourceGrant: 'orders_grant',
+    author: { kind: 'task', taskId: task.task, logicalRun: task.logicalRun } });
+  await db.doc('datasetV2/orders').set({ owner: { kind: 'user', id: member.uid }, deleted: false });
+  await db.doc('datasetV2/orders/grants/orders_grant').set({ status: 'pending', issuer: member.uid, mode: 'live',
+    destination: { team: teamId, conversation: channel }, audience: { member: 1, owner: 1 }, message: sourceId, reference, task });
+  await db.doc('datasetV2Tasks/orders_task').set({ permit: task.permit });
+  await db.doc('datasetV2Permits/orders_permit').set({ revoked: false });
+  await db.doc('datasetV2Deliveries/orders_grant').set({ state: 'delivered' });
+  // Settle the source message's ordinary Bot task before admitting the next one.
+  const sourceTask = await execute('startTask', { ...host, taskId: source.tasks[0].taskId,
+    expectedLastChangeSeq: (await channelRef.get()).data().lastChangeSeq });
+  await execute('completeTask', result(sourceTask, { document: undefined }));
+  const third = output(await admit(), [{ alias: 'orders', messageId: sourceId }]);
+  const reused = await service.execute(owner, 'fixture', third);
+  assert.match(reused.replyId, /^viz_/u);
+  assert.equal((await channelRef.collection('messages').doc(reused.replyId).get()).data().visualization.bindings[0].grant, 'orders_grant');
+  assert.equal(files.size, 2);
+  const changed = structuredClone(third);
+  changed.artifact.parts[0].data.bindings[0].alias = 'different';
+  await assert.rejects(service.execute(owner, 'fixture', changed), { code: 'COMMAND_ID_CONFLICT' });
+
+  await publishAutoReply({ daily: 5 });
+  await execute('setConversationAutoReply', { conversationId: channel, expectedRevision: 0, targets: ['sharedbot_01'] }, member);
+  const trigger = { teamId, generation: 1, conversationId: channel, messageId: 'optional_visualization' };
+  const messages = new TeamMessagesStore(db, () => now);
+  await messages.execute(member, { ...trigger, action: 'mutate', operation: 'create', changeId: 'optional_trigger', text: 'Any packing ideas?' });
+  const optional = await execute('startTask', { ...host, taskId: admissionId(trigger.messageId, 'sharedbot_01'),
+    expectedLastChangeSeq: (await channelRef.get()).data().lastChangeSeq });
+  assert.equal(optional.task.optional, true);
+  await execute('setConversationAutoReply', { conversationId: channel, expectedRevision: 1, targets: [] }, member);
+  const revoked = output(optional);
+  const settled = await service.execute(owner, 'fixture', revoked);
+  assert.equal(settled.state, 'declined');
+  assert.equal(settled.replyId, null);
+  assert.deepEqual(await service.execute(owner, 'fixture', revoked), settled);
+  assert.equal(files.size, 2);
 });
 
 test('execution 2: simultaneous duplicate submissions create one message, admission and quota charge', options, async () => {

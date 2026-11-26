@@ -126,15 +126,15 @@ const unasked = (task, conversation) => task.optional === true && conversation?.
  * interprets old requests or reads old run/trigger collections. */
 export class SharedBotsStore {
   constructor(db, clock = Date.now) { this.db = db; this.clock = clock; }
-  async execute(user, raw, datasetShare, pageAuthority, visualization) {
+  async execute(user, raw, datasetShare, pageAuthority, visualizationOutput) {
     // The scope a command works in is a Team or a hosted Bot service. The two never mix: a command names exactly one,
     // and nothing below falls back from one to the other.
     const service = raw?.serviceId !== undefined;
     const command = (service ? serviceBotCommand : sharedBotCommand).parse(raw);
     const { generation, action, payload: p } = command;
     if ((datasetShare || pageAuthority) && (service || action !== 'submit')) deny(400, 'INVALID_INPUT');
-    if (visualization && (service || action !== 'completeTask')) deny(400, 'INVALID_INPUT');
-    const requestDigest = hash(datasetShare ? { command, datasetShare } : visualization ? { command, visualization } : command), now = this.clock();
+    if (visualizationOutput && (service || action !== 'completeTask')) deny(400, 'INVALID_INPUT');
+    const requestDigest = hash(datasetShare ? { command, datasetShare } : visualizationOutput ? { command, artifactIntent: visualizationOutput.intent } : command), now = this.clock();
     return this.db.runTransaction(async tx => {
       const team = service ? serviceScope.root(this.db, command.serviceId) : this.db.doc(`teams/${command.teamId}`);
       const receiptRef = team.collection('executionReceipts').doc(hash([user.uid, generation, command.commandId]));
@@ -155,7 +155,7 @@ export class SharedBotsStore {
       if (privateTaskBlocked.has(action) && (await tx.get(team.collection('tasks').doc(p.taskId))).data()?.privateDataSource) {
         deny(403, 'DATA_PRIVATE_TASK');
       }
-      const context = { tx, team, self, identity, user, command, now, service, datasetShare, fromPage: Boolean(pageAuthority), visualization };
+      const context = { tx, team, self, identity, user, command, now, service, datasetShare, fromPage: Boolean(pageAuthority), visualizationOutput };
       // A service takes only the commands its scope lists and applies its own gates; what it returns runs after the command.
       const leave = service ? await serviceScope.enter({ tx, root: team, service: teamDoc.data(), self, identity, action, payload: p, now,
         liveState: task => taskView(task, now).state }) : undefined;
@@ -686,15 +686,16 @@ export class SharedBotsStore {
           || !task || task.deploymentId !== p.deploymentId || task.permitDigest !== hash(p.permitId)
           || task.privateDataSource) visualizationError(403, 'EXECUTION_PERMIT_REQUIRED');
       const { bot } = await this.checkHost(tx, team, memberIdentity(user.uid, member.data()), p);
-      if (task.resultDigest) {
-        const { accountEpoch: _accountEpoch, ...stableResult } = p;
-        return { task, replay: true, expectsVisualization: task.resultDigest !== hash(stableResult) };
-      }
+      if (task.resultDigest) return { task, replay: true };
       if (task.state !== 'running' || p.finishedAt < task.attemptStartedAt || p.finishedAt > task.deadline || p.finishedAt > this.clock()) {
         visualizationError(409, 'TASK_EXPIRED');
       }
       if (task.cancelRequestedAt) return { task, publish: false };
-      const gate = await this.outputGate(tx, team, task, bot, p);
+      const gate = await this.outputGate(tx, team, task, bot, p).catch(error => {
+        if (task.optional && error instanceof SharedBotError && error.code === 'TASK_REVOKED') return undefined;
+        throw error;
+      });
+      if (!gate) return { task, publish: false };
       return { task, publish: gate.allowed && gate.c.kind === 'channel' };
     });
   }
@@ -909,13 +910,14 @@ export class SharedBotsStore {
       lastMessage: { id: messageId, seq, at, author, preview: messagePreview(text) } });
     return seq;
   }
-  async complete({ tx, team, identity, command: { payload: p }, now, visualization }) {
+  async complete({ tx, team, identity, command: { payload: p }, now, visualizationOutput }) {
     const { bot } = await this.checkHost(tx, team, identity, p);
     const ref = team.collection('tasks').doc(p.taskId), task = (await tx.get(ref)).data();
     if (!task || task.deploymentId !== p.deploymentId || task.permitDigest !== hash(p.permitId)) deny(403, 'EXECUTION_PERMIT_REQUIRED');
     if (Boolean(task.privateDataSource) !== (p.privateData === true)) deny(403, 'DATA_PRIVATE_TASK');
     const { accountEpoch: _accountEpoch, ...stableResult } = p;
-    const resultDigest = hash(visualization ? { stableResult, visualization } : stableResult);
+    const visualization = visualizationOutput?.descriptor;
+    const resultDigest = hash(visualizationOutput ? { stableResult, artifactIntent: visualizationOutput.intent } : stableResult);
     if (task.resultDigest) {
       if (task.resultDigest !== resultDigest) deny(409, 'TASK_RESULT_CONFLICT');
       return { taskId: task.taskId, state: task.state, replyId: task.replyId ?? null, artifactId: task.artifactId ?? null };
@@ -931,7 +933,7 @@ export class SharedBotsStore {
       return { taskId: task.taskId, state: 'cancelled', replyId: null, artifactId: null };
     }
     if (task.privateDataSource) {
-      if (p.text || p.document || p.readFiles || p.revises || visualization || p.outcome === 'declined') deny(403, 'DATA_PRIVATE_TASK');
+      if (p.text || p.document || p.readFiles || p.revises || visualizationOutput || p.outcome === 'declined') deny(403, 'DATA_PRIVATE_TASK');
       tx.update(ref, { state: p.outcome, resultDigest, replyId: null, artifactId: null, usage: p.usage,
         finishedAt: p.finishedAt, deliveredAt: now });
       if (lock?.taskId === p.taskId) tx.delete(lockRef);
@@ -967,7 +969,7 @@ export class SharedBotsStore {
     const replyId = rich?.reference.page ?? botId([p.taskId, 'reply']);
     const activateVisualization = rich && await confirmVisualizationDelivery(tx, team, gate.c, {
       teamId: team.id, conversationId: task.conversationId, messageId: replyId,
-    }, identity.uid, rich, task.taskId);
+    }, identity.uid, rich, now, task.taskId);
     // Shown on the reply as its sources, and kept on the task as the record of what the model was given.
     const read = allowed && p.outcome === 'completed' ? await taskFiles(tx, team, task, p.readFiles) : [];
     const artifactId = silent || !allowed || !p.document ? null : p.revises ? p.revises.artifactId : hash([p.taskId, 'document']);

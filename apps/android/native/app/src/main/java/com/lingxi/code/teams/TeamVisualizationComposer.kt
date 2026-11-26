@@ -19,6 +19,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,7 +58,7 @@ internal fun TeamVisualizationComposerButton(conversation: String, model: TeamMe
 
 @Composable
 internal fun TeamVisualizationComposer(conversation: String, model: TeamMessagingModel, person: (String) -> String,
-    initialAudience: JSONObject, source: JSONObject? = null, close: () -> Unit,
+    initialAudience: JSONObject, source: JSONObject? = null, from: String = conversation, close: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -73,6 +74,9 @@ internal fun TeamVisualizationComposer(conversation: String, model: TeamMessagin
     var intent by remember { mutableStateOf<Pair<String, String>?>(null) }
     var location by remember { mutableStateOf("mine") }
     var choices by remember { mutableStateOf(emptyList<JSONObject>()) }
+    var cursor by remember { mutableStateOf<String?>(null) }
+    var discoveryId by remember { mutableStateOf(UUID.randomUUID()) }
+    var discovering by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf<JSONObject?>(null) }
     var alias by remember { mutableStateOf("") }
     var mode by remember { mutableStateOf("pinned") }
@@ -107,25 +111,34 @@ internal fun TeamVisualizationComposer(conversation: String, model: TeamMessagin
         }
     }
 
-    LaunchedEffect(location, conversation) {
-        selected = null
-        choices = emptyList()
+    suspend fun discover(after: String? = null) {
+        val request = UUID.randomUUID()
+        val source = location
+        discoveryId = request
+        discovering = true
+        if (after == null) { selected = null; choices = emptyList(); cursor = null }
         val (destination, _) = model.datasetShareDestination(conversation)
-        val filter = when (location) {
+        val filter = when (source) {
             "shared" -> objectOf("kind" to "conversation", "destination" to destination)
             "team" -> objectOf("kind" to "mine", "team" to destination.getString("team"))
             else -> objectOf("kind" to "mine")
         }
         try {
             val result = model.dataset(conversation, objectOf("protocol" to DatasetResourceRef.PROTOCOL_VERSION,
-                "command" to objectOf("action" to "discover", "scope" to filter, "limit" to 50)))
+                "command" to objectOf("action" to "discover", "scope" to filter, "limit" to 50, "after" to after)), from = from)
+            if (discoveryId != request || location != source) return
             val entries = result.getJSONArray("resources")
-            choices = (0 until entries.length()).map(entries::getJSONObject).filter { item ->
-                if (location == "shared") item.stringOrNull("via") != null else item.optBoolean("canShare")
+            val found = (0 until entries.length()).map(entries::getJSONObject).filter { item ->
+                if (source == "shared") item.stringOrNull("via") != null else item.optBoolean("canShare")
             }
+            choices = if (after == null) found else choices + found
+            cursor = result.stringOrNull("cursor")
         } catch (cancel: CancellationException) { throw cancel }
         catch (_: Exception) { /* Standalone HTML needs no dataset. */ }
+        finally { if (discoveryId == request) discovering = false }
     }
+
+    LaunchedEffect(location, conversation) { discover() }
 
     fun add() {
         val item = selected ?: return
@@ -154,18 +167,22 @@ internal fun TeamVisualizationComposer(conversation: String, model: TeamMessagin
         val draft = body.toString()
         if (intent?.first != draft) intent = draft to UUID.randomUUID().toString()
         body.put("operation", intent?.second)
+        busy = true
         scope.launch {
-            busy = true
             error = null
             try {
-                val result = model.visualization(conversation, body)
+                val result = model.visualization(conversation, body, from = from)
                 if (result.optString("status") == "building") building = true else close()
             } catch (cancel: CancellationException) { throw cancel }
             catch (failure: Exception) {
                 error = (failure as? TeamMessageFailure)?.code ?: "VISUALIZATION_UNAVAILABLE"
-                if (error == "DATA_SHARE_CHANGED") runCatching {
-                    model.visualization(conversation, objectOf("action" to "audience"))
-                }.onSuccess { audience = it }
+                if (error == "DATA_SHARE_CHANGED") {
+                    intent = null
+                    building = false
+                    try { audience = model.visualization(conversation, objectOf("action" to "audience"), from = from) }
+                    catch (cancel: CancellationException) { throw cancel }
+                    catch (_: Exception) { /* Keep the send error visible. */ }
+                }
             } finally { busy = false }
         }
     }
@@ -181,13 +198,20 @@ internal fun TeamVisualizationComposer(conversation: String, model: TeamMessagin
                     Text(stringResource(R.string.teams_visualization_import))
                 }
                 OutlinedTextField(html, { html = it; preview = null }, label = { Text("HTML") }, minLines = 4)
-                TextButton(enabled = valid, onClick = { preview = surfaceLoad(bundle(), dark) }) {
+                TextButton(enabled = valid, onClick = { preview = bundle() }) {
                     Text(stringResource(R.string.teams_visualization_preview))
                 }
-                preview?.let {
-                    TeamVisualizationSurface(it, height.coerceIn(32, 360), {}) { packet ->
-                        if (packet.optString("type") == "height") height = packet.optInt("height", 44)
-                        if (packet.optString("type") == "error") error = "VISUALIZATION_SCRIPT_FAILED"
+                preview?.let { content ->
+                    val aliases = bindings.map { it.getString("alias") }
+                    key(content, aliases, dark) {
+                        var send by remember { mutableStateOf<((JSONObject) -> Unit)?>(null) }
+                        TeamVisualizationSurface(surfaceLoad(content, dark, aliases), height.coerceIn(32, 360), { send = it }) { packet ->
+                            when (packet.optString("type")) {
+                                "height" -> height = packet.optInt("height", 44)
+                                "error" -> error = "VISUALIZATION_SCRIPT_FAILED"
+                                "request" -> send?.invoke(surfacePacket("result", previewResult(packet, aliases)))
+                            }
+                        }
                     }
                 }
                 val locations = mapOf("mine" to stringResource(R.string.teams_visualization_personal),
@@ -202,6 +226,11 @@ internal fun TeamVisualizationComposer(conversation: String, model: TeamMessagin
                     alias = item.getJSONObject("reference").getString("dataset")
                     mode = if (location == "shared") item.getString("access") else "pinned"
                     fields = ""; partitions = ""
+                }
+                cursor?.let { next ->
+                    TextButton(onClick = { scope.launch { discover(next) } }, enabled = !discovering) {
+                        Text(stringResource(R.string.teams_visualization_more))
+                    }
                 }
                 selected?.let { item ->
                     OutlinedTextField(alias, { alias = it.take(64) }, label = { Text(stringResource(R.string.teams_visualization_alias)) })
@@ -223,7 +252,7 @@ internal fun TeamVisualizationComposer(conversation: String, model: TeamMessagin
                     Text(item.getString("alias") + " · " + translator.getValue(item.getString("mode")))
                     TextButton(onClick = { bindings = bindings.filterNot { it === item } }) { Text(stringResource(R.string.teams_visualization_remove)) }
                 }
-                Text(stringResource(R.string.teams_visualization_audience,
+                Text(stringResource(R.string.teams_visualization_audience_fmt,
                     audience.getJSONObject("audience").keys().asSequence().map(person).joinToString(" · ")))
                 if (building) Text(stringResource(R.string.teams_visualization_building))
                 error?.let { Text(it) }
@@ -236,6 +265,22 @@ internal fun TeamVisualizationComposer(conversation: String, model: TeamMessagin
         },
         dismissButton = { TextButton(onClick = close, enabled = !busy) { Text(stringResource(android.R.string.cancel)) } },
     )
+}
+
+private fun previewResult(packet: JSONObject, aliases: List<String>): JSONObject {
+    val result = objectOf("id" to packet.opt("id"))
+    val expected = packet.optLong("expected", -1)
+    val state = packet.optJSONObject("state")
+    return when (packet.optString("action")) {
+        "read", "watch" -> if (packet.optString("alias") in aliases) {
+            result.put("value", objectOf("records" to JSONArray()))
+        } else result.put("error", "DATA_ACCESS_REQUIRED")
+        "unwatch" -> result.put("value", JSONObject.NULL)
+        "state" -> if (state != null && expected in 0 until Long.MAX_VALUE) {
+            result.put("value", state.put("version", expected + 1))
+        } else result.put("error", "DATA_ACCESS_REQUIRED")
+        else -> result.put("error", "DATA_ACCESS_REQUIRED")
+    }
 }
 
 @Composable

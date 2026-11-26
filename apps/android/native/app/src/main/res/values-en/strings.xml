@@ -2955,13 +2955,13 @@
     <string name="friends_request_sent_to_fmt">Friend request sent to %1$s</string>
     <string name="friends_confirm_title_fmt">Add “%1$s” as a friend?</string>
     <string name="friends_remove_title_fmt">Remove “%1$s”?</string>
+    <string name="friends_error_recipient_request_limit">This person has too many pending friend requests. Try again later.</string>
     <string name="friends_block_title_fmt">Block “%1$s”?</string>
     <string name="friends_since_fmt">Friends since %1$s</string>
     <string name="friends_section_offers">Team invitations</string>
     <string name="friends_offer_invited_by_fmt">Invited by %1$s</string>
     <string name="friends_offer_expires_fmt">Expires %1$s</string>
     <string name="friends_offer_expired">Expired</string>
-    <string name="friends_error_recipient_request_limit">This person has too many pending friend requests. Try again later.</string>
     <string name="friends_offer_join">Join</string>
     <string name="friends_offer_dismiss">Dismiss</string>
     <string name="friends_offer_joined_fmt">You joined “%1$s”</string>
@@ -3530,7 +3530,6 @@
     <string name="teams_visualization_add">Add visualization</string>
     <string name="teams_visualization_alias">Binding name</string>
     <string name="teams_visualization_apply">Apply changes</string>
-    <string name="teams_visualization_audience">Share with: %1$s</string>
     <string name="teams_visualization_building">Preparing a fixed snapshot…</string>
     <string name="teams_visualization_collapse">Collapse</string>
     <string name="teams_visualization_confirm">Confirm data changes</string>
@@ -3551,4 +3550,7 @@
     <string name="teams_visualization_title">Title</string>
     <string name="teams_visualization_forward">Forward visualization</string>
     <string name="teams_visualization_destination">Destination channel</string>
+    <string name="teams_visualization_more">More datasets</string>
+    <string name="teams_visualization_audience">Share with</string>
+    <string name="teams_visualization_audience_fmt">Share with: %1$s</string>
 </resources>

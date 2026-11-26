@@ -25,6 +25,8 @@ export function VisualizationComposer({ api, scope, locale, source, participantN
   const [preview, setPreview] = useState<VisualizationBundle>();
   const [error, setError] = useState('');
   const [sources, setSources] = useState<Source[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [discovering, setDiscovering] = useState(false);
   const [location, setLocation] = useState<Location>('mine');
   const [selected, setSelected] = useState<Source>();
   const [alias, setAlias] = useState('');
@@ -50,17 +52,23 @@ export function VisualizationComposer({ api, scope, locale, source, participantN
   }, [api, teamId, conversationId, generation, forwarding]);
   useEffect(() => { if (forwarding && !dialog.current?.open) dialog.current?.showModal(); }, [forwarding]);
 
-  async function discover(next: Location, targetId = conversationId) {
+  async function discover(next: Location, targetId = conversationId, after?: string) {
     const current = ++sequence.current;
-    setLocation(next); setSelected(undefined); setSources([]); setError('');
     if (!api.datasets) return;
+    if (!after) { setLocation(next); setSelected(undefined); setSources([]); setCursor(null); }
+    setError(''); setDiscovering(true);
     const destination = { team: teamId, conversation: targetId };
     const query = next === 'shared' ? { kind: 'conversation', destination } : { kind: 'mine', ...(next === 'team' ? { team: teamId } : {}) };
     try {
-      const result = await api.datasets<{ resources: Source[] }>({ protocol: DATA_PROTOCOL_VERSION, dataset: '',
-        command: { action: 'discover', scope: query, limit: 50 } });
-      if (current === sequence.current) setSources(result.resources.filter(item => next === 'shared' ? !!item.via : item.canShare));
+      const result = await api.datasets<{ resources: Source[]; cursor: string | null }>({ protocol: DATA_PROTOCOL_VERSION, dataset: '',
+        command: { action: 'discover', scope: query, limit: 50, ...(after ? { after } : {}) } });
+      if (current === sequence.current) {
+        const visible = result.resources.filter(item => next === 'shared' ? !!item.via : item.canShare);
+        setSources(previous => after ? [...previous, ...visible] : visible);
+        setCursor(result.cursor);
+      }
     } catch (failure) { if (current === sequence.current) setError(errorCode(failure)); }
+    finally { if (current === sequence.current) setDiscovering(false); }
   }
 
   function select(index: number) {
@@ -116,6 +124,8 @@ export function VisualizationComposer({ api, scope, locale, source, participantN
     } catch (failure) {
       setError(errorCode(failure));
       if (errorCode(failure) === 'DATA_SHARE_CHANGED') {
+        intent.current = undefined;
+        setBuilding(false);
         const updated = await visualizationRequest<VisualizationAudience>(api, { teamId, conversationId, generation }, { action: 'audience' }).catch(() => undefined);
         if (updated) setAudience(updated);
       }
@@ -145,12 +155,13 @@ export function VisualizationComposer({ api, scope, locale, source, participantN
             request={async request => {
               if (request.action === 'state') return { ...(request.state as object), version: Number(request.expected) + 1 };
               if (request.action === 'read' || request.action === 'watch') return { records: [] };
+              if (request.action === 'unwatch') return;
               throw new Error('DATA_ACCESS_REQUIRED');
             }}
             onFailure={setError} />}
           <fieldset>
             <legend>{labels.choose}</legend>
-            <select aria-label={labels.choose} value={location} onFocus={() => { if (!sources.length) void discover(location); }}
+            <select aria-label={labels.choose} value={location} onFocus={() => { if (!sources.length && !cursor && !discovering) void discover(location); }}
               onChange={event => void discover(event.target.value as Location)}>
               <option value="mine">{labels.mine}</option><option value="team">{labels.team}</option><option value="shared">{labels.shared}</option>
             </select>
@@ -158,6 +169,8 @@ export function VisualizationComposer({ api, scope, locale, source, participantN
               <option value="">{labels.none}</option>
               {sources.map((item, index) => <option key={index} value={index}>{item.reference.dataset} · {labels[item.access]}</option>)}
             </select>
+            {cursor && <button type="button" className="tw-link" disabled={discovering}
+              onClick={() => void discover(location, conversationId, cursor)}>{labels.more}</button>}
             {selected && <>
               <label>{labels.alias}<input value={alias} maxLength={64} onChange={event => setAlias(event.target.value)} /></label>
               <select aria-label={labels.choose} value={mode} onChange={event => setMode(event.target.value as VisualizationMode)}>
@@ -177,7 +190,7 @@ export function VisualizationComposer({ api, scope, locale, source, participantN
             {bindings.length > 0 && <ul>{bindings.map(item => <li key={item.alias}>{item.alias} · {labels[item.mode]} <button type="button"
               className="tw-link" onClick={() => setBindings(previous => previous.filter(binding => binding.alias !== item.alias))}>{labels.remove}</button></li>)}</ul>}
           </fieldset>
-          {audience && <p>{labels.audience} {Object.keys(audience.audience).map(participantName).join(' · ')}</p>}
+          {audience && <p>{labels.audience(Object.keys(audience.audience).map(participantName).join(' · '))}</p>}
           {error && <p role="alert">{error}</p>}
           {building && <p role="status">{labels.building}</p>}
           <button className="tw-btn" type="button" disabled={busy} onClick={() => dialog.current?.close()}>{labels.close}</button>

@@ -16,10 +16,14 @@ struct TeamVisualizationComposer: View {
     @State private var html = ""
     @State private var importing = false
     @State private var preview = false
+    @State private var previewSend: (([String: Any]) -> Void)?
     @State private var previewHeight: CGFloat = 48
     @State private var audience: [String: Any] = [:]
     @State private var location = "mine"
     @State private var sources: [[String: Any]] = []
+    @State private var cursor: String?
+    @State private var discoveryId = UUID()
+    @State private var discovering = false
     @State private var index = -1
     @State private var alias = ""
     @State private var mode = "pinned"
@@ -47,7 +51,7 @@ struct TeamVisualizationComposer: View {
                         target = $0; audience = [:]; bindings = []; preview = false
                     })) {
                         ForEach(destinations) { Text($0.title).tag($0.id) }
-                    }
+                    }.disabled(busy)
                 }
                 TextField("teams_visualization_title", text: $title)
                 Button("teams_visualization_import") { importing = true }
@@ -56,13 +60,17 @@ struct TeamVisualizationComposer: View {
                     .accessibilityLabel("HTML")
                 Button("teams_visualization_preview") { preview.toggle() }.disabled(!valid)
                 if preview {
-                    TeamVisualizationWebSurface(load: ["bundle": bundle, "aliases": [String](),
-                        "locale": locale.identifier, "theme": ["mode": colorScheme == .dark ? "dark" : "light", "tokens": [:]]],
+                    let aliases = bindings.compactMap { $0["alias"] as? String }
+                    TeamVisualizationWebSurface(load: ["bundle": bundle, "aliases": aliases,
+                        "locale": locale.identifier(.bcp47), "theme": ["mode": colorScheme == .dark ? "dark" : "light", "tokens": [:]]],
                         receive: { value in
                             if let height = value["height"] as? Double, height.isFinite { previewHeight = CGFloat(max(32, min(360, height))) }
                             if value["type"] as? String == "error" { error = "VISUALIZATION_SCRIPT_FAILED" }
-                        }, connected: { _ in })
+                            respondToPreview(value, aliases: aliases)
+                        }, connected: { previewSend = $0 })
+                        .id(aliases)
                         .frame(height: previewHeight)
+                        .onDisappear { previewSend = nil }
                 }
                 dataSection
                 if let members = audience["audience"] as? [String: Int] {
@@ -113,6 +121,9 @@ struct TeamVisualizationComposer: View {
             Picker("teams_dataset_title", selection: $index) {
                 Text("common_none").tag(-1)
                 ForEach(sources.indices, id: \.self) { i in Text(datasetId(sources[i])).tag(i) }
+            }
+            if let cursor {
+                Button("teams_visualization_more") { Task { await discover(after: cursor) } }.disabled(discovering)
             }
             if let selected {
                 TextField("teams_visualization_alias", text: $alias)
@@ -168,6 +179,24 @@ struct TeamVisualizationComposer: View {
         index = -1
     }
 
+    private func respondToPreview(_ packet: [String: Any], aliases: [String]) {
+        guard packet["type"] as? String == "request", let id = packet["id"] as? Int else { return }
+        let action = packet["action"] as? String
+        var result: [String: Any] = ["id": id]
+        if action == "state", var state = packet["state"] as? [String: Any],
+           let expected = packet["expected"] as? Int, expected < Int.max {
+            state["version"] = expected + 1
+            result["value"] = state
+        } else if action == "unwatch" {
+            result["value"] = NSNull()
+        } else if (action == "read" || action == "watch"), let alias = packet["alias"] as? String, aliases.contains(alias) {
+            result["value"] = ["records": [[String: Any]]()]
+        } else {
+            result["error"] = "DATA_ACCESS_REQUIRED"
+        }
+        previewSend?(["type": "result", "value": result])
+    }
+
     private func parseList(_ value: String) -> [String] {
         Set(value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }).sorted()
     }
@@ -175,29 +204,37 @@ struct TeamVisualizationComposer: View {
     private func loadAudience() async {
         error = nil
         do {
-            let result = try await model.visualization(conversationId: destination, body: ["action": "audience"])
+            let result = try await model.visualization(conversationId: destination, body: ["action": "audience"], from: conversation)
             try Task.checkCancellation()
             audience = result
         } catch is CancellationError { }
         catch { self.error = (error as? TeamMessageFailure)?.code ?? "VISUALIZATION_UNAVAILABLE" }
     }
 
-    private func discover() async {
-        index = -1
-        sources = []
-        let target = model.datasetDestination(conversationId: destination)
+    private func discover(after: String? = nil) async {
+        let request = UUID(), channel = destination, source = location
+        discoveryId = request
+        discovering = true
+        defer { if discoveryId == request { discovering = false } }
+        if after == nil { index = -1; sources = []; cursor = nil }
+        let target = model.datasetDestination(conversationId: channel)
         var scope: [String: Any] = ["kind": "mine"]
-        if location == "team" { scope["team"] = target["team"] }
-        if location == "shared" { scope = ["kind": "conversation", "destination": target] }
+        if source == "team" { scope["team"] = target["team"] }
+        if source == "shared" { scope = ["kind": "conversation", "destination": target] }
+        var command: [String: Any] = ["action": "discover", "scope": scope, "limit": 50]
+        command["after"] = after
         do {
-            let data = try await model.dataset(conversationId: destination, body: ["protocol": DatasetResourceRef.protocolVersion,
-                "command": ["action": "discover", "scope": scope, "limit": 50]])
+            let data = try await model.dataset(conversationId: channel, body: ["protocol": DatasetResourceRef.protocolVersion,
+                "command": command], from: conversation)
             try Task.checkCancellation()
+            guard discoveryId == request, destination == channel, location == source else { return }
             let value = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            sources = (value?["resources"] as? [[String: Any]] ?? []).filter {
-                location == "shared" ? $0["via"] is String : $0["canShare"] as? Bool == true
+            let found = (value?["resources"] as? [[String: Any]] ?? []).filter {
+                source == "shared" ? $0["via"] is String : $0["canShare"] as? Bool == true
             }
-        } catch { /* HTML can be shared independently of the Data Core connection. */ }
+            if after == nil { sources = found } else { sources += found }
+            cursor = value?["cursor"] as? String
+        } catch { /* Standalone HTML can be shared independently of the Data Core connection. */ }
     }
 
     private func publish() async {
@@ -210,11 +247,16 @@ struct TeamVisualizationComposer: View {
             guard encoded.count <= 2_105_344 else { throw TeamMessageFailure(code: "VISUALIZATION_TOO_LARGE") }
             if intent?.0 != encoded { intent = (encoded, UUID().uuidString) }
             body["operation"] = intent?.1
-            let result = try await model.visualization(conversationId: destination, body: body)
+            let result = try await model.visualization(conversationId: destination, body: body, from: conversation)
             if result["status"] as? String == "building" { building = true } else { dismiss() }
         } catch {
             self.error = (error as? TeamMessageFailure)?.code ?? "DATA_UNAVAILABLE"
-            if self.error == "DATA_SHARE_CHANGED" { await loadAudience() }
+            if self.error == "DATA_SHARE_CHANGED" {
+                intent = nil
+                building = false
+                await loadAudience()
+                if self.error == nil { self.error = "DATA_SHARE_CHANGED" }
+            }
         }
     }
 }

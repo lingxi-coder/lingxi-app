@@ -505,6 +505,29 @@ export type TeamsKey =
   | 'teams_usage_tokens_fmt'
   | 'teams_usage_tokens_total_fmt'
   | 'teams_uses'
+  | 'teams_visualization_add'
+  | 'teams_visualization_alias'
+  | 'teams_visualization_apply'
+  | 'teams_visualization_building'
+  | 'teams_visualization_collapse'
+  | 'teams_visualization_confirm'
+  | 'teams_visualization_conflict'
+  | 'teams_visualization_destination'
+  | 'teams_visualization_edit'
+  | 'teams_visualization_expand'
+  | 'teams_visualization_fields'
+  | 'teams_visualization_forward'
+  | 'teams_visualization_import'
+  | 'teams_visualization_partitions'
+  | 'teams_visualization_personal'
+  | 'teams_visualization_preview'
+  | 'teams_visualization_remove'
+  | 'teams_visualization_retry'
+  | 'teams_visualization_send'
+  | 'teams_visualization_shared'
+  | 'teams_visualization_source'
+  | 'teams_visualization_team'
+  | 'teams_visualization_title'
   | 'teams_week'
   | 'teams_you'
   | 'tw_approval_approving'
@@ -887,7 +910,12 @@ export type TeamsKey =
   | 'tw_turn_off'
   | 'tw_turn_on'
   | 'tw_unchanged'
-  | 'tw_unread_fmt';
+  | 'tw_unread_fmt'
+  | 'tw_visualization_current'
+  | 'tw_visualization_field'
+  | 'tw_visualization_html_only'
+  | 'tw_visualization_next'
+  | 'tw_visualization_unavailable';
 
 export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocale, string>>>> = {
   account_email: { en: 'Email', 'zh-Hans': '邮箱', 'zh-Hant': '電子郵件', ja: 'メールアドレス', ko: '이메일' },
@@ -1391,6 +1419,29 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_usage_tokens_fmt: { en: '%1$d / %2$d tokens', 'zh-Hans': '%1$d / %2$d tokens', 'zh-Hant': '%1$d / %2$d tokens', ja: '%1$d / %2$d トークン', ko: '%1$d / %2$d 토큰' },
   teams_usage_tokens_total_fmt: { en: '%1$s tokens', 'zh-Hans': '%1$s tokens', 'zh-Hant': '%1$s tokens', ja: '%1$s トークン', ko: '%1$s 토큰' },
   teams_uses: { en: 'Uses', 'zh-Hans': '可用次数', 'zh-Hant': '可用次數', ja: '使用回数', ko: '사용 횟수' },
+  teams_visualization_add: { en: 'Add visualization', 'zh-Hans': '添加可视化', 'zh-Hant': '新增視覺化', ja: '可視化を追加', ko: '시각화 추가' },
+  teams_visualization_alias: { en: 'Binding name', 'zh-Hans': '绑定名称', 'zh-Hant': '繫結名稱', ja: 'バインディング名', ko: '바인딩 이름' },
+  teams_visualization_apply: { en: 'Apply changes', 'zh-Hans': '提交更改', 'zh-Hant': '套用變更', ja: '変更を適用', ko: '변경 적용' },
+  teams_visualization_building: { en: 'Preparing a fixed snapshot…', 'zh-Hans': '正在生成固定快照…', 'zh-Hant': '正在產生固定快照…', ja: '固定スナップショットを作成中…', ko: '고정 스냅샷 준비 중…' },
+  teams_visualization_collapse: { en: 'Collapse', 'zh-Hans': '收起', 'zh-Hant': '收合', ja: '折りたたむ', ko: '접기' },
+  teams_visualization_confirm: { en: 'Confirm data changes', 'zh-Hans': '确认数据更改', 'zh-Hant': '確認資料變更', ja: 'データの変更を確認', ko: '데이터 변경 확인' },
+  teams_visualization_conflict: { en: 'This record changed. Review the current values before applying.', 'zh-Hans': '记录已更新。请核对当前值后提交。', 'zh-Hant': '記錄已更新。請核對目前值後再提交。', ja: 'レコードが更新されました。現在の値を確認してから適用してください。', ko: '레코드가 변경되었습니다. 현재 값을 확인한 후 적용하세요.' },
+  teams_visualization_destination: { en: 'Destination channel', 'zh-Hans': '目标频道', 'zh-Hant': '目標頻道', ja: '転送先のチャンネル', ko: '대상 채널' },
+  teams_visualization_edit: { en: 'Edit together', 'zh-Hans': '共同编辑', 'zh-Hant': '共同編輯', ja: '共同編集', ko: '함께 편집' },
+  teams_visualization_expand: { en: 'Expand', 'zh-Hans': '展开', 'zh-Hant': '展開', ja: '展開', ko: '펼치기' },
+  teams_visualization_fields: { en: 'Visible fields', 'zh-Hans': '可见字段', 'zh-Hant': '可見欄位', ja: '表示フィールド', ko: '표시 필드' },
+  teams_visualization_forward: { en: 'Forward visualization', 'zh-Hans': '转发可视化', 'zh-Hant': '轉發視覺化', ja: '可視化を転送', ko: '시각화 전달' },
+  teams_visualization_import: { en: 'Import HTML', 'zh-Hans': '导入 HTML', 'zh-Hant': '匯入 HTML', ja: 'HTML を読み込む', ko: 'HTML 가져오기' },
+  teams_visualization_partitions: { en: 'Visible partitions', 'zh-Hans': '可见分区', 'zh-Hant': '可見分割區', ja: '表示パーティション', ko: '표시 파티션' },
+  teams_visualization_personal: { en: 'Personal data', 'zh-Hans': '个人数据', 'zh-Hant': '個人資料', ja: '個人データ', ko: '개인 데이터' },
+  teams_visualization_preview: { en: 'Preview', 'zh-Hans': '预览', 'zh-Hant': '預覽', ja: 'プレビュー', ko: '미리보기' },
+  teams_visualization_remove: { en: 'Remove', 'zh-Hans': '移除', 'zh-Hant': '移除', ja: '削除', ko: '제거' },
+  teams_visualization_retry: { en: 'Retry', 'zh-Hans': '重试', 'zh-Hant': '重試', ja: '再試行', ko: '다시 시도' },
+  teams_visualization_send: { en: 'Send visualization', 'zh-Hans': '发送可视化', 'zh-Hant': '傳送視覺化', ja: '可視化を送信', ko: '시각화 보내기' },
+  teams_visualization_shared: { en: 'Shared in this channel', 'zh-Hans': '频道已共享', 'zh-Hant': '頻道已分享', ja: 'チャンネルで共有済み', ko: '채널에 공유된 데이터' },
+  teams_visualization_source: { en: 'Data source', 'zh-Hans': '数据来源', 'zh-Hant': '資料來源', ja: 'データソース', ko: '데이터 소스' },
+  teams_visualization_team: { en: 'Team data', 'zh-Hans': '团队数据', 'zh-Hant': '團隊資料', ja: 'チームデータ', ko: '팀 데이터' },
+  teams_visualization_title: { en: 'Title', 'zh-Hans': '标题', 'zh-Hant': '標題', ja: 'タイトル', ko: '제목' },
   teams_week: { en: '7 days', 'zh-Hans': '7 天', 'zh-Hant': '7 天', ja: '7 日間', ko: '7일' },
   teams_you: { en: 'You', 'zh-Hans': '你', 'zh-Hant': '你', ja: 'あなた', ko: '나' },
   tw_approval_approving: { en: 'Approving…', 'zh-Hans': '正在批准…', 'zh-Hant': '正在核准…', ja: '承認中…', ko: '승인하는 중…' },
@@ -1774,4 +1825,9 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_turn_on: { en: 'Turn on', 'zh-Hans': '开启', 'zh-Hant': '開啟', ja: 'オンにする', ko: '켜기' },
   tw_unchanged: { en: 'unchanged', 'zh-Hans': '未更改', 'zh-Hant': '未變更', ja: '変更なし', ko: '변경 없음' },
   tw_unread_fmt: { en: '%1$s unread', 'zh-Hans': '%1$s 条未读', 'zh-Hant': '%1$s 則未讀', ja: '未読 %1$s 件', ko: '읽지 않음 %1$s개' },
+  tw_visualization_current: { en: 'Current value', 'zh-Hans': '当前值', 'zh-Hant': '目前值', ja: '現在の値', ko: '현재 값' },
+  tw_visualization_field: { en: 'Field', 'zh-Hans': '字段', 'zh-Hant': '欄位', ja: 'フィールド', ko: '필드' },
+  tw_visualization_html_only: { en: 'HTML only', 'zh-Hans': '纯 HTML', 'zh-Hant': '僅 HTML', ja: 'HTML のみ', ko: 'HTML만' },
+  tw_visualization_next: { en: 'New value', 'zh-Hans': '新值', 'zh-Hant': '新值', ja: '新しい値', ko: '새 값' },
+  tw_visualization_unavailable: { en: 'Visualization unavailable', 'zh-Hans': '可视化无法打开', 'zh-Hant': '無法開啟視覺化', ja: '可視化を開けません', ko: '시각화를 열 수 없습니다' },
 };

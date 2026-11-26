@@ -33,7 +33,8 @@ from a personal session to a selected channel.
 The card executes self-contained HTML and JavaScript on the recipient device.
 The shared renderer runs author code in an offline QuickJS worker and projects
 the resulting elements onto a local surface. It supports SVG, D3, bounded Canvas
-operations, form controls and packaged assets. Card code reads its Data
+operations, form controls and packaged assets. Raster images use static PNG,
+JPEG or WebP and a per-card decoded pixel budget. Card code reads its Data
 bindings through `lingxi.data.read` and subscribes through `lingxi.data.watch`.
 `lingxi.data.patch` proposes a field-level edit for the recipient to confirm.
 Viewer state is scoped to the viewer and the immutable page version.
@@ -48,9 +49,13 @@ separation follows A2UI and MCP Apps. [A2A specification](https://a2a-protocol.o
 [A2UI data bindings](https://a2ui.org/concepts/data-binding/),
 [MCP Apps](https://modelcontextprotocol.io/extensions/apps/overview).
 
-Keep publication disabled by default. For a pilot, deploy the matching
-LingXi Data Core and Teams gateway with `LINGXI_DATASET_ORIGIN` configured and
-`LINGXI_DATASET_PAGES_BUCKET` pointing to a private bucket. Set
+Keep publication disabled by default. For a pilot, deploy LingXi Data Core and
+the Teams gateway from the same contract revision before shifting traffic.
+Configure `LINGXI_DATASET_ORIGIN` and point `LINGXI_DATASET_PAGES_BUCKET` to a
+private bucket. The gateway service account needs object read, create and delete
+permissions. Channel bundles have their own version registry. The scheduled job
+removes bundles and viewer state after recall, team deletion, or a 15-minute
+upload reservation expiry, and releases their storage quota. Set
 `LINGXI_TEAM_VISUALIZATION_CHANNELS` to the intended comma-separated
 `teamId/conversationId` entries. The allowlist gates new cards. Existing cards
 continue to use membership and message authorization. Before shifting

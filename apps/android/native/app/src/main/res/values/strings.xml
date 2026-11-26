@@ -2955,13 +2955,13 @@
     <string name="friends_request_sent_to_fmt">已向 %1$s 发送好友请求</string>
     <string name="friends_confirm_title_fmt">将“%1$s”添加为好友？</string>
     <string name="friends_remove_title_fmt">删除好友“%1$s”？</string>
+    <string name="friends_error_recipient_request_limit">对方待处理的好友请求已达上限，请稍后再试。</string>
     <string name="friends_block_title_fmt">屏蔽“%1$s”？</string>
     <string name="friends_since_fmt">%1$s 起成为好友</string>
     <string name="friends_section_offers">团队邀请</string>
     <string name="friends_offer_invited_by_fmt">邀请人：%1$s</string>
     <string name="friends_offer_expires_fmt">%1$s到期</string>
     <string name="friends_offer_expired">已过期</string>
-    <string name="friends_error_recipient_request_limit">对方待处理的好友请求已达上限，请稍后再试。</string>
     <string name="friends_offer_join">加入</string>
     <string name="friends_offer_dismiss">移除</string>
     <string name="friends_offer_joined_fmt">你已加入“%1$s”</string>
@@ -3530,7 +3530,6 @@
     <string name="teams_visualization_add">添加可视化</string>
     <string name="teams_visualization_alias">绑定名称</string>
     <string name="teams_visualization_apply">提交更改</string>
-    <string name="teams_visualization_audience">共享给：%1$s</string>
     <string name="teams_visualization_building">正在生成固定快照…</string>
     <string name="teams_visualization_collapse">收起</string>
     <string name="teams_visualization_confirm">确认数据更改</string>
@@ -3551,4 +3550,7 @@
     <string name="teams_visualization_title">标题</string>
     <string name="teams_visualization_forward">转发可视化</string>
     <string name="teams_visualization_destination">目标频道</string>
+    <string name="teams_visualization_more">更多数据集</string>
+    <string name="teams_visualization_audience">共享给</string>
+    <string name="teams_visualization_audience_fmt">共享给：%1$s</string>
 </resources>

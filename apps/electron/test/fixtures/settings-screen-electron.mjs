@@ -979,6 +979,7 @@ async function runCustomizeScenario(window, webContents) {
   await button('丢弃并切换');
   await click('[data-nav-page="mcp"]');
   await click('[data-catalog-tab="personal"]');
+  await waitFor(webContents, 'Boolean(document.querySelector(".configuration-entry"))');
   await capture('tools');
   shell.mcp = await measureShell('mcp');
   const tools = await run('document.querySelector(".settings-page-title").textContent === "MCP 服务器" && Boolean(document.querySelector(".configuration-entry"))');

@@ -1,6 +1,6 @@
 import type { DesktopInboxApi } from '../../shared/inbox.js';
 import type { ProviderAccountSnapshot } from '../../shared/providerAccounts.js';
-import type { SessionImagePayload, SessionImageSize, SessionResumePreview, TranscriptHistoryCursor, TranscriptHistoryPage } from '../../shared/sessionHistory.js';
+import type { SessionHistoryPreview, SessionImagePayload, SessionImageSize, SessionResumePreview, TranscriptHistoryCursor, TranscriptHistoryPage } from '../../shared/sessionHistory.js';
 import type { ProviderAccountsApi } from '../../shared/providerAccounts.js';
 import type { LocalAppsApi, LocalAppEditRequest } from '../../shared/localApps';
 import type { ProjectCreationPurpose, ProjectFolderSelection } from '../../shared/projectCreation';
@@ -128,6 +128,7 @@ export interface DiagnosticEntry {
   message: string;
 }
 export interface BootstrapState {
+  startupSessionRestore?: SessionHistoryPreview;
   scheduledWorkspace?: string;
   conversationSpaces: ConversationSpacesSnapshot;
   revision: number;
@@ -254,6 +255,7 @@ export interface LingxiApi {
   openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: import('../../shared/conversationSpaces').ConversationSpace, authoringAppId?: string, authoringVersion?: number): Promise<BootstrapState>;
   openSessionWithPreview?(projectPath: string, sessionId: string, selection: SessionOpenSelection | undefined, linkedMode: ConversationSpace | undefined, requestId: string): Promise<BootstrapState>;
   onSessionResumePreview?(callback: (preview: SessionResumePreview) => void): Unsubscribe;
+  onStartupRestoreChanged?(callback: () => void): Unsubscribe;
   loadSessionHistory(sessionId: string, before: TranscriptHistoryCursor): Promise<TranscriptHistoryPage>;
   loadSessionImage(sessionId: string, reference: string, size: SessionImageSize, requestId?: string): Promise<SessionImagePayload>;
   cancelSessionImage(requestId: string): Promise<void>;

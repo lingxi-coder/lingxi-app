@@ -5,6 +5,7 @@ export const CH_SESSION_HISTORY = 'lingxi:session:history';
 export const CH_SESSION_IMAGE = 'lingxi:session:history-image';
 export const CH_SESSION_IMAGE_CANCEL = 'lingxi:session:history-image:cancel';
 export const CH_SESSION_RESUME_PREVIEW = 'lingxi:session:resume-preview';
+export const CH_STARTUP_RESTORE_CHANGED = 'lingxi:session:startup-restore-changed';
 
 export type SessionImageSize = 'thumbnail' | 'original';
 export interface SessionImagePayload { mediaType: string; base64: string }
@@ -13,11 +14,11 @@ export function isHistoryImageReference(value: unknown): value is string {
   return typeof value === 'string' && /^lingxi-history-image:[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}:\d{1,2}:(?:png|jpeg|gif|webp)(?::\d{1,20}:[A-Za-z0-9_-]{1,172})?$/u.test(value);
 }
 
-export interface SessionResumePreview {
-  requestId: string;
+export interface SessionHistoryPreview {
   session: { projectPath: string; sessionId: string; mode: 'chat' | 'code' };
   messages: MessageDto[];
 }
+export interface SessionResumePreview extends SessionHistoryPreview { requestId: string }
 export interface TranscriptHistoryCursor { uuid: string; offset?: number | null; identity?: string | null }
 export interface TranscriptHistoryPage { messages: MessageDto[]; before: TranscriptHistoryCursor | null }
 export interface TranscriptHistoryState { before: TranscriptHistoryCursor | null; loading: boolean; error?: string }

@@ -5,7 +5,7 @@ import { CH_DECISION, CH_DECISION_CHANGED, type DecisionApi } from '../shared/de
 import { DESKTOP_BRIDGE_GLOBAL } from '../shared/desktopBridge.js';
 import { CH_SESSION_RECOVERY, type SessionRecoveryDiagnostic } from '../shared/sessionRecovery.js';
 import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
-import { CH_SESSION_HISTORY, CH_SESSION_IMAGE, CH_SESSION_IMAGE_CANCEL, CH_SESSION_RESUME_PREVIEW, type SessionImagePayload, type SessionImageSize, type SessionResumePreview, type TranscriptHistoryCursor, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
+import { CH_SESSION_HISTORY, CH_SESSION_IMAGE, CH_SESSION_IMAGE_CANCEL, CH_SESSION_RESUME_PREVIEW, CH_STARTUP_RESTORE_CHANGED, type SessionHistoryPreview, type SessionImagePayload, type SessionImageSize, type SessionResumePreview, type TranscriptHistoryCursor, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
 import type { ProviderAccountsApi } from '../shared/providerAccounts.js';
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, type LocalAppsApi, type LocalAppEditRequest } from '../shared/localApps.js';
 import { CH_IMAGE_SAVE, type ImageSaveRequest } from '../shared/imageSave.js';
@@ -221,6 +221,7 @@ export interface DiagnosticEntry {
   message: string;
 }
 export interface BootstrapState {
+  startupSessionRestore?: SessionHistoryPreview;
   scheduledWorkspace?: string;
   conversationSpaces: ConversationSpacesSnapshot;
   settings: PublicSettings;
@@ -344,6 +345,7 @@ export interface LingxiApi {
   openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: ConversationSpace, authoringAppId?: string, authoringVersion?: number): Promise<BootstrapState>;
   openSessionWithPreview?(projectPath: string, sessionId: string, selection: SessionOpenSelection | undefined, linkedMode: ConversationSpace | undefined, requestId: string): Promise<BootstrapState>;
   onSessionResumePreview?(callback: (preview: SessionResumePreview) => void): Unsubscribe;
+  onStartupRestoreChanged?(callback: () => void): Unsubscribe;
   loadSessionHistory(sessionId: string, before: TranscriptHistoryCursor): Promise<TranscriptHistoryPage>;
   loadSessionImage(sessionId: string, reference: string, size: SessionImageSize, requestId?: string): Promise<SessionImagePayload>;
   cancelSessionImage(requestId: string): Promise<void>;
@@ -698,6 +700,7 @@ const api: LingxiApi = {
   cancelSessionHandoff: (requestId) => ipcRenderer.invoke(CH_SESSION_HANDOFF_CANCEL, requestId) as Promise<void>,
   onConversationShown: (callback) => subscribe(CH_CONVERSATION_SHOWN, callback),
   onSessionResumePreview: (callback) => subscribe(CH_SESSION_RESUME_PREVIEW, callback),
+  onStartupRestoreChanged: (callback) => subscribe(CH_STARTUP_RESTORE_CHANGED, callback),
   loadSessionHistory: (sessionId, before) => ipcRenderer.invoke(CH_SESSION_HISTORY, sessionId, before),
   loadSessionImage: (sessionId, reference, size, requestId) => ipcRenderer.invoke(CH_SESSION_IMAGE, sessionId, reference, size, requestId),
   cancelSessionImage: (requestId) => ipcRenderer.invoke(CH_SESSION_IMAGE_CANCEL, requestId),

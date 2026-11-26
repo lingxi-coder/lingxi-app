@@ -1,5 +1,5 @@
 import type { SessionMetadataSelection } from '../../shared/sessionWorkspace.js';
-import { EMPTY_TRANSCRIPT_HISTORY, initialHistory, recentTranscript, type SessionResumePreview } from '../../shared/sessionHistory.js';
+import { EMPTY_TRANSCRIPT_HISTORY, initialHistory, recentTranscript, type SessionHistoryPreview, type SessionResumePreview } from '../../shared/sessionHistory.js';
 import { prependHistory } from './conversation.js';
 import { prependRuntimeHistory } from './runtimeCenterState.js';
 import type { ProviderAccountsApi } from '../../shared/providerAccounts';
@@ -194,6 +194,10 @@ function configurationOperationId(
   return 'operation_id' in command && typeof command.operation_id === 'number' ? command.operation_id : undefined;
 }
 
+function previewConversation({ session, messages }: SessionHistoryPreview) {
+  return { ...conversationFromMessages(recentTranscript(messages)), sessionKey: session.sessionId };
+}
+
 function getHost(): LingxiApi | undefined {
   return typeof window !== 'undefined' ? window.lingxi : undefined;
 }
@@ -352,7 +356,14 @@ export function useBridge(): UseBridge {
 
   const persistedActiveSession = bootstrap?.activeSession ?? bootstrap?.settings.activeSession;
   const activeSession = displayedSession(persistedActiveSession, pendingSession);
-  const sessionLoading = pendingSession !== null && !sessionReady;
+  const restoring = bootstrap?.startupSessionRestore;
+  const startupSession = !pendingSession && navigationOperationRef.current === 0 && restoring
+    && restoring.session.sessionId === persistedActiveSession?.sessionId
+    && restoring.session.projectPath === persistedActiveSession.projectPath
+    && restoring.session.mode === bootstrap?.conversationSpaces.activeMode ? restoring : undefined;
+  const sessionLoading = (pendingSession !== null && !sessionReady) || Boolean(startupSession);
+  const startupPreview = useMemo(() => startupSession?.messages.length
+    ? { conversation: previewConversation(startupSession) } : undefined, [startupSession]);
   const activeSessionId = activeSession?.sessionId ?? null;
   const audioRealtimeState = (activeSessionId && audioRealtimeStates.get(activeSessionId)) ||
     { phase: 'paused' as const, detail: '实时会话已停止', generation: 0 };
@@ -694,9 +705,7 @@ export function useBridge(): UseBridge {
     request.published = true;
     // The preview belongs only to the transcript display. Normal lifecycle
     // events still own permissions, runtime state and final replay.
-    setResumePreview({ requestId, pickerRequestId: request.pickerRequestId, conversation: {
-      ...conversationFromMessages(recentTranscript(messages)), sessionKey: session.sessionId,
-    } });
+    setResumePreview({ requestId, pickerRequestId: request.pickerRequestId, conversation: previewConversation({ session, messages }) });
   }, []);
 
   const beginNavigationOperation = useCallback((): number => {
@@ -1341,6 +1350,12 @@ export function useBridge(): UseBridge {
       applyBootstrap(snapshot);
     });
     const offSessionResumePreview = host.onSessionResumePreview?.(acceptResumePreview);
+    const offStartupRestore = host.onStartupRestoreChanged?.(() => {
+      if (navigationOperationRef.current !== 0) return;
+      void host.bootstrap().then(snapshot => {
+        if (!disposed && navigationOperationRef.current === 0) applyBootstrap(snapshot);
+      }).catch(cause => { if (!disposed && navigationOperationRef.current === 0) setError(messageFrom(cause)); });
+    });
     const offComputerAccess = host.onComputerAccess((envelope) => {
       if (removedRuntimeIds.current.has(envelope.sessionId)) return;
       updateRuntime(envelope.sessionId, (state) => {
@@ -1387,6 +1402,7 @@ export function useBridge(): UseBridge {
       offComputerAccess();
       offConversationShown?.();
       offSessionResumePreview?.();
+      offStartupRestore?.();
     };
   }, [acceptResumePreview, accountSnapshotRefresh, applyBootstrap, capture, clearResumePreview, completeTrackedSpeech, host, scheduleProjectCatalogRefresh, updateRuntime]);
 
@@ -3004,8 +3020,8 @@ export function useBridge(): UseBridge {
     activeSession,
     activeBotId,
     sessionLoading,
-    sessionResumePreview: sessionLoading && resumePreview?.requestId === resumePreviewRequest.current?.requestId
-      ? resumePreview ?? undefined : undefined,
+    sessionResumePreview: sessionLoading && resumePreview && resumePreview.requestId === resumePreviewRequest.current?.requestId
+      ? resumePreview : startupPreview,
     connection,
     connected: !sessionLoading && connection.status === 'connected',
     conversation,

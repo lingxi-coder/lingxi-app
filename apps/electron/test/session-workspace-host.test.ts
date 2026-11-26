@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import type { SessionWorkspaceState, SetWorkingDirectoryRequest, SetWorkingDirectoryResult } from '@lingxi/bridge-client';
 
-import { CH_SESSION_OPEN, HostController, resolveSavedConversationTranscript, type WorkspaceDialogs } from '../src/main/host';
+import { CH_BOOTSTRAP, CH_SESSION_OPEN, HostController, resolveSavedConversationTranscript, type WorkspaceDialogs } from '../src/main/host';
 import { SessionRuntime } from '../src/main/bridge';
 import { SessionRuntimeManager } from '../src/main/sessionRuntimeManager';
 import { DiagnosticBuffer } from '../src/main/host-utils';
@@ -17,7 +17,7 @@ import type { SessionCatalogScope, SessionOpenSelection } from '../src/shared/se
 import { CH_NATIVE_AUDIO_FLOW_LEASE } from '../src/shared/nativeAudio';
 import { CH_REALTIME_AUDIO_COMMAND } from '../src/shared/realtimeAudio';
 import { audioConfigurationDefaults } from '../src/shared/generatedAudioConfiguration';
-import { CH_SESSION_HISTORY, CH_SESSION_IMAGE, CH_SESSION_RESUME_PREVIEW, type TranscriptHistoryPage } from '../src/shared/sessionHistory';
+import { CH_SESSION_HISTORY, CH_SESSION_IMAGE, CH_SESSION_RESUME_PREVIEW, CH_STARTUP_RESTORE_CHANGED, type TranscriptHistoryPage } from '../src/shared/sessionHistory';
 
 const sessionId = '11111111-2222-4333-8444-555555555555';
 const otherId = '22222222-3333-4444-8555-666666666666';
@@ -233,6 +233,53 @@ test('cold open starts the engine while the first page is pending and reads its 
     engineReady.resolve();
     await opening;
   }
+});
+
+for (const switchSession of [false, true]) test(`startup preview is available to a late window until ${switchSession ? 'another selection' : 'engine readiness'}`, { timeout: 5_000 }, async t => {
+  const f = await hostFixture(t);
+  f.runtimes.clear();
+  const owner = { ...f.ref, mode: 'code' as const, projectId: f.source };
+  await f.settings.conversationSpaces.setNavigation('code', f.source, owner);
+  f.settings.rememberSessionTranscriptSelection(owner, { catalogProjectPath: f.source, scope: 'current', transcriptPath: f.original.transcriptPath });
+  delete (f.host as any).bootstrap;
+  Object.assign(f.bridge, { runtimeSummaries: [] });
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const notifications: string[] = [];
+  const sender = { id: 1, mainFrame: frame, isDestroyed: () => false, once() {}, send(channel: string) { notifications.push(channel); } };
+  f.host.registerWindow(sender as any, frame.url);
+  f.host.registerIpc();
+  const event = { sender, senderFrame: frame };
+  const snapshot = () => f.handlers.get(CH_BOOTSTRAP)!(event);
+  const page = Promise.withResolvers<TranscriptHistoryPage>();
+  Object.assign(f.catalog, { selectForOpen: async () => ({ session: f.row(f.source), preview: page.promise }) });
+  const started = Promise.withResolvers<void>(), ready = Promise.withResolvers<void>();
+  const open = f.bridge.openSession;
+  f.bridge.openSession = async (...args) => {
+    if (args[0].sessionId === sessionId) { started.resolve(); await ready.promise; }
+    return open(...args);
+  };
+  const restoring = f.host.restoreConversationNavigation();
+  try {
+    await started.promise;
+    assert.deepEqual((await snapshot()).startupSessionRestore.messages, []);
+    const messages: TranscriptHistoryPage['messages'] = [{ role: 'user', blocks: [{ type: 'text', text: 'first page' }] }];
+    page.resolve({ messages, before: null });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual((await snapshot()).startupSessionRestore.messages, messages);
+    assert.equal(f.calls.activated.length, 0);
+    if (switchSession) {
+      const next = { ...owner, sessionId: otherId };
+      await f.settings.conversationSpaces.register(next);
+      await f.handlers.get(CH_SESSION_OPEN)!(event, f.source, otherId, { scope: 'current', transcriptPath: f.row(f.source, otherId).path });
+      assert.equal((await snapshot()).startupSessionRestore, undefined);
+    }
+  } finally {
+    ready.resolve();
+    await restoring;
+  }
+  assert.equal((await snapshot()).startupSessionRestore, undefined);
+  assert.equal(f.settings.getPublic().activeSession?.sessionId, switchSession ? otherId : sessionId);
+  assert.ok(notifications.includes(CH_STARTUP_RESTORE_CHANGED));
 });
 
 test('history reads the active runtime exact source while work continues and fences late pages', async t => {

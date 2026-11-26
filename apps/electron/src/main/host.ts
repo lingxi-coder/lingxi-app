@@ -1,7 +1,7 @@
 import { CH_DECISION } from '../shared/decision.js';
 import type { DecisionHost } from './decision.js';
 import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
-import { CH_SESSION_HISTORY, CH_SESSION_IMAGE, CH_SESSION_IMAGE_CANCEL, CH_SESSION_RESUME_PREVIEW, historyCursor, isHistoryImageReference, type SessionResumePreview, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
+import { CH_SESSION_HISTORY, CH_SESSION_IMAGE, CH_SESSION_IMAGE_CANCEL, CH_SESSION_RESUME_PREVIEW, CH_STARTUP_RESTORE_CHANGED, historyCursor, isHistoryImageReference, type SessionHistoryPreview, type SessionResumePreview, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
 import { CH_PROVIDER_ACCOUNTS, CH_PROVIDER_ACCOUNTS_CANCEL, type ProviderAccountCommand } from '../shared/providerAccounts.js';
 import type { DesktopProviderAccounts } from './provider-accounts.js';
 import { ProviderVaultClient, ProviderVaultError, vaultIdForAccount, vaultInstallPlan, vaultUpsertFor } from './provider-vault.js';
@@ -395,6 +395,7 @@ export interface WorkspaceMetadata {
 }
 
 export interface BootstrapState {
+  startupSessionRestore?: SessionHistoryPreview;
   revision: number;
   settings: PublicSettings;
   workspace: WorkspaceMetadata;
@@ -596,6 +597,7 @@ export class HostController {
   private sessionArchiveEpoch = 0;
   private readonly sessionArchivals = new Map<string, Promise<unknown>>();
   private navigationGeneration = 0;
+  private startupRestore?: { preview: SessionHistoryPreview; current(): boolean };
   private previewImageSource?: {
     sessionId: string;
     projectPath: string;
@@ -2124,6 +2126,7 @@ export class HostController {
     const engineVersions = activeRuntime?.runtimeVersions;
     const snapshot = {
       revision,
+      ...(this.startupRestore?.current() ? { startupSessionRestore: this.startupRestore.preview } : {}),
       scheduledWorkspace: this.settings.scheduledWorkspace,
       conversationSpaces: this.conversationSpacesSnapshot(),
       settings: this.settings.getPublic(),
@@ -3256,7 +3259,7 @@ export class HostController {
 
   private async openSessionAndActivateInternal(ref: SessionRef, selection?: SessionOpenSelection, generation?: number, expectedMode?: ConversationSpace,
     authoring?: CapturedLocalAppAuthoring, publicationCurrent?: () => boolean, selectMode?: (owner: OwnedConversation) => Promise<boolean>,
-    publishPreview?: (preview: Omit<SessionResumePreview, 'requestId'>) => void): Promise<BootstrapState> {
+    publishPreview?: (preview: SessionHistoryPreview, current: () => boolean) => void): Promise<BootstrapState> {
     if (!isSessionId(ref.sessionId)) throw new Error('invalid session id');
     const admitted = publicationCurrent ?? this.captureSessionOpen(ref.sessionId);
     if (!admitted() || (generation !== undefined && (generation !== this.navigationGeneration
@@ -3400,7 +3403,7 @@ export class HostController {
             };
             this.previewImageSource = previewImageSource;
           }
-          publishPreview({ session: previewSession, messages });
+          publishPreview({ session: previewSession, messages }, previewCurrent);
         };
         if (sourceWasCurrent && !archived()) {
           if (catalogPreview) {
@@ -3636,9 +3639,40 @@ export class HostController {
     const generation = this.navigationGeneration;
     const spaces = this.settings.conversationSpaces;
     const session = spaces.activeSession;
-    if (session) await this.enqueueSessionOpen(session.sessionId,
-      current => this.openSessionAndActivateInternal(session, undefined, generation, session.mode, undefined, current));
-    else await this.switchConversationSpace(spaces.activeMode, generation);
+    if (!session) {
+      await this.switchConversationSpace(spaces.activeMode, generation);
+      return;
+    }
+    await this.enqueueSessionOpen(session.sessionId, async current => {
+      if (this.bridge.get(session.sessionId) || !this.settings.getSessionTranscriptSelection(session)) {
+        return this.openSessionAndActivateInternal(session, undefined, generation, session.mode, undefined, current);
+      }
+      const restoring: NonNullable<typeof this.startupRestore> = {
+        preview: { session, messages: [] },
+        current: () => generation === this.navigationGeneration && current(),
+      };
+      // Windows can subscribe after the page is ready. Bootstrap holds the page
+      // until this exact open finishes, and a notification makes live windows reread it.
+      const notify = () => {
+        try { this.sendToWindows(CH_STARTUP_RESTORE_CHANGED, undefined); }
+        catch (error) { this.diagnostics.add('warn', 'host', sanitizeDiagnostic(error)); }
+      };
+      this.startupRestore = restoring;
+      notify();
+      try {
+        return await this.openSessionAndActivateInternal(session, undefined, generation, session.mode, undefined, current, undefined,
+          (preview, sourceCurrent) => {
+            restoring.preview = preview;
+            restoring.current = sourceCurrent;
+            notify();
+          });
+      } finally {
+        if (this.startupRestore === restoring) {
+          this.startupRestore = undefined;
+          notify();
+        }
+      }
+    });
   }
 
   /**

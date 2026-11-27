@@ -5,7 +5,7 @@ import type { MessageCommand, MessageMutation } from '../../../packages/teams/me
 import { TeamsWorkspace, type TeamsSnapshot } from '../../../packages/teams/workspace';
 import { FakeTeams, botCard, conversation, memoryStorage, members, message, team, uid, until } from './support/fakeTeams';
 import { loadTeamsModule } from './support/loadTeamsModule';
-import { classes, hostNode, mount, scenario, textOf, withDom } from './support/workspacePage';
+import { classes, editorNode, hostNode, mount, scenario, textOf, withDom } from './support/workspacePage';
 
 // These tests drive the components' event handlers and effects through react-test-renderer (see support/workspacePage).
 const { TeamConversationView } = loadTeamsModule<typeof import('../../../packages/teams/TeamConversationView')>('TeamConversationView');
@@ -83,17 +83,17 @@ scenario('composer: Enter sends and clears, Shift+Enter and an input method\'s E
   const { fake, workspace, snapshot } = await open(context);
   workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 3, 'the thread');
   const page = await mount(workspace, conversationView(workspace)); context.after(() => page.unmount());
-  const box = () => page.find(node => node.type === 'textarea')[0];
-  assert.equal(box().props.value, '');
+  const box = () => page.oneByLabel('Message');
+  assert.equal(page.editorText(), '');
   await page.type(box(), 'Hello team');
-  assert.equal(box().props.value, 'Hello team'); assert.equal(workspace.draft('chan-general'), 'Hello team', 'the draft is kept by the workspace');
+  assert.equal(page.editorText(), 'Hello team'); assert.equal(workspace.draft('chan-general'), 'Hello team', 'the draft is kept by the workspace');
   assert.equal(await page.key(box(), 'Enter', { shiftKey: true }), false, 'Shift+Enter is a line break'); assert.equal(mutations(fake).length, 0);
   assert.equal(await page.key(box(), 'Enter', { nativeEvent: { isComposing: true }, keyCode: 229 }), false, 'Enter inside an input method is not a send'); assert.equal(mutations(fake).length, 0);
   assert.equal(await page.key(box(), 'Enter'), true);
   await until(() => mutations(fake).length === 1, 'the send');
   const sent = mutations(fake)[0]!;
   assert.deepEqual([sent.operation, sent.conversationId, sent.text, 'targets' in sent, sent.replyTo], ['create', 'chan-general', 'Hello team', false, undefined]);
-  assert.equal(box().props.value, '', 'the box is cleared once the message is queued'); assert.equal(workspace.draft('chan-general'), '');
+  assert.equal(page.editorText(), '', 'the box is cleared once the message is queued'); assert.equal(workspace.draft('chan-general'), '');
   assert.equal(await page.key(box(), 'Enter'), true, 'Enter on an empty box is swallowed, not sent'); assert.equal(mutations(fake).length, 1);
   await page.type(box(), 'x'.repeat(8193));
   assert.equal(page.oneByClass('tw-send').props.disabled, true, 'over the byte limit'); assert.ok(page.byClass('tw-count').length === 1);
@@ -103,7 +103,7 @@ scenario('composer: @ offers the Bots of the conversation, only a chosen Bot is 
   const { fake, workspace, snapshot, bot } = await open(context);
   workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 3, 'the thread');
   const page = await mount(workspace, conversationView(workspace)); context.after(() => page.unmount());
-  const box = () => page.find(node => node.type === 'textarea')[0];
+  const box = () => page.oneByLabel('Message');
   assert.equal(page.byClass('tw-mentions').length, 0);
   await page.type(box(), 'hey @Fix', 8);
   const options = page.find(node => node.props.role === 'option');
@@ -112,7 +112,7 @@ scenario('composer: @ offers the Bots of the conversation, only a chosen Bot is 
   assert.equal(await page.key(box(), 'Escape'), true, 'Escape closes the list'); assert.equal(page.byClass('tw-mentions').length, 0);
   await page.type(box(), 'hey @Fi', 7); assert.equal(page.byClass('tw-mentions').length, 1, 'typing again reopens it');
   assert.equal(await page.key(box(), 'Enter'), true); assert.equal(mutations(fake).length, 0, 'Enter picks the Bot instead of sending');
-  assert.equal(box().props.value, 'hey ', 'the @ query is replaced by a chip'); assert.deepEqual(page.byClass('tw-target').map(textOf), ['@Fixture Bot']);
+  assert.equal(page.editorText(), 'hey ', 'the @ query is replaced by a chip'); assert.deepEqual(page.byClass('tw-target').map(textOf), ['@Fixture Bot']);
   await page.type(box(), 'hey please look');
   await page.key(box(), 'Enter'); await until(() => commandsOf(fake, 'submit').length === 1, 'the send');
   const submitted = commandsOf(fake, 'submit')[0]!; assert.equal(submitted.action, 'submit'); if (submitted.action !== 'submit') return; assert.deepEqual(submitted.payload.targets, [bot.sharedBotId]); assert.equal(submitted.payload.text, 'hey please look');
@@ -188,7 +188,7 @@ scenario('composer: a Bot whose Desktop is off still takes a message in a channe
   });
   workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 3, 'the thread');
   const page = await mount(workspace, conversationView(workspace)); context.after(() => page.unmount());
-  const box = () => page.find(node => node.type === 'textarea')[0], hint = () => page.byClass('tw-hint').map(textOf).join(' ');
+  const box = () => page.oneByLabel('Message'), hint = () => page.byClass('tw-hint').map(textOf).join(' ');
   await page.type(box(), 'hey @Fix', 8); await page.key(box(), 'Enter'); assert.deepEqual(page.byClass('tw-target').map(textOf), ['@Fixture Bot']);
   await page.type(box(), 'hey please look');
   assert.equal(page.oneByClass('tw-send').props.disabled, false, 'a Desktop that is off does not stop a message to a Bot in a channel');
@@ -220,18 +220,18 @@ scenario('composer: a full display name selects one member ID and survives draft
   });
   workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 3 && snapshot().directory.length === 4);
   const page = await mount(workspace, conversationView(workspace)); context.after(() => page.unmount());
-  const box = () => page.find(node => node.type === 'textarea')[0];
+  const box = () => page.oneByLabel('Message');
   await page.type(box(), '👋 @mary ja');
   assert.deepEqual(page.byClass('tw-mention').map(textOf), ['MJMary Janebob', 'MJMary Janecarol']);
   await page.key(box(), 'ArrowDown'); await page.key(box(), 'Enter');
-  assert.equal(box().props.value, '👋 @Mary Jane ');
+  assert.equal(page.editorText(), '👋 @Mary Jane ');
   const selected = { userId: 'carol', offset: 3, length: 10 };
   assert.deepEqual(workspace.draftMentions('chan-general'), [selected]);
 
   workspace.selectConversation('dm-bob');
-  await until(() => box()?.props.value === '');
+  await until(() => page.editorText() === '');
   workspace.selectConversation('chan-general');
-  await until(() => box()?.props.value === '👋 @Mary Jane ');
+  await until(() => page.editorText() === '👋 @Mary Jane ');
   await page.type(box(), 'Hi 👋 @Mary Jane please');
   const shifted = { ...selected, offset: 6 };
   assert.deepEqual(workspace.draftMentions('chan-general'), [], 'an ambiguous multi-range edit drops the association');
@@ -259,10 +259,10 @@ scenario('composer replaces the rest of a spaced name and preserves the mention 
   });
   workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 3 && snapshot().directory.length === 2);
   const page = await mount(workspace, conversationView(workspace)); context.after(() => page.unmount());
-  const box = () => page.find(node => node.type === 'textarea')[0];
+  const box = () => page.oneByLabel('Message');
   await page.type(box(), '👋 @Mary Jane, please review', 8);
   await page.key(box(), 'Enter');
-  assert.equal(box().props.value, '👋 @Mary Jane, please review');
+  assert.equal(page.editorText(), '👋 @Mary Jane, please review');
   assert.deepEqual(workspace.draftMentions('chan-general'), [{ userId: 'bob', offset: 3, length: 10 }]);
   await page.type(box(), ''); await page.type(box(), '@Mary');
   await page.key(box(), 'Enter');
@@ -282,24 +282,23 @@ scenario('composer replaces a partial surname and removes the recipient on ident
   });
   workspace.selectConversation('chan-general');
   await until(() => snapshot().directory.length === 2 && snapshot().messages.length === 3);
-  const input = Object.assign(new EventTarget(), hostNode());
-  input.addEventListener = EventTarget.prototype.addEventListener;
-  input.removeEventListener = EventTarget.prototype.removeEventListener;
-  const page = await mount(workspace, conversationView(workspace), element => element.type === 'textarea' ? input : hostNode());
+  const input = editorNode();
+  const page = await mount(workspace, conversationView(workspace), element => element.props.contentEditable ? input : hostNode());
   context.after(() => page.unmount());
-  const box = () => page.find(node => node.type === 'textarea')[0];
+  const box = () => page.oneByLabel('Message');
   await page.type(box(), '@Jane, thanks', 3);
   await page.click(page.oneByClass('tw-mention'));
-  assert.equal(box().props.value, '@Mary Jane, thanks');
+  assert.equal(page.editorText(), '@Mary Jane, thanks');
   assert.equal(workspace.draftMentions('chan-general')[0]?.userId, 'bob');
 
   await page.during(() => {
-    Object.assign(input, { value: box().props.value, selectionStart: 0, selectionEnd: 10 });
+    const value = input.textContent;
+    input.selectText(value, 0, 10);
     input.dispatchEvent(new Event('beforeinput'));
-    Object.assign(input, { selectionStart: 10 });
-    input.dispatchEvent(Object.assign(new Event('input'), { inputType: 'insertFromPaste' }));
+    input.selectText(value, 10);
+    box().props.onInput({ nativeEvent: { inputType: 'insertFromPaste' } });
   });
-  assert.equal(box().props.value, '@Mary Jane, thanks');
+  assert.equal(page.editorText(), '@Mary Jane, thanks');
   assert.deepEqual(workspace.draftMentions('chan-general'), []);
   await page.key(box(), 'Enter');
   await until(() => mutations(fake).length === 1);
@@ -315,7 +314,7 @@ scenario('composer windows a large roster and keeps the wrapped active row avail
   });
   workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 3 && snapshot().directory.length === 52);
   const page = await mount(workspace, conversationView(workspace)); context.after(() => page.unmount());
-  const box = () => page.find(node => node.type === 'textarea')[0];
+  const box = () => page.oneByLabel('Message');
   await page.type(box(), '@member');
   assert.ok(page.byClass('tw-mention').length <= 10);
   await page.key(box(), 'ArrowUp');
@@ -330,7 +329,7 @@ scenario('composer preserves a new mention selected while an identical text draf
   const { fake, workspace, snapshot } = await open(context);
   workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 3 && snapshot().directory.length > 0);
   const page = await mount(workspace, conversationView(workspace)); context.after(() => page.unmount());
-  const box = () => page.find(node => node.type === 'textarea')[0];
+  const box = () => page.oneByLabel('Message');
   const run = workspace.run;
   let finish!: () => void;
   const sending = new Promise<void>(resolve => { finish = resolve; });
@@ -340,11 +339,11 @@ scenario('composer preserves a new mention selected while an identical text draf
   await page.submit();
   await until(() => mutations(fake).length === 1);
   await page.key(box(), 'Enter');
-  assert.equal(box().props.value, '@Bob ');
+  assert.equal(page.editorText(), '@Bob ');
   assert.equal(workspace.draftMentions('chan-general')[0]?.userId, 'bob');
   finish();
   await until(() => !snapshot().messageBusy);
-  assert.equal(box().props.value, '@Bob ');
+  assert.equal(page.editorText(), '@Bob ');
   assert.equal(workspace.draftMentions('chan-general')[0]?.userId, 'bob');
 });
 
@@ -379,7 +378,7 @@ scenario('replying, editing and recalling go through the same queue as sending',
   const { fake, workspace, snapshot } = await open(context);
   workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 3, 'the thread');
   const page = await mount(workspace, conversationView(workspace)); context.after(() => page.unmount());
-  const box = () => page.find(node => node.type === 'textarea')[0];
+  const box = () => page.oneByLabel('Message');
   await page.type(box(), 'a draft');
   // Reply to message 3.
   const reply = page.find(node => node.props['aria-label'] === 'Reply'); assert.equal(reply.length, 3);
@@ -390,20 +389,21 @@ scenario('replying, editing and recalling go through the same queue as sending',
   // Edit message 2 (the only one that is the viewer\'s). The draft is set aside and comes back.
   await page.type(box(), 'second draft');
   await page.click(page.oneByLabel('Edit'));
-  assert.equal(box().props.value, 'Mine'); assert.match(page.byClass('tw-context').map(textOf).join(), /Editing message/);
+  assert.equal(page.editorText(), 'Mine'); assert.match(page.byClass('tw-context').map(textOf).join(), /Editing message/);
   // An edit never asks a Bot (rule 8), so the box says so while a message is edited in a conversation that has Bots.
   assert.match(page.byClass('tw-hint').map(textOf).join(' '), /Editing doesn’t notify Bots\. To ask one, send a new message\./);
-  assert.equal(page.byClass('tw-mentions').length, 0); assert.equal(page.byLabel('Mention (@)').length, 1, 'an edit can still mention members');
+  assert.equal(page.byLabel('Mention (@)').length, 0);
+  await page.type(box(), 'Mine @Bob'); assert.equal(page.byClass('tw-mentions').length, 1, 'an edit can still mention members by typing @');
   await page.type(box(), 'Mine, corrected');
   await page.key(box(), 'Enter'); await until(() => mutations(fake).length === 2, 'the edit');
   assert.deepEqual([mutations(fake)[1]!.operation, mutations(fake)[1]!.messageId, mutations(fake)[1]!.text], ['edit', 'message-2', 'Mine, corrected']);
-  assert.equal(box().props.value, 'second draft', 'the draft returns after the edit');
+  assert.equal(page.editorText(), 'second draft', 'the draft returns after the edit');
   assert.doesNotMatch(page.byClass('tw-hint').map(textOf).join(' '), /notify Bots/, 'the hint goes with the edit');
   // Escape abandons an edit.
-  await page.click(page.oneByLabel('Edit')); assert.equal(box().props.value, 'Mine');
-  await page.key(box(), 'Escape'); assert.equal(box().props.value, 'second draft'); assert.equal(page.byClass('tw-context').length, 0);
+  await page.click(page.oneByLabel('Edit')); assert.equal(page.editorText(), 'Mine');
+  await page.key(box(), 'Escape'); assert.equal(page.editorText(), 'second draft'); assert.equal(page.byClass('tw-context').length, 0);
   // Up arrow in an empty box edits the newest own message.
-  await page.type(box(), ''); await page.key(box(), 'ArrowUp'); assert.equal(box().props.value, 'Mine');
+  await page.type(box(), ''); await page.key(box(), 'ArrowUp'); assert.equal(page.editorText(), 'Mine');
   await page.key(box(), 'Escape');
   // Recall asks first.
   await page.click(page.oneByLabel('Recall'));
@@ -696,7 +696,7 @@ scenario('channel gear preserves the chat draft and saves independent post and r
   await until(() => snapshot().messages.length === 3 && !snapshot().offline, 'the channel');
   const page = await mount(workspace, conversationView(workspace));
   context.after(() => page.unmount());
-  const input = () => page.find(node => node.type === 'textarea' && typeof node.props['aria-label'] === 'string')[0];
+  const input = () => page.messageEditor();
   await page.type(input(), 'Keep this draft');
   await page.click(page.oneByLabel('Channel settings'));
   assert.match(page.text(), /General.*Name.*Description/);

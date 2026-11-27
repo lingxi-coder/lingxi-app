@@ -135,12 +135,13 @@ async function openGroup(context: Parameters<Parameters<typeof scenario>[1]>[0],
   const chips = () => page.find(n => n.type === 'li' && classes(n).includes('tw-file')).map(n => textOf(n));
   const sendButton = () => page.oneByLabel('Send');
   const submits = () => sent.filter((command): command is Extract<MessageCommand, { action: 'submit' }> => 'schemaVersion' in command && command.action === 'submit');
-  return { fake, workspace, page, sent, service, choose, chips, sendButton, submits, box: () => page.find(n => n.type === 'textarea')[0] };
+  return { fake, workspace, page, sent, service, choose, chips, sendButton, submits, box: page.messageEditor };
 }
 
 scenario('Files are chosen, upload at once, and go out with the message; what cannot be sent says why (L2, L3)', async context => {
   const { workspace, page, service, choose, chips, sendButton, submits, box } = await openGroup(context);
-  assert.equal(page.byLabel('Add files').length, 1); assert.equal(sendButton().props.disabled, true);
+  await page.click(page.oneByLabel('Add to message'));
+  assert.equal(page.button('Add files').props.role, 'menuitem'); assert.equal(sendButton().props.disabled, true);
   const photo = bytesOf(5000, 3), notes = new TextEncoder().encode('Gate 12, 13:05');
   await choose(picked('photo.png', 'image/png', photo), picked('clip.mov', 'video/quicktime', bytesOf(10)), picked('notes.txt', 'text/plain', notes));
   await until(() => workspace.getSnapshot().draftFiles.every(file => file.state === 'ready') && workspace.getSnapshot().draftFiles.length === 2, 'both uploads');
@@ -157,7 +158,7 @@ scenario('Files are chosen, upload at once, and go out with the message; what ca
   assert.deepEqual(payload.attachments!.map(id => service.files.get(id)!.state), ['verified', 'verified']);
   assert.deepEqual([sha(service.whole(payload.attachments![0]!)), new TextDecoder().decode(service.whole(payload.attachments![1]!))], [sha(photo), 'Gate 12, 13:05']);
   assert.equal(page.byClass('tw-file-refusals').length, 0);
-  assert.equal(box().props.value, '');
+  assert.equal(page.editorText(), '');
 });
 
 scenario('A message waits for its files, a file can be taken out again, and a failed one must be removed before sending (L3)', async context => {

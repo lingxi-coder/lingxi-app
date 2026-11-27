@@ -1,3 +1,4 @@
+import { messageFormatsSchema, validMessageFormats } from './team-message-format.mjs';
 import { confirmShareDelivery } from './dataset-message-grant.mjs';
 import { confirmVisualizationDelivery } from './team-visualization-contract.mjs';
 import { recallVisualization } from './team-visualization-storage.mjs';
@@ -29,9 +30,9 @@ export const messageCommand = z.discriminatedUnion('action', [
   z.object({ action: z.literal('postHistory'), ...thread, postId: id, before: cursor.optional() }).strict(),
   z.object({ action: z.literal('postInteraction'), ...thread, postId: id, liked: z.boolean().optional() }).strict(),
   z.object({ action: z.literal('mutate'), ...thread, messageId: id, changeId: id,
-    operation: z.enum(['create', 'edit', 'recall']), channelMode: z.enum(['chat', 'posts']).optional(), text: z.string(), replyTo: id.optional(), dataRef: dataReference.optional(), mentionEntities: mentionEntitiesSchema.optional() }).strict()
+    operation: z.enum(['create', 'edit', 'recall']), channelMode: z.enum(['chat', 'posts']).optional(), text: z.string(), replyTo: id.optional(), dataRef: dataReference.optional(), mentionEntities: mentionEntitiesSchema.optional(), formats: messageFormatsSchema.optional() }).strict()
     .refine(value => value.operation === 'recall' ? value.text === '' : text.safeParse(value.text).success)
-    .refine(value => validMentionEntities(value.text, value.mentionEntities))
+    .refine(value => validMentionEntities(value.text, value.mentionEntities) && validMessageFormats(value.text, value.formats))
     .refine(value => value.operation === 'create' || (value.replyTo === undefined && value.dataRef === undefined)),
   z.object({ action: z.literal('read'), ...thread, lastReadSeq: cursor }).strict(),
 ]);
@@ -152,9 +153,10 @@ export class TeamMessagesStore {
       else if (input.dataRef) content = JSON.stringify([input.text, input.dataRef]);
       const textDigest = digest(content);
       const mentionDigest = input.mentionEntities === undefined ? undefined : digest(JSON.stringify(input.mentionEntities));
+      const formatDigest = input.formats === undefined ? undefined : digest(JSON.stringify(input.formats));
       if (old) {
         if (old.messageId !== input.messageId || old.operation !== input.operation || old.actorUid !== user.uid
-          || old.generation !== input.generation || old.textDigest !== textDigest || old.mentionDigest !== mentionDigest
+          || old.generation !== input.generation || old.textDigest !== textDigest || old.mentionDigest !== mentionDigest || old.formatDigest !== formatDigest
           || (input.operation === 'create' && (m?.author.kind !== 'user' || m.author.uid !== user.uid || m.kind !== (visualization ? 'visualization' : 'text')
             || (m.replyTo ?? null) !== (input.replyTo ?? null)))) fail(409, 'MESSAGE_ID_CONFLICT');
         return { messageId: input.messageId, changeId: input.changeId, changeSeq: old.seq };
@@ -191,7 +193,7 @@ export class TeamMessagesStore {
       if (!Number.isSafeInteger(changeSeq) || !Number.isSafeInteger(seq)) fail(409, 'CURSOR_LIMIT');
       const now = new Date(clock);
       const change = { seq: changeSeq, messageId: input.messageId, operation: input.operation,
-        actorUid: user.uid, generation: input.generation, textDigest, ...(mentionDigest ? { mentionDigest } : {}), at: now };
+        actorUid: user.uid, generation: input.generation, textDigest, ...(mentionDigest ? { mentionDigest } : {}), ...(formatDigest ? { formatDigest } : {}), at: now };
       const update = { lastChangeSeq: changeSeq, lastChange: { id: input.changeId, seq: changeSeq } };
       if (input.operation === 'create') {
         const author = { kind: 'user', uid: user.uid };
@@ -199,6 +201,7 @@ export class TeamMessagesStore {
         Object.assign(update, { lastSeq: seq, lastMessage: { id: input.messageId, seq, at: now, author, preview: messagePreview(input.text) } });
         tx.create(msgRef, { seq, author, kind: visualization ? 'visualization' : 'text', text: input.text, ...channelContent,
           ...(input.mentionEntities?.length ? mentionFields(input.mentionEntities) : {}),
+          ...(input.formats?.length ? { formats: input.formats } : {}),
           ...(share ? { resourceRef: share.reference, resourceGrant: share.grant } : {}),
           ...(visualization ? { visualization } : {}),
           ...(input.replyTo ? { replyTo: input.replyTo } : {}), ...(input.dataRef ? { dataRef: input.dataRef } : {}), createdAt: now, changeSeq, changeId: input.changeId });
@@ -210,8 +213,11 @@ export class TeamMessagesStore {
         if (input.operation === 'recall' && m.visualization) recallVisualization(tx, teamRef, m.visualization.reference, clock);
         const entities = input.operation === 'recall' ? []
           : input.mentionEntities ?? preserveMentionEntities(m.text, input.text, m.mentionEntities);
+        // A plain-text client can edit the body without leaving stale offsets.
+        const formats = input.operation === 'recall' ? [] : input.formats ?? (m.text === input.text ? m.formats : []);
         // Delivery recipients belong to the original send. Editing only changes the inline ranges.
         tx.update(msgRef, { ...(m.mentionEntities?.length || entities?.length ? { mentionEntities: entities ?? [] } : {}),
+          ...(m.formats?.length || formats?.length ? { formats: formats ?? [] } : {}),
           text: input.text, editedAt: now, changeSeq, changeId: input.changeId,
           ...(input.operation === 'recall' ? { recalled: true, ...(m.dataRef ? { dataRef: null } : {}),
             ...(m.resourceRef ? { resourceRef: null, resourceGrant: null } : {}),

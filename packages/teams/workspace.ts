@@ -1,3 +1,4 @@
+import { validMessageFormats, type MessageFormat } from './message-format.js';
 import { parseMentionEntities, shiftMentionEntities, type MentionEntity } from './mentions.js';
 import { executionCommand, sharedBotUsable, type SharedBotCard } from './execution.js';
 import { botDmHandedOver } from './compose.js';
@@ -376,7 +377,7 @@ export class TeamsWorkspace {
   private botsUnverified = false;
   private botsError = '';
   private readonly conversationByTeam = new Map<string, string>();
-  private readonly drafts = new Map<string, { text: string; entities: MentionEntity[] }>();
+  private readonly drafts = new Map<string, { text: string; entities: MentionEntity[]; formats: MessageFormat[] }>();
   private draftFillRevision = 0;
   // Files of unsent messages, kept like the text drafts. Each upload is for one conversation of one membership and ends there.
   private readonly draftFileLists = new Map<string, DraftFile[]>();
@@ -419,7 +420,9 @@ export class TeamsWorkspace {
   draft = (conversationId: string): string => this.readDraft(conversationId).text;
   draftMentions = (conversationId: string): MentionEntity[] => this.readDraft(conversationId).entities;
 
-  private readDraft(conversationId: string): { text: string; entities: MentionEntity[] } {
+  draftFormats = (conversationId: string): MessageFormat[] => this.readDraft(conversationId).formats;
+
+  private readDraft(conversationId: string): { text: string; entities: MentionEntity[]; formats: MessageFormat[] } {
     const key = this.draftKey(conversationId);
     const cached = this.drafts.get(key);
     if (cached) return cached;
@@ -429,7 +432,8 @@ export class TeamsWorkspace {
       if (current !== null && current !== undefined) {
         const value = JSON.parse(current);
         if (typeof value?.text === 'string' && value.text) {
-          const draft = { text: value.text, entities: parseMentionEntities(value.text, value.entities) };
+          const draft = { text: value.text, entities: parseMentionEntities(value.text, value.entities),
+            formats: validMessageFormats(value.text, value.formats) ? value.formats : [] };
           this.drafts.set(key, draft);
           return draft;
         }
@@ -441,26 +445,24 @@ export class TeamsWorkspace {
             const legacy = JSON.parse(storage?.getItem('lingxi.teamDraftMentions.' + key) ?? 'null');
             if (legacy?.text === text) entities = parseMentionEntities(text, legacy.entities);
           } catch { /* Legacy mention data is optional. */ }
-          const draft = { text, entities };
+          const draft = { text, entities, formats: [] };
           this.drafts.set(key, draft);
           return draft;
         }
       }
     } catch { /* Storage may be unavailable. */ }
-    return { text: '', entities: [] };
+    return { text: '', entities: [], formats: [] };
   }
 
-  setDraft = (conversationId: string, text: string, entities?: MentionEntity[]): void => {
+  setDraft = (conversationId: string, text: string, entities?: MentionEntity[], formats?: MessageFormat[]): void => {
     const key = this.draftKey(conversationId);
-    if (entities === undefined) {
-      const current = this.readDraft(conversationId);
-      entities = shiftMentionEntities(current.text, text, current.entities);
-    }
-    const value = { text, entities };
+    const current = this.readDraft(conversationId);
+    const value = { text, entities: entities ?? shiftMentionEntities(current.text, text, current.entities),
+      formats: formats ?? (text.startsWith(current.text) ? current.formats : []) };
     if (text) this.drafts.set(key, value); else this.drafts.delete(key);
     try {
       const storage = globalThis.localStorage, recordKey = 'lingxi.teamStructuredDraft.v1.' + key;
-      if (text) storage?.setItem(recordKey, JSON.stringify(value));
+      if (text) storage?.setItem(recordKey, JSON.stringify({ text, entities: value.entities, ...(value.formats.length ? { formats: value.formats } : {}) }));
       else {
         // Clear legacy keys before removing the record that takes precedence over them.
         storage?.removeItem('lingxi.teamDraft.' + key);

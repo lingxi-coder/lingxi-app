@@ -642,7 +642,7 @@ export class SharedBotsStore {
     const sharedText = p.privateDataSource ? 'Private data preview requested.' : p.text;
     countPostReply(tx, ref, channelContent.postId);
     tx.create(ref.collection('messages').doc(p.messageId), { seq, changeSeq, changeId: p.changeId, text: sharedText, kind: 'text', author, ...channelContent,
-      createdAt: at, ...(tasks.length ? { taskIds: tasks.map(task => task.taskId) } : {}),
+      createdAt: at, ...(p.formats?.length ? { formats: p.formats } : {}), ...(tasks.length ? { taskIds: tasks.map(task => task.taskId) } : {}),
       ...(p.mentionEntities?.length ? mentionFields(p.mentionEntities, p.targets.map(id => `shared_bot:${id}`))
         : tasks.length ? { mentions: p.targets.map(id => `shared_bot:${id}`) } : {}),
       ...(dataCause ? { dataRef: dataCause.reference } : {}),
@@ -1312,7 +1312,7 @@ export class SharedBotsStore {
     const author = { kind: 'user', uid: identity.uid, displayName: self.displayName || 'Member' }, at = new Date(now);
     countPostReply(tx, ref, channelContent.postId);
     tx.create(ref.collection('messages').doc(p.messageId), { seq, changeSeq, changeId: p.changeId, text: p.text, kind: 'text', author,
-      createdAt: at, replyTo: wait.messageId, ...channelContent, waitId: p.waitId, sourceTaskId: task.taskId, ...(deciding ? { decision: p.decision } : {}) });
+      createdAt: at, ...(p.formats?.length ? { formats: p.formats } : {}), replyTo: wait.messageId, ...channelContent, waitId: p.waitId, sourceTaskId: task.taskId, ...(deciding ? { decision: p.decision } : {}) });
     tx.create(ref.collection('changes').doc(p.changeId), { seq: changeSeq, messageId: p.messageId, operation: 'create',
       actorUid: identity.uid, generation: identity.generation, textDigest: createHash('sha256').update(p.text).digest('hex'), at,
       submissionDigest: digest, submissionReceipt: response });

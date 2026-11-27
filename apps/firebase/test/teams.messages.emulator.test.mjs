@@ -258,6 +258,31 @@ test('T2: concurrent duplicate sends have one identity, seq and immutable receip
   await assert.rejects(execute(command({ text: 'Different payload' })), { code: 'MESSAGE_ID_CONFLICT' });
   await assert.rejects(execute(command({ changeId: 'other-change' })), { code: 'MESSAGE_ID_CONFLICT' });
 });
+test('inline formatting is validated, retried, edited and recalled with its message', options, async () => {
+  const text = '👋 hello', formats = [{ offset: 0, length: 2, style: 1 }, { offset: 3, length: 5, style: 6 }];
+  const send = command({ text, formats });
+  await assert.rejects(execute({ ...send, formats: [{ offset: 1, length: 1, style: 1 }] }));
+  await assert.rejects(execute({ ...send, formats: [{ offset: 0, length: 2, style: 16 }] }));
+  await assert.rejects(execute({ ...send, formats: [...formats, { offset: 4, length: 1, style: 4 }] }));
+  assert.deepEqual(await execute(send), await execute(send));
+  await assert.rejects(execute({ ...send, formats: [] }), { code: 'MESSAGE_ID_CONFLICT' });
+  const received = (await sync()).messages[0];
+  assert.equal(received.text, text);
+  assert.deepEqual(received.formats, formats);
+  assert.equal((await pointer()).preview, text);
+
+  const edit = (changeId, value) => execute(command({ operation: 'edit', changeId, text, ...value }));
+  await edit('change002', { formats: [] });
+  assert.deepEqual((await stored(send.messageId)).formats, []);
+  await edit('change003', { formats });
+  await edit('change004', { text: 'Plain client edit' });
+  assert.deepEqual((await stored(send.messageId)).formats, []);
+  await edit('change005', { formats });
+  await execute(command({ operation: 'recall', changeId: 'change006', text: '' }));
+  assert.deepEqual((await stored(send.messageId)).formats, []);
+  assert.equal((await execute(send)).changeSeq, 1);
+});
+
 test('T2: retry evidence survives later editing and recall without retaining recalled text', options, async () => {
   await execute(command());
   await execute(command({ operation: 'edit', changeId: 'change002', text: 'Edited synthetic body' }));
@@ -489,14 +514,15 @@ test('posts keep history and enforce separate sender and reply rules at commit',
   const config = (mode, senders, replies) => execute({ action: 'channelSettings', teamId, generation: 1, request: {
     op: 'posting', conversationId: room.conversationId, posting: { mode, senders, selected: senders === 'selected' ? ['user:owner'] : [], replies }
   } });
-  const send = (id, actor, channelMode, replyTo) => execute(command({ ...room, messageId: `message-${id}`, changeId: `change-${id}`, channelMode, replyTo }), actor);
+  const send = (id, actor, channelMode, replyTo, formats) => execute(command({ ...room, messageId: `message-${id}`, changeId: `change-${id}`, channelMode, replyTo, formats }), actor);
   await send('old', alice, 'chat');
   await send('quote', owner, 'chat', 'message-old');
   await config('posts', 'selected', 'all');
   await assert.rejects(send('stale', owner, 'chat'), { code: 'CHANNEL_MODE_CHANGED' });
   await assert.rejects(send('denied', alice, 'posts'), { code: 'CHANNEL_POSTING_DENIED' });
-  await send('post', owner, 'posts');
-  await send('reply', alice, 'posts', 'message-post');
+  const formats = [{ offset: 0, length: 9, style: 1 }];
+  await send('post', owner, 'posts', undefined, formats);
+  await send('reply', alice, 'posts', 'message-post', formats);
   await send('nested', alice, 'posts', 'message-reply');
   await config('posts', 'selected', 'authors');
   await assert.rejects(send('restricted', alice, 'posts', 'message-post'), { code: 'CHANNEL_POSTING_DENIED' });
@@ -508,6 +534,8 @@ test('posts keep history and enforce separate sender and reply rules at commit',
   const { messages: history } = await execute({ action: 'history', ...room });
   const post = await execute({ action: 'postHistory', ...room, postId: 'message-post' }, alice);
   assert.equal(post.root.id, 'message-post');
+  assert.deepEqual(post.root.formats, formats);
+  assert.deepEqual(post.replies[0].formats, formats);
   assert.deepEqual(post.replies.map(item => item.id), ['message-reply', 'message-nested']);
   assert.equal(post.next, null);
   await assert.rejects(execute({ action: 'postHistory', ...room, postId: 'message-post' }, hidden), { code: 'CONVERSATION_REQUIRED' });

@@ -486,8 +486,8 @@ test('conversation view: header, stream with day and unread dividers, grouped ru
   assert.equal(count(markup, /aria-label="Edit"/g), 1, 'only the viewer\'s own'); assert.equal(count(markup, /aria-label="Recall"/g), 1);
   assert.match(markup, /aria-label="Mark as read" title="Mark as read"><svg/);
   assert.match(markup, /aria-pressed="false" aria-label="Channel details"/);
-  assert.match(markup, /<textarea[^>]*aria-label="Message"[^>]*placeholder="Message #general"/); assert.match(markup, /Type @ to ask a Bot/);
-  assert.match(markup, /aria-label="Mention \(@\)"/); assert.match(markup, /class="tw-primary tw-send" disabled="" aria-label="Send"/, 'nothing to send yet');
+  assert.match(markup, /<div[^>]*role="textbox"[^>]*aria-label="Message"[^>]*aria-placeholder="Message #general"/); assert.match(markup, /Type @ to ask a Bot/);
+  assert.doesNotMatch(markup, /aria-label="Mention \(@\)"/); assert.match(markup, /aria-label="Add to message"[^>]*aria-haspopup="menu"/); assert.match(markup, /class="tw-primary tw-send" disabled="" aria-label="Send"/, 'nothing to send yet');
   assert.doesNotMatch(markup, /tw-jump/, 'pinned to the newest message: no jump button');
 });
 
@@ -524,15 +524,15 @@ test('conversation view: someone else\'s Bot dm is read-only; a Bot dm needs its
   await until(() => snapshot().conversations.length === 5, 'five conversations');
   workspace.selectConversation('others-bot-chat'); await until(() => snapshot().messages.length === 1, 'their thread');
   const observer = html(view(workspace, snapshot()));
-  assert.match(observer, /only participants can send messages/); assert.doesNotMatch(observer, /<textarea/); assert.doesNotMatch(observer, /aria-label="Reply"/);
+  assert.match(observer, /only participants can send messages/); assert.doesNotMatch(observer, /role="textbox"/); assert.doesNotMatch(observer, /aria-label="Reply"/);
   assert.match(observer, /Ready · Maintainer: Owner/); assert.match(observer, /<h2>Fixture Bot · Bob<\/h2>/, 'the Bot\'s maintainer sees whose chat it is');
   workspace.selectConversation('bot-chat'); await until(() => snapshot().selectedConversationId === 'bot-chat', 'bot chat');
   const own = html(view(workspace, snapshot()));
-  assert.match(own, /<textarea[^>]*placeholder="Message Fixture Bot"/); assert.match(own, /Messages ask this Bot automatically/); assert.doesNotMatch(own, /Mention \(@\)/, 'a Bot dm asks its Bot by itself');
+  assert.match(own, /<div[^>]*role="textbox"[^>]*aria-placeholder="Message Fixture Bot"/); assert.match(own, /Messages ask this Bot automatically/); assert.doesNotMatch(own, /Mention \(@\)/, 'a Bot dm asks its Bot by itself');
   assert.match(own, /Ready · Maintainer: Owner/); assert.match(own, /<h2>Fixture Bot<\/h2>/); assert.doesNotMatch(own, /tw-chan/, 'a Bot dm has its Bot\'s picture, not the channel #');
   fake.bots = [botCard({ permitted: false })]; await workspace.refreshBots(); await until(() => snapshot().bots[0]?.permitted === false, 'revoked access');
   const revoked = html(view(workspace, snapshot()));
-  assert.match(revoked, /This Bot is not available to you right now/); assert.doesNotMatch(revoked, /<textarea/);
+  assert.match(revoked, /This Bot is not available to you right now/); assert.doesNotMatch(revoked, /role="textbox"/);
   fake.bots = []; fake.messages = async () => { throw new Error('SERVICE_UNAVAILABLE'); }; await workspace.refreshBots(); await until(() => snapshot().botsUnverified, 'unverified');
   assert.match(html(view(workspace, snapshot())), /Bot availability could not be verified/);
   workspace.selectConversation('dm-bob'); await until(() => snapshot().selectedConversationId === 'dm-bob', 'dm');

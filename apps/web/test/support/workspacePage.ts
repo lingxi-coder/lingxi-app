@@ -13,7 +13,7 @@ export const reactTestRenderer = () => renderer;
 
 export function hostNode() {
   const node: Record<string, unknown> = {
-    open: false, style: {}, scrollTop: 0, scrollHeight: 0, clientHeight: 0, offsetTop: 0, value: '', selectionStart: 0, selectionEnd: 0,
+    ownerDocument: globalThis.document, open: false, style: {}, scrollTop: 0, scrollHeight: 0, clientHeight: 0, offsetTop: 0, value: '', selectionStart: 0, selectionEnd: 0,
     focus() {}, blur() {}, select() {}, setSelectionRange() {}, setAttribute() {}, removeAttribute() {}, addEventListener() {}, removeEventListener() {},
     querySelector: () => null, querySelectorAll: () => [], closest: () => null, contains: () => false,
     getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 }),
@@ -21,6 +21,56 @@ export function hostNode() {
   };
   return node;
 }
+export function editorNode() {
+  type TextNode = { nodeType: number; nodeValue: string };
+  const createTextNode = (nodeValue: string): TextNode => ({ nodeType: 3, nodeValue });
+  let start = 0, end = 0;
+  const node = Object.assign(new EventTarget(), hostNode(), {
+    addEventListener: EventTarget.prototype.addEventListener,
+    removeEventListener: EventTarget.prototype.removeEventListener,
+    nodeType: 1, childNodes: [] as TextNode[],
+    textContent: '',
+    contains(child: unknown) { return child === node || node.childNodes.some(text => text === child); },
+    replaceChildren(content: { children: TextNode[] }) { node.childNodes = content.children; },
+    selectText(value: string, from = value.length, to = from) {
+      node.childNodes = [createTextNode(value)]; start = from; end = to;
+    },
+    ownerDocument: {
+      activeElement: null as unknown, addEventListener() {}, removeEventListener() {},
+      createTextNode,
+      createDocumentFragment() {
+        const children: TextNode[] = [];
+        return { children, append(child: TextNode) { children.push(child); } };
+      },
+      createRange() {
+        let offset = 0;
+        return {
+          selectNodeContents() { offset = node.textContent.length; },
+          setStart(_node: unknown, value: number) { offset = value; },
+          collapse() {},
+          get offset() { return offset; },
+        };
+      },
+      createTreeWalker() {
+        let index = 0;
+        return { nextNode: () => node.childNodes[index++] ?? null };
+      },
+      getSelection() {
+        const boundary = node.childNodes[0] ?? node;
+        return {
+          rangeCount: 1,
+          getRangeAt: () => ({ commonAncestorContainer: boundary, startContainer: boundary, endContainer: boundary, startOffset: start, endOffset: end }),
+          removeAllRanges() {},
+          addRange(range: { offset: number }) { start = end = range.offset; },
+        };
+      },
+    },
+  });
+  // Object.assign reads accessors, so install the live text accessor on the host.
+  Object.defineProperty(node, 'textContent', { get: () => node.childNodes.map(child => child.nodeValue).join('') });
+  return node;
+}
+
 export function withDom(context: TestContext): void {
   const names = ['document', 'window', 'HTMLElement'] as const;
   const saved = names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const);
@@ -43,10 +93,15 @@ export const classes = (node: any) => String(node.props.className ?? '').split('
 export const textOf = (node: any): string => typeof node === 'string' ? node : (node.children ?? []).map(textOf).join('');
 
 export async function mount<Snapshot>(workspace: Store<Snapshot>, render: (snapshot: Snapshot) => ReactElement,
-  createNodeMock: (element: ReactElement) => unknown = hostNode) {
+  createNodeMock: (element: ReactElement) => unknown = element => element.props.contentEditable ? editorNode() : hostNode()) {
   const { create, act } = renderer!;
   let tree: any;
-  await act(async () => { tree = create(createElement(Host, { workspace, render }), { createNodeMock }); await settle(); });
+  let editor: ReturnType<typeof editorNode> | undefined;
+  await act(async () => {
+    tree = create(createElement(Host, { workspace, render }), { createNodeMock: (element: ReactElement) =>
+      element.props.contentEditable ? (editor = createNodeMock(element) as typeof editor) : createNodeMock(element) });
+    await settle();
+  });
   const find = (match: (node: any) => boolean): any[] => tree.root.findAll((node: any) => typeof node.type === 'string' && match(node));
   const one = (match: (node: any) => boolean, label: string): any => {
     const found = find(match);
@@ -55,6 +110,8 @@ export async function mount<Snapshot>(workspace: Store<Snapshot>, render: (snaps
   };
   const page = {
     find,
+    messageEditor: () => find(node => node.props.contentEditable === true)[0],
+    editorText: () => editor?.textContent,
     byClass: (name: string) => find(node => classes(node).includes(name)),
     oneByClass: (name: string) => one(node => classes(node).includes(name), `.${name}`),
     byLabel: (label: string) => find(node => node.props['aria-label'] === label),
@@ -66,7 +123,16 @@ export async function mount<Snapshot>(workspace: Store<Snapshot>, render: (snaps
     async click(node: any) { assert.notEqual(node.props.disabled, true, 'a disabled control cannot be pressed'); await page.during(() => node.props.onClick({ preventDefault() {}, stopPropagation() {} })); },
     async check(node: any, checked = true) { await page.during(() => node.props.onChange({ target: { checked } })); },
     async submit(form: any = one(node => node.type === 'form', 'form')) { await page.during(() => form.props.onSubmit({ preventDefault() {} })); },
-    async type(node: any, value: string, caret = value.length) { await page.during(() => node.props.onChange({ target: { value, selectionStart: caret }, currentTarget: { value, selectionStart: caret } })); },
+    async type(node: any, value: string, caret = value.length) {
+      await page.during(() => {
+        if (node.props.contentEditable) {
+          editor!.selectText(value, caret);
+          node.props.onInput({ nativeEvent: { inputType: 'insertText' } });
+        } else {
+          node.props.onChange({ target: { value, selectionStart: caret }, currentTarget: { value, selectionStart: caret } });
+        }
+      });
+    },
     async key(node: any, key: string, more: Record<string, unknown> = {}) {
       let prevented = false;
       await page.during(() => node.props.onKeyDown({ key, shiftKey: false, keyCode: key === 'Enter' ? 13 : 0, nativeEvent: { isComposing: false }, preventDefault() { prevented = true; }, stopPropagation() {}, defaultPrevented: false, target: node, currentTarget: node, ...more }));

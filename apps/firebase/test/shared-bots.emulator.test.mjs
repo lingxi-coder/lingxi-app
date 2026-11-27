@@ -642,8 +642,10 @@ test('wait: pause invalidates the permit and publishes one question with a durab
 test('wait: a 30 minute wait is not charged; the answer grants epoch 2 and completion succeeds', options, async () => {
   const { started, taskId } = await paused({ activeMs: 60000 });
   now += 30 * 60000;
-  const answered = await execute('answerWait', answerPayload(), member);
+  const payload = answerPayload(), formats = [{ offset: 0, length: payload.text.length, style: 2 }];
+  const answered = await execute('answerWait', { ...payload, formats }, member);
   assert.equal(answered.taskId, taskId);
+  assert.deepEqual((await chatRef().collection('messages').doc(answered.messageId).get()).data().formats, formats);
   const queued = await taskData(taskId);
   assert.equal(queued.state, 'queued'); assert.equal(queued.deadline, now + 300000);
   assert.deepEqual(queued.resume, { waitId: 'wait_0001', answerMessageId: answered.messageId, answerSeq: 3 });

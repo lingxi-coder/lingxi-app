@@ -296,7 +296,6 @@ export type TeamsKey =
   | 'teams_composer_lock_bot_unavailable'
   | 'teams_composer_lock_bot_unverified'
   | 'teams_composer_lock_owner_reading'
-  | 'teams_composer_mention'
   | 'teams_composer_mention_options'
   | 'teams_composer_note_bot_dm'
   | 'teams_composer_note_group'
@@ -761,9 +760,11 @@ export type TeamsKey =
   | 'tw_channel_settings'
   | 'tw_channel_team_required'
   | 'tw_checking'
+  | 'tw_composer_add'
   | 'tw_composer_answering_fmt'
   | 'tw_composer_attach'
   | 'tw_composer_connecting'
+  | 'tw_composer_format'
   | 'tw_composer_handed_over'
   | 'tw_composer_keys_hint'
   | 'tw_composer_message'
@@ -887,6 +888,11 @@ export type TeamsKey =
   | 'tw_file_view_fmt'
   | 'tw_files_one'
   | 'tw_files_other_fmt'
+  | 'tw_format_bold'
+  | 'tw_format_italic'
+  | 'tw_format_limit'
+  | 'tw_format_strike'
+  | 'tw_format_underline'
   | 'tw_handover'
   | 'tw_handover_after'
   | 'tw_handover_answer_with'
@@ -1377,7 +1383,6 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_composer_lock_bot_unavailable: { en: 'This Bot is not available to you right now.', 'zh-Hans': '此 Bot 目前对你不可用。', 'zh-Hant': '此 Bot 目前對你不可用。', ja: 'この Bot は現在利用できません。', ko: '이 Bot은 지금 사용할 수 없습니다.' },
   teams_composer_lock_bot_unverified: { en: 'Bot availability could not be verified. Reconnect to check.', 'zh-Hans': '未能确认 Bot 可用状态，请联网后重试。', 'zh-Hant': '未能確認 Bot 可用狀態，請連線後重試。', ja: 'Bot の利用可否を確認できませんでした。再接続して確認してください。', ko: 'Bot 사용 가능 여부를 확인하지 못했습니다. 다시 연결해 확인하세요.' },
   teams_composer_lock_owner_reading: { en: 'You can read this conversation because you maintain its Bot, but only participants can send messages.', 'zh-Hans': '你因维护其中的 Bot 而可阅读此会话，但只有参与者可以发送消息。', 'zh-Hant': '你因維護其中的 Bot 而可閱讀此會話，但只有參與者可以傳送訊息。', ja: 'あなたはこの会話に含まれる Bot のメンテナーなので閲覧できますが、メッセージを送れるのは参加者だけです。', ko: '이 대화에 포함된 Bot의 메인테이너이므로 읽을 수 있지만, 메시지는 참가자만 보낼 수 있습니다.' },
-  teams_composer_mention: { en: 'Mention (@)', 'zh-Hans': '提及 (@)', 'zh-Hant': '提及 (@)', ja: 'メンション (@)', ko: '멘션 (@)' },
   teams_composer_mention_options: { en: 'Mention suggestions', 'zh-Hans': '提及候选', 'zh-Hant': '提及候選', ja: 'メンション候補', ko: '멘션 후보' },
   teams_composer_note_bot_dm: { en: 'Messages ask this Bot automatically. Its maintainer can read this conversation.', 'zh-Hans': '发送消息会请求此 Bot。其维护者可阅读此会话。', 'zh-Hant': '傳送訊息會請求此 Bot。其維護者可閱讀此會話。', ja: 'メッセージを送ると、この Bot に自動で依頼されます。メンテナーはこの会話を読めます。', ko: '메시지를 보내면 이 Bot에게 자동으로 요청됩니다. 메인테이너가 이 대화를 읽을 수 있습니다.' },
   teams_composer_note_group: { en: 'Type @ to ask a Bot. Only Bots chosen from the list run.', 'zh-Hans': '输入 @ 请求 Bot。仅从列表中选择的 Bot 会执行。', 'zh-Hant': '輸入 @ 請求 Bot。僅從清單中選擇的 Bot 會執行。', ja: 'Bot に依頼するには @ を入力します。一覧から選んだ Bot だけが実行されます。', ko: 'Bot에게 요청하려면 @를 입력하세요. 목록에서 선택한 Bot만 실행됩니다.' },
@@ -1842,9 +1847,11 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_channel_settings: { en: 'Channel settings', 'zh-Hans': '频道设置', 'zh-Hant': '頻道設定', ja: 'チャンネル設定', ko: '채널 설정' },
   tw_channel_team_required: { en: 'Join the team first.', 'zh-Hans': '请先加入团队。', 'zh-Hant': '請先加入團隊。', ja: '先にチームに参加してください。', ko: '먼저 팀에 가입하세요.' },
   tw_checking: { en: 'Checking…', 'zh-Hans': '检查中…', 'zh-Hant': '檢查中…', ja: '確認中…', ko: '확인 중…' },
+  tw_composer_add: { en: 'Add to message', 'zh-Hans': '添加到消息', 'zh-Hant': '加入訊息', ja: 'メッセージに追加', ko: '메시지에 추가' },
   tw_composer_answering_fmt: { en: 'Replying to %1$s’s question', 'zh-Hans': '回复 %1$s 的问题', 'zh-Hant': '回覆 %1$s 的問題', ja: '%1$s の質問に返信中', ko: '%1$s 님의 질문에 답장 중' },
   tw_composer_attach: { en: 'Add pictures, PDFs or text files (up to 5, 10 MB each)', 'zh-Hans': '添加图片、PDF 或文本文件（最多 5 个，每个不超过 10 MB）', 'zh-Hant': '新增圖片、PDF 或純文字檔（最多 5 個，每個不超過 10 MB）', ja: '画像、PDF、テキストファイルを追加（最大5件、各10 MBまで）', ko: '사진, PDF 또는 텍스트 파일 추가(최대 5개, 각 10 MB까지)' },
   tw_composer_connecting: { en: 'Connecting: messages will send after server confirmation.', 'zh-Hans': '正在连接：服务器确认后发送消息。', 'zh-Hant': '正在連線：伺服器確認後傳送訊息。', ja: '接続中: サーバーの確認後にメッセージが送信されます。', ko: '연결 중: 서버 확인 후 메시지가 전송됩니다.' },
+  tw_composer_format: { en: 'Text Format', 'zh-Hans': '文本格式', 'zh-Hant': '文字格式', ja: 'テキストの書式', ko: '텍스트 서식' },
   tw_composer_handed_over: { en: 'This Bot has a new maintainer and no longer answers in this chat. What was said here stays as it is.', 'zh-Hans': '此 Bot 已更换维护者，不再在此对话中作答。这里的内容保持不变。', 'zh-Hant': '此 Bot 已更換維護者，不再在此對話中作答。這裡的內容保持不變。', ja: 'この Bot はメンテナーが変わったため、このチャットでは応答しません。ここでのやり取りはそのまま残ります。', ko: '이 Bot은 메인테이너가 바뀌어 이 채팅에서는 더 이상 답하지 않습니다. 여기에서 나눈 내용은 그대로 남습니다.' },
   tw_composer_keys_hint: { en: 'Enter to send, Shift+Enter for a new line.', 'zh-Hans': '按 Enter 发送，Shift+Enter 换行。', 'zh-Hant': '按 Enter 傳送，Shift+Enter 換行。', ja: 'Enter で送信、Shift+Enter で改行。', ko: 'Enter로 전송, Shift+Enter로 줄바꿈.' },
   tw_composer_message: { en: 'Message', 'zh-Hans': '消息', 'zh-Hant': '訊息', ja: 'メッセージ', ko: '메시지' },
@@ -1968,6 +1975,11 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_file_view_fmt: { en: 'View %1$s', 'zh-Hans': '查看 %1$s', 'zh-Hant': '檢視 %1$s', ja: '%1$s を表示', ko: '%1$s 보기' },
   tw_files_one: { en: '1 file', 'zh-Hans': '1 个文件', 'zh-Hant': '1 個檔案', ja: '1 件のファイル', ko: '파일 1개' },
   tw_files_other_fmt: { en: '%1$s files', 'zh-Hans': '%1$s 个文件', 'zh-Hant': '%1$s 個檔案', ja: '%1$s 件のファイル', ko: '파일 %1$s개' },
+  tw_format_bold: { en: 'Bold', 'zh-Hans': '粗体', 'zh-Hant': '粗體', ja: '太字', ko: '굵게' },
+  tw_format_italic: { en: 'Italic', 'zh-Hans': '斜体', 'zh-Hant': '斜體', ja: '斜体', ko: '기울임꼴' },
+  tw_format_limit: { en: 'This message has too many separate formatting changes.', 'zh-Hans': '这条消息中的独立格式过多。', 'zh-Hant': '這則訊息的個別格式過多。', ja: 'メッセージ内に書式の切り替えが多すぎます。', ko: '이 메시지의 개별 서식이 너무 많습니다.' },
+  tw_format_strike: { en: 'Strikethrough', 'zh-Hans': '删除线', 'zh-Hant': '刪除線', ja: '取り消し線', ko: '취소선' },
+  tw_format_underline: { en: 'Underline', 'zh-Hans': '下划线', 'zh-Hant': '底線', ja: '下線', ko: '밑줄' },
   tw_handover: { en: 'Handover', 'zh-Hans': '移交', 'zh-Hant': '移交', ja: '引き継ぎ', ko: '인계' },
   tw_handover_after: { en: 'Once they take it over, their Mac answers and they pay for the model. You can no longer stop sharing or publish it, and people start a new chat with it.', 'zh-Hans': '对方接手后，由对方的 Mac 作答并承担模型费用。你将不能再停止共享或发布它，成员需与它开始新的对话。', 'zh-Hant': '對方接手後，由對方的 Mac 作答並承擔模型費用。你將不能再停止共享或發布它，成員需與它開始新的對話。', ja: '相手が引き継ぐと、相手の Mac が応答を担当し、モデルの費用も相手が負担します。あなたはこの Bot の共有の停止や公開ができなくなり、メンバーは新しいチャットを始めることになります。', ko: '상대방이 인계받으면 상대방의 Mac이 답변을 맡고 모델 비용도 상대방이 부담합니다. 회원님은 더 이상 이 Bot의 공유를 중지하거나 게시할 수 없으며, 멤버들은 새 대화를 시작해야 합니다.' },
   tw_handover_answer_with: { en: 'Answer with', 'zh-Hans': '由此 Bot 作答', 'zh-Hant': '由此 Bot 作答', ja: '応答に使う Bot', ko: '답변에 사용할 Bot' },

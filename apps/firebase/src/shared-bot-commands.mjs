@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { messageFormatsSchema, validMessageFormats } from './team-message-format.mjs';
 import { mentionEntitiesSchema, validMentionEntities } from './team-mentions.mjs';
 import { deploymentRecord, memberRef, usePolicy } from './team-execution-contract.mjs';
 import { attachmentLimits, attachmentTypes } from './team-attachments.mjs';
@@ -153,12 +154,12 @@ const payloads = {
   // A message that asks Bots, carries files, or both. A message with neither is an ordinary message and is not sent here.
   submit: z.object({ ...thread, channelMode: z.enum(['chat', 'posts']).optional(), messageId: executionId, changeId: executionId, text: z.string().refine(value => Buffer.byteLength(value, 'utf8') <= 8192),
     targets: z.array(executionId).max(8).refine(unique), replyTo: executionId.optional(),
-    mentionEntities: mentionEntitiesSchema.optional(),
+    mentionEntities: mentionEntitiesSchema.optional(), formats: messageFormatsSchema.optional(),
     privateDataSource: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/u).optional(),
     attachments: z.array(executionId).min(1).max(attachmentLimits.messageFiles).refine(unique).optional() }).strict()
     .refine(value => value.targets.length > 0 || value.attachments !== undefined).refine(value => value.text.length > 0 || value.attachments !== undefined)
-    .refine(value => validMentionEntities(value.text, value.mentionEntities))
-    .refine(value => !value.privateDataSource || (value.targets.length === 1 && !value.replyTo && !value.attachments && !value.mentionEntities?.length)),
+    .refine(value => validMentionEntities(value.text, value.mentionEntities) && validMessageFormats(value.text, value.formats))
+    .refine(value => !value.privateDataSource || (value.targets.length === 1 && !value.replyTo && !value.attachments && !value.mentionEntities?.length && !value.formats?.length)),
   // Files in a message (detailed design 19): uploaded for one Chat in parts of at most 700 KiB, checked as a whole, then carried by a message.
   createUpload: z.object({ ...thread, uploadId: executionId, name: fileName, mime: z.enum(attachmentTypes),
     byteLength: z.number().int().min(1).max(attachmentLimits.fileBytes), sha256: digest }).strict(),
@@ -230,7 +231,8 @@ const payloads = {
   listHistory: z.object({ sharedBotId: executionId, beforeRevision: positive.optional() }).strict(),
   resolveOperation: z.object({ ...task, operationId: digest, resolution: z.enum(['succeeded', 'failed']) }).strict(),
   listOperations: z.object(task).strict(),
-  answerWait: z.object({ ...thread, waitId: executionId, messageId: executionId, changeId: executionId, text }).strict(),
+  answerWait: z.object({ ...thread, waitId: executionId, messageId: executionId, changeId: executionId, text, formats: messageFormatsSchema.optional() }).strict()
+    .refine(value => validMessageFormats(value.text, value.formats)),
   decideWait: z.object({ ...thread, waitId: executionId, messageId: executionId, changeId: executionId,
     decision: z.enum(['approve', 'deny']) }).strict(),
   cancelTask: z.object(task).strict(),

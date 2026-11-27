@@ -39,10 +39,10 @@ scenario('A member example opens the correct existing DM and appends to its draf
   const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en' })); cleanup(() => page.unmount());
   await page.click(page.button('Plan groceries'));
   assert.equal(workspace.getSnapshot().selectedConversationId, 'bot-chat');
-  assert.equal(page.find(node => node.type === 'textarea')[0].props.value, 'Existing draft\n\nPlan groceries');
+  assert.equal(page.editorText(), 'Existing draft\n\nPlan groceries');
   assert.equal(workspace.draft('other-chat'), 'Unrelated draft');
   assert.equal(fake.commands.some(command => command.action === 'submit' || command.action === 'mutate'), false);
-  await page.click(page.button('Plan groceries')); assert.equal(page.find(node => node.type === 'textarea')[0].props.value, 'Existing draft\n\nPlan groceries\n\nPlan groceries');
+  await page.click(page.button('Plan groceries')); assert.equal(page.editorText(), 'Existing draft\n\nPlan groceries\n\nPlan groceries');
   assert.match(page.text(), /Wait and resume: Supported · Write operations: Not supported/); assert.match(page.text(), /remaining requests today: 4/); assert.match(page.text(), /2026-11-17 00:00:00 UTC/);
   workspace.selectTeam('team-other'); assert.equal(workspace.draft('bot-chat'), ''); workspace.selectTeam('team-test'); assert.equal(workspace.draft('bot-chat'), 'Existing draft\n\nPlan groceries\n\nPlan groceries');
 });
@@ -51,17 +51,17 @@ scenario('Repeated example intent updates the composer after local edits even wh
   const { fake, workspace, cleanup } = await open(context); workspace.selectConversation('bot-chat');
   workspace.setDraft('other-chat', 'Unrelated draft');
   const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en' })); cleanup(() => page.unmount());
-  const box = () => page.find(node => node.type === 'textarea')[0];
+  const box = () => page.messageEditor();
   for (const original of ['', 'Keep my local draft']) {
     await page.type(box(), original);
     await page.click(page.button('Plan groceries'));
     const expected = original ? `${original}\n\nPlan groceries` : 'Plan groceries';
-    assert.equal(box().props.value, expected);
+    assert.equal(page.editorText(), expected);
     // Return to the local text without publishing a workspace snapshot, then repeat the same intent.
     await page.type(box(), original);
-    assert.equal(box().props.value, original);
+    assert.equal(page.editorText(), original);
     await page.click(page.button('Plan groceries'));
-    assert.equal(box().props.value, expected, 'the fill is applied once even if its result equals the previous published value');
+    assert.equal(page.editorText(), expected, 'the fill is applied once even if its result equals the previous published value');
     assert.equal(workspace.draft('bot-chat'), expected);
   }
   assert.equal(workspace.draft('other-chat'), 'Unrelated draft');
@@ -72,7 +72,7 @@ scenario('Explicit unavailable health blocks a new request while preserving hist
   const { fake, workspace, cleanup } = await open(context); fake.bots = [botCard({ examples: ['Try a question'], availability: 'quota_exhausted', ready: true, dailyRemaining: 0 })]; await workspace.refreshBots(); workspace.selectConversation('bot-chat');
   const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en' })); cleanup(() => page.unmount());
   await page.click(page.button('Try a question')); assert.equal(page.oneByLabel('Send').props.disabled, true); assert.match(page.text(), /Daily quota exhausted/); assert.match(page.text(), /remaining requests today: 0/); assert.match(page.text(), /Wait and resume: Unknown · Write operations: Unknown/); assert.match(page.text(), /Resets: Unknown/);
-  await page.key(page.find(node => node.type === 'textarea')[0], 'Enter'); assert.equal(fake.commands.some(command => command.action === 'submit'), false); assert.equal(workspace.draft('bot-chat'), 'Try a question');
+  await page.key(page.messageEditor(), 'Enter'); assert.equal(fake.commands.some(command => command.action === 'submit'), false); assert.equal(workspace.draft('bot-chat'), 'Try a question');
   fake.bots = [botCard()]; await page.during(() => workspace.refreshBots()); assert.match(page.text(), /Status unverified/); assert.match(page.text(), /remaining requests today: Unknown/);
 });
 
@@ -155,7 +155,7 @@ scenario('The original wizard blocks shared lists without verified write support
 for (const availability of ['maintenance', 'quota_exhausted'] as const) scenario(`${availability} expiry and failed refresh never enable a new Bot submission before fresh Ready`, async context => {
   const { fake, workspace, cleanup } = await open(context); workspace.selectConversation('bot-chat');
   const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en' })); cleanup(() => page.unmount());
-  await page.type(page.find(node => node.type === 'textarea')[0], 'Preserve this request');
+  await page.type(page.messageEditor(), 'Preserve this request');
   const { act } = reactTestRenderer(), flush = async () => { for (let i = 0; i < 100; i++) await Promise.resolve(); };
   // Cancel the fixture's real presence timer before installing the fake clock.
   fake.bots = [botCard({ availability: 'unverified', ready: false, onlineUntil: 0 })];

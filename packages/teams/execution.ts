@@ -1,3 +1,4 @@
+import type { MessageFormat } from './message-format.js';
 import { HUMAN_MENTION_MODES, isMemberExecutionCommand } from './execution-validation.js';
 export { HUMAN_MENTION_MODES, MAX_REPLIES_LIMIT } from './execution-validation.js';
 import type { BotScopeNarrowing, PublishedBotScope } from './bot-scope.js';
@@ -188,7 +189,7 @@ export interface MemberExecutionPayloads {
   listSharedBots: Record<string, never>;
   createConversation: { conversationId: string; kind: 'bot_dm' | 'group' | 'channel'; title: string; participantUids: string[]; sharedBotIds: string[] };
   /** A message that asks Bots, carries files (`attachments`: checked uploads of this sender for this conversation), or both. */
-  submit: { channelMode?: 'chat' | 'posts'; conversationId: string; messageId: string; changeId: string; text: string; targets: string[]; replyTo?: string; attachments?: string[]; privateDataSource?: string; mentionEntities?: import('./mentions.js').MentionEntity[] };
+  submit: { channelMode?: 'chat' | 'posts'; conversationId: string; messageId: string; changeId: string; text: string; targets: string[]; replyTo?: string; attachments?: string[]; privateDataSource?: string; mentionEntities?: import('./mentions.js').MentionEntity[]; formats?: MessageFormat[] };
   createUpload: { conversationId: string; uploadId: string; name: string; mime: 'image/png' | 'image/jpeg' | 'application/pdf' | 'text/plain'; byteLength: number; sha256: string };
   putUploadPart: { uploadId: string; index: number; data: string };
   finalizeUpload: { uploadId: string };
@@ -198,7 +199,7 @@ export interface MemberExecutionPayloads {
   /** The sender takes a file back out of a sent message. */
   revokeAttachment: { attachmentId: string; changeId: string };
   pauseSharedBot: { sharedBotId: string; expectedRevision: number };
-  answerWait: { conversationId: string; waitId: string; messageId: string; changeId: string; text: string };
+  answerWait: { conversationId: string; waitId: string; messageId: string; changeId: string; text: string; formats?: MessageFormat[] };
   decideWait: { conversationId: string; waitId: string; messageId: string; changeId: string; decision: 'approve' | 'deny' };
   cancelTask: { taskId: string };
   getTask: { taskId: string };

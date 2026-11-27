@@ -88,7 +88,7 @@ test('IndexedDB upgrade deletes only the retired command store and preserves unr
   assert.equal(await indexedDbCommandStorage().load('account-team-generation'), undefined);
   assert.deepEqual(opened, [['lingxi-team-messages', 3]]); assert.deepEqual(deleted, ['projections']); assert.deepEqual([...stores], ['protected-sentinel', 'commands-v2']);
 });
-test('mention commands persist separately and keep the shared v2 journal readable by older tabs', async context => {
+test('mention and format commands keep the shared v2 journals readable by older tabs', async context => {
   const { indexedDbCommandStorage } = await import('../../../packages/teams/command-storage');
   const { emptyProjection, pendingCommands } = await import('../../../packages/teams/messages');
   const records = new Map<string, unknown>();
@@ -120,18 +120,22 @@ test('mention commands persist separately and keep the shared v2 journal readabl
     conversationId: 'chat_0001', messageId: changeId, changeId, text: 'Hello' } });
   const mention = { command: { ...plain('mention_1').command, text: '@Mary Jane',
     mentionEntities: [{ userId: 'mary', offset: 0, length: 10 }] } };
+  const formatted = { command: { ...mention.command, messageId: 'format_1', changeId: 'format_1',
+    formats: [{ offset: 0, length: 10, style: 3 }] } };
   const first = plain('plain_1'), second = plain('plain_2'), fromOldTab = plain('plain_3');
-  await storage.update(key, () => ({ ...emptyProjection('alice', scope), outbox: [first, mention, second] }));
+  await storage.update(key, () => ({ ...emptyProjection('alice', scope), outbox: [first, mention, formatted, second] }));
   const legacy = records.get(key) as ReturnType<typeof pendingCommands>;
   assert.deepEqual(legacy.outbox, [first, second]);
+  assert.deepEqual((records.get('mentions:' + key) as typeof legacy).outbox, [mention]);
+  assert.deepEqual((records.get('formats:' + key) as typeof legacy).outbox, [formatted]);
   records.set(key, { ...legacy, outbox: [second, fromOldTab] });
-  assert.deepEqual((await storage.load(key))?.outbox, [mention, second, fromOldTab]);
+  assert.deepEqual((await storage.load(key))?.outbox, [mention, formatted, second, fromOldTab]);
 
   await storage.update(key, old => ({ ...old!, outbox: old!.outbox.map(row =>
     pendingPayload(row).changeId === 'mention_1' ? { ...row, attempted: true, error: 'MENTION_TARGET_REQUIRED' } : row) }));
   const restored = await indexedDbCommandStorage().load(key);
-  assert.deepEqual(restored?.outbox, [{ ...mention, attempted: true, error: 'MENTION_TARGET_REQUIRED' }, second, fromOldTab]);
-  await storage.update(key, old => ({ ...old!, outbox: old!.outbox.filter(row => pendingPayload(row).changeId !== 'mention_1') }));
+  assert.deepEqual(restored?.outbox, [{ ...mention, attempted: true, error: 'MENTION_TARGET_REQUIRED' }, formatted, second, fromOldTab]);
+  await storage.update(key, old => ({ ...old!, outbox: old!.outbox.filter(row => !['mention_1', 'format_1'].includes(pendingPayload(row).changeId)) }));
   assert.deepEqual((await storage.load(key))?.outbox, [second, fromOldTab]);
   assert.deepEqual([...records.keys()], [key]);
 });

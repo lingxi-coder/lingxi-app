@@ -1,3 +1,4 @@
+import { formatTags, messageFormatParts, type MessageFormat } from './message-format.js';
 import { mentionTextParts } from './mentions.js';
 import {SourceNoticePreview} from '../inbox/SourceNoticePreview';
 import type {InboxNoticeTarget} from '../inbox/contracts';
@@ -231,6 +232,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
         replyTo,
         ...(postId ? { postId } : 'channelMode' in payload && payload.channelMode === 'posts' && !replyTo ? { channelPost: true as const } : {}),
         mentionEntities: 'mentionEntities' in payload ? payload.mentionEntities : undefined,
+        formats: payload.formats,
         dataRef: 'dataRef' in payload ? payload.dataRef : undefined,
       };
       outgoing.set(message.id, { message, intent, fileCount: 'attachments' in payload ? payload.attachments?.length ?? 0 : 0 });
@@ -814,6 +816,30 @@ function PostMenu({ items, label }: { items: MenuItem[]; label: string }) {
   </div>;
 }
 
+function messageInlineText(text: string, formats: MessageFormat[], mentions: TeamMessage['mentionEntities']): ReactNode {
+  const runs = messageFormatParts(text, formats);
+  let offset = 0, index = 0;
+  return mentionTextParts(text, mentions).map(part => {
+    const start = offset;
+    const end = offset + part.text.length;
+    const children = [];
+    while (index < runs.length) {
+      const run = runs[index]!;
+      const runEnd = run.offset + run.text.length;
+      const from = Math.max(start, run.offset), to = Math.min(end, runEnd);
+      if (from < to) {
+        let content: ReactNode = text.slice(from, to);
+        for (const [style, Tag] of formatTags) if (run.style & style) content = <Tag>{content}</Tag>;
+        children.push(<Fragment key={from}>{content}</Fragment>);
+      }
+      if (runEnd > end) break;
+      index++;
+    }
+    offset = end;
+    return part.mention ? <strong className="tw-member-mention" key={start}>{children}</strong> : <Fragment key={start}>{children}</Fragment>;
+  });
+}
+
 function MessageItem({ message, grouped, author, mine, owner, quote, question, approval, locale, now, renderAvatar, renderMarkdown, onReply, onEdit, onRecall, pending, read, children }: {
   message: TeamMessage; grouped: boolean; author: Identity; mine: boolean; owner: string; quote?: { author: string; text: string }; question?: boolean; /** A request to approve a change; the card under it says what. */ approval?: boolean; locale: string; renderAvatar?: RenderAvatar; renderMarkdown?: RenderMarkdown;
   onReply?(message: TeamMessage): void; onEdit?(message: TeamMessage): void; onRecall?(message: TeamMessage): void; children?: ReactNode;
@@ -826,13 +852,13 @@ function MessageItem({ message, grouped, author, mine, owner, quote, question, a
     full: message.createdAt ? new Date(message.createdAt).toLocaleString(locale) : undefined,
   }), [message.createdAt, locale]);
   const acts = !message.recalled && (onReply || onEdit || onRecall || pending?.actions);
-  // Only a shared Bot writes Markdown; what a person types is shown exactly as typed.
+  // Bot replies use Markdown. Human messages carry explicit inline formatting ranges.
   const markdown = message.author.kind === 'shared_bot' && !message.recalled && renderMarkdown !== undefined;
   const hasFiles = !!(message.attachments?.length || pending?.fileCount);
   const filesOnly = !message.text && !message.recalled && hasFiles;
   const body = message.visualization?.title === message.text ? null : markdown ? <MessageMarkdown text={message.text} render={renderMarkdown} /> : filesOnly ? null : <p className="tw-msg-body">
-    {message.recalled ? <em>{t('teams_message_recalled')}</em> : message.mentionEntities?.length ? mentionTextParts(message.text, message.mentionEntities).map((part, index) =>
-      part.mention ? <strong className="tw-member-mention" key={index}>{part.text}</strong> : part.text) : message.text}
+    {message.recalled ? <em>{t('teams_message_recalled')}</em> : message.mentionEntities?.length || message.formats?.length
+      ? messageInlineText(message.text, message.formats ?? [], message.mentionEntities) : message.text}
   </p>;
   const postEntry = Boolean(message.channelPost || message.postId);
   const shownTime = postEntry ? formatPostTime(message.createdAt, now, locale) : clock;

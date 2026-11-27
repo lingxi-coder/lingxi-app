@@ -111,11 +111,13 @@ test('one reply can mention a participant, ask a Bot and carry an attachment', o
   const file = await upload(png(4096), { conversationId });
   const text = '@Trip Owner itinerary';
   const mention = { userId: owner.uid, offset: 0, length: '@Trip Owner'.length };
-  const payload = { text, conversationId, replyTo, targets: [botId] };
+  const formats = [{ offset: 0, length: mention.length, style: 3 }];
+  const payload = { text, formats, conversationId, replyTo, targets: [botId] };
   await assert.rejects(send([file.uploadId], { ...payload, mentionEntities: [{ ...mention, userId: other.uid }] }), { code: 'MENTION_TARGET_REQUIRED' });
   const sent = await send([file.uploadId], { ...payload, mentionEntities: [mention] });
   const message = await messageData(sent.messageId, conversationId);
   assert.deepEqual(message.mentionEntities, [mention]);
+  assert.deepEqual(message.formats, formats);
   assert.deepEqual(message.mentionRecipientUids, [owner.uid]);
   assert.deepEqual(message.mentions, [`shared_bot:${botId}`, `user:${owner.uid}`]);
   assert.equal(message.replyTo, replyTo);

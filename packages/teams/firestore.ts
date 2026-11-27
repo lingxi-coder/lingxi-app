@@ -1,3 +1,4 @@
+import { validMessageFormats } from './message-format.js';
 import { parseMentionEntities } from './mentions.js';
 import { isResourceRef } from './dataset-resource.js';
 import { parseDataRef } from './lingxi-data.js';
@@ -82,6 +83,7 @@ export function firestoreFriendName(value: DocumentData | undefined): { displayN
 }
 
 export function firestoreMessage(id: string, value: DocumentData): TeamMessage {
+  const formats = !value.recalled && validMessageFormats(value.text, value.formats) ? value.formats : [];
   const mentionEntities = value.recalled ? [] : parseMentionEntities(value.text, value.mentionEntities);
   const dataRef = value.recalled ? undefined : parseDataRef(value.dataRef);
   const resourceRef = !value.recalled && isResourceRef(value.resourceRef) ? value.resourceRef : undefined;
@@ -92,6 +94,7 @@ export function firestoreMessage(id: string, value: DocumentData): TeamMessage {
     ...(value.channelPost === true ? { channelPost: true as const } : {}), ...(typeof value.postId === 'string' ? { postId: value.postId } : {}),
     ...(postStats ? { postStats } : {}),
     ...(value.recalled ? { recalled: true } : {}), ...(value.mentions ? { mentions: value.mentions } : {}), ...(mentionEntities.length ? { mentionEntities } : {}),
+    ...(formats.length ? { formats } : {}),
     ...(value.taskId ? { taskId: value.taskId } : {}), ...(value.taskIds ? { taskIds: value.taskIds } : {}), ...(value.artifactId ? { artifactId: value.artifactId } : {}),
     ...(value.waitId ? { waitId: value.waitId } : {}),
     ...(approvalOf(value.approval) ? { approval: approvalOf(value.approval)! } : {}),

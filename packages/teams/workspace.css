@@ -467,16 +467,67 @@
 .tw-msg-sources { margin: 0 0 2px; color: var(--tw-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tw-target { display: inline-flex; align-items: center; gap: 2px; padding: 0 2px 0 10px; border-radius: 14px; background: var(--tw-selected); font-size: 12px; font-weight: 600; min-height: 28px; }
 .tw-compose-box { --composer-border: var(--tw-border); --composer-surface: var(--tw-surface); }
-.tw-compose-box:focus-within { --composer-border: var(--tw-focus); box-shadow: 0 0 0 2px color-mix(in srgb, var(--tw-focus) 35%, transparent); }
+.tw-compose-box:focus-within { --composer-surface: color-mix(in srgb, var(--tw-surface) 94%, var(--tw-selected)); }
 .tw-compose-context { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px 0; }
-.composer-surface.tw-compose-box textarea { resize: none; color: inherit; }
-.tw-compose-box textarea::placeholder { color: var(--tw-muted); opacity: 1; }
-@supports (field-sizing: content) {
-  .composer-surface.tw-compose-box textarea { field-sizing: content; inline-size: auto; min-inline-size: 100%; max-inline-size: 100%; }
+.tw-scope .tw-message-editor:focus-visible { outline: 0; }
+.tw-message-editor[data-empty='true']::before {
+  content: attr(aria-placeholder);
+  position: absolute;
+  color: var(--tw-muted);
+  font-weight: 400;
+  pointer-events: none;
 }
 .tw-scope .tw-compose-box > .composer-toolbar { justify-content: flex-end; flex-wrap: wrap; }
 .tw-compose-leading { display: flex; align-items: center; gap: 4px; margin-inline-end: auto; }
 .tw-scope .tw-compose-leading .tw-icon-btn { width: 40px; min-height: 40px; border-radius: 50%; }
+.tw-scope .tw-compose-actions .tw-compose-add:is(:focus-visible, [aria-expanded='true']) {
+  outline: 0; background: var(--tw-accent); color: var(--tw-accent-fg);
+}
+.tw-compose-menu {
+  position: absolute; inset-block-end: calc(100% + 8px); inset-inline-start: 8px; z-index: 21;
+  display: grid; gap: 2px; inline-size: min(13rem, calc(100vw - 48px)); max-block-size: min(18rem, 45dvh);
+  overflow: auto; overscroll-behavior: contain; padding: 5px; border: 1px solid var(--tw-line);
+  border-radius: 15px; background: var(--tw-surface); box-shadow: var(--tw-shadow);
+  transform-origin: 20px bottom;
+}
+@supports (backdrop-filter: blur(16px)) {
+  .tw-compose-menu { background: color-mix(in srgb, var(--tw-surface) 88%, transparent); backdrop-filter: blur(16px) saturate(145%); }
+}
+.tw-scope .tw-compose-menu button {
+  display: grid; grid-template-columns: 24px 1fr auto; gap: 9px; justify-content: start;
+  min-block-size: 36px; padding: 4px 8px; border: 0; border-radius: 10px; text-align: start; line-height: 1.25;
+}
+.tw-scope .tw-compose-menu button:focus-visible {
+  outline: 0; background: var(--tw-accent); color: var(--tw-accent-fg);
+}
+.tw-scope .tw-compose-menu button:active { scale: .98; }
+.tw-compose-menu-icon { display: grid; place-items: center; inline-size: 24px; block-size: 24px; }
+.tw-compose-menu[data-page='add'] .tw-compose-menu-icon {
+  border-radius: 7px; background: var(--tw-selected); color: var(--tw-accent-text);
+}
+.tw-compose-menu-letters { font-size: 13px; font-weight: 650; letter-spacing: -0.025em; }
+.tw-compose-menu-next, .tw-compose-menu-back > span { font-size: 19px; line-height: 1; }
+.tw-compose-menu-back > span { text-align: center; }
+.tw-compose-format-symbol { font-size: 15px; }
+.tw-compose-format-symbol[data-style='bold'] { font-weight: 750; }
+.tw-compose-format-symbol[data-style='italic'] { font-style: italic; }
+.tw-compose-format-symbol[data-style='underline'] { text-decoration: underline; }
+.tw-compose-format-symbol[data-style='strikeThrough'] { text-decoration: line-through; }
+@media (pointer: coarse) {
+  .tw-scope .tw-compose-menu button { min-block-size: 44px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .tw-compose-menu { animation: tw-compose-menu-in 120ms ease-out; }
+  @keyframes tw-compose-menu-in { from { opacity: 0; transform: translateY(4px) scale(.98); } }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .tw-compose-menu { background: var(--tw-surface); backdrop-filter: none; }
+}
+@media (forced-colors: active) {
+  .tw-scope .tw-compose-actions .tw-compose-add:is(:focus-visible, [aria-expanded='true']),
+  .tw-scope .tw-compose-menu button:focus-visible { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+  .tw-scope .tw-message-editor:focus-visible { outline: 1px solid Highlight; outline-offset: -1px; }
+}
 .tw-count { font-size: 11px; color: var(--tw-muted); }
 .tw-count[data-over='true'] { color: var(--tw-danger); font-weight: 700; }
 .tw-scope .tw-compose-box .tw-send { min-width: 40px; min-height: 40px; border-radius: 999px; }

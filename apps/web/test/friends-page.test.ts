@@ -12,7 +12,7 @@ import { FakeFriends, card, pairTeamId, pointer, uid, until } from './support/fa
 import { FakeTeams, conversation } from './support/fakeTeams';
 import { loadTeamsModule } from './support/loadTeamsModule';
 import { fakeAuthHook } from './support/fakeAuthHook';
-import { hostNode, reactTestRenderer, scenario, settle, textOf, withDom } from './support/workspacePage';
+import { editorNode, hostNode, reactTestRenderer, scenario, settle, textOf, withDom } from './support/workspacePage';
 
 const require = createRequire(import.meta.url);
 const { FriendsWorkspaceView } = loadTeamsModule<typeof import('../src/friends/FriendsWorkspaceView')>(new URL('../src/friends/FriendsWorkspaceView', import.meta.url).pathname);
@@ -57,7 +57,7 @@ function browserTabs(context: TestContext, persistent: Pick<Storage, 'getItem' |
 const open = async (Page: typeof FriendsPageType, props: Record<string, unknown> = {}) => {
   const { create, act } = reactTestRenderer(); let tree: any;
   const badges: (string | null)[] = [];
-  await act(async () => { tree = create(createElement(Page, { locale: 'en', route: '/friends/add', badge: null, onBadge: (text: string | null) => badges.push(text), ...props }), { createNodeMock: (element:any) => element.props.className === 'teams-web-chat-slot' ? null : hostNode() }); await settle(); });
+  await act(async () => { tree = create(createElement(Page, { locale: 'en', route: '/friends/add', badge: null, onBadge: (text: string | null) => badges.push(text), ...props }), { createNodeMock: (element:any) => element.props.className === 'teams-web-chat-slot' ? null : element.props.contentEditable ? editorNode() : hostNode() }); await settle(); });
   return { tree, badges, act, text: () => textOf(tree.toJSON() ?? ''), find: (match: (node: any) => boolean): any[] => tree.root.findAll((node: any) => typeof node.type === 'string' && match(node)) };
 };
 
@@ -135,6 +135,6 @@ scenario('/friends/add opens Add friend and /friends?chat= opens that friend\'s 
   again('?chat=bob', '/friends');
   const page = await open(chat.Page, { route: '/friends' }); context.after(() => page.act(async () => page.tree.unmount()));
   await page.act(async () => { chat.signIn(); await settle(); });
-  await until(() => page.find(node => node.type === 'textarea').length > 0, 'the chat\'s composer');
+  await until(() => page.find(node => node.props.contentEditable === true).length === 1, 'the chat\'s composer');
   assert.ok(page.find(node => node.type === 'h2').some(node => textOf(node) === 'Bob'), 'with the friend in the header');
 });

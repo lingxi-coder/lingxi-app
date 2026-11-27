@@ -366,7 +366,7 @@ async function openChat(context: Parameters<Parameters<typeof scenario>[1]>[0], 
   await until(() => workspace.getSnapshot().selectedConversationId === 'test-chat' && workspace.getSnapshot().messages.length === messages.length && workspace.getSnapshot().botsLoaded, 'the chat');
   const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale })); context.after(() => page.unmount());
   const buttons = (text: string) => page.find(n => n.type === 'button' && textOf(n) === text);
-  const box = () => page.find(n => n.type === 'textarea')[0];
+  const box = page.messageEditor;
   return { fake, workspace, page, sent, buttons, box };
 }
 scenario('Bot replies hide automatic copies and keep full or revised documents accessible', async context => {
@@ -421,7 +421,7 @@ scenario('Replying to a question answers its wait with fresh ids and never submi
   const command = answers[0]!; if (command.action !== 'answerWait') return;
   assert.deepEqual([command.payload.conversationId, command.payload.waitId, command.payload.text], ['test-chat', 'wait-test', '@Fixture Bot Lisbon']);
   assert.notEqual(command.payload.messageId, command.payload.changeId);
-  assert.doesNotMatch(chat.page.text(), /Replying to/, 'answer mode ends once the answer is accepted'); assert.equal(chat.box().props.value, '');
+  assert.doesNotMatch(chat.page.text(), /Replying to/, 'answer mode ends once the answer is accepted'); assert.equal(chat.page.editorText(), '');
 });
 scenario('The question message offers the same Reply, and Escape or the dismiss control leaves answer mode', async context => {
   withDom(context);
@@ -435,7 +435,7 @@ scenario('A closed wait ends answer mode, keeps the typed text and says why', as
   withDom(context);
   const chat = await openChat(context, () => [waitTask()], command => { if (command.action === 'answerWait') throw new Error('WAIT_CLOSED'); return {}; });
   await chat.page.click(chat.buttons('Reply')[0]); await chat.page.type(chat.box(), 'Lisbon'); await chat.page.submit();
-  assert.doesNotMatch(chat.page.text(), /Replying to/); assert.equal(chat.box().props.value, 'Lisbon');
+  assert.doesNotMatch(chat.page.text(), /Replying to/); assert.equal(chat.page.editorText(), 'Lisbon');
   assert.match(chat.page.text(), /This question is no longer waiting for a reply/);
   assert.equal(chat.page.find(n => n.props.className?.includes?.('tw-pending')).length, 0, 'a refused answer is not left in the queue');
 });
@@ -445,7 +445,7 @@ scenario('Answer mode ends by itself when the task stops waiting', async context
   const chat = await openChat(context, () => [state === 'waiting' ? waitTask() : waitTask({ state: 'queued', wait: undefined })]);
   await chat.page.click(chat.buttons('Reply')[0]); await chat.page.type(chat.box(), 'Lisbon'); assert.match(chat.page.text(), /Replying to/);
   state = 'queued'; chat.fake.signal({ conversationId: 'test-chat' }); await chat.page.during(() => undefined);
-  assert.doesNotMatch(chat.page.text(), /Replying to/); assert.equal(chat.buttons('Reply').length, 0); assert.equal(chat.box().props.value, 'Lisbon');
+  assert.doesNotMatch(chat.page.text(), /Replying to/); assert.equal(chat.buttons('Reply').length, 0); assert.equal(chat.page.editorText(), 'Lisbon');
 });
 // ── Approving a list change ──
 const proposal = { second: { text: 'Asks to change the list “Groceries” (3 changes).', approval: { title: 'Groceries', changes: [{ op: 'add' as const, text: 'Bread' },

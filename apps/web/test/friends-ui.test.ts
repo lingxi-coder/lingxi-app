@@ -597,7 +597,7 @@ scenario('a friend\'s chat is the Team conversation with the friend in the heade
   assert.ok(text.includes('Bob') && text.includes('@bobby')); assert.ok(text.includes('Hi Alice') && text.includes('Hello there'));
   assert.equal(page.byLabel('Team details').length, 0, 'no details panel'); assert.equal(page.byClass('tw-platform').length, 0, 'no platform chip');
   assert.ok(!page.has('New conversation') && !text.includes('Channels'), 'one conversation, nothing to add to');
-  assert.equal(page.find(node => node.type === 'textarea').length, 1, 'the composer is the Teams composer');
+  assert.ok(page.messageEditor(), 'the composer is the Teams composer');
   assert.ok(!text.includes('You and Bob are now friends'), 'no greeting for an old friendship');
   assert.deepEqual(fake.commands, [], 'opening a chat writes nothing to Friends');
 });
@@ -932,7 +932,7 @@ scenario('Message opens a Bot DM in the plain Teams view with a way back; the fr
   assert.equal(page.byClass('tw-friends-bots').length, 0, 'the panel closed');
   assert.equal(page.byLabel('Back').length, 1); assert.equal(page.byLabel('More').length, 0, 'no friend menu in a Bot DM');
   assert.ok(!page.text().includes('@bobby'), 'nor the friend\'s header');
-  assert.equal(page.find(node => node.type === 'textarea').length, 1, 'the composer is the Teams composer');
+  assert.ok(page.messageEditor(), 'the composer is the Teams composer');
   assert.equal(page.byLabel('Shared Bots').length, 0, 'the Bots action is the friend chat\'s');
   await page.click(page.oneByLabel('Back'));
   assert.equal(pair().getSnapshot().selectedConversationId, 'friend_chat');

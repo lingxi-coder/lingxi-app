@@ -3,6 +3,7 @@ import type { MentionEntity } from './mentions.js';
 import type { ResourceRef } from './dataset-resource.js';
 import { parseDataRef, type DataRef } from './lingxi-data.js';
 import type { TeamVisualization } from './visualization.js';
+import { validMessageFormats, type MessageFormat } from './message-format.js';
 import { isMemberExecutionCommand } from './execution-validation.js';
 import { executionCommand, type HumanMentionMode, type MemberExecutionCommand } from './execution.js';
 import { ATTACHMENT_MESSAGE_FILES, type MessageAttachment } from './attachments.js';
@@ -54,6 +55,7 @@ export interface TeamMessage {
   decision?: 'approve' | 'deny';
   mentions?: string[];
   mentionEntities?: MentionEntity[];
+  formats?: MessageFormat[];
   /** Files the message carries, in the order they were added. */
   attachments?: MessageAttachment[];
   dataRef?: DataRef;
@@ -65,7 +67,7 @@ export interface TeamMessage {
 }
 export interface MessageScope { teamId: string; generation: number }
 export type MessageMutation = MessageScope & { action: 'mutate'; conversationId: string; messageId: string; changeId: string;
-  operation: 'create' | 'edit' | 'recall'; channelMode?: ChannelPosting['mode']; text: string; replyTo?: string; dataRef?: DataRef; mentionEntities?: MentionEntity[] };
+  operation: 'create' | 'edit' | 'recall'; channelMode?: ChannelPosting['mode']; text: string; replyTo?: string; dataRef?: DataRef; mentionEntities?: MentionEntity[]; formats?: MessageFormat[] };
 export type MessageCommand = MessageMutation | MemberExecutionCommand | ChannelCommand
   | MessageScope & { action: 'create'; conversationId: string; kind: TeamConversation['kind']; title: string; participantUids: string[];  }
   | MessageScope & { action:'history';conversationId:string;before?:number }
@@ -264,8 +266,9 @@ export class TeamMessaging {
       && (kind === 'creation' ? command.action === 'createConversation' : command.action === 'submit' || command.action === 'answerWait');
     // Human-message commands retain the existing transport; no execution targets are accepted here.
     const fields = kind === 'creation' ? ['action', 'teamId', 'generation', 'conversationId', 'kind', 'title', 'participantUids']
-      : ['action', 'teamId', 'generation', 'conversationId', 'messageId', 'changeId', 'operation', 'text', 'replyTo', 'mentionEntities', 'channelMode'];
-    return command.action === (kind === 'creation' ? 'create' : 'mutate') && Object.keys(command).every(key => fields.includes(key));
+      : ['action', 'teamId', 'generation', 'conversationId', 'messageId', 'changeId', 'operation', 'text', 'replyTo', 'mentionEntities', 'channelMode', 'formats'];
+    return command.action === (kind === 'creation' ? 'create' : 'mutate') && Object.keys(command).every(key => fields.includes(key))
+      && (command.action !== 'mutate' || command.formats === undefined || validMessageFormats(command.text, command.formats));
   }
   private async reload(): Promise<void> {
     const value = await this.storage.load(this.key);
@@ -445,7 +448,7 @@ export class TeamMessaging {
     return conversationId;
   }
   /** `attachments`: checked uploads of this sender for the open conversation. A new message may be files alone. */
-  async queue(operation: MessageMutation['operation'], text: string, messageId: string = crypto.randomUUID(), replyTo?: string, targets: string[] = [], attachments: string[] = [], dataRef?: DataRef, privateDataSource?: string, mentionEntities?: MentionEntity[]) {
+  async queue(operation: MessageMutation['operation'], text: string, messageId: string = crypto.randomUUID(), replyTo?: string, targets: string[] = [], attachments: string[] = [], dataRef?: DataRef, privateDataSource?: string, mentionEntities?: MentionEntity[], formats?: MessageFormat[]) {
     if (this.closed || !this.selected || (operation !== 'recall' && ((!text.trim() && !attachments.length) || new TextEncoder().encode(text).length > 8192))) throw new Error('INVALID_INPUT');
     if (operation !== 'create' && (targets.length || attachments.length)) throw new Error('INVALID_BOT_TARGET');
     if (attachments.length > ATTACHMENT_MESSAGE_FILES || new Set(attachments).size !== attachments.length) throw new Error('ATTACHMENT_LIMIT');
@@ -456,6 +459,7 @@ export class TeamMessaging {
     if (dataRef && (!parseDataRef(dataRef) || operation !== 'create' || selectedTargets.length || attachments.length)) throw new Error('INVALID_INPUT');
     if (privateDataSource && (!/^[A-Za-z0-9_-]{1,64}$/u.test(privateDataSource)
       || operation !== 'create' || replyTo || selectedTargets.length !== 1 || attachments.length || dataRef)) throw new Error('INVALID_INPUT');
+    if (formats !== undefined && !validMessageFormats(text, formats)) throw new Error('INVALID_INPUT');
     const changeId = crypto.randomUUID();
     const channelMode = conversation?.kind === 'channel' && operation === 'create' ? conversation.posting?.mode ?? 'chat' : undefined;
     const channel = channelMode ? { channelMode } : {};
@@ -463,8 +467,8 @@ export class TeamMessaging {
     const command: OutboxCommand = operation === 'create' && (selectedTargets.length || attachments.length)
       ? executionCommand(this.scope, 'submit', { conversationId: this.selected, messageId, changeId, text: text.trim() ? text : '', targets: [...selectedTargets], ...channel,
         ...(replyTo ? { replyTo } : {}), ...(attachments.length ? { attachments: [...attachments] } : {}),
-        ...(privateDataSource ? { privateDataSource } : {}), ...(mentionEntities?.length ? { mentionEntities } : {}) })
-      : { action: 'mutate', ...this.scope, conversationId: this.selected, messageId, changeId, operation, text, ...channel, ...(replyTo ? { replyTo } : {}), ...(dataRef ? { dataRef } : {}), ...(mentionEntities !== undefined ? { mentionEntities } : {}) };
+        ...(privateDataSource ? { privateDataSource } : {}), ...(mentionEntities?.length ? { mentionEntities } : {}), ...(text.trim() && formats?.length ? { formats } : {}) })
+      : { action: 'mutate', ...this.scope, conversationId: this.selected, messageId, changeId, operation, text, ...channel, ...(replyTo ? { replyTo } : {}), ...(dataRef ? { dataRef } : {}), ...(mentionEntities !== undefined ? { mentionEntities } : {}), ...(formats !== undefined ? { formats } : {}) };
     const intent = { command, enqueuedAt: operation === 'create' ? new Date().toISOString() : undefined };
     await this.commit(old => ({ ...old, outbox: [...old.outbox, intent] }));
     void this.refresh();
@@ -474,10 +478,11 @@ export class TeamMessaging {
    * lost response repeats the same ids. A refused answer is dropped from the queue and thrown, so the caller keeps the text;
    * any other failure stays queued and is retried like a message.
    */
-  async answer(waitId: string, text: string) {
+  async answer(waitId: string, text: string, formats?: MessageFormat[]) {
     if (this.closed || !this.selected || !text.trim() || new TextEncoder().encode(text).length > 8192) throw new Error('INVALID_INPUT');
     const changeId = crypto.randomUUID();
-    const command = executionCommand(this.scope, 'answerWait', { conversationId: this.selected, waitId, messageId: crypto.randomUUID(), changeId, text });
+    if (formats !== undefined && !validMessageFormats(text, formats)) throw new Error('INVALID_INPUT');
+    const command = executionCommand(this.scope, 'answerWait', { conversationId: this.selected, waitId, messageId: crypto.randomUUID(), changeId, text, ...(formats?.length ? { formats } : {}) });
     const intent = { command, enqueuedAt: new Date().toISOString() };
     await this.commit(old => ({ ...old, outbox: [...old.outbox, intent] }));
     await this.refresh();

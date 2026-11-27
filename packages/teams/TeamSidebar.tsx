@@ -160,7 +160,8 @@ export function TeamSidebar({ workspace, snapshot, renderAvatar, onOpenSettings,
               {section.visible.map(conversation => <ConversationRow key={conversation.id} conversation={conversation} snapshot={snapshot} renderAvatar={renderAvatar}
                 selected={conversation.id === selectedId} tabStop={conversation.id === tabStop} locale={tag} now={nowMs} authorName={authorName}
                 menuOpen={menuFor === conversation.id} onMenu={setMenuFor} onFocusRow={setFocusId}
-                onSelect={select} onMarkRead={id => void workspace.markRead(id)} onOpenDetails={onOpenDetails} />)}
+                onSelect={select} onMarkRead={id => void workspace.markRead(id)} onOpenDetails={onOpenDetails}
+                onPrefetch={workspace.prefetchConversation} onCancelPrefetch={workspace.cancelConversationPrefetch} />)}
             </ul> : loadingRows || searching ? null : <p className="tw-empty-line">{section.empty}</p>}
             {section.hidden > 0 ? <button type="button" className="tw-link tw-more" onClick={() => setLimits(old => ({ ...old, [section.id]: old[section.id] + ROW_LIMIT }))}>{t('mobile_bots_show_more_fmt', section.hidden)}</button> : null}
           </section>;
@@ -176,10 +177,11 @@ export function TeamSidebar({ workspace, snapshot, renderAvatar, onOpenSettings,
   </nav>;
 }
 
-function ConversationRow({ conversation, snapshot, renderAvatar, selected, tabStop, locale, now, authorName, menuOpen, onMenu, onFocusRow, onSelect, onMarkRead, onOpenDetails }: {
+function ConversationRow({ conversation, snapshot, renderAvatar, selected, tabStop, locale, now, authorName, menuOpen, onMenu, onFocusRow, onSelect, onMarkRead, onOpenDetails, onPrefetch, onCancelPrefetch }: {
   conversation: TeamConversation; snapshot: TeamsSnapshot; renderAvatar?: RenderAvatar; selected: boolean; tabStop: boolean; locale: string; now: number;
   authorName(author: import('./messages').MessageAuthor): string; menuOpen: boolean;
   onMenu(id: string): void; onFocusRow(id: string): void; onSelect(id: string): void; onMarkRead(id: string): void; onOpenDetails?(id: string): void;
+  onPrefetch(id: string): void; onCancelPrefetch(id: string): void;
 }): ReactElement {
   const t = useTeamsText(locale);
   const mainRef = useRef<HTMLButtonElement>(null), moreRef = useRef<HTMLButtonElement>(null), origin = useRef<'main' | 'more'>('more');
@@ -200,7 +202,13 @@ function ConversationRow({ conversation, snapshot, renderAvatar, selected, tabSt
   const open = (from: 'main' | 'more') => { origin.current = from; onMenu(menuOpen ? '' : conversation.id); };
   return <li className="tw-row" data-selected={selected} data-unread={unread > 0} data-kind={conversation.kind}>
     <button ref={mainRef} type="button" className="tw-row-main" data-row={conversation.id} aria-current={selected ? 'page' : undefined} tabIndex={tabStop ? 0 : -1}
-      onClick={() => onSelect(conversation.id)} onFocus={() => onFocusRow(conversation.id)}
+      onClick={() => onSelect(conversation.id)} onFocus={event => {
+        onFocusRow(conversation.id);
+        if (event.currentTarget.matches(':focus-visible')) onPrefetch(conversation.id);
+      }}
+      onBlur={() => onCancelPrefetch(conversation.id)}
+      onPointerEnter={event => { if (event.pointerType === 'mouse') onPrefetch(conversation.id); }}
+      onPointerLeave={event => { if (event.pointerType === 'mouse') onCancelPrefetch(conversation.id); }}
       onContextMenu={items.length ? event => { event.preventDefault(); open('main'); } : undefined}>
       <span className="tw-row-lead"><ConversationLead conversation={conversation} label={label} snapshot={snapshot} locale={locale} render={renderAvatar} /></span>
       <span className="tw-row-text">

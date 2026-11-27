@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { executionCommand, operationUnverified, type ExecutionScope, type OperationResolved, type TaskOperation, type TaskOperations, type TeamArtifact, type TeamTaskView, type TaskUsage, type TriageLogItem } from './execution.js';
+import { executionCommand, isAutomaticReplyCopy, operationUnverified, type ExecutionScope, type OperationResolved, type TaskOperation, type TaskOperations, type TeamArtifact, type TeamTaskView, type TaskUsage, type TriageLogItem } from './execution.js';
 import { pendingPayload } from './messages.js';
 import type { TeamsApi } from './index.js';
 import { messageErrorText } from './errors.js';
@@ -73,9 +73,25 @@ export function tokenSplit(usage: TaskUsage | undefined, locale: string): string
   return !usage || usage.status === 'missing' ? '' : teamsText(locale)('teams_usage_tokens_fmt', usage.inputTokens ?? 0, usage.outputTokens ?? 0);
 }
 
-export function ArtifactButton({ api, scope, artifactId, locale, renderMarkdown, people }: { api: TeamsApi; scope: ExecutionScope; artifactId: string; locale: string; renderMarkdown?: RenderMarkdown; people?: DocumentPeople }) {
+export function ArtifactButton({ api, scope, artifactId, locale, renderMarkdown, people, replyText }: { api: TeamsApi; scope: ExecutionScope; artifactId: string; locale: string; renderMarkdown?: RenderMarkdown; people?: DocumentPeople; replyText?: string }) {
   const t = useTeamsText(locale);
   const [artifact, setArtifact] = useState<TeamArtifact>(), [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const [checked, setChecked] = useState<TeamArtifact | null>();
+  const { teamId, generation } = scope;
+  const checkForCopy = replyText !== undefined;
+  useEffect(() => {
+    if (!checkForCopy) return;
+    let live = true;
+    // Older messages only store the artifact ID. Resolve it once while the row is mounted.
+    setChecked(undefined);
+    void api.messages<TeamArtifact>(executionCommand({ teamId, generation }, 'readArtifact', { artifactId })).then(
+      result => { if (live) setChecked(result); },
+      () => { if (live) setChecked(null); },
+    );
+    return () => { live = false; };
+  }, [api, teamId, generation, artifactId, checkForCopy]);
+  if (replyText !== undefined && (checked === undefined ||
+    (checked?.currentRevision === 1 && isAutomaticReplyCopy(checked.document, replyText)))) return null;
   const open = async () => {
     if (busy) return; setBusy(true); setError(''); setArtifact(undefined);
     try { setArtifact(await api.messages<TeamArtifact>(executionCommand(scope, 'readArtifact', { artifactId }))); }
@@ -93,6 +109,20 @@ export function expiresIn(at: number, now: number, locale: string): string {
   if (minutes < 60) return t('tw_in_minutes_fmt', minutes);
   const hours = Math.ceil(minutes / 60);
   return hours < 48 ? (t('tw_in_hours_fmt', hours)) : (t('tw_in_days_fmt', Math.ceil(hours / 24)));
+}
+
+function WaitingDetail({ at, locale, recipient }: { at: number; locale: string; recipient?: string }) {
+  const t = useTeamsText(locale);
+  const [expires, setExpires] = useState(() => expiresIn(at, Date.now(), locale));
+  useEffect(() => {
+    const update = () => setExpires(expiresIn(at, Date.now(), locale));
+    update();
+    const timer = setInterval(update, 1000);
+    return () => clearInterval(timer);
+  }, [at, locale]);
+  return <p className="tw-run-detail">{recipient === undefined
+    ? t('teams_task_waiting_you_fmt', expires)
+    : t('teams_task_waiting_member_fmt', recipient, expires)}</p>;
 }
 /**
  * What a task did outside the Chat. The Bot's maintainer confirms the actions nobody could verify:
@@ -140,7 +170,7 @@ export function OperationsDialog({ api, scope, task, locale, canResolve, people,
 }
 const CANCELLABLE: TeamTaskView['state'][] = ['queued', 'running', 'waiting', 'awaiting_approval'];
 type RunViewer = Pick<TeamsSnapshot, 'uid' | 'bots' | 'directory' | 'pending'>;
-export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, tasks, reason, onReply, onChanged }: {
+export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, tasks, reason, onReply, onChanged, replyText }: {
   task: TeamTaskView; api: TeamsApi; scope: ExecutionScope; locale: string; renderMarkdown?: RenderMarkdown; snapshot: RunViewer;
   /** The other tasks of the Chat: a task that waits for another Bot's reply finds that Bot's name in the task it asked when the Team's list has no card of it. */
   tasks?: readonly TeamTaskView[];
@@ -150,6 +180,7 @@ export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, tas
   onReply?(task: TeamTaskView): void;
   /** A command changed the task: fetch it again. */
   onChanged?(): void;
+  replyText?: string;
 }) {
   const [cancelling, setCancelling] = useState(false), [error, setError] = useState(''), [reviewing, setReviewing] = useState(false);
   const t = useTeamsText(locale);
@@ -182,10 +213,9 @@ export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, tas
   const look = runLook(task.state);
   const label = stopping ? t('teams_task_cancelling') : wait?.kind === 'tool_approval' ? t('teams_task_waiting_approval') : t(look.label);
   // One line under the state (U4): who it waits for, what to check, or what the state means.
-  const expires = wait ? expiresIn(wait.expiresAt, Date.now(), locale) : '';
   // A wait for another Bot's reply (Bot v3 B8) is not for the person who asked, whom the service names as its recipient: it says which Bot it waits for.
-  const detail = wait ? (wait.kind === 'delegation' ? t('teams_task_waiting_bot_fmt', waitingForBot(task, snapshot.bots, tasks) ?? t('teams_bot_tag'))
-      : isMember(wait.recipient) ? t('teams_task_waiting_you_fmt', expires) : t('teams_task_waiting_member_fmt', nameOf(wait.recipient.uid), expires))
+  // Any other wait counts down in `WaitingDetail`.
+  const detail = wait?.kind === 'delegation' ? t('teams_task_waiting_bot_fmt', waitingForBot(task, snapshot.bots, tasks) ?? t('teams_bot_tag'))
     : unchecked ? (maintains
       ? t('teams_task_needs_checking_maintainer')
       : t('teams_task_needs_checking_hint'))
@@ -202,7 +232,8 @@ export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, tas
       <span>{label}</span>
     </p>
     {chain ? <p className="tw-run-detail tw-run-chain">{t('teams_task_delegation_chain_fmt', chain)}</p> : null}
-    {detail ? <p className="tw-run-detail">{detail}</p> : null}
+    {wait && wait.kind !== 'delegation' ? <WaitingDetail key={wait.waitId} at={wait.expiresAt} locale={locale} recipient={isMember(wait.recipient) ? undefined : nameOf(wait.recipient.uid)} />
+      : detail ? <p className="tw-run-detail">{detail}</p> : null}
     {usage ? <p className="tw-run-detail" title={tokenSplit(task.usage, locale) || undefined}>{usage}</p> : null}
     {canReply || (canCancel && !stopping) ? <div className="teams-row-actions">
       {canReply ? <button type="button" aria-label={t('tw_run_reply')} onClick={() => onReply!(task)}>{t('teams_message_reply')}</button> : null}
@@ -211,6 +242,6 @@ export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, tas
     {unchecked && (maintains || isMember(task.requester)) ? <div className="teams-row-actions"><button type="button" onClick={() => setReviewing(true)}>{maintains ? t('teams_ops_review') : t('teams_ops_view')}</button></div> : null}
     {reviewing ? <OperationsDialog api={api} scope={scope} task={task} locale={locale} canResolve={maintains} people={snapshot} onClose={() => setReviewing(false)} onChanged={onChanged} /> : null}
     {error ? <p role="alert">{messageErrorText(error, locale)}</p> : null}
-    {task.artifactId ? <ArtifactButton api={api} scope={scope} artifactId={task.artifactId} locale={locale} renderMarkdown={renderMarkdown} people={snapshot} /> : null}
+    {task.artifactId ? <ArtifactButton key={task.artifactId} api={api} scope={scope} artifactId={task.artifactId} locale={locale} renderMarkdown={renderMarkdown} people={snapshot} replyText={replyText} /> : null}
   </section>;
 }

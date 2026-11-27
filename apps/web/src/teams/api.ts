@@ -4,7 +4,7 @@ import { collection, onSnapshot, type Firestore } from 'firebase/firestore';
 import { teamsTransport, type TeamsApi, type TeamCommand, type TeamDetail, type TeamResult, type TeamSummary } from '../../../../packages/teams';
 import { InboxController } from '../../../../packages/inbox/controller';
 import { createInboxRequest } from '../../../../packages/inbox/client';
-import { readFirestoreMessagePage, watchFirestoreMessages } from '../../../../packages/teams/firestore.js';
+import { prefetchFirestoreMessages, readFirestoreMessagePage, watchFirestoreMessages } from '../../../../packages/teams/firestore.js';
 import type { MessageSignal, MessageCommand } from '../../../../packages/teams/messages';
 import type { DataRequest } from '../../../../packages/teams/lingxi-data.js';
 import { getAuth, type User } from 'firebase/auth';
@@ -60,6 +60,12 @@ export function webTeamsApi(user: User, db: Firestore, currentUid: () => string 
     },
     peerReceipt:(scope,id)=>inboxRequest({action:'peerReceipt',key:'team:'+scope.teamId+':'+id,generation:scope.generation}),
     readVisible:(scope,id,through,manualUnreadRevision,observedPendingActionRevision,observedFailureRevision)=>inbox.mutate({action:'markRead',key:'team:'+scope.teamId+':'+id,generation:scope.generation,through,manualUnreadRevision,...(observedPendingActionRevision===undefined?{}:{observedPendingActionRevision}),...(observedFailureRevision===undefined?{}:{observedFailureRevision})}),
+    prefetchMessages(scope, id) {
+      if (closed || currentUid() !== user.uid) return () => {};
+      const key = crypto.randomUUID(), stop = prefetchFirestoreMessages(firestore, db, scope, id);
+      messageStops.set(key, stop);
+      return () => { stop(); messageStops.delete(key); };
+    },
     watchMessages(scope, conversationId, next) {
       if (closed || currentUid() !== user.uid) throw new Error('INVALID_SESSION');
       const key = crypto.randomUUID();

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import vectors from '../../../packages/teams/contracts/execution-vectors.json';
-import { createElement } from 'react';
+import { createElement, Profiler } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { TeamsWorkspace } from '../../../packages/teams/workspace';
 import type { TeamsApi } from '../../../packages/teams';
@@ -242,10 +242,24 @@ scenario('Changed member generation invalidates a confirmed publication review',
   await page.during(() => workspace.refresh()); assert.equal(page.button('Publish Bot').props.disabled, true); assert.match(page.text(), /memberships changed/); assert.equal(sends, 0);
 });
 scenario('Foreground task polling updates queued status within its one-second observation interval', async context => {
-  const { fake, workspace } = await open(context); let state = 'queued';
-  fake.messages = async <T>(command: MessageCommand) => command.action === 'listTasks' ? { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'alice', generation: 1 }, state, createdAt: 1, deadline: Date.now() + 300000 }] } as T : { bots: fake.bots } as T;
+  const { fake, workspace } = await open(context);
+  let state = 'queued', polls = 0, commits = 0;
+  const deadline = Date.now() + 300_000;
+  fake.messages = async <T>(command: MessageCommand) => {
+    if (command.action !== 'listTasks') return { bots: fake.bots } as T;
+    polls++;
+    return { tasks: [{ taskId: 'task-test', conversationId: 'test-chat', sharedBotId: 'assistant-fixture', requester: { uid: 'alice', generation: 1 }, state, createdAt: 1, deadline }] } as T;
+  };
   context.mock.timers.enable({ apis: ['setInterval'] });
-  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en' })); context.after(() => page.unmount()); assert.match(page.text(), /Queued/); state = 'running';
+  const page = await mount(workspace, snapshot => createElement(Profiler, { id: 'team-messages', onRender: () => { commits++; } },
+    createElement(TeamConversationView, { workspace, snapshot, locale: 'en' })));
+  context.after(() => page.unmount());
+  assert.match(page.text(), /Queued/);
+  const previousPolls = polls, previousCommits = commits;
+  await page.during(() => { context.mock.timers.tick(1000); });
+  assert.equal(polls, previousPolls + 1);
+  assert.equal(commits, previousCommits, 'an identical response does not commit a render');
+  state = 'running';
   await page.during(() => { context.mock.timers.tick(1000); }); assert.match(page.text(), /Processing/);
 });
 scenario('A task without a reply message is a Bot row inside the message log, with the same wrapper as a delivered one', async context => {
@@ -355,6 +369,31 @@ async function openChat(context: Parameters<Parameters<typeof scenario>[1]>[0], 
   const box = () => page.find(n => n.type === 'textarea')[0];
   return { fake, workspace, page, sent, buttons, box };
 }
+scenario('Bot replies hide automatic copies and keep full or revised documents accessible', async context => {
+  withDom(context);
+  const reply = '{"probeId":"fixture"}';
+  const documents = [
+    { artifactId: 'artifact-copy', revision: 1, text: reply, body: reply },
+    { artifactId: 'artifact-full', revision: 1, text: 'Result saved as a shared document.', body: reply },
+    { artifactId: 'artifact-revised', revision: 2, text: reply, body: reply },
+  ];
+  const chat = await openChat(context, () => [waitTask({ state: 'completed', wait: undefined, artifactId: 'artifact-copy', replyId: 'message-2' })], command => {
+    if (command.action !== 'readArtifact') return {};
+    const item = documents.find(document => document.artifactId === command.payload.artifactId)!;
+    return { artifactId: item.artifactId, revision: item.revision, currentRevision: item.revision, document: { title: 'Shared Bot result', body: item.body } };
+  }, 'alice', 'en', {
+    second: { waitId: undefined, text: reply, artifactId: 'artifact-copy' },
+    then: documents.slice(1).map((item, index) => message(index + 3, { author: botAuthor, text: item.text, artifactId: item.artifactId })),
+  });
+  await until(() => chat.sent.filter(command => command.action === 'readArtifact').length >= 3 && chat.buttons('Open document').length === 2);
+  assert.match(chat.page.text(), /Completed/);
+  assert.match(chat.page.text(), /"probeId":"fixture"/);
+  const copy = chat.page.find(node => node.type === 'li' && node.props['data-message-id'] === 'message-2')[0];
+  assert.doesNotMatch(textOf(copy), /Open document/);
+  await chat.page.click(chat.buttons('Open document')[0]);
+  assert.match(chat.page.text(), /Shared Bot result/);
+  assert.match(chat.page.text(), /Revision 1/);
+});
 scenario('A waiting task names who it waits for and when the wait ends; only that person is offered Reply', async context => {
   withDom(context);
   const mine = await openChat(context, () => [waitTask()]);

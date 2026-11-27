@@ -71,6 +71,7 @@ export interface MessageApi {
   readVisible?(scope:MessageScope,conversationId:string,through:number,manualUnreadRevision:number,observedPendingActionRevision?:number,observedFailureRevision?:number):Promise<unknown>;
   onMessagesChanged(callback: (signal?: MessageSignal) => void): () => void;
   watchMessages(scope: MessageScope, conversationId: string, next: (snapshot: MessageSnapshot) => void): () => void;
+  prefetchMessages?(scope: MessageScope, conversationId: string): () => void;
 }
 export type MessageSnapshot = MessageScope & { uid: string; fromCache: boolean } & (
   | { kind: 'directory'; conversations: TeamConversation[] }
@@ -160,6 +161,10 @@ function failedCommand<T extends CommandMetadata>(intent: T, error: unknown, per
 export const ANSWER_REFUSED = ['WAIT_CLOSED', 'WAIT_RECIPIENT_REQUIRED', 'WAIT_REQUIRED', 'TASK_REVOKED'];
 const isRevokedAccessError = (error: unknown) => error instanceof Error && ['MEMBERSHIP_REQUIRED', 'STALE_MEMBERSHIP', 'INVALID_SESSION', 'SIGN_IN_REQUIRED', 'CONVERSATION_REQUIRED'].includes(error.message);
 const isPermanentMessageError = (error: unknown) => error instanceof Error && ['MESSAGE_ID_CONFLICT', 'DATA_REFERENCE_UNAVAILABLE', 'DATA_ACCESS_REQUIRED', 'DATA_NOT_FOUND', 'MESSAGE_RECALLED', 'MESSAGE_AUTHOR_REQUIRED', 'REPLY_REQUIRED', 'MENTION_TARGET_REQUIRED', 'INVALID_INPUT', 'BOT_USE_REQUIRED', 'BOT_PARTICIPANT_REQUIRED', 'INVALID_BOT_TARGET', 'HOST_UNAVAILABLE', 'REQUEST_QUOTA_EXCEEDED', 'CONVERSATION_POLICY_REQUIRED', 'INPUT_GRANT_REQUIRED', 'BOT_RETIRED', 'COMMAND_ID_CONFLICT', ...ANSWER_REFUSED].includes(error.message);
+const PREFETCH_HOVER_MS = 80;
+const PREFETCH_TIMEOUT_MS = 1500;
+const PREFETCH_MIN_INTERVAL_MS = 750;
+const PREFETCH_COOLDOWN_MS = 30_000;
 /** Persist command identities before transport; Firestore owns message history. */
 export class TeamMessaging {
   state: MessageProjection;
@@ -182,6 +187,10 @@ export class TeamMessaging {
   private retry?: ReturnType<typeof setTimeout>;
   private retryDelay = 1000;
   private stopWatch?: () => void;
+  private watchVersion = 0;
+  private prefetch?: { id: string; timer: ReturnType<typeof setTimeout>; stop?: () => void };
+  private prefetchedAt = new Map<string, number>();
+  private nextPrefetchAt = 0;
   private connectionTimeout?: ReturnType<typeof setTimeout>;
   constructor(private api: MessageApi, private storage: CommandStorage, readonly uid: string, readonly scope: MessageScope) {
     this.state = emptyProjection(uid, scope); this.key = projectionKey(uid, scope);
@@ -215,22 +224,33 @@ export class TeamMessaging {
     if (!this.closed) this.state = { ...this.state, ...this.validPending(value) };
   }
   private watch(): void {
-    this.stopWatch?.();
+    const previous = this.stopWatch;
+    this.stopWatch = undefined;
+    const version = ++this.watchVersion;
     clearTimeout(this.connectionTimeout);
     this.connecting = true;
     // A cached SDK snapshot does not establish that the server is unreachable.
     // Bound the initial confirmation period so an unavailable network still
     // settles to offline even when the SDK only produces cached snapshots.
     this.connectionTimeout = setTimeout(() => { this.connecting = false; this.emit(); }, 10000);
-    this.stopWatch = this.api.watchMessages(this.scope, this.selected, snapshot => this.receive(snapshot));
+    try {
+      const stop = this.api.watchMessages(this.scope, this.selected, snapshot => {
+        if (version === this.watchVersion) this.receive(snapshot);
+      });
+      if (this.closed || version !== this.watchVersion) stop();
+      else this.stopWatch = stop;
+    } finally {
+      previous?.();
+    }
   }
   private finishConnecting(): void { clearTimeout(this.connectionTimeout); this.connectionTimeout = undefined; this.connecting = false; }
   private receive(snapshot: MessageSnapshot): void {
     if (this.closed || snapshot.uid !== this.uid || snapshot.teamId !== this.scope.teamId || snapshot.generation !== this.scope.generation) return;
-    if (snapshot.kind === 'error') { this.finishConnecting(); this.error = snapshot.error; this.offline = true; void this.deny(new Error(snapshot.error)); this.emit(); return; }
+    if (snapshot.kind === 'error') { this.cancelPrefetch(); this.finishConnecting(); this.error = snapshot.error; this.offline = true; void this.deny(new Error(snapshot.error)); this.emit(); return; }
     if (snapshot.kind === 'directory') {
       this.state = mergeDirectory(this.state, snapshot.conversations, true);
       const allowed = new Set(snapshot.conversations.map(value => value.id));
+      if (this.prefetch && !allowed.has(this.prefetch.id)) this.cancelPrefetch();
       this.state = { ...this.state, threads: Object.fromEntries(Object.entries(this.state.threads).filter(([id]) => allowed.has(id))) };
       if (!snapshot.fromCache && this.selected && !allowed.has(this.selected) && (this.state.creation ? pendingPayload(this.state.creation).conversationId : undefined) !== this.selected) { this.selected = ''; this.watch(); }
       this.directoryCached = snapshot.fromCache;
@@ -244,6 +264,7 @@ export class TeamMessaging {
         this.state = applyMessageSnapshot(this.state, through===undefined ? snapshot : {...snapshot,replace:false,messages:snapshot.messages.filter(row=>row.seq<=through)});
       }
       this.messagesCached = snapshot.fromCache;
+      if (!snapshot.fromCache && snapshot.replace) this.cancelPrefetch(snapshot.conversationId);
     } else if (snapshot.kind === 'read') {
       this.state = { ...this.state, conversations: this.state.conversations.map(value => value.id === snapshot.conversationId ? { ...value, lastReadSeq: Math.max(value.lastReadSeq, snapshot.lastReadSeq), ...(snapshot.unreadCount===undefined?{}:{unreadCount:snapshot.unreadCount}), ...(snapshot.failureRevision===undefined?{}:{failureRevision:snapshot.failureRevision}),...(snapshot.pendingActionRevision===undefined?{}:{pendingActionRevision:snapshot.pendingActionRevision}), ...(snapshot.manualUnreadRevision===undefined?{}:{manualUnreadRevision:snapshot.manualUnreadRevision}) } : value) };
     }
@@ -272,8 +293,51 @@ export class TeamMessaging {
     if (!this.closed) void this.refresh();
   }
   reconnect(): void { if (this.closed) return; this.error = ''; this.watch(); this.emit(); void this.refresh(); }
-  select(id: string) { this.pageRevision++; this.pageBusy=false; this.historicalWindow=false; this.selected = id; this.messagesCached = true; this.offline = this.directoryCached || !!id; this.state = { ...this.state, threads: this.state.threads[id] ? { [id]: this.state.threads[id]! } : {} }; this.watch(); this.error = ''; this.emit(); void this.refresh(); }
-  async older():Promise<string|undefined> {
+  private canPrefetch(id: string): boolean {
+    return !this.closed && !this.offline && !this.error && id !== this.selected
+      && !!this.api.prefetchMessages && this.state.conversations.some(row => row.id === id && row.lastSeq > 0);
+  }
+  prefetchConversation(id: string): void {
+    if (!this.canPrefetch(id) || this.prefetch?.id === id) return;
+    this.cancelPrefetch();
+    const now = Date.now();
+    for (const [key, at] of this.prefetchedAt) if (now - at >= PREFETCH_COOLDOWN_MS) this.prefetchedAt.delete(key);
+    if (this.prefetchedAt.has(id)) return;
+    this.prefetch = { id, timer: setTimeout(() => {
+      const startedAt = Date.now();
+      if (startedAt < this.nextPrefetchAt || !this.canPrefetch(id)) { this.cancelPrefetch(id); return; }
+      try {
+        const stop = this.api.prefetchMessages!(this.scope, id);
+        this.prefetchedAt.set(id, startedAt);
+        this.nextPrefetchAt = startedAt + PREFETCH_MIN_INTERVAL_MS;
+        this.prefetch = { id, stop, timer: setTimeout(() => this.cancelPrefetch(id), PREFETCH_TIMEOUT_MS) };
+      } catch { this.cancelPrefetch(id); }
+    }, PREFETCH_HOVER_MS) };
+  }
+  cancelPrefetch(id?: string): void {
+    const active = this.prefetch;
+    if (!active || (id !== undefined && active.id !== id)) return;
+    this.prefetch = undefined;
+    clearTimeout(active.timer);
+    active.stop?.();
+  }
+  select(id: string) {
+    // An in-flight prefetch for the selected channel can share its SDK query with the new watch.
+    if (this.prefetch?.id !== id || !this.prefetch.stop) this.cancelPrefetch();
+    this.pageRevision++;
+    this.pageBusy = false;
+    this.historicalWindow = false;
+    this.selected = id;
+    this.messagesCached = true;
+    this.offline = this.directoryCached || !!id;
+    const thread = this.state.threads[id];
+    this.state = { ...this.state, threads: thread ? { [id]: thread } : {} };
+    this.watch();
+    this.error = '';
+    this.emit();
+    void this.refresh();
+  }
+  async older(beforePrepend?: (firstId: string) => void):Promise<string|undefined> {
     const thread=this.state.threads[this.selected]?.messages, before=thread?.[0]?.seq;
     if(!this.api.historyPage || this.pageBusy || !before || before<=1 || this.closed) return;
     const id=this.selected, revision=this.pageRevision;
@@ -281,6 +345,8 @@ export class TeamMessaging {
     try {
       const messages=await this.api.historyPage(this.scope,id,before);
       if(this.closed || revision!==this.pageRevision) return;
+      if(!messages.length) return;
+      beforePrepend?.(messages[0].id);
       this.historicalWindow=this.historicalWindow || (thread?.length??0)+messages.length>200;
       this.state=applyMessageSnapshot(this.state,{kind:'messages',uid:this.uid,...this.scope,conversationId:id,fromCache:false,messages,replace:false,older:true});
       this.emit();
@@ -449,5 +515,5 @@ export class TeamMessaging {
     }
     this.scheduleRetry(); this.emit();
   }
-  close() { this.closed = true; this.finishConnecting(); clearTimeout(this.retry); this.stopWatch?.(); this.stopWatch = undefined; this.stops.forEach(stop => stop()); this.stops = []; this.callbacks.clear(); }
+  close() { this.closed = true; this.cancelPrefetch(); this.prefetchedAt.clear(); this.finishConnecting(); clearTimeout(this.retry); this.stopWatch?.(); this.stopWatch = undefined; this.stops.forEach(stop => stop()); this.stops = []; this.callbacks.clear(); }
 }

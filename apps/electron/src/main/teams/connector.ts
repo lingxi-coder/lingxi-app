@@ -6,6 +6,7 @@ import { open, lstat } from 'node:fs/promises';
 import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { providerAccountEnvelope, type ProviderAccountLaunch } from '../provider-accounts.js';
 import type { AcceptSharedBotInput, LocalPublishableBot, OfferSharedBotInput, PublishLocalBotInput, PublishedBotScope, PublishedKnowledge, SelectedSharedFile, SharedBotCard, SharedHostBot, SharedHostStatus, SharedListItem, TaskUsage, TeamTaskView, TriageLogPage, TriageLogRequest, TriageTarget, TriageVerdict, BidTier } from '../../../../../packages/teams/execution.js';
+import { isAutomaticReplyCopy } from '../../../../../packages/teams/execution.js';
 import { isPublishedBotScope, isSharedListWrite } from '../../../../../packages/teams/execution-validation.js';
 import { TeamsApiError, type TeamSummary } from '../../../../../packages/teams/index.js';
 import type { ChatReadRequest, ChatReadResult, ChatSourceMessage } from '../../../../../packages/teams/chat-source.js';
@@ -1658,12 +1659,14 @@ export class TeamConnector implements LocalTeamHost {
   private async saveResult(c: TeamAccountContext, record: SavedExecution, result: TeamRunResult, synthesized = false) {
     // A Bot that chose silence has nothing to post: no text, no document, no files.
     const declined = !record.privateData && result.status === 'declined' && record.mayDecline === true;
-    const payload = {...record.payload,outcome:declined?'declined':result.status==='completed'?'completed':'failed',text:record.privateData || declined ? '' : result.text || 'The assistant could not complete this request.',finishedAt:result.finishedAt,
+    const text = record.privateData || declined ? '' : result.text || 'The assistant could not complete this request.';
+    const document = !record.privateData && result.document && !declined ? { title: result.document.title, body: result.document.markdown } : undefined;
+    const payload = {...record.payload,outcome:declined?'declined':result.status==='completed'?'completed':'failed',text,finishedAt:result.finishedAt,
       outputAudience:{mode:'published_inputs'},usage:totalUsage(record.usage,result.usage,record.recoveries>0),
       // A finished run was given these files as model input: the worker refuses a batch whose files it cannot show the model.
       ...(!record.privateData && result.status==='completed' && record.files?.length ? { readFiles: record.files } : {}),
       ...(!record.privateData && record.visualizations && result.status === 'completed' && result.visualization ? { visualization: result.visualization } : {}),
-      ...(!record.privateData && result.document && !declined ? {document:{title:result.document.title,body:result.document.markdown}} : {})};
+      ...(document && !isAutomaticReplyCopy(document, text) ? { document } : {})};
     // Only what would have been posted waits for the maintainer: a Bot that chose silence, a failure (the host's own included) and a task on private data have no reply to approve.
     const held = record.hold === true && !record.privateData && payload.outcome === 'completed';
     const delivery: SavedDelivery = {schemaVersion:1,teamId:record.teamId,generation:record.generation,taskId:record.taskId,deadlineAt:record.deadlineAt,commandId:record.commandId,

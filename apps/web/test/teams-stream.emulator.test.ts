@@ -5,7 +5,7 @@ import test from 'node:test';
 import { initializeApp, deleteApp } from 'firebase/app';
 import { initializeAuth, inMemoryPersistence, connectAuthEmulator, signInWithCustomToken } from 'firebase/auth';
 import { getFirestore, connectFirestoreEmulator, disableNetwork, enableNetwork, terminate } from 'firebase/firestore';
-import { readFirestoreMessagePage, watchFirestoreMessages } from '../../../packages/teams/firestore.js';
+import { prefetchFirestoreMessages, readFirestoreMessagePage, watchFirestoreMessages } from '../../../packages/teams/firestore.js';
 import { emptyProjection, applyMessageSnapshot, type MessageSnapshot } from '../../../packages/teams/messages.js';
 
 const enabled = !!process.env.FIRESTORE_EMULATOR_HOST && !!process.env.FIREBASE_AUTH_EMULATOR_HOST;
@@ -22,7 +22,7 @@ test('SDK stream: cached metadata, reconnect, old edits/recalls, read marks, gen
   let stop: (() => void) | undefined;
   const snapshots: MessageSnapshot[] = [];
   let view = emptyProjection(uid, { teamId, generation: 1 });
-  const until = async (predicate: () => boolean) => { const end = Date.now() + 15000; while (!predicate()) { if (Date.now() >= end) throw new Error('SDK stream condition timed out'); await new Promise(resolve => setTimeout(resolve, 10)); } };
+  const until = async (predicate: () => boolean | Promise<boolean>) => { const end = Date.now() + 15000; while (!(await predicate())) { if (Date.now() >= end) throw new Error('SDK stream condition timed out'); await new Promise(resolve => setTimeout(resolve, 10)); } };
   const pointer = () => snapshots.filter((value): value is Extract<MessageSnapshot, { kind: 'directory' }> => value.kind === 'directory').at(-1)?.conversations[0]?.lastMessage;
   function latestMessages(): Extract<MessageSnapshot, { kind: 'messages' }> | undefined { const last = snapshots.filter((value): value is Extract<MessageSnapshot, { kind: 'messages' }> => value.kind === 'messages').at(-1); return last ? { ...last, messages: view.threads[conversationId]?.messages ?? [] } : undefined; }
   try {
@@ -33,6 +33,12 @@ test('SDK stream: cached metadata, reconnect, old edits/recalls, read marks, gen
     for (let i = 1; i <= 125; i++) batch.set(conversation.collection('messages').doc(`message-${i}`), { seq: i, author: { uid, kind: 'user' }, kind: 'text', text: `Body ${i}`, createdAt: new Date(), changeSeq: i, changeId: `change-${i}` });
     await batch.commit();
     await signInWithCustomToken(auth, await backend('firebase-admin/auth').getAuth(adminApp).createCustomToken(uid));
+    const head = firestore.query(firestore.collection(db, 'teams', teamId, 'conversations', conversationId, 'messages'),
+      firestore.orderBy('seq', 'desc'), firestore.limit(50));
+    assert.equal((await firestore.getDocsFromCache(head)).size, 0);
+    const cancelPrefetch = prefetchFirestoreMessages(firestore, db, { teamId, generation: 1 }, conversationId);
+    try { await until(async () => (await firestore.getDocsFromCache(head)).size === 50); }
+    finally { cancelPrefetch(); }
     stop = watchFirestoreMessages(firestore, db, uid, { teamId, generation: 1 }, conversationId, value => { if (value.kind === 'messages') view = applyMessageSnapshot(view, value); snapshots.push(value); }, () => auth.currentUser?.uid === uid);
     await until(() => latestMessages()?.messages.length === 50 && latestMessages()?.fromCache === false);
     for(const before of [76,26]) {

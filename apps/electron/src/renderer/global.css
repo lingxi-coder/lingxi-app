@@ -2039,6 +2039,39 @@ body {
   white-space: pre;
 }
 .code-card code { font: inherit; }
+.tw-msg-agent .code-card {
+  background: var(--tw-surface);
+  box-shadow: none;
+}
+.tw-msg-agent .code-card-toolbar {
+  padding-inline: 12px 4px;
+  min-block-size: 30px;
+  border-bottom: 0;
+  background: transparent;
+}
+.tw-scope .tw-msg-agent .code-card-copy {
+  min-inline-size: 0;
+  padding-inline: 7px;
+  border: 0;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--tw-muted);
+}
+.tw-scope .tw-msg-agent .code-card-copy:focus-visible {
+  outline: 0;
+  background: var(--tw-selected);
+}
+.tw-scope .tw-msg-agent .code-card-copy:is(:hover, :focus-visible) { color: var(--tw-fg); }
+.tw-scope .tw-msg-agent .code-card-copy:active {
+  scale: none;
+  background: var(--tw-selected);
+}
+.tw-scope .tw-msg-agent .code-card-copy[data-state='copied'] { color: var(--code-success); }
+.tw-scope .tw-msg-agent .code-card-copy[data-state='error'] { color: var(--code-error); }
+.tw-msg-agent .code-card pre {
+  padding: 4px 12px 10px;
+  line-height: 1.5;
+}
 .code-card .hljs { color: var(--code-text); background: transparent; }
 .code-card .hljs-keyword,
 .code-card .hljs-selector-tag { color: var(--syntax-keyword); }

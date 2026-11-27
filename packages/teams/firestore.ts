@@ -153,6 +153,16 @@ export async function readFirestoreMessagePage(sdk:typeof import('firebase/fires
   return page.docs.map(doc=>firestoreMessage(doc.id,doc.data())).reverse();
 }
 
+function recentMessagesQuery(sdk: typeof import('firebase/firestore'), db: Firestore, scope: MessageScope, id: string) {
+  return sdk.query(sdk.collection(db, 'teams', scope.teamId, 'conversations', id, 'messages'), sdk.orderBy('seq', 'desc'), sdk.limit(50));
+}
+
+/** Warm only the SDK cache. The selected conversation watcher still owns message and read snapshots. */
+export function prefetchFirestoreMessages(sdk: typeof import('firebase/firestore'), db: Firestore, scope: MessageScope, id: string): () => void {
+  // The short-lived listener also lets a click reuse the same live query while it is still subscribed.
+  return sdk.onSnapshot(recentMessagesQuery(sdk, db, scope, id), () => {}, () => {});
+}
+
 /** SDK snapshots are the only ordinary-message read path, including offline reads. */
 export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'), db: Firestore, uid: string, scope: MessageScope, conversationId: string,
   next: (snapshot: MessageSnapshot) => void, isCurrent: () => boolean): () => void {
@@ -174,6 +184,11 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
   let stopMessages: (() => void) | undefined;
   let selectedAllowed = false;
   const root = ['teams', scope.teamId] as const;
+  const selectedPath = [...root, 'conversations', conversationId] as const;
+  const head = conversationId ? recentMessagesQuery(sdk, db, scope, conversationId) : undefined;
+  // Start the SDK cache read while the membership and directory listeners confirm access.
+  // Only watchSelected may publish this result, after both checks have passed.
+  let initialCache = head ? sdk.getDocsFromCache(head).catch(() => undefined) : undefined;
   type SnapshotValue = MessageSnapshot extends infer Value ? Value extends MessageSnapshot ? Omit<Value, keyof MessageScope | 'uid'> : never : never;
   function emit(value: SnapshotValue): void {
     if (closed) return;
@@ -191,9 +206,9 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
     watchSelected();
   }
   function watchSelected(): void {
-    if (!authorized || closed || !selectedAllowed || stopMessages) return;
+    if (!authorized || closed || !selectedAllowed || stopMessages || !head) return;
     let stopped=false, stopChanges:(()=>void)|undefined, version=0;
-    const path=[...root,'conversations',conversationId] as const;
+    const path = selectedPath, recentQuery = head;
     const current=()=>!closed && !stopped && selectedAllowed && isCurrent();
     let watermark=directory?.conversations.find(row=>row.id===conversationId)?.lastChangeSeq ?? 0;
     const read=sdk.onSnapshot(doc(db,...path,'reads',uid),{includeMetadataChanges:true},mark=>{
@@ -210,17 +225,24 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
       emit({kind:'read',conversationId,lastReadSeq:count(row.readThrough)??0,fromCache:mark.metadata.fromCache,...value});
     },()=>{/* Existing installations may only expose the source read mark. */});
     stopMessages=()=>{stopped=true;version++;stopChanges?.();read();own();};
-    const head=sdk.query(collection(db,...path,'messages'),orderBy('seq','desc'),sdk.limit(50));
-    const recent=(async (rebase=false)=>{
+    const recent = async (rebase = false) => {
       const ticket=++version;
-      if(!rebase) {
-        const cached=await sdk.getDocsFromCache(head);
-        if(current() && version===ticket && cached.size) emit({kind:'messages',conversationId,fromCache:true,replace:true,messages:cached.docs.map(d=>firestoreMessage(d.id,d.data())).reverse()});
+      const pageRequest = sdk.getDocs(recentQuery);
+      let publishedPage = false;
+      if (!rebase && initialCache) {
+        const cachedPage = initialCache;
+        initialCache = undefined;
+        void cachedPage.then(cached => {
+          if (!publishedPage && current() && version === ticket && cached?.size) {
+            emit({kind:'messages',conversationId,fromCache:true,replace:true,messages:cached.docs.map(d=>firestoreMessage(d.id,d.data())).reverse()});
+          }
+        }).catch(error => { if (current() && version === ticket) fail(error); });
       }
-      const page=await sdk.getDocs(head);
+      const page=await pageRequest;
+      publishedPage = true;
       if(!current() || ticket!==version) return;
       emit({kind:'messages',conversationId,fromCache:page.metadata.fromCache,replace:true,rebase,messages:page.docs.map(d=>firestoreMessage(d.id,d.data())).reverse()});
-    });
+    };
     let chain=Promise.resolve();
     async function consume(page:import('firebase/firestore').QuerySnapshot) {
       if(!current()) return;

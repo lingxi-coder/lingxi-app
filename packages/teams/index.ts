@@ -80,6 +80,7 @@ export interface DesktopTeamsApi {
   serviceMessages<T>(uid: string, command: Record<string, unknown> & { serviceId: string; generation: number; action: string }): Promise<T>;
   onMessagesChanged: MessageApi['onMessagesChanged'];
   watchMessages(uid: string, scope: import('./messages').MessageScope, conversationId: string, next: (snapshot: import('./messages').MessageSnapshot) => void): () => void;
+  prefetchMessages?(uid: string, scope: MessageScope, conversationId: string): () => void;
 }
 export class TeamsApiError extends Error {
   constructor(public readonly code: string, public readonly status: number) { super(code); }

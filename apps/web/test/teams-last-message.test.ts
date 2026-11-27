@@ -77,7 +77,7 @@ test('Firestore pointer: null is a conversation with no message yet, and anythin
 });
 
 type Listener = { path: string; next(snapshot: unknown): void };
-function watch() {
+function watch(conversationId = '', reads?: { getDocsFromCache(): Promise<unknown>; getDocs(): Promise<unknown> }, authorize = true) {
   const listeners: Listener[] = [];
   let stopped = 0;
   const target = (kind: string, path: unknown[]) => ({ kind, path: path.filter(part => typeof part === 'string').join('/') });
@@ -87,15 +87,62 @@ function watch() {
     query: (source: { path: string }) => ({ ...source, kind: 'query' }),
     where: () => ({}), limit: () => ({}), orderBy: () => ({}),
     onSnapshot: (source: { kind: string; path: string }, _options: unknown, next: (snapshot: unknown) => void) => { listeners.push({ path: `${source.kind}:${source.path}`, next }); return () => { stopped++; }; },
+    ...reads,
   } as unknown as typeof import('firebase/firestore');
   const received: MessageSnapshot[] = [];
-  const stop = watchFirestoreMessages(sdk, {} as never, uid, scope, '', value => received.push(value), () => true);
+  const stop = watchFirestoreMessages(sdk, {} as never, uid, scope, conversationId, value => received.push(value), () => true);
   const on = (path: string) => listeners.find(value => value.path === path)!;
-  on('doc:teams/test-team/members/alice').next({ data: () => ({ generation: 1 }), metadata: { fromCache: false } });
+  const confirm = () => on('doc:teams/test-team/members/alice').next({ data: () => ({ generation: 1 }), metadata: { fromCache: false } });
+  if (authorize) confirm();
   const document = (id: string, value: Record<string, unknown>) => ({ id, data: () => ({ kind: 'dm', title: id, participants: ['user:alice'], lastSeq: 2, lastChangeSeq: 2, lastMessage: null, ...value }) });
   const directory = (docs: unknown[]) => on('query:teams/test-team/conversations').next({ metadata: { fromCache: false }, docChanges: () => [], docs });
-  return { received, directory, document, stop, stopped: () => stopped };
+  return { received, directory, document, confirm, stop, stopped: () => stopped };
 }
+
+test('switching conversations starts the SDK cache before authorization and the server read without waiting for cache', async context => {
+  type Page = Awaited<ReturnType<typeof import('firebase/firestore')['getDocs']>>;
+  let resolveCache!: (page: Page) => void, resolveServer!: (page: Page) => void;
+  const cache = new Promise<Page>(resolve => { resolveCache = resolve; });
+  const server = new Promise<Page>(resolve => { resolveServer = resolve; });
+  const calls: string[] = [];
+  const chat = watch('test-chat', {
+    getDocsFromCache() { calls.push('cache'); return cache; },
+    getDocs() { calls.push('server'); return server; },
+  }, false);
+  context.after(chat.stop);
+  const page = (text: string) => ({
+    size: 1, metadata: { fromCache: false },
+    docs: [{ id: 'message-2', data: () => ({ author: { kind: 'user', uid }, seq: 2, text }) }],
+  }) as Page;
+  assert.deepEqual(calls, ['cache']);
+  chat.directory([chat.document('test-chat', {})]);
+  assert.deepEqual(calls, ['cache'], 'the remote read still requires confirmed access');
+  chat.confirm();
+  assert.deepEqual(calls, ['cache', 'server']);
+  resolveServer(page('fresh'));
+  await server;
+  resolveCache(page('stale'));
+  await cache;
+  await Promise.resolve();
+  assert.deepEqual(chat.received.flatMap(value => value.kind === 'messages' ? value.messages.map(message => message.text) : []), ['fresh']);
+});
+
+test('returning to a cached conversation shows its messages as soon as access is confirmed', async context => {
+  const cached = Promise.resolve({
+    size: 1,
+    docs: [{ id: 'message-2', data: () => ({ author: { kind: 'user', uid }, seq: 2, text: 'Cached message' }) }],
+  });
+  const chat = watch('test-chat', { getDocsFromCache: () => cached, getDocs: () => new Promise(() => {}) }, false);
+  context.after(chat.stop);
+  chat.directory([chat.document('test-chat', {})]);
+  await cached;
+  assert.ok(!chat.received.some(value => value.kind === 'messages'));
+  chat.confirm();
+  await new Promise(resolve => setImmediate(resolve));
+  const initial = chat.received.find(value => value.kind === 'messages');
+  assert.ok(initial?.fromCache);
+  assert.equal(initial.messages[0].text, 'Cached message');
+});
 
 test('directory snapshots carry each conversation lastMessage through the Firestore watcher', () => {
   const { received, directory, document, stop } = watch();

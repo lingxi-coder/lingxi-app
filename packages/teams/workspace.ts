@@ -615,7 +615,12 @@ export class TeamsWorkspace {
 
   // ── Conversations and messaging ──
 
-  selectConversation = (id: string): void => { this.messaging?.select(id); };
+  selectConversation = (id: string): void => {
+    const model = this.messaging;
+    if (model && (id !== model.selected || model.error)) model.select(id);
+  };
+  prefetchConversation = (id: string): void => { this.messaging?.prefetchConversation(id); };
+  cancelConversationPrefetch = (id: string): void => { this.messaging?.cancelPrefetch(id); };
   /**
    * Open one conversation of one team, from a link or a list outside the workspace: the team is selected now when it is
    * listed, or once the list arrives. A team the viewer is not in is never replaced by another one; `loading` false with
@@ -624,7 +629,7 @@ export class TeamsWorkspace {
   openConversation = (teamId: string, conversationId: string): void => {
     if (this.closed || this.pair) return;
     this.conversationByTeam.set(teamId, conversationId);
-    if (this.selection === teamId) { this.messaging?.select(conversationId); return; }
+    if (this.selection === teamId) { this.selectConversation(conversationId); return; }
     if (this.teams.some(team => team.id === teamId)) { this.selectTeam(teamId); return; }
     if (!this.listed) this.initialTeamId = teamId;
   };

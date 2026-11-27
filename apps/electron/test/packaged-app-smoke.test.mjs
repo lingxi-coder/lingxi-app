@@ -507,6 +507,8 @@ test('packaged bootstrap validates account metadata and rejects nested secret pa
     enabled: true, userPriority: 0, configRevision: 1, identityGeneration: 1 };
   const snapshot = { storeScope: 'test-scope', configRevision: 1, accounts: [account], health: [], modelEntitlements: [], modelAvailability: [] };
   assert.equal(isSafeProviderAccountSnapshot(snapshot), true);
+  assert.equal(isSafeProviderAccountSnapshot({ ...snapshot, accounts: [{ ...account, additionalOpenaiModels: true }] }), true);
+  assert.equal(isSafeProviderAccountSnapshot({ ...snapshot, accounts: [{ ...account, additionalOpenaiModels: 'secret' }] }), false);
   const scopedHealth = [{ accountId: account.accountId, identityGeneration: 1, scopeKind: 'model', scopeId: 'test-model', unavailableUntilMs: 42, reason: 'rate_limited' }];
   assert.equal(isSafeProviderAccountSnapshot({ ...snapshot, scopedHealth }), true);
   assert.equal(isSafeProviderAccountSnapshot({ ...snapshot, scopedHealth: [{ ...scopedHealth[0], access_token: 'secret' }] }), false);

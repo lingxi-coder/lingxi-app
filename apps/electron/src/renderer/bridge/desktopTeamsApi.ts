@@ -92,6 +92,7 @@ export function desktopTeamsApi(
         }
       : {}),
     watchMessages: (scope, conversationId, next) => desktop.watchMessages(uid, scope, conversationId, next),
+    prefetchMessages: desktop.prefetchMessages ? (scope, id) => desktop.prefetchMessages!(uid, scope, id) : undefined,
     services: (command) => desktop.services(uid, command),
     serviceMessages: (command) => desktop.serviceMessages(uid, command),
     datasets: (request) => desktop.datasets(uid, request),

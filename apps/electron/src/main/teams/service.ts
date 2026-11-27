@@ -53,7 +53,7 @@ export class TeamsService {
   private dataOperation: Promise<void> = Promise.resolve();
   private dataOpening?: Promise<import('./messageWindow.js').TeamsMessageSession>;
   private sdk?: typeof import('./firestore.js');
-  private readonly messageLeases = new Map<string, { uid: string; teamId: string; generation: number; conversationId: string }>();
+  private readonly messageLeases = new Map<string, { uid: string; teamId: string; generation: number; conversationId: string; prefetch: boolean }>();
   private stops = new Map<string, () => void>();
   private failed = new Map<string, number>();
   private readonly stopAccount: () => void;
@@ -238,12 +238,13 @@ export class TeamsService {
     this.assertHostContext(context);
     return result;
   }
-  async watchMessages(leaseId: string, uid: string, scope: { teamId: string; generation: number }, conversationId: string): Promise<void> {
+  async watchMessages(leaseId: string, uid: string, scope: { teamId: string; generation: number }, conversationId: string, prefetch = false): Promise<void> {
     if (!/^[A-Za-z0-9_-]{8,64}$/u.test(scope.teamId) || !Number.isSafeInteger(scope.generation) || scope.generation < 1
+      || (prefetch && !conversationId)
       || conversationId !== '' && !/^[A-Za-z0-9_-]{8,64}$/u.test(conversationId)) throw new Error('INVALID_INPUT');
     this.syncAccount();
     if (uid !== this.uid) throw new Error('INVALID_SESSION');
-    const lease = { uid, ...scope, conversationId };
+    const lease = { uid, ...scope, conversationId, prefetch };
     this.messageLeases.set(leaseId, lease);
     try {
       await this.connectMessages(uid);
@@ -263,7 +264,7 @@ export class TeamsService {
       if (epoch !== this.epoch || !this.messageLeases.has(key.slice(3))) return;
       this.events.emit('snapshot', { leaseId: key.slice(3), snapshot });
       if (snapshot.kind === 'signal' || snapshot.kind === 'error') this.events.emit('messages', snapshot.kind === 'signal' ? snapshot.signal : undefined);
-    }));
+    }, lease.prefetch));
   }
   onMessageSnapshot(callback: (event: { leaseId: string; snapshot: MessageSnapshot }) => void): () => void {
     this.events.on('snapshot', callback); return () => { this.events.off('snapshot', callback); };

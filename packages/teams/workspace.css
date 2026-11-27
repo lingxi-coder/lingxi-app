@@ -261,10 +261,15 @@
 .tw-stream { flex: 1; min-height: 0; overflow-y: auto; position: relative; overscroll-behavior: contain; padding-block-end: 8px; }
 .tw-chat-thread .tw-stream { display: flex; flex-direction: column; padding-block-end: 12px; background: color-mix(in srgb, var(--tw-bg) 78%, var(--tw-sidebar-bg)); }
 .tw-chat-thread .tw-stream > * { flex: none; }
-.tw-earlier { display: flex; justify-content: center; padding-block-start: 10px; }
+.tw-earlier { display: flex; justify-content: center; padding-block: 8px; }
+.tw-scope .tw-earlier button {
+  border-color: transparent; border-radius: 999px; background: var(--tw-surface);
+  color: var(--tw-accent-text); font-size: 0.8125rem; font-weight: 600; padding-inline: 12px;
+}
+.tw-scope .tw-earlier button[aria-disabled='true'] { color: var(--tw-muted); cursor: wait; }
 .tw-scope .tw-chat-thread .tw-messages { inline-size: 100%; max-inline-size: 52rem; margin-block-start: auto; margin-inline: auto; padding: 8px clamp(10px, 3%, 24px) 0; }
 .tw-date { display: flex; justify-content: center; margin-block: 16px 8px; font-size: 12px; color: var(--tw-muted); }
-.tw-date span { padding: 4px 11px; border-radius: 999px; background: var(--tw-hover); font-weight: 600; }
+.tw-date span { padding: 2px 8px; font-weight: 600; }
 .tw-unread { display: flex; align-items: center; gap: 10px; margin-block: 12px 8px; font-size: 12px; font-weight: 700; color: var(--tw-accent-text); }
 .tw-unread::before, .tw-unread::after { content: ''; flex: 1; height: 1px; background: currentColor; opacity: 0.4; }
 .tw-msg { display: flex; align-items: flex-start; gap: 8px; padding-block: 1px; }
@@ -303,7 +308,15 @@
 .tw-pending .tw-msg-main { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .tw-pending[data-error='true'] .tw-msg-head small { color: var(--tw-danger); }
 .tw-pending-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.tw-scope .tw-jump { position: absolute; inset-inline-end: 16px; bottom: 12px; border-radius: 999px; background: var(--tw-surface); box-shadow: var(--tw-shadow); padding: 3px 12px; z-index: 3; }
+.tw-scope .tw-jump {
+  position: absolute; inset-inline-end: 16px; bottom: 12px; z-index: 3;
+  min-height: 36px; border-color: var(--tw-line); border-radius: 999px; background: var(--tw-surface);
+  box-shadow: var(--tw-shadow); padding: 3px 12px; font-size: 0.8125rem; font-weight: 600;
+}
+.tw-scope .tw-chat-thread :is(.tw-earlier button, .tw-jump, .tw-msg-actions button):focus-visible { outline: 0; background: var(--tw-selected); }
+@media (any-pointer: coarse) {
+  .tw-scope .tw-chat-thread :is(.tw-earlier button, .tw-jump) { min-height: 44px; }
+}
 @container chat-thread (min-width: 32rem) {
   .tw-chat-thread .tw-msg[data-mine='true'] .tw-msg-main { max-inline-size: min(calc(100% - 104px), 34rem); }
   .tw-msg[data-mine='true'] .tw-msg-actions { inset-inline-end: 100%; inset-inline-start: auto; }
@@ -313,9 +326,45 @@
 }
 @media (hover: none) {
   .tw-scope .tw-row-more { opacity: 1; }
+}
+@media (any-pointer: coarse), (hover: none) {
   .tw-msg-actions { opacity: 1; pointer-events: auto; position: static; width: fit-content; margin-block-start: 3px; margin-inline-start: auto; box-shadow: none; border: 0; padding: 0; background: transparent; }
+  .tw-scope .tw-msg-actions button { min-width: 44px; min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) { .tw-msg-actions { transition: none; } }
+
+/* Keep a Bot reply's content prominent and its controls in the message flow. */
+.tw-msg-agent .tw-msg-head { margin-block-end: 5px; }
+.tw-msg-agent .tw-msg-head small { overflow-wrap: anywhere; }
+.tw-msg-bot-label {
+  padding-inline: 5px;
+  border-radius: 4px;
+  background: var(--tw-hover);
+  color: var(--tw-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+.tw-msg-agent .tw-quote {
+  margin-block: 0 6px;
+  padding-block: 4px;
+  border-inline-start-color: var(--tw-line);
+  max-height: none;
+}
+.tw-msg-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.tw-msg-footer .tw-msg-meta { margin-block-start: 0; }
+.tw-msg-footer .tw-msg-actions {
+  position: static;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  opacity: 1;
+  pointer-events: auto;
+}
+.tw-scope .tw-msg-footer .tw-icon-btn { color: var(--tw-muted); }
+.tw-scope .tw-msg-footer .tw-icon-btn:is(:hover, :focus-visible) { color: var(--tw-fg); }
+
 
 /* ── Composer ── */
 .tw-composer { flex: none; padding: 8px 16px 16px; display: flex; flex-direction: column; gap: 6px; }
@@ -450,6 +499,34 @@
 .team-bot-run[data-tone='ok'] .tw-run-glyph { color: var(--tw-online); }
 .team-bot-run[data-tone='danger'] .tw-run-glyph { color: var(--tw-danger); }
 .tw-run-detail { color: var(--tw-muted); line-height: 1.5; overflow-wrap: anywhere; }
+.tw-msg-agent > .tw-embed:has(> .team-bot-run[data-state='completed']) { margin-block: 4px 0; }
+.tw-scope .tw-msg-agent > .tw-embed > .team-bot-run[data-state='completed'] {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 8px;
+  min-block-size: 1.75rem;
+  max-inline-size: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.tw-msg-agent .team-bot-run[data-state='completed'] .tw-run-state { font-size: inherit; }
+.tw-scope .tw-msg-agent .team-bot-run[data-state='completed'] > button {
+  border: 0;
+  padding-inline: 6px;
+  color: var(--tw-accent-text);
+  font-weight: 600;
+}
+.tw-scope .tw-msg-agent .team-bot-run[data-state='completed'] > button:focus-visible {
+  outline: 0;
+  background: var(--tw-selected);
+}
+.tw-msg-agent .team-bot-run[data-state='completed'] > [role='alert'] {
+  flex-basis: 100%;
+  color: var(--tw-danger);
+  overflow-wrap: anywhere;
+}
 /* A task that is going on turns; with reduced motion the turning glyph gives way to a still one (both are decoration, neither leaves the tree). */
 .tw-run-spin { animation: tw-spin 1s linear infinite; }
 .tw-run-still { position: absolute; top: 0; left: 0; opacity: 0; }

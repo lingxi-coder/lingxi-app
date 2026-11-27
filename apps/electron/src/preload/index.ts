@@ -579,6 +579,11 @@ const api: LingxiApi = {
     services: (uid, command) => teamsRequest({ type: 'services', uid, command }),
     serviceMessages: (uid, command) => teamsRequest({ type: 'serviceMessages', uid, command }),
     onMessagesChanged: callback => subscribe('lingxi:teams:messages', callback),
+    prefetchMessages: (uid, scope, conversationId) => {
+      const leaseId = crypto.randomUUID();
+      void teamsRequest({ type: 'watchMessages', uid, scope, conversationId, leaseId, prefetch: true }).catch(() => undefined);
+      return () => { void teamsRequest({ type: 'unwatchMessages', uid, leaseId }).catch(() => undefined); };
+    },
     watchMessages: (uid, scope, conversationId, next) => {
       const leaseId = crypto.randomUUID();
       let closed = false;

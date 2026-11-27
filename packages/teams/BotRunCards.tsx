@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { executionCommand, operationUnverified, type ExecutionScope, type OperationResolved, type TaskOperation, type TaskOperations, type TeamArtifact, type TeamTaskView, type TaskUsage } from './execution.js';
+import { executionCommand, isAutomaticReplyCopy, operationUnverified, type ExecutionScope, type OperationResolved, type TaskOperation, type TaskOperations, type TeamArtifact, type TeamTaskView, type TaskUsage } from './execution.js';
 import { pendingPayload } from './messages.js';
 import type { TeamsApi } from './index.js';
 import { messageErrorText } from './errors.js';
@@ -69,9 +69,25 @@ export function tokenSplit(usage: TaskUsage | undefined, locale: string): string
   return !usage || usage.status === 'missing' ? '' : teamsText(locale)('teams_usage_tokens_fmt', usage.inputTokens ?? 0, usage.outputTokens ?? 0);
 }
 
-export function ArtifactButton({ api, scope, artifactId, locale, renderMarkdown, people }: { api: TeamsApi; scope: ExecutionScope; artifactId: string; locale: string; renderMarkdown?: RenderMarkdown; people?: DocumentPeople }) {
+export function ArtifactButton({ api, scope, artifactId, locale, renderMarkdown, people, replyText }: { api: TeamsApi; scope: ExecutionScope; artifactId: string; locale: string; renderMarkdown?: RenderMarkdown; people?: DocumentPeople; replyText?: string }) {
   const t = useTeamsText(locale);
   const [artifact, setArtifact] = useState<TeamArtifact>(), [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const [checked, setChecked] = useState<TeamArtifact | null>();
+  const { teamId, generation } = scope;
+  const checkForCopy = replyText !== undefined;
+  useEffect(() => {
+    if (!checkForCopy) return;
+    let live = true;
+    // Older messages only store the artifact ID. Resolve it once while the row is mounted.
+    setChecked(undefined);
+    void api.messages<TeamArtifact>(executionCommand({ teamId, generation }, 'readArtifact', { artifactId })).then(
+      result => { if (live) setChecked(result); },
+      () => { if (live) setChecked(null); },
+    );
+    return () => { live = false; };
+  }, [api, teamId, generation, artifactId, checkForCopy]);
+  if (replyText !== undefined && (checked === undefined ||
+    (checked?.currentRevision === 1 && isAutomaticReplyCopy(checked.document, replyText)))) return null;
   const open = async () => {
     if (busy) return; setBusy(true); setError(''); setArtifact(undefined);
     try { setArtifact(await api.messages<TeamArtifact>(executionCommand(scope, 'readArtifact', { artifactId }))); }
@@ -136,12 +152,13 @@ export function OperationsDialog({ api, scope, task, locale, canResolve, people,
 }
 const CANCELLABLE: TeamTaskView['state'][] = ['queued', 'running', 'waiting'];
 type RunViewer = Pick<TeamsSnapshot, 'uid' | 'bots' | 'directory' | 'pending'>;
-export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, onReply, onChanged }: {
+export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, onReply, onChanged, replyText }: {
   task: TeamTaskView; api: TeamsApi; scope: ExecutionScope; locale: string; renderMarkdown?: RenderMarkdown; snapshot: RunViewer;
   /** Start answering the Bot's question; absent where the composer is not at hand. */
   onReply?(task: TeamTaskView): void;
   /** A command changed the task: fetch it again. */
   onChanged?(): void;
+  replyText?: string;
 }) {
   const [cancelling, setCancelling] = useState(false), [error, setError] = useState(''), [reviewing, setReviewing] = useState(false);
   const t = useTeamsText(locale);
@@ -190,6 +207,6 @@ export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, onR
     {unchecked && (maintains || isMember(task.requester)) ? <div className="teams-row-actions"><button type="button" onClick={() => setReviewing(true)}>{maintains ? t('teams_ops_review') : t('teams_ops_view')}</button></div> : null}
     {reviewing ? <OperationsDialog api={api} scope={scope} task={task} locale={locale} canResolve={maintains} people={snapshot} onClose={() => setReviewing(false)} onChanged={onChanged} /> : null}
     {error ? <p role="alert">{messageErrorText(error, locale)}</p> : null}
-    {task.artifactId ? <ArtifactButton api={api} scope={scope} artifactId={task.artifactId} locale={locale} renderMarkdown={renderMarkdown} people={snapshot} /> : null}
+    {task.artifactId ? <ArtifactButton key={task.artifactId} api={api} scope={scope} artifactId={task.artifactId} locale={locale} renderMarkdown={renderMarkdown} people={snapshot} replyText={replyText} /> : null}
   </section>;
 }

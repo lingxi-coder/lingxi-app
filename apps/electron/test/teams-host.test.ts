@@ -352,6 +352,24 @@ test('an older source edited between range and change reads rejects before the s
 
 const queued=(taskId='task00001')=>({taskId,conversationId,sharedBotId,requester:{uid:'member',generation:1},state:'queued',messageId:'message000001',messageSeq:1,createdAt:Date.now(),deadline:Date.now()+300000});
 const completions=(f:{mock:{commands:any[]}})=>f.mock.commands.filter(c=>c.action==='completeTask');
+test('delivery omits the automatic reply copy and keeps the full result when the chat text differs', async t => {
+  const body = '{"probeId":"fixture"}';
+  const document = { title: 'Shared Bot result', markdown: body, operationId: 'operation1', deliveryId: 'delivery01', sha256: digest(body) };
+  for (const text of [body, 'Result saved as a shared document.']) {
+    const f = fixture(t, async o => {
+      if (o.bootstrap.type === 'inspect_scope') return { status: 'inspected', cursor };
+      return { status: 'completed', cursor, text, document, finishedAt: Date.now() };
+    });
+    await f.connector.publishLocalBot('owner', f.input);
+    f.mock.tasks.push(queued());
+    f.mock.wake();
+    await settle(() => completions(f).length === 1);
+    const { payload } = completions(f)[0];
+    assert.equal(payload.text, text);
+    assert.deepEqual(payload.document, text === body ? undefined : { title: document.title, body });
+    await f.connector.idle();
+  }
+});
 const hold=(runs:TeamHostProcessOptions[],release:Array<(r:TeamHostResult)=>void>=[])=>async(o:TeamHostProcessOptions):Promise<TeamHostResult>=>{
  if(o.bootstrap.type==='inspect_scope')return {status:'inspected',cursor};if(o.bootstrap.type==='inspect_result')return {status:'not_found',cursor};
  runs.push(o);return new Promise<TeamHostResult>((resolve,reject)=>{release.push(resolve);o.signal.addEventListener('abort',()=>reject(Error('INVALID_SESSION')),{once:true});});};

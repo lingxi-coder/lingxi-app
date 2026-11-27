@@ -317,6 +317,39 @@
 }
 @media (prefers-reduced-motion: reduce) { .tw-msg-actions { transition: none; } }
 
+/* Keep a Bot reply's content prominent and its controls in the message flow. */
+.tw-msg-agent .tw-msg-head { margin-block-end: 5px; }
+.tw-msg-agent .tw-msg-head small { overflow-wrap: anywhere; }
+.tw-msg-bot-label {
+  padding-inline: 5px;
+  border-radius: 4px;
+  background: var(--tw-hover);
+  color: var(--tw-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+.tw-msg-agent .tw-quote {
+  margin-block: 0 6px;
+  padding-block: 4px;
+  border-inline-start-color: var(--tw-line);
+  max-height: none;
+}
+.tw-msg-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.tw-msg-footer .tw-msg-meta { margin-block-start: 0; }
+.tw-msg-footer .tw-msg-actions {
+  position: static;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  opacity: 1;
+  pointer-events: auto;
+}
+.tw-scope .tw-msg-footer .tw-icon-btn { color: var(--tw-muted); }
+.tw-scope .tw-msg-footer .tw-icon-btn:is(:hover, :focus-visible) { color: var(--tw-fg); }
+
+
 /* ── Composer ── */
 .tw-composer { flex: none; padding: 8px 16px 16px; display: flex; flex-direction: column; gap: 6px; }
 .tw-composer > .tw-hint { width: 100%; max-width: var(--conversation-width, 52rem); margin-inline: auto; padding-inline: 10px; }
@@ -450,6 +483,34 @@
 .team-bot-run[data-tone='ok'] .tw-run-glyph { color: var(--tw-online); }
 .team-bot-run[data-tone='danger'] .tw-run-glyph { color: var(--tw-danger); }
 .tw-run-detail { color: var(--tw-muted); line-height: 1.5; overflow-wrap: anywhere; }
+.tw-msg-agent > .tw-embed:has(> .team-bot-run[data-state='completed']) { margin-block: 4px 0; }
+.tw-scope .tw-msg-agent > .tw-embed > .team-bot-run[data-state='completed'] {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 8px;
+  min-block-size: 1.75rem;
+  max-inline-size: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.tw-msg-agent .team-bot-run[data-state='completed'] .tw-run-state { font-size: inherit; }
+.tw-scope .tw-msg-agent .team-bot-run[data-state='completed'] > button {
+  border: 0;
+  padding-inline: 6px;
+  color: var(--tw-accent-text);
+  font-weight: 600;
+}
+.tw-scope .tw-msg-agent .team-bot-run[data-state='completed'] > button:focus-visible {
+  outline: 0;
+  background: var(--tw-selected);
+}
+.tw-msg-agent .team-bot-run[data-state='completed'] > [role='alert'] {
+  flex-basis: 100%;
+  color: var(--tw-danger);
+  overflow-wrap: anywhere;
+}
 /* A task that is going on turns; with reduced motion the turning glyph gives way to a still one (both are decoration, neither leaves the tree). */
 .tw-run-spin { animation: tw-spin 1s linear infinite; }
 .tw-run-still { position: absolute; top: 0; left: 0; opacity: 0; }

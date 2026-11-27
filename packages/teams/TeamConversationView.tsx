@@ -217,7 +217,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   // A task gets a reply message only once it is delivered. Until then (queued, running, failed, expired, …)
   // it has no message to sit under, so it is shown as its own Bot row placed by time among the messages.
   const unanswered = useMemo(() => placeTasks(visible, runs.tasks.filter(task => !task.replyId).reverse(), start > 0), [visible, runs.tasks, start]);
-  const botRun = (task: TeamTaskView) => <BotRun task={task} api={workspace.api} scope={scope} locale={locale} renderMarkdown={renderMarkdown} snapshot={snapshot}
+  const botRun = (task: TeamTaskView, replyText?: string) => <BotRun task={task} api={workspace.api} scope={scope} locale={locale} renderMarkdown={renderMarkdown} snapshot={snapshot} replyText={replyText}
     onReply={answerable(task) ? startAnswer : undefined} onChanged={runs.refresh} />;
   const taskRow = (task: TeamTaskView) => <TaskRow key={`task:${task.taskId}`} task={task} author={botIdentity(task.sharedBotId)} locale={locale} renderAvatar={renderAvatar}>
     <div className="tw-embed">{botRun(task)}</div>
@@ -378,6 +378,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
             if (row.type === 'unread') return <li key={row.key} className="tw-unread" data-unread-divider=""><span>{t('teams_new_messages_divider')}</span></li>;
             const message = row.message, author = authorOf(message), mine = isMine(message);
             const tasks = runs.tasks.filter(task => task.replyId === message.id);
+            const replyText = message.author.kind === 'shared_bot' && !message.recalled && message.text ? message.text : undefined;
             // A Bot's question; while its task still waits for this viewer, Reply on it answers instead of quoting.
             const question = message.author.kind === 'shared_bot' && message.waitId !== undefined;
             const approval = question && !message.recalled ? message.approval : undefined;
@@ -415,8 +416,8 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
               {approval ? <div className="tw-embed"><ApprovalCard api={workspace.api} scope={scope} conversationId={conversation.id} message={message} approval={approval} locale={locale} onChanged={runs.refresh} {...approvalOf(message, waiting)} /></div> : null}
               {answering && !answerPending(message.waitId!)
                 ? <div className="tw-embed"><div className="teams-row-actions"><button type="button" aria-label={t('tw_run_reply')} onClick={() => startAnswer(answering)}>{t('teams_message_reply')}</button></div></div> : null}
-              {message.artifactId && !tasks.some(task => task.artifactId === message.artifactId) ? <ArtifactButton key={message.artifactId} api={workspace.api} scope={scope} artifactId={message.artifactId} locale={locale} renderMarkdown={renderMarkdown} people={snapshot} /> : null}
-              {tasks.map(task => <div className="tw-embed" key={task.taskId}>{botRun(task)}</div>)}
+              {message.artifactId && !tasks.some(task => task.artifactId === message.artifactId) ? <ArtifactButton key={message.artifactId} api={workspace.api} scope={scope} artifactId={message.artifactId} locale={locale} renderMarkdown={renderMarkdown} people={snapshot} replyText={replyText} /> : null}
+              {tasks.map(task => <div className="tw-embed" key={task.taskId}>{botRun(task, replyText)}</div>)}
             </MessageItem>{placed?.map(taskRow)}</Fragment>;
           })}
           {unanswered.tail.map(taskRow)}
@@ -508,14 +509,20 @@ function MessageItem({ message, grouped, author, mine, owner, quote, question, a
     {edited ? <small className="tw-edited">({t('tw_edited_tag')})</small> : null}
     {clock ? <time className="tw-msg-time" dateTime={message.createdAt ?? undefined} title={full}>{clock}</time> : null}
   </div> : null;
-  const inlineTime = author.kind === 'user' && !!body && !message.attachments?.length && !!meta;
+  const bot = author.kind === 'bot';
+  const inlineTime = !bot && !!body && !message.attachments?.length && !!meta;
+  const actions = acts ? <div className="tw-msg-actions" role="group" aria-label={t('teams_message_actions')}>
+    {onReply ? <button type="button" className="tw-icon-btn" aria-label={t('teams_message_reply')} title={t('teams_message_reply')} onClick={() => onReply(message)}><Icon name="reply" /></button> : null}
+    {onEdit ? <button type="button" className="tw-icon-btn" aria-label={t('teams_message_edit')} title={t('teams_message_edit')} onClick={() => onEdit(message)}><Icon name="edit" /></button> : null}
+    {onRecall ? <button type="button" className="tw-icon-btn tw-danger" aria-label={t('teams_message_recall')} title={t('teams_message_recall')} onClick={() => onRecall(message)}><Icon name="trash" /></button> : null}
+  </div> : null;
   return <li className="tw-msg" data-grouped={grouped} data-mine={mine} data-kind={author.kind} data-recalled={message.recalled ? 'true' : undefined} data-message-id={message.id} data-message-seq={message.seq}>
     {!mine ? <div className="tw-msg-lead">{!grouped ? <Avatar identity={author} size={32} render={renderAvatar} /> : null}</div> : null}
     <div className="tw-msg-main">
       <div className={author.kind === 'user' ? 'tw-msg-bubble' : 'tw-msg-agent'}>
         {!grouped ? <div className="tw-msg-head">
           <b className="tw-msg-author">{mine ? t('teams_you') : author.name}</b>
-          {author.kind === 'bot' ? <span className="tw-tag">{t('teams_bot_tag')}</span> : null}
+          {bot ? <span className="tw-msg-bot-label">{t('teams_bot_tag')}</span> : null}
           {question ? <span className="tw-tag">{t('services_question')}</span> : null}
           {approval ? <span className="tw-tag">{t('teams_approval_tag')}</span> : null}
           {owner ? <small>{t('teams_bot_owner_fmt', owner)}</small> : null}
@@ -523,13 +530,9 @@ function MessageItem({ message, grouped, author, mine, owner, quote, question, a
         {quote ? <blockquote className="tw-quote">{quote.author ? <b>{quote.author}</b> : null} {quote.text}</blockquote> : null}
         {inlineTime ? <div className="tw-msg-text-line">{body}{meta}</div> : body}
         {children}
-        {inlineTime ? null : meta}
+        {bot ? (meta || actions) && <div className="tw-msg-footer">{meta}{actions}</div> : inlineTime ? null : meta}
       </div>
-      {acts ? <div className="tw-msg-actions" role="group" aria-label={t('teams_message_actions')}>
-        {onReply ? <button type="button" className="tw-icon-btn" aria-label={t('teams_message_reply')} title={t('teams_message_reply')} onClick={() => onReply(message)}><Icon name="reply" /></button> : null}
-        {onEdit ? <button type="button" className="tw-icon-btn" aria-label={t('teams_message_edit')} title={t('teams_message_edit')} onClick={() => onEdit(message)}><Icon name="edit" /></button> : null}
-        {onRecall ? <button type="button" className="tw-icon-btn tw-danger" aria-label={t('teams_message_recall')} title={t('teams_message_recall')} onClick={() => onRecall(message)}><Icon name="trash" /></button> : null}
-      </div> : null}
+      {bot ? null : actions}
     </div>
   </li>;
 }

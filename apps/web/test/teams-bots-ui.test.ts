@@ -334,6 +334,31 @@ async function openChat(context: Parameters<Parameters<typeof scenario>[1]>[0], 
   const box = () => page.find(n => n.type === 'textarea')[0];
   return { fake, workspace, page, sent, buttons, box };
 }
+scenario('Bot replies hide automatic copies and keep full or revised documents accessible', async context => {
+  withDom(context);
+  const reply = '{"probeId":"fixture"}';
+  const documents = [
+    { artifactId: 'artifact-copy', revision: 1, text: reply, body: reply },
+    { artifactId: 'artifact-full', revision: 1, text: 'Result saved as a shared document.', body: reply },
+    { artifactId: 'artifact-revised', revision: 2, text: reply, body: reply },
+  ];
+  const chat = await openChat(context, () => [waitTask({ state: 'completed', wait: undefined, artifactId: 'artifact-copy', replyId: 'message-2' })], command => {
+    if (command.action !== 'readArtifact') return {};
+    const item = documents.find(document => document.artifactId === command.payload.artifactId)!;
+    return { artifactId: item.artifactId, revision: item.revision, currentRevision: item.revision, document: { title: 'Shared Bot result', body: item.body } };
+  }, 'alice', 'en', {
+    second: { waitId: undefined, text: reply, artifactId: 'artifact-copy' },
+    then: documents.slice(1).map((item, index) => message(index + 3, { author: botAuthor, text: item.text, artifactId: item.artifactId })),
+  });
+  await until(() => chat.sent.filter(command => command.action === 'readArtifact').length >= 3 && chat.buttons('Open document').length === 2);
+  assert.match(chat.page.text(), /Completed/);
+  assert.match(chat.page.text(), /"probeId":"fixture"/);
+  const copy = chat.page.find(node => node.type === 'li' && node.props['data-message-id'] === 'message-2')[0];
+  assert.doesNotMatch(textOf(copy), /Open document/);
+  await chat.page.click(chat.buttons('Open document')[0]);
+  assert.match(chat.page.text(), /Shared Bot result/);
+  assert.match(chat.page.text(), /Revision 1/);
+});
 scenario('A waiting task names who it waits for and when the wait ends; only that person is offered Reply', async context => {
   withDom(context);
   const mine = await openChat(context, () => [waitTask()]);

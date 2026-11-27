@@ -44,6 +44,10 @@ export interface TeamTaskView {
   optional?: true;
 }
 export interface TeamDocument { title: string; body: string }
+/** The Desktop worker uses this title for an automatic copy of the result. */
+export function isAutomaticReplyCopy(document: TeamDocument, reply: string): boolean {
+  return document.title === 'Shared Bot result' && document.body === reply;
+}
 /** One revision of a shared document. `currentRevision` is the newest one, so `revision < currentRevision` is history. */
 export interface TeamArtifact { artifactId: string; revision: number; digest: string; document: TeamDocument; currentRevision: number }
 export type RevisionAuthor = { kind: 'user'; uid: string; generation: number } | { kind: 'shared_bot'; sharedBotId: string };

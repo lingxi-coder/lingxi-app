@@ -369,6 +369,7 @@ export type TeamsKey =
   | 'teams_error_sync_failed'
   | 'teams_expiry'
   | 'teams_file_add'
+  | 'teams_file_add_photos'
   | 'teams_file_error_count'
   | 'teams_file_error_damaged'
   | 'teams_file_error_empty'
@@ -1456,6 +1457,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_error_sync_failed: { en: 'Could not sync messages. Check your connection and try again.', 'zh-Hans': '消息同步未完成，请检查网络后重试。', 'zh-Hant': '訊息同步未完成，請檢查網路後重試。', ja: 'メッセージを同期できませんでした。接続を確認してもう一度お試しください。', ko: '메시지를 동기화하지 못했습니다. 연결을 확인한 후 다시 시도하세요.' },
   teams_expiry: { en: 'Expires in', 'zh-Hans': '有效期', 'zh-Hant': '有效期限', ja: '有効期間', ko: '유효 기간' },
   teams_file_add: { en: 'Add files', 'zh-Hans': '添加文件', 'zh-Hant': '加入檔案', ja: 'ファイルを追加', ko: '파일 추가' },
+  teams_file_add_photos: { en: 'Photo Library', 'zh-Hans': '照片图库', 'zh-Hant': '照片圖庫', ja: '写真ライブラリ', ko: '사진 보관함' },
   teams_file_error_count: { en: 'A message carries up to five files.', 'zh-Hans': '一条消息最多带五个文件。', 'zh-Hant': '一則訊息最多帶五個檔案。', ja: '1 件のメッセージに添付できるファイルは 5 個までです。', ko: '메시지 하나에 파일은 최대 5개입니다.' },
   teams_file_error_damaged: { en: 'The file could not be read whole. Try again.', 'zh-Hans': '未能完整读取文件，请重试。', 'zh-Hant': '未能完整讀取檔案，請重試。', ja: 'ファイルを完全に読み取れませんでした。もう一度お試しください。', ko: '파일을 온전히 읽지 못했습니다. 다시 시도하세요.' },
   teams_file_error_empty: { en: 'This file is empty.', 'zh-Hans': '此文件为空。', 'zh-Hant': '此檔案是空的。', ja: 'このファイルは空です。', ko: '이 파일은 비어 있습니다.' },

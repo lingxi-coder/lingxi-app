@@ -10,7 +10,7 @@ import { isMemberExecutionCommand } from '../../../packages/teams/execution-vali
 import { firestoreMessage } from '../../../packages/teams/firestore';
 import { FakeTeams, conversation, memoryStorage, message, team, until } from './support/fakeTeams';
 import { loadTeamsModule } from './support/loadTeamsModule';
-import { classes, mount, scenario, textOf, withDom } from './support/workspacePage';
+import { classes, editorNode, hostNode, mount, scenario, textOf, withDom } from './support/workspacePage';
 const { TeamConversationView } = loadTeamsModule<typeof import('../../../packages/teams/TeamConversationView')>('TeamConversationView');
 const { MessageFiles } = loadTeamsModule<typeof import('../../../packages/teams/MessageFiles')>('MessageFiles');
 
@@ -130,20 +130,33 @@ async function openGroup(context: Parameters<Parameters<typeof scenario>[1]>[0],
   const workspace = new TeamsWorkspace(fake.api, 'alice', { storage: memoryStorage, environment: new EventTarget() }); context.after(() => workspace.close());
   await workspace.refresh(); workspace.selectConversation('test-chat');
   await until(() => workspace.getSnapshot().selectedConversationId === 'test-chat' && workspace.getSnapshot().messages.length === thread.length && workspace.getSnapshot().botsLoaded, 'the chat');
-  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en' })); context.after(() => page.unmount());
-  const choose = (...files: ReturnType<typeof picked>[]) => page.during(() => page.find(n => n.type === 'input' && n.props.type === 'file')[0].props.onChange({ target: { files, value: 'x' } }));
+  const pickerClicks: string[] = [];
+  const page = await mount(workspace, snapshot => createElement(TeamConversationView, { workspace, snapshot, locale: 'en' }),
+    element => element.props.contentEditable ? editorNode() : {
+      ...hostNode(), click() { if (element.props.type === 'file') pickerClicks.push(element.props.accept); },
+    });
+  context.after(() => page.unmount());
+  const choose = (...files: ReturnType<typeof picked>[]) => page.during(() => page.find(n => n.type === 'input' && n.props.type === 'file')[0].props.onChange({ currentTarget: { files, value: 'x' } }));
   const chips = () => page.find(n => n.type === 'li' && classes(n).includes('tw-file')).map(n => textOf(n));
   const sendButton = () => page.oneByLabel('Send');
   const submits = () => sent.filter((command): command is Extract<MessageCommand, { action: 'submit' }> => 'schemaVersion' in command && command.action === 'submit');
-  return { fake, workspace, page, sent, service, choose, chips, sendButton, submits, box: page.messageEditor };
+  return { fake, workspace, page, sent, service, choose, chips, sendButton, submits, pickerClicks, box: page.messageEditor };
 }
 
 scenario('Files are chosen, upload at once, and go out with the message; what cannot be sent says why (L2, L3)', async context => {
-  const { workspace, page, service, choose, chips, sendButton, submits, box } = await openGroup(context);
+  const { workspace, page, service, choose, chips, sendButton, submits, pickerClicks, box } = await openGroup(context);
   await page.click(page.oneByLabel('Add to message'));
-  assert.equal(page.button('Add files').props.role, 'menuitem'); assert.equal(sendButton().props.disabled, true);
+  assert.equal(page.button('Add files').props.role, 'menuitem');
+  assert.equal(page.button('Photo Library').props.role, 'menuitem');
+  assert.equal(sendButton().props.disabled, true);
   const photo = bytesOf(5000, 3), notes = new TextEncoder().encode('Gate 12, 13:05');
-  await choose(picked('photo.png', 'image/png', photo), picked('clip.mov', 'video/quicktime', bytesOf(10)), picked('notes.txt', 'text/plain', notes));
+  const photos = page.find(node => node.type === 'input' && node.props.accept === 'image/png,image/jpeg,.png,.jpg,.jpeg')[0];
+  assert.ok(photos.props.multiple);
+  await page.click(page.button('Photo Library'));
+  assert.deepEqual(pickerClicks, [photos.props.accept]);
+  assert.equal(page.byLabel('Add to message')[0].props['aria-expanded'], false);
+  await page.during(() => photos.props.onChange({ currentTarget: { files: [picked('photo.png', 'image/png', photo)], value: 'x' } }));
+  await choose(picked('clip.mov', 'video/quicktime', bytesOf(10)), picked('notes.txt', 'text/plain', notes));
   await until(() => workspace.getSnapshot().draftFiles.every(file => file.state === 'ready') && workspace.getSnapshot().draftFiles.length === 2, 'both uploads');
   await page.during(() => {});
   assert.deepEqual(chips(), ['photo.png5 KB', 'notes.txt14 B']);

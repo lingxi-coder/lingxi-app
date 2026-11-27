@@ -9,7 +9,8 @@ export const ATTACHMENT_PART_BYTES = 700 * 1024, ATTACHMENT_FILE_BYTES = 10 * 10
 export const ATTACHMENT_TYPES = ['image/png', 'image/jpeg', 'application/pdf', 'text/plain'] as const;
 export type AttachmentType = typeof ATTACHMENT_TYPES[number];
 /** What a file picker is asked for. */
-export const ATTACHMENT_ACCEPT = 'image/png,image/jpeg,application/pdf,text/plain,.png,.jpg,.jpeg,.pdf,.txt,.md,.csv,.log';
+export const PHOTO_ATTACHMENT_ACCEPT = 'image/png,image/jpeg,.png,.jpg,.jpeg';
+export const ATTACHMENT_ACCEPT = `${PHOTO_ATTACHMENT_ACCEPT},application/pdf,text/plain,.pdf,.txt,.md,.csv,.log`;
 /** A file as a message carries it. `revoked`: its sender took it back and its bytes are gone. */
 export interface MessageAttachment { attachmentId: string; name: string; mime: AttachmentType; byteLength: number; sha256: string; revoked?: boolean }
 export interface UploadView { uploadId: string; state: 'uploading' | 'verified' | 'attached' | 'failed' | 'revoked'; parts: number; partBytes: number; expiresAt?: number; code?: string }

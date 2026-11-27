@@ -12,7 +12,7 @@ const actions = [
 export function ComposerActions({ locale, onOpen, onAttach, onFormat, activeStyles }: {
   locale: string;
   onOpen(): void;
-  onAttach?: () => void;
+  onAttach?: (kind: 'photos' | 'files') => void;
   onFormat(action: FormatAction): void;
   activeStyles: number;
 }) {
@@ -57,7 +57,7 @@ export function ComposerActions({ locale, onOpen, onAttach, onFormat, activeStyl
       case 'Home': buttons[0]?.focus(); break;
       case 'End': buttons.at(-1)?.focus(); break;
       case 'ArrowRight':
-        if (menu !== 'add' || index !== 1) return;
+        if (menu !== 'add' || buttons[index]?.getAttribute('aria-haspopup') !== 'menu') return;
         setMenu('format');
         break;
       case 'ArrowLeft':
@@ -78,6 +78,11 @@ export function ComposerActions({ locale, onOpen, onAttach, onFormat, activeStyl
     event.stopPropagation();
   };
 
+  const attach = (kind: 'photos' | 'files') => {
+    setMenu(undefined);
+    trigger.current?.focus();
+    onAttach?.(kind);
+  };
   const label = t('tw_composer_add');
   const format = t('tw_composer_format');
   return <div ref={root} className="tw-compose-actions" onKeyDown={keys}>
@@ -90,8 +95,11 @@ export function ComposerActions({ locale, onOpen, onAttach, onFormat, activeStyl
       onClick={() => { if (menu) { setMenu(undefined); trigger.current?.focus(); } else open(); }}><Icon name="plus" size={19} /></button>
     {menu ? <div id={id} role="menu" aria-label={menu === 'add' ? label : format} className="tw-compose-menu" data-page={menu} key={menu}>
       {menu === 'add' ? <>
+        <button type="button" role="menuitem" tabIndex={-1} onClick={() => attach('photos')}>
+          <span className="tw-compose-menu-icon"><Icon name="image" size={17} /></span>{t('teams_file_add_photos')}
+        </button>
         <button type="button" role="menuitem" tabIndex={-1} title={t('tw_composer_attach')}
-          onClick={() => { setMenu(undefined); trigger.current?.focus(); onAttach?.(); }}>
+          onClick={() => attach('files')}>
           <span className="tw-compose-menu-icon"><Icon name="clip" size={17} /></span>{t('teams_file_add')}
         </button>
         <button type="button" role="menuitem" tabIndex={-1} aria-haspopup="menu" onClick={() => setMenu('format')}>

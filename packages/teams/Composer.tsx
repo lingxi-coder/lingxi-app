@@ -6,7 +6,7 @@ import { ComposerActions, type FormatAction } from './ComposerActions';
 import { messageStyles, maxMessageFormats, type MessageFormat } from './message-format.js';
 import { editorRange, pasteMessageEditor, placeEditorCaret, readMessageEditor, replaceEditorFormats, restoreEditorRange, writeMessageEditor, type EditorDraft } from './message-editor.js';
 import { ChatTopbarTarget } from './ChatTopbar';
-import { ATTACHMENT_ACCEPT, type FileRefusal } from './attachments.js';
+import { ATTACHMENT_ACCEPT, PHOTO_ATTACHMENT_ACCEPT, type FileRefusal } from './attachments.js';
 import { DraftFiles } from './MessageFiles';
 import { BotMemberDetails, botAvailabilityText } from './BotMemberDetails';
 import { messageErrorText } from './errors.js';
@@ -95,7 +95,7 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
   const [formats, setFormats] = useState(() => workspace.draftFormats(conversation.id));
   const [targets, setTargets] = useState<string[]>([]);
   const [caret, setCaret] = useState(0), [active, setActive] = useState(0), [dismissed, setDismissed] = useState(-1);
-  const picker = useRef<HTMLInputElement>(null);
+  const picker = useRef<HTMLInputElement>(null), photoPicker = useRef<HTMLInputElement>(null);
   const [refused, setRefused] = useState<{ name: string; code: FileRefusal }[]>([]);
   // Files belong to a new message: an edit and an answer to a Bot's question carry none.
   const files = editing || answering ? [] : snapshot.draftFiles;
@@ -427,9 +427,13 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
       </ComposerEditor>
       <ComposerToolbar>
         <div className="tw-compose-leading">
-          {!editing && !answering ? <input ref={picker} type="file" multiple hidden accept={ATTACHMENT_ACCEPT} aria-hidden="true" tabIndex={-1}
-            onChange={event => { add([...(event.target.files ?? [])]); event.target.value = ''; }} /> : null}
-          <ComposerActions locale={locale} onOpen={openActions} onAttach={editing || answering ? undefined : () => picker.current?.click()}
+          {!editing && !answering ? <>
+            {[{ ref: picker, accept: ATTACHMENT_ACCEPT }, { ref: photoPicker, accept: PHOTO_ATTACHMENT_ACCEPT }].map(({ ref, accept }) =>
+              <input key={accept} ref={ref} type="file" multiple hidden accept={accept} aria-hidden="true" tabIndex={-1}
+                onChange={event => { add([...(event.currentTarget.files ?? [])]); event.currentTarget.value = ''; }} />)}
+          </> : null}
+          <ComposerActions locale={locale} onOpen={openActions}
+            onAttach={editing || answering ? undefined : kind => (kind === 'photos' ? photoPicker : picker).current?.click()}
             onFormat={applyFormat} activeStyles={activeStyles} />
         </div>
         {bytes > MESSAGE_BYTES * 0.9 ? <span className="tw-count" data-over={bytes > MESSAGE_BYTES} role="status">{bytes.toLocaleString(intlTag(locale))} / {MESSAGE_BYTES.toLocaleString(intlTag(locale))}</span> : null}

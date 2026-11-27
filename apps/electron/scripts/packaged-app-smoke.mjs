@@ -231,8 +231,9 @@ export function isSafeProviderAccountSnapshot(snapshot) {
   if (!only(snapshot, ['storeScope', 'configRevision', 'accounts', 'health', 'modelEntitlements', 'modelAvailability', 'providerPolicies', 'scopedHealth'])
     || typeof snapshot.storeScope !== 'string' || !Number.isSafeInteger(snapshot.configRevision)
     || !Array.isArray(snapshot.accounts) || !Array.isArray(snapshot.health)) return false;
-  return snapshot.accounts.every(row => only(row, ['accountId', 'providerId', 'displayName', 'authKind', 'executionBindingId', 'credentialRef', 'enabled', 'userPriority', 'configRevision', 'identityGeneration'])
+  return snapshot.accounts.every(row => only(row, ['accountId', 'providerId', 'displayName', 'authKind', 'executionBindingId', 'credentialRef', 'enabled', 'additionalOpenaiModels', 'userPriority', 'configRevision', 'identityGeneration'])
     && typeof row.accountId === 'string' && ['api_key', 'oauth'].includes(row.authKind)
+    && (row.additionalOpenaiModels === undefined || typeof row.additionalOpenaiModels === 'boolean')
     && only(row.credentialRef, ['storeScope', 'secretRef']) && typeof row.credentialRef.secretRef === 'string')
     && (snapshot.scopedHealth ?? []).every(row => only(row, ['accountId', 'identityGeneration', 'scopeKind', 'scopeId', 'unavailableUntilMs', 'reason']))
     && snapshot.health.every(row => only(row, ['accountId', 'identityGeneration', 'status', 'reason', 'cooldownUntilMs', 'healthRevision']))

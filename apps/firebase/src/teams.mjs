@@ -381,6 +381,10 @@ export function createTeamsHandler({ store, friends, inbox, data, datasets, data
         code: error.code, ...(error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}),
       } }, error.status);
       if (error instanceof TeamConversationError) return reply({ error: { code: error.code } }, error.status);
+      // The reply says nothing of the cause. The log names its class and gRPC status (a Firestore PERMISSION_DENIED is 7) and the path, never its message:
+      // that can carry document paths and request data.
+      console.error(JSON.stringify({ severity: 'ERROR', message: 'teams.unhandled', path: new URL(request.url).pathname,
+        error: error?.constructor?.name ?? typeof error, ...(Number.isInteger(error?.code) ? { status: error.code } : {}) }));
       return reply({ error: { code: 'SERVICE_UNAVAILABLE' } }, 503);
     }
   };

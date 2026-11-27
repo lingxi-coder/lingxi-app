@@ -215,7 +215,7 @@ test('Teams handler friends routes: authenticated, size-limited, strictly routed
       calls.push(['execute', user.uid, body]);
       if (body.action === 'accept') throw new FriendsError(404, 'REQUEST_UNAVAILABLE');
       if (body.action === 'profile') throw new z.ZodError([]);
-      if (body.action === 'revokeCode') throw new Error('provider detail must not leak');
+      if (body.action === 'revokeCode') throw Object.assign(new Error('provider detail must not leak'), { code: 7 });
       return { ok: true };
     },
   };
@@ -237,9 +237,14 @@ test('Teams handler friends routes: authenticated, size-limited, strictly routed
   assert.equal(unavailable.status, 404);
   assert.deepEqual(await unavailable.json(), { error: { code: 'REQUEST_UNAVAILABLE' } });
   assert.equal((await send(handler, 'POST', { action: 'profile' })).status, 400);
-  const unexpected = await send(handler, 'POST', { action: 'revokeCode' });
+  const logged = [], log = console.error;
+  console.error = line => logged.push(line);
+  let unexpected;
+  try { unexpected = await send(handler, 'POST', { action: 'revokeCode' }); } finally { console.error = log; }
   assert.equal(unexpected.status, 503);
   assert.deepEqual(await unexpected.json(), { error: { code: 'SERVICE_UNAVAILABLE' } });
+  // The log says where and what kind of failure, not what it said.
+  assert.deepEqual(logged.map(line => JSON.parse(line)), [{ severity: 'ERROR', message: 'teams.unhandled', path: '/v1/friends', error: 'Error', status: 7 }]);
   assert.equal((await send(handler, 'POST', '{')).status, 400);
   assert.equal((await send(handler, 'POST', 'x'.repeat(16385))).status, 413);
   assert.equal((await send(handler, 'PUT', { action: 'revokeCode' })).status, 404);

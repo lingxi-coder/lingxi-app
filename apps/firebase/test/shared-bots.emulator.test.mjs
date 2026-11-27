@@ -145,6 +145,9 @@ test('channel visualization Bot publishes a typed artifact through its completio
   const trigger = { teamId, generation: 1, conversationId: channel, messageId: 'optional_visualization' };
   const messages = new TeamMessagesStore(db, () => now);
   await messages.execute(member, { ...trigger, action: 'mutate', operation: 'create', changeId: 'optional_trigger', text: 'Any packing ideas?' });
+  // The message opened a reply round: the Bot's bid settles it before the task may start.
+  assert.deepEqual(await execute('bidReply', { ...host, taskId: admissionId(trigger.messageId, 'sharedbot_01'), tier: 'run', source: 'rule' }),
+    { taskId: admissionId(trigger.messageId, 'sharedbot_01'), round: 'won' });
   const optional = await execute('startTask', { ...host, taskId: admissionId(trigger.messageId, 'sharedbot_01'),
     expectedLastChangeSeq: (await channelRef.get()).data().lastChangeSeq });
   assert.equal(optional.task.optional, true);

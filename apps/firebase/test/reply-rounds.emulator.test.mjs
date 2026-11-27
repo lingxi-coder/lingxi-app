@@ -500,7 +500,7 @@ test('the round is the service\'s alone: it has no rule for a client, and what b
   await say(member, 1);
   await bid(alpha, 1, 'run');
   const round = await roundData(1);
-  assert.equal(JSON.stringify(Object.keys(round).sort()), JSON.stringify(['bids', 'candidates', 'conversationId', 'createdAt', 'deadlineAt', 'maxReplies', 'roundId', 'schemaVersion', 'state']));
+  assert.equal(JSON.stringify(Object.keys(round).sort()), JSON.stringify(['bids', 'candidates', 'conversationId', 'createdAt', 'deadlineAt', 'expireAt', 'maxReplies', 'roundId', 'schemaVersion', 'state']));
   // `listHostTasks` carries the state of the round to the Desktop of each Bot, and nothing of the others' bids.
   const row = (await listed(beta)).tasks[0];
   assert.equal(row.round, 'open');

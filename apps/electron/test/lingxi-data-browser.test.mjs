@@ -6,6 +6,121 @@ import { pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 import { createProductDataBrowserFixture } from '../../firebase/test/lingxi-data-browser-fixture.mjs';
 
+test('Desktop Datasets distinguishes load errors, empty states and record management', {
+  skip: !process.env.LINGXI_TEST_PLAYWRIGHT_MODULE, timeout: 30000,
+}, async t => {
+  const bundle = await build({ write: false, outfile: 'workspace.js', bundle: true, jsx: 'automatic', platform: 'browser', format: 'esm',
+    nodePaths: [resolve('node_modules')], stdin: { sourcefile: 'workspace.tsx', resolveDir: resolve('.'), loader: 'tsx', contents: `
+      import { createRoot } from 'react-dom/client';
+      import '../../packages/teams/styles.ts';
+      import './src/renderer/components/LocalApps.css';
+      import { LocalAppDatasets } from './src/renderer/components/LocalAppDatasets.tsx';
+      import { Theme } from './src/renderer/theme/ThemeContext.tsx';
+      import { tokens } from './src/renderer/theme/tokens.ts';
+      import { teamsThemeVariables } from './src/renderer/theme/teamsTheme.ts';
+      const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+      const palette = tokens(dark);
+      document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+      const api = { data: async body => {
+        const response = await fetch('/data', { method: 'POST', body: JSON.stringify(body) });
+        if (!response.ok) throw new Error('Service unavailable');
+        return response.json();
+      }};
+      createRoot(document.querySelector('#app')).render(<Theme.Provider value={palette}>
+        <LocalAppDatasets workspace={{ uid: 'user', api, teams: [] }} locale="en" teamsTheme={teamsThemeVariables(palette)} />
+      </Theme.Provider>);
+    ` } });
+  const scripts = new Map(bundle.outputFiles.map(file => ['/' + file.path.split('/').at(-1), file.text]));
+  const { chromium } = await import(pathToFileURL(process.env.LINGXI_TEST_PLAYWRIGHT_MODULE).href);
+  const browser = await chromium.launch({ executablePath: process.env.LINGXI_TEST_CHROME });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ locale: 'en-US', viewport: { width: 1050, height: 760 } });
+  page.setDefaultTimeout(5000);
+  let catalogReads = 0;
+  let descriptions = 0;
+  const createOperations = [];
+  let schema;
+  const dataset = 'inventory';
+  const records = [];
+  let releaseCatalog;
+  const pendingCatalog = new Promise(resolve => { releaseCatalog = resolve; });
+  await page.route('https://datasets.test/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/') return route.fulfill({ contentType: 'text/html', body: `<!doctype html><meta charset="utf-8">
+      <style>*{box-sizing:border-box;margin:0;padding:0}body{font:13px/1.5 system-ui}dialog{margin:auto}</style>
+      <link rel="stylesheet" href="/workspace.css"><main id="app"></main><script type="module" src="/workspace.js"></script>` });
+    if (scripts.has(path)) return route.fulfill({ contentType: path.endsWith('.css') ? 'text/css' : 'text/javascript', body: scripts.get(path) });
+    if (path !== '/data') return route.fulfill({ status: 404 });
+    const { command, operation } = route.request().postDataJSON();
+    switch (command.action) {
+      case 'datasets':
+        if (++catalogReads === 1) { await pendingCatalog; return route.fulfill({ status: 503 }); }
+        return route.fulfill({ json: { datasets: schema ? [{ dataset, access: 'manage' }] : [] } });
+      case 'create':
+        createOperations.push(operation);
+        schema = command.schema;
+        if (createOperations.length === 1) return route.fulfill({ status: 503 });
+        return route.fulfill({ json: { dataset } });
+      case 'describe':
+        if (++descriptions === 1) return route.fulfill({ status: 503 });
+        return route.fulfill({ json: { schema, epoch: 1, schemaVersion: 1, rules: {} } });
+      case 'list': return route.fulfill({ json: { records, cursor: null } });
+      case 'templateViews': return route.fulfill({ json: { views: [] } });
+      case 'put':
+        records.push({ id: command.record, record: { revision: 1, schemaVersion: 1, value: command.value } });
+        return route.fulfill({ json: { dataset, record: command.record, revision: 1, schemaVersion: 1 } });
+      default: return route.fulfill({ status: 400 });
+    }
+  });
+
+  await page.goto('https://datasets.test/');
+  await page.getByRole('status').filter({ hasText: 'Loading datasets' }).waitFor();
+  releaseCatalog();
+  await page.getByRole('alert').filter({ hasText: 'Could not load datasets.' }).waitFor();
+  assert.equal(await page.getByRole('combobox', { name: 'Dataset' }).count(), 0);
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await page.getByRole('heading', { name: 'No datasets yet' }).waitFor();
+
+  const trigger = page.getByRole('button', { name: 'New dataset' });
+  const modal = page.getByRole('dialog', { name: 'New dataset' });
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  await modal.waitFor();
+  const input = modal.getByRole('textbox', { name: 'JSON Schema' });
+  assert.equal(await input.evaluate(element => element === document.activeElement), true);
+  await page.keyboard.press('Escape');
+  await modal.waitFor({ state: 'hidden' });
+  assert.equal(await trigger.evaluate(element => element === document.activeElement), true);
+  await trigger.click();
+  await input.fill('[]');
+  await modal.getByRole('button', { name: 'Create dataset' }).click();
+  await modal.getByRole('alert').filter({ hasText: 'Enter a valid JSON object.' }).waitFor();
+  assert.equal(createOperations.length, 0);
+  await input.fill(JSON.stringify({ type: 'object', additionalProperties: false, properties: { title: { type: 'string' } } }));
+  await modal.getByRole('button', { name: 'Create dataset' }).click();
+  await modal.getByRole('alert').filter({ hasText: 'Could not create the dataset.' }).waitFor();
+  await modal.getByRole('button', { name: 'Create dataset' }).click();
+  await page.getByRole('alert').filter({ hasText: 'Could not open this dataset.' }).waitFor();
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await page.getByText('This dataset has no records yet.').waitFor();
+  assert.equal(createOperations.length, 2);
+  assert.equal(createOperations[0], createOperations[1]);
+  assert.equal(await page.getByRole('combobox', { name: 'Dataset' }).inputValue(), dataset);
+
+  await page.getByText('Add record', { exact: true }).click();
+  await page.getByRole('textbox', { name: 'Record ID' }).fill('sample');
+  await page.getByRole('textbox', { name: 'Record JSON' }).fill('{"title":"Field notebook"}');
+  await page.getByRole('button', { name: 'Save record' }).click();
+  await page.getByRole('cell', { name: 'Field notebook' }).waitFor();
+  assert.equal(await page.getByRole('textbox', { name: 'Record ID' }).isVisible(), false);
+  await page.setViewportSize({ width: 340, height: 660 });
+  assert.equal(await page.locator('body').evaluate(element => element.scrollWidth === element.clientWidth), true);
+  await page.getByText('Publish to Team', { exact: true }).click();
+  await page.getByRole('button', { name: 'Preview publication audience' }).waitFor();
+  await page.reload();
+  await page.getByRole('cell', { name: 'Field notebook' }).waitFor();
+});
+
 test('Desktop and Web open a custom record view, recover a conflict and import a Chat schema', {
   skip: !process.env.LINGXI_DATA_FIXTURE || !process.env.LINGXI_TEST_PLAYWRIGHT_MODULE, timeout: 45000,
 }, async t => {

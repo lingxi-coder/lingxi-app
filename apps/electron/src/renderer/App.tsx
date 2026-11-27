@@ -883,7 +883,8 @@ export function App() {
             topbar={<>
               {hasChatTopbar && <div ref={setChatTopbar} className="desktop-chat-topbar-slot no-drag" />}
               {page === 'scheduled' && <ScheduledTasksTopBar />}
-              {(page === 'apps' || page === 'datasets') && <LocalAppsTopBar onOpenMarket={() => { void window.lingxi?.localApps?.marketBrowse().catch(error => setLocalAppNavigationError(error instanceof Error ? error.message : String(error))); }} />}
+              {page === 'apps' && <LocalAppsTopBar onOpenMarket={() => { void window.lingxi?.localApps?.marketBrowse().catch(error => setLocalAppNavigationError(error instanceof Error ? error.message : String(error))); }} />}
+              {page === 'datasets' && <LocalAppsTopBar title={tr('apps_datasets')} />}
               <div style={{ display: page === 'chat' && (sidebarMode === 'home' || sidebarMode === 'apps' || botChat) ? 'contents' : 'none' }}>
                 <BetaTopBar
                   bridge={bridge}

@@ -163,6 +163,3 @@
 .local-app-navigation p { padding: 0 10px; color: var(--apps-muted); font-size: 13px; }
 .local-app-navigation button span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .local-app-nav-avatar { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; background: var(--apps-selected); flex-shrink: 0; }
-.local-app-datasets-panel { max-block-size: none; overflow: visible; max-inline-size: 960px; color: var(--apps-text); }
-.local-app-datasets-panel button { justify-self: start; }
-.local-app-datasets-panel details > summary { cursor: pointer; }

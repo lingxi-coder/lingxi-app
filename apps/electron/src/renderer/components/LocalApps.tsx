@@ -19,20 +19,20 @@ const phaseLabels: Record<LocalAppPhase, string> = { stopped: 'desktop_apps_read
 export function AppsGlyph({ size = 20 }: { size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.8"/><rect x="14" y="3" width="7" height="7" rx="1.8"/><rect x="3" y="14" width="7" height="7" rx="1.8"/><rect x="14" y="14" width="7" height="7" rx="1.8"/></svg>;
 }
-export function LocalAppsTopBar({ onOpenMarket }: { onOpenMarket: () => void }) {
+export function LocalAppsTopBar({ title = tr('apps_title'), onOpenMarket }: { title?: string; onOpenMarket?: () => void }) {
   const t = useT();
   return <header className="drag-region desktop-topbar local-app-topbar" style={{
     '--toolbar-material': t.sidebarBg, '--topbar-action-color': t.text3,
     '--topbar-action-hover-color': t.text, '--topbar-action-focus': t.surfaceHover,
     '--topbar-action-ring': t.borderStrong,
   } as CSSProperties}>
-    <span className="local-app-topbar-title">{tr('apps_title')}</span>
-    <button type="button" className="no-drag desktop-topbar-action local-app-market-button"
+    <span className="local-app-topbar-title">{title}</span>
+    {onOpenMarket && <button type="button" className="no-drag desktop-topbar-action local-app-market-button"
       aria-label="Market · Open in browser" title="Market · Open in browser" onClick={onOpenMarket}>
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" aria-hidden="true">
         <path d="M3 10h18l-2-6H5l-2 6Z"/><path d="M3 10v2a3 3 0 0 0 6 0 3 3 0 0 0 6 0 3 3 0 0 0 6 0v-2M5 15v6h14v-6M10 21v-5h4v5M9 10l1-6m5 6-1-6"/>
       </svg>
-    </button>
+    </button>}
   </header>;
 }
 export function LocalApps({ visible, onCreate, onDevelopmentBlocked, canDevelop }: { sidebarTarget?: HTMLElement | null; visible: boolean; onCreate: () => void; onDevelopmentBlocked: () => void; canDevelop: boolean }) {

@@ -79,7 +79,7 @@ export interface ManagedDataSource {
 export type SourceDraft = { source: string; kind: ManagedDataSource['kind']; fields: string[] };
 export type SourceConfiguration = Pick<ManagedDataSource, 'source' | 'scope' | 'name' | 'enabled' | 'requesters' | 'grants'> & { expectedVersion: number };
 export type LocalDataSourceCommand =
-  | { action: 'import' }
+  | { action: 'import'; kind?: DataSourceKind }
   | { action: 'list' }
   | { action: 'configure'; input: SourceConfiguration }
   | { action: 'captureReport'; source: string; dataset: string; scope: TeamDataScope; plan: ReportPlan }

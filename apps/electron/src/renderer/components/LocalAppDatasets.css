@@ -49,6 +49,7 @@
   overflow: visible;
   font-size: .875rem;
   line-height: 1.5;
+  --datasets-dialog-top: clamp(1rem, 15dvh, 8rem);
 }
 
 .local-app-datasets .personal-dataset-header {
@@ -72,6 +73,12 @@
   margin-block-start: .375rem;
   color: var(--apps-muted);
   font-size: .875rem;
+}
+
+.personal-dataset-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
 }
 
 .local-app-datasets-panel button:where(:not(.tw-dialog button)) {
@@ -179,11 +186,14 @@
 .personal-dataset-notice p, .personal-dataset-action-message[role='alert'],
 .personal-dataset-create [role='alert'] { color: var(--tw-danger); }
 
-.personal-dataset-create {
+.local-app-datasets-panel :is(.personal-dataset-create, .desktop-data-sources) {
+  position: fixed;
+  inset-block: var(--datasets-dialog-top) auto;
+  inset-inline: 0;
   inline-size: min(calc(100% - 2rem), 34rem);
-  max-block-size: calc(100% - 2rem);
-  margin: auto;
-  padding: clamp(1rem, 4vw, 1.5rem);
+  max-inline-size: 34rem;
+  max-block-size: calc(100dvh - var(--datasets-dialog-top) - 1rem);
+  margin: 0 auto;
   border: 1px solid var(--apps-border);
   border-radius: .875rem;
   background: var(--apps-surface);
@@ -191,12 +201,54 @@
   box-shadow: 0 .75rem 2.5rem #0003;
 }
 
-.personal-dataset-create::backdrop { background: #0005; }
+.personal-dataset-create, .local-app-datasets-panel .desktop-data-sources .tw-dialog-panel {
+  padding: clamp(1rem, 4vw, 1.5rem);
+}
+
+.local-app-datasets-panel :is(.personal-dataset-create, .desktop-data-sources)::backdrop { background: #0005; }
+.dataset-provider-field {
+  margin-block: 1rem 0;
+  font-weight: 600;
+}
+.dataset-provider-field select { inline-size: min(100%, 23rem); font-weight: 500; }
+.dataset-provider-setup {
+  display: grid;
+  gap: 1.125rem;
+  margin-block-start: .75rem;
+  color: var(--apps-muted);
+  font-size: .8125rem;
+}
+.local-app-datasets-panel .desktop-data-sources .tw-dialog-panel { max-block-size: none; overflow: visible; }
+.local-app-datasets-panel .desktop-data-sources h2 { font-size: 1.125rem; font-weight: 650; }
+.local-app-datasets-panel :is(.personal-dataset-create, .desktop-data-sources) button {
+  min-block-size: 2.25rem;
+  border-color: transparent;
+  border-radius: .5rem;
+  padding: .375rem .75rem;
+  font-size: .8125rem;
+  font-weight: 550;
+}
+.local-app-datasets-panel :is(.personal-dataset-create, .desktop-data-sources) button:not(.personal-dataset-primary) {
+  background: var(--apps-hover);
+  color: var(--apps-text);
+}
+.local-app-datasets-panel :is(.personal-dataset-create, .desktop-data-sources) button:not(.personal-dataset-primary):is(:hover, :focus-visible, :active):enabled {
+  background: var(--apps-active);
+}
+
 .personal-dataset-create form { margin-block-start: 1rem; }
 .personal-dataset-create form > label { font-weight: 600; }
 .personal-dataset-create form > p { color: var(--apps-muted); font-size: .8125rem; }
 .local-app-datasets .personal-dataset-create textarea { font-family: var(--font-mono-default); }
-.personal-dataset-form-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; }
+.personal-dataset-form-actions, .local-app-datasets-panel .desktop-data-source-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: .5rem;
+}
+.local-app-datasets-panel .desktop-data-sources button { justify-self: start; }
+.local-app-datasets-panel .desktop-data-sources form[method='dialog'] { justify-items: end; }
+.local-app-datasets-panel .desktop-data-sources form[method='dialog'] button { justify-self: end; }
 
 .personal-dataset-detail { display: grid; gap: 1rem; grid-template-columns: minmax(0, 1fr); }
 .personal-dataset-records, .personal-dataset-settings {

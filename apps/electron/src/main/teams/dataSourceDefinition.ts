@@ -1,5 +1,5 @@
 import { isAbsolute } from 'node:path';
-import type { SourceDraft } from '../../../../../packages/teams/lingxi-data.js';
+import type { DataSourceKind, SourceDraft } from '../../../../../packages/teams/lingxi-data.js';
 
 /** Source IDs and field names accepted in a data host definition. */
 export const id = /^[A-Za-z0-9_-]{1,64}$/u;
@@ -28,7 +28,7 @@ function connectionField(kind: string): 'dsn' | 'uri' | 'url' | undefined {
  * connection must be the Desktop keychain item for its kind and source, never a test
  * file or the loopback test mode; file inputs need an absolute path.
  */
-export function readDefinition(content: string, uid: string): SourceDraft {
+export function readDefinition(content: string, uid: string, expectedKind?: DataSourceKind): SourceDraft {
   const value: unknown = JSON.parse(content);
   if (!object(value) || value.owner !== uid || typeof value.source !== 'string' || !id.test(value.source)
     || !keychain(value.key, 'com.lingxi.data.host-key', value.source) || value.proxy != null
@@ -42,5 +42,6 @@ export function readDefinition(content: string, uid: string): SourceDraft {
   } else if (!['sqlite', 'csv', 'json'].includes(kind) || typeof input.path !== 'string' || !isAbsolute(input.path)) {
     throw new Error('INVALID_INPUT');
   }
+  if (expectedKind !== undefined && kind !== expectedKind) throw new Error('DATA_SOURCE_KIND_MISMATCH');
   return { source: value.source, kind: kind as SourceDraft['kind'], fields: [...new Set(fields)] as string[] };
 }

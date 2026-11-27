@@ -46,6 +46,14 @@ test('Desktop Datasets lists datasets in the sidebar and opens their records', {
   t.after(() => browser.close());
   const page = await browser.newPage({ locale: 'en-US', viewport: { width: 1050, height: 760 } });
   page.setDefaultTimeout(5000);
+  await page.addInitScript(() => {
+    window.lingxi = { teams: { localDataSource: async (uid, request) => {
+      const response = await fetch('/sources', { method: 'POST', body: JSON.stringify({ uid, ...request }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error);
+      return result;
+    } } };
+  });
   let catalogReads = 0;
   let descriptions = 0;
   const createOperations = [];
@@ -53,6 +61,14 @@ test('Desktop Datasets lists datasets in the sidebar and opens their records', {
   const dataset = 'inventory';
   const otherDataset = 'recipes';
   const records = [];
+  const sourceRequests = [];
+  const postgres = { source: 'orders', kind: 'postgres', fields: ['id', 'title'] };
+  const sources = [{
+    source: 'cache', kind: 'redis', name: 'Cache', scope: { kind: 'personal' },
+    enabled: true, version: 1, requesters: [], grants: [], running: false,
+  }];
+  let sourceLists = 0;
+  let sourceImports = 0;
   let releaseCatalog;
   const pendingCatalog = new Promise(resolve => { releaseCatalog = resolve; });
   await page.route('https://datasets.test/**', async route => {
@@ -61,6 +77,23 @@ test('Desktop Datasets lists datasets in the sidebar and opens their records', {
       <style>*{box-sizing:border-box;margin:0;padding:0}body{font:13px/1.5 system-ui}dialog{margin:auto}.workspace{display:flex}aside{flex:0 0 220px}</style>
       <link rel="stylesheet" href="/workspace.css"><div id="app"></div><script type="module" src="/workspace.js"></script>` });
     if (scripts.has(path)) return route.fulfill({ contentType: path.endsWith('.css') ? 'text/css' : 'text/javascript', body: scripts.get(path) });
+    if (path === '/sources') {
+      const request = route.request().postDataJSON();
+      sourceRequests.push(request);
+      switch (request.action) {
+        case 'list':
+          if (++sourceLists === 1) return route.fulfill({ status: 503, json: { error: 'DATA_UNAVAILABLE' } });
+          return route.fulfill({ json: sources });
+        case 'import':
+          if (++sourceImports === 1) return route.fulfill({ status: 400, json: { error: 'DATA_SOURCE_KIND_MISMATCH' } });
+          return route.fulfill({ json: postgres });
+        case 'configure':
+          sources.push({ ...postgres, ...request.input, running: false });
+          return route.fulfill({ json: { running: false } });
+        case 'start': return route.fulfill({ json: { running: true } });
+        default: return route.fulfill({ status: 400, json: { error: 'INVALID_INPUT' } });
+      }
+    }
     if (path !== '/data') return route.fulfill({ status: 404 });
     const { command, operation } = route.request().postDataJSON();
     switch (command.action) {
@@ -100,12 +133,52 @@ test('Desktop Datasets lists datasets in the sidebar and opens their records', {
   await trigger.focus();
   await page.keyboard.press('Enter');
   await modal.waitFor();
+  const provider = modal.getByRole('combobox', { name: 'Data provider' });
   const input = modal.getByRole('textbox', { name: 'JSON Schema' });
-  assert.equal(await input.evaluate(element => element === document.activeElement), true);
+  assert.equal(await provider.evaluate(element => element === document.activeElement), true);
+  assert.deepEqual(await provider.locator('option').allTextContents(), [
+    'LingXi managed', 'MySQL', 'PostgreSQL', 'SQLite', 'MongoDB', 'Redis', 'CSV', 'JSON',
+  ]);
+  const initialProviderPosition = await provider.boundingBox();
+  await input.fill('{"type":"object"}');
+  await provider.selectOption('csv');
+  await modal.getByText('Use a host configuration to read an existing file on this Mac.').waitFor();
+  assert.deepEqual(await provider.boundingBox(), initialProviderPosition);
+  assert.equal(await input.count(), 0);
+  await provider.selectOption('managed');
+  assert.equal(await input.inputValue(), '{"type":"object"}');
   await page.keyboard.press('Escape');
   await modal.waitFor({ state: 'hidden' });
   assert.equal(await trigger.evaluate(element => element === document.activeElement), true);
   await trigger.click();
+  await provider.selectOption('postgres');
+  await modal.getByRole('button', { name: 'Set up data source' }).click();
+  await modal.waitFor({ state: 'hidden' });
+  const sourceDialog = page.getByRole('dialog', { name: 'PostgreSQL data sources' });
+  await sourceDialog.getByRole('alert').waitFor();
+  await sourceDialog.getByRole('button', { name: 'Retry' }).click();
+  const choose = sourceDialog.getByRole('button', { name: 'Choose host configuration' });
+  await choose.click();
+  await sourceDialog.getByText('Choose a host configuration for PostgreSQL.').waitFor();
+  await choose.click();
+  await sourceDialog.getByRole('textbox', { name: 'Name' }).fill('Orders');
+  await sourceDialog.getByRole('button', { name: 'Save source' }).click();
+  await sourceDialog.getByText('Orders', { exact: true }).waitFor();
+  assert.equal(await sourceDialog.getByText('Cache', { exact: true }).count(), 0);
+  assert.deepEqual(sourceRequests.filter(request => request.action === 'import'), [
+    { uid: 'user', action: 'import', kind: 'postgres' }, { uid: 'user', action: 'import', kind: 'postgres' },
+  ]);
+  assert.equal(createOperations.length, 0);
+  await sourceDialog.getByRole('button', { name: 'Close', exact: true }).click();
+  assert.equal(await trigger.evaluate(element => element === document.activeElement), true);
+  await page.getByRole('button', { name: 'Data sources', exact: true }).click();
+  const sourceManager = page.getByRole('dialog', { name: 'Data sources', exact: true });
+  await sourceManager.getByText('Orders', { exact: true }).waitFor();
+  await sourceManager.getByText('Cache', { exact: true }).waitFor();
+  await sourceManager.getByRole('button', { name: 'Close', exact: true }).click();
+
+  await trigger.click();
+  await provider.selectOption('managed');
   await input.fill('[]');
   await modal.getByRole('button', { name: 'Create dataset' }).click();
   await modal.getByRole('alert').filter({ hasText: 'Enter a valid JSON object.' }).waitFor();

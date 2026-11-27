@@ -24,12 +24,18 @@ test('network databases read their connection only from the Desktop keychain ite
   ] as const) {
     const input = { kind, [field]: keychain(`com.lingxi.data.${kind}`), ...rest };
     assert.deepEqual(readDefinition(definition(input), uid), { source: 'orders', kind, fields: ['id', 'total'] });
+    assert.equal(readDefinition(definition(input), uid, kind).kind, kind);
     rejected({ ...input, isolatedLoopback: true });
     rejected({ ...input, [field]: keychain(kind === 'mysql' ? 'com.lingxi.data.postgres' : 'com.lingxi.data.mysql') });
     rejected({ ...input, [field]: keychain(`com.lingxi.data.${kind}`, 'other') });
     rejected({ ...input, [field]: { localTestFile: '/tmp/connection' } });
     rejected({ kind, ...rest });
   }
+});
+
+test('a provider-specific import rejects host configurations for other providers', () => {
+  const csv = { kind: 'csv', path: '/data/orders.csv' };
+  assert.throws(() => readDefinition(definition(csv), uid, 'postgres'), /DATA_SOURCE_KIND_MISMATCH/);
 });
 
 test('file inputs need an absolute path', () => {

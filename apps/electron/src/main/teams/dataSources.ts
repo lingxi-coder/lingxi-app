@@ -59,7 +59,7 @@ export class DesktopDataSources {
         if (bytesRead === bytes.length) throw new Error('INVALID_INPUT');
         content = bytes.subarray(0, bytesRead).toString('utf8');
       } finally { await file.close(); }
-      const draft = readDefinition(content, uid);
+      const draft = readDefinition(content, uid, request.kind);
       const directory = await this.folder(uid);
       const staged = join(directory, randomUUID() + '.json');
       await writeFile(staged, content, { mode: 0o600, flag: 'wx' });

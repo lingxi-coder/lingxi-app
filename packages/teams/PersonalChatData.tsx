@@ -33,6 +33,8 @@ export type PersonalDatasetCatalog = {
 type PersonalDataPage = {
   heading: ReactNode;
   icon: ReactNode;
+  actions?: ReactNode;
+  renderCreate?(options: { schemaForm: ReactNode; busy: boolean; close(): void }): ReactNode;
   renderCatalog?(catalog: PersonalDatasetCatalog): ReactNode;
   labels: Record<'newDataset' | 'create' | 'cancel' | 'loading' | 'loadFailed' | 'opening' | 'openFailed' | 'retry'
     | 'empty' | 'emptyHint' | 'dataset' | 'choose' | 'records' | 'noRecords' | 'schemaHelp' | 'schemaInvalid'
@@ -186,7 +188,11 @@ function PersonalDataBody({ api, data: requestData, uid, teams, locale, chatRepl
     event.preventDefault();
     let schema: Record<string, unknown>;
     try { schema = jsonObject(schemaDraft); }
-    catch { setCreateError('json'); return; }
+    catch {
+      setCreateError('json');
+      event.currentTarget.querySelector('textarea')?.focus();
+      return;
+    }
     setCreateError(undefined);
     const attempt = createAttempt.current?.draft === schemaDraft
       ? createAttempt.current : { draft: schemaDraft, operation: crypto.randomUUID() };
@@ -366,15 +372,18 @@ function PersonalDataBody({ api, data: requestData, uid, teams, locale, chatRepl
     {page && <>
       <header className="personal-dataset-header">
         {page.heading}
-        <button type="button" className="personal-dataset-primary" disabled={catalog === 'loading'}
-          onClick={() => createDialog.current?.showModal()}>
-          <span aria-hidden="true">+</span>{page.labels.newDataset}
-        </button>
+        <div className="personal-dataset-header-actions">
+          {page.actions}
+          <button type="button" className="personal-dataset-primary" disabled={catalog === 'loading'}
+            onClick={() => createDialog.current?.showModal()}>
+            <span aria-hidden="true">+</span>{page.labels.newDataset}
+          </button>
+        </div>
       </header>
       <dialog ref={createDialog} className="personal-dataset-create no-drag" aria-labelledby={createHeading}
         onCancel={event => { if (busy) event.preventDefault(); }}>
         <h2 id={createHeading}>{page.labels.newDataset}</h2>
-        {createForm}
+        {page.renderCreate ? page.renderCreate({ schemaForm: createForm, busy, close: () => createDialog.current?.close() }) : createForm}
       </dialog>
     </>}
     {renderCatalog ? renderCatalog({ datasets, selected, status: catalog, busy,

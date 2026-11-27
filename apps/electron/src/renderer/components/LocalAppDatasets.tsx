@@ -1,9 +1,11 @@
-import { useId, type CSSProperties, type ReactElement } from 'react';
+import { useId, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { PersonalDataPanel, type PersonalDatasetCatalog } from '../../../../../packages/teams/PersonalChatData.js';
 import type { TeamSummary, TeamsApi } from '../../../../../packages/teams/index.js';
+import { DATA_SOURCE_KINDS, type DataSourceKind } from '../../../../../packages/teams/lingxi-data.js';
 import { tr } from '../i18n/locale';
 import { useT } from '../theme/ThemeContext';
+import { DesktopDataSources } from './DesktopDataSources';
 import { DatasetGlyph } from './LocalAppsSidebar';
 import './LocalAppDatasets.css';
 
@@ -32,17 +34,22 @@ export function LocalAppDatasets({ workspace, locale, teamsTheme, sidebarTarget 
   } as CSSProperties}>
     <div className="tw-scope tw-data-workspace local-app-datasets-panel">
       {workspace?.api.data
-        ? <PersonalDataPanel key={workspace.uid} uid={workspace.uid} api={workspace.api} teams={workspace.teams} locale={locale}
-            page={{ heading: title, icon, renderCatalog, labels: {
-              newDataset: tr('apps_datasets_new'), create: tr('apps_datasets_create'), cancel: tr('common_cancel'),
-              loading: tr('apps_datasets_loading'), loadFailed: tr('apps_datasets_load_failed'),
-              opening: tr('apps_datasets_opening'), openFailed: tr('apps_datasets_open_failed'), retry: tr('common_retry'),
-              empty: tr('apps_datasets_empty'), emptyHint: tr('apps_datasets_empty_hint'),
-              dataset: tr('apps_datasets_picker'), choose: tr('apps_datasets_choose'),
-              records: tr('apps_datasets_records'), noRecords: tr('apps_datasets_no_records'), addRecord: tr('apps_datasets_add_record'),
-              schemaHelp: tr('apps_datasets_schema_help'), schemaInvalid: tr('apps_datasets_schema_invalid'),
-              createFailed: tr('apps_datasets_create_failed'), publish: tr('apps_datasets_publish'),
-            } }} />
+        ? <DesktopDataSources key={workspace.uid} {...workspace} locale={locale}>{showSources =>
+          <PersonalDataPanel {...workspace} locale={locale}
+            page={{ heading: title, icon, renderCatalog,
+              actions: showSources && <button type="button" onClick={() => showSources()}>{tr('apps_datasets_sources')}</button>,
+              renderCreate: options => <DatasetProviderPicker {...options} showSources={showSources} />,
+              labels: {
+                newDataset: tr('apps_datasets_new'), create: tr('apps_datasets_create'), cancel: tr('common_cancel'),
+                loading: tr('apps_datasets_loading'), loadFailed: tr('apps_datasets_load_failed'),
+                opening: tr('apps_datasets_opening'), openFailed: tr('apps_datasets_open_failed'), retry: tr('common_retry'),
+                empty: tr('apps_datasets_empty'), emptyHint: tr('apps_datasets_empty_hint'),
+                dataset: tr('apps_datasets_picker'), choose: tr('apps_datasets_choose'),
+                records: tr('apps_datasets_records'), noRecords: tr('apps_datasets_no_records'), addRecord: tr('apps_datasets_add_record'),
+                schemaHelp: tr('apps_datasets_schema_help'), schemaInvalid: tr('apps_datasets_schema_invalid'),
+                createFailed: tr('apps_datasets_create_failed'), publish: tr('apps_datasets_publish'),
+              } }} />
+        }</DesktopDataSources>
         : <>
             {renderCatalog?.()}
             <header className="personal-dataset-header">{title}</header>
@@ -53,6 +60,42 @@ export function LocalAppDatasets({ workspace, locale, teamsTheme, sidebarTarget 
           </>}
     </div>
   </section>;
+}
+
+function DatasetProviderPicker({ schemaForm, busy, close, showSources }: {
+  schemaForm: ReactNode; busy: boolean; close(): void; showSources?(kind: DataSourceKind): void;
+}): ReactElement {
+  const field = useId();
+  const [provider, setProvider] = useState<'managed' | DataSourceKind>('managed');
+  const file = provider === 'csv' || provider === 'json' || provider === 'sqlite';
+  return <>
+    <label className="dataset-provider-field" htmlFor={field}>
+      {tr('apps_datasets_provider')}
+      <select id={field} name="provider" value={provider} disabled={busy}
+        onChange={event => setProvider(event.currentTarget.value as typeof provider)}>
+        <option value="managed">{tr('apps_datasets_provider_managed')}</option>
+        <optgroup label={tr('apps_datasets_provider_databases')}>
+          {Object.entries(DATA_SOURCE_KINDS).filter(([kind]) => kind !== 'csv' && kind !== 'json')
+            .map(([kind, name]) => <option key={kind} value={kind}>{name}</option>)}
+        </optgroup>
+        <optgroup label={tr('apps_datasets_provider_files')}>
+          <option value="csv">{DATA_SOURCE_KINDS.csv}</option>
+          <option value="json">{DATA_SOURCE_KINDS.json}</option>
+        </optgroup>
+      </select>
+    </label>
+    {provider === 'managed' ? schemaForm : <div className="dataset-provider-setup">
+      <p>{tr(file ? 'apps_datasets_provider_file_help' : 'apps_datasets_provider_database_help')}</p>
+      {!showSources && <p role="status">{tr('apps_datasets_provider_unavailable')}</p>}
+      <div className="personal-dataset-form-actions">
+        <button type="button" onClick={close}>{tr('common_cancel')}</button>
+        {showSources && <button type="button" className="personal-dataset-primary" onClick={() => {
+          close();
+          showSources(provider);
+        }}>{tr('apps_datasets_provider_setup')}</button>}
+      </div>
+    </div>}
+  </>;
 }
 
 function DatasetSidebar({ catalog }: { catalog?: PersonalDatasetCatalog }): ReactElement {

@@ -2804,6 +2804,8 @@
   "provider_account_rate_limited": "Rate limited",
   "provider_account_unavailable_auth": "A model account needs sign-in or updated authentication. Manage accounts to reconnect.",
   "provider_account_model_unverified": "Access unverified",
+  "provider_account_additional_openai_models": "Enable additional OpenAI models",
+  "provider_account_additional_openai_models_desc": "Show more GPT and reasoning models in Chat and Code for this API key. OpenAI account access and billing apply.",
   "provider_account_needs_auth": "Sign-in or API key required",
   "provider_account_remove": "Remove this account",
   "provider_account_device_browser_failed": "Unable to open the system browser. Use the verification URL above.",

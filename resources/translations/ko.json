@@ -2799,6 +2799,8 @@
   "provider_account_rate_limited": "요청 제한됨",
   "provider_account_unavailable_auth": "모델 계정에 로그인하거나 인증을 갱신해야 합니다. 계정 관리에서 다시 연결하세요.",
   "provider_account_model_unverified": "접근 권한 미확인",
+  "provider_account_additional_openai_models": "추가 OpenAI 모델 사용",
+  "provider_account_additional_openai_models_desc": "이 API 키로 Chat 및 Code에서 추가 GPT 및 추론 모델을 표시합니다. 모델 이용 권한과 요금은 OpenAI 계정에 따릅니다.",
   "provider_account_needs_auth": "로그인 또는 API 키가 필요합니다",
   "provider_account_remove": "이 계정 삭제",
   "provider_account_device_browser_failed": "시스템 브라우저를 열 수 없습니다. 위의 인증 URL을 사용하세요.",

@@ -2799,6 +2799,8 @@
   "provider_account_rate_limited": "請求速率受限",
   "provider_account_unavailable_auth": "模型帳號需要登入或更新驗證。請管理帳號以重新連線。",
   "provider_account_model_unverified": "存取權限未驗證",
+  "provider_account_additional_openai_models": "啟用更多 OpenAI 模型",
+  "provider_account_additional_openai_models_desc": "在 Chat 和 Code 中為此 API Key 顯示更多 GPT 和推理模型。可用性與費用以 OpenAI 帳戶為準。",
   "provider_account_needs_auth": "需要登入或 API 金鑰",
   "provider_account_remove": "移除此帳號",
   "provider_account_device_browser_failed": "無法開啟系統瀏覽器，請使用上方驗證網址。",

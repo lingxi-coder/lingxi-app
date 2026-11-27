@@ -2629,6 +2629,8 @@
     <string name="provider_account_rate_limited">レート制限中</string>
     <string name="provider_account_unavailable_auth">モデルアカウントへのサインインまたは認証の更新が必要です。アカウントを管理して再接続してください。</string>
     <string name="provider_account_model_unverified">アクセス権は未確認</string>
+    <string name="provider_account_additional_openai_models">追加の OpenAI モデルを有効にする</string>
+    <string name="provider_account_additional_openai_models_desc">この API キーで Chat と Code に追加の GPT モデルと推論モデルを表示します。利用可否と料金は OpenAI アカウントに従います。</string>
     <string name="provider_account_needs_auth">サインインまたは API キーが必要です</string>
     <string name="provider_account_remove">このアカウントを削除</string>
     <string name="provider_account_device_browser_failed">システムブラウザーを開けません。上の認証 URL を使用してください。</string>

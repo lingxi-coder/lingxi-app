@@ -2629,6 +2629,8 @@
     <string name="provider_account_rate_limited">请求频率受限</string>
     <string name="provider_account_unavailable_auth">模型账号需要登录或更新认证。请管理账号以重新连接。</string>
     <string name="provider_account_model_unverified">权限未验证</string>
+    <string name="provider_account_additional_openai_models">启用更多 OpenAI 模型</string>
+    <string name="provider_account_additional_openai_models_desc">在 Chat 和 Code 中为此 API Key 显示更多 GPT 和推理模型。可用性和费用以 OpenAI 账户为准。</string>
     <string name="provider_account_needs_auth">需要登录或 API key</string>
     <string name="provider_account_remove">移除此账号</string>
     <string name="provider_account_device_browser_failed">无法打开系统浏览器，请使用上方验证网址。</string>

@@ -910,6 +910,8 @@ export type TeamsKey =
   | 'tw_list_separator'
   | 'tw_maintainer'
   | 'tw_mark_as_read'
+  | 'tw_message_read'
+  | 'tw_message_sent'
   | 'tw_messages'
   | 'tw_more'
   | 'tw_more_fmt'
@@ -1932,6 +1934,8 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_list_separator: { en: ', ', 'zh-Hans': '、', 'zh-Hant': '、', ja: '、', ko: ', ' },
   tw_maintainer: { en: 'Maintainer', 'zh-Hans': '维护者', 'zh-Hant': '維護者', ja: 'メンテナー', ko: '메인테이너' },
   tw_mark_as_read: { en: 'Mark as read', 'zh-Hans': '标为已读', 'zh-Hant': '標為已讀', ja: '既読にする', ko: '읽음으로 표시' },
+  tw_message_read: { en: 'Read', 'zh-Hans': '已读', 'zh-Hant': '已讀', ja: '既読', ko: '읽음' },
+  tw_message_sent: { en: 'Sent', 'zh-Hans': '已发送', 'zh-Hant': '已傳送', ja: '送信済み', ko: '전송됨' },
   tw_messages: { en: 'Messages', 'zh-Hans': '消息', 'zh-Hant': '訊息', ja: 'メッセージ', ko: '메시지' },
   tw_more: { en: 'More', 'zh-Hans': '更多', 'zh-Hant': '更多', ja: 'その他', ko: '더 보기' },
   tw_more_fmt: { en: '%1$s more', 'zh-Hans': '另外 %1$s 人', 'zh-Hant': '另外 %1$s 人', ja: 'ほか %1$s 人', ko: '외 %1$s명' },

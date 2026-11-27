@@ -3715,6 +3715,8 @@
   "tw_sidebar_join": "초대로 참가",
   "tw_sidebar_opening_team": "팀을 여는 중…",
   "tw_sidebar_loading_conversations": "대화를 불러오는 중…",
+  "tw_message_read": "읽음",
+  "tw_message_sent": "전송됨",
   "tw_sidebar_not_sent": "전송되지 않음",
   "tw_sidebar_pending": "전송 대기 중",
   "tw_sidebar_conversation_actions": "대화 작업",

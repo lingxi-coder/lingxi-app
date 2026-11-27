@@ -25,7 +25,7 @@ import { parseReportLink } from './reports.js';
 import { MessageFiles } from './MessageFiles';
 import type { MessageAttachment } from './attachments.js';
 import { executionCommand } from './execution.js';
-import { pendingPayload, type TeamConversation, type TeamMessage } from './messages.js';
+import { createsMessage, pendingPayload, type TeamConversation, type TeamMessage, type VisiblePendingMessage } from './messages.js';
 import { ArtifactButton, BotRun } from './BotRunCards';
 import { VisualizationComposer } from './VisualizationComposer.js';
 import { VisualizationMessage } from './VisualizationMessage.js';
@@ -179,8 +179,29 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   const unread = unreadCount(conversation);
   const start = useMemo(() => visibleStart(messages, { startId, lastReadSeq: conversation.lastReadSeq, uid }), [messages, startId, conversation.lastReadSeq, uid]);
   const visible = useMemo(() => messages.slice(start), [messages, start]);
-  const rows = useMemo(() => buildStreamRows(visible, { lastReadSeq: conversation.lastReadSeq, uid, locale: tag, now: minute * 60_000 }), [visible, conversation.lastReadSeq, uid, tag, minute]);
   const byId = useMemo(() => new Map(messages.map(message => [message.id, message])), [messages]);
+  const { outgoing, operations } = useMemo(() => {
+    const outgoing = new Map<string, { message: TeamMessage; intent: VisiblePendingMessage; fileCount: number }>();
+    const operations: VisiblePendingMessage[] = [];
+    for (const intent of snapshot.pending) {
+      const payload = pendingPayload(intent);
+      if (!createsMessage(intent) || byId.has(payload.messageId) || outgoing.has(payload.messageId)) {
+        operations.push(intent);
+        continue;
+      }
+      const message: TeamMessage = {
+        id: payload.messageId, seq: 0, changeId: payload.changeId, changeSeq: 0, author: { kind: 'user', uid },
+        kind: 'text', text: payload.text, createdAt: intent.enqueuedAt ?? null,
+        replyTo: 'replyTo' in payload ? payload.replyTo : undefined,
+        mentionEntities: 'mentionEntities' in payload ? payload.mentionEntities : undefined,
+        dataRef: 'dataRef' in payload ? payload.dataRef : undefined,
+      };
+      outgoing.set(message.id, { message, intent, fileCount: 'attachments' in payload ? payload.attachments?.length ?? 0 : 0 });
+    }
+    return { outgoing, operations };
+  }, [snapshot.pending, byId, uid]);
+  const rows = useMemo(() => buildStreamRows(outgoing.size ? [...visible, ...Array.from(outgoing.values(), value => value.message)] : visible,
+    { lastReadSeq: conversation.lastReadSeq, uid, locale: tag, now: minute * 60_000 }), [visible, outgoing, conversation.lastReadSeq, uid, tag, minute]);
   const runs = useTeamTasks(workspace.api, { teamId: team.id, generation: team.generation }, conversation.id, !friend);
   const membersById = useMemo(() => new Map(snapshot.directory.map(member => [member.uid, member])), [snapshot.directory]);
   const botsById = useMemo(() => new Map(snapshot.bots.map(bot => [bot.sharedBotId, bot])), [snapshot.bots]);
@@ -283,6 +304,20 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
     <div className="tw-embed">{botRun(task)}</div>
   </TaskRow>;
   let afterTask = unanswered.head.length > 0;
+  const pendingLabel = (intent: VisiblePendingMessage) => {
+    if (intent.error) return messageErrorText(intent.error, locale) || t('tw_sidebar_not_sent');
+    if (intent.acknowledged) return t('tw_message_sent');
+    return intent.attempted || !snapshot.offline ? t('teams_message_confirming') : t('teams_message_pending');
+  };
+  const pendingActions = (intent: VisiblePendingMessage) => {
+    const { changeId, text } = pendingPayload(intent);
+    return <>
+      {intent.error === 'MENTION_TARGET_REQUIRED' && text
+        ? <button type="button" onClick={() => void workspace.attempt(() => navigator.clipboard.writeText(text))}>{t('chat_message_copy')}</button> : null}
+      {intent.error === 'HOST_UNAVAILABLE' ? <button type="button" onClick={() => void workspace.attempt(() => model.retryHostUnavailable(changeId))}>{t('common_retry')}</button> : null}
+      {!intent.attempted || intent.error ? <button type="button" disabled={(intent.leaseUntil ?? 0) > Date.now()} onClick={() => void workspace.attempt(() => model.discard(changeId))}>{t('teams_message_discard')}</button> : null}
+    </>;
+  };
   const loadingMessages = !messages.length && conversation.lastSeq > 0;
 
   // ── Scrolling: open at the first unread message (else the newest), follow the newest while at the bottom ──
@@ -480,6 +515,12 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
             if (row.type === 'date') return <li key={row.key} className="tw-date"><span>{row.label}</span></li>;
             if (row.type === 'unread') return <li key={row.key} className="tw-unread" data-unread-divider=""><span>{t('teams_new_messages_divider')}</span></li>;
             const message = row.message, author = authorOf(message), mine = isMine(message);
+            const pending = outgoing.get(message.id);
+            const delivery: PendingDelivery | undefined = pending ? {
+              label: pendingLabel(pending.intent), state: pending.intent.error ? 'failed' : pending.intent.acknowledged ? 'sent' : 'pending',
+              fileCount: pending.fileCount,
+              actions: !pending.intent.attempted || pending.intent.error ? pendingActions(pending.intent) : undefined,
+            } : undefined;
             const tasks = tasksByReply.get(message.id);
             const replyText = message.author.kind === 'shared_bot' && !message.recalled && message.text ? message.text : undefined;
             // A Bot's question; while its task still waits for this viewer, Reply on it answers instead of quoting.
@@ -490,9 +531,9 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
             const placed = unanswered.after.get(message.id), grouped = row.grouped && !afterTask && !question;
             afterTask = !!placed;
             return <Fragment key={row.key}><MessageItem message={localized(message)} grouped={grouped} author={author} mine={mine} owner={message.author.kind === 'shared_bot' ? nameOf(botsById.get(message.author.sharedBotId)?.maintainer.uid ?? '') : ''}
-              quote={quoteOf(message)} locale={tag} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} question={question && !approval} approval={!!approval}
-              onReply={lock ? undefined : answering ? () => startAnswer(answering) : answer} onEdit={mine && participant && !message.decision && message.kind !== 'visualization' ? edit : undefined} onRecall={mine && participant && !message.decision ? setRecall : undefined}>
-              {mine && peerRead!==null && peerRead>=message.seq && message===tail?<small>{locale.startsWith('zh')?'已读':'Read'}</small>:null}
+              quote={quoteOf(message)} locale={tag} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} question={question && !approval} approval={!!approval} pending={delivery}
+              read={mine && message === tail && peerRead !== null && peerRead >= message.seq}
+              onReply={pending || lock ? undefined : answering ? () => startAnswer(answering) : answer} onEdit={!pending && mine && participant && !message.decision && message.kind !== 'visualization' ? edit : undefined} onRecall={!pending && mine && participant && !message.decision ? setRecall : undefined}>
               {message.readFiles?.length && !message.recalled ? <p className="tw-msg-sources" title={message.readFiles.map(file => file.name).join('\n')}>
                 <Icon name="clip" size={12} /> {t('tw_conv_read_files_fmt', message.readFiles.map(file => file.name).join(t('tw_list_separator')))}</p> : null}
               {message.resourceRef && message.resourceRef.kind !== 'pageVersion' && message.resourceGrant && !message.recalled
@@ -525,21 +566,15 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
           })}
           {unanswered.tail.map(taskRow)}
           {placedHeld.orphans.map(row => <HeldReplyRow key={`held:${row.reply.taskId}`} row={row} author={botIdentity(row.reply.sharedBotId)} renderAvatar={renderAvatar} locale={locale}>{heldCard(row)}</HeldReplyRow>)}
-          {snapshot.pending.map(intent => {
+          {operations.map(intent => {
             const payload = pendingPayload(intent);
             const operation = 'operation' in payload ? payload.operation : 'create';
-            const status = (intent.error ? messageErrorText(intent.error, locale) : '') || (intent.attempted ? t('teams_message_confirming') : t('teams_message_pending'));
             return <li key={payload.changeId} className="tw-msg tw-pending" data-mine="true" data-error={intent.error ? 'true' : undefined}>
               <div className="tw-msg-main tw-msg-bubble">
-                <div className="tw-msg-head"><b className="tw-msg-author">{t('teams_you')}</b><small role="status">{status}</small></div>
+                <div className="tw-msg-head"><small role="status">{pendingLabel(intent)}</small></div>
                 <p className="tw-msg-body">{operation === 'recall' ? t('tw_conv_recall_message') : `${operation === 'edit' ? `${t('teams_message_edit')}: ` : ''}${payload.text}`}</p>
                 {'attachments' in payload && payload.attachments?.length ? <p className="tw-msg-body tw-pending-files"><Icon name="clip" size={12} /> {payload.attachments.length === 1 ? t('tw_files_one') : t('tw_files_other_fmt', payload.attachments.length)}</p> : null}
-                <div className="tw-pending-actions">
-                  {intent.error === 'MENTION_TARGET_REQUIRED' && payload.text
-                    ? <button type="button" onClick={() => void workspace.attempt(() => navigator.clipboard.writeText(payload.text))}>{t('chat_message_copy')}</button> : null}
-                  {intent.error === 'HOST_UNAVAILABLE' ? <button type="button" onClick={() => void workspace.attempt(() => model.retryHostUnavailable(payload.changeId))}>{t('common_retry')}</button> : null}
-                  <button type="button" disabled={Boolean(intent.attempted && !intent.error) || (intent.leaseUntil ?? 0) > Date.now()} onClick={() => void workspace.attempt(() => model.discard(payload.changeId))}>{t('teams_message_discard')}</button>
-                </div>
+                {!intent.attempted || intent.error ? <div className="tw-pending-actions">{pendingActions(intent)}</div> : null}
               </div>
             </li>;
           })}
@@ -616,41 +651,54 @@ const MessageMarkdown = memo(function MessageMarkdown({ text, render }: { text: 
   return <div className="tw-msg-body tw-md" data-markdown="true">{render(text)}</div>;
 });
 
-function MessageItem({ message, grouped, author, mine, owner, quote, question, approval, locale, renderAvatar, renderMarkdown, onReply, onEdit, onRecall, children }: {
+type PendingDelivery = { label: string; state: 'failed' | 'pending' | 'sent'; fileCount: number; actions?: ReactNode };
+const deliveryIcon = { failed: 'circleAlert', pending: 'clock', sent: 'check', read: 'checks' } as const;
+
+function MessageItem({ message, grouped, author, mine, owner, quote, question, approval, locale, renderAvatar, renderMarkdown, onReply, onEdit, onRecall, pending, read, children }: {
   message: TeamMessage; grouped: boolean; author: Identity; mine: boolean; owner: string; quote?: { author: string; text: string }; question?: boolean; /** A request to approve a change; the card under it says what. */ approval?: boolean; locale: string; renderAvatar?: RenderAvatar; renderMarkdown?: RenderMarkdown;
   onReply?(message: TeamMessage): void; onEdit?(message: TeamMessage): void; onRecall?(message: TeamMessage): void; children?: ReactNode;
+  pending?: PendingDelivery;
+  read: boolean;
 }): ReactElement {
   const t = useTeamsText(locale);
   const { clock, full } = useMemo(() => ({
     clock: formatClock(message.createdAt, locale),
     full: message.createdAt ? new Date(message.createdAt).toLocaleString(locale) : undefined,
   }), [message.createdAt, locale]);
-  const acts = !message.recalled && (onReply || onEdit || onRecall);
+  const acts = !message.recalled && (onReply || onEdit || onRecall || pending?.actions);
   // Only a shared Bot writes Markdown; what a person types is shown exactly as typed.
   const markdown = message.author.kind === 'shared_bot' && !message.recalled && renderMarkdown !== undefined;
-  const filesOnly = !message.text && !message.recalled && !!message.attachments?.length;
+  const hasFiles = !!(message.attachments?.length || pending?.fileCount);
+  const filesOnly = !message.text && !message.recalled && hasFiles;
   const body = message.visualization?.title === message.text ? null : markdown ? <MessageMarkdown text={message.text} render={renderMarkdown} /> : filesOnly ? null : <p className="tw-msg-body">
     {message.recalled ? <em>{t('teams_message_recalled')}</em> : message.mentionEntities?.length ? mentionTextParts(message.text, message.mentionEntities).map((part, index) =>
       part.mention ? <strong className="tw-member-mention" key={index}>{part.text}</strong> : part.text) : message.text}
   </p>;
   const edited = message.editedAt && !message.recalled;
-  const meta = clock || edited ? <div className="tw-msg-meta">
+  const delivery = mine && !message.recalled;
+  const label = pending?.label ?? t(read ? 'tw_message_read' : 'tw_message_sent');
+  const state = pending?.state ?? (read ? 'read' : 'sent');
+  const meta = clock || edited || delivery ? <div className="tw-msg-meta">
     {edited ? <small className="tw-edited">({t('tw_edited_tag')})</small> : null}
     {clock ? <time className="tw-msg-time" dateTime={message.createdAt ?? undefined} title={full}>{clock}</time> : null}
+    {delivery ? <span className="tw-msg-delivery" data-state={state} role="img" aria-label={state === 'failed' ? t('tw_sidebar_not_sent') : label} title={label}>
+      <Icon name={deliveryIcon[state]} size={13} />
+    </span> : null}
   </div> : null;
   const bot = author.kind === 'bot';
-  const inlineTime = !bot && !!body && !message.attachments?.length && !!meta;
+  const inlineTime = !bot && !!body && !hasFiles && !!meta;
   const actions = acts ? <div className="tw-msg-actions" role="group" aria-label={t('teams_message_actions')}>
     {onReply ? <button type="button" className="tw-icon-btn" aria-label={t('teams_message_reply')} title={t('teams_message_reply')} onClick={() => onReply(message)}><Icon name="reply" /></button> : null}
     {onEdit ? <button type="button" className="tw-icon-btn" aria-label={t('teams_message_edit')} title={t('teams_message_edit')} onClick={() => onEdit(message)}><Icon name="edit" /></button> : null}
     {onRecall ? <button type="button" className="tw-icon-btn tw-danger" aria-label={t('teams_message_recall')} title={t('teams_message_recall')} onClick={() => onRecall(message)}><Icon name="trash" /></button> : null}
+    {pending?.actions}
   </div> : null;
-  return <li className="tw-msg" data-grouped={grouped} data-mine={mine} data-kind={author.kind} data-recalled={message.recalled ? 'true' : undefined} data-message-id={message.id} data-message-seq={message.seq}>
+  return <li className="tw-msg" data-grouped={grouped} data-mine={mine} data-kind={author.kind} data-recalled={message.recalled ? 'true' : undefined} data-message-id={message.id} data-message-seq={pending ? undefined : message.seq}>
     {!mine ? <div className="tw-msg-lead">{!grouped ? <Avatar identity={author} size={32} render={renderAvatar} /> : null}</div> : null}
     <div className="tw-msg-main">
       <div className={author.kind === 'user' ? 'tw-msg-bubble' : 'tw-msg-agent'}>
-        {!grouped ? <div className="tw-msg-head">
-          <b className="tw-msg-author">{mine ? t('teams_you') : author.name}</b>
+        {!mine && !grouped ? <div className="tw-msg-head">
+          <b className="tw-msg-author">{author.name}</b>
           {bot ? <span className="tw-msg-bot-label">{t('teams_bot_tag')}</span> : null}
           {question ? <span className="tw-tag">{t('services_question')}</span> : null}
           {approval ? <span className="tw-tag">{t('teams_approval_tag')}</span> : null}
@@ -658,9 +706,11 @@ function MessageItem({ message, grouped, author, mine, owner, quote, question, a
         </div> : null}
         {quote ? <blockquote className="tw-quote">{quote.author ? <b>{quote.author}</b> : null} {quote.text}</blockquote> : null}
         {inlineTime ? <div className="tw-msg-text-line">{body}{meta}</div> : body}
+        {pending?.fileCount ? <p className="tw-msg-body tw-pending-files"><Icon name="clip" size={12} /> {pending.fileCount === 1 ? t('tw_files_one') : t('tw_files_other_fmt', pending.fileCount)}</p> : null}
         {children}
         {bot ? (meta || actions) && <div className="tw-msg-footer">{meta}{actions}</div> : inlineTime ? null : meta}
       </div>
+      {state === 'failed' && pending ? <small className="tw-msg-delivery-error" role="status">{pending.label}</small> : null}
       {bot ? null : actions}
     </div>
   </li>;

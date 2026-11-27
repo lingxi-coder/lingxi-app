@@ -3730,6 +3730,8 @@
   "tw_sidebar_join": "Join with an invite",
   "tw_sidebar_opening_team": "Opening team…",
   "tw_sidebar_loading_conversations": "Loading conversations…",
+  "tw_message_read": "Read",
+  "tw_message_sent": "Sent",
   "tw_sidebar_not_sent": "Not sent",
   "tw_sidebar_pending": "Pending",
   "tw_sidebar_conversation_actions": "Conversation actions",

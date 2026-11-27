@@ -80,7 +80,7 @@ export type MessageSnapshot = MessageScope & { uid: string; fromCache: boolean }
   | { kind: 'signal'; signal?: MessageSignal }
   | { kind: 'error'; error: string }
 );
-interface CommandMetadata { error?: string; leaseUntil?: number; attempted?: boolean; retryDelay?: number }
+interface CommandMetadata { error?: string; leaseUntil?: number; attempted?: boolean; retryDelay?: number; enqueuedAt?: string }
 type CreationCommand = Extract<MessageCommand, { action: 'create' | 'createConversation' }>;
 type OutboxCommand = MessageMutation | Extract<MemberExecutionCommand, { action: 'submit' | 'answerWait' }>;
 export interface PendingCommand<C> extends CommandMetadata { command: C }
@@ -89,9 +89,13 @@ export interface PendingCommands {
   creation?: PendingCommand<CreationCommand>;
   outbox: PendingCommand<OutboxCommand>[];
 }
+export type VisiblePendingMessage = PendingCommand<OutboxCommand> & { acknowledged?: true };
 export function pendingPayload<C extends MessageCommand>(value: PendingCommand<C>): C extends { payload: infer P } ? P : C {
   return ('payload' in value.command ? value.command.payload : value.command) as C extends { payload: infer P } ? P : C;
 }
+export const createsMessage = (intent: PendingCommands['outbox'][number]) =>
+  intent.command.action !== 'mutate' || intent.command.operation === 'create';
+const EMPTY_PENDING: VisiblePendingMessage[] = [];
 /** The projection is ephemeral. Firestore owns all durable message/read caches. */
 export interface MessageProjection extends PendingCommands {
   conversations: TeamConversation[]; threads: Record<string, { messages: TeamMessage[] }>;
@@ -192,10 +196,32 @@ export class TeamMessaging {
   private prefetchedAt = new Map<string, number>();
   private nextPrefetchAt = 0;
   private connectionTimeout?: ReturnType<typeof setTimeout>;
+  private awaitingEcho: VisiblePendingMessage[] = [];
+  private pendingView?: {
+    selected: string; messages?: TeamMessage[]; outbox: PendingCommands['outbox'];
+    awaitingEcho: VisiblePendingMessage[]; value: VisiblePendingMessage[];
+  };
   constructor(private api: MessageApi, private storage: CommandStorage, readonly uid: string, readonly scope: MessageScope) {
     this.state = emptyProjection(uid, scope); this.key = projectionKey(uid, scope);
   }
   onChanged(callback: () => void) { this.callbacks.add(callback); return () => { this.callbacks.delete(callback); }; }
+  get visiblePending(): VisiblePendingMessage[] {
+    const { selected, awaitingEcho } = this;
+    const { outbox, threads } = this.state;
+    if (!selected || (!outbox.length && !awaitingEcho.length)) return EMPTY_PENDING;
+    const messages = threads[selected]?.messages;
+    const previous = this.pendingView;
+    if (previous?.selected === selected && previous.messages === messages
+      && previous.outbox === outbox && previous.awaitingEcho === awaitingEcho) return previous.value;
+    const queued = new Set(outbox.map(intent => pendingPayload(intent).changeId));
+    const confirmed = new Set(messages?.filter(row => row.author.kind === 'user' && row.author.uid === this.uid).map(row => row.id));
+    const value = [...awaitingEcho.filter(intent => !queued.has(pendingPayload(intent).changeId)), ...outbox].filter(intent => {
+      const payload = pendingPayload(intent);
+      return payload.conversationId === selected && (intent.error || !createsMessage(intent) || !confirmed.has(payload.messageId));
+    });
+    this.pendingView = { selected, messages, outbox, awaitingEcho, value };
+    return value;
+  }
   private emit() { if (!this.closed) for (const callback of this.callbacks) callback(); }
   private async commit(reduce: (old: MessageProjection) => MessageProjection): Promise<void> {
     const value = await this.storage.update(this.key, old => pendingCommands(this.revoked ? emptyProjection(this.uid, this.scope) : reduce({ ...this.state, ...this.validPending(old) })));
@@ -264,7 +290,7 @@ export class TeamMessaging {
       const allowed = new Set(snapshot.conversations.map(value => value.id));
       if (this.prefetch && !allowed.has(this.prefetch.id)) this.cancelPrefetch();
       this.state = { ...this.state, threads: Object.fromEntries(Object.entries(this.state.threads).filter(([id]) => allowed.has(id))) };
-      if (!snapshot.fromCache && this.selected && !allowed.has(this.selected) && (this.state.creation ? pendingPayload(this.state.creation).conversationId : undefined) !== this.selected) { this.selected = ''; this.watch(); }
+      if (!snapshot.fromCache && this.selected && !allowed.has(this.selected) && (this.state.creation ? pendingPayload(this.state.creation).conversationId : undefined) !== this.selected) { this.selected = ''; this.awaitingEcho = []; this.watch(); }
       this.directoryCached = snapshot.fromCache;
     } else if (snapshot.kind === 'messages') {
       if (snapshot.conversationId !== this.selected) return;
@@ -274,6 +300,11 @@ export class TeamMessaging {
       } else {
         const through=this.historicalWindow ? previous?.[previous.length-1]?.seq : undefined;
         this.state = applyMessageSnapshot(this.state, through===undefined ? snapshot : {...snapshot,replace:false,messages:snapshot.messages.filter(row=>row.seq<=through)});
+      }
+      if (this.awaitingEcho.length) {
+        const confirmed = new Set(this.state.threads[this.selected]?.messages.filter(row => row.author.kind === 'user' && row.author.uid === this.uid).map(row => row.id));
+        const remaining = this.awaitingEcho.filter(intent => !confirmed.has(pendingPayload(intent).messageId));
+        if (remaining.length !== this.awaitingEcho.length) this.awaitingEcho = remaining;
       }
       this.messagesCached = snapshot.fromCache;
       if (!snapshot.fromCache && snapshot.replace) this.cancelPrefetch(snapshot.conversationId);
@@ -339,6 +370,7 @@ export class TeamMessaging {
     this.pageRevision++;
     this.pageBusy = false;
     this.historicalWindow = false;
+    if (id !== this.selected) this.awaitingEcho = [];
     this.selected = id;
     this.messagesCached = true;
     this.offline = this.directoryCached || !!id;
@@ -419,7 +451,8 @@ export class TeamMessaging {
         ...(replyTo ? { replyTo } : {}), ...(attachments.length ? { attachments: [...attachments] } : {}),
         ...(privateDataSource ? { privateDataSource } : {}), ...(mentionEntities?.length ? { mentionEntities } : {}) })
       : { action: 'mutate', ...this.scope, conversationId: this.selected, messageId, changeId, operation, text, ...(replyTo ? { replyTo } : {}), ...(dataRef ? { dataRef } : {}), ...(mentionEntities !== undefined ? { mentionEntities } : {}) };
-    await this.commit(old => ({ ...old, outbox: [...old.outbox, { command }] }));
+    const intent = { command, enqueuedAt: operation === 'create' ? new Date().toISOString() : undefined };
+    await this.commit(old => ({ ...old, outbox: [...old.outbox, intent] }));
     void this.refresh();
   }
   /**
@@ -431,7 +464,8 @@ export class TeamMessaging {
     if (this.closed || !this.selected || !text.trim() || new TextEncoder().encode(text).length > 8192) throw new Error('INVALID_INPUT');
     const changeId = crypto.randomUUID();
     const command = executionCommand(this.scope, 'answerWait', { conversationId: this.selected, waitId, messageId: crypto.randomUUID(), changeId, text });
-    await this.commit(old => ({ ...old, outbox: [...old.outbox, { command }] }));
+    const intent = { command, enqueuedAt: new Date().toISOString() };
+    await this.commit(old => ({ ...old, outbox: [...old.outbox, intent] }));
     await this.refresh();
     const refused = this.state.outbox.find(item => pendingPayload(item).changeId === changeId)?.error;
     if (refused && ANSWER_REFUSED.includes(refused)) { await this.discard(changeId); throw new Error(refused); }
@@ -515,6 +549,15 @@ export class TeamMessaging {
           const command = intent.command;
           await this.api.messages(command);
           if (this.closed) return;
+          // Transport can settle before Firestore delivers the row. Retire the
+          // durable command without removing the message from the open transcript.
+          const payload = pendingPayload(intent);
+          if (createsMessage(intent) && this.selected === payload.conversationId
+            && !this.state.threads[this.selected]?.messages.some(row =>
+              row.id === payload.messageId && row.author.kind === 'user' && row.author.uid === this.uid)
+            && !this.awaitingEcho.some(value => pendingPayload(value).changeId === changeId)) {
+            this.awaitingEcho = [...this.awaitingEcho, { ...intent, acknowledged: true }];
+          }
           await this.commit(old => ({ ...old, outbox: old.outbox.filter(item => pendingPayload(item).changeId !== changeId) }));
         } catch (error) {
           await this.commit(old => ({ ...old, outbox: old.outbox.map(item => pendingPayload(item).changeId === changeId ? failedCommand(item, error, isPermanentMessageError(error)) : item) }));
@@ -530,5 +573,5 @@ export class TeamMessaging {
     }
     this.scheduleRetry(); this.emit();
   }
-  close() { this.closed = true; this.cancelPrefetch(); this.prefetchedAt.clear(); this.finishConnecting(); clearTimeout(this.retry); this.stopWatch?.(); this.stopWatch = undefined; this.stops.forEach(stop => stop()); this.stops = []; this.callbacks.clear(); }
+  close() { this.closed = true; this.cancelPrefetch(); this.prefetchedAt.clear(); this.awaitingEcho = []; this.pendingView = undefined; this.finishConnecting(); clearTimeout(this.retry); this.stopWatch?.(); this.stopWatch = undefined; this.stops.forEach(stop => stop()); this.stops = []; this.callbacks.clear(); }
 }

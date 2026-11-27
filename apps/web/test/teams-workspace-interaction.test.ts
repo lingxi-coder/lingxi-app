@@ -121,6 +121,63 @@ scenario('composer: @ offers the Bots of the conversation, only a chosen Bot is 
   assert.equal('targets' in mutations(fake)[0]!, false, 'typing a name never asks a Bot');
 });
 
+for (const first of ['acknowledgement', 'message stream'] as const) {
+  scenario(`outgoing bubble and mention stay mounted when the ${first} arrives first`, async context => {
+    const { fake, workspace, snapshot } = await open(context);
+    workspace.selectConversation('chan-general');
+    await until(() => snapshot().messages.length === 3);
+    const original = fake.messages;
+    let acknowledge: (() => void) | undefined;
+    let sent: MessageMutation | undefined;
+    fake.messages = async <T>(command: MessageCommand) => {
+      if (command.action === 'mutate') {
+        sent = command;
+        await new Promise<void>(resolve => { acknowledge = resolve; });
+      }
+      return original<T>(command);
+    };
+    context.after(() => acknowledge?.());
+    const page = await mount(workspace, conversationView(workspace));
+    context.after(() => page.unmount());
+    const text = '@Bob hello';
+    const mentionEntities = [{ userId: 'bob', offset: 0, length: 4 }];
+    await page.during(() => snapshot().messaging!.queue('create', text, 'outgoing-id', undefined, [], [], undefined, undefined, mentionEntities));
+    await until(() => !!acknowledge);
+
+    const row = () => {
+      const rows = page.find(node => node.props['data-message-id'] === 'outgoing-id');
+      assert.equal(rows.length, 1);
+      return rows[0];
+    };
+    const current = row();
+    const body = current.findByProps({ className: 'tw-msg-body' });
+    const mention = body.findByProps({ className: 'tw-member-mention' });
+    const delivery = current.findByProps({ className: 'tw-msg-delivery' });
+    assert.equal(textOf(mention), '@Bob');
+    assert.equal(delivery.props['data-state'], 'pending');
+    assert.equal(current.props['data-message-seq'], undefined);
+
+    const [watch] = fake.open('team-aaaa', 'chan-general');
+    assert.ok(watch);
+    const [pending] = snapshot().pending;
+    const published = message(4, { id: 'outgoing-id', changeId: sent!.changeId, author: { kind: 'user', uid }, text, mentionEntities, createdAt: pending!.enqueuedAt });
+    const emit = () => fake.emit(watch, { kind: 'messages', conversationId: 'chan-general', replace: false, messages: [published] });
+    if (first === 'message stream') await page.during(emit);
+    await page.during(() => { acknowledge!(); });
+    await until(() => snapshot().messaging!.state.outbox.length === 0);
+    assert.equal(row(), current);
+    assert.equal(delivery.props['data-state'], 'sent');
+    if (first === 'acknowledgement') await page.during(emit);
+
+    assert.equal(row(), current);
+    assert.equal(current.findByProps({ className: 'tw-msg-body' }), body);
+    assert.equal(body.findByProps({ className: 'tw-member-mention' }), mention);
+    assert.equal(current.findByProps({ className: 'tw-msg-delivery' }), delivery);
+    assert.equal(current.props['data-message-seq'], 4);
+    assert.equal(snapshot().pending.length, 0);
+  });
+}
+
 scenario('composer: a Bot whose Desktop is off still takes a message in a channel and the hint says it answers when it is back; a Bot DM says no at once', async context => {
   const { fake, workspace, snapshot, bot } = await open(context, fake => {
     fake.bots = [botCard({ availability: 'offline', ready: false })];
@@ -304,8 +361,18 @@ scenario('a failed Bot request can be retried from its message after the host re
   await until(() => snapshot().pending[0]?.error === 'HOST_UNAVAILABLE');
   await until(() => page.has('Retry'));
   ready = true; await page.click(page.button('Retry'));
-  await until(() => submits.length === 2 && snapshot().pending.length === 0);
+  await until(() => submits.length === 2 && snapshot().pending[0]?.acknowledged === true);
   assert.deepEqual(submits[1], submits[0]);
+  const retried = submits[1];
+  assert.ok(retried?.action === 'submit');
+  const [watch] = fake.open('team-aaaa', 'chan-general');
+  assert.ok(watch);
+  await page.during(() => {
+    fake.emit(watch, { kind: 'messages', conversationId: 'chan-general', replace: false,
+      messages: [message(4, { id: retried.payload.messageId, changeId: retried.payload.changeId,
+        author: { kind: 'user', uid }, text: 'Please help' })] });
+  });
+  assert.equal(snapshot().pending.length, 0);
 });
 
 scenario('replying, editing and recalling go through the same queue as sending', async context => {

@@ -3,7 +3,7 @@ import { executionCommand, sharedBotUsable, type SharedBotCard } from './executi
 import { botDmHandedOver } from './compose.js';
 import { indexedDbCommandStorage } from './command-storage.js';
 import { inviteLink, type TeamCommand, type TeamDetail, type TeamMember, type TeamSummary, type TeamsApi } from './index.js';
-import { TeamMessaging, pendingPayload, type CommandStorage, type MessageScope, type PendingCommands, type TeamConversation, type TeamMessage } from './messages.js';
+import { TeamMessaging, type CommandStorage, type MessageScope, type PendingCommands, type TeamConversation, type TeamMessage, type VisiblePendingMessage } from './messages.js';
 import { admitFiles, uploadAttachment, type AttachmentType, type DraftFile, type FileRefusal } from './attachments.js';
 import { teamsText } from './i18n.js';
 
@@ -220,7 +220,7 @@ export interface TeamsSnapshot {
   readonly conversation: TeamConversation | undefined;
   readonly messages: TeamMessage[];
   /** Pending (unconfirmed) mutations of the selected conversation. */
-  readonly pending: PendingCommands['outbox'];
+  readonly pending: VisiblePendingMessage[];
   /** A conversation creation that has not been confirmed yet. */
   readonly creation: PendingCommands['creation'];
   /** Showing this device's saved data; sending waits for a connection. */
@@ -384,7 +384,6 @@ export class TeamsWorkspace {
   // Unread of the other teams: one directory-only listener each (`watchMessages` with no conversation).
   private readonly watchers = new Map<string, { generation: number; stop(): void }>();
   private readonly unread = new Map<string, number>();
-  private outboxFor: { outbox: PendingCommands['outbox']; id: string; value: PendingCommands['outbox'] } | undefined;
 
   constructor(readonly api: TeamsApi, readonly uid: string, options: TeamsWorkspaceOptions = {}) {
     this.storage = options.storage ?? indexedDbCommandStorage;
@@ -831,10 +830,6 @@ export class TeamsWorkspace {
   private build(): TeamsSnapshot {
     const model = this.messaging, selected = model?.selected ?? '';
     const conversations = model?.state.conversations ?? EMPTY_CONVERSATIONS;
-    const outbox = model?.state.outbox ?? EMPTY_OUTBOX;
-    if (!this.outboxFor || this.outboxFor.outbox !== outbox || this.outboxFor.id !== selected) {
-      this.outboxFor = { outbox, id: selected, value: outbox.length ? outbox.filter(value => pendingPayload(value).conversationId === selected) : EMPTY_OUTBOX };
-    }
     const unreadByTeam: Record<string, number> = Object.fromEntries(this.unread);
     if (model && this.messagingTeam) unreadByTeam[this.messagingTeam.id] = totalUnreadOf(conversations);
     const team = this.teams.find(value => value.id === this.selection) ?? (this.selection && this.messagingTeam?.id === this.selection ? this.messagingTeam : undefined);
@@ -847,7 +842,7 @@ export class TeamsWorkspace {
       inviteLink: this.link, messaging: model, conversations, selectedConversationId: selected,
       conversation: conversations.find(value => value.id === selected),
       messages: model?.state.threads[selected]?.messages ?? EMPTY_MESSAGES,
-      pending: this.outboxFor.value, creation: model?.state.creation, offline: model?.offline ?? false,
+      pending: model?.visiblePending ?? EMPTY_OUTBOX, creation: model?.state.creation, offline: model?.offline ?? false,
       messagingConnecting: model?.connecting ?? !!this.selection, messagingError: model?.error ?? '',
       draftFiles: this.draftFileLists.get(this.draftKey(selected)) ?? EMPTY_FILES,
       draftText: this.draft(selected),

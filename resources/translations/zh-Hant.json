@@ -3715,6 +3715,8 @@
   "tw_sidebar_join": "透過邀請加入",
   "tw_sidebar_opening_team": "正在開啟團隊…",
   "tw_sidebar_loading_conversations": "正在載入會話…",
+  "tw_message_read": "已讀",
+  "tw_message_sent": "已傳送",
   "tw_sidebar_not_sent": "未傳送",
   "tw_sidebar_pending": "待傳送",
   "tw_sidebar_conversation_actions": "對話操作",

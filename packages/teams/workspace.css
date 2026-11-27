@@ -358,6 +358,9 @@
 .tw-msg-head small, .tw-msg-head time, .tw-msg-meta { font-size: 11px; color: var(--tw-muted); }
 .tw-msg-meta { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 2px 5px; margin-block-start: 2px; font-variant-numeric: tabular-nums; line-height: 1.2; }
 .tw-msg-meta small { font-size: inherit; }
+.tw-msg-delivery { display: inline-flex; align-self: center; inline-size: 13px; block-size: 13px; }
+.tw-msg-delivery[data-state='failed'], .tw-msg-delivery-error { color: var(--tw-danger); }
+.tw-msg-delivery-error { display: block; margin-block-start: 3px; font-size: 11px; text-align: end; }
 .tw-msg-agent .tw-msg-meta { justify-content: flex-start; }
 .tw-msg-text-line { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; }
 .tw-msg-text-line .tw-msg-body { min-inline-size: 0; }

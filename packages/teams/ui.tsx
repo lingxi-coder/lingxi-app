@@ -124,6 +124,7 @@ const paths = {
   at: 'M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0zm0 0v1.5a2.5 2.5 0 0 0 5 0V12a9 9 0 1 0-3.5 7.1',
   send: 'M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z',
   check: 'M5 12l5 5 9-10',
+  checks: 'M2 12l5 5L17 7m-5 10L22 7',
   arrowDown: 'M12 5v14M6 13l6 6 6-6',
   arrowUp: 'M12 19V5M6 11l6-6 6 6',
   panel: 'M4 5h16v14H4zM15 5v14',

@@ -300,7 +300,7 @@ test('a Bot whose sandbox is on, on a computer that has none, says its chats can
 test('a request for the Bot\'s sandbox settings opens at the Sandbox tab, which is then selected and drops the way to itself', async () => {
   const bots = await pageBots({ kind: 'detail', botId: 'a', sandboxRequest: 1 }, [bot({ botId: 'a', name: 'Alpha' })], NO_SANDBOX);
   const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
-  assert.match(html, /role="tab" id="[^"]+" aria-selected="true" aria-controls="[^"]+" tabindex="0">Sandbox<\/button>/);
+  assert.match(html, /role="tab" id="[^"]+" aria-selected="true" aria-controls="[^"]+" tabindex="0"><span class="bots-tab-icon"[^>]*>.*?<\/span>Sandbox<\/button>/);
   assert.ok(!html.includes('>Sandbox settings<'), 'the setting is already in view');
 });
 

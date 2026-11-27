@@ -243,18 +243,24 @@ struct NewConversationSheet: View {
             }
             Section {
                 ForEach(people) { member in
+                    let chosen = parties.contains(member.uid)
                     Button { choose(member.uid) } label: {
                         HStack(spacing: 12) {
                             PersonAvatar(id: member.uid, name: member.displayName, size: 24)
                             Text(member.displayName).foregroundStyle(.primary)
                             Spacer()
-                            Image(systemName: parties.contains(member.uid) ? (kind == "dm" ? "largecircle.fill.circle" : "checkmark.circle.fill") : (kind == "dm" ? "circle" : "circle"))
-                                .foregroundStyle(parties.contains(member.uid) ? Color.accentColor : Color.secondary)
-                                .accessibilityHidden(true)
+                            if kind == "channel" {
+                                ChannelCheckbox(checked: chosen)
+                            } else {
+                                Image(systemName: chosen ? (kind == "dm" ? "largecircle.fill.circle" : "checkmark.circle.fill") : "circle")
+                                    .foregroundStyle(chosen ? Color.accentColor : Color.secondary)
+                                    .accessibilityHidden(true)
+                            }
                         }
+                        .frame(minHeight: kind == "channel" ? 44 : nil)
                         .contentShape(Rectangle())
                     }
-                    .accessibilityAddTraits(parties.contains(member.uid) ? .isSelected : [])
+                    .accessibilityAddTraits(chosen ? .isSelected : [])
                 }
                 if people.isEmpty { Text("teams_new_no_members").font(.footnote).foregroundStyle(.secondary) }
             } header: {
@@ -272,9 +278,14 @@ struct NewConversationSheet: View {
                                     Text("teams_bot_owner \(owner(bot.maintainer.uid))").font(.caption).foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                Image(systemName: chosen ? "checkmark.circle.fill" : "circle").foregroundStyle(chosen ? Color.accentColor : Color.secondary)
-                                    .accessibilityHidden(true)
+                                if kind == "channel" {
+                                    ChannelCheckbox(checked: chosen)
+                                } else {
+                                    Image(systemName: chosen ? "checkmark.circle.fill" : "circle").foregroundStyle(chosen ? Color.accentColor : Color.secondary)
+                                        .accessibilityHidden(true)
+                                }
                             }
+                            .frame(minHeight: kind == "channel" ? 44 : nil)
                             .contentShape(Rectangle())
                         }
                         .disabled(!chosen && botParties.count >= Self.maxBots)
@@ -399,5 +410,20 @@ struct NewConversationSheet: View {
     private func openBot(_ bot: TeamBotCard, fresh: Bool) async {
         tried = true
         if let opened = await workspace.openBotDM(bot, fresh: fresh) { onOpen(opened) }
+    }
+}
+
+private struct ChannelCheckbox: View {
+    @Environment(\.isEnabled) private var isEnabled
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = 20
+    let checked: Bool
+
+    var body: some View {
+        Image(systemName: checked ? "checkmark.square.fill" : "square")
+            .font(.system(size: size, weight: .medium))
+            .foregroundStyle(checked ? Color.accentColor : Color.secondary)
+            .frame(width: size, height: size)
+            .opacity(isEnabled ? 1 : 0.5)
+            .accessibilityHidden(true)
     }
 }

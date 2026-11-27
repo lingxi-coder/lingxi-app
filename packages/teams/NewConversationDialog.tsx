@@ -34,7 +34,7 @@ export function NewConversationDialog({ workspace, snapshot, locale, mode, rende
   };
   const choose = (id: string, checked: boolean) => setParties(kind === 'dm' ? [id] : checked ? [...parties, id] : parties.filter(value => value !== id));
   return <Dialog title={mode === 'channel' ? t('teams_new_channel_title') : t('teams_new_message_title')} onClose={onClose}>
-    <form className="tw-form" onSubmit={event => { event.preventDefault(); void submit(); }}>
+    <form className={mode === 'channel' ? 'tw-form tw-new-channel-form' : 'tw-form'} onSubmit={event => { event.preventDefault(); void submit(); }}>
       {mode === 'direct' ? <div className="tw-segment" role="radiogroup" aria-label={t('teams_conversation_type')}>
         {(['dm', 'group'] as const).map(value => <label key={value} className="tw-segment-option" data-checked={direct === value}>
           <input type="radio" name="tw-kind" value={value} checked={direct === value} onChange={() => { setDirect(value); setParties([]); setBotParties([]); }} />

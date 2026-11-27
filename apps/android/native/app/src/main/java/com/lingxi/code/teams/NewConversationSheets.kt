@@ -1,6 +1,12 @@
 package com.lingxi.code.teams
 
+import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -14,6 +20,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
@@ -42,6 +49,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -181,18 +190,26 @@ internal fun NewConversationSheet(
                 Text(stringResource(if (!channel && !group) R.string.teams_new_to else R.string.teams_members), Modifier.semantics { heading() }, style = MaterialTheme.typography.labelLarge)
                 // A picker row is one element with the control's role and state (radio for one person, checkbox for several); the control inside is only its picture.
                 others.forEach { member ->
-                    val single = !channel && !group
+                    val memberName = member.displayName.ifEmpty { stringResource(R.string.teams_member) }
+                    val chooseMember: (Boolean) -> Unit = { people = if (it) people + member.uid else people - member.uid }
+                    if (channel) {
+                        ChannelParticipantRow(memberName, member.uid in people, onCheckedChange = chooseMember) {
+                            PersonAvatar(member.uid, member.displayName, 24.dp)
+                        }
+                        return@forEach
+                    }
+                    val single = !group
                     Row(
                         Modifier.fillMaxWidth().heightIn(min = 48.dp).then(
                             if (single) Modifier.selectable(selected = peer == member.uid, role = Role.RadioButton, onClick = { peer = member.uid })
-                            else Modifier.toggleable(value = member.uid in people, role = Role.Checkbox, onValueChange = { people = if (it) people + member.uid else people - member.uid }),
+                            else Modifier.toggleable(value = member.uid in people, role = Role.Checkbox, onValueChange = chooseMember),
                         ),
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         if (single) RadioButton(selected = peer == member.uid, onClick = null)
                         else Checkbox(checked = member.uid in people, onCheckedChange = null)
                         PersonAvatar(member.uid, member.displayName, 24.dp)
-                        Text(member.displayName.ifEmpty { stringResource(R.string.teams_member) }, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(memberName, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
                 if (channel || group) {
@@ -201,10 +218,17 @@ internal fun NewConversationSheet(
                         usableBots.forEach { bot ->
                             val chosen = bot.sharedBotId in sharedBotIds
                             val pickable = chosen || sharedBotIds.size < TeamsComposeLogic.MAX_TARGETS
+                            val chooseBot: (Boolean) -> Unit = { sharedBotIds = if (it) sharedBotIds + bot.sharedBotId else sharedBotIds - bot.sharedBotId }
+                            if (channel) {
+                                ChannelParticipantRow(bot.name, chosen, pickable, chooseBot) {
+                                    BotAvatar(bot.avatarId, 24.dp)
+                                }
+                                return@forEach
+                            }
                             Row(
                                 Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(
                                     value = chosen, enabled = pickable, role = Role.Checkbox,
-                                    onValueChange = { sharedBotIds = if (it) sharedBotIds + bot.sharedBotId else sharedBotIds - bot.sharedBotId },
+                                    onValueChange = chooseBot,
                                 ),
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
@@ -236,6 +260,50 @@ internal fun NewConversationSheet(
                     },
                 ) { Text(stringResource(when { channel -> R.string.teams_new_create_channel; group -> R.string.teams_new_create_group; else -> R.string.teams_new_open_dm })) }
             }
+        }
+    }
+}
+
+@Composable
+private fun ChannelParticipantRow(
+    name: String,
+    checked: Boolean,
+    enabled: Boolean = true,
+    onCheckedChange: (Boolean) -> Unit,
+    avatar: @Composable () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val disabledColor = colors.onSurface.copy(alpha = 0.38f)
+    val checkboxColor = when {
+        !enabled -> disabledColor
+        checked || focused -> colors.primary
+        else -> colors.outline
+    }
+    val shape = RoundedCornerShape(5.dp)
+    Row(
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (focused) colors.primary.copy(alpha = 0.14f) else Color.Transparent)
+            .toggleable(
+                value = checked, enabled = enabled, role = Role.Checkbox,
+                interactionSource = interaction, indication = LocalIndication.current,
+                onValueChange = onCheckedChange,
+            )
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        avatar()
+        Text(name, modifier = Modifier.weight(1f), color = if (enabled) colors.onSurface else disabledColor)
+        Box(
+            modifier = Modifier.size(20.dp)
+                .background(if (checked) checkboxColor else Color.Transparent, shape)
+                .border(1.dp, checkboxColor, shape),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (checked) Icon(Icons.Outlined.Check, contentDescription = null, modifier = Modifier.size(14.dp), tint = colors.onPrimary)
         }
     }
 }

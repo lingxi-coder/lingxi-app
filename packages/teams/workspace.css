@@ -162,6 +162,73 @@
 .tw-fieldset legend { padding: 0 4px; font-size: 12px; color: var(--tw-muted); }
 .tw-form .tw-check { flex-direction: row; align-items: center; gap: 8px; min-height: 28px; }
 .tw-check input { flex: none; }
+
+.tw-dialog:has(.tw-new-channel-form) { max-width: 420px; border-radius: 16px; }
+.tw-dialog:has(.tw-new-channel-form) .tw-dialog-panel { padding: 22px; gap: 16px; }
+.tw-dialog:has(.tw-new-channel-form) .tw-dialog-title { font-size: 18px; line-height: 1.25; letter-spacing: -0.02em; }
+.tw-new-channel-form { gap: 16px; }
+.tw-new-channel-form > label, .tw-new-channel-form .tw-fieldset legend { font-size: 12px; font-weight: 600; }
+.tw-dialog .tw-new-channel-form input[data-autofocus] { min-height: 36px; padding-inline: 10px; font-size: 14px; font-weight: 400; }
+
+@media (forced-colors: none) {
+  .tw-dialog .tw-new-channel-form input[data-autofocus] {
+    border-color: transparent;
+    background: color-mix(in srgb, var(--tw-fg) 7%, var(--tw-surface));
+  }
+  .tw-new-channel-form > label:focus-within { color: var(--tw-accent-text); }
+  .tw-dialog .tw-new-channel-form input[data-autofocus]:focus-visible {
+    color: var(--tw-fg);
+    caret-color: var(--tw-accent-text);
+    background: color-mix(in srgb, var(--tw-focus) 16%, var(--tw-surface));
+    outline: 0;
+  }
+}
+@media (prefers-contrast: more) {
+  .tw-dialog .tw-new-channel-form input[data-autofocus] { border-color: var(--tw-border); }
+  .tw-dialog .tw-new-channel-form input[data-autofocus]:focus-visible { outline: 2px solid var(--tw-focus); }
+}
+
+.tw-new-channel-form .tw-fieldset { margin: 0; padding: 4px 0 0; border: 0; border-radius: 0; }
+.tw-new-channel-form .tw-fieldset legend { padding: 0; }
+.tw-new-channel-form .tw-check {
+  min-height: 44px; padding: 4px 10px; border-radius: 8px; overflow-wrap: anywhere;
+}
+.tw-new-channel-form .tw-check:has(input:enabled) { cursor: pointer; }
+.tw-new-channel-form .tw-check:has(input:enabled):hover { background: var(--tw-hover); }
+.tw-new-channel-form .tw-check:has(input:disabled) { color: var(--tw-muted); cursor: not-allowed; }
+.tw-new-channel-form .tw-check input[type='checkbox'] {
+  order: 1; margin: 0; margin-inline-start: auto; font: inherit;
+  inline-size: 1.375em; block-size: 1.375em; accent-color: var(--tw-accent); cursor: inherit;
+}
+@media (forced-colors: none) {
+  .tw-new-channel-form .tw-check input[type='checkbox'] {
+    appearance: none; display: inline-grid; place-items: center;
+    border: 1px solid var(--tw-border); border-radius: 0.32em;
+    background: var(--tw-surface); color: var(--tw-accent-fg);
+  }
+  .tw-new-channel-form .tw-check input[type='checkbox']:checked {
+    background: var(--tw-accent); border-color: var(--tw-accent);
+  }
+  .tw-new-channel-form .tw-check input[type='checkbox']:checked::before {
+    content: ''; inline-size: 0.33em; block-size: 0.62em;
+    border: solid currentColor; border-width: 0 0.14em 0.14em 0;
+    transform: translateY(-0.05em) rotate(45deg);
+  }
+  .tw-new-channel-form .tw-check input[type='checkbox']:disabled { opacity: 0.5; }
+}
+@media (forced-colors: none) and (prefers-contrast: no-preference) {
+  .tw-new-channel-form .tw-check:has(input:focus-visible) {
+    background: color-mix(in srgb, var(--tw-focus) 14%, var(--tw-surface));
+    color: var(--tw-accent-text);
+  }
+  .tw-new-channel-form .tw-check input[type='checkbox']:focus-visible { outline: 0; }
+  .tw-new-channel-form .tw-check input[type='checkbox']:focus-visible:not(:checked) { border-color: var(--tw-focus); }
+}
+.tw-new-channel-form .tw-check:has(input:enabled):active { background: var(--tw-selected); }
+.tw-new-channel-form .tw-hint { padding-block: 4px; }
+.tw-dialog .tw-new-channel-form .tw-dialog-actions button { padding: 7px 12px; }
+.tw-dialog .tw-new-channel-form .tw-dialog-actions button[type='button'] { border-color: transparent; }
+
 .tw-picker { display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow: auto; }
 .tw-picker li { display: flex; align-items: center; gap: 10px; padding: 6px 4px; border-bottom: 1px solid var(--tw-line); }
 .tw-picker-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }

@@ -66,14 +66,14 @@ export function webTeamsApi(user: User, db: Firestore, currentUid: () => string 
       messageStops.set(key, stop);
       return () => { stop(); messageStops.delete(key); };
     },
-    watchMessages(scope, conversationId, next) {
+    watchMessages(scope, conversationId, next, postId) {
       if (closed || currentUid() !== user.uid) throw new Error('INVALID_SESSION');
       const key = crypto.randomUUID();
       const stop = watchFirestoreMessages(firestore, db, user.uid, scope, conversationId, snapshot => {
         if (closed) return;
         next(snapshot);
         if (snapshot.kind === 'signal' || snapshot.kind === 'error') for (const callback of messageCallbacks) callback(snapshot.kind === 'signal' ? snapshot.signal : undefined);
-      }, () => !closed && currentUid() === user.uid);
+      }, () => !closed && currentUid() === user.uid, postId);
       messageStops.set(key, stop);
       return () => { stop(); messageStops.delete(key); };
     },

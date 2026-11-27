@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { initializeApp, deleteApp } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import { initializeTestEnvironment, assertFails } from '@firebase/rules-unit-testing';
-import { doc, setDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { TeamsStore, createTeamsHandler } from '../src/teams.mjs';
 import { TeamMessagesStore } from '../src/team-messages.mjs';
 import { createTeamVisualizations } from '../src/team-visualizations.mjs';
@@ -456,4 +456,116 @@ test('lastMessage: edits of the newest message keep the sender and are truncated
   assert.equal(last.preview, 'x'.repeat(120)); assert.deepEqual(last.author, { kind: 'user', uid: alice.uid }); assert.equal(last.id, 'message02');
   await assert.rejects(execute(command({ messageId: 'message02', operation: 'edit', changeId: 'change004', text: 'Hijacked' })), { code: 'MESSAGE_AUTHOR_REQUIRED' });
   assert.equal((await pointer()).preview, 'x'.repeat(120)); // a rejected edit leaves the pointer alone
+});
+
+test('channel management delegates without giving a team owner message access and redeems one current invite', options, async () => {
+  const room = { ...scope, conversationId: 'morning-room' };
+  const call = (op, args = {}, actor = owner) => execute({ action: 'channelSettings', teamId, generation: 1,
+    request: { op, ...(op === 'list' ? {} : { conversationId: room.conversationId }), ...args } }, actor);
+  await execute({ action: 'create', ...room, kind: 'channel', title: 'Morning', participantUids: [alice.uid, hidden.uid] }, alice);
+  await assert.rejects(execute({ action: 'history', ...room }), { code: 'CONVERSATION_REQUIRED' });
+  assert.deepEqual((await call('list')).channels, [{ id: room.conversationId, title: 'Morning' }]);
+  await call('admin', { uid: alice.uid, enabled: true });
+  await assert.rejects(call('admin', { uid: hidden.uid, enabled: true }, alice), { code: 'CHANNEL_ADMIN_REQUIRED' });
+  await call('profile', { title: 'Morning Meeting', description: 'Agenda and notes' }, alice);
+  await call('remove', { uid: hidden.uid }, alice);
+  await assert.rejects(execute({ action: 'history', ...room }, hidden), { code: 'CONVERSATION_REQUIRED' });
+  const [first, second] = await Promise.all([call('createInvite', {}, alice), call('createInvite', {}, alice)]);
+  assert.equal(first.code, second.code);
+  await assert.rejects(call('redeem', first, { uid: 'outsider' }), { code: 'CHANNEL_TEAM_REQUIRED' });
+  await Promise.all([call('redeem', first, hidden), call('redeem', first, hidden)]);
+  assert.deepEqual((await db.doc(`teams/${teamId}/conversations/${room.conversationId}`).get()).data().participants, ['user:alice', 'user:hidden']);
+  await call('revokeInvite', first, alice);
+  await assert.rejects(call('redeem', second, hidden), { code: 'CHANNEL_INVITE_INVALID' });
+  assert.deepEqual((await execute({ action: 'history', ...room }, hidden)).messages, []);
+  await call('admin', { uid: alice.uid, enabled: false });
+  await assert.rejects(call('posting', { posting: { mode: 'chat', senders: 'all', selected: [], replies: 'all' } }, alice), { code: 'CHANNEL_ADMIN_REQUIRED' });
+  await assert.rejects(execute({ action: 'history', ...room }), { code: 'CONVERSATION_REQUIRED' });
+});
+
+test('posts keep history and enforce separate sender and reply rules at commit', options, async () => {
+  const room = { ...scope, conversationId: 'posting-room' };
+  await execute({ action: 'create', ...room, kind: 'channel', title: 'Channel', participantUids: [owner.uid, alice.uid] });
+  const config = (mode, senders, replies) => execute({ action: 'channelSettings', teamId, generation: 1, request: {
+    op: 'posting', conversationId: room.conversationId, posting: { mode, senders, selected: senders === 'selected' ? ['user:owner'] : [], replies }
+  } });
+  const send = (id, actor, channelMode, replyTo) => execute(command({ ...room, messageId: `message-${id}`, changeId: `change-${id}`, channelMode, replyTo }), actor);
+  await send('old', alice, 'chat');
+  await send('quote', owner, 'chat', 'message-old');
+  await config('posts', 'selected', 'all');
+  await assert.rejects(send('stale', owner, 'chat'), { code: 'CHANNEL_MODE_CHANGED' });
+  await assert.rejects(send('denied', alice, 'posts'), { code: 'CHANNEL_POSTING_DENIED' });
+  await send('post', owner, 'posts');
+  await send('reply', alice, 'posts', 'message-post');
+  await send('nested', alice, 'posts', 'message-reply');
+  await config('posts', 'selected', 'authors');
+  await assert.rejects(send('restricted', alice, 'posts', 'message-post'), { code: 'CHANNEL_POSTING_DENIED' });
+  await config('posts', 'all', 'none');
+  await assert.rejects(send('closed', owner, 'posts', 'message-post'), { code: 'CHANNEL_POSTING_DENIED' });
+  await config('chat', 'all', 'all');
+  await assert.rejects(send('archived', owner, 'chat', 'message-post'), { code: 'CHANNEL_MODE_CHANGED' });
+  await send('new', alice, 'chat');
+  const { messages: history } = await execute({ action: 'history', ...room });
+  const post = await execute({ action: 'postHistory', ...room, postId: 'message-post' }, alice);
+  assert.equal(post.root.id, 'message-post');
+  assert.deepEqual(post.replies.map(item => item.id), ['message-reply', 'message-nested']);
+  assert.equal(post.next, null);
+  await assert.rejects(execute({ action: 'postHistory', ...room, postId: 'message-post' }, hidden), { code: 'CONVERSATION_REQUIRED' });
+  assert.deepEqual(history.map(m => [m.id, m.channelPost ?? false, m.postId ?? null, m.replyTo ?? null]), [
+    ['message-old', false, null, null], ['message-quote', false, null, 'message-old'], ['message-post', true, null, null],
+    ['message-reply', false, 'message-post', 'message-post'], ['message-nested', false, 'message-post', 'message-reply'], ['message-new', false, null, null],
+  ]);
+});
+
+test('bot dependency blocks removal until resolved and Bot identities use the same posting policy', options, async () => {
+  const room = { ...scope, conversationId: 'bot-guard-room' };
+  await execute({ action: 'create', ...room, kind: 'channel', title: 'Channel', participantUids: [owner.uid, alice.uid] });
+  const botId = 'minutes-bot', principal = `shared_bot:${botId}`;
+  const ref = db.doc(`teams/${teamId}/conversations/${room.conversationId}`);
+  await ref.update({ participants: ['user:alice', 'user:owner', principal] });
+  await db.doc(`teams/${teamId}/sharedBots/${botId}`).set({ name: 'Minutes Bot', identity: { maintainer: { uid: alice.uid, generation: 1 } } });
+  const call = (request, actor = owner) => execute({ action: 'channelSettings', teamId, generation: 1, request: { ...request, conversationId: room.conversationId } }, actor);
+  const { mayPost } = await import('../src/channel-settings.mjs');
+  await call({ op: 'posting', posting: { mode: 'posts', senders: 'selected', selected: [principal], replies: 'none' } });
+  const c = (await ref.get()).data();
+  assert.equal(mayPost(c, principal), true);
+  assert.equal(mayPost(c, principal, true), false);
+  assert.equal(mayPost(c, 'user:alice'), false);
+  assert.deepEqual(await call({ op: 'remove', uid: alice.uid }), { blockedBy: [{ id: botId, name: 'Minutes Bot' }] });
+  assert.ok((await ref.get()).data().memberUids.includes(alice.uid));
+  await call({ op: 'detachBot', botId }, alice);
+  await call({ op: 'remove', uid: alice.uid });
+  assert.ok(!(await ref.get()).data().memberUids.includes(alice.uid));
+});
+
+test('post likes are reversible and views unique across retries, members and older posts', options, async () => {
+  const room = { ...scope, conversationId: 'post-metrics' }, postId = 'original-post';
+  await execute({ action: 'create', ...room, kind: 'channel', title: 'Updates', participantUids: [owner.uid, alice.uid] });
+  await execute({ action: 'channelSettings', teamId, generation: room.generation, request: { op: 'posting',
+    conversationId: room.conversationId, posting: { mode: 'posts', senders: 'selected', selected: ['user:owner'], replies: 'all' } } });
+  const post = fields => command({ ...room, channelMode: 'posts', ...fields });
+  await execute(post({ messageId: postId, changeId: 'publish-post' }));
+  const interact = (actor, liked) => execute({ action: 'postInteraction', ...room, postId, ...(liked !== undefined ? { liked } : {}) }, actor);
+  await Promise.all([interact(alice, true), interact(alice, true), interact(owner)]);
+  assert.deepEqual(await interact(alice), { liked: true, stats: { replies: 0, likes: 1, views: 2, revision: 2 } });
+  assert.deepEqual(await interact(alice, false), { liked: false, stats: { replies: 0, likes: 0, views: 2, revision: 3 } });
+  await assert.rejects(interact(hidden, true), { code: 'CONVERSATION_REQUIRED' });
+  const client = environment.authenticatedContext(alice.uid).firestore();
+  const path = `teams/${teamId}/conversations/${room.conversationId}/messages/${postId}`;
+  assert.equal((await getDoc(doc(client, path + '/postViewers/' + alice.uid))).data().liked, false);
+  await assertFails(getDoc(doc(client, path + '/postViewers/' + owner.uid)));
+  await assertFails(setDoc(doc(client, path + '/postViewers/' + alice.uid), { liked: true }));
+  await assertFails(setDoc(doc(client, path), { postStats: { likes: 99 } }, { merge: true }));
+  await execute(post({ messageId: 'reply-one', changeId: 'reply-one-change', replyTo: postId }), alice);
+  await execute(post({ messageId: 'reply-two', changeId: 'reply-two-change', replyTo: 'reply-one' }), alice);
+  await execute(post({ messageId: 'reply-one', changeId: 'recall-reply', operation: 'recall', text: '' }), alice);
+  assert.equal((await interact(owner)).stats.replies, 1);
+  const root = db.doc(`teams/${teamId}/conversations/${room.conversationId}/messages/${postId}`);
+  const { postStats, ...legacy } = (await root.get()).data();
+  await root.set(legacy);
+  await root.collection('postViewers').doc(alice.uid).delete();
+  await root.collection('postViewers').doc(owner.uid).delete();
+  assert.deepEqual((await interact(alice)).stats, { replies: 1, likes: 0, views: 1, revision: 1 });
+  await execute(post({ messageId: postId, changeId: 'recall-post', operation: 'recall', text: '' }));
+  await assert.rejects(interact(alice, true), { code: 'CHANNEL_POST_REQUIRED' });
 });

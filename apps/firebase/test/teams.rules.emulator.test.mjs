@@ -409,3 +409,16 @@ test('teams: the trusted HTTP route and the rules-checked SDK write the same las
   await http('create', 'message04', 'change007', 'Fourth via HTTP'); // the next message replaces the recalled pointer
   assert.deepEqual(await keys(), shape);
 });
+
+test('legacy channel writes are confined to unrestricted chat', options, async () => {
+  const cid = 'channel01';
+  await create({ ...conversation(cid), kind: 'channel' });
+  const alice = user('alice'), channel = admin.doc(`teams/team-test/conversations/${cid}`);
+  await assertSucceeds(send(alice, { cid }));
+  await channel.update({ posting: { mode: 'chat', senders: 'selected', selected: ['user:bob'], replies: 'all' } });
+  await assertFails(send(alice, { cid, mid: 'message02', changeId: 'change002' }));
+  await channel.update({ posting: { mode: 'posts', senders: 'all', selected: [], replies: 'all' } });
+  await assertFails(send(alice, { cid, mid: 'message03', changeId: 'change003' }));
+  await channel.update({ posting: { mode: 'chat', senders: 'all', selected: [], replies: 'none' } });
+  await assertSucceeds(send(alice, { cid, mid: 'message04', changeId: 'change004' }));
+});

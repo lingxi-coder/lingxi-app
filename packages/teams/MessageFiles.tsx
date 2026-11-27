@@ -54,22 +54,46 @@ export function DraftFiles({ files, locale, onRemove }: { files: readonly DraftF
  * The files a message carries. A picture is shown in place; any file can be saved; plain text can be read here. Every look at a
  * file asks the service, which answers only while the viewer reads the conversation. The sender can take a file back.
  */
-export function MessageFiles({ api, scope, files, locale, save = saveFile, onRevoke }: {
+export function MessageFiles({ api, scope, files, locale, layout, save = saveFile, onRevoke }: {
   api: Api; scope: ExecutionScope; files: readonly MessageAttachment[]; locale: string;
+  layout?: 'gallery';
   /** Test seam: where a saved file goes. */ save?(file: MessageAttachment, bytes: Uint8Array): void;
   /** Present for the sender while they may still change the conversation. */ onRevoke?(file: MessageAttachment): void;
 }): ReactElement {
   const t = useTeamsText(locale);
-  return <ul className="tw-files" aria-label={t('remote_files')}>
-    {files.map(file => <MessageFile key={file.attachmentId} api={api} scope={scope} file={file} locale={locale} save={save} onRevoke={onRevoke} />)}
-  </ul>;
+  const renderFile = (file: MessageAttachment, tile: boolean) => <MessageFile key={file.attachmentId} api={api} scope={scope}
+    file={file} locale={locale} save={save} onRevoke={onRevoke} tile={tile} />;
+  if (layout !== 'gallery') return <ul className="tw-files" aria-label={t('remote_files')}>{files.map(file => renderFile(file, false))}</ul>;
+  const groups: { pictures: boolean; files: MessageAttachment[] }[] = [];
+  for (const file of files) {
+    const pictures = isImage(file) && !file.revoked;
+    const last = groups.at(-1);
+    if (last && last.pictures === pictures) last.files.push(file);
+    else groups.push({ pictures, files: [file] });
+  }
+  return <div className="tw-post-files">{groups.map(group => <ul key={group.files[0]!.attachmentId}
+    className={group.pictures ? 'tw-post-gallery' : 'tw-files'} data-count={group.pictures ? group.files.length : undefined} aria-label={t('remote_files')}>
+    {group.files.map(file => renderFile(file, group.pictures))}
+  </ul>)}</div>;
 }
 
-function MessageFile({ api, scope, file, locale, save, onRevoke }: { api: Api; scope: ExecutionScope; file: MessageAttachment; locale: string; save(file: MessageAttachment, bytes: Uint8Array): void; onRevoke?(file: MessageAttachment): void }): ReactElement {
+function MessageFile({ api, scope, file, locale, save, onRevoke, tile }: { api: Api; scope: ExecutionScope; file: MessageAttachment; locale: string; tile: boolean; save(file: MessageAttachment, bytes: Uint8Array): void; onRevoke?(file: MessageAttachment): void }): ReactElement {
   const t = useTeamsText(locale);
   const picture = isImage(file) && !file.revoked;
   const [url, setUrl] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState(''), [open, setOpen] = useState(false), [text, setText] = useState<string>();
-  const [wanted, setWanted] = useState(picture && file.byteLength <= AUTO_PREVIEW_BYTES);
+  const [wanted, setWanted] = useState(!tile && picture && file.byteLength <= AUTO_PREVIEW_BYTES);
+  const [attempt, setAttempt] = useState(0);
+  const tileButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const button = tileButton.current;
+    if (!button || !picture || wanted || file.byteLength > AUTO_PREVIEW_BYTES) return;
+    if (typeof IntersectionObserver === 'undefined') { setWanted(true); return; }
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) { setWanted(true); observer.disconnect(); }
+    }, { root: button.closest('.tw-stream'), rootMargin: '240px 0px' });
+    observer.observe(button);
+    return () => observer.disconnect();
+  }, [picture, tile, wanted, file.byteLength]);
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const read = async <T,>(use: (bytes: Uint8Array) => T): Promise<T | undefined> => {
@@ -81,12 +105,12 @@ function MessageFile({ api, scope, file, locale, save, onRevoke }: { api: Api; s
   // The picture itself, once wanted. Its object URL lives as long as this row shows it.
   useEffect(() => {
     if (!wanted || !picture) return;
-    let made = '';
-    void read(bytes => { made = URL.createObjectURL(blobOf(file, bytes)); setUrl(made); });
-    return () => { if (made) URL.revokeObjectURL(made); setUrl(''); };
+    let made = '', current = true;
+    void read(bytes => { if (current) { made = URL.createObjectURL(blobOf(file, bytes)); setUrl(made); } });
+    return () => { current = false; if (made) URL.revokeObjectURL(made); setUrl(''); };
   // One file, one membership.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wanted, picture, file.attachmentId, scope.teamId, scope.generation]);
+  }, [wanted, picture, attempt, file.attachmentId, scope.teamId, scope.generation]);
   useEffect(() => { if (file.revoked) forgetAttachment(scope, file); }, [file, scope]);
 
   if (file.revoked) return <li className="tw-file" data-state="revoked"><Icon name="file" /><span className="tw-file-text"><b>{file.name}</b><small>{t('teams_file_taken_back')}</small></span></li>;
@@ -94,8 +118,23 @@ function MessageFile({ api, scope, file, locale, save, onRevoke }: { api: Api; s
   const actions = <>
     {file.mime === 'text/plain' ? <button type="button" disabled={busy} onClick={() => void read(bytes => { setText(new TextDecoder().decode(bytes.subarray(0, 256 * 1024))); setOpen(true); })}>{t('common_open')}</button> : null}
     <button type="button" className="tw-icon-btn" disabled={busy} aria-label={t('tw_file_save_fmt', file.name)} title={t('common_save')} onClick={() => void read(bytes => save(file, bytes))}><Icon name="download" /></button>
-    {onRevoke ? <button type="button" className="tw-icon-btn tw-danger" aria-label={t('tw_file_take_back_fmt', file.name)} title={t('tw_handover_take_back')} onClick={() => onRevoke(file)}><Icon name="trash" /></button> : null}
+    {onRevoke ? <button type="button" className="tw-icon-btn tw-danger" aria-label={t('tw_file_take_back_fmt', file.name)} title={t('tw_handover_take_back')} onClick={() => { if (open) setOpen(false); onRevoke(file); }}><Icon name="trash" /></button> : null}
   </>;
+  if (tile && picture) return <li className="tw-post-tile">
+    <button type="button" ref={tileButton} className="tw-file-picture" aria-label={t('tw_file_view_fmt', file.name)} title={file.name}
+      onClick={() => { setOpen(true); setWanted(true); if (error && !url) setAttempt(n => n + 1); }}>
+      {url ? <img src={url} alt={file.name} /> : <span className="tw-post-placeholder"><Icon name="image" size={22} />
+        <span>{busy ? t('teams_loading') : file.name}</span></span>}
+    </button>
+    {open && <Dialog title={file.name} onClose={() => setOpen(false)}>
+      {url && <img className="tw-post-image-full" src={url} alt={file.name} />}
+      {error ? <p role="alert">{messageErrorText(error, locale)} <button type="button" onClick={() => setAttempt(n => n + 1)}>{t('common_retry')}</button></p>
+        : !url && <p role="status">{t('teams_loading')}</p>}
+      <div className="tw-post-file-controls"><small>{size}</small>{actions}
+        <button type="button" data-autofocus onClick={() => setOpen(false)}>{t('common_close')}</button>
+      </div>
+    </Dialog>}
+  </li>;
   return <li className="tw-file" data-kind={picture ? 'image' : 'file'}>
     {picture && url ? <button type="button" className="tw-file-picture" aria-label={t('tw_file_view_fmt', file.name)} onClick={() => setOpen(true)}><img src={url} alt={file.name} /></button>
       : picture && !wanted ? <button type="button" className="tw-file-picture tw-file-placeholder" onClick={() => setWanted(true)}><Icon name="image" size={20} />{t('tw_file_show_picture')}</button>

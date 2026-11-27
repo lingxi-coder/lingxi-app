@@ -1,4 +1,5 @@
 import { buildDeepLink, type DeepLinkTarget } from '../../../../packages/deep-links';
+import { channelInvitePath } from '../../../../packages/teams/channel-settings';
 import { friendLink } from '../../../../packages/teams/friends';
 import { chatRoute, remoteSessionRoute, type ChatTarget } from '../app/router';
 import { friendViewerPath } from '../friends/viewer';
@@ -35,6 +36,7 @@ export function linkInBrowser(target: DeepLinkTarget): { path: string; at: 'now'
   const now = (path: string) => ({ path, at: 'now' as const }), offer = (path: string) => ({ path, at: 'offer' as const });
   switch (target.route) {
     case 'team/chat': return now(chatRoute({ kind: 'team', teamId: team!, conversationId: conversation! }));
+    case 'team/post': return now(chatRoute({ kind: 'team', teamId: team!, conversationId: conversation!, postId: target.params.post! }));
     case 'team/bot': return now(chatRoute({ kind: 'bot', teamId: team!, botId: bot! }));
     case 'friend/chat': return now(chatRoute({ kind: 'friend', uid: uid! }));
     case 'new': {
@@ -44,6 +46,7 @@ export function linkInBrowser(target: DeepLinkTarget): { path: string; at: 'now'
     }
     // A full page load, so /remote starts under its own strict policy.
     case 'team/inbox': return offer('/teams');
+    case 'team/join-channel': return offer(channelInvitePath({ teamId: team!, conversationId: conversation!, code: code! }));
     case 'team/join': return offer(`/teams/join?code=${encodeURIComponent(code!)}`);
     default: {
       const [kind, hostId, sessionId] = target.route.split('/');
@@ -68,7 +71,9 @@ export function sharedPrompt(hash: string): string | undefined {
 export function appLinkForChat(target: ChatTarget, prompt?: string): string | null {
   let link: DeepLinkTarget;
   switch (target.kind) {
-    case 'team': link = { route: 'team/chat', params: { team: target.teamId, conversation: target.conversationId } }; break;
+    case 'team': link = target.postId
+      ? { route: 'team/post', params: { team: target.teamId, conversation: target.conversationId, post: target.postId } }
+      : { route: 'team/chat', params: { team: target.teamId, conversation: target.conversationId } }; break;
     case 'bot': link = { route: 'team/bot', params: { team: target.teamId, bot: target.botId } }; break;
     case 'friend': link = { route: 'friend/chat', params: { uid: target.uid } }; break;
     case 'home':

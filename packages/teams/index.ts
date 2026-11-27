@@ -79,7 +79,7 @@ export interface DesktopTeamsApi {
   services<T>(uid: string, command: import('./hosted-service.js').ServiceCommand): Promise<T>;
   serviceMessages<T>(uid: string, command: Record<string, unknown> & { serviceId: string; generation: number; action: string }): Promise<T>;
   onMessagesChanged: MessageApi['onMessagesChanged'];
-  watchMessages(uid: string, scope: import('./messages').MessageScope, conversationId: string, next: (snapshot: import('./messages').MessageSnapshot) => void): () => void;
+  watchMessages(uid: string, scope: import('./messages').MessageScope, conversationId: string, next: (snapshot: import('./messages').MessageSnapshot) => void, postId?: string): () => void;
   prefetchMessages?(uid: string, scope: MessageScope, conversationId: string): () => void;
 }
 export class TeamsApiError extends Error {

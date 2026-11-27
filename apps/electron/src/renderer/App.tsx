@@ -130,11 +130,13 @@ export function App() {
   const [notificationPreview, setNotificationPreview] = useState(false);
   const [inboxNotice, setInboxNotice] = useState<{ uid: string | null; notice: InboxNotification }>();
   const [inboxSourceTarget, setInboxSourceTarget] = useState<InboxNoticeTarget & { key: string; generation: number; uid: string | null }>();
+  const [channelInvite, setChannelInvite] = useState<import('../../../../packages/teams/channel-settings').ChannelInvite>();
   const [teamInvite, setTeamInvite] = useState<string>();
   const handledTeamInvite = useCallback(() => setTeamInvite(undefined), []);
   // A friend link waits here, in memory only (D8), until the Friends workspace of a signed-in account can take it.
   const [friendTarget, setFriendTarget] = useState<FriendLink>();
   const [teamLink, setTeamLink] = useState<TeamLinkRequest>();
+  const [sharedPost, setSharedPost] = useState<import('../../../../packages/teams/share').ChannelPostTarget>();
   const handledFriendCode = useCallback((code: string) => {
     setFriendTarget(current => current?.kind === 'add' && current.code === code ? undefined : current);
   }, []);
@@ -411,6 +413,10 @@ export function App() {
     && inboxSourceTarget.key.split(':')[0] === 'assistant'
     && inboxSourceTarget.key.split(':')[2] === bridge.activeSession?.sessionId ? inboxSourceTarget : undefined;
   const conversationNoticeTarget = inboxSourceTarget?.uid === inbox.uid && inboxSourceTarget.key === activeInboxKey ? inboxSourceTarget : undefined;
+  useEffect(() => {
+    if (sharedPost && (page !== 'teams' || (!!teams.snapshot && !teams.snapshot.messagingConnecting &&
+      (teams.snapshot.selectedTeamId !== sharedPost.teamId || teams.snapshot.selectedConversationId !== sharedPost.conversationId)))) setSharedPost(undefined);
+  }, [page, sharedPost, teams.snapshot?.messagingConnecting, teams.snapshot?.selectedTeamId, teams.snapshot?.selectedConversationId]);
   const activeActivity = bridge.activeSession ? bridge.bootstrap?.projectCatalogs?.[bridge.activeSession.projectPath]?.sessions.find(row => row.uuid === bridge.activeSession!.sessionId)?.activity_json : undefined;
   const inboxReading = useAssistantInboxReading(inbox, bridge.activeSession?.sessionId,
     activeActivity, page === 'chat' && !assistantNoticeTarget && !bridge.sessionLoading && !settingsRoute && !sessionPicker, notificationPreview || Boolean(messageTarget));
@@ -453,7 +459,11 @@ export function App() {
     // Opening or selecting the team is a step on the way: the effect runs again with the team's conversations.
     if (next.step === 'open') { teams.workspace.openConversation(next.teamId, next.conversationId); return; }
     if (next.step === 'team') { teams.workspace.selectTeam(next.teamId); return; }
-    if (next.step === 'select') teams.workspace.selectConversation(next.conversationId);
+    if (next.step === 'select') {
+      teams.workspace.selectConversation(next.conversationId);
+      setSharedPost(teamLink.kind === 'conversation' && teamLink.postId
+        ? { teamId: teamLink.teamId, conversationId: next.conversationId, postId: teamLink.postId } : undefined);
+    }
     else showTeamDetails('bots');
     setTeamLink(undefined);
   }, [teamLink, teams.workspace, teams.snapshot, friendsWorkspace, friends.snapshot, showTeamDetails, setLocalAppNavigationError]);
@@ -685,13 +695,16 @@ export function App() {
         }
         const friend = friendLink(delivery.target);
         // The join dialog (and the friend dialog likewise) opens in the sidebar, which cannot be used while it is hidden.
-        if (route === 'team/join' || route === 'team/inbox') { setTeamInvite(params.code); setPage('teams'); setSidebarCollapsed(false); }
+        if (route === 'team/join-channel') {
+          setChannelInvite({ teamId: params.team!, conversationId: params.conversation!, code: params.code! });
+          setBotServices(false); setSidebarMode('home'); setPage('teams'); setSidebarCollapsed(false);
+        } else if (route === 'team/join' || route === 'team/inbox') { setTeamInvite(params.code); setPage('teams'); setSidebarCollapsed(false); }
         else if (friend) { setFriendTarget(friend); setPage('friends'); setSidebarCollapsed(false); }
         else if (teamLinkRequest(delivery.target)) {
           // Like a friend link, it waits for its workspace: on a cold start the account may still be loading, and a
           // signed-out viewer is asked to sign in on the page it opens.
           const request = teamLinkRequest(delivery.target)!;
-          setTeamLink(request); setBotServices(false); setSidebarMode('home'); setPage(request.kind === 'pair' ? 'friends' : 'teams');
+          setInboxSourceTarget(undefined); setTeamLink(request); setBotServices(false); setSidebarMode('home'); setPage(request.kind === 'pair' ? 'friends' : 'teams');
         }
         else if (settingsTarget) { linkSurfacePending.current = true; openSettings(settingsTarget); }
         else if (kind === 'settings') {
@@ -919,7 +932,7 @@ export function App() {
           {page === 'messages' && <p style={{ margin: 'auto', color: palette.text3 }}>
             {locale.startsWith('zh') ? '选择一条会话以查看消息' : 'Select a conversation to view messages'}
           </p>}
-          {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} friends={friends} locale={locale} drawer={teamsDrawer} services={botServices} inboxTarget={serviceInboxTarget} notificationTarget={conversationNoticeTarget} onCloseServices={closeBotServices} /></Suspense>}
+          {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} friends={friends} locale={locale} drawer={teamsDrawer} services={botServices} inboxTarget={serviceInboxTarget} notificationTarget={conversationNoticeTarget} sharedPost={sharedPost} onExitPost={() => setSharedPost(undefined)} channelInvite={channelInvite} onChannelInviteHandled={() => setChannelInvite(undefined)} onCloseServices={closeBotServices} /></Suspense>}
           <DesktopInboxToast notice={inboxNotice?.uid === inbox.uid ? inboxNotice.notice : undefined}
             api={inbox.api} uid={inbox.uid} locale={locale} onDismiss={dismissInboxNotice} onOpen={notice => {
               dismissInboxNotice(notice);

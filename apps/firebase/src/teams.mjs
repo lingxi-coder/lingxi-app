@@ -4,6 +4,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { TeamConversationError, conversationRecord } from './team-conversations.mjs';
+import { ChannelError } from './channel-settings.mjs';
 import { TeamMessagesStore, TeamMessageError } from './team-messages.mjs';
 import { SharedBotError } from './shared-bots.mjs';
 import { HostedBotServiceError, HostedBotServices, SERVICE_PREFIX } from './hosted-bot-service.mjs';
@@ -373,7 +374,7 @@ export function createTeamsHandler({ store, friends, inbox, data, datasets, data
       return reply(await store.execute(user, body));
     } catch (error) {
       if (error instanceof z.ZodError) return reply({ error: { code: 'INVALID_INPUT' } }, 400);
-      if (error instanceof TeamMessageError) return reply({ error: { code: error.code } }, error.status);
+      if (error instanceof ChannelError || error instanceof TeamMessageError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof SharedBotError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof HostedBotServiceError) return reply({ error: { code: error.code } }, error.status);
       if (error instanceof LingxiDataError) return reply({ error: { code: error.code } }, error.status);

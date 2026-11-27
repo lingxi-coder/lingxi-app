@@ -37,7 +37,7 @@ window.addEventListener('message', function receive(event: MessageEvent): void {
       return { app, db, auth, uid: options.uid };
     } catch (error) { await terminate(db); await deleteApp(app); throw error; }
   }
-  async function handle(message: { type: string; id: string; options: SessionOptions; scope: MessageScope; conversationId: string; prefetch?: boolean; clearAuthentication?: boolean; beforeSeq?:number; request?: ChatReadRequest }): Promise<void> {
+  async function handle(message: { type: string; id: string; options: SessionOptions; scope: MessageScope; conversationId: string; prefetch?: boolean; postId?: string; clearAuthentication?: boolean; beforeSeq?:number; request?: ChatReadRequest }): Promise<void> {
     if (message.type === 'open') {
       session = await open(message.options);
       const current = session;
@@ -92,6 +92,6 @@ window.addEventListener('message', function receive(event: MessageEvent): void {
         if(snapshot.kind==='error' || snapshot.kind==='directory' && !snapshot.conversations.some(row=>row.id===message.conversationId))
           history?.revoke(message.scope,message.conversationId);
         port.postMessage({type:'snapshot',id:message.id,snapshot});
-      }, () => !!session && session.auth.currentUser?.uid === session.uid));
+      }, () => !!session && session.auth.currentUser?.uid === session.uid, message.postId));
   }
 });

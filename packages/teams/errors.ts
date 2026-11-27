@@ -28,6 +28,11 @@ export function messageErrorText(code: string, locale: string): string {
     return t('teams_messages_storage_error');
   }
   switch (code) {
+    case 'CHANNEL_POSTING_DENIED':
+      return t('tw_channel_posting_changed');
+    case 'CHANNEL_POST_REQUIRED':
+    case 'CHANNEL_MODE_CHANGED':
+      return t('tw_channel_mode_changed');
     case 'MENTION_TARGET_REQUIRED':
       return t('teams_error_mention_target');
     case 'BOT_USE_REQUIRED':

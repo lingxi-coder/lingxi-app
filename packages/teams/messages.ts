@@ -1,3 +1,4 @@
+import type { ChannelCommand, ChannelPosting } from './channel-settings.js';
 import type { MentionEntity } from './mentions.js';
 import type { ResourceRef } from './dataset-resource.js';
 import { parseDataRef, type DataRef } from './lingxi-data.js';
@@ -19,6 +20,9 @@ export interface TeamConversation {
   id: string; kind: 'dm' | 'group' | 'channel' | 'bot_dm'; title: string; participants: string[];
   /** Who can read it, as written when it was made: its people and the maintainers its Bots had then. Absent when the source does not say. */
   readers?: string[];
+  description?: string;
+  posting?: ChannelPosting;
+  channelAdmins?: Record<string, number>;
   unreadCount?: number;
   manualUnreadRevision?:number;
   pendingActionRevision?:number;
@@ -34,8 +38,11 @@ export interface TeamConversation {
 /** One change a Bot asks to make to its list. `item` is the text of the item it touches as it read when the Bot asked, `null` if it was gone. */
 export interface ListApprovalChange { op: 'add' | 'update' | 'remove'; text?: string; itemId?: string; done?: boolean; item?: string | null }
 export interface ListApproval { title: string; changes: ListApprovalChange[] }
+export interface PostStats { replies: number; likes: number; views: number; revision: number }
+export interface PostInteraction { stats: PostStats; liked: boolean }
 export interface TeamMessage {
   id: string; seq: number; author: MessageAuthor;
+  channelPost?: true; postId?: string; postStats?: PostStats;
   kind: string; text: string; replyTo?: string; createdAt: string | null; editedAt?: string | null;
   recalled?: boolean; changeSeq: number; changeId: string;
   taskId?: string; taskIds?: string[]; artifactId?: string;
@@ -58,10 +65,12 @@ export interface TeamMessage {
 }
 export interface MessageScope { teamId: string; generation: number }
 export type MessageMutation = MessageScope & { action: 'mutate'; conversationId: string; messageId: string; changeId: string;
-  operation: 'create' | 'edit' | 'recall'; text: string; replyTo?: string; dataRef?: DataRef; mentionEntities?: MentionEntity[] };
-export type MessageCommand = MessageMutation | MemberExecutionCommand
+  operation: 'create' | 'edit' | 'recall'; channelMode?: ChannelPosting['mode']; text: string; replyTo?: string; dataRef?: DataRef; mentionEntities?: MentionEntity[] };
+export type MessageCommand = MessageMutation | MemberExecutionCommand | ChannelCommand
   | MessageScope & { action: 'create'; conversationId: string; kind: TeamConversation['kind']; title: string; participantUids: string[];  }
   | MessageScope & { action:'history';conversationId:string;before?:number }
+  | MessageScope & { action: 'postHistory'; conversationId: string; postId: string; before?: number }
+  | MessageScope & { action: 'postInteraction'; conversationId: string; postId: string; liked?: boolean }
   | MessageScope & { action: 'read'; conversationId: string; lastReadSeq: number };
 export interface MessageSignal { bots?: boolean; conversationId?: string }
 export interface MessageApi {
@@ -70,10 +79,11 @@ export interface MessageApi {
   peerReceipt?(scope:MessageScope,id:string):Promise<{readThrough:number|null}>;
   readVisible?(scope:MessageScope,conversationId:string,through:number,manualUnreadRevision:number,observedPendingActionRevision?:number,observedFailureRevision?:number):Promise<unknown>;
   onMessagesChanged(callback: (signal?: MessageSignal) => void): () => void;
-  watchMessages(scope: MessageScope, conversationId: string, next: (snapshot: MessageSnapshot) => void): () => void;
+  watchMessages(scope: MessageScope, conversationId: string, next: (snapshot: MessageSnapshot) => void, postId?: string): () => void;
   prefetchMessages?(scope: MessageScope, conversationId: string): () => void;
 }
 export type MessageSnapshot = MessageScope & { uid: string; fromCache: boolean } & (
+  | { kind: 'postStats'; conversationId: string; postId: string; stats?: PostStats; reaction?: { liked: boolean; revision: number } }
   | { kind: 'directory'; conversations: TeamConversation[] }
   | { kind: 'messages'; conversationId: string; messages: TeamMessage[]; removed?: string[]; replace?: boolean; older?:boolean; rebase?:boolean; updatedIds?:string[] }
   | { kind: 'read'; conversationId: string; lastReadSeq: number; unreadCount?:number; manualUnreadRevision?:number;pendingActionRevision?:number;failureRevision?:number }
@@ -126,7 +136,8 @@ export function mergeConversation(old: TeamConversation | undefined, value: Team
     && (old.readers ?? []).join('\n') === (merged.readers ?? []).join('\n')
     && old.autoReply?.revision === merged.autoReply?.revision && (old.autoReply?.targets ?? []).join('\n') === (merged.autoReply?.targets ?? []).join('\n')
     && old.autoReply?.maxReplies === merged.autoReply?.maxReplies && old.autoReply?.humanMentions === merged.autoReply?.humanMentions
-    && sameBotScopes(old.botScopes, merged.botScopes)) return old;
+    && old.description === merged.description && JSON.stringify(old.posting) === JSON.stringify(merged.posting)
+    && JSON.stringify(old.channelAdmins) === JSON.stringify(merged.channelAdmins) && sameBotScopes(old.botScopes, merged.botScopes)) return old;
   return merged;
 }
 export function mergeDirectory(state: MessageProjection, incoming: TeamConversation[], replace: boolean): MessageProjection {
@@ -164,7 +175,7 @@ function failedCommand<T extends CommandMetadata>(intent: T, error: unknown, per
 /** Server verdicts that end an answer to a Bot's question for good: the wait is over, is not the viewer's, or the task lost its authority. */
 export const ANSWER_REFUSED = ['WAIT_CLOSED', 'WAIT_RECIPIENT_REQUIRED', 'WAIT_REQUIRED', 'TASK_REVOKED'];
 const isRevokedAccessError = (error: unknown) => error instanceof Error && ['MEMBERSHIP_REQUIRED', 'STALE_MEMBERSHIP', 'INVALID_SESSION', 'SIGN_IN_REQUIRED', 'CONVERSATION_REQUIRED'].includes(error.message);
-const isPermanentMessageError = (error: unknown) => error instanceof Error && ['MESSAGE_ID_CONFLICT', 'DATA_REFERENCE_UNAVAILABLE', 'DATA_ACCESS_REQUIRED', 'DATA_NOT_FOUND', 'MESSAGE_RECALLED', 'MESSAGE_AUTHOR_REQUIRED', 'REPLY_REQUIRED', 'MENTION_TARGET_REQUIRED', 'INVALID_INPUT', 'BOT_USE_REQUIRED', 'BOT_PARTICIPANT_REQUIRED', 'INVALID_BOT_TARGET', 'HOST_UNAVAILABLE', 'REQUEST_QUOTA_EXCEEDED', 'CONVERSATION_POLICY_REQUIRED', 'INPUT_GRANT_REQUIRED', 'BOT_RETIRED', 'COMMAND_ID_CONFLICT', ...ANSWER_REFUSED].includes(error.message);
+const isPermanentMessageError = (error: unknown) => error instanceof Error && ['MESSAGE_ID_CONFLICT', 'DATA_REFERENCE_UNAVAILABLE', 'DATA_ACCESS_REQUIRED', 'DATA_NOT_FOUND', 'MESSAGE_RECALLED', 'MESSAGE_AUTHOR_REQUIRED', 'REPLY_REQUIRED', 'CHANNEL_POSTING_DENIED', 'CHANNEL_POST_REQUIRED', 'CHANNEL_MODE_CHANGED', 'MENTION_TARGET_REQUIRED', 'INVALID_INPUT', 'BOT_USE_REQUIRED', 'BOT_PARTICIPANT_REQUIRED', 'INVALID_BOT_TARGET', 'HOST_UNAVAILABLE', 'REQUEST_QUOTA_EXCEEDED', 'CONVERSATION_POLICY_REQUIRED', 'INPUT_GRANT_REQUIRED', 'BOT_RETIRED', 'COMMAND_ID_CONFLICT', ...ANSWER_REFUSED].includes(error.message);
 const PREFETCH_HOVER_MS = 80;
 const PREFETCH_TIMEOUT_MS = 1500;
 const PREFETCH_MIN_INTERVAL_MS = 750;
@@ -253,7 +264,7 @@ export class TeamMessaging {
       && (kind === 'creation' ? command.action === 'createConversation' : command.action === 'submit' || command.action === 'answerWait');
     // Human-message commands retain the existing transport; no execution targets are accepted here.
     const fields = kind === 'creation' ? ['action', 'teamId', 'generation', 'conversationId', 'kind', 'title', 'participantUids']
-      : ['action', 'teamId', 'generation', 'conversationId', 'messageId', 'changeId', 'operation', 'text', 'replyTo', 'mentionEntities'];
+      : ['action', 'teamId', 'generation', 'conversationId', 'messageId', 'changeId', 'operation', 'text', 'replyTo', 'mentionEntities', 'channelMode'];
     return command.action === (kind === 'creation' ? 'create' : 'mutate') && Object.keys(command).every(key => fields.includes(key));
   }
   private async reload(): Promise<void> {
@@ -285,6 +296,7 @@ export class TeamMessaging {
   private receive(snapshot: MessageSnapshot): void {
     if (this.closed || snapshot.uid !== this.uid || snapshot.teamId !== this.scope.teamId || snapshot.generation !== this.scope.generation) return;
     if (snapshot.kind === 'error') { this.cancelPrefetch(); this.finishConnecting(); this.error = snapshot.error; this.offline = true; void this.deny(new Error(snapshot.error)); this.emit(); return; }
+    if (snapshot.kind === 'postStats') return;
     if (snapshot.kind === 'directory') {
       this.state = mergeDirectory(this.state, snapshot.conversations, true);
       const allowed = new Set(snapshot.conversations.map(value => value.id));
@@ -445,12 +457,14 @@ export class TeamMessaging {
     if (privateDataSource && (!/^[A-Za-z0-9_-]{1,64}$/u.test(privateDataSource)
       || operation !== 'create' || replyTo || selectedTargets.length !== 1 || attachments.length || dataRef)) throw new Error('INVALID_INPUT');
     const changeId = crypto.randomUUID();
+    const channelMode = conversation?.kind === 'channel' && operation === 'create' ? conversation.posting?.mode ?? 'chat' : undefined;
+    const channel = channelMode ? { channelMode } : {};
     // Files alone carry no text: surrounding spaces are not a message.
     const command: OutboxCommand = operation === 'create' && (selectedTargets.length || attachments.length)
-      ? executionCommand(this.scope, 'submit', { conversationId: this.selected, messageId, changeId, text: text.trim() ? text : '', targets: [...selectedTargets],
+      ? executionCommand(this.scope, 'submit', { conversationId: this.selected, messageId, changeId, text: text.trim() ? text : '', targets: [...selectedTargets], ...channel,
         ...(replyTo ? { replyTo } : {}), ...(attachments.length ? { attachments: [...attachments] } : {}),
         ...(privateDataSource ? { privateDataSource } : {}), ...(mentionEntities?.length ? { mentionEntities } : {}) })
-      : { action: 'mutate', ...this.scope, conversationId: this.selected, messageId, changeId, operation, text, ...(replyTo ? { replyTo } : {}), ...(dataRef ? { dataRef } : {}), ...(mentionEntities !== undefined ? { mentionEntities } : {}) };
+      : { action: 'mutate', ...this.scope, conversationId: this.selected, messageId, changeId, operation, text, ...channel, ...(replyTo ? { replyTo } : {}), ...(dataRef ? { dataRef } : {}), ...(mentionEntities !== undefined ? { mentionEntities } : {}) };
     const intent = { command, enqueuedAt: operation === 'create' ? new Date().toISOString() : undefined };
     await this.commit(old => ({ ...old, outbox: [...old.outbox, intent] }));
     void this.refresh();

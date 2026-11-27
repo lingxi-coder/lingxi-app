@@ -188,7 +188,7 @@ export interface MemberExecutionPayloads {
   listSharedBots: Record<string, never>;
   createConversation: { conversationId: string; kind: 'bot_dm' | 'group' | 'channel'; title: string; participantUids: string[]; sharedBotIds: string[] };
   /** A message that asks Bots, carries files (`attachments`: checked uploads of this sender for this conversation), or both. */
-  submit: { conversationId: string; messageId: string; changeId: string; text: string; targets: string[]; replyTo?: string; attachments?: string[]; privateDataSource?: string; mentionEntities?: import('./mentions.js').MentionEntity[] };
+  submit: { channelMode?: 'chat' | 'posts'; conversationId: string; messageId: string; changeId: string; text: string; targets: string[]; replyTo?: string; attachments?: string[]; privateDataSource?: string; mentionEntities?: import('./mentions.js').MentionEntity[] };
   createUpload: { conversationId: string; uploadId: string; name: string; mime: 'image/png' | 'image/jpeg' | 'application/pdf' | 'text/plain'; byteLength: number; sha256: string };
   putUploadPart: { uploadId: string; index: number; data: string };
   finalizeUpload: { uploadId: string };

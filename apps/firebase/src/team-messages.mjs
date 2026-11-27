@@ -4,6 +4,7 @@ import { recallVisualization } from './team-visualization-storage.mjs';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { mirrorHttpRead } from './inbox-store.mjs';
+import { channelCommand, channelFields, channelMessageFields, countPostReply, executeChannelCommand, interactWithPost } from './channel-settings.mjs';
 import { createTeamConversation } from './team-conversations.mjs';
 import { SharedBotsStore } from './shared-bots.mjs';
 import { authorizeDataBinding, dataReference } from './lingxi-data.mjs';
@@ -25,8 +26,10 @@ export const messageCommand = z.discriminatedUnion('action', [
     title: z.string().trim().min(1).max(120), participantUids: z.array(uid).min(1).max(200) }).strict(),
   z.object({ action: z.literal('sync'), ...thread, after: cursor, limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ action: z.literal('history'), ...thread, before: cursor.optional() }).strict(),
+  z.object({ action: z.literal('postHistory'), ...thread, postId: id, before: cursor.optional() }).strict(),
+  z.object({ action: z.literal('postInteraction'), ...thread, postId: id, liked: z.boolean().optional() }).strict(),
   z.object({ action: z.literal('mutate'), ...thread, messageId: id, changeId: id,
-    operation: z.enum(['create', 'edit', 'recall']), text: z.string(), replyTo: id.optional(), dataRef: dataReference.optional(), mentionEntities: mentionEntitiesSchema.optional() }).strict()
+    operation: z.enum(['create', 'edit', 'recall']), channelMode: z.enum(['chat', 'posts']).optional(), text: z.string(), replyTo: id.optional(), dataRef: dataReference.optional(), mentionEntities: mentionEntitiesSchema.optional() }).strict()
     .refine(value => value.operation === 'recall' ? value.text === '' : text.safeParse(value.text).success)
     .refine(value => validMentionEntities(value.text, value.mentionEntities))
     .refine(value => value.operation === 'create' || (value.replyTo === undefined && value.dataRef === undefined)),
@@ -44,7 +47,7 @@ const message = snapshot => {
 };
 function conversation(snapshot, read, generation) {
   const value = snapshot.data();
-  return { id: snapshot.id, kind: value.kind, title: value.title, participants: value.participants,
+  return { id: snapshot.id, kind: value.kind, title: value.title, participants: value.participants, ...channelFields(value),
     lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq,
     ...(value.autoReply ? { autoReply: { revision: value.autoReply.revision, targets: value.autoReply.targets,
       ...(value.autoReply.maxReplies !== undefined ? { maxReplies: value.autoReply.maxReplies } : {}),
@@ -58,6 +61,7 @@ function conversation(snapshot, read, generation) {
 export class TeamMessagesStore {
   constructor(db, clock = Date.now, readData) { this.db = db; this.clock = clock; this.readData = readData; }
   async execute(user, raw, share, visualization) {
+    if (raw?.action === 'channelSettings') return executeChannelCommand(this.db, user, channelCommand.parse(raw));
     if (raw?.schemaVersion !== undefined) return new SharedBotsStore(this.db, this.clock).execute(user, raw);
     // A hosted Bot service's sessions are read with the same commands, addressed by `serviceId`. They are written only
     // through the execution ledger, so nothing but reading is taken here.
@@ -105,6 +109,16 @@ export class TeamMessagesStore {
           tx.set(readRef, { lastReadSeq, generation: input.generation });
         }
         return { lastReadSeq };
+      }
+      if (input.action === 'postInteraction') return interactWithPost(tx, ref, c, user.uid, input.postId, input.liked);
+      if (input.action === 'postHistory') {
+        if (c.kind !== 'channel') fail(404, 'CHANNEL_POST_REQUIRED');
+        let query = ref.collection('messages').where('postId', '==', input.postId).orderBy('seq', 'desc');
+        if (input.before !== undefined) query = query.startAfter(input.before);
+        const [root, page] = await Promise.all([tx.get(ref.collection('messages').doc(input.postId)), tx.get(query.limit(51))]);
+        if (root.data()?.channelPost !== true) fail(404, 'CHANNEL_POST_REQUIRED');
+        const docs = page.docs.slice(0, 50);
+        return { root: message(root), replies: docs.map(message).reverse(), next: page.size > 50 ? docs.at(-1).data().seq : null };
       }
       if (input.action === 'history') {
         let q = ref.collection('messages').orderBy('seq', 'desc');
@@ -165,6 +179,8 @@ export class TeamMessagesStore {
         if (reads.slice(replyRefs.length).some(member => !member.exists)) fail(409, 'MENTION_TARGET_REQUIRED');
         replied = replyRefs.length ? reads[0].data() : undefined;
       }
+      const channelContent = input.operation === 'create'
+        ? channelMessageFields(c, `user:${user.uid}`, replied, input.replyTo, input.channelMode, fail) : {};
       const releaseFiles = input.operation === 'recall' ? await recallAttachments(tx, teamRef, m, clock) : () => {};
       // A recalled message takes its round and its waiting tasks with it.
       const recall = input.operation === 'recall' ? await recalled(tx, teamRef, input.messageId, m) : { write() {} };
@@ -181,14 +197,16 @@ export class TeamMessagesStore {
         const author = { kind: 'user', uid: user.uid };
         // The conversation list reads this pointer instead of the message; the author mirrors the message doc.
         Object.assign(update, { lastSeq: seq, lastMessage: { id: input.messageId, seq, at: now, author, preview: messagePreview(input.text) } });
-        tx.create(msgRef, { seq, author, kind: visualization ? 'visualization' : 'text', text: input.text,
+        tx.create(msgRef, { seq, author, kind: visualization ? 'visualization' : 'text', text: input.text, ...channelContent,
           ...(input.mentionEntities?.length ? mentionFields(input.mentionEntities) : {}),
           ...(share ? { resourceRef: share.reference, resourceGrant: share.grant } : {}),
           ...(visualization ? { visualization } : {}),
           ...(input.replyTo ? { replyTo: input.replyTo } : {}), ...(input.dataRef ? { dataRef: input.dataRef } : {}), createdAt: now, changeSeq, changeId: input.changeId });
         activateVisualization?.();
+        countPostReply(tx, ref, channelContent.postId);
         unasked.write(seq);
       } else {
+        if (input.operation === 'recall') countPostReply(tx, ref, m.postId, -1);
         if (input.operation === 'recall' && m.visualization) recallVisualization(tx, teamRef, m.visualization.reference, clock);
         const entities = input.operation === 'recall' ? []
           : input.mentionEntities ?? preserveMentionEntities(m.text, input.text, m.mentionEntities);

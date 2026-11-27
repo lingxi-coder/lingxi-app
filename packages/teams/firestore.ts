@@ -7,7 +7,7 @@ import { ATTACHMENT_TYPES, type MessageAttachment } from './attachments.js';
 import { decodeBotScopes } from './bot-scope.js';
 import { HUMAN_MENTION_MODES, MAX_REPLIES_LIMIT } from './execution-validation.js';
 import { FRIEND_CHAT, type BlockEntry, type FriendCard, type TeamOffer } from './friends.js';
-import type { ListApproval, ListApprovalChange, MessageScope, MessageSnapshot, TeamConversation, TeamMessage } from './messages.js';
+import type { ListApproval, ListApprovalChange, MessageScope, MessageSnapshot, PostStats, TeamConversation, TeamMessage } from './messages.js';
 
 function timestamp(value: unknown): string | null {
   if (value && typeof value === 'object' && 'toDate' in value && typeof value.toDate === 'function') return value.toDate().toISOString();
@@ -86,8 +86,11 @@ export function firestoreMessage(id: string, value: DocumentData): TeamMessage {
   const dataRef = value.recalled ? undefined : parseDataRef(value.dataRef);
   const resourceRef = !value.recalled && isResourceRef(value.resourceRef) ? value.resourceRef : undefined;
   const visualization = value.kind === 'visualization' && !value.recalled ? parseVisualization(value.visualization, id) : undefined;
+  const postStats = value.channelPost === true ? decodePostStats(value.postStats) : undefined;
   return { id, seq: value.seq, author: pointerAuthor(value.author), kind: value.kind, text: value.text, changeSeq: value.changeSeq, changeId: value.changeId,
     createdAt: timestamp(value.createdAt), editedAt: timestamp(value.editedAt), ...(value.replyTo ? { replyTo: value.replyTo } : {}),
+    ...(value.channelPost === true ? { channelPost: true as const } : {}), ...(typeof value.postId === 'string' ? { postId: value.postId } : {}),
+    ...(postStats ? { postStats } : {}),
     ...(value.recalled ? { recalled: true } : {}), ...(value.mentions ? { mentions: value.mentions } : {}), ...(mentionEntities.length ? { mentionEntities } : {}),
     ...(value.taskId ? { taskId: value.taskId } : {}), ...(value.taskIds ? { taskIds: value.taskIds } : {}), ...(value.artifactId ? { artifactId: value.artifactId } : {}),
     ...(value.waitId ? { waitId: value.waitId } : {}),
@@ -157,6 +160,44 @@ function recentMessagesQuery(sdk: typeof import('firebase/firestore'), db: Fires
   return sdk.query(sdk.collection(db, 'teams', scope.teamId, 'conversations', id, 'messages'), sdk.orderBy('seq', 'desc'), sdk.limit(50));
 }
 
+function decodePostStats(value: unknown): PostStats | undefined {
+  if (!value || typeof value !== 'object') return;
+  const stats = value as PostStats;
+  if ([stats.replies, stats.likes, stats.views, stats.revision].every(n => Number.isSafeInteger(n) && n >= 0))
+    return { replies: stats.replies, likes: stats.likes, views: stats.views, revision: stats.revision };
+}
+
+/** Visible posts listen to aggregate changes independently of the chat edit and unread cursors. */
+function watchPostStats(sdk: typeof import('firebase/firestore'), db: Firestore, uid: string, scope: MessageScope,
+  conversationId: string, postId: string, next: (snapshot: MessageSnapshot) => void, isCurrent: () => boolean): () => void {
+  let stopPost: (() => void) | undefined, stopViewer: (() => void) | undefined, active = true;
+  let stats: PostStats | undefined, reaction: { liked: boolean; revision: number } | undefined;
+  const root = ['teams', scope.teamId] as const;
+  const emit = () => {
+    if (active && isCurrent()) next({ ...scope, uid, kind: 'postStats', conversationId, postId, fromCache: false, stats, reaction });
+  };
+  const clear = () => { stopPost?.(); stopViewer?.(); stopPost = stopViewer = undefined; stats = reaction = undefined; emit(); };
+  const stopMember = sdk.onSnapshot(sdk.doc(db, ...root, 'members', uid), { includeMetadataChanges: true }, member => {
+    if (!active || !isCurrent()) return;
+    if (member.metadata.fromCache || member.data()?.generation !== scope.generation) { clear(); return; }
+    if (stopPost) return;
+    const ref = sdk.doc(db, ...root, 'conversations', conversationId, 'messages', postId);
+    stopPost = sdk.onSnapshot(ref, { includeMetadataChanges: true }, snap => {
+      if (snap.metadata.fromCache) return;
+      const post = snap.data();
+      stats = post?.channelPost && !post.recalled ? decodePostStats(post.postStats) : undefined;
+      emit();
+    }, clear);
+    stopViewer = sdk.onSnapshot(sdk.doc(ref, 'postViewers', uid), { includeMetadataChanges: true }, snap => {
+      if (snap.metadata.fromCache) return;
+      const own = snap.data();
+      reaction = { liked: own?.liked === true, revision: count(own?.revision) ?? 0 };
+      emit();
+    }, clear);
+  }, clear);
+  return () => { active = false; clear(); stopMember(); };
+}
+
 /** Warm only the SDK cache. The selected conversation watcher still owns message and read snapshots. */
 export function prefetchFirestoreMessages(sdk: typeof import('firebase/firestore'), db: Firestore, scope: MessageScope, id: string): () => void {
   // The short-lived listener also lets a click reuse the same live query while it is still subscribed.
@@ -165,7 +206,8 @@ export function prefetchFirestoreMessages(sdk: typeof import('firebase/firestore
 
 /** SDK snapshots are the only ordinary-message read path, including offline reads. */
 export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'), db: Firestore, uid: string, scope: MessageScope, conversationId: string,
-  next: (snapshot: MessageSnapshot) => void, isCurrent: () => boolean): () => void {
+  next: (snapshot: MessageSnapshot) => void, isCurrent: () => boolean, postId?: string): () => void {
+  if (postId) return watchPostStats(sdk, db, uid, scope, conversationId, postId, next, isCurrent);
   const { collection, doc, onSnapshot, orderBy, query, where } = sdk;
   let closed = false;
   const stops: (() => void)[] = [];
@@ -304,7 +346,8 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
               ...(Number.isSafeInteger(auto.maxReplies) && auto.maxReplies >= 1 && auto.maxReplies <= MAX_REPLIES_LIMIT ? { maxReplies: auto.maxReplies as number } : {}),
               ...((HUMAN_MENTION_MODES as readonly unknown[]).includes(auto.humanMentions) ? { humanMentions: auto.humanMentions as typeof HUMAN_MENTION_MODES[number] } : {}) } } : {};
           const botScopes = decodeBotScopes(value.botScopes);
-          return { id: id, kind: value.kind, title: value.title, participants: value.participants, ...readers, ...autoReply, ...(botScopes ? { botScopes } : {}), lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq, lastReadSeq: readSeq.get(id) ?? 0, ...(!readSeq.has(id)?{unreadCount:0}:{}), ...(lastMessage ? { lastMessage } : {}) };
+          return { id: id, kind: value.kind, title: value.title, participants: value.participants,
+            ...(value.kind === 'channel' ? { description: value.description, posting: value.posting, channelAdmins: value.channelAdmins } : {}), ...readers, ...autoReply, ...(botScopes ? { botScopes } : {}), lastSeq: value.lastSeq, lastChangeSeq: value.lastChangeSeq, lastReadSeq: readSeq.get(id) ?? 0, ...(!readSeq.has(id)?{unreadCount:0}:{}), ...(lastMessage ? { lastMessage } : {}) };
   }
   let sourceWindow:TeamConversation[]=[];
   let exact:TeamConversation|undefined, exactReady=!conversationId, stopExact:(()=>void)|undefined, windowCache=true;

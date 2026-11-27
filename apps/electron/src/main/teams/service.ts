@@ -53,7 +53,7 @@ export class TeamsService {
   private dataOperation: Promise<void> = Promise.resolve();
   private dataOpening?: Promise<import('./messageWindow.js').TeamsMessageSession>;
   private sdk?: typeof import('./firestore.js');
-  private readonly messageLeases = new Map<string, { uid: string; teamId: string; generation: number; conversationId: string; prefetch: boolean }>();
+  private readonly messageLeases = new Map<string, { uid: string; teamId: string; generation: number; conversationId: string; prefetch: boolean; postId?: string }>();
   private stops = new Map<string, () => void>();
   private failed = new Map<string, number>();
   private readonly stopAccount: () => void;
@@ -222,7 +222,7 @@ export class TeamsService {
       if (command.schemaVersion !== 1 || !['listSharedBots', 'createConversation', 'submit', 'pauseSharedBot', 'answerWait', 'cancelTask', 'getTask', 'listTasks', 'listTriage', 'listHeldReplies', 'approveReply', 'rejectReply', 'readArtifact', 'listArtifactRevisions', 'reviseArtifact', 'listOperations', 'resolveOperation', 'readList', 'writeList', 'listHistory', 'decideWait', 'setConversationPolicy', 'setConversationAutoReply', 'setConversationBotScope', 'endTransfer',
         'createUpload', 'putUploadPart', 'finalizeUpload', 'cancelUpload', 'readAttachmentPart', 'revokeAttachment'].includes(command.action)) throw new Error('INVALID_INPUT');
       if (command.action === 'pauseSharedBot') this.host?.stopBinding(command.teamId, command.payload.sharedBotId);
-    } else if (!['create', 'read', 'mutate'].includes(command.action)) throw new Error('INVALID_INPUT');
+    } else if (!['create', 'read', 'mutate', 'channelSettings', 'postHistory', 'postInteraction'].includes(command.action)) throw new Error('INVALID_INPUT');
     await this.connect(expectedUid);
     const result = await this.checked<T>(expectedUid, '/messages', command);
     if (['create','mutate','createConversation','submit','pauseSharedBot','answerWait','cancelTask','approveReply','rejectReply','setConversationPolicy','setConversationAutoReply','setConversationBotScope','endTransfer','revokeAttachment'].includes(command.action)) this.events.emit('messages');
@@ -238,13 +238,14 @@ export class TeamsService {
     this.assertHostContext(context);
     return result;
   }
-  async watchMessages(leaseId: string, uid: string, scope: { teamId: string; generation: number }, conversationId: string, prefetch = false): Promise<void> {
+  async watchMessages(leaseId: string, uid: string, scope: { teamId: string; generation: number }, conversationId: string, prefetch = false, postId?: unknown): Promise<void> {
+    if (postId !== undefined && (typeof postId !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/u.test(postId) || !conversationId || prefetch)) throw new Error('INVALID_INPUT');
     if (!/^[A-Za-z0-9_-]{8,64}$/u.test(scope.teamId) || !Number.isSafeInteger(scope.generation) || scope.generation < 1
       || (prefetch && !conversationId)
       || conversationId !== '' && !/^[A-Za-z0-9_-]{8,64}$/u.test(conversationId)) throw new Error('INVALID_INPUT');
     this.syncAccount();
     if (uid !== this.uid) throw new Error('INVALID_SESSION');
-    const lease = { uid, ...scope, conversationId, prefetch };
+    const lease = { uid, ...scope, conversationId, prefetch, ...(typeof postId === 'string' ? { postId } : {}) };
     this.messageLeases.set(leaseId, lease);
     try {
       await this.connectMessages(uid);
@@ -264,7 +265,7 @@ export class TeamsService {
       if (epoch !== this.epoch || !this.messageLeases.has(key.slice(3))) return;
       this.events.emit('snapshot', { leaseId: key.slice(3), snapshot });
       if (snapshot.kind === 'signal' || snapshot.kind === 'error') this.events.emit('messages', snapshot.kind === 'signal' ? snapshot.signal : undefined);
-    }, lease.prefetch));
+    }, lease.prefetch, lease.postId));
   }
   onMessageSnapshot(callback: (event: { leaseId: string; snapshot: MessageSnapshot }) => void): () => void {
     this.events.on('snapshot', callback); return () => { this.events.off('snapshot', callback); };
@@ -352,7 +353,7 @@ export class TeamsService {
   async hostMessages<T>(context: TeamAccountContext, command: Record<string, unknown>, openVisualization?: OpenBotVisualization): Promise<T> {
     this.assertHostContext(context);
     if (command.schemaVersion !== 1 || ![
-      'listSharedBots', 'publishSharedBot', 'heartbeatDeployment', 'activateDeployment', 'listHostTasks',
+      'listSharedBots', 'publishSharedBot', 'heartbeatDeployment', 'activateDeployment', 'listHostTasks', 'publishChannelMessage',
       'prepareTask', 'validateTask', 'startTask', 'completeTask', 'holdReply', 'pauseTask', 'continueTask', 'getTask',
       'readTaskList', 'recordOperation', 'writeTaskList', 'readAttachmentPart',
       'putTransferPart', 'offerTransfer', 'acceptTransfer', 'readTransferPart', 'completeTransfer', 'declineTask', 'recordTriage', 'listTriage', 'bidReply', 'delegateTask', 'detachDelegation',

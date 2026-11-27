@@ -1709,3 +1709,36 @@ test('auto-reply: a hosted Bot service cannot allow auto-reply', options, async 
     action: 'publishSharedBot', payload: publish({ autoReply: { daily: 5 } }) }));
 });
 
+
+test('channel bots use their own posting permissions on proactive posts and on reply delivery', options, async () => {
+  const conversationId = 'bot_posts';
+  const channelRef = db.doc(`teams/${teamId}/conversations/${conversationId}`);
+  await execute('createConversation', { conversationId, kind: 'channel', title: 'Bot posts',
+    participantUids: [owner.uid, member.uid], sharedBotIds: ['sharedbot_01'] }, member);
+  const rules = (selected, replies = 'all') => new TeamMessagesStore(db, () => now).execute(owner, {
+    action: 'channelSettings', teamId, generation: 1, request: { op: 'posting', conversationId,
+      posting: { mode: 'posts', senders: 'selected', selected, replies } },
+  });
+  await rules(['user:member']);
+  const publish = { ...host, conversationId, text: 'Morning notes', channelMode: 'posts' };
+  await assert.rejects(execute('publishChannelMessage', publish), { code: 'CHANNEL_POSTING_DENIED' });
+  await assert.rejects(execute('publishChannelMessage', publish, member), { code: 'DEPLOYMENT_REQUIRED' });
+  const admit = async () => {
+    const sent = await execute('submit', { ...submit(), conversationId, channelMode: 'posts' }, member);
+    const started = await execute('startTask', { ...host, taskId: sent.tasks[0].taskId, expectedLastChangeSeq: (await channelRef.get()).data().lastChangeSeq });
+    return { sent, started };
+  };
+  const first = await admit();
+  const allowed = await execute('completeTask', result(first.started, { document: undefined }));
+  assert.equal((await channelRef.collection('messages').doc(allowed.replyId).get()).data().postId, first.sent.messageId);
+  const second = await admit();
+  await rules(['user:member', 'shared_bot:sharedbot_01'], 'none');
+  const suppressed = await execute('completeTask', result(second.started, { document: undefined }));
+  assert.equal(suppressed.replyId, null);
+  const botPost = await execute('publishChannelMessage', publish, owner, 'bot-post-one');
+  assert.deepEqual(await execute('publishChannelMessage', publish, owner, 'bot-post-one'), botPost);
+  const root = (await channelRef.collection('messages').doc(botPost.messageId).get()).data();
+  assert.equal(root.channelPost, true);
+  assert.equal(root.author.sharedBotId, 'sharedbot_01');
+  assert.equal((await channelRef.collection('messages').where('postId', '==', second.sent.messageId).get()).size, 0);
+});

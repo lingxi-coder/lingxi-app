@@ -7,6 +7,8 @@ import type { FriendsApi } from '../../../../packages/teams/friends';
 import { ChatTopbarControl } from '../../../../packages/teams/ChatTopbar';
 import { useTeamsText } from '../../../../packages/teams/i18n';
 import '../../../../packages/teams/styles';
+import { ChannelJoinDialog } from '../../../../packages/teams/ChannelManagement';
+import type { ChannelInvite } from '../../../../packages/teams/channel-settings';
 import { TeamConversationView } from '../../../../packages/teams/TeamConversationView';
 import { TeamDetailsDrawer } from '../../../../packages/teams/TeamDetailsDrawer';
 import { TeamSidebar } from '../../../../packages/teams/TeamSidebar';
@@ -24,6 +26,8 @@ interface LayoutProps {
   locale: string;
   /** An invitation from a link: the join dialog opens with it filled in, but never joins by itself. */
   invite?: string;
+  channelInvite?: ChannelInvite;
+  onChannelInviteHandled?(): void;
   onInviteHandled?(): void;
   onInviteResolved?(): void;
   /** Without it members have no Add friend action (D15) and owners and admins no Invite friends action (D26). */
@@ -42,7 +46,7 @@ export function TeamsWorkspaceView({ api, uid, ...layout }: LayoutProps & { api:
  * on the right. Under 760px wide only one of the sidebar and the conversation is shown at a time. Wrap it in
  * `.teams-web`, which sets the workspace's colors from the site's theme.
  */
-export function TeamsWorkspaceLayout({ teams: { workspace, snapshot }, locale, invite, onInviteHandled, onInviteResolved, friends }: LayoutProps & { teams: UseTeams }) {
+export function TeamsWorkspaceLayout({ teams: { workspace, snapshot }, locale, invite, channelInvite, onChannelInviteHandled, onInviteHandled, onInviteResolved, friends }: LayoutProps & { teams: UseTeams }) {
   const t = useTeamsText(locale);
   const [drawer, setDrawer] = useState<DrawerTarget>();
   const [teamTab, setTeamTab] = useState<DrawerTab>('members');
@@ -66,8 +70,9 @@ export function TeamsWorkspaceLayout({ teams: { workspace, snapshot }, locale, i
         }}>{t('tw_back_conversations')}</button></ChatTopbarControl> : null}
         {invited ? <InviteNotice names={invited} locale={locale} onDone={() => setInvited(undefined)} /> : null}
         <TeamConversationView notificationTarget={noticeTargetFromSearch(typeof location==='undefined'?'':location.search)} workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown}
-          detailsOpen={drawer === 'conversation'} onToggleDetails={() => setDrawer(current => current === 'conversation' ? undefined : 'conversation')} />
+          onOpenChannelSettings={() => setDrawer(undefined)} detailsOpen={drawer === 'conversation'} onToggleDetails={() => setDrawer(current => current === 'conversation' ? undefined : 'conversation')} />
       </div>
+      {channelInvite && onChannelInviteHandled ? <ChannelJoinDialog key={channelInvite.code} workspace={workspace} snapshot={snapshot} locale={locale} invite={channelInvite} onClose={onChannelInviteHandled} onJoined={() => setPane('conversation')} /> : null}
       {drawer ? <TeamDetailsDrawer target={drawer} workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar}
         tab={drawer === 'team' ? teamTab : conversationTab} onTabChange={drawer === 'team' ? setTeamTab : setConversationTab}
         onClose={() => setDrawer(undefined)} onAddFriend={friends ? setAdding : undefined} onInviteFriends={friends ? () => setInviting(true) : undefined} /> : null}

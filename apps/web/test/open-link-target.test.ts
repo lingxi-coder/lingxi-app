@@ -4,6 +4,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { buildDeepLink, parseDeepLink } from '../../../packages/deep-links/index';
 import { parseChatRoute } from '../src/app/router';
+import { postShareLink } from '../../../packages/teams/share';
 import { agentShareLink, SHARED_PROMPT_LIMIT } from '../src/chat/agent/share';
 import { OpenInAppBanner } from '../src/chat/OpenInAppBanner';
 import { appLinkForChat, linkInBrowser, sharedPrompt, withViaLink } from '../src/pages/openLinkTarget';
@@ -18,6 +19,18 @@ test('a shared conversation link continues at the same conversation in the Chat 
   assert.equal(web('https://lingxios.net/open/team/bot?team=design-team&bot=Helper_01'), '/chat/bot/design-team/Helper_01', 'ids keep their case');
   assert.equal(web('https://lingxios.net/open/friend/chat?uid=UidB'), '/chat/friend/UidB');
   for (const path of ['/chat/team/design-team/c_1', '/chat/bot/design-team/Helper_01', '/chat/friend/UidB']) assert.ok(parseChatRoute(path), path);
+});
+
+test('a shared channel post identifies the same post on Web and Desktop without a team invitation', () => {
+  const url = new URL(postShareLink('studio-team', 'field-notes', 'flower-study'));
+  const target = parseChatRoute(url.pathname);
+  assert.deepEqual(target, { kind: 'team', teamId: 'studio-team', conversationId: 'field-notes', postId: 'flower-study' });
+  assert.equal(url.searchParams.get('via'), 'link');
+  const native = appLinkForChat(target!);
+  assert.ok(native);
+  assert.equal(web(native), url.pathname);
+  assert.throws(() => parseDeepLink(native + '&code=' + 'x'.repeat(32)));
+  assert.equal(parseChatRoute(url.pathname.replace('flower-study','%2F')), null);
 });
 
 test('a shared prompt becomes a new chat with the prompt in the composer; other links keep the Open LingXi page', () => {

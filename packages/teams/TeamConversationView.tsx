@@ -2,7 +2,9 @@ import { mentionTextParts } from './mentions.js';
 import {SourceNoticePreview} from '../inbox/SourceNoticePreview';
 import type {InboxNoticeTarget} from '../inbox/contracts';
 import { durableReadFrontier,observeTranscript,type VisibleReadFrontier } from '../inbox/visibility.js';
-import { Fragment, memo, useContext, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
+import { Fragment, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
+import { ChannelSettingsPage } from './ChannelManagement';
+import { canChannelSend } from './channel-settings';
 import { ChatTopbarHeader, ChatTopbarTarget, TopbarConnection } from './ChatTopbar';
 import { useTeamTasks } from './bot-runs.js';
 import type { TeamTaskView } from './execution.js';
@@ -23,6 +25,7 @@ import { DatasetPageCard, DatasetPagePublisher } from './DatasetPage.js';
 import { ReportCard } from './ReportViews.js';
 import { parseReportLink } from './reports.js';
 import { MessageFiles } from './MessageFiles';
+import { PostActions } from './PostActions';
 import type { MessageAttachment } from './attachments.js';
 import { executionCommand } from './execution.js';
 import { createsMessage, pendingPayload, type TeamConversation, type TeamMessage, type VisiblePendingMessage } from './messages.js';
@@ -37,8 +40,8 @@ import { maintainsBot, triageBots } from './triage-log.js';
 import { HeldReplyCard } from './HeldReplyCard';
 import { useHeldReplies } from './held-hooks.js';
 import { heldReplyBots, placeHeld, type HeldRow } from './held-replies.js';
-import { buildStreamRows, formatClock, placeTasks, visibleStart, WINDOW_SIZE } from './stream.js';
-import { Avatar, ConversationLead, Dialog, Icon, platformChip, platformNotice, useIsoLayoutEffect, type RenderAvatar, type RenderMarkdown } from './ui';
+import { buildStreamRows, formatClock, formatPostTime, placeTasks, visibleStart, WINDOW_SIZE, type StreamRow } from './stream.js';
+import { Avatar, ConversationLead, Dialog, Icon, PopupMenu, platformChip, platformNotice, useIsoLayoutEffect, type MenuItem, type RenderAvatar, type RenderMarkdown } from './ui';
 import { conversationLabel, unreadCount, type Identity, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';
 import { intlTag, teamsText, useTeamsText } from './i18n.js';
 
@@ -54,11 +57,14 @@ export interface FriendHeader {
 
 export interface TeamConversationViewProps {
   notificationTarget?:InboxNoticeTarget;
+  sharedPostId?: string;
+  onExitPost?(): void;
   workspace: TeamsWorkspace;
   snapshot: TeamsSnapshot;
   /** Whether the details drawer is open. With `onToggleDetails` the header shows a button for it. */
   detailsOpen?: boolean;
   onToggleDetails?(): void;
+  onOpenChannelSettings?(): void;
   renderAvatar?: RenderAvatar;
   /** Renders a shared Bot's messages and documents as Markdown. People's messages stay plain text. */
   renderMarkdown?: RenderMarkdown;
@@ -124,7 +130,7 @@ export function TeamConversationView(props: TeamConversationViewProps): ReactEle
     </section></>;
   }
   if(notificationTarget && token!==dismissed)return <SourceNoticePreview api={props.workspace.api} kind="team" sourceId={team.id} generation={team.generation} conversationId={conversation.id} locale={locale} target={notificationTarget} onReturn={()=>setDismissed(token)} />;
-  return <ConversationPane key={`${snapshot.uid}:${team.id}:${team.generation}:${conversation.id}`} {...props} conversation={conversation} model={model} team={team} />;
+  return <ConversationPane key={`${snapshot.uid}:${team.id}:${team.generation}:${conversation.id}:${props.sharedPostId ?? ''}`} {...props} conversation={conversation} model={model} team={team} />;
 }
 
 export function CreationBanner({ workspace, snapshot, locale }: { workspace: TeamsWorkspace; snapshot: TeamsSnapshot; locale: string }): ReactElement | null {
@@ -140,12 +146,31 @@ export function CreationBanner({ workspace, snapshot, locale }: { workspace: Tea
 
 type Pane = TeamConversationViewProps & { conversation: TeamConversation; model: NonNullable<TeamsSnapshot['messaging']>; team: NonNullable<TeamsSnapshot['team']> };
 
-function ConversationPane({ workspace, snapshot, conversation, model, team, detailsOpen, onToggleDetails, renderAvatar, renderMarkdown, locale, now, friend, onBack }: Pane): ReactElement {
+function ConversationPane({ workspace, snapshot, conversation, model, team, detailsOpen, onToggleDetails, onOpenChannelSettings, renderAvatar, renderMarkdown, locale, now, friend, onBack, sharedPostId, onExitPost }: Pane): ReactElement {
   const t = useTeamsText(locale);
   const hasTopbar = useContext(ChatTopbarTarget) !== undefined;
   const uid = snapshot.uid, messages = snapshot.messages, tag = intlTag(locale);
   const channel = conversation.kind === 'channel';
-  const minute = Math.floor((now === undefined ? Date.now() : typeof now === 'number' ? now : now.getTime()) / 60_000);
+  const postsMode = channel && conversation.posting?.mode === 'posts';
+  const [currentMinute, setCurrentMinute] = useState(() => Math.floor(Date.now() / 60000));
+  useEffect(() => {
+    if (now !== undefined || !channel) return;
+    const tick = () => setCurrentMinute(Math.floor(Date.now() / 60000));
+    const timer = setInterval(tick, 60000);
+    document.addEventListener('visibilitychange', tick);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', tick); };
+  }, [now, channel]);
+  const minute = now === undefined ? (channel ? currentMinute : Math.floor(Date.now() / 60000)) : Math.floor(Number(now) / 60000);
+  const [threadPages, setThreadPages] = useState<Record<string, { root: TeamMessage; replies: TeamMessage[]; next: number | null }>>({});
+  const [threadLoading, setThreadLoading] = useState(new Set<string>());
+  const threadRequests = useRef(new Set<string>());
+  const [threadErrors, setThreadErrors] = useState(new Set<string>());
+  const [settings, setSettings] = useState(false);
+  const gear = useRef<HTMLButtonElement>(null);
+  const returnToGear = useRef(false);
+  useIsoLayoutEffect(() => {
+    if (!settings && returnToGear.current) { gear.current?.focus(); returnToGear.current = false; }
+  }, [settings]);
   const [startId, setStartId] = useState<string>();
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const requestingEarlier = useRef(false);
@@ -179,7 +204,15 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   const unread = unreadCount(conversation);
   const start = useMemo(() => visibleStart(messages, { startId, lastReadSeq: conversation.lastReadSeq, uid }), [messages, startId, conversation.lastReadSeq, uid]);
   const visible = useMemo(() => messages.slice(start), [messages, start]);
-  const byId = useMemo(() => new Map(messages.map(message => [message.id, message])), [messages]);
+  const byId = useMemo(() => {
+    const indexed = new Map<string, TeamMessage>();
+    for (const page of Object.values(threadPages)) {
+      indexed.set(page.root.id, page.root);
+      for (const reply of page.replies) indexed.set(reply.id, reply);
+    }
+    for (const message of messages) indexed.set(message.id, message);
+    return indexed;
+  }, [messages, threadPages]);
   const { outgoing, operations } = useMemo(() => {
     const outgoing = new Map<string, { message: TeamMessage; intent: VisiblePendingMessage; fileCount: number }>();
     const operations: VisiblePendingMessage[] = [];
@@ -189,10 +222,14 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
         operations.push(intent);
         continue;
       }
+      const replyTo = 'replyTo' in payload ? payload.replyTo : undefined;
+      const target = replyTo ? byId.get(replyTo) : undefined;
+      const postId = target?.postId ?? (target?.channelPost ? replyTo : undefined);
       const message: TeamMessage = {
         id: payload.messageId, seq: 0, changeId: payload.changeId, changeSeq: 0, author: { kind: 'user', uid },
         kind: 'text', text: payload.text, createdAt: intent.enqueuedAt ?? null,
-        replyTo: 'replyTo' in payload ? payload.replyTo : undefined,
+        replyTo,
+        ...(postId ? { postId } : 'channelMode' in payload && payload.channelMode === 'posts' && !replyTo ? { channelPost: true as const } : {}),
         mentionEntities: 'mentionEntities' in payload ? payload.mentionEntities : undefined,
         dataRef: 'dataRef' in payload ? payload.dataRef : undefined,
       };
@@ -202,6 +239,85 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   }, [snapshot.pending, byId, uid]);
   const rows = useMemo(() => buildStreamRows(outgoing.size ? [...visible, ...Array.from(outgoing.values(), value => value.message)] : visible,
     { lastReadSeq: conversation.lastReadSeq, uid, locale: tag, now: minute * 60_000 }), [visible, outgoing, conversation.lastReadSeq, uid, tag, minute]);
+  const loadPost = useCallback(async (postId: string, older = false) => {
+    if (threadRequests.current.has(postId) || (!older && threadPages[postId])) return;
+    threadRequests.current.add(postId);
+    setThreadLoading(new Set(threadRequests.current));
+    setThreadErrors(previous => new Set([...previous].filter(id => id !== postId)));
+    const before = older ? threadPages[postId]?.next ?? undefined : undefined;
+    try {
+      const page = await workspace.api.messages<{ root: TeamMessage; replies: TeamMessage[]; next: number | null }>({
+        action: 'postHistory', teamId: team.id, generation: team.generation, conversationId: conversation.id, postId, ...(before !== undefined ? { before } : {}),
+      });
+      setThreadPages(previous => ({ ...previous, [postId]: {
+        ...page, replies: [...page.replies, ...(before !== undefined ? previous[postId]?.replies ?? [] : [])],
+      } }));
+    } catch { setThreadErrors(previous => new Set(previous).add(postId)); }
+    finally { threadRequests.current.delete(postId); setThreadLoading(new Set(threadRequests.current)); }
+  }, [threadPages, workspace.api, team.id, team.generation, conversation.id]);
+  useEffect(() => {
+    if (sharedPostId && !snapshot.offline && !threadErrors.has(sharedPostId)) void loadPost(sharedPostId);
+  }, [sharedPostId, snapshot.offline, threadErrors, loadPost]);
+  const { postReplies, timeline } = useMemo(() => {
+    const replies = new Map<string, Extract<(typeof rows)[number], { type: 'message' }>[]>();
+    const roots = new Set<string>();
+    for (const row of rows) if (row.type === 'message') {
+      if (row.message.channelPost) roots.add(row.message.id);
+      if (row.message.postId) {
+        const thread = replies.get(row.message.postId) ?? [];
+        thread.push(row);
+        replies.set(row.message.postId, thread);
+      }
+    }
+    for (const [id, page] of Object.entries(threadPages)) {
+      const loaded = replies.get(id) ?? [];
+      const byId = new Map(page.replies.map(message => [message.id, { type: 'message' as const, key: message.id, message, grouped: false }]));
+      for (const row of loaded) byId.set(row.message.id, row);
+      replies.set(id, [...byId.values()].sort((a, b) => (a.message.seq || Infinity) - (b.message.seq || Infinity)));
+    }
+    if (!replies.size) return { postReplies: replies, timeline: rows };
+    const shown = new Set<string>();
+    const timeline: (StreamRow | { type: 'missingPost'; key: string; postId: string })[] = [];
+    let date: Extract<StreamRow, { type: 'date' }> | undefined;
+    let unread: Extract<StreamRow, { type: 'unread' }> | undefined;
+    let followedReply = false;
+    for (const row of rows) {
+      if (row.type === 'date') { date = row; continue; }
+      if (row.type === 'unread') { unread = row; continue; }
+      const id = row.message.postId;
+      if (id && (roots.has(id) || shown.has(id))) {
+        followedReply = true;
+        continue;
+      }
+      if (date) timeline.push({ ...date, key: date.key + ':' + row.key });
+      if (unread) timeline.push(unread);
+      if (id) {
+        const root = threadPages[id]?.root;
+        timeline.push(root ? { type: 'message', key: 'message:' + root.id, message: root, grouped: false } : { type: 'missingPost', key: id, postId: id });
+        shown.add(id);
+      } else timeline.push(followedReply && row.grouped ? { ...row, grouped: false } : row);
+      date = undefined;
+      unread = undefined;
+      followedReply = false;
+    }
+    if (unread) timeline.push(unread);
+    return { postReplies: replies, timeline };
+  }, [rows, threadPages]);
+  const focusedPost = sharedPostId ? byId.get(sharedPostId) : undefined;
+  const chatDates = useMemo(() => {
+    const dates = new Set<string>();
+    if (postsMode) {
+      let day: string | undefined;
+      for (const row of timeline) {
+        if (row.type === 'date') day = row.key;
+        else if (day && row.type === 'message' && !row.message.channelPost) dates.add(day);
+      }
+    }
+    return dates;
+  }, [postsMode, timeline]);
+  const feed = sharedPostId
+    ? (focusedPost?.channelPost ? [{ type: 'message' as const, key: focusedPost.id, message: focusedPost, grouped: false }] : [])
+    : timeline;
   const runs = useTeamTasks(workspace.api, { teamId: team.id, generation: team.generation }, conversation.id, !friend);
   const membersById = useMemo(() => new Map(snapshot.directory.map(member => [member.uid, member])), [snapshot.directory]);
   const botsById = useMemo(() => new Map(snapshot.bots.map(bot => [bot.sharedBotId, bot])), [snapshot.bots]);
@@ -321,7 +437,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   const loadingMessages = !messages.length && conversation.lastSeq > 0;
 
   // ── Scrolling: open at the first unread message (else the newest), follow the newest while at the bottom ──
-  const toBottom = () => { const node = scroller.current; if (node) node.scrollTop = node.scrollHeight; };
+  const toBottom = () => { const node = scroller.current; if (node && !sharedPostId) node.scrollTop = node.scrollHeight; };
   const measure = () => {
     const node = scroller.current;
     if (!node) return;
@@ -375,7 +491,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
     const node = content.current, box = scroller.current;
     if (!node || !box || typeof ResizeObserver === 'undefined') return;
     // Cards, images, and the composer can change how much of the latest message is visible.
-    const observer = new ResizeObserver(() => { if (pinnedRef.current) box.scrollTop = box.scrollHeight; });
+    const observer = new ResizeObserver(() => { if (pinnedRef.current && !sharedPostId) box.scrollTop = box.scrollHeight; });
     observer.observe(node);
     observer.observe(box);
     return () => observer.disconnect();
@@ -427,7 +543,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
     if (await workspace.run(() => workspace.api.messages(executionCommand(scope, 'revokeAttachment', { attachmentId: target.attachmentId, changeId: crypto.randomUUID() })))) setTakeBack(undefined);
   };
   const subtitle = conversationSubtitle(conversation, snapshot, locale);
-  const hasChannelSettings = channel && !!onToggleDetails;
+  const hasChannelSettings = channel && !friend;
   const auto = friend || hasChannelSettings ? { bots: [], on: [] } : autoReplyBots(conversation, snapshot);
   const limitable = friend || hasChannelSettings ? [] : scopedBots(conversation, snapshot);
   const logBots = friend ? [] : triageBots(conversation, snapshot.bots, uid, team.generation).filter(bot => !triageDenied.includes(bot.sharedBotId));
@@ -436,8 +552,12 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   // friendship's Bot DM (reached with Back) has no link of its own.
   const link = !(onBack && conversation.kind === 'bot_dm') ? conversationShareLink(team.id, conversation) : null;
 
-  return <section className="tw-scope tw-conv" aria-label={label}>
-    <ChatTopbarHeader><header className="tw-conv-head">
+  const settingsLabel = t('tw_channel_settings');
+  return <>
+    {settings && channel ? <ChannelSettingsPage workspace={workspace} snapshot={snapshot} locale={locale} conversation={conversation}
+      onClose={() => { returnToGear.current = true; setSettings(false); }} /> : null}
+    <section className="tw-scope tw-conv" aria-label={label} hidden={settings} style={settings ? { display: 'none' } : undefined}>
+    {!settings ? <ChatTopbarHeader><header className="tw-conv-head">
       {onBack ? <button type="button" className="tw-icon-btn" aria-label={t('remote_back')} title={t('remote_back')} onClick={onBack}><Icon name="chevronLeft" /></button> : null}
       <div className="tw-conv-identity">
         {friend ? <Avatar identity={{ kind: 'user', id: friend.uid, name: friend.name }} size={hasTopbar ? 32 : 40} render={renderAvatar} />
@@ -482,9 +602,11 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
         {auto.bots.length ? <button type="button" className="tw-icon-btn" aria-pressed={auto.on.length > 0} aria-label={t('teams_auto_reply_title')} title={t('teams_auto_reply_title')} onClick={() => setAutoReplyOpen(true)}><Icon name="bot" /></button> : null}
         {limitable.length ? <button type="button" className="tw-icon-btn" aria-label={t('teams_bot_scope_title')} title={t('teams_bot_scope_title')} onClick={() => setBotScopeOpen(true)}><Icon name="sliders" /></button> : null}
         {logBots.length ? <button type="button" className="tw-icon-btn" aria-label={t('teams_triage_title')} title={t('teams_triage_title')} onClick={() => setTriageOpen(true)}><Icon name="clock" /></button> : null}
+        {hasChannelSettings ? <button ref={gear} type="button" className="tw-icon-btn" aria-label={settingsLabel} title={settingsLabel}
+          onClick={() => { onOpenChannelSettings?.(); setSettings(true); }}><Icon name="gear" /></button> : null}
         {onToggleDetails && !friend ? <button type="button" className="tw-icon-btn" aria-pressed={!!detailsOpen} aria-label={t(channel ? 'tw_channel_details' : 'teams_team_details')} title={t(channel ? 'tw_channel_details' : 'teams_team_details')} onClick={onToggleDetails}><Icon name="panel" /></button> : null}
       </div>
-    </header></ChatTopbarHeader>
+    </header></ChatTopbarHeader> : null}
     {readError?<p role="status">{locale.startsWith('zh')?'已读状态暂时无法同步':'Read status could not sync'}</p>:null}
     {!hasTopbar && (snapshot.messagingError
       ? <div className="tw-banner" role="alert" data-kind="error"><span>{messageErrorText(snapshot.messagingError, locale)}</span><button type="button" className="tw-link" onClick={() => workspace.reconnect()}>{t('teams_reconnect')}</button></div>
@@ -499,20 +621,31 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
     {held.view.status === 'failed' && held.view.error && held.view.error !== runs.error
       ? <div role="alert" className="tw-banner" data-kind="error"><span>{heldReplyErrorText(held.view.error, locale)}</span><button type="button" className="tw-link" onClick={held.reload}>{t('common_retry')}</button></div> : null}
 
-    <div className="tw-stream-wrap tw-chat-thread">
+    <div className="tw-stream-wrap tw-chat-thread" data-posts-mode={postsMode || Boolean(sharedPostId) || undefined}>
       <div ref={scroller} className="tw-stream" role="log" aria-label={t('tw_messages')} tabIndex={0} onScroll={measure}>
-        {start > 0 || (messages[0]?.seq ?? 0) > 1 && workspace.api.historyPage ? <div className="tw-earlier">
+        {sharedPostId && <div className="tw-post-context">
+          <button type="button" className="tw-link" onClick={onExitPost}><Icon name="chevronLeft" />{t('tw_channel_back')}</button>
+          {!focusedPost?.channelPost && (threadErrors.has(sharedPostId) ? <p role="alert">{t('tw_channel_load_post_failed')} <button type="button" disabled={snapshot.offline} onClick={() => void loadPost(sharedPostId)}>{t('common_retry')}</button></p>
+            : <p role="status">{t(snapshot.offline ? 'teams_offline_title' : 'teams_loading_messages')}</p>)}
+        </div>}
+        {!sharedPostId && (start > 0 || (messages[0]?.seq ?? 0) > 1 && workspace.api.historyPage) ? <div className="tw-earlier">
           <button type="button" aria-disabled={loadingEarlier} onClick={() => void showEarlier()}>
             <span role="status">{t(loadingEarlier ? 'teams_loading_messages' : 'teams_messages_earlier')}</span>
           </button>
         </div> : null}
-        {!messages.length && !snapshot.pending.length && !runs.tasks.length ? loadingMessages
+        {!sharedPostId && !messages.length && !snapshot.pending.length && !runs.tasks.length ? loadingMessages
           ? <p className="tw-empty-line" role="status">{t('teams_loading_messages')}</p>
           : <div className="tw-empty" role="status"><h3>{t('teams_preview_none')}</h3><p>{t('teams_empty_thread_hint')}</p></div> : null}
         <ol ref={content} className="tw-messages">
-          {unanswered.head.map(taskRow)}
-          {rows.map(row => {
-            if (row.type === 'date') return <li key={row.key} className="tw-date"><span>{row.label}</span></li>;
+          {!sharedPostId && unanswered.head.map(taskRow)}
+          {feed.map(function renderRow(row): ReactNode {
+            if (row.type === 'missingPost') return <li key={row.key} className="tw-post-context">
+              <button type="button" className="tw-link" disabled={threadLoading.has(row.postId) || snapshot.offline} onClick={() => void loadPost(row.postId)}>
+                {threadLoading.has(row.postId) ? t('teams_loading_messages') : t('tw_channel_open_post')}
+              </button>
+              {threadErrors.has(row.postId) ? <p role="alert">{t('tw_channel_load_post_failed')}</p> : null}
+            </li>;
+            if (row.type === 'date') return !postsMode || chatDates.has(row.key) ? <li key={row.key} className="tw-date"><span>{row.label}</span></li> : null;
             if (row.type === 'unread') return <li key={row.key} className="tw-unread" data-unread-divider=""><span>{t('teams_new_messages_divider')}</span></li>;
             const message = row.message, author = authorOf(message), mine = isMine(message);
             const pending = outgoing.get(message.id);
@@ -528,12 +661,14 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
             const approval = question && !message.recalled ? message.approval : undefined;
             const waiting = question ? waitingById.get(message.waitId!) : undefined;
             const answering = answerable(waiting) ? waiting : undefined;
-            const placed = unanswered.after.get(message.id), grouped = row.grouped && !afterTask && !question;
+            const thread = postReplies.get(message.id), page = threadPages[message.id];
+            const canReply = !pending && !lock && !message.recalled && canChannelSend(conversation, uid, message);
+            const placed = unanswered.after.get(message.id), grouped = row.grouped && !afterTask && !question && !message.channelPost && !message.postId;
             afterTask = !!placed;
             return <Fragment key={row.key}><MessageItem message={localized(message)} grouped={grouped} author={author} mine={mine} owner={message.author.kind === 'shared_bot' ? nameOf(botsById.get(message.author.sharedBotId)?.maintainer.uid ?? '') : ''}
-              quote={quoteOf(message)} locale={tag} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} question={question && !approval} approval={!!approval} pending={delivery}
+              quote={message.postId && message.replyTo === message.postId ? undefined : quoteOf(message)} locale={tag} now={minute * 60000} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} question={question && !approval} approval={!!approval} pending={delivery}
               read={mine && message === tail && peerRead !== null && peerRead >= message.seq}
-              onReply={pending || lock ? undefined : answering ? () => startAnswer(answering) : answer} onEdit={!pending && mine && participant && !message.decision && message.kind !== 'visualization' ? edit : undefined} onRecall={!pending && mine && participant && !message.decision ? setRecall : undefined}>
+              onReply={!canReply || message.channelPost ? undefined : answering ? () => startAnswer(answering) : answer} onEdit={!pending && mine && participant && !message.decision && message.kind !== 'visualization' ? edit : undefined} onRecall={!pending && mine && participant && !message.decision ? setRecall : undefined}>
               {message.readFiles?.length && !message.recalled ? <p className="tw-msg-sources" title={message.readFiles.map(file => file.name).join('\n')}>
                 <Icon name="clip" size={12} /> {t('tw_conv_read_files_fmt', message.readFiles.map(file => file.name).join(t('tw_list_separator')))}</p> : null}
               {message.resourceRef && message.resourceRef.kind !== 'pageVersion' && message.resourceGrant && !message.recalled
@@ -556,17 +691,30 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
                 reference={message.dataRef} locale={locale} allowEdit /> : null}
               {!message.recalled && parseReportLink(message.text) && <ReportCard key={message.text} api={workspace.api}
                 scope={{ kind: 'team', ...scope, conversationId: conversation.id }} reference={parseReportLink(message.text)!} locale={locale} />}
-              {message.attachments?.length && !message.recalled ? <MessageFiles api={workspace.api} scope={scope} files={message.attachments} locale={locale} onRevoke={mine && participant ? file => setTakeBack(file) : undefined} /> : null}
+              {message.attachments?.length && !message.recalled ? <MessageFiles api={workspace.api} scope={scope} files={message.attachments}
+                locale={locale} layout={message.channelPost ? 'gallery' : undefined} onRevoke={mine && participant ? file => setTakeBack(file) : undefined} /> : null}
               {approval ? <div className="tw-embed"><ApprovalCard api={workspace.api} scope={scope} conversationId={conversation.id} message={message} approval={approval} locale={locale} onChanged={runs.refresh} {...approvalOf(message, waiting)} /></div> : null}
               {answering && !pendingWaits.has(message.waitId!)
                 ? <div className="tw-embed"><div className="teams-row-actions"><button type="button" aria-label={t('tw_run_reply')} onClick={() => startAnswer(answering)}>{t('teams_message_reply')}</button></div></div> : null}
               {message.artifactId && !tasks?.some(task => task.artifactId === message.artifactId) ? <ArtifactButton key={message.artifactId} api={workspace.api} scope={scope} artifactId={message.artifactId} locale={locale} renderMarkdown={renderMarkdown} people={snapshot} replyText={replyText} /> : null}
               {tasks?.map(task => <div className="tw-embed" key={task.taskId}>{botRun(task, replyText)}</div>)}
-            </MessageItem>{placed?.map(taskRow)}</Fragment>;
+              {message.channelPost && !pending ? <PostActions api={workspace.api} scope={scope} conversationId={conversation.id} post={message} locale={tag}
+                online={!snapshot.offline} participant={participant} knownReplies={thread?.filter(row => !row.message.recalled).length ?? 0}
+                threadComplete={page?.next === null}
+                openForReply={sharedPostId === message.id || reply?.id === message.id || reply?.postId === message.id}
+                needsThread={!page && !threadLoading.has(message.id) && !threadErrors.has(message.id)}
+                loadThread={() => void loadPost(message.id)} onReply={canReply ? () => answering ? startAnswer(answering) : answer(message) : undefined}>
+                  {page?.next || threadErrors.has(message.id) ? <button type="button" className="tw-link" disabled={threadLoading.has(message.id) || snapshot.offline}
+                    onClick={() => void loadPost(message.id, Boolean(page?.next))}>{threadErrors.has(message.id) ? t('common_retry') : t('teams_messages_earlier')}</button> : null}
+                  {threadLoading.has(message.id) ? <p role="status">{t('teams_loading_messages')}</p> : null}
+                  {thread?.length ? <ol className="tw-messages">{thread.map(renderRow)}</ol> : page && !threadLoading.has(message.id)
+                    ? <p>{t('tw_channel_replies_empty')}</p> : null}
+              </PostActions> : null}
+            </MessageItem>{!sharedPostId && placed?.map(taskRow)}</Fragment>;
           })}
-          {unanswered.tail.map(taskRow)}
-          {placedHeld.orphans.map(row => <HeldReplyRow key={`held:${row.reply.taskId}`} row={row} author={botIdentity(row.reply.sharedBotId)} renderAvatar={renderAvatar} locale={locale}>{heldCard(row)}</HeldReplyRow>)}
-          {operations.map(intent => {
+          {!sharedPostId && unanswered.tail.map(taskRow)}
+          {!sharedPostId && placedHeld.orphans.map(row => <HeldReplyRow key={`held:${row.reply.taskId}`} row={row} author={botIdentity(row.reply.sharedBotId)} renderAvatar={renderAvatar} locale={locale}>{heldCard(row)}</HeldReplyRow>)}
+          {!sharedPostId && operations.map(intent => {
             const payload = pendingPayload(intent);
             const operation = 'operation' in payload ? payload.operation : 'create';
             return <li key={payload.changeId} className="tw-msg tw-pending" data-mine="true" data-error={intent.error ? 'true' : undefined}>
@@ -580,12 +728,12 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
           })}
         </ol>
       </div>
-      {!pinned || (tail && tail.seq < conversation.lastSeq) ? <button type="button" className="tw-jump" onClick={() => { if(tail && tail.seq<conversation.lastSeq) model.select(conversation.id); void workspace.markRead(); toBottom(); pinnedRef.current = true; setPinned(true); }}>
+      {!sharedPostId && (!pinned || (tail && tail.seq < conversation.lastSeq)) ? <button type="button" className="tw-jump" onClick={() => { if(tail && tail.seq<conversation.lastSeq) model.select(conversation.id); void workspace.markRead(); toBottom(); pinnedRef.current = true; setPinned(true); }}>
         <Icon name="arrowDown" />{unseen > 0 ? t('teams_new_messages_pill_fmt', unseen) : t('tw_conv_latest')}
       </button> : null}
     </div>
 
-    <Composer workspace={workspace} snapshot={snapshot} conversation={conversation} label={label} locale={locale} renderAvatar={renderAvatar}
+    {(!sharedPostId || reply || editing || answerTask) && <Composer workspace={workspace} snapshot={snapshot} conversation={conversation} label={label} locale={locale} renderAvatar={renderAvatar}
       editing={editing} reply={reply ? { message: reply, author: authorOf(reply).name } : undefined} focusToken={focusToken}
       answering={answerTask ? { waitId: answerTask.wait!.waitId, author: botIdentity(answerTask.sharedBotId).name, question: byId.get(answerTask.wait!.messageId) } : undefined}
       onClearAnswering={() => setAnswerWait(undefined)} onAnswered={runs.refresh}
@@ -595,7 +743,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
           const message = messages[i];
           if (isMine(message) && !message.recalled) { edit(message); break; }
         }
-      }} />
+      }} />}
 
     {autoReplyOpen ? <AutoReplyDialog workspace={workspace} snapshot={snapshot} conversation={conversation} scope={scope} locale={locale} onClose={() => setAutoReplyOpen(false)} /> : null}
     {botScopeOpen ? <BotScopeDialog workspace={workspace} snapshot={snapshot} conversation={conversation} scope={scope} locale={locale} onClose={() => setBotScopeOpen(false)} /> : null}
@@ -620,7 +768,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
         </div>
       </div>
     </Dialog> : null}
-  </section>;
+  </section></>;
 }
 
 /** The row of a reply nobody asked for that waits for its Bot's maintainer: the service lists no task for it, so it is a row of its own, like a task's. */
@@ -654,10 +802,22 @@ const MessageMarkdown = memo(function MessageMarkdown({ text, render }: { text: 
 type PendingDelivery = { label: string; state: 'failed' | 'pending' | 'sent'; fileCount: number; actions?: ReactNode };
 const deliveryIcon = { failed: 'circleAlert', pending: 'clock', sent: 'check', read: 'checks' } as const;
 
-function MessageItem({ message, grouped, author, mine, owner, quote, question, approval, locale, renderAvatar, renderMarkdown, onReply, onEdit, onRecall, pending, read, children }: {
+function PostMenu({ items, label }: { items: MenuItem[]; label: string }) {
+  const [open, setOpen] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
+  return <div className="tw-post-menu">
+    <button type="button" className="tw-icon-btn" ref={trigger} aria-label={label} title={label} aria-haspopup="menu"
+      aria-expanded={open} onClick={() => setOpen(!open)}><Icon name="more" size={18} /></button>
+    {open && <PopupMenu items={items} label={label} anchor={trigger} align="end" onClose={restore => {
+      setOpen(false); if (restore) trigger.current?.focus();
+    }} />}
+  </div>;
+}
+
+function MessageItem({ message, grouped, author, mine, owner, quote, question, approval, locale, now, renderAvatar, renderMarkdown, onReply, onEdit, onRecall, pending, read, children }: {
   message: TeamMessage; grouped: boolean; author: Identity; mine: boolean; owner: string; quote?: { author: string; text: string }; question?: boolean; /** A request to approve a change; the card under it says what. */ approval?: boolean; locale: string; renderAvatar?: RenderAvatar; renderMarkdown?: RenderMarkdown;
   onReply?(message: TeamMessage): void; onEdit?(message: TeamMessage): void; onRecall?(message: TeamMessage): void; children?: ReactNode;
-  pending?: PendingDelivery;
+  pending?: PendingDelivery; now: number;
   read: boolean;
 }): ReactElement {
   const t = useTeamsText(locale);
@@ -674,13 +834,15 @@ function MessageItem({ message, grouped, author, mine, owner, quote, question, a
     {message.recalled ? <em>{t('teams_message_recalled')}</em> : message.mentionEntities?.length ? mentionTextParts(message.text, message.mentionEntities).map((part, index) =>
       part.mention ? <strong className="tw-member-mention" key={index}>{part.text}</strong> : part.text) : message.text}
   </p>;
+  const postEntry = Boolean(message.channelPost || message.postId);
+  const shownTime = postEntry ? formatPostTime(message.createdAt, now, locale) : clock;
   const edited = message.editedAt && !message.recalled;
   const delivery = mine && !message.recalled;
   const label = pending?.label ?? t(read ? 'tw_message_read' : 'tw_message_sent');
   const state = pending?.state ?? (read ? 'read' : 'sent');
   const meta = clock || edited || delivery ? <div className="tw-msg-meta">
     {edited ? <small className="tw-edited">({t('tw_edited_tag')})</small> : null}
-    {clock ? <time className="tw-msg-time" dateTime={message.createdAt ?? undefined} title={full}>{clock}</time> : null}
+    {shownTime ? <time className="tw-msg-time" dateTime={message.createdAt ?? undefined} title={full} aria-label={full}>{shownTime}</time> : null}
     {delivery ? <span className="tw-msg-delivery" data-state={state} role="img" aria-label={state === 'failed' ? t('tw_sidebar_not_sent') : label} title={label}>
       <Icon name={deliveryIcon[state]} size={13} />
     </span> : null}
@@ -693,24 +855,47 @@ function MessageItem({ message, grouped, author, mine, owner, quote, question, a
     {onRecall ? <button type="button" className="tw-icon-btn tw-danger" aria-label={t('teams_message_recall')} title={t('teams_message_recall')} onClick={() => onRecall(message)}><Icon name="trash" /></button> : null}
     {pending?.actions}
   </div> : null;
-  return <li className="tw-msg" data-grouped={grouped} data-mine={mine} data-kind={author.kind} data-recalled={message.recalled ? 'true' : undefined} data-message-id={message.id} data-message-seq={pending ? undefined : message.seq}>
+  const authorHeader = <div className="tw-msg-head">
+    <b className="tw-msg-author">{author.name}</b>
+    {bot ? <span className="tw-msg-bot-label">{t('teams_bot_tag')}</span> : null}
+    {question ? <span className="tw-tag">{t('services_question')}</span> : null}
+    {approval ? <span className="tw-tag">{t('teams_approval_tag')}</span> : null}
+    {owner ? <small>{t('teams_bot_owner_fmt', owner)}</small> : null}
+    {postEntry && meta ? <><span className="tw-post-dot" aria-hidden="true">·</span>{meta}</> : null}
+  </div>;
+  const quoteContent = quote ? <blockquote className="tw-quote">{quote.author ? <b>{quote.author}</b> : null} {quote.text}</blockquote> : null;
+  const pendingFiles = pending?.fileCount ? <p className="tw-msg-body tw-pending-files"><Icon name="clip" size={12} /> {pending.fileCount === 1 ? t('tw_files_one') : t('tw_files_other_fmt', pending.fileCount)}</p> : null;
+  const deliveryError = state === 'failed' && pending ? <small className="tw-msg-delivery-error" role="status">{pending.label}</small> : null;
+  const messageAttributes = { 'data-recalled': message.recalled ? 'true' : undefined, 'data-message-id': message.id, 'data-message-seq': pending ? undefined : message.seq };
+
+  if (postEntry) {
+    const items: MenuItem[] = [];
+    if (!message.recalled && onEdit) items.push({ id: 'edit', label: t('teams_message_edit'), icon: 'edit', onSelect: () => onEdit(message) });
+    if (!message.recalled && onRecall) items.push({ id: 'recall', label: t('teams_message_recall'), icon: 'trash', danger: true, onSelect: () => onRecall(message) });
+    return <li className={message.channelPost ? 'tw-post' : 'tw-post-comment'} data-channel-post={message.channelPost} {...messageAttributes}>
+      <Avatar identity={author} size={message.channelPost ? 40 : 32} render={renderAvatar} />
+      <div className="tw-post-main">
+        <div className="tw-post-header">{authorHeader}{items.length > 0 && <PostMenu items={items} label={t('teams_message_actions')} />}</div>
+        {quoteContent}{body}{pendingFiles}
+        {children}
+        {onReply && !message.recalled && <button type="button" className="tw-post-write" onClick={() => onReply(message)}><Icon name="reply" size={14} />{t('teams_message_reply')}</button>}
+        {deliveryError}{pending?.actions}
+      </div>
+    </li>;
+  }
+
+  return <li className="tw-msg" data-grouped={grouped} data-mine={mine} data-kind={author.kind} {...messageAttributes}>
     {!mine ? <div className="tw-msg-lead">{!grouped ? <Avatar identity={author} size={32} render={renderAvatar} /> : null}</div> : null}
     <div className="tw-msg-main">
       <div className={author.kind === 'user' ? 'tw-msg-bubble' : 'tw-msg-agent'}>
-        {!mine && !grouped ? <div className="tw-msg-head">
-          <b className="tw-msg-author">{author.name}</b>
-          {bot ? <span className="tw-msg-bot-label">{t('teams_bot_tag')}</span> : null}
-          {question ? <span className="tw-tag">{t('services_question')}</span> : null}
-          {approval ? <span className="tw-tag">{t('teams_approval_tag')}</span> : null}
-          {owner ? <small>{t('teams_bot_owner_fmt', owner)}</small> : null}
-        </div> : null}
-        {quote ? <blockquote className="tw-quote">{quote.author ? <b>{quote.author}</b> : null} {quote.text}</blockquote> : null}
+        {!mine && !grouped ? authorHeader : null}
+        {quoteContent}
         {inlineTime ? <div className="tw-msg-text-line">{body}{meta}</div> : body}
-        {pending?.fileCount ? <p className="tw-msg-body tw-pending-files"><Icon name="clip" size={12} /> {pending.fileCount === 1 ? t('tw_files_one') : t('tw_files_other_fmt', pending.fileCount)}</p> : null}
+        {pendingFiles}
         {children}
         {bot ? (meta || actions) && <div className="tw-msg-footer">{meta}{actions}</div> : inlineTime ? null : meta}
       </div>
-      {state === 'failed' && pending ? <small className="tw-msg-delivery-error" role="status">{pending.label}</small> : null}
+      {deliveryError}
       {bot ? null : actions}
     </div>
   </li>;

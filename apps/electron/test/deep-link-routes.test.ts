@@ -34,6 +34,8 @@ test('confirmed terminal commands preserve reviewed multiline input and reject c
 
 test('a shared team conversation opens in its own team only; a Bot opens the viewer\'s chat with it or the team\'s Bots, never a new chat', () => {
   const chat = teamLinkRequest(parseDeepLink('lingxi://team/chat?team=design&conversation=c1'))!;
+  assert.deepEqual(teamLinkRequest(parseDeepLink('lingxi://team/post?team=studio-team&conversation=field-notes&post=flower-study')),
+    { kind: 'conversation', teamId: 'studio-team', conversationId: 'field-notes', postId: 'flower-study' });
   const bot = teamLinkRequest(parseDeepLink('lingxi://team/bot?team=design&bot=helper'))!;
   assert.deepEqual(chat, { kind: 'conversation', teamId: 'design', conversationId: 'c1' });
   assert.deepEqual(bot, { kind: 'bot', teamId: 'design', botId: 'helper' });

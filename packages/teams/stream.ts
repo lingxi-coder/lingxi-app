@@ -82,6 +82,21 @@ export function formatListTime(value: string | null | undefined, now: Date | num
   return new Intl.DateTimeFormat(locale, { ...zone, month: 'short', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }) }).format(ms);
 }
 
+const postTimeFormatters = new Map<string, Intl.RelativeTimeFormat>();
+export function formatPostTime(value: string | null | undefined, now: number, locale: string): string {
+  const ms = instant(value);
+  if (ms === undefined) return '';
+  const minutes = Math.max(0, Math.floor((now - ms) / 60000));
+  if (minutes >= 1440 || ms - now > 60000) return formatListTime(value, now, locale);
+  let format = postTimeFormatters.get(locale);
+  if (!format) {
+    format = new Intl.RelativeTimeFormat(locale, { numeric: 'auto', style: 'narrow' });
+    postTimeFormatters.set(locale, format);
+  }
+  if (!minutes) return format.format(0, 'second');
+  return minutes < 60 ? format.format(-minutes, 'minute') : format.format(-Math.floor(minutes / 60), 'hour');
+}
+
 const sameAuthor = (a: TeamMessage['author'], b: TeamMessage['author']) => authorIdentity(a) === authorIdentity(b);
 
 /** The first unread message written by someone else: where the "new messages" divider goes. */

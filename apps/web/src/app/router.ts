@@ -1,5 +1,6 @@
 import { startTransition, useEffect, useMemo, useState } from 'react';
 import { docPageIds } from './docRoutes';
+import { channelPostPath } from '../../../../packages/teams/share';
 
 const docRoutes = new Set(docPageIds.map((id) => `/docs/${id}`));
 
@@ -125,7 +126,7 @@ export type ChatTarget =
   | { kind: 'home' }
   | { kind: 'providers' }
   | { kind: 'agent'; id: string }
-  | { kind: 'team'; teamId: string; conversationId: string }
+  | { kind: 'team'; teamId: string; conversationId: string; postId?: string }
   | { kind: 'friend'; uid: string }
   | { kind: 'bot'; teamId: string; botId: string };
 
@@ -145,6 +146,10 @@ export function parseChatRoute(path: string): ChatTarget | null {
   if (parts[0] === 'agent' && ids.length === 1) return { kind: 'agent', id: first! };
   if (parts[0] === 'friend' && ids.length === 1) return { kind: 'friend', uid: first! };
   if (parts[0] === 'team' && ids.length === 2) return { kind: 'team', teamId: first!, conversationId: second! };
+  if (parts[0] === 'team' && ids.length === 4 && ids[2] === 'post' &&
+    [first!, second!, ids[3]!].every(id => /^[A-Za-z0-9_-]{8,64}$/u.test(id))) {
+    return { kind: 'team', teamId: first!, conversationId: second!, postId: ids[3]! };
+  }
   if (parts[0] === 'bot' && ids.length === 2) return { kind: 'bot', teamId: first!, botId: second! };
   return null;
 }
@@ -157,7 +162,8 @@ export function chatRoute(target: ChatTarget): AppRoute {
     case 'providers': return '/chat/settings/providers';
     case 'agent': return `/chat/agent/${e(target.id)}`;
     case 'friend': return `/chat/friend/${e(target.uid)}`;
-    case 'team': return `/chat/team/${e(target.teamId)}/${e(target.conversationId)}`;
+    case 'team': return target.postId ? channelPostPath(target.teamId, target.conversationId, target.postId)
+      : `/chat/team/${e(target.teamId)}/${e(target.conversationId)}`;
     case 'bot': return `/chat/bot/${e(target.teamId)}/${e(target.botId)}`;
   }
 }

@@ -16,6 +16,7 @@ interface Props {
   teams: UseTeams;
   teamId: string;
   conversationId: string;
+  postId?: string;
   locale: string;
   friends?: FriendsApi;
   /** The open conversation changed inside the pane (a new Bot DM, a details action): follow it in the address bar. */
@@ -23,7 +24,7 @@ interface Props {
 }
 
 /** One conversation of one team. A team the viewer is not in shows that, never another team. */
-export function TeamPane({ teams: { workspace, snapshot }, teamId, conversationId, locale, friends, onFollow }: Props) {
+export function TeamPane({ teams: { workspace, snapshot }, teamId, conversationId, postId, locale, friends, onFollow }: Props) {
   const t = useTeamsText(locale);
   const zh = locale === 'zh';
   const [drawer, setDrawer] = useState<{ open: boolean; tab: DrawerTab }>({ open: false, tab: 'members' });
@@ -55,6 +56,7 @@ export function TeamPane({ teams: { workspace, snapshot }, teamId, conversationI
   return <div className="chat-pane-team">
     <div className="chat-pane-conversation">
       <TeamConversationView workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown}
+        sharedPostId={selected === conversationId ? postId : undefined} onExitPost={() => onFollow({ kind: 'team', teamId, conversationId })}
         detailsOpen={drawer.open} onToggleDetails={() => setDrawer(current => ({ ...current, open: !current.open }))} />
     </div>
     {drawer.open ? <TeamDetailsDrawer target="conversation" workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} tab={drawer.tab}

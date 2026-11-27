@@ -31,6 +31,13 @@ service cloud.firestore {
       let c = get(convPath(tid, cid)).data;
       return inConversation(tid, cid) && ('user:' + request.auth.uid) in c.participants;
     }
+    function legacyChannelSend(tid, cid, message) {
+      let channel = get(convPath(tid, cid)).data;
+      return channel.kind != 'channel' || ((!('posting' in channel)
+        || (channel.posting.mode == 'chat' && channel.posting.senders == 'all'))
+        && (!('replyTo' in message) || !('channelPost' in get(msgPath(tid, cid, message.replyTo)).data)
+          && !('postId' in get(msgPath(tid, cid, message.replyTo)).data)));
+    }
     function validText(text) { return text is string && text.size() > 0 && text.toUtf8().size() <= 8192; }
     function validId(id) { return id is string && id.matches('^[A-Za-z0-9_-]{8,64}$'); }
     function isAuthor(tid, cid, a) {
@@ -52,6 +59,8 @@ service cloud.firestore {
       let m = request.resource.data;
       return m.keys().hasOnly(['seq', 'author', 'kind', 'text', 'replyTo', 'createdAt', 'changeSeq', 'changeId'])
         && get(convPath(tid, cid)).data.kind != 'bot_dm'
+        // Posts and restricted channels use the server transaction, including all reply checks.
+        && legacyChannelSend(tid, cid, m)
         && m.keys().hasAll(['seq', 'author', 'kind', 'text', 'createdAt', 'changeSeq', 'changeId'])
         && validId(mid) && !mid.matches('^bot_.*$') && m.seq is int && m.seq == get(convPath(tid, cid)).data.lastSeq + 1
         && getAfter(convPath(tid, cid)).data.lastSeq == m.seq
@@ -72,6 +81,7 @@ service cloud.firestore {
     function isRecall(tid, cid, mid) {
       let m = request.resource.data;
       return resource.data.get('recalled', false) == false
+        && !('postId' in resource.data)
         && m.diff(resource.data).affectedKeys().hasOnly(['recalled', 'text', 'editedAt', 'changeSeq', 'changeId'])
         && m.recalled == true && m.text == '' && m.editedAt == request.time
         && hasChange(tid, cid, mid, m, 'recall');
@@ -184,6 +194,9 @@ service cloud.firestore {
         allow update: if maySpeak(tid, cid) && isConversationChange(tid, cid);
         match /messages/{mid} {
           allow get, list: if inConversation(tid, cid);
+          match /postViewers/{viewer} {
+            allow get: if isSelf(viewer) && inConversation(tid, cid);
+          }
           allow create: if maySpeak(tid, cid) && isNewMessage(tid, cid, mid);
           allow update: if maySpeak(tid, cid) && request.auth.uid == resource.data.author.uid
             && resource.data.kind != 'visualization'

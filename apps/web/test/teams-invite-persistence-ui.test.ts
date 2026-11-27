@@ -7,12 +7,12 @@ import { JsxEmit, ModuleKind, ScriptTarget, transpileModule } from 'typescript';
 import * as intent from '../src/teams/invite-intent';
 import type { User } from 'firebase/auth';
 import type TeamsPageType from '../src/pages/TeamsPage';
-import { FakeTeams, team, until } from './support/fakeTeams';
+import type { MessageCommand } from '../../../packages/teams/messages';
+import { FakeTeams, conversation, team, until } from './support/fakeTeams';
 import { loadTeamsModule } from './support/loadTeamsModule';
 import { fakeAuthHook } from './support/fakeAuthHook';
 import { hostNode, reactTestRenderer, scenario, settle, textOf, withDom } from './support/workspacePage';
 
-const require = createRequire(import.meta.url);
 const { TeamsWorkspaceView } = loadTeamsModule<typeof import('../src/teams/TeamsWorkspaceView')>(new URL('../src/teams/TeamsWorkspaceView', import.meta.url).pathname);
 const { SignInCard } = loadTeamsModule<typeof import('../src/teams/SignInCard')>(new URL('../src/teams/SignInCard', import.meta.url).pathname);
 const i18n = loadTeamsModule<typeof import('../../../packages/teams/i18n')>('i18n');
@@ -23,6 +23,7 @@ const store = () => { const values = new Map<string, string>(); return { values,
 function pageFixture() {
   const fake = new FakeTeams('alice'), listeners = new Set<(user: User | null) => void>();
   const source = new URL('../src/pages/TeamsPage.tsx', import.meta.url);
+  const require = createRequire(source);
   const compiled = transpileModule(readFileSync(source, 'utf8'), { fileName: source.pathname, compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2020, jsx: JsxEmit.ReactJSX, esModuleInterop: true } });
   const auth = { app: {} }, module = { exports: {} as { default: typeof TeamsPageType } };
   const mocks: Record<string, unknown> = {
@@ -51,6 +52,35 @@ function browserTabs(context: TestContext, persistent: Pick<Storage, 'getItem' |
     return location;
   };
 }
+
+scenario('a channel invitation waits for sign-in and explicit confirmation', async context => {
+  const fixture = pageFixture(), tab = browserTabs(context, store());
+  const teamId = 'team-aaaa', conversationId = 'room-aaaa';
+  const location = tab(`?channelTeam=${teamId}&channel=${conversationId}&channelCode=${code}`, '/teams/join');
+  fixture.fake.teams = [team(teamId)];
+  const fallback = fixture.fake.messages;
+  fixture.fake.messages = async <T>(command: MessageCommand) => {
+    if (command.action !== 'channelSettings' || command.request.op !== 'redeem') return fallback<T>(command);
+    fixture.fake.commands.push(command);
+    fixture.fake.conversations.set(teamId, [conversation(conversationId, { title: 'Morning Meeting' })]);
+    return { conversationId } as T;
+  };
+  const { create, act } = reactTestRenderer();
+  let tree: ReturnType<typeof create>;
+  context.after(async () => act(async () => tree?.unmount()));
+  await act(async () => { tree = create(createElement(fixture.Page, { locale: 'en' }), { createNodeMock: hostNode }); await settle(); });
+  assert.match(textOf(tree!.toJSON()), /Sign in to review and confirm the invitation/);
+  await act(async () => { fixture.signIn(); await settle(); });
+  assert.equal(fixture.fake.commands.some(command => command.action === 'channelSettings'), false);
+  const confirm = tree!.root.findAllByType('button').find((button: unknown) => textOf(button) === 'Join channel');
+  assert.ok(confirm);
+  await act(async () => { confirm.props.onClick(); await settle(); });
+  assert.deepEqual(fixture.fake.commands.find(command => command.action === 'channelSettings'), {
+    action: 'channelSettings', teamId, generation: 1, request: { op: 'redeem', conversationId, code },
+  });
+  assert.equal(location.search, '');
+  assert.match(textOf(tree!.toJSON()), /Morning Meeting/);
+});
 
 scenario('closing an invitation tab and reopening Teams retains bounded intent until an explicit join', async context => {
   const persistent = store(), fixture = pageFixture(), tab = browserTabs(context, persistent);

@@ -60,12 +60,13 @@ export function terminalCommandInput(command: string): string {
 
 /** A shared team conversation or team Bot (`team/chat`, `team/bot`). A friendship's links name its pair team (`f_…`). */
 export type TeamLinkRequest =
-  | { kind: 'conversation'; teamId: string; conversationId: string }
+  | { kind: 'conversation'; teamId: string; conversationId: string; postId?: string }
   | { kind: 'bot'; teamId: string; botId: string }
   | { kind: 'pair'; teamId: string };
 
 export function teamLinkRequest(target: DeepLinkTarget): TeamLinkRequest | null {
   const { team, conversation, bot } = target.params;
+  if (target.route === 'team/post') return { kind: 'conversation', teamId: team!, conversationId: conversation!, postId: target.params.post! };
   if (target.route !== 'team/chat' && target.route !== 'team/bot') return null;
   if (team!.startsWith('f_')) return { kind: 'pair', teamId: team! };
   return target.route === 'team/chat' ? { kind: 'conversation', teamId: team!, conversationId: conversation! } : { kind: 'bot', teamId: team!, botId: bot! };

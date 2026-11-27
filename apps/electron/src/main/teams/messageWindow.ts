@@ -6,7 +6,7 @@ import type { TeamsFirestoreOptions } from './firestore.js';
 import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source.js';
 
 export interface TeamsMessageSession {
-  watch(id: string, scope: MessageScope, conversationId: string, next: (snapshot: MessageSnapshot) => void, prefetch?: boolean): () => void;
+  watch(id: string, scope: MessageScope, conversationId: string, next: (snapshot: MessageSnapshot) => void, prefetch?: boolean, postId?: string): () => void;
   historyPage(scope:MessageScope,conversationId:string,beforeSeq:number):Promise<TeamMessage[]>;
   read(request: ChatReadRequest): Promise<ChatReadResult>;
   close(clearAuthentication?: boolean): Promise<void>;
@@ -115,11 +115,11 @@ export async function openTeamsMessageSession(options: Omit<TeamsFirestoreOption
           Array.isArray(v) && v.length<=50 && v.every((m,i)=>m && typeof m.id==='string' && Number.isSafeInteger(m.seq)
             && m.seq>0 && m.seq<beforeSeq && (!i || v[i-1].seq<m.seq)));
       },
-      watch(id, scope, conversationId, next, prefetch) {
+      watch(id, scope, conversationId, next, prefetch, postId) {
         if (closed) throw new Error('INVALID_SESSION');
         const receive = (snapshot: MessageSnapshot) => next(snapshot.kind === 'error' ? { ...snapshot, ...scope } : snapshot);
         if (!prefetch) listeners.set(id, receive);
-        port!.postMessage({ type: 'watch', id, scope, conversationId, prefetch });
+        port!.postMessage({ type: 'watch', id, scope, conversationId, prefetch, postId });
         return () => { listeners.delete(id); if (!closed) port!.postMessage({ type: 'unwatch', id }); };
       }, close,
     };

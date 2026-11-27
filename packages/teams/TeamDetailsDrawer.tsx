@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent, type PointerEve
 import { messageErrorText, teamsErrorText } from './errors.js';
 import type { TeamCommand, TeamMember, TeamRole } from './index.js';
 import { BotDirectory } from './BotDirectory';
-import { ChannelSettings } from './ChannelSettings';
+import { TeamChannelAdmins } from './ChannelManagement';
 import { canInviteFriends } from './friends.js';
 import { Avatar, ConversationLead, Dialog, Icon, platformNotice, rovingIndex, TeamMark, type DrawerTab, type DrawerTarget, type RenderAvatar } from './ui';
 import type { TeamsSnapshot, TeamsWorkspace } from './workspace.js';
@@ -13,7 +13,7 @@ export const DRAWER_MIN = 280;
 export const DRAWER_MAX = 480;
 export const DRAWER_DEFAULT = 360;
 const STEP = 16, STEP_LARGE = 48;
-const CHANNEL_TABS: readonly DrawerTab[] = ['members', 'settings'];
+const CHANNEL_TABS: readonly DrawerTab[] = ['members'];
 
 /** A drawer width kept within its limits. Anything that is not a finite number becomes the default. */
 export const clampDrawerWidth = (width: number): number => Number.isFinite(width) ? Math.min(DRAWER_MAX, Math.max(DRAWER_MIN, Math.round(width))) : DRAWER_DEFAULT;
@@ -72,6 +72,7 @@ export function TeamDetailsDrawer({ workspace, snapshot, target = 'team', tab, o
   closing.current = onClose;
   const [ownTab, setOwnTab] = useState<DrawerTab>('members');
   const [ownWidth, setOwnWidth] = useState(() => clampDrawerWidth(defaultWidth ?? DRAWER_DEFAULT));
+  const [channelAdminsOpen, setChannelAdminsOpen] = useState(false);
   const [confirmation, setConfirmation] = useState<Confirmation>();
   const [uses, setUses] = useState(1), [ttl, setTtl] = useState(86400), [inviteRole, setInviteRole] = useState<'member' | 'admin'>('member');
   const [notice, setNotice] = useState('');
@@ -161,8 +162,6 @@ export function TeamDetailsDrawer({ workspace, snapshot, target = 'team', tab, o
   const invites = detail?.invites ?? [];
   const body = (): ReactElement => {
     if (channel) {
-      if (current === 'settings') return <ChannelSettings key={`${uid}:${team.id}:${team.generation}:${channel.id}:${snapshot.authority}`}
-        workspace={workspace} snapshot={snapshot} conversation={channel} scope={{ teamId: team.id, generation: team.generation }} locale={locale} />;
       return <ul className="tw-people" aria-label={t('teams_members')}>
         {channelPeople.map(person => {
           const member = person.kind === 'user' && !person.self ? snapshot.directory.find(candidate => candidate.uid === person.id) : undefined;
@@ -286,6 +285,8 @@ export function TeamDetailsDrawer({ workspace, snapshot, target = 'team', tab, o
       <ConversationLead conversation={conversation} label={chatLabel} snapshot={snapshot} locale={locale} size={32} render={renderAvatar} />
       <div className="tw-drawer-title"><p>{t('teams_conversation_details')}</p><strong>{chatLabel}</strong></div>
     </div> : null}
+    {!channel && team.role !== 'member' && target === 'team' ? <button type="button" onClick={() => setChannelAdminsOpen(true)}>{t('tw_channel_manage_admins')}</button> : null}
+    {channelAdminsOpen && !channel && team.role !== 'member' && target === 'team' ? <TeamChannelAdmins key={team.id} workspace={workspace} snapshot={snapshot} locale={locale} onClose={() => setChannelAdminsOpen(false)} /> : null}
     {!channel && snapshot.error ? <p role="alert" className="tw-error tw-drawer-error">{teamsErrorText(snapshot.error, locale)}</p> : null}
     <div className="tw-tabs" role="tablist" aria-label={detailsLabel} onKeyDown={tabKey}>
       {tabs.map(value => <button key={value} type="button" role="tab" id={`${id}-tab-${value}`} aria-selected={value === current} aria-controls={`${id}-panel`} tabIndex={value === current ? 0 : -1}

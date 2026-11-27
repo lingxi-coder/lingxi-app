@@ -92,7 +92,7 @@ export function ChatWorkspace({ user, locale, theme, target, onLocaleChange, onT
 
   let pane: ReactNode;
   if (pair) pane = <FriendPane friends={friends} pairTeamId={target.teamId} locale={locale} />;
-  else if (target.kind === 'team') pane = <TeamPane teams={teams} teamId={target.teamId} conversationId={target.conversationId} locale={locale} friends={apis?.friends} onFollow={follow} />;
+  else if (target.kind === 'team') pane = <TeamPane teams={teams} teamId={target.teamId} conversationId={target.conversationId} postId={target.postId} locale={locale} friends={apis?.friends} onFollow={follow} />;
   else if (target.kind === 'friend') pane = <FriendPane friends={friends} uid={target.uid} locale={locale} />;
   else if (target.kind === 'bot') pane = <BotPane teams={teams} teamId={target.teamId} botId={target.botId} locale={locale} onFollow={open} />;
   else pane = renderAgent({ target, onAgentChats: setAgentChats, open });

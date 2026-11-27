@@ -655,21 +655,62 @@ scenario('channel settings change Bot behavior for the active channel and stay s
   workspace.selectConversation('chan-general');
   await until(() => snapshot().conversation?.id === 'chan-general' && !snapshot().offline, 'the channel');
   const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer, { target: 'conversation', workspace, snapshot, locale: 'en', onClose() {} }));
-  context.after(() => page.unmount());
   assert.match(page.text(), /general.*Channel · 2 members/);
   assert.doesNotMatch(page.text(), /Acme|Invites|Delete team|Visualization size limit/);
   assert.match(page.text(), /Bob.*Fixture Bot.*Alice/);
   assert.doesNotMatch(page.text(), /Owner/, 'the remaining teammate is outside this channel');
-  await page.click(page.find(node => node.props.role === 'tab' && textOf(node) === 'Channel settings')[0]);
-  await page.click(page.button('What Bots can use in this chat'));
-  assert.match(page.text(), /Calendar/);
-  await page.click(page.button('Close'));
-  await page.click(page.button('Bots that answer on their own'));
-  const enabled = page.find(node => node.type === 'input' && node.props.type === 'checkbox' && textOf(node.parent) === 'Fixture Bot')[0];
-  await page.check(enabled);
-  await page.click(page.button('Save'));
+  await page.unmount();
+  const settings = await mount(workspace, conversationView(workspace));
+  context.after(() => settings.unmount());
+  await settings.click(settings.oneByLabel('Channel settings'));
+  await settings.click(settings.button('Bots'));
+  await settings.click(settings.button('What Bots can use in this chat'));
+  assert.match(settings.text(), /Calendar/);
+  await settings.click(settings.button('Close'));
+  await settings.click(settings.button('Bots that answer on their own'));
+  const enabled = settings.find(node => node.type === 'input' && node.props.type === 'checkbox' && textOf(node.parent) === 'Fixture Bot')[0];
+  await settings.check(enabled);
+  await settings.click(settings.button('Save'));
   assert.deepEqual(fake.commands.find(command => command.action === 'setConversationAutoReply')?.payload, {
     conversationId: 'chan-general', expectedRevision: 0, targets: ['assistant-fixture'],
   });
-  assert.equal(page.find(node => node.type === 'dialog').length, 0);
+  assert.equal(settings.find(node => node.type === 'dialog').length, 0);
+});
+
+scenario('channel gear preserves the chat draft and saves independent post and reply settings', async context => {
+  const { workspace, snapshot } = await open(context, fake => {
+    const old = fake.messages;
+    fake.messages = async <T>(command: MessageCommand) => {
+      if (command.action === 'channelSettings' && command.request.op === 'posting') {
+        fake.commands.push(command);
+        const { conversationId, posting } = command.request;
+        const rows = fake.conversations.get('team-aaaa')!;
+        fake.conversations.set('team-aaaa', rows.map(row => row.id === conversationId ? { ...row, posting } : row));
+        for (const watch of fake.open('team-aaaa')) fake.deliver(watch);
+        return { ok: true } as T;
+      }
+      return old<T>(command);
+    };
+  });
+  workspace.selectConversation('chan-general');
+  await until(() => snapshot().messages.length === 3 && !snapshot().offline, 'the channel');
+  const page = await mount(workspace, conversationView(workspace));
+  context.after(() => page.unmount());
+  const input = () => page.find(node => node.type === 'textarea' && typeof node.props['aria-label'] === 'string')[0];
+  await page.type(input(), 'Keep this draft');
+  await page.click(page.oneByLabel('Channel settings'));
+  assert.match(page.text(), /General.*Name.*Description/);
+  await page.click(page.button('Posting'));
+  const fields = () => page.find(node => node.type === 'select');
+  await page.type(fields()[0], 'posts');
+  await page.type(fields()[1], 'selected');
+  await page.check(page.find(node => node.type === 'input' && textOf(node.parent).includes('Fixture Bot'))[0]);
+  await page.type(fields()[2], 'none');
+  await page.submit(page.find(node => node.type === 'form' && node.props.className === 'tw-form')[0]);
+  assert.deepEqual(snapshot().conversation?.posting, {
+    mode: 'posts', senders: 'selected', selected: ['shared_bot:assistant-fixture'], replies: 'none',
+  });
+  await page.click(page.oneByLabel('Back to channel'));
+  assert.match(page.text(), /You do not have permission to post here/);
+  assert.equal(workspace.draft('chan-general'), 'Keep this draft');
 });

@@ -9,6 +9,7 @@ import { BotMemberDetails, botAvailabilityText } from './BotMemberDetails';
 import { messageErrorText } from './errors.js';
 import { sharedBotUsable, type SharedBotCard } from './execution.js';
 import { botDmHandedOver, byteLength, canSendText, mentionCandidates, MESSAGE_BYTES, sendsOnEnter, snippet, withoutMention } from './compose.js';
+import { canChannelSend } from './channel-settings';
 import { ANSWER_REFUSED, type TeamConversation, type TeamMessage } from './messages.js';
 import { Avatar, Icon, SLOT, useIsoLayoutEffect, withSlot, type RenderAvatar } from './ui';
 import type { PickedFile, TeamsSnapshot, TeamsWorkspace } from './workspace.js';
@@ -96,7 +97,11 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
   const caretTo = useRef<number>();
   const latest = useRef({ text, entities });
   latest.current = { text, entities };
-  const lock = composerLock({ uid: snapshot.uid, conversation, bots: snapshot.bots, botsLoaded: snapshot.botsLoaded, botsUnverified: snapshot.botsUnverified }, locale);
+  const postingDenied = !editing && !answering && !canChannelSend(conversation, snapshot.uid, reply?.message);
+  const lock = composerLock({ uid: snapshot.uid, conversation, bots: snapshot.bots, botsLoaded: snapshot.botsLoaded, botsUnverified: snapshot.botsUnverified }, locale)
+    || (postingDenied ? t('tw_channel_posting_denied') : '');
+  const newPost = conversation.kind === 'channel' && conversation.posting?.mode === 'posts' && !reply && !editing && !answering;
+  const postLabel = t('tw_channel_new_post');
   const canMention = !answering && (conversation.kind === 'group' || conversation.kind === 'channel');
   const asks = canMention && !editing;
   const mention = canMention ? memberMentionAt(text, caret, entities) : null;
@@ -312,6 +317,7 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
   // After a handover the Bot answers in a new chat, which its new maintainer can read: one step from here.
   const moved = botDmHandedOver(conversation, snapshot.bots) ? snapshot.bots.find(bot => sharedBotUsable(bot) && conversation.participants.includes(`shared_bot:${bot.sharedBotId}`)) : undefined;
   if (lock) return <div className="tw-composer tw-composer-locked"><p className="tw-readonly" role="status">{lock}</p>
+    {reply && postingDenied ? <button type="button" onClick={onClearReply}>{t('common_cancel')}</button> : null}
     {moved ? <button type="button" disabled={snapshot.messageBusy} onClick={() => void workspace.openBotDm(moved)}>{t('tw_composer_new_chat')}</button> : null}</div>;
   return <form className="tw-composer" onSubmit={event => { event.preventDefault(); void send(); }} onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={drop}>
     {contextBots.map(bot => <div key={bot.sharedBotId}>{!dmBot ? <b>{bot.name}</b> : null}<BotMemberDetails bot={bot} bots={snapshot.bots} locale={locale} conversation={conversation} busy={snapshot.messageBusy || !!editing || !!answering} onExample={dmBot ? example => workspace.fillExample(conversation.id, example) : undefined} /></div>)}
@@ -354,7 +360,7 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
         <textarea ref={input} className="composer-editor-control" rows={1} value={text} onChange={change} onPaste={paste} onSelect={event => setCaret(event.currentTarget.selectionStart)} onKeyDown={keys}
         aria-label={t('tw_composer_message')} aria-haspopup={canMention ? 'listbox' : undefined} aria-controls={open ? listId : undefined}
         aria-activedescendant={open ? `${listId}-${choice}` : undefined} aria-autocomplete={canMention ? 'list' : undefined}
-        placeholder={editing ? t('teams_composer_edit_hint') : answering ? t('tw_composer_reply_to_fmt', answering.author) : t('teams_composer_hint_fmt', `${conversation.kind === 'channel' ? '#' : ''}${label}`)} />
+        placeholder={editing ? t('teams_composer_edit_hint') : answering ? t('tw_composer_reply_to_fmt', answering.author) : newPost ? postLabel : t('teams_composer_hint_fmt', `${conversation.kind === 'channel' ? '#' : ''}${label}`)} />
       </ComposerEditor>
       <ComposerToolbar>
         <div className="tw-compose-leading">
@@ -368,8 +374,8 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
         </div>
         {bytes > MESSAGE_BYTES * 0.9 ? <span className="tw-count" data-over={bytes > MESSAGE_BYTES} role="status">{bytes.toLocaleString(intlTag(locale))} / {MESSAGE_BYTES.toLocaleString(intlTag(locale))}</span> : null}
         {editing ? <button type="button" onClick={onClearEditing}>{t('common_cancel')}</button> : null}
-        <button type="submit" className="tw-primary tw-send" disabled={snapshot.messageBusy || unavailable || !sendable} aria-label={editing ? t('teams_message_save') : t('teams_message_send')}>
-          {editing ? t('common_save') : <Icon name="arrowUp" />}
+        <button type="submit" className="tw-primary tw-send" data-post={newPost || undefined} disabled={snapshot.messageBusy || unavailable || !sendable} aria-label={editing ? t('teams_message_save') : newPost ? postLabel : t('teams_message_send')}>
+          {editing ? t('common_save') : newPost ? postLabel : <Icon name="arrowUp" />}
         </button>
       </ComposerToolbar>
     </ComposerSurface>

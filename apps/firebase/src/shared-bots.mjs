@@ -9,6 +9,7 @@ import { confirmShareDelivery } from './dataset-message-grant.mjs';
 import { confirmVisualizationDelivery, fail as visualizationError, visualizationChannelEnabled } from './team-visualization-contract.mjs';
 import { allowedPrivateSource } from './lingxi-data-sources.mjs';
 import { messagePreview } from './team-message-preview.mjs';
+import { channelMessageFields, countPostReply, mayPost } from './channel-settings.mjs';
 import { prepareSharedConversation } from './team-conversations.mjs';
 import { effectiveScope, emptyScope, scopeSize, withinPublished } from './bot-scope.mjs';
 import { attachable, cancelUpload, createUpload, finalizeUpload, putUploadPart, readAttachmentPart, revokeAttachment, taskFiles } from './team-attachments.mjs';
@@ -195,6 +196,7 @@ export class SharedBotsStore {
       else if (action === 'getTransfer') response = await this.getTransfer(context);
       else if (action === 'heartbeatDeployment') response = await this.heartbeat(context);
       else if (action === 'activateDeployment') response = await this.activate(context);
+      else if (action === 'publishChannelMessage') response = await this.publishChannelMessage(context);
       else if (action === 'submit') response = await this.submit(context);
       else if (action === 'listHostTasks') response = await this.hostTasks(context);
       else if (action === 'startTask') response = await this.start(context);
@@ -542,6 +544,26 @@ export class SharedBotsStore {
     if (!value?.memberUids?.includes(identity.uid) || (mustParticipate && !value.participants.includes(`user:${identity.uid}`))) deny(403, 'CONVERSATION_REQUIRED');
     return { ref, value };
   }
+  async publishChannelMessage({ tx, team, identity, command: { commandId, payload: p }, now, service }) {
+    if (service) deny(403, 'SERVICE_SCOPE_UNSUPPORTED');
+    const [{ bot }, { ref, value: c }] = await Promise.all([
+      this.checkHost(tx, team, identity, p), this.conversation(tx, team, p.conversationId, identity),
+    ]);
+    if (c.kind !== 'channel') deny(404, 'CHANNEL_UNAVAILABLE');
+    const sharedBotId = bot.identity.sharedBotId;
+    const fields = channelMessageFields(c, `shared_bot:${sharedBotId}`, undefined, undefined, p.channelMode, deny);
+    const messageId = botId(['channel-post', identity.uid, identity.generation, sharedBotId, commandId]);
+    const changeId = botId(['channel-post-change', messageId]);
+    const seq = c.lastSeq + 1, changeSeq = c.lastChangeSeq + 1, at = new Date(now);
+    if (!Number.isSafeInteger(seq) || !Number.isSafeInteger(changeSeq)) deny(409, 'CURSOR_LIMIT');
+    const author = { kind: 'shared_bot', sharedBotId, displayName: bot.name };
+    tx.create(ref.collection('messages').doc(messageId), { seq, changeSeq, changeId, author, kind: 'text', text: p.text, createdAt: at, ...fields });
+    tx.create(ref.collection('changes').doc(changeId), { seq: changeSeq, messageId, operation: 'create',
+      actorUid: identity.uid, generation: identity.generation, at, textDigest: createHash('sha256').update(p.text).digest('hex') });
+    tx.update(ref, { lastSeq: seq, lastChangeSeq: changeSeq, lastChange: { id: changeId, seq: changeSeq },
+      lastMessage: { id: messageId, seq, at, author, preview: messagePreview(p.text) } });
+    return { messageId, changeId, changeSeq };
+  }
   async submit({ tx, team, identity, self, command: { payload: p }, now, service, dataCause, delegation, datasetShare, fromPage }) {
     const { ref, value: c } = await this.conversation(tx, team, p.conversationId, identity, true);
     if (!dataCause && !delegation && (p.messageId.startsWith('bot_') || p.changeId.startsWith('bot_'))) deny(400, 'INVALID_INPUT');
@@ -579,6 +601,9 @@ export class SharedBotsStore {
     const botStart = replyRefs.length + memberRefs.length;
     if (reads.slice(replyRefs.length, botStart).some(member => !member.exists)) deny(409, 'MENTION_TARGET_REQUIRED');
     const bots = reads.slice(botStart), replied = replyRefs.length ? reads[0].data() : undefined;
+    const author = dataCause?.author ?? delegation?.author ?? { kind: 'user', uid: identity.uid, displayName: self.displayName || 'Member' };
+    const actor = author.kind === 'shared_bot' ? `shared_bot:${author.sharedBotId}` : author.kind === 'user' ? `user:${author.uid}` : '';
+    const channelContent = channelMessageFields(c, actor, replied, p.replyTo, p.channelMode, deny);
     const owners = await all(bots.map(doc => team.collection('members').doc(doc.data()?.identity.maintainer.uid ?? '_missing')));
     const deployments = await all(bots.map(doc => team.collection('deployments').doc(doc.data()?.identity.activeDeploymentId ?? '_missing')));
     // Whose Desktop is off. In a group or channel the message is still sent and the task waits for it; a Bot DM or a service says so at once.
@@ -613,9 +638,10 @@ export class SharedBotsStore {
     if (!Number.isSafeInteger(seq) || !Number.isSafeInteger(changeSeq)) deny(409, 'CURSOR_LIMIT');
     const tasks = p.targets.map(sharedBotId => ({ sharedBotId, taskId: admissionId(p.messageId, sharedBotId) }));
     const response = { messageId: p.messageId, changeId: p.changeId, changeSeq, tasks };
-    const author = dataCause?.author ?? delegation?.author ?? { kind: 'user', uid: identity.uid, displayName: self.displayName || 'Member' }, at = new Date(now);
+    const at = new Date(now);
     const sharedText = p.privateDataSource ? 'Private data preview requested.' : p.text;
-    tx.create(ref.collection('messages').doc(p.messageId), { seq, changeSeq, changeId: p.changeId, text: sharedText, kind: 'text', author,
+    countPostReply(tx, ref, channelContent.postId);
+    tx.create(ref.collection('messages').doc(p.messageId), { seq, changeSeq, changeId: p.changeId, text: sharedText, kind: 'text', author, ...channelContent,
       createdAt: at, ...(tasks.length ? { taskIds: tasks.map(task => task.taskId) } : {}),
       ...(p.mentionEntities?.length ? mentionFields(p.mentionEntities, p.targets.map(id => `shared_bot:${id}`))
         : tasks.length ? { mentions: p.targets.map(id => `shared_bot:${id}`) } : {}),
@@ -984,18 +1010,23 @@ export class SharedBotsStore {
     const members = c.memberUids.length ? await tx.getAll(...c.memberUids.map(uid => team.collection('members').doc(uid))) : [];
     const readers = members.filter(doc => doc.exists).map(doc => memberIdentity(doc.id, doc.data()));
     const grantsMatch = same([...p.inputGrantIds].sort(), [...task.inputGrantIds].sort()) && task.botRevision === bot.identity.revision;
-    const allowed = sourceCurrent && p.outputAudience.mode === 'published_inputs' && grantsMatch && identityPermitted(bot, task.requester)
+    const source = c.kind === 'channel' ? (await tx.get(conversation.ref.collection('messages').doc(task.messageId))).data() : undefined;
+    const postId = source?.postId ?? (source?.channelPost ? task.messageId : undefined);
+    const postingDenied = c.kind === 'channel' && (Boolean(postId) !== (c.posting?.mode === 'posts')
+      || !mayPost(c, `shared_bot:${task.sharedBotId}`, Boolean(postId)));
+    const allowed = !postingDenied && sourceCurrent && p.outputAudience.mode === 'published_inputs' && grantsMatch && identityPermitted(bot, task.requester)
       && readers.every(reader => bot.grants.every(grant => this.grantPermits(grant, reader)));
     const refusal = sourceCurrent ? '结果需要授权，请联系助手维护者。' : '消息已更新，本次结果未发布。请重新提问。';
-    return { conversation, c, readers, sourceCurrent, allowed, refusal };
+    return { conversation, c, readers, sourceCurrent, allowed, refusal, postingDenied, postId };
   }
   /** One Bot-authored, task-linked message with its change record and conversation pointers. */
-  botMessage(tx, { conversation, c }, task, bot, identity, now, { messageId, changeId, text, fields }) {
+  botMessage(tx, { conversation, c, postId }, task, bot, identity, now, { messageId, changeId, text, fields }) {
     const seq = c.lastSeq + 1, changeSeq = c.lastChangeSeq + 1, at = new Date(now);
     if (!Number.isSafeInteger(seq) || !Number.isSafeInteger(changeSeq)) deny(409, 'CURSOR_LIMIT');
     const author = { kind: 'shared_bot', sharedBotId: task.sharedBotId, displayName: bot.name };
+    countPostReply(tx, conversation.ref, postId);
     tx.create(conversation.ref.collection('messages').doc(messageId), { seq, changeSeq, changeId, author, kind: 'text', text,
-      taskId: task.taskId, replyTo: task.messageId, createdAt: at, ...fields });
+      taskId: task.taskId, replyTo: task.messageId, ...(postId ? { postId } : {}), createdAt: at, ...fields });
     tx.create(conversation.ref.collection('changes').doc(changeId), { seq: changeSeq, messageId, operation: 'create',
       actorUid: identity.uid, generation: identity.generation, at, textDigest: createHash('sha256').update(text).digest('hex') });
     tx.update(conversation.ref, { lastSeq: seq, lastChangeSeq: changeSeq, lastChange: { id: changeId, seq: changeSeq },
@@ -1082,7 +1113,7 @@ export class SharedBotsStore {
       || base.revision >= revisionLimit || base.digest === hash(p.document));
     const allowed = gate.allowed && !stale;
     // The run that asked another Bot for this reply, if it still waits for it: the reply goes to it, not to the Chat (B8).
-    return { base, stale, allowed, silent: unasked(task, gate.c) && !(allowed && p.outcome === 'completed'), handBack: await handBackOf(tx, team, task) };
+    return { base, stale, allowed, silent: gate.postingDenied || (unasked(task, gate.c) && !(allowed && p.outcome === 'completed')), handBack: await handBackOf(tx, team, task) };
   }
   /**
    * A finished result enters its Chat: the reply as a message of the Bot, its document as an artifact revision, and the task as what that came to. The one
@@ -1163,8 +1194,8 @@ export class SharedBotsStore {
     const gate = await this.outputGate(tx, team, task, bot, p), { sourceCurrent, allowed } = gate;
     if (!allowed) {
       // Same as a refused result: the generic notice is published, no question and no wait exist.
-      const replyId = botId([p.taskId, 'reply']), changeId = botId([p.taskId, 'reply-change']);
-      this.botMessage(tx, gate, task, bot, identity, now, { messageId: replyId, changeId, text: gate.refusal,
+      const replyId = gate.postingDenied ? null : botId([p.taskId, 'reply']), changeId = botId([p.taskId, 'reply-change']);
+      if (replyId) this.botMessage(tx, gate, task, bot, identity, now, { messageId: replyId, changeId, text: gate.refusal,
         fields: { deliveryId: hash([task.taskId, 'delivery']) } });
       const state = sourceCurrent ? 'authorization_required' : 'failed';
       tx.update(ref, { state, resultDigest: pauseDigest, replyId, artifactId: null, finishedAt: p.pausedAt, deliveredAt: now, ...shown(task, replyId, state) });
@@ -1270,6 +1301,8 @@ export class SharedBotsStore {
     const bot = (await tx.get(team.collection('sharedBots').doc(task.sharedBotId))).data();
     if (!bot || !this.requesterAuthorized(bot, task)) deny(403, 'TASK_REVOKED');
     await this.validateTask(tx, team, task);
+    const replyTarget = (await tx.get(ref.collection('messages').doc(wait.messageId))).data();
+    const channelContent = channelMessageFields(c, `user:${identity.uid}`, replyTarget, wait.messageId, undefined, deny);
     const lockRef = team.collection('chatExecutionLocks').doc(hash([task.sharedBotId, task.conversationId]));
     const lock = (await tx.get(lockRef)).data();
     const held = await supersedable(tx, team, c, p.conversationId), rounds = await openRounds(tx, team, c, p.conversationId);
@@ -1277,8 +1310,9 @@ export class SharedBotsStore {
     if (!Number.isSafeInteger(seq) || !Number.isSafeInteger(changeSeq)) deny(409, 'CURSOR_LIMIT');
     const response = { messageId: p.messageId, changeId: p.changeId, changeSeq, taskId: task.taskId };
     const author = { kind: 'user', uid: identity.uid, displayName: self.displayName || 'Member' }, at = new Date(now);
+    countPostReply(tx, ref, channelContent.postId);
     tx.create(ref.collection('messages').doc(p.messageId), { seq, changeSeq, changeId: p.changeId, text: p.text, kind: 'text', author,
-      createdAt: at, replyTo: wait.messageId, waitId: p.waitId, sourceTaskId: task.taskId, ...(deciding ? { decision: p.decision } : {}) });
+      createdAt: at, replyTo: wait.messageId, ...channelContent, waitId: p.waitId, sourceTaskId: task.taskId, ...(deciding ? { decision: p.decision } : {}) });
     tx.create(ref.collection('changes').doc(p.changeId), { seq: changeSeq, messageId: p.messageId, operation: 'create',
       actorUid: identity.uid, generation: identity.generation, textDigest: createHash('sha256').update(p.text).digest('hex'), at,
       submissionDigest: digest, submissionReceipt: response });

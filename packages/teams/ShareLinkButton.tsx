@@ -12,7 +12,7 @@ function prefersShareSheet(): boolean {
  * The header's "Share link": the system share sheet on a touch device, else a copy to the clipboard with a short confirmation.
  * The link opens the app where it is installed and the same conversation on the web otherwise.
  */
-export function ShareLinkButton({ link, title, note, locale }: { link: string; title: string; note?: string; locale: string }): ReactElement {
+export function ShareLinkButton({ link, title, note, locale, post = false }: { link: string; title: string; note?: string; locale: string; post?: boolean }): ReactElement {
   const t = useTeamsText(locale);
   const [status, setStatus] = useState<'copied' | 'failed'>();
   useEffect(() => {
@@ -22,14 +22,14 @@ export function ShareLinkButton({ link, title, note, locale }: { link: string; t
   }, [status]);
   const share = async () => {
     if (prefersShareSheet()) {
-      try { await navigator.share({ title: t('teams_share_text_fmt', title), url: link }); return; }
+      try { await navigator.share({ title: post ? title : t('teams_share_text_fmt', title), url: link }); return; }
       catch (error) { if (error instanceof DOMException && error.name === 'AbortError') return; }
     }
     try { await navigator.clipboard.writeText(link); setStatus('copied'); } catch { setStatus('failed'); }
   };
-  const label = note ? `${t('teams_share_link')} · ${note}` : t('teams_share_link');
+  const label = post ? t('tw_post_share') : note ? `${t('teams_share_link')} · ${note}` : t('teams_share_link');
   return <span className="tw-link-share">
-    <button type="button" className="tw-icon-btn" aria-label={label} title={label} onClick={() => void share()}><Icon name={status === 'copied' ? 'check' : 'link'} /></button>
+    <button type="button" className="tw-icon-btn" aria-label={label} title={label} onClick={() => void share()}><Icon name={status === 'copied' ? 'check' : post ? 'share' : 'link'} size={post ? 18 : 16} /></button>
     <span className="tw-link-share-status" role="status" aria-live="polite">{status ? t(status === 'copied' ? 'teams_share_link_copied' : 'teams_share_link_failed') : ''}</span>
   </span>;
 }

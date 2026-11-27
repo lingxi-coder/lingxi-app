@@ -24,6 +24,7 @@ export type TeamsKey =
   | 'desktop_dataset_task_review'
   | 'desktop_dataset_task_revoke'
   | 'desktop_dataset_task_revoked'
+  | 'drawer_tab_chat'
   | 'drawer_workspace_details'
   | 'friends_add'
   | 'friends_block_body'
@@ -214,6 +215,7 @@ export type TeamsKey =
   | 'services_terms_retention'
   | 'services_title'
   | 'services_used'
+  | 'settings_group_general'
   | 'teams_admin'
   | 'teams_approval_add_fmt'
   | 'teams_approval_approve'
@@ -706,9 +708,58 @@ export type TeamsKey =
   | 'tw_botdir_undo_replace'
   | 'tw_botdir_will_replace_fmt'
   | 'tw_botdir_will_stop'
+  | 'tw_channel_action_failed'
+  | 'tw_channel_admin_required'
+  | 'tw_channel_admins'
+  | 'tw_channel_all_members'
+  | 'tw_channel_appoint_admin'
+  | 'tw_channel_back'
+  | 'tw_channel_bot_dependency'
+  | 'tw_channel_bot_removed'
+  | 'tw_channel_choose'
+  | 'tw_channel_confirm'
+  | 'tw_channel_description'
   | 'tw_channel_details'
+  | 'tw_channel_dismiss_admin'
+  | 'tw_channel_invite_changed'
+  | 'tw_channel_invite_copy_manual'
+  | 'tw_channel_invite_invalid'
+  | 'tw_channel_invite_link'
+  | 'tw_channel_invite_links'
+  | 'tw_channel_invite_revoke'
+  | 'tw_channel_invite_revoke_confirm'
+  | 'tw_channel_invite_scope'
+  | 'tw_channel_join'
+  | 'tw_channel_join_scope'
+  | 'tw_channel_load_post_failed'
+  | 'tw_channel_manage_admins'
+  | 'tw_channel_member_limit'
+  | 'tw_channel_member_removed'
+  | 'tw_channel_member_required'
+  | 'tw_channel_mode'
+  | 'tw_channel_mode_changed'
+  | 'tw_channel_name'
+  | 'tw_channel_new_post'
+  | 'tw_channel_no_admins'
   | 'tw_channel_no_settings'
+  | 'tw_channel_open_desktop'
+  | 'tw_channel_open_post'
+  | 'tw_channel_post_permission'
+  | 'tw_channel_posters'
+  | 'tw_channel_posting'
+  | 'tw_channel_posting_changed'
+  | 'tw_channel_posting_denied'
+  | 'tw_channel_posts'
+  | 'tw_channel_remove_bot'
+  | 'tw_channel_remove_fmt'
+  | 'tw_channel_replies'
+  | 'tw_channel_replies_closed'
+  | 'tw_channel_replies_empty'
+  | 'tw_channel_reply_permission'
+  | 'tw_channel_selected_members'
+  | 'tw_channel_send_permission'
   | 'tw_channel_settings'
+  | 'tw_channel_team_required'
   | 'tw_checking'
   | 'tw_composer_answering_fmt'
   | 'tw_composer_attach'
@@ -922,6 +973,12 @@ export type TeamsKey =
   | 'tw_on'
   | 'tw_opening'
   | 'tw_people'
+  | 'tw_post_activity_failed'
+  | 'tw_post_hide_replies'
+  | 'tw_post_like'
+  | 'tw_post_share'
+  | 'tw_post_unlike'
+  | 'tw_post_views'
   | 'tw_preview_fmt'
   | 'tw_report_cost_fmt'
   | 'tw_report_cursor_loop'
@@ -1048,6 +1105,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   desktop_dataset_task_review: { en: 'Review plan', 'zh-Hans': '审核方案', 'zh-Hant': '審核方案', ja: '計画を確認', ko: '계획 검토' },
   desktop_dataset_task_revoke: { en: 'Revoke Dataset approval', 'zh-Hans': '撤销 Dataset 许可', 'zh-Hant': '撤銷 Dataset 許可', ja: 'データセットの承認を取り消す', ko: '데이터세트 승인 취소' },
   desktop_dataset_task_revoked: { en: 'Dataset task approval revoked.', 'zh-Hans': '数据任务许可已撤销。', 'zh-Hant': '資料任務許可已撤銷。', ja: 'データセットタスクの承認を取り消しました。', ko: '데이터세트 작업 승인이 취소되었습니다.' },
+  drawer_tab_chat: { en: 'Chat', 'zh-Hans': '对话', 'zh-Hant': '對話', ja: '会話', ko: '대화' },
   drawer_workspace_details: { en: 'Details', 'zh-Hans': '详情', 'zh-Hant': '詳情', ja: '詳細', ko: '세부정보' },
   friends_add: { en: 'Add friend', 'zh-Hans': '添加好友', 'zh-Hant': '新增好友', ja: '友だちを追加', ko: '친구 추가' },
   friends_block_body: { en: 'They are also removed from your friends and the chat is deleted for both of you. Until you unblock them, they can\'t find you or send you requests.', 'zh-Hans': '同时会将对方从好友中移除，并对双方删除聊天记录。在你解除屏蔽之前，对方无法找到你或向你发送请求。', 'zh-Hant': '同時會將對方從好友中移除，並對雙方刪除聊天記錄。在你解除封鎖之前，對方無法找到你或向你傳送請求。', ja: '友だちからも削除され、チャットは双方から削除されます。ブロックを解除するまで、相手はあなたを見つけたりリクエストを送ったりできません。', ko: '친구에서도 삭제되고 대화가 양쪽 모두에서 삭제됩니다. 차단을 해제할 때까지 상대는 나를 찾거나 요청을 보낼 수 없습니다.' },
@@ -1238,6 +1296,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   services_terms_retention: { en: 'What is kept, as the publisher states it', 'zh-Hans': '保留内容（发布者的说明）', 'zh-Hant': '保留內容（發布者的說明）', ja: '保存される内容（提供者の説明）', ko: '보관되는 내용(제공자의 설명)' },
   services_title: { en: 'Bot services', 'zh-Hans': 'Bot 服务', 'zh-Hant': 'Bot 服務', ja: 'Bot サービス', ko: 'Bot 서비스' },
   services_used: { en: 'Services you use', 'zh-Hans': '你使用的服务', 'zh-Hant': '你使用的服務', ja: '利用中のサービス', ko: '이용 중인 서비스' },
+  settings_group_general: { en: 'General', 'zh-Hans': '通用', 'zh-Hant': '一般', ja: '一般', ko: '일반' },
   teams_admin: { en: 'Admin', 'zh-Hans': '管理员', 'zh-Hant': '管理員', ja: '管理者', ko: '관리자' },
   teams_approval_add_fmt: { en: 'Add %1$s', 'zh-Hans': '添加%1$s', 'zh-Hant': '新增%1$s', ja: '%1$sを追加', ko: '%1$s 추가' },
   teams_approval_approve: { en: 'Approve', 'zh-Hans': '批准', 'zh-Hant': '核准', ja: '承認', ko: '승인' },
@@ -1730,9 +1789,58 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_botdir_undo_replace: { en: 'Undo replace', 'zh-Hans': '撤销替换', 'zh-Hant': '復原替換', ja: '置き換えを元に戻す', ko: '교체 실행 취소' },
   tw_botdir_will_replace_fmt: { en: 'will be replaced by %1$s', 'zh-Hans': '将替换为 %1$s', 'zh-Hant': '將替換為 %1$s', ja: '%1$s に置き換えられます', ko: '%1$s(으)로 교체됩니다' },
   tw_botdir_will_stop: { en: 'will stop being shared', 'zh-Hans': '将停止共享', 'zh-Hant': '將停止共享', ja: '共有を停止します', ko: '공유가 중지됩니다' },
+  tw_channel_action_failed: { en: 'The channel action could not be completed. Try again.', 'zh-Hans': '频道操作未完成，请重试。', 'zh-Hant': '頻道操作未完成，請再試一次。', ja: 'チャンネルでの操作を完了できませんでした。もう一度お試しください。', ko: '채널 작업을 완료하지 못했습니다. 다시 시도하세요.' },
+  tw_channel_admin_required: { en: 'You no longer have permission for this action.', 'zh-Hans': '你已无权执行此操作。', 'zh-Hant': '你已無權執行此操作。', ja: 'この操作を行う権限がなくなりました。', ko: '이 작업을 수행할 권한이 사라졌습니다.' },
+  tw_channel_admins: { en: 'Administrators', 'zh-Hans': '管理员', 'zh-Hant': '管理員', ja: '管理者', ko: '관리자' },
+  tw_channel_all_members: { en: 'All channel members', 'zh-Hans': '所有频道成员', 'zh-Hant': '所有頻道成員', ja: 'すべてのチャンネルメンバー', ko: '모든 채널 멤버' },
+  tw_channel_appoint_admin: { en: 'Make administrator', 'zh-Hans': '任命为管理员', 'zh-Hant': '任命為管理員', ja: '管理者にする', ko: '관리자로 지정' },
+  tw_channel_back: { en: 'Back to channel', 'zh-Hans': '返回频道', 'zh-Hant': '返回頻道', ja: 'チャンネルに戻る', ko: '채널로 돌아가기' },
+  tw_channel_bot_dependency: { en: 'Remove these Bots from the channel or transfer their maintenance before removing the member.', 'zh-Hans': '请先移出这些 Bot 或完成维护权交接，再移除成员。', 'zh-Hant': '請先移出這些 Bot 或完成維護權交接，再移除成員。', ja: 'メンバーを外す前に、該当する Bot をチャンネルから外すか、メンテナーを交代してください。', ko: '멤버를 내보내기 전에 해당 Bot을 채널에서 내보내거나 관리 권한을 넘기세요.' },
+  tw_channel_bot_removed: { en: 'Bot removed from channel', 'zh-Hans': '已将 Bot 移出频道', 'zh-Hant': '已將 Bot 移出頻道', ja: 'チャンネルから Bot を削除しました', ko: '채널에서 Bot을 내보냈습니다' },
+  tw_channel_choose: { en: 'Choose a channel', 'zh-Hans': '选择频道', 'zh-Hant': '選擇頻道', ja: 'チャンネルを選択', ko: '채널 선택' },
+  tw_channel_confirm: { en: 'Confirm', 'zh-Hans': '确认', 'zh-Hant': '確認', ja: '確認', ko: '확인' },
+  tw_channel_description: { en: 'Description', 'zh-Hans': '简介', 'zh-Hant': '簡介', ja: '説明', ko: '설명' },
   tw_channel_details: { en: 'Channel details', 'zh-Hans': '频道详情', 'zh-Hant': '頻道詳情', ja: 'チャンネルの詳細', ko: '채널 상세 정보' },
+  tw_channel_dismiss_admin: { en: 'Remove administrator', 'zh-Hans': '撤任', 'zh-Hant': '撤換管理員', ja: '管理者から外す', ko: '관리자 해제' },
+  tw_channel_invite_changed: { en: 'The invitation link has changed. Refresh and try again.', 'zh-Hans': '邀请链接已变更，请刷新后重试。', 'zh-Hant': '邀請連結已變更，請重新整理後再試。', ja: '招待リンクが変更されました。更新してからやり直してください。', ko: '초대 링크가 변경되었습니다. 새로 고침한 후 다시 시도하세요.' },
+  tw_channel_invite_copy_manual: { en: 'Select the link to copy it.', 'zh-Hans': '请选择链接并复制。', 'zh-Hant': '請選取連結並複製。', ja: 'リンクを選択してコピーしてください。', ko: '링크를 선택해 복사하세요.' },
+  tw_channel_invite_invalid: { en: 'This invitation link is no longer valid.', 'zh-Hans': '此邀请链接已失效。', 'zh-Hant': '此邀請連結已失效。', ja: 'この招待リンクは無効です。', ko: '이 초대 링크는 더 이상 유효하지 않습니다.' },
+  tw_channel_invite_link: { en: 'Invite link', 'zh-Hans': '邀请链接', 'zh-Hant': '邀請連結', ja: '招待リンク', ko: '초대 링크' },
+  tw_channel_invite_links: { en: 'Invite links', 'zh-Hans': '邀请链接', 'zh-Hant': '邀請連結', ja: '招待リンク', ko: '초대 링크 관리' },
+  tw_channel_invite_revoke: { en: 'Revoke link', 'zh-Hans': '撤销链接', 'zh-Hant': '撤銷連結', ja: 'リンクを無効にする', ko: '링크 취소' },
+  tw_channel_invite_revoke_confirm: { en: 'Revoke this invitation link?', 'zh-Hans': '撤销这条邀请链接？', 'zh-Hant': '撤銷這條邀請連結？', ja: 'この招待リンクを無効にしますか？', ko: '이 초대 링크를 취소할까요?' },
+  tw_channel_invite_scope: { en: 'Only current team members can join with this link.', 'zh-Hans': '只有当前团队成员可以通过链接加入。', 'zh-Hant': '只有目前的團隊成員可以透過連結加入。', ja: 'このリンクで参加できるのは現在のチームメンバーだけです。', ko: '현재 팀 멤버만 이 링크로 가입할 수 있습니다.' },
+  tw_channel_join: { en: 'Join channel', 'zh-Hans': '加入频道', 'zh-Hant': '加入頻道', ja: 'チャンネルに参加', ko: '채널 가입' },
+  tw_channel_join_scope: { en: 'This invitation is for current team members.', 'zh-Hans': '此邀请仅供当前团队成员使用。', 'zh-Hant': '此邀請僅供目前的團隊成員使用。', ja: 'この招待は現在のチームメンバー向けです。', ko: '현재 팀 멤버만 사용할 수 있는 초대입니다.' },
+  tw_channel_load_post_failed: { en: 'Could not load this post.', 'zh-Hans': '暂时无法加载帖子。', 'zh-Hant': '暫時無法載入貼文。', ja: '投稿を読み込めませんでした。', ko: '게시물을 불러오지 못했습니다.' },
+  tw_channel_manage_admins: { en: 'Channel administrators', 'zh-Hans': '频道管理员', 'zh-Hant': '頻道管理員', ja: 'チャンネル管理者', ko: '채널 관리자' },
+  tw_channel_member_limit: { en: 'This channel is full.', 'zh-Hans': '此频道成员已满。', 'zh-Hant': '此頻道成員已滿。', ja: 'このチャンネルは定員に達しています。', ko: '이 채널은 정원에 도달했습니다.' },
+  tw_channel_member_removed: { en: 'Member removed', 'zh-Hans': '已移出成员', 'zh-Hant': '已移出成員', ja: 'メンバーを削除しました', ko: '멤버를 내보냈습니다' },
+  tw_channel_member_required: { en: 'Choose current channel members.', 'zh-Hans': '请选择当前频道成员。', 'zh-Hant': '請選擇目前的頻道成員。', ja: '現在のチャンネルメンバーを選択してください。', ko: '현재 채널 멤버를 선택하세요.' },
+  tw_channel_mode: { en: 'Channel mode', 'zh-Hans': '频道模式', 'zh-Hant': '頻道模式', ja: 'チャンネルの形式', ko: '채널 모드' },
+  tw_channel_mode_changed: { en: 'The channel mode changed. Send again using the current composer.', 'zh-Hans': '频道模式已变更，请使用当前频道的输入框重新发送。', 'zh-Hant': '頻道模式已變更，請使用目前的輸入框重新傳送。', ja: 'チャンネルの形式が変更されました。現在の入力欄から送信し直してください。', ko: '채널 모드가 변경되었습니다. 현재 입력창에서 다시 보내세요.' },
+  tw_channel_name: { en: 'Name', 'zh-Hans': '名称', 'zh-Hant': '名稱', ja: '名前', ko: '이름' },
+  tw_channel_new_post: { en: 'New post', 'zh-Hans': '发新帖', 'zh-Hant': '發新貼文', ja: '新規投稿', ko: '새 게시물' },
+  tw_channel_no_admins: { en: 'No channel administrators', 'zh-Hans': '暂无频道管理员', 'zh-Hant': '目前沒有頻道管理員', ja: 'チャンネル管理者はいません', ko: '채널 관리자가 없습니다' },
   tw_channel_no_settings: { en: 'There are no Bot settings for this channel.', 'zh-Hans': '此频道暂无 Bot 设置。', 'zh-Hant': '此頻道目前沒有 Bot 設定。', ja: 'このチャンネルには Bot 設定がありません。', ko: '이 채널에는 Bot 설정이 없습니다.' },
+  tw_channel_open_desktop: { en: 'Open in the desktop app', 'zh-Hans': '在桌面应用中打开', 'zh-Hant': '在桌面應用程式中開啟', ja: 'デスクトップアプリで開く', ko: '데스크톱 앱에서 열기' },
+  tw_channel_open_post: { en: 'View post and replies', 'zh-Hans': '查看原帖和回复', 'zh-Hant': '查看原貼文和回覆', ja: '投稿と返信を表示', ko: '게시물 및 댓글 보기' },
+  tw_channel_post_permission: { en: 'Who can start a post', 'zh-Hans': '谁可以发新帖', 'zh-Hant': '誰可以發新貼文', ja: '新規投稿できるメンバー', ko: '새 게시물을 작성할 수 있는 멤버' },
+  tw_channel_posters: { en: 'Members who can post', 'zh-Hans': '仅可发帖的成员', 'zh-Hant': '有發文權限的成員', ja: '投稿できるメンバーのみ', ko: '게시 권한이 있는 멤버만' },
+  tw_channel_posting: { en: 'Posting', 'zh-Hans': '发言设置', 'zh-Hant': '發言設定', ja: '投稿設定', ko: '게시 설정' },
+  tw_channel_posting_changed: { en: 'Channel posting permission changed. The message was not sent.', 'zh-Hans': '频道发言权限已变更，消息未发送。', 'zh-Hant': '頻道發言權限已變更，訊息未傳送。', ja: 'チャンネルの投稿権限が変更されたため、メッセージを送信できませんでした。', ko: '채널 게시 권한이 변경되어 메시지를 보내지 못했습니다.' },
+  tw_channel_posting_denied: { en: 'You do not have permission to post here.', 'zh-Hans': '你没有权限在这里发言。', 'zh-Hant': '你沒有在此發言的權限。', ja: 'ここに投稿する権限がありません。', ko: '이 채널에 게시할 권한이 없습니다.' },
+  tw_channel_posts: { en: 'Posts', 'zh-Hans': '帖子', 'zh-Hant': '貼文', ja: '投稿', ko: '게시물' },
+  tw_channel_remove_bot: { en: 'Remove Bot', 'zh-Hans': '移出 Bot', 'zh-Hant': '移出 Bot', ja: 'Bot を削除', ko: 'Bot 내보내기' },
+  tw_channel_remove_fmt: { en: 'Remove %1$s from this channel?', 'zh-Hans': '将 %1$s 移出频道？', 'zh-Hant': '將 %1$s 移出頻道？', ja: '%1$s をチャンネルから削除しますか？', ko: '%1$s 님을 이 채널에서 내보낼까요?' },
+  tw_channel_replies: { en: 'Replies', 'zh-Hans': '回复', 'zh-Hant': '回覆', ja: '返信', ko: '댓글' },
+  tw_channel_replies_closed: { en: 'No replies', 'zh-Hans': '关闭回复', 'zh-Hant': '關閉回覆', ja: '返信を受け付けない', ko: '댓글 닫기' },
+  tw_channel_replies_empty: { en: 'No replies yet', 'zh-Hans': '暂无回复', 'zh-Hant': '目前沒有回覆', ja: 'まだ返信はありません', ko: '아직 댓글이 없습니다' },
+  tw_channel_reply_permission: { en: 'Who can reply', 'zh-Hans': '谁可以回复帖子', 'zh-Hant': '誰可以回覆貼文', ja: '返信できるメンバー', ko: '댓글을 달 수 있는 멤버' },
+  tw_channel_selected_members: { en: 'Selected members', 'zh-Hans': '指定成员', 'zh-Hant': '指定成員', ja: '指定したメンバー', ko: '선택한 멤버' },
+  tw_channel_send_permission: { en: 'Who can send messages', 'zh-Hans': '谁可以发送消息', 'zh-Hant': '誰可以傳送訊息', ja: 'メッセージを送信できるメンバー', ko: '메시지를 보낼 수 있는 멤버' },
   tw_channel_settings: { en: 'Channel settings', 'zh-Hans': '频道设置', 'zh-Hant': '頻道設定', ja: 'チャンネル設定', ko: '채널 설정' },
+  tw_channel_team_required: { en: 'Join the team first.', 'zh-Hans': '请先加入团队。', 'zh-Hant': '請先加入團隊。', ja: '先にチームに参加してください。', ko: '먼저 팀에 가입하세요.' },
   tw_checking: { en: 'Checking…', 'zh-Hans': '检查中…', 'zh-Hant': '檢查中…', ja: '確認中…', ko: '확인 중…' },
   tw_composer_answering_fmt: { en: 'Replying to %1$s’s question', 'zh-Hans': '回复 %1$s 的问题', 'zh-Hant': '回覆 %1$s 的問題', ja: '%1$s の質問に返信中', ko: '%1$s 님의 질문에 답장 중' },
   tw_composer_attach: { en: 'Add pictures, PDFs or text files (up to 5, 10 MB each)', 'zh-Hans': '添加图片、PDF 或文本文件（最多 5 个，每个不超过 10 MB）', 'zh-Hant': '新增圖片、PDF 或純文字檔（最多 5 個，每個不超過 10 MB）', ja: '画像、PDF、テキストファイルを追加（最大5件、各10 MBまで）', ko: '사진, PDF 또는 텍스트 파일 추가(최대 5개, 각 10 MB까지)' },
@@ -1946,6 +2054,12 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_on: { en: 'On', 'zh-Hans': '已开启', 'zh-Hant': '已開啟', ja: 'オン', ko: '켜짐' },
   tw_opening: { en: 'Opening…', 'zh-Hans': '正在打开…', 'zh-Hant': '正在開啟…', ja: '開いています…', ko: '여는 중…' },
   tw_people: { en: 'People', 'zh-Hans': '成员', 'zh-Hant': '成員', ja: 'メンバー', ko: '멤버' },
+  tw_post_activity_failed: { en: 'Couldn’t update post activity.', 'zh-Hans': '暂时无法更新帖子互动数据。', 'zh-Hant': '暫時無法更新貼文互動資料。', ja: '投稿の反応を更新できませんでした。', ko: '게시물 반응을 업데이트하지 못했습니다.' },
+  tw_post_hide_replies: { en: 'Hide replies', 'zh-Hans': '收起回复', 'zh-Hant': '收合回覆', ja: '返信を閉じる', ko: '댓글 접기' },
+  tw_post_like: { en: 'Like', 'zh-Hans': '点赞', 'zh-Hant': '按讚', ja: 'いいね', ko: '좋아요' },
+  tw_post_share: { en: 'Share post', 'zh-Hans': '分享帖子', 'zh-Hant': '分享貼文', ja: '投稿を共有', ko: '게시물 공유' },
+  tw_post_unlike: { en: 'Unlike', 'zh-Hans': '取消点赞', 'zh-Hant': '收回讚', ja: 'いいねを取り消す', ko: '좋아요 취소' },
+  tw_post_views: { en: 'Views', 'zh-Hans': '浏览人数', 'zh-Hant': '瀏覽人數', ja: '閲覧者数', ko: '조회한 멤버 수' },
   tw_preview_fmt: { en: '%1$s: %2$s', 'zh-Hans': '%1$s：%2$s', 'zh-Hant': '%1$s：%2$s', ja: '%1$s: %2$s', ko: '%1$s: %2$s' },
   tw_report_cost_fmt: { en: 'Complete priced cost: %1$s %2$s', 'zh-Hans': '完整已定价费用：%1$s %2$s', 'zh-Hant': '完整已定價費用：%1$s %2$s', ja: '使用量が完全で価格が確定した費用: %1$s %2$s', ko: '사용량이 완전하고 가격이 책정된 비용: %1$s %2$s' },
   tw_report_cursor_loop: { en: 'The page cursor repeated. No incomplete report was exported. Retry.', 'zh-Hans': '分页游标重复，未导出不完整报告，请重试。', 'zh-Hant': '分頁游標重複，未匯出不完整的報告，請重試。', ja: 'ページカーソルが繰り返されました。不完全なレポートは書き出していません。もう一度お試しください。', ko: '페이지 커서가 반복되었습니다. 불완전한 보고서는 내보내지 않았습니다. 다시 시도하세요.' },

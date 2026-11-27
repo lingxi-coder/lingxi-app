@@ -3,6 +3,9 @@ import type { TeamMember } from '../../../../../packages/teams';
 import { InviteFriendsDialog, InviteNotice, MemberFriendDialog } from '../../../../../packages/teams/friend-dialogs';
 import { HostedServices } from '../../../../../packages/teams/HostedServices';
 import { serviceLink, type HostedServicesApi } from '../../../../../packages/teams/hosted-service';
+import { ChannelJoinDialog } from '../../../../../packages/teams/ChannelManagement';
+import type { ChannelInvite } from '../../../../../packages/teams/channel-settings';
+import type { ChannelPostTarget } from '../../../../../packages/teams/share';
 import { TeamConversationView } from '../../../../../packages/teams/TeamConversationView';
 import { TeamDetailsDrawer } from '../../../../../packages/teams/TeamDetailsDrawer';
 import type { UseFriends } from '../../../../../packages/teams/useFriendsWorkspace';
@@ -30,9 +33,11 @@ export const renderTeamMarkdown: RenderMarkdown = text => <MarkdownContent text=
  * A member of the team can be added as a friend (D15) and, by a manager, friends can be invited to it (D26) once the window has a
  * Friends workspace. `locale` orders the friends of the picker as the Friends list is ordered (D5).
  */
-export function TeamsMain({ teams, friends, locale, drawer, services, inboxTarget, notificationTarget, onCloseServices }: { teams: UseTeams; friends: UseFriends; locale: string; drawer: TeamsDrawer;
+export function TeamsMain({ teams, friends, locale, drawer, services, inboxTarget, notificationTarget, sharedPost, onExitPost, channelInvite, onChannelInviteHandled, onCloseServices }: { teams: UseTeams; friends: UseFriends; locale: string; drawer: TeamsDrawer;
   inboxTarget?: { serviceId: string; sessionId: string };
   notificationTarget?: InboxNoticeTarget;
+  sharedPost?: ChannelPostTarget; onExitPost?(): void;
+  channelInvite?: ChannelInvite; onChannelInviteHandled?(): void;
   /** Bot services are shown in place of the Team. */ services: boolean; onCloseServices(): void }) {
   const { workspace, snapshot, signedIn } = teams;
   const [adding, setAdding] = useState<TeamMember>();
@@ -62,8 +67,10 @@ export function TeamsMain({ teams, friends, locale, drawer, services, inboxTarge
       <div className="teams-conversation">
         {invited ? <InviteNotice names={invited} locale={locale} onDone={() => setInvited(undefined)} /> : null}
         <TeamConversationView workspace={workspace} snapshot={snapshot} locale={locale} notificationTarget={notificationTarget} renderAvatar={renderTeamAvatar} renderMarkdown={renderTeamMarkdown}
-          detailsOpen={drawer.target === 'conversation'} onToggleDetails={() => drawer.toggle('conversation')} />
+          sharedPostId={sharedPost && sharedPost.teamId === snapshot.team?.id && sharedPost.conversationId === snapshot.conversation?.id ? sharedPost.postId : undefined} onExitPost={onExitPost}
+          onOpenChannelSettings={drawer.close} detailsOpen={drawer.target === 'conversation'} onToggleDetails={() => drawer.toggle('conversation')} />
       </div>
+      {channelInvite && onChannelInviteHandled ? <ChannelJoinDialog key={channelInvite.code} workspace={workspace} snapshot={snapshot} locale={locale} invite={channelInvite} onClose={onChannelInviteHandled} /> : null}
       {drawer.target ? <TeamDetailsDrawer target={drawer.target} workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar}
         tab={drawer.tab} onTabChange={drawer.setTab} width={drawer.width} onWidthChange={drawer.setWidth} onClose={drawer.close}
         onAddFriend={friends.workspace ? setAdding : undefined} onInviteFriends={friends.workspace ? () => setInviting(true) : undefined} /> : null}

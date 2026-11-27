@@ -584,11 +584,11 @@ const api: LingxiApi = {
       void teamsRequest({ type: 'watchMessages', uid, scope, conversationId, leaseId, prefetch: true }).catch(() => undefined);
       return () => { void teamsRequest({ type: 'unwatchMessages', uid, leaseId }).catch(() => undefined); };
     },
-    watchMessages: (uid, scope, conversationId, next) => {
+    watchMessages: (uid, scope, conversationId, next, postId) => {
       const leaseId = crypto.randomUUID();
       let closed = false;
       const stop = subscribe('lingxi:teams:snapshot', (event: { leaseId: string; snapshot: import('../../../../packages/teams/messages').MessageSnapshot }) => { if (event.leaseId === leaseId && event.snapshot.uid === uid) next(event.snapshot); });
-      void teamsRequest({ type: 'watchMessages', uid, scope, conversationId, leaseId }).catch(error => { if (!closed) next({ uid, ...scope, kind: 'error', fromCache: true, error: error instanceof Error ? error.message : 'MESSAGE_LISTENER_FAILED' }); });
+      void teamsRequest({ type: 'watchMessages', uid, scope, conversationId, leaseId, postId }).catch(error => { if (!closed) next({ uid, ...scope, kind: 'error', fromCache: true, error: error instanceof Error ? error.message : 'MESSAGE_LISTENER_FAILED' }); });
       return () => { closed = true; stop(); void teamsRequest({ type: 'unwatchMessages', uid, leaseId }).catch(() => undefined); };
     },
     execute: (uid, command) => teamsRequest({ type: 'execute', uid, command }),

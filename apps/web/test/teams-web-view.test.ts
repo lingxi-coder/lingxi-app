@@ -53,8 +53,11 @@ scenario('layout: sidebar and conversation side by side, with the details only w
   assert.equal(toggle().props['aria-pressed'], false);
   await page.click(toggle()); assert.equal(drawer().length, 1); assert.equal(toggle().props['aria-pressed'], true);
   assert.equal(drawer()[0].props['aria-label'], 'Channel details');
-  assert.deepEqual(page.find(node => node.props.role === 'tab').map(textOf), ['Members', 'Channel settings']);
-  await page.click(toggle()); assert.equal(drawer().length, 0);
+  assert.deepEqual(page.find(node => node.props.role === 'tab').map(textOf), ['Members']);
+  await page.click(page.oneByLabel('Channel settings')); assert.equal(drawer().length, 0);
+  assert.match(page.text(), /General.*Posting.*Members/);
+  await page.click(page.oneByLabel('Back to channel'));
+  assert.ok(page.oneByLabel('Channel settings'));
 });
 
 scenario('layout: on a phone the sidebar and the conversation take turns, and the conversation has a way back', async context => {

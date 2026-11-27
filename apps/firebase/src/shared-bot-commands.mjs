@@ -151,7 +151,7 @@ const payloads = {
     expectedAccountEpoch: positive, newAccountEpoch: positive }).strict()
     .refine(value => value.newAccountEpoch > value.expectedAccountEpoch, 'Account epoch must advance'),
   // A message that asks Bots, carries files, or both. A message with neither is an ordinary message and is not sent here.
-  submit: z.object({ ...thread, messageId: executionId, changeId: executionId, text: z.string().refine(value => Buffer.byteLength(value, 'utf8') <= 8192),
+  submit: z.object({ ...thread, channelMode: z.enum(['chat', 'posts']).optional(), messageId: executionId, changeId: executionId, text: z.string().refine(value => Buffer.byteLength(value, 'utf8') <= 8192),
     targets: z.array(executionId).max(8).refine(unique), replyTo: executionId.optional(),
     mentionEntities: mentionEntitiesSchema.optional(),
     privateDataSource: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/u).optional(),
@@ -167,6 +167,7 @@ const payloads = {
   cancelUpload: z.object({ uploadId: executionId }).strict(),
   readAttachmentPart: z.object({ attachmentId: executionId, index: partIndex }).strict(),
   revokeAttachment: z.object({ attachmentId: executionId, changeId: executionId }).strict(),
+  publishChannelMessage: z.object({ ...host, ...thread, text, channelMode: z.enum(['chat', 'posts']) }).strict(),
   listHostTasks: z.object({ ...host, after: executionId.optional() }).strict(),
   startTask: z.object({ ...host, ...task, expectedLastChangeSeq: cursor, permitNonce: permitNonce.optional(), privateData: z.literal(true).optional() }).strict(),
   prepareTask: z.object({ ...host, ...task }).strict(),

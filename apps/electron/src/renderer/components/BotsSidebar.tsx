@@ -236,7 +236,6 @@ export function BotsSidebar({ bots, sessions, bridge, query, chatVisible, onOpen
                     openMenu(target, { left: event.clientX, top: event.clientY }, event.currentTarget);
                   }}
                 >
-                  <Icon name="chevron" size={13} stroke={1.7} />
                   <AgentAvatar agentId={bot.botId} size={20} />
                   <span className="bots-sidebar-name">{bot.name}</span>
                   <ActivityDot activity={activity} />

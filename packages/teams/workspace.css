@@ -261,10 +261,15 @@
 .tw-stream { flex: 1; min-height: 0; overflow-y: auto; position: relative; overscroll-behavior: contain; padding-block-end: 8px; }
 .tw-chat-thread .tw-stream { display: flex; flex-direction: column; padding-block-end: 12px; background: color-mix(in srgb, var(--tw-bg) 78%, var(--tw-sidebar-bg)); }
 .tw-chat-thread .tw-stream > * { flex: none; }
-.tw-earlier { display: flex; justify-content: center; padding-block-start: 10px; }
+.tw-earlier { display: flex; justify-content: center; padding-block: 8px; }
+.tw-scope .tw-earlier button {
+  border-color: transparent; border-radius: 999px; background: var(--tw-surface);
+  color: var(--tw-accent-text); font-size: 0.8125rem; font-weight: 600; padding-inline: 12px;
+}
+.tw-scope .tw-earlier button[aria-disabled='true'] { color: var(--tw-muted); cursor: wait; }
 .tw-scope .tw-chat-thread .tw-messages { inline-size: 100%; max-inline-size: 52rem; margin-block-start: auto; margin-inline: auto; padding: 8px clamp(10px, 3%, 24px) 0; }
 .tw-date { display: flex; justify-content: center; margin-block: 16px 8px; font-size: 12px; color: var(--tw-muted); }
-.tw-date span { padding: 4px 11px; border-radius: 999px; background: var(--tw-hover); font-weight: 600; }
+.tw-date span { padding: 2px 8px; font-weight: 600; }
 .tw-unread { display: flex; align-items: center; gap: 10px; margin-block: 12px 8px; font-size: 12px; font-weight: 700; color: var(--tw-accent-text); }
 .tw-unread::before, .tw-unread::after { content: ''; flex: 1; height: 1px; background: currentColor; opacity: 0.4; }
 .tw-msg { display: flex; align-items: flex-start; gap: 8px; padding-block: 1px; }
@@ -303,7 +308,15 @@
 .tw-pending .tw-msg-main { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .tw-pending[data-error='true'] .tw-msg-head small { color: var(--tw-danger); }
 .tw-pending-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.tw-scope .tw-jump { position: absolute; inset-inline-end: 16px; bottom: 12px; border-radius: 999px; background: var(--tw-surface); box-shadow: var(--tw-shadow); padding: 3px 12px; z-index: 3; }
+.tw-scope .tw-jump {
+  position: absolute; inset-inline-end: 16px; bottom: 12px; z-index: 3;
+  min-height: 36px; border-color: var(--tw-line); border-radius: 999px; background: var(--tw-surface);
+  box-shadow: var(--tw-shadow); padding: 3px 12px; font-size: 0.8125rem; font-weight: 600;
+}
+.tw-scope .tw-chat-thread :is(.tw-earlier button, .tw-jump, .tw-msg-actions button):focus-visible { outline: 0; background: var(--tw-selected); }
+@media (any-pointer: coarse) {
+  .tw-scope .tw-chat-thread :is(.tw-earlier button, .tw-jump) { min-height: 44px; }
+}
 @container chat-thread (min-width: 32rem) {
   .tw-chat-thread .tw-msg[data-mine='true'] .tw-msg-main { max-inline-size: min(calc(100% - 104px), 34rem); }
   .tw-msg[data-mine='true'] .tw-msg-actions { inset-inline-end: 100%; inset-inline-start: auto; }
@@ -313,7 +326,10 @@
 }
 @media (hover: none) {
   .tw-scope .tw-row-more { opacity: 1; }
+}
+@media (any-pointer: coarse), (hover: none) {
   .tw-msg-actions { opacity: 1; pointer-events: auto; position: static; width: fit-content; margin-block-start: 3px; margin-inline-start: auto; box-shadow: none; border: 0; padding: 0; background: transparent; }
+  .tw-scope .tw-msg-actions button { min-width: 44px; min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) { .tw-msg-actions { transition: none; } }
 

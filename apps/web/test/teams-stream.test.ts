@@ -10,6 +10,14 @@ const when = (day: number, hour: number, minute: number, second = 0) => new Date
 const msg = (seq: number, createdAt: string | null, more: Partial<TeamMessage> = {}) => message(seq, { createdAt, ...more });
 const shape = (rows: StreamRow[]) => rows.map(row => row.type === 'message' ? `${row.message.seq}${row.grouped ? '+' : ''}` : row.type === 'date' ? `[${row.label}]` : '<new>').join(' ');
 
+test('task placement stops at the first newer timestamp even when message times are out of order', () => {
+  const messages = [msg(1, when(2, 10, 0)), msg(2, when(2, 10, 5)), msg(3, null), msg(4, when(2, 10, 2))];
+  const task = (minute: number) => ({ createdAt: Date.parse(when(2, 10, minute)), state: 'running' as const });
+  const before = task(2), after = task(5);
+  const placement = placeTasks(messages, [before, after], false);
+  assert.deepEqual([...placement.after], [['message-1', [before]], ['message-4', [after]]]);
+});
+
 test('a run of messages from one author within five minutes groups; the first of a run does not', () => {
   const rows = buildStreamRows([msg(1, when(2, 10, 0)), msg(2, when(2, 10, 1)), msg(3, when(2, 10, 3, 30))], options());
   assert.equal(shape(rows), '[Today] 1 2+ 3+');

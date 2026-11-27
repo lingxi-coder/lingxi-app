@@ -22,6 +22,7 @@ export type StreamRow =
   | { type: 'message'; key: string; message: TeamMessage; grouped: boolean };
 
 const dayFormatters = new Map<string, Intl.DateTimeFormat>();
+const clockFormatters = new Map<string, Intl.DateTimeFormat>();
 /** `YYYY-MM-DD` of an instant in a time zone, comparable as a string. */
 function dayKey(ms: number, timeZone?: string): string {
   const id = timeZone ?? '';
@@ -54,7 +55,15 @@ export function dayLabel(ms: number, now: Date | number, locale: string, timeZon
 /** Hour and minute of a message in the viewer's locale. Empty for a missing or invalid time. */
 export function formatClock(value: string | null | undefined, locale: string, timeZone?: string): string {
   const ms = instant(value);
-  return ms === undefined ? '' : new Intl.DateTimeFormat(locale, { ...(timeZone ? { timeZone } : {}), hour: 'numeric', minute: '2-digit' }).format(ms);
+  if (ms === undefined) return '';
+  const key = `${locale}:${timeZone ?? ''}`;
+  let formatter = clockFormatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(locale, { timeZone, hour: 'numeric', minute: '2-digit' });
+    if (clockFormatters.size >= 32) clockFormatters.clear();
+    clockFormatters.set(key, formatter);
+  }
+  return formatter.format(ms);
 }
 
 /** Compact conversation-list time: clock today, "Yesterday", weekday this week, then the date. */
@@ -120,14 +129,24 @@ const ACTIVE_TASKS: ReadonlySet<TaskState> = new Set<TaskState>(['queued', 'runn
  */
 export function placeTasks<T extends { createdAt: number; state: TaskState }>(visible: readonly TeamMessage[], tasks: readonly T[], olderHidden: boolean): { after: Map<string, T[]>; head: T[]; tail: T[] } {
   const after = new Map<string, T[]>(), head: T[] = [], tail: T[] = [];
+  if (!tasks.length) return { after, head, tail };
+  const positions: { id: string; latestTime: number }[] = [];
+  let latestTime = -Infinity;
+  for (const message of visible) {
+    const time = instant(message.createdAt);
+    if (time === undefined) continue;
+    // The running maximum preserves the first-newer-message cutoff even when timestamps are out of order.
+    latestTime = Math.max(latestTime, time);
+    positions.push({ id: message.id, latestTime });
+  }
   for (const task of tasks) {
-    let anchor: TeamMessage | undefined;
-    for (const message of visible) {
-      const time = instant(message.createdAt);
-      if (time === undefined) continue;
-      if (time > task.createdAt) break;
-      anchor = message;
+    let low = 0, high = positions.length;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      if (positions[mid].latestTime > task.createdAt) high = mid;
+      else low = mid + 1;
     }
+    const anchor = positions[low - 1];
     if (anchor) { const list = after.get(anchor.id); if (list) list.push(task); else after.set(anchor.id, [task]); }
     else if (!olderHidden) head.push(task);
     else if (ACTIVE_TASKS.has(task.state)) tail.push(task);

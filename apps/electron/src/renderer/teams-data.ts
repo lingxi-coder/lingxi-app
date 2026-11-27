@@ -3,7 +3,7 @@ import * as firestore from 'firebase/firestore';
 import { deleteApp, initializeApp } from 'firebase/app';
 import { connectAuthEmulator, initializeAuth, browserLocalPersistence, signInWithCustomToken, signOut } from 'firebase/auth';
 import { connectFirestoreEmulator, initializeFirestore, persistentLocalCache, persistentSingleTabManager, terminate } from 'firebase/firestore';
-import { watchFirestoreMessages } from '../../../../packages/teams/firestore.js';
+import { prefetchFirestoreMessages, watchFirestoreMessages } from '../../../../packages/teams/firestore.js';
 import type { TeamsFirestoreOptions } from '../main/teams/firestore.js';
 import type { MessageScope } from '../../../../packages/teams/messages.js';
 import { createChatSourceReader, type ChatReadRequest } from '../../../../packages/teams/chat-source.js';
@@ -37,7 +37,7 @@ window.addEventListener('message', function receive(event: MessageEvent): void {
       return { app, db, auth, uid: options.uid };
     } catch (error) { await terminate(db); await deleteApp(app); throw error; }
   }
-  async function handle(message: { type: string; id: string; options: SessionOptions; scope: MessageScope; conversationId: string; clearAuthentication?: boolean; beforeSeq?:number; request?: ChatReadRequest }): Promise<void> {
+  async function handle(message: { type: string; id: string; options: SessionOptions; scope: MessageScope; conversationId: string; prefetch?: boolean; clearAuthentication?: boolean; beforeSeq?:number; request?: ChatReadRequest }): Promise<void> {
     if (message.type === 'open') {
       session = await open(message.options);
       const current = session;
@@ -81,6 +81,12 @@ window.addEventListener('message', function receive(event: MessageEvent): void {
       return;
     }
     stops.get(message.id)?.(); stops.delete(message.id);
+    if (message.type === 'watch' && message.prefetch) {
+      if (session.auth.currentUser?.uid === session.uid) {
+        stops.set(message.id, prefetchFirestoreMessages(firestore, session.db, message.scope, message.conversationId));
+      }
+      return;
+    }
     if (message.type === 'watch') stops.set(message.id, watchFirestoreMessages(firestore, session.db, session.uid, message.scope, message.conversationId,
       snapshot => {
         if(snapshot.kind==='error' || snapshot.kind==='directory' && !snapshot.conversations.some(row=>row.id===message.conversationId))

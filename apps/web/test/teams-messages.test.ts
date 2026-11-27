@@ -84,6 +84,57 @@ test('cross-device read snapshots are monotonic; wrong UID/generation and late s
   assert.equal(model.state.threads[conversation.id], undefined);
 });
 
+test('switching channels overlaps listener handoff and ignores delayed callbacks from the old watch', async context => {
+  const callbacks: ((snapshot: MessageSnapshot) => void)[] = [];
+  const events: string[] = [];
+  const source = fixture();
+  source.api.watchMessages = (_scope, id, next) => {
+    events.push(`watch:${id}`);
+    callbacks.push(next);
+    return () => { events.push(`stop:${id}`); };
+  };
+  const model = new TeamMessaging(source.api, memoryStorage(), uid, scope);
+  context.after(() => model.close());
+  model.select(conversation.id);
+  model.select('other-chat');
+  assert.deepEqual(events, ['watch:test-chat', 'watch:other-chat', 'stop:test-chat']);
+  callbacks[0]({ uid, ...scope, kind: 'directory', fromCache: false, conversations: [conversation] });
+  assert.equal(model.selected, 'other-chat');
+  callbacks[0]({ uid, ...scope, kind: 'error', fromCache: false, error: 'CONVERSATION_REQUIRED' });
+  assert.equal(model.error, '');
+});
+
+test('channel prefetch waits for navigation intent, shares the handoff, and is scoped to one authorized conversation', async context => {
+  const source = fixture();
+  const starts: string[] = [], stops: string[] = [];
+  source.api.prefetchMessages = (_scope, id) => {
+    starts.push(id);
+    return () => { stops.push(id); };
+  };
+  const model = new TeamMessaging(source.api, memoryStorage(), uid, scope);
+  context.after(() => model.close());
+  await model.start();
+  await until(() => !model.offline);
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+
+  model.prefetchConversation('unlisted');
+  model.prefetchConversation(conversation.id);
+  context.mock.timers.tick(40);
+  model.cancelPrefetch(conversation.id);
+  context.mock.timers.tick(100);
+  assert.deepEqual(starts, []);
+
+  model.prefetchConversation(conversation.id);
+  context.mock.timers.tick(80);
+  assert.deepEqual(starts, [conversation.id]);
+  assert.equal(model.selected, '');
+  assert.deepEqual(model.state.threads, {});
+  model.select(conversation.id);
+  assert.deepEqual(stops, [], 'clicking keeps the matching query in flight');
+  context.mock.timers.tick(1500);
+  assert.deepEqual(stops, [conversation.id]);
+});
+
 test('HTTP outbox survives ACK loss and restart; SDK history never enters the command journal', async context => {
   const storage = memoryStorage(); let drop = true; const calls: unknown[] = [];
   const source = fixture(async command => { assert.equal(command.action, 'mutate'); if (drop && calls.length) throw new Error('SERVICE_UNAVAILABLE'); calls.push(structuredClone(command)); if (drop) throw new Error('SERVICE_UNAVAILABLE'); return {} as never; });

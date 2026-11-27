@@ -45,7 +45,7 @@ export function installTeamsIpc(service: TeamsService, windows: () => readonly B
             sender.on('destroyed', destroyed); sender.on('did-start-navigation', navigate);
             senders.set(sender.id, () => { sender.off('destroyed', destroyed); sender.off('did-start-navigation', navigate); });
           }
-          await service.watchMessages(lease, command.uid, command.scope as Parameters<TeamsService['watchMessages']>[2], command.conversationId);
+          await service.watchMessages(lease, command.uid, command.scope as Parameters<TeamsService['watchMessages']>[2], command.conversationId, command.prefetch === true);
           break;
         }
         case 'list':

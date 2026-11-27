@@ -106,6 +106,20 @@ export function expiresIn(at: number, now: number, locale: string): string {
   const hours = Math.ceil(minutes / 60);
   return hours < 48 ? (t('tw_in_hours_fmt', hours)) : (t('tw_in_days_fmt', Math.ceil(hours / 24)));
 }
+
+function WaitingDetail({ at, locale, recipient }: { at: number; locale: string; recipient?: string }) {
+  const t = useTeamsText(locale);
+  const [expires, setExpires] = useState(() => expiresIn(at, Date.now(), locale));
+  useEffect(() => {
+    const update = () => setExpires(expiresIn(at, Date.now(), locale));
+    update();
+    const timer = setInterval(update, 1000);
+    return () => clearInterval(timer);
+  }, [at, locale]);
+  return <p className="tw-run-detail">{recipient === undefined
+    ? t('teams_task_waiting_you_fmt', expires)
+    : t('teams_task_waiting_member_fmt', recipient, expires)}</p>;
+}
 /**
  * What a task did outside the Chat. The Bot's maintainer confirms the actions nobody could verify:
  * the task ends only when each of them is known to have happened or not.
@@ -185,9 +199,7 @@ export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, onR
   const look = runLook(task.state);
   const label = stopping ? t('teams_task_cancelling') : wait?.kind === 'tool_approval' ? t('teams_task_waiting_approval') : t(look.label);
   // One line under the state (U4): who it waits for, what to check, or what the state means.
-  const expires = wait ? expiresIn(wait.expiresAt, Date.now(), locale) : '';
-  const detail = wait ? (isMember(wait.recipient) ? t('teams_task_waiting_you_fmt', expires) : t('teams_task_waiting_member_fmt', nameOf(wait.recipient.uid), expires))
-    : unchecked ? (maintains
+  const detail = unchecked ? (maintains
       ? t('teams_task_needs_checking_maintainer')
       : t('teams_task_needs_checking_hint'))
     : look.detail ? t(look.detail) : '';
@@ -198,7 +210,8 @@ export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, onR
       <span className="tw-run-glyph"><Icon name={look.icon} className={look.spins && !stopping ? 'tw-run-spin' : undefined} />{look.spins && !stopping ? <Icon name="dotsCircle" className="tw-run-still" /> : null}</span>
       <span>{label}</span>
     </p>
-    {detail ? <p className="tw-run-detail">{detail}</p> : null}
+    {wait ? <WaitingDetail key={wait.waitId} at={wait.expiresAt} locale={locale} recipient={isMember(wait.recipient) ? undefined : nameOf(wait.recipient.uid)} />
+      : detail ? <p className="tw-run-detail">{detail}</p> : null}
     {usage ? <p className="tw-run-detail" title={tokenSplit(task.usage, locale) || undefined}>{usage}</p> : null}
     {canReply || (canCancel && !stopping) ? <div className="teams-row-actions">
       {canReply ? <button type="button" aria-label={t('tw_run_reply')} onClick={() => onReply!(task)}>{t('teams_message_reply')}</button> : null}

@@ -197,6 +197,19 @@ test('openConversation of a team the viewer is not in leaves that team missing f
   assert.notEqual(snapshot().selectedTeamId, 'team-zzzz', 'the chat pane reads this as no access');
 });
 
+test('clicking the active channel keeps its subscription and message rows', async context => {
+  const { fake, workspace, snapshot } = workspaceFixture();
+  context.after(() => workspace.close());
+  await until(() => snapshot().conversations.length === 2);
+  workspace.selectConversation('chan-a');
+  await until(() => snapshot().messages.length === 5);
+  const rows = snapshot().messages;
+  const watch = fake.open('team-aaaa', 'chan-a')[0];
+  workspace.selectConversation('chan-a');
+  assert.equal(snapshot().messages, rows);
+  assert.equal(fake.open('team-aaaa', 'chan-a')[0], watch);
+});
+
 test('switching teams closes the previous controller and leaves no listeners on the inactive team', async context => {
   const { fake, workspace, snapshot } = workspaceFixture(); context.after(() => workspace.close());
   await until(() => snapshot().conversations.length === 2, 'team A');

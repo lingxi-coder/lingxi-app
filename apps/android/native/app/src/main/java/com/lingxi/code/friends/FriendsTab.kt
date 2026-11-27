@@ -69,9 +69,15 @@ internal fun FriendsTab(
     val inbox = if (workspaceOverride == null) remember(context) { com.lingxi.code.inbox.InboxController.get(context.applicationContext) } else null
     val inboxProjection = inbox?.projectedRows?.collectAsStateWithLifecycle()?.value.orEmpty()
     val inboxRows = inbox?.state?.collectAsStateWithLifecycle()?.value?.rows.orEmpty()
-    val projectedUnread = remember(inboxProjection, inboxRows, inbox) {
-        if (inbox == null) null else (inboxProjection.values + inboxRows).filter { it.category == "friend" && !it.archived }
-            .mapNotNull { row -> row.peerUid?.let { it to maxOf(row.unreadCount, if (row.manualUnread) 1 else 0) } }.toMap()
+    val projectedUnread = remember(inboxProjection, inboxRows, inbox, state.cards) {
+        val pairs = state.cards.associate { it.uid to it.pair }
+        if (inbox == null) null else (inboxProjection.values + inboxRows).mapNotNull { row ->
+            val peer = row.peerUid ?: return@mapNotNull null
+            val pair = pairs[peer] ?: return@mapNotNull null
+            if (row.category != "friend" || row.archived || row.ref.sourceId != pair.teamId
+                || row.ref.generation != pair.generation || row.ref.conversationId != FriendsLogic.CHAT_CONVERSATION_ID) return@mapNotNull null
+            peer to maxOf(row.unreadCount, if (row.manualUnread) 1 else 0)
+        }.toMap()
     }
     val link by workspace.link.state.collectAsStateWithLifecycle()
     val search by workspace.search.state.collectAsStateWithLifecycle()
@@ -83,11 +89,21 @@ internal fun FriendsTab(
     var scrollToRequests by remember { mutableIntStateOf(0) }
 
     // The pushed screens, newest last: "add", "profile", "blocked" or "chat:<uid>". Saved as text so it survives the tab leaving composition.
+    val uid = state.uid
+    var routeOwner by rememberSaveable { mutableStateOf<String?>(null) }
     var stackText by rememberSaveable { mutableStateOf("") }
     var inboxConversation by rememberSaveable { mutableStateOf<String?>(null) }
     var fromInbox by rememberSaveable { mutableStateOf(false) }
-    val stack = stackText.split('\n').filter { it.isNotEmpty() }
-    fun setStack(next: List<String>) { stackText = next.joinToString("\n") }
+    val ownsRoute = uid != null && routeOwner == uid
+    val stack = if (ownsRoute) stackText.split('\n').filter { it.isNotEmpty() } else emptyList()
+    fun setStack(next: List<String>) {
+        routeOwner = uid
+        stackText = next.joinToString("\n")
+        if (next.none { it.startsWith("chat:") }) {
+            inboxConversation = null
+            fromInbox = false
+        }
+    }
     fun openPage(page: String) = setStack(if (wide) listOf(page) else if (page in stack) stack else stack + page)
     // A chat replaces Add friend, which led to it; beside the list (wide) it replaces whatever is in the pane.
     fun openChat(friendUid: String) {
@@ -96,18 +112,14 @@ internal fun FriendsTab(
         setStack(if (wide) listOf("chat:$friendUid") else stack.filterNot { it == "add" || it.startsWith("chat:") } + "chat:$friendUid")
     }
     fun close(page: String) {
-        val next = stack.filterNot { it == page }
-        setStack(next)
-        if (page.startsWith("chat:") && fromInbox) {
-            inboxConversation = null
-            fromInbox = false
-            host.select(AppTab.Chats)
-        }
+        val returnToInbox = page.startsWith("chat:") && fromInbox
+        setStack(stack.filterNot { it == page })
+        if (returnToInbox) host.select(AppTab.Chats)
     }
 
-    val uid = state.uid
     LaunchedEffect(uid) {
-        if (uid == null) { setStack(emptyList()); workspace.link.clear() }
+        if (uid != routeOwner) setStack(emptyList())
+        if (uid == null) workspace.link.clear()
         else if (state.profile == null) workspace.loadProfile()
     }
     // The invitations' clock (D28): read when the tab is shown, when the app comes back to the front and once a minute while it stays, so the
@@ -116,13 +128,18 @@ internal fun FriendsTab(
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { workspace.refreshClock() }
 
     // A link or push waits for sign-in and, for a chat, for the first cards snapshot (D16).
-    LaunchedEffect(request?.id, uid, state.cardsLoaded) {
+    LaunchedEffect(request?.id, uid, state.cardsLoaded, state.cardsFailed) {
         val pending = request ?: return@LaunchedEffect
         if (uid == null) return@LaunchedEffect
         when (val target = pending.link) {
             is FriendLink.Add -> { setStack(emptyList()); workspace.link.lookup(FriendProof.Code(target.code)) }
             FriendLink.Requests -> { setStack(emptyList()); scrollToRequests++ }
             is FriendLink.Chat -> {
+                if (state.cardsFailed && !state.cardsLoaded) {
+                    onRequestHandled(pending.id)
+                    workspace.chatUnavailable()
+                    return@LaunchedEffect
+                }
                 if (!state.cardsLoaded) return@LaunchedEffect
                 if (target.expectedTeam != null && state.cards.none { card ->
                     card.uid == target.uid && card.pair?.teamId == target.expectedTeam && card.pair?.generation == target.expectedGeneration
@@ -170,18 +187,34 @@ internal fun FriendsTab(
             val list: @Composable (Modifier) -> Unit = { m ->
                 FriendsListScreen(
                     state = state, uid = uid, projectedUnread = projectedUnread, openChatUid = if (wide) chatUid else "", listState = listState, scrollToRequests = scrollToRequests,
-                    onOpenChat = ::openChat, onAdd = { openPage("add") }, onProfile = { openPage("profile") }, onBlocked = { openPage("blocked") },
+                    onOpenChat = ::openChat, onAdd = { openPage("add") }, onMe = { openPage("me") }, onProfile = { openPage("profile") }, onBlocked = { openPage("blocked") },
                     onRetry = workspace::retry, onRetryProfile = workspace::loadProfile,
-                    onAccept = workspace::accept, onDecline = workspace::decline, onCancel = workspace::cancel,
-                    onJoinOffer = { teamId -> workspace.acceptOffer(teamId, onJoined = refreshTeams) }, onDeclineOffer = workspace::declineOffer, modifier = m,
+                    onAccept = { workspace.accept(it, state.card(it)?.version ?: FriendsLogic.LEGACY_VERSION) },
+                    onDecline = { workspace.decline(it, state.card(it)?.version ?: FriendsLogic.LEGACY_VERSION) },
+                    onCancel = { workspace.cancel(it, state.card(it)?.version ?: FriendsLogic.LEGACY_VERSION) },
+                    onJoinOffer = { teamId ->
+                        val offer = state.offers.firstOrNull { it.teamId == teamId }
+                        workspace.acceptOffer(teamId, offer?.version ?: FriendsLogic.LEGACY_VERSION, onJoined = refreshTeams)
+                    },
+                    onDeclineOffer = { teamId ->
+                        val offer = state.offers.firstOrNull { it.teamId == teamId }
+                        workspace.declineOffer(teamId, offer?.version ?: FriendsLogic.LEGACY_VERSION)
+                    }, modifier = m,
                 )
             }
             val page: @Composable (String, Modifier) -> Unit = { entry, m ->
                 when {
                     entry == "add" -> AddFriendScreen(
-                        state, search, showBack = !wide, onClose = { close(entry) }, onOpenChat = ::openChat, onLoadProfile = workspace::loadProfile,
-                        onRotateCode = workspace::rotateCode, onRevokeCode = workspace::revokeCode, onLookup = workspace.search::lookup,
+                        state, search, showBack = !wide, onClose = { close(entry) }, onOpenChat = ::openChat,
+                        onLookup = workspace.search::lookup,
+                        onSearchHandles = workspace.search::searchHandles, onSelect = workspace.search::select,
+                        onBackToResults = workspace.search::clearSelection,
                         onConfirm = workspace.search::confirm, onClear = workspace.search::clear, modifier = m,
+                    )
+                    entry == "me" -> MyFriendCardScreen(
+                        state, showBack = !wide, onClose = { close(entry) }, onLoadProfile = workspace::loadProfile,
+                        onRotateCode = workspace::rotateCode, onRevokeCode = workspace::revokeCode,
+                        onProfile = { openPage("profile") }, onBlocked = { openPage("blocked") }, modifier = m,
                     )
                     entry == "profile" -> FriendProfileScreen(
                         state, showBack = !wide, onClose = { close(entry) }, onLoad = workspace::loadProfile, onSave = workspace::saveProfile, modifier = m,

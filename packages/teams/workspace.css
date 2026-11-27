@@ -189,8 +189,8 @@
 .tw-section-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 4px 4px 8px; }
 .tw-section-head h3 { font-size: 12px; font-weight: 700; color: var(--tw-muted); letter-spacing: 0.02em; }
 .tw-row { position: relative; }
-.tw-scope .tw-row-main { width: 100%; min-height: 44px; padding: 6px 8px; justify-content: flex-start; align-items: center; gap: 10px; text-align: left; border-color: transparent; border-radius: 8px; }
-.tw-row[data-selected='true'] .tw-row-main { background: var(--tw-selected); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tw-accent-text) 18%, transparent); }
+.tw-scope :is(.tw-row-main, .tw-me-main) { width: 100%; min-height: 44px; padding: 6px 8px; justify-content: flex-start; align-items: center; gap: 10px; text-align: left; border-color: transparent; border-radius: 8px; }
+:is(.tw-row[data-selected='true'] .tw-row-main, .tw-friend-me[data-selected='true'] .tw-me-main) { background: var(--tw-selected); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tw-accent-text) 18%, transparent); }
 .tw-row-lead { width: 40px; display: inline-flex; align-items: center; justify-content: center; flex: none; }
 .tw-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .tw-row-top, .tw-row-bottom { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
@@ -526,13 +526,36 @@
 .tw-friends-card, .tw-lookup { display: flex; flex-direction: column; gap: 10px; border: 1px solid var(--tw-line); border-radius: 10px; }
 .tw-friends-card { padding: 14px; }
 .tw-friends-card h3 { font-size: 13px; }
-.tw-friends-find { display: flex; gap: 8px; }
-.tw-friends-find input { flex: 1; }
+.tw-friend-me { margin: 4px 8px 8px; }
+.tw-scope .tw-me-main { min-height: 56px; }
+.tw-me-main > svg:last-child, .tw-friend-results button > svg:last-child,
+.tw-friend-settings button > svg { flex: none; color: var(--tw-muted); }
+.tw-friends-discovery { display: flex; flex-direction: column; align-items: stretch; gap: 12px; }
+.tw-friends-discovery > button { align-self: start; }
+.tw-friends-find { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; }
+.tw-friend-search-field { position: relative; flex: 1 1 13rem; min-width: 0; }
+.tw-friend-search-field > svg { position: absolute; inset-inline-start: 12px; inset-block-start: 50%; transform: translateY(-50%); color: var(--tw-muted); pointer-events: none; }
+.tw-scope .tw-friend-search-field input[type='search'] { width: 100%; min-height: 44px; padding-inline: 38px 46px; border-radius: 12px; }
+.tw-friend-search-field input::-webkit-search-cancel-button { display: none; }
+.tw-scope .tw-friend-search-clear { position: absolute; inset-block: 0; inset-inline-end: 0; min-width: 44px; height: 100%; color: var(--tw-muted); }
+.tw-friends-find > button { min-height: 44px; }
+.tw-friend-results, .tw-friend-settings { display: flex; flex-direction: column; padding: 0; margin: 0; list-style: none; border: 1px solid var(--tw-line); border-radius: 12px; }
+.tw-scope .tw-friend-results button, .tw-scope .tw-friend-settings button {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 48px;
+  padding: 8px 12px; text-align: start; border-color: transparent; background: transparent;
+}
+.tw-friend-results li + li, .tw-scope .tw-friend-settings button + button { border-block-start: 1px solid var(--tw-line); }
+.tw-scope .tw-friend-results button:hover, .tw-scope .tw-friend-settings button:hover { background: var(--tw-hover); }
+.tw-scope .tw-friend-results button:active, .tw-scope .tw-friend-me button:active, .tw-scope .tw-friend-settings button:active { background: var(--tw-selected); }
+.tw-friends-card.tw-friend-identity { flex-direction: row; align-items: center; gap: 14px; }
+.tw-friend-identity b { font-size: 18px; line-height: 1.25; letter-spacing: -0.015em; }
+.tw-friend-qr { align-self: center; width: min(100%, 204px); aspect-ratio: 1; height: auto; image-rendering: pixelated; border-radius: 12px; background: white; }
 .tw-link-text { display: flex; min-width: 0; padding: 6px 8px; border-radius: 6px; background: var(--tw-hover); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; user-select: all; }
 .tw-link-head { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tw-link-tail { flex: none; white-space: nowrap; }
 .tw-lookup { padding: 12px; }
 .tw-lookup-who { display: flex; align-items: center; gap: 10px; }
+button.tw-lookup-who { text-align: start; }
 .tw-lookup-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .tw-lookup-note textarea { resize: vertical; }
 .tw-friends-chat { position: relative; display: flex; height: 100%; min-height: 0; container: friend-chat / inline-size; }
@@ -669,3 +692,14 @@
   margin-inline-start: 0;
   white-space: pre-wrap;
 }
+.tw-scope .tw-visualization {
+  max-width: 100%;
+  min-width: min(24rem, 100%);
+  overflow: hidden;
+  border: 1px solid var(--tw-line, currentColor);
+  border-radius: .65rem;
+  padding: .75rem;
+}
+.tw-scope .tw-visualization-title { display: flex; justify-content: space-between; align-items: baseline; gap: .75rem; }
+.tw-scope .tw-visualization-frame { display: block; width: 100%; border: 0; }
+.tw-scope .tw-data-record form fieldset { display: grid; gap: .5rem; }

@@ -13,8 +13,12 @@
 //! `AttachmentMessage.tsx`) — this replaces the pre-split `"[attachment]"`
 //! sub-wildcard that flattened the PDF/selected-lines/MCP/plan/skills kinds.
 
-use std::path::Path;
+use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::SystemTime;
 
+use lru::LruCache;
 use tui_core::message::Attachment;
 use tui_core::render::osc8::file_link;
 use tui_core::render::StyledLine;
@@ -211,6 +215,18 @@ const CELL_PIXEL_HEIGHT: u32 = 16;
 /// image from dwarfing the terminal; protocols scale it down to fit).
 const MAX_IMAGE_ROWS: u16 = 12;
 
+#[derive(PartialEq, Eq, Hash)]
+struct InlineImageKey {
+    path: PathBuf,
+    protocol: ImageProtocol,
+    len: u64,
+    modified: SystemTime,
+}
+
+static INLINE_IMAGES: LazyLock<Mutex<LruCache<InlineImageKey, ScrollbackEscape>>> =
+    LazyLock::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(16).unwrap())));
+const MAX_CACHED_ESCAPE_BYTES: usize = 512 * 1024;
+
 /// [`RenderedMessage::UserImage`](tui_core::message::RenderedMessage::UserImage)
 /// — the `[Image #N]` text placeholder, always visible. When the message
 /// carries a `source_path` AND the terminal speaks an inline-image protocol,
@@ -280,12 +296,26 @@ impl StyledCell for UserImageCell {
             return None;
         }
         let path = Path::new(self.source_path.as_deref()?);
+        let metadata = path.metadata().ok()?;
+        let key = InlineImageKey {
+            path: path.to_path_buf(),
+            protocol: self.protocol,
+            len: metadata.len(),
+            modified: metadata.modified().ok()?,
+        };
+        if let Some(image) = INLINE_IMAGES.lock().ok()?.get(&key) {
+            return Some(image.clone());
+        }
         let (_, height_px) = crate::image_view::image_pixel_size(path)?;
         let rows = u16::try_from(height_px.div_ceil(CELL_PIXEL_HEIGHT))
             .unwrap_or(MAX_IMAGE_ROWS)
             .clamp(1, MAX_IMAGE_ROWS);
         let escape = crate::term_image::render_inline_image(path, self.protocol, rows)?;
-        Some(ScrollbackEscape { rows, escape })
+        let image = ScrollbackEscape { rows, escape };
+        if image.escape.len() <= MAX_CACHED_ESCAPE_BYTES {
+            INLINE_IMAGES.lock().ok()?.put(key, image.clone());
+        }
+        Some(image)
     }
 }
 

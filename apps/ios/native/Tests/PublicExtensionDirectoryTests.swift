@@ -1,10 +1,24 @@
 import Foundation
+import UIKit
 import XCTest
 
 @testable import LingxiCode
 
 @MainActor
 final class PublicExtensionDirectoryTests: XCTestCase {
+    func testBundledDesignAndGraphicsRecommendations() throws {
+        let items = try XCTUnwrap(PublicExtensionDirectory.load()).items
+        let effects = try XCTUnwrap(items.first { $0.id == "pixelfx" })
+        XCTAssertEqual(effects.category, .graphics)
+        XCTAssertEqual(effects.previewURL?.absoluteString, "https://patch-gg.github.io/pixelfx/")
+        XCTAssertTrue(items.contains { $0.category == .graphics && $0.skills.contains("threejs-lighting") })
+        XCTAssertTrue(items.contains { $0.category == .design && $0.skills.contains("accessibility-review") })
+        XCTAssertFalse(items.contains { ["shadcn-ui", "threejs-mcp"].contains($0.id) })
+        for category in PublicExtensionCategory.allCases {
+            XCTAssertNotNil(UIImage(named: "extension_\(category.rawValue).jpg"))
+        }
+    }
+
     func testRecommendedPluginTargetFollowsVerifiedMarketplaceAliases() {
         let candidate = PublicExtensionMarketplace(source: "anthropics/skills", name: "anthropic-agent-skills", plugin: "document-skills")
         let alias = PluginMarketplace(name: "my-skills", sourceJSON: #"{"source":"github","repo":"anthropics/skills"}"#, installLocation: nil, lastUpdated: nil)

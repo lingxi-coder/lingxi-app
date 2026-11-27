@@ -65,7 +65,7 @@
 //! [`crate::settings_bridge::SettingsContext`] the composition root supplies.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -273,7 +273,7 @@ fn replay_captured_authority(
     let loaded = session::jsonl::loader::route_captured_session_source(&path, id, &content)
         .map_err(|error| format!("resume: selected session is not resumable: {error}"))?;
     crate::boot::validate_captured_transcript(&path, id, &content, &loaded, false)?;
-    let replayed = orchestrator::resume::replay_captured_session(path, content.clone(), loaded, id)
+    let replayed = orchestrator::resume::replay_prepared_session(path, &content, &loaded, id)
         .map_err(|error| format!("resume: selected session is not resumable: {error}"))?;
     let source = authority.pinned_resume_source(content);
     Ok((replayed, source))
@@ -291,13 +291,17 @@ async fn replay_unique_catalog_source(
 > {
     let (_, authority) =
         harness_runtime::headless::session::resolve_unique_resume_source(home, id).await?;
-    let content = String::from_utf8(
-        authority
-            .read_checked()
-            .map_err(|error| error.to_string())?,
-    )
-    .map_err(|_| "resume: transcript is not valid UTF-8")?;
-    replay_captured_authority(authority, content, id)
+    tokio::task::spawn_blocking(move || {
+        let content = String::from_utf8(
+            authority
+                .read_checked()
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|_| "resume: transcript is not valid UTF-8")?;
+        replay_captured_authority(authority, content, id)
+    })
+    .await
+    .map_err(|error| format!("resume: transcript replay task failed: {error}"))?
 }
 
 impl SessionStoreContext {
@@ -477,6 +481,16 @@ pub trait CommandRouter: Send + Sync + 'static {
     /// replaying deferred tools. The requesting host fences its event sequence.
     async fn transcript_checkpoint(&self, _session_id: uuid::Uuid) -> Result<ClientEvent, String> {
         Err("desktop transcript checkpoint is unavailable".into())
+    }
+
+    /// Capture a bounded display projection of the already admitted cold source.
+    async fn prepare_cold_resume_preview(
+        &self,
+        _session_id: uuid::Uuid,
+        _path: &Path,
+        _mode: ConversationMode,
+    ) -> Result<Arc<crate::workspace_commands::ColdResumePreview>, String> {
+        Err("desktop cold resume preview is unavailable".into())
     }
 
     /// Authenticated, private Native `set_cwd` control request.
@@ -938,27 +952,31 @@ impl EngineCommandRouter {
         let Some(pending) = pending else {
             return replay_unique_catalog_source(home, uuid).await;
         };
-        let authority = session::jsonl::writer::TranscriptFileAuthority::from_capture(
-            pending.identity.root.clone(),
-            pending.identity.relative.clone(),
-            pending.identity.root_identity,
-            pending.identity.file_identity,
-        )
-        .map_err(|error| format!("resume: invalid fork target authority: {error}"))?;
-        let content = authority
-            .read_checked()
-            .map_err(|error| format!("resume: published fork target changed: {error}"))?;
-        if content.len() != pending.content_len
-            || remote_control_client::encoding::sha256(&content) != pending.content_sha256
-        {
-            return Err("resume: published fork target changed".into());
-        }
-        authority
-            .verify_current()
-            .map_err(|error| format!("resume: published fork target changed: {error}"))?;
-        let content = String::from_utf8(content)
-            .map_err(|_| "resume: published fork target is not valid UTF-8")?;
-        replay_captured_authority(authority, content, uuid)
+        tokio::task::spawn_blocking(move || {
+            let authority = session::jsonl::writer::TranscriptFileAuthority::from_capture(
+                pending.identity.root.clone(),
+                pending.identity.relative.clone(),
+                pending.identity.root_identity,
+                pending.identity.file_identity,
+            )
+            .map_err(|error| format!("resume: invalid fork target authority: {error}"))?;
+            let content = authority
+                .read_checked()
+                .map_err(|error| format!("resume: published fork target changed: {error}"))?;
+            if content.len() != pending.content_len
+                || remote_control_client::encoding::sha256(&content) != pending.content_sha256
+            {
+                return Err("resume: published fork target changed".into());
+            }
+            authority
+                .verify_current()
+                .map_err(|error| format!("resume: published fork target changed: {error}"))?;
+            let content = String::from_utf8(content)
+                .map_err(|_| "resume: published fork target is not valid UTF-8")?;
+            replay_captured_authority(authority, content, uuid)
+        })
+        .await
+        .map_err(|error| format!("resume: transcript replay task failed: {error}"))?
     }
 
     async fn resume_replayed_session(
@@ -2083,22 +2101,40 @@ impl CommandRouter for EngineCommandRouter {
         if self.handle.conversation_mode().await.mode != expected_mode {
             return Err("session_mode_mismatch: expected mode differs from the runtime".into());
         }
+        let page_display = request.at_pointer("/page_display").and_then(|value| value.as_bool()) == Some(true);
         if let Some(workspace) = &self.workspace_commands {
             if let Some(proof) = workspace
-                .complete_cold_resume(id, &path, expected_mode)
+                .complete_cold_resume(id, &path, expected_mode, page_display)
                 .await?
             {
                 self.emit_resumed_session(id, proof.messages, proof.current_usage, None, sink)
                     .await;
-                return Utf16JsonProjection::parse(r#"{"status":"ok"}"#)
-                    .map_err(|error| error.to_string());
+                return if page_display {
+                    #[derive(serde::Serialize)]
+                    struct Receipt {
+                        status: &'static str,
+                        history_before: Option<String>,
+                        history_overview: Vec<client::protocol::message::MessageDto>,
+                    }
+                    let value = serde_json::to_string(&Receipt {
+                        status: "ok", history_before: proof.history_before,
+                        history_overview: proof.history_overview,
+                    }).map_err(|error| error.to_string())?;
+                    Utf16JsonProjection::parse(&value)
+                } else {
+                    Utf16JsonProjection::parse(r#"{"status":"ok"}"#)
+                }.map_err(|error| error.to_string());
             }
         }
         let store = self
             .session_store
             .as_ref()
             .ok_or("resume: persisted session store is unavailable")?;
-        let (replayed, source) = replay_pinned_catalog_source(&store.lingxi_home, &path, id)?;
+        let home = store.lingxi_home.clone();
+        let (replayed, source) =
+            tokio::task::spawn_blocking(move || replay_pinned_catalog_source(&home, &path, id))
+                .await
+                .map_err(|error| format!("resume: transcript replay task failed: {error}"))??;
         self.resume_replayed_session(id, replayed, expected_mode, source, sink)
             .await?;
         Utf16JsonProjection::parse(r#"{"status":"ok"}"#).map_err(|error| error.to_string())
@@ -2375,6 +2411,22 @@ impl CommandRouter for EngineCommandRouter {
             }
         }
     }
+    async fn prepare_cold_resume_preview(
+        &self,
+        session_id: uuid::Uuid,
+        path: &Path,
+        mode: ConversationMode,
+    ) -> Result<Arc<crate::workspace_commands::ColdResumePreview>, String> {
+        if self.is_turn_active() {
+            return Err("desktop cold resume preview requires the idle session owner".into());
+        }
+        self.workspace_commands
+            .as_ref()
+            .ok_or("desktop cold resume preview is unavailable")?
+            .prepare_cold_resume_preview(session_id, path, mode)
+            .await
+    }
+
     async fn transcript_checkpoint(&self, session_id: uuid::Uuid) -> Result<ClientEvent, String> {
         if self.is_turn_active() || self.handle.current_session_id().await.as_uuid() != session_id {
             return Err("desktop transcript checkpoint requires the idle session owner".into());
@@ -3963,10 +4015,9 @@ mod catalog;
 mod configuration;
 mod sessions;
 mod settings;
+pub(crate) use settings::parse_settings_patch;
 mod tasks;
 
-#[cfg(test)]
-use settings::parse_settings_patch;
 use tasks::emit_correlated_task_list;
 use tasks::task_status_wire;
 pub use tasks::TaskPoll;

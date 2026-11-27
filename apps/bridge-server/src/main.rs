@@ -25,12 +25,14 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use bridge::McpEndpoint;
 use bridge_server::boot::{self, BridgeArgs};
 use client::protocol::events::{ClientEvent, ErrorKindDto};
 
 fn main() -> anyhow::Result<()> {
+    let started_at = Instant::now();
     let catalog_worker =
         std::env::args().nth(1).as_deref() == Some("--session-catalog-worker-json");
     let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -41,7 +43,7 @@ fn main() -> anyhow::Result<()> {
         builder.worker_threads(2).max_blocking_threads(20);
     }
     let runtime = builder.build()?;
-    let result = runtime.block_on(async_main());
+    let result = runtime.block_on(async_main(started_at));
     if catalog_worker {
         // Tokio stdin's blocking read cannot be cancelled on idle timeout.
         // Bound shutdown rather than keeping an unused metadata child alive.
@@ -50,7 +52,7 @@ fn main() -> anyhow::Result<()> {
     result
 }
 
-async fn async_main() -> anyhow::Result<()> {
+async fn async_main(started_at: Instant) -> anyhow::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("--session-catalog-worker-json") {
         if std::env::args_os().len() != 2 {
             return Err(anyhow::anyhow!("invalid session catalog worker arguments"));
@@ -76,6 +78,18 @@ async fn async_main() -> anyhow::Result<()> {
             .await
             .map_err(|error| anyhow::anyhow!(error))?;
         println!("{result}");
+        return Ok(());
+    }
+    if std::env::args().nth(1).as_deref() == Some("--project-settings-command") {
+        let home = boot::brand_home().ok_or_else(|| anyhow::anyhow!("settings home unavailable"))?;
+        let events = bridge_server::project_settings::run(
+            home,
+            std::env::current_dir()?,
+            std::io::stdin().lock(),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+        println!("{}", serde_json::to_string(&events)?);
         return Ok(());
     }
     if std::env::args().nth(1).as_deref() == Some("--provider-settings-command") {
@@ -257,6 +271,14 @@ async fn async_main() -> anyhow::Result<()> {
         provider_account_credentials = envelope.provider_account_credentials;
         cfg.injected_plugin_secrets = envelope.plugin_secrets;
     }
+    let cold_resume = args.session_transcript_path.is_some();
+    if cold_resume {
+        tracing::info!(
+            phase = "process_setup",
+            duration_ms = started_at.elapsed().as_millis() as u64,
+            "bridge boot phase"
+        );
+    }
     tracing::info!(
         cwd = %cfg.cwd.display(),
         model = %cfg.default_model,
@@ -284,6 +306,7 @@ async fn async_main() -> anyhow::Result<()> {
     let semantic_failure_sink = bound.connection.policy_semantic_worker_failure_sink();
 
     // (3) Start the loopback WebSocket endpoint on an ephemeral port.
+    let bind_started_at = Instant::now();
     let endpoint =
         match McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(bound.connection)).await {
             Ok(endpoint) => endpoint,
@@ -293,6 +316,7 @@ async fn async_main() -> anyhow::Result<()> {
             }
         };
     let port = endpoint.port();
+    let publish_started_at = Instant::now();
 
     // (4) Write the F2-04 discovery lockfile and enforce its token on the
     //     endpoint. The workspace folder is the resolved cwd; the lockfile lives
@@ -337,6 +361,15 @@ async fn async_main() -> anyhow::Result<()> {
             ));
         }
     };
+    if cold_resume {
+        tracing::info!(
+            phase = "lockfile_publication",
+            duration_us = publish_started_at.elapsed().as_micros() as u64,
+            socket_bind_us = publish_started_at.duration_since(bind_started_at).as_micros() as u64,
+            process_elapsed_ms = started_at.elapsed().as_millis() as u64,
+            "bridge boot phase"
+        );
+    }
 
     // (5) Log the chosen port + lockfile path (NEVER the token), then block.
     tracing::info!(

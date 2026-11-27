@@ -104,6 +104,9 @@ struct TeamConversationDetailsSheet: View {
                 .padding(.vertical, 4)
                 .accessibilityElement(children: .combine)
             }
+            if conversation.kind == "channel" && !model.offline {
+                TeamVisualizationSettings(conversation: conversation.id, model: model)
+            }
             if unread > 0 {
                 Section {
                     Button("teams_mark_read", systemImage: "checkmark.circle") {

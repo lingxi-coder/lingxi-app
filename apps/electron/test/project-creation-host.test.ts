@@ -2,12 +2,13 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { HostController } from '../src/main/host';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 import { SettingsStore } from '../src/main/settings';
 import type { ProjectSessionCatalog } from '../src/main/session-catalog';
+import { CH_PROJECT_SETTINGS } from '../src/shared/projectSettings';
 import { CH_PROJECT_APPS_DEFAULT, CH_PROJECT_CREATE, CH_PROJECT_FOLDER_PICK } from '../src/shared/projectCreation';
 
 async function fixture(t: TestContext, existing = false, mode: 'chat' | 'code' = 'chat') {
@@ -267,4 +268,23 @@ test('a Code project creation admitted before navigation is recorded only in Cod
   const workspace = await admitted;
   assert.deepEqual(h.settings.conversationSpaces.snapshot().projects[workspace.path], ['code']);
   assert.equal(h.settings.conversationSpaces.snapshot().activeMode, 'chat');
+});
+
+
+test('project settings IPC accepts registered directories and configuration commands without touching chat navigation', async t => {
+  const h = await fixture(t, true);
+  h.settings.addProject(h.path);
+  const before = h.settings.getPublic();
+  const navigation = h.settings.conversationSpaces.snapshot();
+  const seen: string[] = [];
+  Object.assign(h.catalog, { projectSettings: async (path: string) => { seen.push(path); return []; } });
+  const invoke = h.handlers.get(CH_PROJECT_SETTINGS)!;
+  const read = { type: 'refresh_listings', which: [{ type: 'settings' }] };
+  assert.deepEqual(await invoke(h.event, h.path, read), []);
+  await assert.rejects(invoke(h.event, dirname(h.path), read), /project list/i);
+  await assert.rejects(invoke(h.event, h.path, { type: 'new_session' }));
+  assert.deepEqual(seen, [h.path]);
+  assert.deepEqual(h.settings.getPublic(), before);
+  assert.deepEqual(h.settings.conversationSpaces.snapshot(), navigation);
+  assert.deepEqual(h.calls, []);
 });

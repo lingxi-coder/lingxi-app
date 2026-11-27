@@ -35,6 +35,8 @@ pub mod methods {
     pub const SESSIONS_CHANGED: &str = "sessions.changed";
     /// Viewer request: attach to a session.
     pub const SESSION_ATTACH: &str = "session.attach";
+    /// Host notification: an optional, read-only first page before attachment.
+    pub const SESSION_PREVIEW: &str = "session.preview";
     /// Host notification: a snapshot page.
     pub const SESSION_SNAPSHOT: &str = "session.snapshot";
     /// Host notification: the next record.
@@ -527,6 +529,17 @@ pub struct SessionAttachParams {
     pub resume: Option<ResumeCursor>,
 }
 
+/// A saved tail shown while the engine completes a fresh attach.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionPreviewParams {
+    /// Session id.
+    pub session_id: String,
+    /// A provisional display mode.
+    pub session_mode: SessionModeDto,
+    /// Recent history for display.
+    pub messages: Vec<MessageDto>,
+}
+
 /// Answer to `session.attach`. `delta`: the viewer's state is still valid; records
 /// after `resume.after_seq` follow as `session.event`, and `pending` is the full
 /// pending set. `snapshot`: `session.snapshot` notifications follow.
@@ -897,6 +910,22 @@ pub struct ImageGetParams {
     /// The ref a record carries.
     #[serde(rename = "ref")]
     pub image_ref: String,
+    /// The variant the viewer needs. Omitted by legacy clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<SessionImageSize>,
+    /// Starting offset in base64 characters for an original.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+}
+
+/// A display thumbnail or an original image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionImageSize {
+    /// A smaller image for the transcript.
+    Thumbnail,
+    /// The original bytes for viewing and export.
+    Original,
 }
 
 /// `image.get` result.
@@ -906,6 +935,9 @@ pub struct ImageGetResult {
     pub media_type: String,
     /// The bytes, base64.
     pub base64: String,
+    /// Next base64 offset when returning an original in several frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------

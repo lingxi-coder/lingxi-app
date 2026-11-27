@@ -1,12 +1,17 @@
 .settings-screen {
   --settings-titlebar-height: 40px;
-  --settings-top-padding: 12px;
+  --settings-top-padding: 10px;
+  --settings-window-controls-end: env(titlebar-area-x, 0px);
   accent-color: var(--settings-accent);
+}
+
+.settings-screen[data-macos] {
+  --settings-window-controls-end: max(88px, env(titlebar-area-x, 0px));
 }
 
 .settings-window-drag-region {
   position: absolute;
-  z-index: 1;
+  pointer-events: none;
   /* Leave room for the native macOS window buttons. */
   inset: 0 0 auto 88px;
   height: var(--settings-titlebar-height);
@@ -15,7 +20,22 @@
 
 .settings-sidebar-controls {
   flex-shrink: 0;
-  padding: calc(var(--settings-titlebar-height) + var(--settings-top-padding)) 14px 8px;
+  padding: var(--settings-top-padding) 14px 8px;
+}
+
+.settings-back-button {
+  --settings-back-offset: max(0px, calc(var(--settings-window-controls-end) - 14px));
+  margin-inline-start: var(--settings-back-offset);
+  width: calc(100% - var(--settings-back-offset));
+}
+
+.settings-page-header {
+  -webkit-app-region: drag;
+}
+
+/* Controls remain clickable when they scroll through the window's drag region. */
+.settings-screen :is(button, input, select, textarea, summary, a[href], [contenteditable="true"], [role="button"]) {
+  -webkit-app-region: no-drag;
 }
 
 :is(.settings-screen, .settings-model-popup) :is(button, input, select, textarea, summary, a[href], [tabindex]):focus-visible {
@@ -86,7 +106,6 @@
   min-width: 0;
   min-height: 0;
   margin: 0 6px 8px 0;
-  padding-top: var(--settings-titlebar-height);
   overflow: hidden;
 }
 

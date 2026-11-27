@@ -17,8 +17,17 @@ final class TeamMessageRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchec
 
 @MainActor @Observable
 final class TeamMessagingModel {
+    private struct VisualizationCard: Hashable, Sendable {
+        let conversation: String
+        let message: String
+        let version: String
+    }
+    @ObservationIgnored private var visibleVisualizations: [VisualizationCard: Int] = [:]
+    @ObservationIgnored private var visualizationChecks: [String: Task<[VisualizationCard: Bool], Error>] = [:]
+    @ObservationIgnored private var visualizationLeases: [String: (until: ContinuousClock.Instant, results: [VisualizationCard: Bool])] = [:]
+
     static let conversationFields: Set<String> = ["kind", "title", "participants", "lastSeq", "lastChangeSeq", "lastMessage", "sharedBotId", "autoReply", "botScopes"]
-    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "mentionEntities", "targets", "taskId", "taskIds", "artifactId", "waitId", "approval", "decision", "dataRef", "resourceRef", "resourceGrant"]
+    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "mentionEntities", "targets", "taskId", "taskIds", "artifactId", "waitId", "approval", "decision", "dataRef", "resourceRef", "resourceGrant", "visualization"]
     private(set) var cache: TeamMessageProjection?
     private(set) var offline = true
     private(set) var error = ""
@@ -252,6 +261,10 @@ final class TeamMessagingModel {
     }
     private func closeSelectedListeners() {
         selectedRevision &+= 1
+        visualizationChecks.values.forEach { $0.cancel() }
+        visualizationChecks.removeAll()
+        visualizationLeases.removeAll()
+        visibleVisualizations.removeAll()
         readListener?.remove(); readListener = nil
         changesListener?.remove(); changesListener = nil
         messageListener?.remove(); messageListener = nil
@@ -878,30 +891,100 @@ final class TeamMessagingModel {
         return try await response(body, life: lifecycle, dataConversation: conversationId)
     }
 
-    func dataset(conversationId: String, body: [String: Any]) async throws -> Data {
-        try await response(body, life: lifecycle, dataConversation: conversationId, dataset: true)
+    func dataset(conversationId: String, body: [String: Any], from source: String? = nil) async throws -> Data {
+        try await response(body, life: lifecycle, dataConversation: conversationId, dataset: true, sourceConversation: source)
     }
 
-    private func response(_ body: [String: Any], life: Int, timeout: TimeInterval = 20, dataConversation: String? = nil, dataset: Bool = false) async throws -> Data {
+    func visualization(conversationId: String, body: [String: Any], from source: String? = nil) async throws -> [String: Any] {
+        let bytes = try await response(body, life: lifecycle, timeout: 45, dataConversation: conversationId,
+                                       visualization: true, sourceConversation: source)
+        guard let value = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else {
+            throw TeamMessageFailure(code: "INVALID_DATA")
+        }
+        return value
+    }
+
+    func observeVisualization(conversation: String, message: String, version: String) -> () -> Void {
+        let card = VisualizationCard(conversation: conversation, message: message, version: version)
+        let revision = selectedRevision
+        visibleVisualizations[card, default: 0] += 1
+        return { [weak self] in
+            guard let self, self.selectedRevision == revision, let count = self.visibleVisualizations[card] else { return }
+            self.visibleVisualizations[card] = count > 1 ? count - 1 : nil
+            if !self.visibleVisualizations.keys.contains(where: { $0.conversation == conversation }) {
+                self.visualizationLeases[conversation] = nil
+            }
+        }
+    }
+
+    func checkVisualization(conversation: String, message: String, version: String) async throws {
+        guard active, selected == conversation else { throw CancellationError() }
+        let revision = selectedRevision
+        let card = VisualizationCard(conversation: conversation, message: message, version: version)
+        if let lease = visualizationLeases[conversation], ContinuousClock.now < lease.until {
+            if lease.results[card] == false { throw TeamMessageFailure(code: "DATA_ACCESS_REQUIRED") }
+            return
+        }
+        let check: Task<[VisualizationCard: Bool], Error>
+        if let current = visualizationChecks[conversation] {
+            check = current
+        } else {
+            check = Task {
+                defer { if selectedRevision == revision { visualizationChecks[conversation] = nil } }
+                try Task.checkCancellation()
+                let cards = visibleVisualizations.keys.filter { $0.conversation == conversation }
+                var results: [VisualizationCard: Bool] = [:]
+                for start in stride(from: 0, to: cards.count, by: 40) {
+                    let batch = cards[start..<min(start + 40, cards.count)]
+                    let response = try await visualization(conversationId: conversation, body: ["action": "checkBatch",
+                        "cards": batch.map { ["message": $0.message, "version": $0.version] }])
+                    guard let active = response["active"] as? [Bool], active.count == batch.count else {
+                        throw TeamMessageFailure(code: "INVALID_DATA")
+                    }
+                    for (key, allowed) in zip(batch, active) { results[key] = allowed }
+                }
+                try Task.checkCancellation()
+                if visibleVisualizations.keys.contains(where: { $0.conversation == conversation }) {
+                    visualizationLeases[conversation] = (ContinuousClock.now.advanced(by: .seconds(12)), results)
+                }
+                return results
+            }
+            visualizationChecks[conversation] = check
+        }
+        if try await check.value[card] == false { throw TeamMessageFailure(code: "DATA_ACCESS_REQUIRED") }
+    }
+
+    func datasetDestination(conversationId: String) -> [String: String] {
+        ["team": teamId, "conversation": conversationId]
+    }
+
+    private func response(_ body: [String: Any], life: Int, timeout: TimeInterval = 20, dataConversation: String? = nil, dataset: Bool = false, visualization: Bool = false, sourceConversation: String? = nil) async throws -> Data {
         guard active, life == lifecycle, let user = auth.currentUser, user.uid == uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
+        let dataSelection = selectedRevision
         let token = try await user.getIDToken()
         guard active, life == lifecycle, auth.currentUser?.uid == uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
         var body = body
+        let selectedSource = sourceConversation ?? dataConversation
+        if let selectedSource, selectedSource != selected || dataSelection != selectedRevision { throw TeamMessageFailure(code: "CONVERSATION_REQUIRED") }
         if let dataConversation {
-            guard dataConversation == selected else { throw TeamMessageFailure(code: "CONVERSATION_REQUIRED") }
-            if !dataset { body["scope"] = ["kind": "team", "teamId": teamId, "generation": generation, "conversationId": dataConversation] }
+            if visualization {
+                body["teamId"] = teamId; body["generation"] = generation; body["conversationId"] = dataConversation
+            } else if !dataset {
+                body["scope"] = ["kind": "team", "teamId": teamId, "generation": generation, "conversationId": dataConversation]
+            }
         } else {
             body["teamId"] = teamId; body["generation"] = generation
         }
         if body["schemaVersion"] != nil { try TeamExecutionContract.validate(body) }
-        let endpoint = dataConversation == nil ? apiRoot : apiRoot.deletingLastPathComponent().appendingPathComponent(dataset ? "datasets" : "data")
+        let endpoint = dataConversation == nil ? apiRoot : apiRoot.deletingLastPathComponent().appendingPathComponent(
+            visualization ? "visualizations" : dataset ? "datasets" : "data")
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"; request.timeoutInterval = timeout; request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, response) = try await session.data(for: request)
         guard active, life == lifecycle, auth.currentUser?.uid == uid else { throw TeamMessageFailure(code: "INVALID_SESSION") }
-        if let dataConversation, dataConversation != selected { throw TeamMessageFailure(code: "CONVERSATION_REQUIRED") }
+        if let selectedSource, selectedSource != selected || dataSelection != selectedRevision { throw TeamMessageFailure(code: "CONVERSATION_REQUIRED") }
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             let code = (object?["error"] as? [String: Any])?["code"] as? String ?? "SERVICE_UNAVAILABLE"

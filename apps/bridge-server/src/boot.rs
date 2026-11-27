@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde::Deserialize;
 
@@ -120,8 +121,10 @@ mod workspace_resume_tests;
 
 #[path = "catalog_worker.rs"]
 mod catalog_worker;
+#[path = "history_image.rs"]
+pub(crate) mod history_image;
 #[path = "history_page.rs"]
-mod history_page;
+pub(crate) mod history_page;
 
 /// Serve bounded metadata requests without resolving providers or building an engine.
 pub async fn run_session_catalog_worker() -> Result<(), String> {
@@ -639,16 +642,17 @@ pub fn resolve_api_base() -> String {
     std::env::var(API_BASE_ENV).unwrap_or_else(|_| DEFAULT_API_BASE.to_string())
 }
 
-async fn desktop_provider_catalog_listings(
+fn desktop_provider_catalog_fallback(
     cfg: &DesktopConfig,
     region: llm_runtime::Region,
 ) -> Vec<lingxi_core::host::ModelListing> {
+    // ListModels reads the live official snapshot directly whenever it is configured.
+    if cfg.startup_catalog.is_some() {
+        return Vec::new();
+    }
     let assembled = provider_config::assemble_for_region(
         provider_config::AssembleInputs {
-            official_catalog: match &cfg.startup_catalog {
-                Some(source) => Some((*source.load().await).clone()),
-                None => None,
-            },
+            official_catalog: None,
             anthropic_api_base: cfg.api_base.clone(),
             anthropic_models: desktop_provider_catalog_anthropic_models(
                 &cfg.default_model,
@@ -1315,6 +1319,22 @@ pub(crate) fn capture_selected_transcript_source(
     path: &Path,
     id: uuid::Uuid,
 ) -> Result<(session::jsonl::writer::TranscriptFileAuthority, String), String> {
+    let (canonical_home, relative) = selected_transcript_location(home, path, id)?;
+    let (authority, bytes) =
+        session::jsonl::writer::TranscriptFileAuthority::capture(canonical_home, relative)
+            .map_err(|error| format!("selected transcript is unavailable: {error}"))?;
+    let content = String::from_utf8(bytes).map_err(|_| "selected transcript is not valid UTF-8")?;
+    if content.is_empty() {
+        return Err("selected transcript must be a nonempty JSONL file".into());
+    }
+    Ok((authority, content))
+}
+
+fn selected_transcript_location(
+    home: &Path,
+    path: &Path,
+    id: uuid::Uuid,
+) -> Result<(PathBuf, PathBuf), String> {
     validate_selected_transcript_identity(path, &id.to_string())?;
     let canonical_home =
         std::fs::canonicalize(home).map_err(|_| "selected transcript home is unavailable")?;
@@ -1330,16 +1350,8 @@ pub(crate) fn capture_selected_transcript_source(
     {
         return Err("selected transcript is outside the session catalog".into());
     }
-    let (authority, bytes) = session::jsonl::writer::TranscriptFileAuthority::capture(
-        canonical_home,
-        relative.to_path_buf(),
-    )
-    .map_err(|error| format!("selected transcript is unavailable: {error}"))?;
-    let content = String::from_utf8(bytes).map_err(|_| "selected transcript is not valid UTF-8")?;
-    if content.is_empty() {
-        return Err("selected transcript must be a nonempty JSONL file".into());
-    }
-    Ok((authority, content))
+    let relative = relative.to_path_buf();
+    Ok((canonical_home, relative))
 }
 
 /// Empty scheduled owners must carry the authoritative workspace anchor.
@@ -1350,7 +1362,7 @@ pub(crate) fn validate_captured_transcript(
     content: &str,
     loaded: &session::jsonl::LoadedTranscript,
     allow_unanchored_draft: bool,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if !content.ends_with('\n') {
         return Err("selected transcript has an incomplete final record".into());
     }
@@ -1358,21 +1370,31 @@ pub(crate) fn validate_captured_transcript(
         return Err("selected transcript contains malformed records".into());
     }
     let id_text = id.to_string();
-    let (messages, _) = session::jsonl::build_conversation_chain(loaded, &id_text);
-    if !messages.is_empty() {
-        return Ok(());
+    if session::jsonl::find_tip(loaded, &id_text).is_some() {
+        return Ok(true);
     }
+    validate_empty_transcript(path, &id_text, content, loaded, allow_unanchored_draft)?;
+    Ok(false)
+}
+
+fn validate_empty_transcript(
+    path: &Path,
+    id: &str,
+    content: &str,
+    loaded: &session::jsonl::LoadedTranscript,
+    allow_unanchored_draft: bool,
+) -> Result<(), String> {
     let has_anchor_field = content.lines().any(|line| {
         lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line)
             .is_ok_and(|row| row.contains_property("mobileEmptySession"))
     });
     if allow_unanchored_draft
         && !has_anchor_field
-        && session::jsonl::is_mode_only_draft(content, &id_text)
+        && session::jsonl::is_mode_only_draft(content, id)
     {
         return Ok(());
     }
-    let cwd = session::jsonl::validated_empty_draft_cwd(content, &id_text)
+    let cwd = session::jsonl::validated_empty_draft_cwd(content, id)
         .ok_or("empty session has no valid workspace anchor")?;
     if session::jsonl::loader::transcript_workspace_path(path, loaded)
         .map(PathBuf::from)
@@ -1438,7 +1460,7 @@ async fn prepare_selected_boot_session_after_capture(
     let (authority, preflight) = capture_selected_transcript_source(&cfg.lingxi_home, &path, uuid)?;
     validate_selected_session_mode(&preflight, uuid, expected)?;
     let preview = session::jsonl::route_lines(&preflight);
-    validate_captured_transcript(
+    let has_conversation = validate_captured_transcript(
         &authority.path(),
         uuid,
         &preflight,
@@ -1480,23 +1502,17 @@ async fn prepare_selected_boot_session_after_capture(
         session::jsonl::loader::validate_captured_session_source(&path, uuid, &content, &loaded)
             .map_err(|error| format!("selected transcript is not resumable: {error}"))?;
     }
-    validate_captured_transcript(&path, uuid, &content, &loaded, cfg.restore_draft)?;
-    // The source can change between the preflight and the writer claim.
-    validate_selected_session_mode(&content, uuid, expected)?;
-    let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &uuid.to_string());
-    if cfg.restore_draft
-        && !harness_runtime::desktop::session_state::is_mode_only_draft(&content, &uuid.to_string())
-    {
-        return Err("draft transcript is not valid mode-only metadata".into());
+    let id_text = uuid.to_string();
+    // Byte equality preserves the preflight mode and chain tip. An empty
+    // transcript's workspace anchor can still disappear while claiming it.
+    if !has_conversation {
+        validate_empty_transcript(&path, &id_text, &content, &loaded, cfg.restore_draft)?;
     }
-    if messages.is_empty()
-        && !loaded.mobile_empty_sessions.contains(&uuid.to_string())
-        && !(cfg.restore_draft
-            && harness_runtime::desktop::session_state::is_mode_only_draft(
-                &content,
-                &uuid.to_string(),
-            ))
-    {
+    if cfg.restore_draft {
+        if !harness_runtime::desktop::session_state::is_mode_only_draft(&content, &id_text) {
+            return Err("draft transcript is not valid mode-only metadata".into());
+        }
+    } else if !has_conversation && !loaded.mobile_empty_sessions.contains(&id_text) {
         return Err("selected transcript has no resumable conversation".into());
     }
     if let Some(workspace) = session::jsonl::loader::transcript_workspace_path(&path, &loaded)
@@ -1511,16 +1527,25 @@ async fn prepare_selected_boot_session_after_capture(
             return Err("selected transcript workspace changed; refresh its metadata and trust before launching".into());
         }
     }
+    // The legacy cost lookup needs only the newest record for this session.
+    // Keep the SDK's durable journal precedence and cost decoding.
+    let cost_record = content.lines().rev().find(|line| {
+        (line.contains("cost-state") || line.contains("\\u"))
+            && lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line).is_ok_and(|row| {
+                row.string_at("/type") == Some("cost-state")
+                    && row.string_at("/sessionId") == Some(id_text.as_str())
+            })
+    });
     let resume_cost = harness_runtime::desktop::session_state::capture_resume_cost(
         &cfg.lingxi_home,
         uuid,
         lease.clone(),
-        &content,
+        cost_record.unwrap_or_default(),
     )
     .await?;
     cfg.session_resume_cost = resume_cost;
     cfg.session_resume_snapshot = Some(harness_runtime::desktop::DesktopSessionResumeSnapshot {
-        source_session_id: uuid.to_string(),
+        source_session_id: id_text,
         content: content.into(),
     });
     cfg.session_resume_loaded = Some(harness_runtime::desktop::DesktopSessionResumeLoaded::new(
@@ -2164,6 +2189,9 @@ pub async fn assemble_with_account_credentials(
     provider_account_home: Option<PathBuf>,
     provider_account_backend: Option<String>,
 ) -> Result<BoundServer, String> {
+    let cold_start =
+        !cfg.restore_draft && !cfg.defer_session_start && cfg.session_transcript_path.is_some();
+    let before_prepare = cold_start.then(Instant::now);
     if cfg.team_invocation.is_none() {
         crate::provider_settings::apply_managed(&mut cfg).await?;
     }
@@ -2181,12 +2209,22 @@ pub async fn assemble_with_account_credentials(
     let media_handoffs =
         Arc::new(harness_runtime::desktop::DesktopMediaAgentHandoffQueue::default());
     cfg.media_agent_handoffs = Some(media_handoffs.clone());
-    prepare_draft_boot_session(&mut cfg).await?;
-    prepare_selected_boot_session(&mut cfg).await?;
-    let cold_resume = if cfg.restore_draft {
-        None
+    if cfg.restore_draft {
+        prepare_draft_boot_session(&mut cfg).await?;
     } else {
-        crate::workspace_commands::ColdBootResume::capture(&cfg)?
+        prepare_selected_boot_session(&mut cfg).await?;
+    }
+    if let Some(started) = before_prepare {
+        tracing::info!(
+            phase = "selected_transcript",
+            duration_ms = started.elapsed().as_millis() as u64,
+            "bridge boot phase"
+        );
+    }
+    let cold_resume = if cold_start {
+        crate::workspace_commands::ColdBootResume::from_prepared_config(&cfg)?
+    } else {
+        None
     };
     let provider_credentials_ephemeral = matches!(
         cfg.credential_storage_policy,
@@ -2414,12 +2452,11 @@ pub async fn assemble_with_account_credentials(
         connection.event_sink(),
     ));
     let official_catalog = cfg.startup_catalog.clone();
-    let provider_model_catalog_listings = desktop_provider_catalog_listings(
+    let provider_model_catalog_listings = desktop_provider_catalog_fallback(
         &cfg,
         harness_runtime::desktop::resolve_provider_region(&cfg, &settings_context.managed)
             .map_err(|error| settings_error_message(&error))?,
-    )
-    .await;
+    );
 
     let mut shared = harness_runtime::desktop::build_shared_credential_stack_with_policy(
         &cfg.lingxi_home,
@@ -2495,18 +2532,35 @@ pub async fn assemble_with_account_credentials(
             ));
     }
     let initial_account_snapshot = shared.provider_accounts.clone();
-    let runtime = Arc::new(
+    let assembly_started_at = Instant::now();
+    let assembly = async {
         // Do not nest the SDK's large assembly future in every transport wrapper.
         // This also keeps cold resume within ordinary worker-thread stack limits.
-        Box::pin(harness_runtime::desktop::build_with_host_automation(
+        let result = Box::pin(harness_runtime::desktop::build_with_host_automation(
             cfg,
             output,
             permission_sink,
             shared,
         ))
         .await
-        .map_err(|e| e.to_string())?,
-    );
+        .map(Arc::new)
+        .map_err(|e| e.to_string());
+        if cold_start {
+            tracing::info!(
+                phase = "runtime_assembly",
+                duration_ms = assembly_started_at.elapsed().as_millis() as u64,
+                "bridge boot phase"
+            );
+        }
+        result
+    };
+    let runtime = assembly.await?;
+    if cold_resume.is_some() {
+        tracing::info!(
+            duration_ms = assembly_started_at.elapsed().as_millis(),
+            "cold resume: runtime assembled"
+        );
+    }
     if let Some(writer) = runtime.orchestrator.session_transcript_writer() {
         ask_user_question_broker.bind_inbox(&writer);
     }
@@ -3033,6 +3087,20 @@ mod tests {
     }
     use super::*;
     use lingxi_core::host::live_sessions::LiveSessionDir;
+
+    #[test]
+    fn official_catalog_skips_fallback_model_assembly() {
+        let home = tempfile::tempdir().unwrap();
+        let mut cfg = DesktopConfig::default();
+        let region = llm_runtime::Region::International;
+        assert!(!desktop_provider_catalog_fallback(&cfg, region).is_empty());
+        cfg.startup_catalog = Some(harness_runtime::StartupCatalog::new(
+            harness_runtime::CatalogPlatform::Desktop,
+            "1.0.0",
+            home.path(),
+        ));
+        assert!(desktop_provider_catalog_fallback(&cfg, region).is_empty());
+    }
 
     #[test]
     fn remote_timeout_flags_are_validated_and_reach_the_runtime() {
@@ -3725,7 +3793,7 @@ mod tests {
             .prepared_session_resume()
             .expect("boot retains its validated parse");
         let prepared_address = prepared as *const session::jsonl::LoadedTranscript;
-        let proof = crate::workspace_commands::ColdBootResume::capture(&cfg).unwrap();
+        let proof = crate::workspace_commands::ColdBootResume::from_prepared_config(&cfg).unwrap();
         assert!(proof.is_some());
         assert_eq!(
             cfg.prepared_session_resume().unwrap() as *const _,
@@ -3922,7 +3990,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selected_empty_session_accepts_matching_durable_workspace_anchor() {
+    async fn selected_empty_session_rechecks_durable_workspace_anchor_after_claim() {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         let cwd = root.path().join("workspace");
@@ -3937,11 +4005,23 @@ mod tests {
         );
         std::fs::write(&path, &content).unwrap();
         let mut cfg = DesktopConfig::default();
-        cfg.cwd = cwd;
+        cfg.cwd = cwd.clone();
         cfg.lingxi_home = home;
         cfg.session_id_override = Some(id.into());
         cfg.session_transcript_path = Some(path.clone());
         cfg.initial_conversation_mode = Some(ConversationMode::Code);
+        let error = prepare_selected_boot_session_after_capture(&mut cfg, || {
+            std::fs::remove_dir(&cwd).unwrap();
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "empty session workspace does not match its transcript"
+        );
+        assert!(cfg.session_writer_lease.is_none());
+
+        std::fs::create_dir(&cwd).unwrap();
         prepare_selected_boot_session(&mut cfg).await.unwrap();
         assert!(cfg.session_transcript_authority.is_some());
         assert!(cfg.session_writer_lease.is_some());
@@ -5055,6 +5135,7 @@ mod tests {
 
     // Debug builds retain larger execution futures than optimized Desktop
     // builds. Give both the polling thread and spawned workers a test budget.
+            use tokio_tungstenite::tungstenite::handshake::client::generate_key;
     fn run_runtime_test<F, Fut>(test: F)
     where
         F: FnOnce() -> Fut + Send + 'static,
@@ -5091,7 +5172,6 @@ mod tests {
             use futures_util::{SinkExt, StreamExt};
             use std::sync::atomic::{AtomicBool, Ordering};
             use std::time::Duration;
-            use tokio_tungstenite::tungstenite::handshake::client::generate_key;
             use tokio_tungstenite::tungstenite::Message;
 
             struct InjectFixture(Arc<AtomicBool>);

@@ -102,6 +102,7 @@ export class FakeRuntime implements RemoteRuntime {
   readonly projectPath: string;
   engineWorkspacePath?: string;
   connectionState: ConnectionState = { status: 'connected' };
+  remoteActionReady = true;
   turnActive = false;
   remoteModel: string | undefined = 'model-one';
   readonly runtimeId: string;
@@ -134,6 +135,8 @@ export class FakeRuntime implements RemoteRuntime {
   remoteView(): RemoteRuntimeView {
     return {
       sessionId: this.sessionId,
+      ...(this.remoteActionReady && (this.base?.event.type === 'session_resumed' || this.base?.event.type === 'session_started')
+        ? { sessionMode: this.base.event.mode } : {}),
       runtimeId: this.runtimeId,
       epoch: this.epoch,
       baseSequence: this.baseSequence,
@@ -169,9 +172,14 @@ export class FakeRuntime implements RemoteRuntime {
     for (const observer of [...this.observers]) observer(observation);
   }
 
+  setActionReady(ready: boolean): void {
+    this.remoteActionReady = ready;
+    this.emit({ type: 'action_readiness', ready });
+  }
+
   /** A new base (`session_resumed`), as `/clear` or a restart makes. */
   resume(messages: Array<import('@lingxi/bridge-client').MessageDto> = []): SequencedRuntimeEventEnvelope<ClientEvent> {
-    const item = envelope(this.sessionId, ++this.lastSequence, { type: 'session_resumed', session_id: this.sessionId, messages } as ClientEvent);
+    const item = envelope(this.sessionId, ++this.lastSequence, { type: 'session_resumed', session_id: this.sessionId, mode: 'code', messages });
     this.base = item;
     this.baseSequence = item.sequence;
     this.events = [];

@@ -1,8 +1,13 @@
 import { tr } from '../../../i18n/locale';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
+import { publicExtensionCategories, publicExtensionText, type PublicExtensionCategory, type PublicExtensionItem } from '../../../../shared/publicExtensionDirectory';
+import { useI18n } from '../../../i18n/useI18n';
+import { Icon } from '../../Icon';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps, SettingsNavigationRequest } from '../SettingsScreen';
+import { projectDisplayName } from '../useEngineSettings';
+import type { ExtensionCatalogTab, ExtensionScopeNavigation } from '../extensionScopes';
 import { ExtensionGlyph, ExtensionSkillArtwork } from './ExtensionHubIcons';
 
 const DIALOG_FOCUSABLE_SELECTOR = [
@@ -100,10 +105,14 @@ export function extensionHubStyle(t: ReturnType<typeof useT>): CSSProperties {
   } as CSSProperties;
 }
 
-/** The runtime catalog does not supply artwork, so use a neutral plugin mark. */
-export function ExtensionIcon({ kind = 'plugin', large = false }: { kind?: 'plugin' | 'skill' | 'mcp'; large?: boolean }) {
+const recommendationSymbols = { layout: 'topbar-inspector-open', palette: 'sliders', pencil: 'pencil', cube: 'box', pixels: 'image' } as const;
+
+export function ExtensionIcon({ kind = 'plugin', icon, large = false }: {
+  kind?: 'plugin' | 'skill' | 'mcp'; icon?: PublicExtensionItem['icon']; large?: boolean;
+}) {
   return <span className={`extension-hub-icon extension-icon-${kind}${large ? ' is-large' : ''}`} aria-hidden="true">
-    {kind === 'skill' ? <ExtensionSkillArtwork /> : <ExtensionGlyph name={kind} size={large ? 32 : 24} />}
+    {icon ? <Icon name={recommendationSymbols[icon]} size={large ? 32 : 22} />
+      : kind === 'skill' ? <ExtensionSkillArtwork /> : <ExtensionGlyph name={kind} size={large ? 32 : 24} />}
   </span>;
 }
 
@@ -127,11 +136,129 @@ export function ExtensionHubLayout({ children }: { children: ReactNode }) {
   return <div className="extension-hub-main" style={extensionHubStyle(t)}><div className="extension-hub-page">{children}</div></div>;
 }
 
-export function ExtensionHubHeader({ title, description, search, onSearch, actions }: {
-  title: string; description: string; search: string; onSearch: (value: string) => void; actions: ReactNode;
+export function ExtensionHubHeader({ title, search, onSearch, filter, actions }: {
+  title: string; search: string; onSearch: (value: string) => void; actions: ReactNode;
+  filter?: ReturnType<typeof useExtensionCategoryFilter>;
 }) {
+  const searchLabel = tr('desktop_shell_search_named', title);
   return <header className="extension-hub-header">
-    <div className="extension-hub-heading"><p>{description}</p></div>
-    <div className="extension-hub-toolbar"><label className="extension-search-field"><ExtensionGlyph name="search" size={16} /><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder={tr('desktop_shell_search_named', title)} aria-label={tr('desktop_shell_search_named', title)} /></label><div className="extension-hub-toolbar-actions">{actions}</div></div>
+    <div className="extension-hub-toolbar">
+      <label className="extension-search-field">
+        <ExtensionGlyph name="search" size={16} />
+        <input value={search} onChange={(event) => onSearch(event.target.value)} placeholder={searchLabel} aria-label={searchLabel} />
+      </label>
+      {filter && filter.options.length > 1 && <label className="extension-category-filter">
+        {tr('extension_directory_category')}
+        <select value={filter.value} onChange={(event) => filter.setValue(event.target.value as typeof filter.value)}>
+          <option value="all">{tr('extension_directory_category_all')}</option>
+          {filter.options.map(category => <option key={category} value={category}>{tr(`extension_directory_category_${category}`)}</option>)}
+        </select>
+      </label>}
+      <div className="extension-hub-toolbar-actions">{actions}</div>
+    </div>
   </header>;
+}
+
+export function useExtensionCatalogView(scopes: ExtensionScopeNavigation | undefined, initial: ExtensionCatalogTab) {
+  const [view, setView] = useState(initial);
+  return [scopes?.view ?? view, scopes?.setView ?? setView] as const;
+}
+
+export function useExtensionCategoryFilter(items: readonly PublicExtensionItem[]) {
+  const [value, setValue] = useState<PublicExtensionCategory | 'all'>('all');
+  return {
+    value, setValue,
+    options: publicExtensionCategories.filter(category => items.some(item => item.category === category)),
+    items: value === 'all' ? items : items.filter(item => item.category === value),
+  };
+}
+
+export function ExtensionCatalogTabs({ label, value, onChange, scopes, locked = false }: {
+  label: string;
+  value: ExtensionCatalogTab;
+  onChange: (value: ExtensionCatalogTab) => void;
+  scopes?: ExtensionScopeNavigation;
+  locked?: boolean;
+}) {
+  const projects = scopes?.projects ?? [];
+  const names = projects.map(projectDisplayName);
+  const parts = projects.map(path => path.split(/[\\/]/).filter(Boolean));
+  function projectLabel(index: number) {
+    const name = names[index];
+    if (names.indexOf(name) === names.lastIndexOf(name)) return name;
+    for (let depth = 2; depth <= parts[index].length; depth++) {
+      const suffix = parts[index].slice(-depth).join('/');
+      if (!parts.some((other, j) => j !== index && other.slice(-depth).join('/') === suffix)) return suffix;
+    }
+    return projects[index];
+  }
+  const activeProject = value === 'personal' && scopes && scopes.layer !== 'user' ? scopes.activeProject : null;
+  return <div className="extension-catalog-controls">
+    <nav className="extension-catalog-tabs extension-scope-tabs" aria-label={label}>
+      <button type="button" data-catalog-tab="public" aria-pressed={value === 'public'} disabled={locked}
+        onClick={scopes?.selectRecommended ?? (() => onChange('public'))}>
+        {tr('extension_directory_recommended')}
+      </button>
+      <button type="button" data-catalog-tab="personal" aria-pressed={value === 'personal' && !activeProject} disabled={locked}
+        onClick={scopes?.selectUser ?? (() => onChange('personal'))}>
+        {tr('settings_parity_user_layer')}
+      </button>
+      {projects.map((path, index) => (
+        <button key={path} type="button" data-catalog-tab="project" data-project-path={path}
+          aria-pressed={activeProject === path}
+          title={path}
+          disabled={locked} onClick={() => scopes?.selectProject(path)}>
+          <Icon name="folder" size={14} /><bdi>{projectLabel(index)}</bdi>
+        </button>
+      ))}
+    </nav>
+  </div>;
+}
+
+export function ExtensionRecommendationGroups({ items, children }: {
+  items: readonly PublicExtensionItem[];
+  children: (item: PublicExtensionItem) => ReactNode;
+}) {
+  return publicExtensionCategories.map((category) => {
+    const group = items.filter((item) => item.category === category);
+    if (!group.length) return null;
+    const title = tr(`extension_directory_category_${category}`);
+    const artwork = new URL(`../../../../../../../resources/extension-artwork/drawable-nodpi/extension_${category}.jpg`, import.meta.url).href;
+    return <section key={category} className="extension-catalog-section extension-collection" aria-label={title} data-category={category}>
+      <h2 className="extension-collection-heading">
+        <img src={artwork} width={46} height={46} alt="" draggable={false} />
+        {title}<span className="extension-collection-count">{group.length}</span>
+      </h2>
+      <div className="extension-hub-list extension-collection-grid">{group.map(children)}</div>
+    </section>;
+  });
+}
+
+export function ExtensionRecommendationCard({ item, kind = item.kind, onOpen, status, installCount, action }: {
+  item: PublicExtensionItem;
+  kind?: 'plugin' | 'skill' | 'mcp';
+  onOpen: () => void;
+  status?: string;
+  installCount?: string;
+  action: ReactNode;
+}) {
+  const { locale } = useI18n();
+  return <article className="extension-hub-row extension-collection-card">
+    <button type="button" id={`extension-card-${item.id}`} className="extension-hub-row-open extension-card-open" onClick={onOpen}
+      aria-label={tr('desktop_extension_view_details_named', item.name)}>
+      <ExtensionIcon kind={kind} icon={item.icon} />
+      <span className="extension-hub-row-title">{item.name}</span>
+      <ExtensionGlyph name="chevronR" size={14} />
+    </button>
+    <p>{publicExtensionText(item.description, locale)}</p>
+    <footer>
+      <div className="extension-card-meta">
+        <span>{item.publisher}{kind === 'skill' && item.skills?.length
+          ? ` · ${tr('extension_directory_skills_count', item.skills.length)}` : item.version ? ` · ${item.version}` : ''}</span>
+        {status && <span className="extension-card-status">{status}</span>}
+        {installCount && <span className="plugin-install-count">{installCount}</span>}
+      </div>
+      {action}
+    </footer>
+  </article>;
 }

@@ -1,16 +1,20 @@
 //! User-owned workspace commands. These handlers are registered only on the
 //! host slash surface; no model tool can call the relocation primitive.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 
+use client::protocol::message::{MessageBlockDto, MessageDto};
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use command_api::workspace_directory::{self, AddDirValidation};
 use harness_runtime::desktop::DesktopRuntime;
+use lingxi_core::host::session_context::ConversationMode;
 use lingxi_core::host::OrchestratorHandle;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 
 use crate::settings_bridge::SettingsContext;
 
@@ -49,17 +53,111 @@ struct RuntimeControls {
 pub(crate) struct ColdBootResume {
     session_id: uuid::Uuid,
     transcript_path: PathBuf,
-    replayed: Option<orchestrator::ReplayedSession>,
-    mode: lingxi_core::host::session_context::ConversationMode,
+    mode: ConversationMode,
+    preview: Arc<ColdResumePreview>,
+}
+
+/// Holds only the boot-validated source and shares its display window between
+/// the read-only preview and the authoritative resume.
+pub struct ColdResumePreview {
+    capture: harness_runtime::desktop::DesktopConfig,
+    session_id: uuid::Uuid,
+    transcript_path: PathBuf,
+    window: OnceLock<ColdDisplayWindow>,
+}
+
+#[derive(Clone, Default)]
+struct ColdDisplayWindow {
+    history: Vec<ConversationMessage>,
+    tool_results: HashMap<String, Utf16JsonProjection>,
+    timestamps: HashMap<String, i64>,
+    captured_ids: HashSet<MessageId>,
+    has_earlier: bool,
+    overview: Vec<MessageDto>,
+}
+
+impl ColdResumePreview {
+    fn loaded(&self) -> &session::jsonl::LoadedTranscript {
+        self.capture
+            .prepared_session_resume()
+            .expect("cold source includes its admitted parse")
+    }
+
+    fn window(&self) -> &ColdDisplayWindow {
+        self.window.get_or_init(|| {
+            let source = self
+                .capture
+                .session_resume_snapshot
+                .as_ref()
+                .expect("cold source");
+            let identity =
+                self.capture
+                    .session_transcript_authority
+                    .as_ref()
+                    .and_then(|authority| {
+                        use lingxi_core::host::rooted_fs;
+                        let pinned = authority.pinned_resume_source(String::new());
+                        let file = rooted_fs::open_read_file_pinned(
+                            &pinned.root,
+                            &pinned.relative,
+                            Some(&pinned.root_identity),
+                        )
+                        .ok()?;
+                        if rooted_fs::opened_file_identity(&file).ok()? != pinned.file_identity {
+                            return None;
+                        }
+                        Some(crate::boot::history_page::identity(&file.metadata().ok()?))
+                    });
+            project_cold_display(
+                self.loaded(),
+                self.session_id,
+                identity
+                    .as_deref()
+                    .map(|value| (source.content.as_ref(), value)),
+            )
+        })
+    }
+
+    // Older callers request the legacy baseline. Build it only for that RPC.
+    fn replay_legacy(&self) -> Result<Option<orchestrator::ReplayedSession>, String> {
+        if session::jsonl::find_tip(self.loaded(), &self.session_id.to_string()).is_none() {
+            return Ok(None);
+        }
+        let source = self
+            .capture
+            .session_resume_snapshot
+            .as_ref()
+            .expect("cold source");
+        let mut replayed = orchestrator::resume::replay_prepared_session(
+            self.transcript_path.clone(),
+            &source.content,
+            self.loaded(),
+            self.session_id,
+        )
+        .map_err(|error| format!("cold resume proof is unavailable: {error}"))?;
+        for row in &mut replayed.display_history {
+            crate::boot::history_image::reference_captured_images(row);
+        }
+        Ok(Some(replayed))
+    }
+
+    pub(crate) fn messages(&self) -> Vec<MessageDto> {
+        let window = self.window();
+        let rows = lower_display_rows(&window.history, &window.tool_results, &window.timestamps);
+        fit_cold_display(rows, crate::boot::history_page::MAX_PREVIEW_BYTES - 4096).0
+    }
 }
 
 pub(crate) struct ColdResumeProof {
-    pub(crate) messages: Vec<client::protocol::message::MessageDto>,
+    pub(crate) messages: Vec<MessageDto>,
+    pub(crate) history_before: Option<String>,
+    pub(crate) history_overview: Vec<MessageDto>,
     pub(crate) current_usage: Option<lingxi_core::host::CurrentUsageSnapshot>,
 }
 
 impl ColdBootResume {
-    pub(crate) fn capture(
+    /// Build the proof after boot has checked the captured source's fixed mode.
+    pub(crate) fn from_prepared_config(
         cfg: &harness_runtime::desktop::DesktopConfig,
     ) -> Result<Option<Self>, String> {
         if cfg.defer_session_start {
@@ -76,43 +174,30 @@ impl ColdBootResume {
         if uuid::Uuid::parse_str(&snapshot.source_session_id).ok() != Some(session_id) {
             return Err("cold resume snapshot does not match the active session".into());
         }
-        let fallback;
-        let loaded = if let Some(loaded) = cfg.prepared_session_resume() {
-            loaded
+        let mode = cfg
+            .initial_conversation_mode
+            .ok_or("selected transcript requires an expected conversation mode")?;
+        let mut capture = harness_runtime::desktop::DesktopConfig::default();
+        capture.session_resume_snapshot = Some(snapshot.clone());
+        capture.session_transcript_authority = cfg.session_transcript_authority.clone();
+        capture.session_resume_loaded = Some(if cfg.prepared_session_resume().is_some() {
+            cfg.session_resume_loaded.clone().expect("prepared capture")
         } else {
-            fallback = session::jsonl::route_lines(&snapshot.content);
-            &fallback
-        };
-        let mode = session::JsonlWriter::fixed_session_mode_from_source(
-            &snapshot.content,
-            &session_id.to_string(),
-        )?;
-        let (messages, _) =
-            session::jsonl::build_conversation_chain(loaded, &session_id.to_string());
-        // Explicit mobile draft anchors are allowed by the cold loader and
-        // have no display baseline or deferred tool calls to replay.
-        let replayed = if messages.is_empty()
-            && loaded
-                .mobile_empty_sessions
-                .contains(&session_id.to_string())
-        {
-            None
-        } else {
-            Some(
-                orchestrator::resume::replay_prepared_session(
-                    path.clone(),
-                    &snapshot.content,
-                    loaded,
-                    session_id,
-                )
-                .map_err(|error| format!("cold resume proof is unavailable: {error}"))?,
+            harness_runtime::desktop::DesktopSessionResumeLoaded::new(
+                snapshot,
+                Arc::new(session::jsonl::route_lines(&snapshot.content)),
             )
-        };
+        });
         Ok(Some(Self {
             session_id,
             transcript_path: path.clone(),
-            replayed,
             mode,
+            preview: Arc::new(ColdResumePreview {
+                capture,
+                session_id,
+                transcript_path: path.clone(),
+                window: OnceLock::new(),
+            }),
         }))
     }
 }
@@ -132,111 +217,452 @@ fn recent_display_history(
     &history[start..]
 }
 
-/// Bound the Desktop baseline before lowering and transport, including when
-/// the pinned SDK still restores a full display history. Model state is separate.
 pub(crate) fn lower_initial_transcript(
     replayed: &orchestrator::ReplayedSession,
-) -> Vec<client::protocol::message::MessageDto> {
-    client::adapter::lowering::lower_transcript_with_identities(
+) -> Vec<MessageDto> {
+    lower_display_rows(
         recent_display_history(&replayed.display_history),
         &replayed.client_state_tool_results,
+        &replayed.display_timestamps,
     )
-    .into_iter()
-    .map(|(id, mut message)| {
-        let uuid = id.as_uuid().to_string();
-        message.sent_at_ms = replayed.display_timestamps.get(&uuid).copied();
-        message.transcript_uuid = Some(uuid);
-        message
-    })
-    .collect()
+}
+
+fn project_cold_display(
+    loaded: &session::jsonl::LoadedTranscript,
+    session_id: uuid::Uuid,
+    image_source: Option<(&str, &str)>,
+) -> ColdDisplayWindow {
+    use crate::boot::history_page::{PAGE_ROWS, assistant_group, owns_row, update_activity};
+
+    let is_compact = |row: &session::jsonl::JsonlMessage| {
+        row.message_type == "system" && row.extra.string_at("/subtype") == Some("compact_boundary")
+    };
+    let source = &loaded.messages_in_order;
+    // Uncompacted, single-owner transcripts already have the exact display scope.
+    // Only mixed-owner or compacted sources need the SDK's lineage walk.
+    let chain = source
+        .iter()
+        .any(|row| !row.is_sidechain && (is_compact(row) || !owns_row(row, session_id)))
+        .then(|| session::jsonl::build_conversation_chain(loaded, &session_id.to_string()).0);
+    let lineage = chain.as_ref().map(|rows| {
+        rows.iter()
+            .map(|row| row.uuid.as_str())
+            .collect::<HashSet<_>>()
+    });
+    let boundary = lineage
+        .as_ref()
+        .and_then(|lineage| {
+            source.iter().rposition(|row| {
+                !row.is_sidechain && is_compact(row) && lineage.contains(row.uuid.as_str())
+            })
+        })
+        .unwrap_or(0);
+    let rows = source[boundary..]
+        .iter()
+        .filter(|row| {
+            !row.is_sidechain
+                && (owns_row(row, session_id)
+                    || lineage
+                        .as_ref()
+                        .is_some_and(|ids| ids.contains(row.uuid.as_str())))
+        })
+        .collect::<Vec<_>>();
+    let mut start = rows.len();
+    let mut results = HashSet::new();
+    let mut summary = false;
+    let mut newer_assistant = None;
+    for (index, row) in rows.iter().enumerate().rev() {
+        let group = assistant_group(row);
+        if rows.len() - start >= PAGE_ROWS
+            && results.is_empty()
+            && !summary
+            && (group.is_none() || group != newer_assistant)
+        {
+            break;
+        }
+        update_activity(row, &mut results, &mut summary);
+        newer_assistant = group;
+        start = index;
+    }
+    let mut visible = rows[start..]
+        .iter()
+        .map(|row| (*row).clone())
+        .collect::<Vec<_>>();
+    crate::boot::history_image::project_captured_images(&mut visible, image_source);
+    let mut state = orchestrator::resume::state_from_messages(session_id, &visible);
+    for row in &mut state.history {
+        crate::boot::history_image::reference_captured_images(row);
+    }
+    let captured_ids = source
+        .iter()
+        .filter(|row| !row.is_sidechain)
+        .filter_map(|row| {
+            uuid::Uuid::parse_str(&row.uuid)
+                .ok()
+                .map(MessageId::from_uuid)
+        })
+        .collect();
+    let tool_results = orchestrator::resume::client_state_tool_results_from_messages(&visible);
+    let timestamps = display_timestamps(&visible);
+    let overview = project_earlier_plans(&rows[..start], session_id);
+    ColdDisplayWindow {
+        history: state.history,
+        tool_results,
+        timestamps,
+        captured_ids,
+        has_earlier: start > 0 || boundary > 0,
+        overview,
+    }
+}
+
+fn display_timestamps(rows: &[session::jsonl::JsonlMessage]) -> HashMap<String, i64> {
+    rows.iter()
+        .filter_map(|row| {
+            row.timestamp
+                .parse::<jiff::Timestamp>()
+                .ok()
+                .map(|at| (row.uuid.clone(), at.as_millisecond()))
+        })
+        .collect()
+}
+
+fn project_earlier_plans(
+    rows: &[&session::jsonl::JsonlMessage],
+    session_id: uuid::Uuid,
+) -> Vec<MessageDto> {
+    let mut calls = HashSet::new();
+    let mut relevant = Vec::new();
+    for row in rows {
+        let mut keep = false;
+        for index in 0..row.message.array_len("/content").unwrap_or_default() {
+            let pointer = format!("/content/{index}");
+            match row.message.string_at(&format!("{pointer}/type")) {
+                Some("tool_use") => {
+                    let name = row.message.string_at(&format!("{pointer}/name"));
+                    let plan_path = name == Some("Write")
+                        && row
+                            .message
+                            .string_at(&format!("{pointer}/input/file_path"))
+                            .is_some_and(is_plan_file);
+                    if plan_path || matches!(name, Some("EnterPlanMode" | "ExitPlanMode")) {
+                        calls.extend(row.message.string_at(&format!("{pointer}/id")));
+                        keep = true;
+                    }
+                }
+                Some("tool_result") => {
+                    keep |= row
+                        .message
+                        .string_at(&format!("{pointer}/tool_use_id"))
+                        .is_some_and(|id| calls.contains(id));
+                }
+                _ => {}
+            }
+        }
+        if keep {
+            relevant.push((*row).clone());
+        }
+    }
+    if relevant.is_empty() {
+        return Vec::new();
+    }
+    let history = orchestrator::resume::state_from_messages(session_id, &relevant).history;
+    let tool_results = orchestrator::resume::client_state_tool_results_from_messages(&relevant);
+    let timestamps = display_timestamps(&relevant);
+    lower_cold_plan_overview(&history, &tool_results, &timestamps)
+}
+
+fn is_plan_file(path: &str) -> bool {
+    let path = format!("/{}", path.replace('\\', "/"));
+    path.ends_with(".md") && (path.contains("/.lingxi/plans/") || path.contains("/.claude/plans/"))
+}
+
+/// Count actual escaped JSON bytes, stopping at the budget without collecting a large buffer.
+fn json_size(value: &impl serde::Serialize, budget: usize) -> Option<usize> {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_sub(bytes.len())
+                .ok_or(std::io::ErrorKind::FileTooLarge)?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut remaining = Count(budget);
+    serde_json::to_writer(&mut remaining, value).ok()?;
+    Some(budget - remaining.0)
+}
+
+/// Keep a suffix of complete tool activities. If the newest activity cannot fit
+/// by itself, use its oldest row as a durable boundary for the following page.
+fn fit_cold_display(mut rows: Vec<MessageDto>, budget: usize) -> (Vec<MessageDto>, usize) {
+    let mut pending = HashSet::new();
+    let mut remaining = Some(budget.saturating_sub(2));
+    let mut first = rows.len();
+    for (index, row) in rows.iter().enumerate().rev() {
+        remaining = remaining.and_then(|bytes| {
+            json_size(row, bytes.saturating_sub(1)).and_then(|size| bytes.checked_sub(size + 1))
+        });
+        for block in row.blocks.iter().rev() {
+            match block {
+                MessageBlockDto::ToolResult { id, .. } => {
+                    pending.insert(id.as_str());
+                }
+                MessageBlockDto::ToolUse { id, .. } => {
+                    pending.remove(id.as_str());
+                }
+                _ => {}
+            }
+        }
+        if pending.is_empty() || index == 0 {
+            if remaining.is_some() {
+                first = index;
+            } else {
+                if first == rows.len() {
+                    return (
+                        vec![crate::boot::history_page::oversized_activity(
+                            row.transcript_uuid.clone(),
+                            &row.role,
+                        )],
+                        index,
+                    );
+                }
+                break;
+            }
+        }
+    }
+    rows.drain(..first);
+    (rows, first)
+}
+
+// A selected cold resume also has to fit the bridge frame for older clients.
+fn cap_legacy_cold_display(messages: Vec<MessageDto>) -> Vec<MessageDto> {
+    const BUDGET: usize = 16 * 1024 * 1024 - 64 * 1024;
+    if json_size(&messages, BUDGET).is_some() {
+        messages
+    } else {
+        fit_cold_display(messages, BUDGET).0
+    }
+}
+
+fn lower_cold_display_page(
+    window: &ColdDisplayWindow,
+) -> (Vec<MessageDto>, Option<String>, Vec<MessageDto>) {
+    use crate::boot::history_page::MAX_PAGE_BYTES;
+    let history = recent_display_history(&window.history);
+    let rows = lower_display_rows(history, &window.tool_results, &window.timestamps);
+    let (messages, skipped) = fit_cold_display(rows, MAX_PAGE_BYTES - 4096);
+    let has_earlier = window.has_earlier
+        || skipped > 0
+        || history.len() < window.history.len()
+        || messages.first().is_some_and(|row| {
+            row.blocks
+                .iter()
+                .any(|block| matches!(block, MessageBlockDto::CompactBoundary { .. }))
+        });
+    let before = has_earlier
+        .then(|| messages.first()?.transcript_uuid.clone())
+        .flatten();
+    let earlier = before
+        .as_deref()
+        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+        .and_then(|id| history.iter().position(|row| row.id().as_uuid() == id));
+    let mut overview = window.overview.clone();
+    if let Some(end) = earlier {
+        overview.extend(lower_cold_plan_overview(
+            &history[..end],
+            &window.tool_results,
+            &window.timestamps,
+        ));
+    }
+    let mut bytes = MAX_PAGE_BYTES - 4096;
+    let mut overview = overview
+        .into_iter()
+        .rev()
+        .filter(|row| {
+            let Some(size) = json_size(row, bytes.saturating_sub(1)) else {
+                return false;
+            };
+            bytes = bytes.saturating_sub(size + 1);
+            true
+        })
+        .collect::<Vec<_>>();
+    overview.reverse();
+    (messages, before, overview)
+}
+
+fn lower_cold_plan_overview(
+    earlier: &[ConversationMessage],
+    tool_results: &HashMap<String, Utf16JsonProjection>,
+    timestamps: &HashMap<String, i64>,
+) -> Vec<MessageDto> {
+    let mut calls = HashSet::new();
+    let rows: Vec<_> = earlier
+        .iter()
+        .filter_map(|row| {
+            let content = match row {
+                ConversationMessage::User { content, .. }
+                | ConversationMessage::Assistant { content, .. } => content,
+                _ => return None,
+            };
+            let blocks: Vec<_> = content
+                .iter()
+                .filter(|block| match block {
+                    ContentBlock::ToolUse {
+                        id, name, input, ..
+                    } => {
+                        let plan_write = name == "Write"
+                            && input.string_at("/file_path").is_some_and(is_plan_file);
+                        if plan_write || matches!(name.as_str(), "EnterPlanMode" | "ExitPlanMode") {
+                            calls.insert(id.as_str().to_owned());
+                            return true;
+                        }
+                        false
+                    }
+                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                        calls.contains(tool_use_id.as_str())
+                    }
+                    _ => false,
+                })
+                .cloned()
+                .collect();
+            if blocks.is_empty() {
+                return None;
+            }
+            let mut row = row.clone();
+            match &mut row {
+                ConversationMessage::User { content, .. }
+                | ConversationMessage::Assistant { content, .. } => *content = blocks,
+                _ => unreachable!("a plan tool belongs to a conversation row"),
+            }
+            Some(row)
+        })
+        .collect();
+    let mut messages = lower_display_rows(&rows, tool_results, timestamps);
+    for block in messages.iter_mut().flat_map(|row| &mut row.blocks) {
+        if let MessageBlockDto::ToolResult {
+            tool, result_json, ..
+        } = block
+        {
+            if tool == "Write" {
+                *result_json = "".into();
+            }
+        }
+    }
+    messages
+}
+
+fn lower_display_rows(
+    history: &[ConversationMessage],
+    tool_results: &HashMap<String, Utf16JsonProjection>,
+    timestamps: &HashMap<String, i64>,
+) -> Vec<MessageDto> {
+    client::adapter::lowering::lower_transcript_with_identities(history, tool_results)
+        .into_iter()
+        .map(|(id, mut message)| {
+            let uuid = id.as_uuid().to_string();
+            message.sent_at_ms = timestamps.get(&uuid).copied();
+            message.transcript_uuid = Some(uuid);
+            crate::boot::history_image::reference_images(&mut message);
+            message
+        })
+        .collect()
 }
 
 fn merge_live_display_history(
-    display: &mut Vec<lingxi_core::types::ConversationMessage>,
-    live: Vec<lingxi_core::types::ConversationMessage>,
+    display: &mut Vec<ConversationMessage>,
+    live: &[ConversationMessage],
+    mut captured_ids: HashSet<MessageId>,
 ) {
-    let mut seen = display
-        .iter()
-        .map(lingxi_core::types::ConversationMessage::id)
-        .collect::<std::collections::HashSet<_>>();
-    for message in live {
-        // Captured display rows retain the complete pre-compact form. Model
-        // history may have normalized that same ID for provider context.
-        if seen.insert(message.id()) {
-            display.push(message);
-        }
-    }
+    // The live model may retain pre-compact or normalized rows. Keep the
+    // captured display and clone only the first live addition for each new ID.
+    display.extend(
+        live.iter()
+            .filter(|row| captured_ids.insert(row.id()))
+            .cloned(),
+    );
 }
 
 fn merge_live_resume_projection(
     replayed: &mut orchestrator::ReplayedSession,
-    live: &[lingxi_core::types::ConversationMessage],
-    envelopes: &std::collections::HashMap<
-        lingxi_core::types::MessageId,
-        lingxi_core::host::TaskDeliveryHistoryEnvelope,
-    >,
+    live: &[ConversationMessage],
+    envelopes: &HashMap<MessageId, lingxi_core::host::TaskDeliveryHistoryEnvelope>,
 ) {
-    use lingxi_core::types::{ContentBlock, ConversationMessage};
     let mut captured_ids = replayed
         .display_history
         .iter()
         .map(ConversationMessage::id)
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<HashSet<_>>();
     captured_ids.extend(replayed.messages.iter().filter_map(|row| {
         uuid::Uuid::parse_str(&row.uuid)
             .ok()
-            .map(lingxi_core::types::MessageId::from_uuid)
+            .map(MessageId::from_uuid)
     }));
-    let tool_names = replayed
-        .display_history
-        .iter()
-        .chain(live)
-        .filter_map(|message| match message {
-            ConversationMessage::Assistant { content, .. }
-            | ConversationMessage::User { content, .. } => Some(content),
-            _ => None,
-        })
-        .flatten()
-        .filter_map(|block| match block {
-            ContentBlock::ToolUse { id, name, .. } => Some((id.to_string(), name.as_str())),
-            _ => None,
-        })
-        .collect::<std::collections::HashMap<_, _>>();
+    merge_live_projection(
+        &mut replayed.display_history,
+        &mut replayed.client_state_tool_results,
+        captured_ids,
+        live,
+        envelopes,
+    );
+}
+
+fn merge_live_projection(
+    display: &mut Vec<ConversationMessage>,
+    tool_results: &mut HashMap<String, Utf16JsonProjection>,
+    captured_ids: HashSet<MessageId>,
+    live: &[ConversationMessage],
+    envelopes: &HashMap<MessageId, lingxi_core::host::TaskDeliveryHistoryEnvelope>,
+) {
+    let mut tool_names = None;
     for message in live {
-        if captured_ids.contains(&message.id()) {
+        let id = message.id();
+        let Some(raw) = envelopes
+            .get(&id)
+            .and_then(|envelope| envelope.tool_use_result.as_ref())
+            .filter(|_| !captured_ids.contains(&id))
+        else {
             continue;
-        }
+        };
         let ConversationMessage::User { content, .. } = message else {
             continue;
         };
         let mut result_ids = content.iter().filter_map(|block| match block {
-            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.to_string()),
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
             _ => None,
         });
         let (Some(id), None) = (result_ids.next(), result_ids.next()) else {
             continue;
         };
-        if !tool_names
-            .get(&id)
+        // Only a newly recovered structured result needs this index. Most
+        // resumes can reuse the structured results already in the replay.
+        let tool_names = tool_names.get_or_insert_with(|| {
+            display
+                .iter()
+                .chain(live)
+                .filter_map(|message| match message {
+                    ConversationMessage::Assistant { content, .. }
+                    | ConversationMessage::User { content, .. } => Some(content),
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|block| match block {
+                    ContentBlock::ToolUse { id, name, .. } => Some((id.as_str(), name.as_str())),
+                    _ => None,
+                })
+                .collect::<HashMap<_, _>>()
+        });
+        if tool_names
+            .get(id)
             .is_some_and(|name| orchestrator::CLIENT_STATE_TOOLS.contains(name))
         {
-            continue;
-        }
-        if let Some(raw) = envelopes
-            .get(&message.id())
-            .and_then(|envelope| envelope.tool_use_result.as_ref())
-        {
-            replayed.client_state_tool_results.insert(id, raw.clone());
+            tool_results.insert(id.to_owned(), raw.clone());
         }
     }
-    // The live model chain can retain pre-compact rows that the initial display
-    // deliberately omitted. Only post-capture additions belong in this merge.
-    let additions = live
-        .iter()
-        .filter(|message| !captured_ids.contains(&message.id()))
-        .cloned()
-        .collect();
-    merge_live_display_history(&mut replayed.display_history, additions);
+    merge_live_display_history(display, live, captured_ids);
 }
 
 #[derive(Default)]
@@ -296,6 +722,40 @@ impl WorkspaceCommands {
             .take();
     }
 
+    pub(crate) async fn prepare_cold_resume_preview(
+        &self,
+        session_id: uuid::Uuid,
+        path: &Path,
+        mode: ConversationMode,
+    ) -> Result<Arc<ColdResumePreview>, String> {
+        let runtime = self.host.runtime()?;
+        let active = &runtime.orchestrator;
+        if active.current_session_id().await.as_uuid() != session_id
+            || active.conversation_mode().await.mode != mode
+            || active
+                .session_transcript_writer()
+                .map(|writer| writer.active_path())
+                .as_deref()
+                != Some(path)
+            || self.facts.request_dequeued.load(Ordering::SeqCst)
+        {
+            return Err("cold resume preview requires the admitted session owner".into());
+        }
+        let captured = self
+            .cold_resume
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let captured = captured
+            .as_ref()
+            .filter(|captured| {
+                captured.session_id == session_id
+                    && captured.transcript_path == path
+                    && captured.mode == mode
+            })
+            .ok_or("cold resume preview is unavailable for this selection")?;
+        Ok(captured.preview.clone())
+    }
+
     pub(crate) async fn merge_live_resume_display(
         &self,
         replayed: &mut orchestrator::ReplayedSession,
@@ -316,6 +776,7 @@ impl WorkspaceCommands {
         session_id: uuid::Uuid,
         path: &Path,
         expected_mode: lingxi_core::host::session_context::ConversationMode,
+        page_display: bool,
     ) -> Result<Option<ColdResumeProof>, String> {
         // Any selected resume consumes the startup opportunity. A later
         // same-path request must be an ordinary owned resume, not a permanent
@@ -325,7 +786,7 @@ impl WorkspaceCommands {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .take();
-        let Some(mut captured) = captured.filter(|captured| {
+        let Some(captured) = captured.filter(|captured| {
             captured.session_id == session_id && captured.transcript_path == path
         }) else {
             return Ok(None);
@@ -347,11 +808,28 @@ impl WorkspaceCommands {
         {
             return Ok(None);
         }
-        let deferred_tools = captured
-            .replayed
-            .as_mut()
-            .map(|replayed| std::mem::take(&mut replayed.runtime_metadata.deferred_tools))
-            .unwrap_or_default();
+        enum Display {
+            Paged(ColdDisplayWindow),
+            Legacy(Option<Box<orchestrator::ReplayedSession>>),
+        }
+        let source = captured.preview.clone();
+        let projection = tokio::task::spawn_blocking(move || {
+            if page_display {
+                Ok(Display::Paged(source.window().clone()))
+            } else {
+                source
+                    .replay_legacy()
+                    .map(|replayed| Display::Legacy(replayed.map(Box::new)))
+            }
+        });
+        let deferred_tools = tokio::task::spawn_blocking(move || {
+            orchestrator::resume::deferred_tool_replays_for_session(
+                &captured.preview.loaded().messages_in_order,
+                session_id,
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())?;
         runtime
             .orchestrator
             .complete_cold_resume_deferred_tools(
@@ -361,15 +839,41 @@ impl WorkspaceCommands {
             )
             .await
             .map_err(|error| format!("cold resume completion failed: {error}"))?;
-        let messages = if let Some(mut replayed) = captured.replayed {
-            self.merge_live_resume_display(&mut replayed).await?;
-            lower_initial_transcript(&replayed)
-        } else {
-            let live = runtime.orchestrator.snapshot_history().await;
-            client::adapter::lowering::lower_transcript(&live)
-        };
+        let (messages, history_before, history_overview) =
+            match projection.await.map_err(|error| error.to_string())?? {
+                Display::Paged(mut window) => {
+                    let session = runtime.orchestrator.session();
+                    {
+                        let session = session.lock().await;
+                        merge_live_projection(
+                            &mut window.history,
+                            &mut window.tool_results,
+                            std::mem::take(&mut window.captured_ids),
+                            &session.history,
+                            &session.native_request_history.task_delivery_envelopes,
+                        );
+                    }
+                    tokio::task::spawn_blocking(move || lower_cold_display_page(&window))
+                        .await
+                        .map_err(|error| error.to_string())?
+                }
+                Display::Legacy(Some(mut replayed)) => {
+                    self.merge_live_resume_display(&mut replayed).await?;
+                    (cap_legacy_cold_display(lower_initial_transcript(&replayed)), None, Vec::new())
+                }
+                Display::Legacy(None) => {
+                    let live = runtime.orchestrator.snapshot_history().await;
+                    (
+                        cap_legacy_cold_display(client::adapter::lowering::lower_transcript(&live)),
+                        None,
+                        Vec::new(),
+                    )
+                }
+            };
         Ok(Some(ColdResumeProof {
             messages,
+            history_before,
+            history_overview,
             current_usage: runtime.orchestrator.snapshot_cost().await.current_usage,
         }))
     }
@@ -1239,6 +1743,85 @@ mod tests {
     }
 
     #[test]
+    fn cold_display_sends_the_same_tail_for_100_and_600_rows() {
+        let session_id = uuid::Uuid::new_v4();
+        let ids = (0..600).map(|_| uuid::Uuid::new_v4()).collect::<Vec<_>>();
+        let prepare = |offset: usize| {
+            let mut source = format!(
+                "{}\n",
+                serde_json::json!({
+                    "type":"fixed-session-mode","sessionId":session_id,"sessionMode":"code","instructionEpoch":0,
+                })
+            );
+            for (index, id) in ids.iter().enumerate().skip(offset) {
+                source.push_str(&format!("{}\n", serde_json::json!({
+                    "type":"user","uuid":id,"sessionId":session_id,
+                    "parentUuid": if index > offset { Some(ids[index - 1]) } else { None },
+                    "timestamp":"2026-11-12T00:00:00Z","message":{"role":"user","content":format!("row {index}")},
+                })));
+            }
+            let loaded = session::jsonl::route_lines(&source);
+            project_cold_display(&loaded, session_id, None)
+        };
+        let short = prepare(500);
+        let long = prepare(0);
+        let (short_page, short_before, _) = lower_cold_display_page(&short);
+        let (long_page, long_before, _) = lower_cold_display_page(&long);
+        assert_eq!(long_page.len(), 60);
+        assert_eq!(short_page, long_page);
+        assert_eq!(short_before, long_before);
+        assert_eq!(long_before.as_deref(), Some(ids[540].to_string().as_str()));
+        assert_eq!(short.history.len(), 60);
+        assert_eq!(long.history.len(), 60);
+    }
+
+    #[test]
+    fn cold_display_never_sends_an_oversized_tool_group() {
+        let id = uuid::Uuid::new_v4();
+        let first = uuid::Uuid::new_v4();
+        let call = uuid::Uuid::new_v4();
+        let result = uuid::Uuid::new_v4();
+        let source = [
+            serde_json::json!({"type":"user","sessionId":id,"uuid":first,"message":{"role":"user","content":"earlier"}}),
+            serde_json::json!({"type":"assistant","sessionId":id,"uuid":call,"parentUuid":first,"message":{"role":"assistant","content":[
+                {"type":"tool_use","id":"paired","name":"Bash","input":{"command":"x".repeat(9 * 1024 * 1024)}}
+            ]}}),
+            serde_json::json!({"type":"user","sessionId":id,"uuid":result,"parentUuid":call,"message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"paired","content":"y".repeat(9 * 1024 * 1024)}
+            ]}}),
+        ].iter().map(|row| format!("{row}\n")).collect::<String>();
+        let loaded = session::jsonl::route_lines(&source);
+        let window = project_cold_display(&loaded, id, None);
+        let (messages, before, overview) = lower_cold_display_page(&window);
+        assert_eq!(before, Some(call.to_string()));
+        assert_eq!(messages.len(), 1);
+        let json = serde_json::to_string(&messages).unwrap();
+        assert!(json.contains("exceeds the display size limit"));
+        assert!(json.len() < 1024);
+        assert!(overview.is_empty());
+    }
+
+    #[test]
+    fn cold_image_references_keep_the_physical_row_offset() {
+        let id = uuid::Uuid::new_v4();
+        let message = uuid::Uuid::new_v4();
+        let prefix = "{}\n";
+        let row = serde_json::json!({
+            "type":"user","sessionId":id,"uuid":message,"isSidechain":false,
+            "message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"QUJD"}}]}
+        });
+        let source = format!("{prefix}{row}\n");
+        let loaded = session::jsonl::route_lines(&source);
+        let window = project_cold_display(&loaded, id, Some((&source, "abc")));
+        let (messages, _, _) = lower_cold_display_page(&window);
+        assert_eq!(
+            messages[0].images[0].url,
+            format!("lingxi-history-image:{message}:0:png:3:YWJj")
+        );
+        assert!(!serde_json::to_string(&messages).unwrap().contains("QUJD"));
+    }
+
+    #[test]
     fn initial_transcript_lowering_keeps_uuid_clock_and_model_context() {
         let root = tempfile::tempdir().unwrap();
         let session_id = uuid::Uuid::new_v4();
@@ -1337,11 +1920,12 @@ mod tests {
         ];
         merge_live_display_history(
             &mut display,
-            vec![
+            &[
                 ConversationMessage::user(shared_id, "normalized model content".into()),
                 ConversationMessage::user(added_id, "SessionStart or deferred result".into()),
                 ConversationMessage::user(added_id, "duplicate live projection".into()),
             ],
+            HashSet::from([historical_id, shared_id]),
         );
         assert_eq!(
             display

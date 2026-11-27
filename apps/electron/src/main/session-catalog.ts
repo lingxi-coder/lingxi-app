@@ -1,12 +1,18 @@
+import type { ProjectSettingsCommand } from '../shared/projectSettings.js';
 import type { ProviderAccountCredentialVersion } from './provider-accounts.js';
 import type { HostProviderSettings, ProviderAccountCommand, ProviderAccountSnapshot } from '../shared/providerAccounts.js';
 import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, isAbsolute } from 'node:path';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 import type { SessionRowDto } from '@lingxi/bridge-client';
 import { validateClientEvent } from '@lingxi/bridge-client';
-import { historyCursor, type TranscriptHistoryCursor, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
+import { CancellableImageRequests } from '@lingxi/bridge-client/remote';
+import { historyCursor, isHistoryImageReference, type SessionImagePayload, type SessionImageSize, type TranscriptHistoryCursor, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
+import { lstat } from 'node:fs/promises';
+import { LRUCache } from 'lru-cache';
+import { isSupportedImageMediaType } from '../shared/imageInput.js';
 
 import { buildBridgeArguments, buildBridgeEnvironment } from './host-utils.js';
 import { resolveServerBin } from './bridgeDiscovery.js';
@@ -15,6 +21,7 @@ import { isSessionId } from './sessionIdentity.js';
 import { sessionCatalogScope, type SessionCatalogScope, type SessionOpenSelection } from '../shared/sessionWorkspace.js';
 
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+const MAX_IMAGE_OUTPUT_BYTES = 28 * 1024 * 1024;
 const MAX_SESSIONS = 200;
 const DEFAULT_CACHE_TTL_MS = 15_000;
 const MAX_CATALOG_CHILDREN = 2;
@@ -77,14 +84,17 @@ interface CatalogCacheEntry {
   expiresAt: number;
 }
 
+type CatalogChildKind = 'selection' | 'default';
+
 /** A lease covers the child's lifetime, including a timed-out writer's drain. */
 class CatalogChildAdmission {
+  constructor(private readonly capacity = MAX_CATALOG_CHILDREN) {}
   private active = 0;
-  private readonly waiting: Array<() => void> = [];
+  private readonly waiting: Array<{ launch(): void; kind: CatalogChildKind }> = [];
   private readonly idle = new Map<() => void, () => void>();
   private readonly unreaped = new Set<() => void>();
 
-  start<T>(start: (release: () => void) => T, waitMs = 15_000): Promise<Awaited<T>> {
+  start<T>(start: (release: () => void) => T, waitMs = 15_000, kind: CatalogChildKind = 'default'): Promise<Awaited<T>> {
     return new Promise<Awaited<T>>((resolve, reject) => {
       const launch = () => {
         this.active++;
@@ -100,10 +110,10 @@ class CatalogChildAdmission {
         try { resolve(start(release) as Awaited<T>); }
         catch (error) { release(); reject(error); }
       };
-      if (this.active < MAX_CATALOG_CHILDREN && this.waiting.length === 0) launch();
+      if (this.active < this.capacity && this.waiting.length === 0) launch();
       else if (this.waiting.length >= MAX_QUEUED_CATALOG_OPERATIONS) reject(this.busyError());
       else {
-        const admitted = () => { clearTimeout(timeout); launch(); };
+        const admitted = { launch: () => { clearTimeout(timeout); launch(); }, kind };
         const timeout = setTimeout(() => {
           const index = this.waiting.indexOf(admitted);
           if (index < 0) return;
@@ -134,7 +144,10 @@ class CatalogChildAdmission {
   }
 
   private drain(): void {
-    while (this.waiting.length > 0 && this.active < MAX_CATALOG_CHILDREN) this.waiting.shift()!();
+    while (this.waiting.length > 0 && this.active < this.capacity) {
+      const selection = this.waiting.findIndex(entry => entry.kind === 'selection');
+      this.waiting.splice(Math.max(0, selection), 1)[0]!.launch();
+    }
     // A persistent reader must give up its process slot when another helper,
     // especially a durable metadata writer, is waiting to start.
     if (this.waiting.length > 0) {
@@ -145,6 +158,8 @@ class CatalogChildAdmission {
 }
 
 const catalogChildren = new CatalogChildAdmission();
+// A timed-out writer can still own a settings file until its process closes.
+const settingsChildren = new CatalogChildAdmission(1);
 
 /** Signalling is an attempt; only the ChildProcess close event returns its lease. */
 class CatalogChildTermination {
@@ -153,14 +168,14 @@ class CatalogChildTermination {
   private closed = false;
   private retry?: ReturnType<typeof setTimeout>;
 
-  constructor(private readonly child: ReturnType<typeof spawn>, private readonly release: () => void) {
+  constructor(private readonly child: ReturnType<typeof spawn>, private readonly release: () => void, private readonly admission = catalogChildren) {
     const stopRetries = () => { if (this.retry) clearTimeout(this.retry); this.retry = undefined; };
     child.once('exit', () => { this.exited = true; stopRetries(); });
     child.once('close', () => { this.closed = true; stopRetries(); });
   }
 
   error(): void {
-    if (this.requested && !this.closed && !this.exited) catalogChildren.notReaped(this.release);
+    if (this.requested && !this.closed && !this.exited) this.admission.notReaped(this.release);
   }
 
   stop(): void {
@@ -177,7 +192,7 @@ class CatalogChildTermination {
       if (this.closed || this.exited) return;
       this.retry = setTimeout(() => {
         this.retry = undefined;
-        if (!this.closed && !this.exited) catalogChildren.notReaped(this.release);
+        if (!this.closed && !this.exited) this.admission.notReaped(this.release);
       }, CHILD_TERMINATION_RETRY_MS);
       this.retry.unref();
     }, CHILD_TERMINATION_RETRY_MS);
@@ -193,17 +208,22 @@ class CatalogChildTermination {
 
 interface CatalogWorkerQuery {
   cwd: string;
+  workspaceEnvironment?: true;
   sessionId?: string;
   scope?: SessionCatalogScope;
   transcriptPath?: string;
   historyBefore?: TranscriptHistoryCursor;
+  historyLimit?: number;
+  historyLatest?: true;
+  historyImage?: { reference: string; size: SessionImageSize };
   activityAfter?: number;
+  activityPreview?: number;
 }
 
 /** One request at a time bounds worker IO; catalog callers retain their own deduplication. */
 class CatalogWorker {
   private nextId = 0;
-  private current?: { id: number; resolve(output: string): void; reject(error: Error): void; timeout: ReturnType<typeof setTimeout> };
+  private current?: { id: number; limit: number; resolve(output: string): void; reject(error: Error): void; timeout: ReturnType<typeof setTimeout> };
   private readonly header = Buffer.alloc(MAX_WORKER_HEADER_BYTES);
   private headerBytes = 0;
   private response?: { body: Buffer; bytes: number; kind: 'output' | 'error' };
@@ -215,6 +235,7 @@ class CatalogWorker {
 
   constructor(
     private readonly child: ReturnType<typeof spawn>,
+    readonly cwd: string,
     private readonly release: () => void,
     private readonly timeoutMs: number,
     private readonly idleMs: number,
@@ -250,7 +271,7 @@ class CatalogWorker {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => this.fail(new Error('session catalog timed out')), this.timeoutMs);
       timeout.unref();
-      this.current = { id, resolve, reject, timeout };
+      this.current = { id, limit: query.historyImage ? MAX_IMAGE_OUTPUT_BYTES : MAX_OUTPUT_BYTES, resolve, reject, timeout };
       const frame = `${JSON.stringify({ version: 2, id, ...query })}\n`;
       if (Buffer.byteLength(frame, 'utf8') > MAX_WORKER_REQUEST_BYTES) { this.fail(new Error('session catalog request is too large')); return; }
       try { this.child.stdin!.write(frame); }
@@ -262,6 +283,8 @@ class CatalogWorker {
     this.retiring = true;
     if (!this.current) this.stop();
   }
+
+  cancel(): void { if (this.current) this.fail(new Error('thumbnail request cancelled')); }
 
   private stop(): void {
     this.retiring = true;
@@ -301,7 +324,7 @@ class CatalogWorker {
           || Object.keys(value).some(key => !['version', 'id', 'bytes', 'kind'].includes(key))
           || value.version !== 2 || !Number.isSafeInteger(value.id) || value.id !== this.current.id
           || typeof value.bytes !== 'number' || !Number.isSafeInteger(value.bytes) || value.bytes < 1
-          || value.bytes > MAX_OUTPUT_BYTES || (value.kind !== 'output' && value.kind !== 'error')) {
+          || value.bytes > this.current.limit || (value.kind !== 'output' && value.kind !== 'error')) {
           this.fail(new Error('session catalog returned an invalid worker response')); return;
         }
         // The bounded length is known before allocation. A single destination
@@ -348,6 +371,13 @@ interface CatalogWorkerLane {
   key?: string;
   pending?: Promise<CatalogWorker>;
   tail: Promise<void>;
+  queued: number;
+}
+
+interface SessionImageRuntime {
+  projectPath: string;
+  sessionId: string;
+  getWorkspaceState(): Promise<{ transcript_path?: string | null }>;
 }
 
 function boundedOutput(value: string): string {
@@ -408,6 +438,10 @@ function parseCatalog(output: string, maxSessions?: number): ProjectSessionCatal
   } catch {
     throw new Error('session catalog returned invalid JSON');
   }
+  return parseCatalogValue(parsed, maxSessions);
+}
+
+function parseCatalogValue(parsed: unknown, maxSessions?: number): ProjectSessionCatalogResult {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('session catalog returned an invalid payload');
   const input = parsed as Record<string, unknown>;
   if (input['version'] !== 1 || !Array.isArray(input['sessions'])) throw new Error('session catalog returned an unsupported payload');
@@ -427,11 +461,28 @@ export class ProjectSessionCatalog {
   private readonly cache = new Map<string, CatalogCacheEntry>();
   private readonly pending = new Map<string, Promise<ProjectSessionCatalogResult>>();
   private readonly pendingSessions = new Map<string, Promise<ProjectSessionCatalogResult>>();
+  private readonly pendingOpen = new Map<string, Promise<{ session?: ProjectSessionCatalogRow; preview?: Promise<TranscriptHistoryPage | undefined> }>>();
   private readonly pendingHistory = new Map<string, Promise<TranscriptHistoryPage>>();
+  private providerListTail: Promise<void> = Promise.resolve();
+  private queuedProviderList?: { key: string; output: Promise<string> };
   private nativeProductPaths?: Promise<ProductPaths>;
   private generation = 0;
-  private readonly foregroundLane: CatalogWorkerLane = { tail: Promise.resolve() };
-  private readonly historyLane: CatalogWorkerLane = { tail: Promise.resolve() };
+  private readonly foregroundLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
+  private readonly overlappingCatalogLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
+  private readonly historyLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
+  private readonly imageLane: CatalogWorkerLane = { tail: Promise.resolve(), queued: 0 };
+  private readonly imageRevisions = new LRUCache<string, {
+    dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number; revision: number;
+  }>({ max: 128 });
+  private nextImageRevision = 0;
+  private readonly imageSources = new WeakMap<SessionImageRuntime, ReturnType<SessionImageRuntime['getWorkspaceState']>>();
+  private readonly images = new CancellableImageRequests<SessionImagePayload>(new LRUCache<string, SessionImagePayload>({
+    max: 128,
+    maxSize: 64 * 1024 * 1024,
+    sizeCalculation: image => image.base64.length * 2,
+    ttl: 10 * 60_000,
+  }));
+  private foregroundKind: 'directory' | 'session' = 'directory';
   private catalogQueued = 0;
   private disposed = false;
 
@@ -463,6 +514,26 @@ export class ProjectSessionCatalog {
     return page;
   }
 
+  async readActivityPreview(projectPath: string, sessionId: string, transcriptPath: string, through: number): Promise<import('../shared/inbox.js').AssistantActivityPreview> {
+    if (!isSessionId(sessionId) || !isAbsolute(transcriptPath) || transcriptPath.includes('\0')
+      || basename(transcriptPath).toLowerCase() !== `${sessionId.toLowerCase()}.jsonl`
+      || !Number.isSafeInteger(through) || through < 1) throw new Error('Invalid activity source.');
+    const output = await this.runWorker({ cwd: realpathSync.native(projectPath), sessionId: sessionId.toLowerCase(), transcriptPath, activityPreview: through }, this.historyLane);
+    const rows = JSON.parse(output) as { uuid: string; at: number; blocks: number[][] }[];
+    if (!Array.isArray(rows) || rows.length > 16) throw new Error('Invalid activity preview');
+    let units = 0, blocks = 0;
+    const messages = rows.map(row => {
+      if (!isSessionId(row?.uuid) || !Number.isSafeInteger(row.at) || !Array.isArray(row.blocks)
+        || !row.blocks.length || (blocks += row.blocks.length) > 16) throw new Error('Invalid activity preview');
+      return { role: 'assistant' as const, transcript_uuid: row.uuid, sent_at_ms: row.at, blocks: row.blocks.map(text => {
+        if (!Array.isArray(text) || !text.length || (units += text.length) > 32_768
+          || text.some(unit => !Number.isInteger(unit) || unit < 0 || unit > 0xffff)) throw new Error('Invalid activity preview');
+        return { type: 'text' as const, text: String.fromCharCode(...text) };
+      }) };
+    });
+    return { available: messages.length > 0, messages };
+  }
+
   async captureMetadataSource(projectPath: string, sessionId: string, transcriptPath: string, sessionMode: 'chat' | 'code'): Promise<string> {
     if (!isSessionId(sessionId) || !isAbsolute(transcriptPath) || transcriptPath.includes('\0')) throw new Error('Invalid metadata source.');
     const result = await this.metadataRequest(projectPath, { action: 'capture', sessionId, transcriptPath, sessionMode });
@@ -476,10 +547,20 @@ export class ProjectSessionCatalog {
     if (action === 'rename' || action === 'touch') this.invalidate(projectPath);
   }
 
+  async projectSettings(projectPath: string, command: ProjectSettingsCommand) {
+    const read = command.type === 'refresh_listings' || ('command' in command
+      && /^(get_|preview_operation$|validate_document$)/.test(command.command.action));
+    const output = await this.runOutput(realpathSync.native(projectPath), ['--project-settings-command'],
+      JSON.stringify(command), read ? 'default' : 'durable-write', this.options.timeoutMs ?? (read ? 15_000 : 300_000), settingsChildren);
+    const events: unknown = JSON.parse(boundedOutput(output));
+    if (!Array.isArray(events)) throw new Error('Invalid project settings response');
+    return events.map(validateClientEvent);
+  }
+
   private async metadataRequest(projectPath: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
     const args = ['--session-metadata-json', ...(this.options.configHome ? ['--session-config-home', this.options.configHome] : [])];
     const output = await this.runOutput(realpathSync.native(projectPath), args, `${JSON.stringify(input)}\n`,
-      input.action !== 'rename' && input.action !== 'touch');
+      input.action === 'rename' || input.action === 'touch' ? 'durable-write' : 'default');
     const result: unknown = JSON.parse(boundedOutput(output));
     if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('Invalid session metadata response.');
     return result as Record<string, unknown>;
@@ -506,16 +587,34 @@ export class ProjectSessionCatalog {
       : action === 'set_policy' ? { action, expectedRevision, providerId, allowSubscriptionToMetered }
       : action === 'update' ? { action, expectedRevision, accountId, displayName }
       : action === 'reorder' ? { action, expectedRevision, providerId, accountIds }
+      : action === 'set_additional_openai_models' ? { action, expectedRevision, accountId, enabled }
       : action === 'enable' ? { action: 'set_enabled', expectedRevision, accountId, enabled }
       : { action, expectedRevision, accountId };
-    const output = await this.runOutput(realpathSync.native(homedir()), ['--provider-account-command'],
-      JSON.stringify({ ...(credentialPresence ? { credential_presence: credentialPresence } : {}), ...(this.options.appVersion !== undefined ? { app_version: this.options.appVersion } : {}), request_json: JSON.stringify(command), metadata_only: true, backend: 'desktop-broker', credential_channel: this.options.providerAccountChannel ?? 'development', ...(credential ? { credential } : {}) }));
+    const cwd = realpathSync.native(homedir());
+    const input = JSON.stringify({ ...(credentialPresence ? { credential_presence: credentialPresence } : {}), ...(this.options.appVersion !== undefined ? { app_version: this.options.appVersion } : {}), request_json: JSON.stringify(command), metadata_only: true, backend: 'desktop-broker', credential_channel: this.options.providerAccountChannel ?? 'development', ...(credential ? { credential } : {}) });
+    const plainList = action === 'list' && expectedRevision === 0 && credentialPresence === undefined;
+    const output = await this.runOutput(cwd, ['--provider-account-command'], input, plainList ? 'provider-list' : 'default');
     const result = JSON.parse(boundedOutput(output));
     if (result.error) throw new Error('Provider account operation failed.');
     const snapshot = typeof result.snapshot_json === 'string' ? JSON.parse(result.snapshot_json) : result;
     if (!snapshot || typeof snapshot.storeScope !== 'string' || !Number.isSafeInteger(snapshot.configRevision)
       || !Array.isArray(snapshot.accounts) || !Array.isArray(snapshot.health)) throw new Error('Invalid provider account snapshot.');
     return snapshot as ProviderAccountSnapshot;
+  }
+
+  private readProviderList(key: string, read: () => Promise<string>): Promise<string> {
+    if (this.queuedProviderList?.key === key) return this.queuedProviderList.output;
+    if (this.queuedProviderList) return read(); // A different configuration has its own authority.
+    // Audio, the renderer and runtime recovery all need the same metadata. Keep
+    // one helper slot available for session work. Only requests received before
+    // dispatch share bytes, so a later caller always observes a fresh native read.
+    const output = this.providerListTail.then(() => {
+      this.queuedProviderList = undefined;
+      return read();
+    });
+    this.queuedProviderList = { key, output };
+    this.providerListTail = output.then(() => undefined, () => undefined);
+    return output;
   }
 
   /** Private authority commit: never exposed as an account-management command. */
@@ -562,7 +661,14 @@ export class ProjectSessionCatalog {
   /** Read settings with the engine's merge rules before starting its process. */
   async workspaceSettings(projectPath: string): Promise<WorkspaceLaunchSettings> {
     const canonical = realpathSync.native(projectPath);
-    const output = await this.runOutput(canonical, ['--cwd', canonical, '--workspace-environment-json']);
+    const readOnce = () => this.runOutput(canonical, ['--cwd', canonical, '--workspace-environment-json'], undefined, 'selection');
+    // A selected transcript usually leaves a reader idle in the target workspace.
+    // Read current settings there, with the same process cwd as the one-shot CLI.
+    const idle = [this.foregroundLane, this.overlappingCatalogLane].find(lane =>
+      lane.queued === 0 && lane.worker?.available && lane.worker.cwd === canonical);
+    const output = idle
+      ? await this.runWorker({ cwd: canonical, workspaceEnvironment: true }, idle).catch(readOnce)
+      : await readOnce();
     const input = JSON.parse(boundedOutput(output)) as { version?: unknown; environment?: unknown; config_home?: unknown; global_config_path?: unknown };
     if (input?.version !== 1 || !input.environment || typeof input.environment !== 'object' || Array.isArray(input.environment)) {
       throw new Error('invalid workspace environment response');
@@ -631,25 +737,83 @@ export class ProjectSessionCatalog {
 
   /** A picker selection must retain its displayed scope and exact file. */
   async select(projectPath: string, sessionId: string, selection: SessionOpenSelection): Promise<ProjectSessionCatalogRow | undefined> {
+    const query = this.selectionQuery(projectPath, sessionId, selection);
+    const result = await this.loadSession(query.cwd, query.sessionId, query.scope, query.transcriptPath);
+    return this.selectedRow(result, query);
+  }
+
+  /** Resolve the exact owner once, and read its visible tail independently of startup. */
+  selectForOpen(projectPath: string, sessionId: string, selection: SessionOpenSelection): Promise<{
+    session?: ProjectSessionCatalogRow;
+    preview?: Promise<TranscriptHistoryPage | undefined>;
+  }> {
+    if (!selection.transcriptPath || this.options.catalogWorker === false) {
+      return this.select(projectPath, sessionId, selection).then(session => ({ session }));
+    }
+    const query = this.selectionQuery(projectPath, sessionId, selection);
+    const key = JSON.stringify(query);
+    const existing = this.pendingOpen.get(key);
+    if (existing) return existing;
+    const generation = this.generation;
+    const operation = this.loadSession(query.cwd, query.sessionId, query.scope, query.transcriptPath).then(result => {
+      const session = this.selectedRow(result, query);
+      if (!session || session.empty_session || generation !== this.generation) return { session };
+      // Let startup claim the now-idle settings reader before a preview
+      // worker can reclaim its process slot.
+      const preview = nextTurn().then(() => generation === this.generation
+        ? this.readLatestHistory(query.cwd, session.uuid, session.path, session.mode) : undefined);
+      return { session, preview };
+    });
+    this.pendingOpen.set(key, operation);
+    const cleanup = () => { if (this.pendingOpen.get(key) === operation) this.pendingOpen.delete(key); };
+    void operation.then(result => result.preview).then(cleanup, cleanup);
+    return operation;
+  }
+
+  /** The display tail of a source the caller has already selected and validated. */
+  async readLatestHistory(projectPath: string, sessionId: string, transcriptPath: string,
+    mode: 'chat' | 'code'): Promise<TranscriptHistoryPage | undefined> {
+    if (this.options.catalogWorker === false) return undefined;
+    const generation = this.generation;
+    try {
+      const { cwd } = this.selectionQuery(projectPath, sessionId, { scope: 'current', transcriptPath });
+      const output = await this.runWorker({ cwd, sessionId, transcriptPath, historyLatest: true }, this.historyLane);
+      if (generation !== this.generation) return undefined;
+      const page = JSON.parse(output) as Partial<TranscriptHistoryPage>;
+      const event = validateClientEvent({ type: 'session_resumed', mode, session_id: sessionId, messages: page.messages });
+      if (event.type !== 'session_resumed' || !event.messages.length || !event.messages.every(message =>
+        message && typeof message.role === 'string' && Array.isArray(message.blocks)
+          && message.blocks.every(block => block && typeof block.type === 'string'))) return undefined;
+      return { messages: event.messages, before: page.before == null ? null : historyCursor(page.before) };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private selectionQuery(projectPath: string, sessionId: string, selection: SessionOpenSelection): CatalogWorkerQuery & { sessionId: string } {
     if (!isSessionId(sessionId)) throw new Error('invalid session id');
     sessionId = sessionId.toLowerCase();
     if (selection.transcriptPath !== undefined && (!isAbsolute(selection.transcriptPath)
       || selection.transcriptPath.includes('\0') || basename(selection.transcriptPath).toLowerCase() !== `${sessionId}.jsonl`)) {
       throw new Error('invalid selected transcript path');
     }
-    const canonical = realpathSync.native(projectPath);
-    const result = await this.run(canonical, sessionId, sessionCatalogScope(selection.scope), selection.transcriptPath);
-    const row = result.sessions.find((candidate) => candidate.uuid === sessionId);
-    if (row && selection.transcriptPath !== undefined && row.path !== selection.transcriptPath) {
+    return { cwd: realpathSync.native(projectPath), sessionId, scope: sessionCatalogScope(selection.scope), transcriptPath: selection.transcriptPath };
+  }
+
+  private selectedRow(result: ProjectSessionCatalogResult, query: { sessionId: string; transcriptPath?: string }): ProjectSessionCatalogRow | undefined {
+    const row = result.sessions.find((candidate) => candidate.uuid === query.sessionId);
+    if (row && query.transcriptPath !== undefined && row.path !== query.transcriptPath) {
       throw new Error('This session selection has changed. Refresh the session list and try again.');
     }
     return row ? { ...row } : undefined;
   }
 
-  async readHistory(projectPath: string, sessionId: string, transcriptPath: string, before: TranscriptHistoryCursor): Promise<TranscriptHistoryPage> {
+  async readHistory(projectPath: string, sessionId: string, transcriptPath: string, before: TranscriptHistoryCursor, limit?: number): Promise<TranscriptHistoryPage> {
     if (!isSessionId(sessionId) || !isAbsolute(transcriptPath) || transcriptPath.includes('\0')
       || basename(transcriptPath).toLowerCase() !== `${sessionId.toLowerCase()}.jsonl`) throw new Error('Invalid history source.');
-    const query = { cwd: realpathSync.native(projectPath), sessionId: sessionId.toLowerCase(), transcriptPath, historyBefore: historyCursor(before) };
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 200)) throw new Error('Invalid history limit');
+    const query = { cwd: realpathSync.native(projectPath), sessionId: sessionId.toLowerCase(), transcriptPath,
+      historyBefore: historyCursor(before), ...(limit === undefined ? {} : { historyLimit: limit }) };
     const key = JSON.stringify(query);
     const existing = this.pendingHistory.get(key);
     if (existing) return existing;
@@ -658,6 +822,61 @@ export class ProjectSessionCatalog {
     });
     this.pendingHistory.set(key, operation);
     return operation;
+  }
+
+  async readRuntimeImage(runtime: SessionImageRuntime, reference: string, size: SessionImageSize, signal?: AbortSignal): Promise<SessionImagePayload> {
+    signal?.throwIfAborted();
+    let state = this.imageSources.get(runtime);
+    if (!state) {
+      state = runtime.getWorkspaceState().finally(() => this.imageSources.delete(runtime));
+      this.imageSources.set(runtime, state);
+    }
+    // Other thumbnails may still need the workspace lookup after this caller scrolls away.
+    const workspace = await (signal ? new Promise<Awaited<typeof state>>((resolve, reject) => {
+      const abort = () => reject(signal.reason);
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) {
+        signal.removeEventListener('abort', abort);
+        abort();
+      }
+      void state.then(resolve, reject).then(() => signal.removeEventListener('abort', abort));
+    }) : state);
+    if (!workspace?.transcript_path) throw new Error('History image source is unavailable');
+    return this.readImage(runtime.projectPath, runtime.sessionId, workspace.transcript_path, reference, size, signal);
+  }
+
+  async readImage(projectPath: string, sessionId: string, transcriptPath: string, reference: string, size: SessionImageSize, signal?: AbortSignal): Promise<SessionImagePayload> {
+    if (!isSessionId(sessionId) || !isAbsolute(transcriptPath) || transcriptPath.includes('\0')
+      || basename(transcriptPath).toLowerCase() !== `${sessionId.toLowerCase()}.jsonl`
+      || !isHistoryImageReference(reference) || (size !== 'thumbnail' && size !== 'original')) {
+      throw new Error('Invalid history image request');
+    }
+    signal?.throwIfAborted();
+    const source = await lstat(transcriptPath);
+    if (!source.isFile() || source.nlink !== 1) throw new Error('History image source is unavailable');
+    const query = { cwd: realpathSync.native(projectPath), sessionId: sessionId.toLowerCase(), transcriptPath,
+      historyImage: { reference, size } };
+    // Located references name a physical row. A pure append cannot change it;
+    // UUID-only references still follow the newest matching row.
+    const [, , , , offset] = reference.split(':');
+    const previous = offset === undefined ? undefined : this.imageRevisions.get(transcriptPath);
+    const sameRevision = previous?.dev === source.dev && previous.ino === source.ino
+      && (source.size > previous.size || (source.size === previous.size
+        && source.mtimeMs === previous.mtimeMs && source.ctimeMs === previous.ctimeMs));
+    const revision = sameRevision ? previous.revision : ++this.nextImageRevision;
+    if (offset !== undefined) this.imageRevisions.set(transcriptPath, {
+      dev: source.dev, ino: source.ino, size: source.size, mtimeMs: source.mtimeMs, ctimeMs: source.ctimeMs, revision,
+    });
+    const key = JSON.stringify([query, offset === undefined
+      ? [source.dev, source.ino, source.mtimeMs, source.ctimeMs, source.size] : revision]);
+    return this.images.fetch(key, async loadSignal => {
+      const output = await this.runWorker(query, this.imageLane, size === 'thumbnail' ? loadSignal : undefined);
+      const image = JSON.parse(output) as SessionImagePayload;
+      if (!isSupportedImageMediaType(image.mediaType) || typeof image.base64 !== 'string' || !image.base64.length) {
+        throw new Error('Invalid history image response');
+      }
+      return image;
+    }, signal);
   }
 
   private async loadHistory(query: CatalogWorkerQuery & { sessionId: string; historyBefore: TranscriptHistoryCursor }): Promise<TranscriptHistoryPage> {
@@ -677,17 +896,24 @@ export class ProjectSessionCatalog {
   }
 
   /** Invalidate after a durable transcript/metadata mutation. */
-  invalidate(projectPath?: string): void {
+  invalidate(projectPath?: string, options?: { preserveImages: true }): void {
     this.generation++;
     // An alias may refer to the mutated transcript, so all discovery scopes
     // expire together. Pending readers may finish, but cannot repopulate them.
     this.cache.clear();
     this.pending.clear();
     this.pendingSessions.clear();
+    this.pendingOpen.clear();
     this.pendingHistory.clear();
     // Retire after the current captured response; a mutation must never reuse
     // projections from before its durable revision/generation boundary.
-    for (const lane of [this.foregroundLane, this.historyLane]) {
+    if (!options?.preserveImages) {
+      this.images.clear();
+      this.imageRevisions.clear();
+    }
+    const lanes = [this.foregroundLane, this.overlappingCatalogLane, this.historyLane];
+    if (!options?.preserveImages) lanes.push(this.imageLane);
+    for (const lane of lanes) {
       lane.worker?.retire();
       lane.worker = undefined;
       lane.key = undefined;
@@ -723,11 +949,11 @@ export class ProjectSessionCatalog {
     return operation;
   }
 
-  private loadSession(canonical: string, sessionId: string): Promise<ProjectSessionCatalogResult> {
-    const key = `${canonical}\0${sessionId}`;
+  private loadSession(canonical: string, sessionId: string, scope?: SessionCatalogScope, transcriptPath?: string): Promise<ProjectSessionCatalogResult> {
+    const key = JSON.stringify([canonical, sessionId, scope, transcriptPath]);
     const existing = this.pendingSessions.get(key);
     if (existing) return existing;
-    const operation = this.run(canonical, sessionId).finally(() => {
+    const operation = this.run(canonical, sessionId, scope, transcriptPath).finally(() => {
       if (this.pendingSessions.get(key) === operation) this.pendingSessions.delete(key);
     });
     this.pendingSessions.set(key, operation);
@@ -737,8 +963,7 @@ export class ProjectSessionCatalog {
   private run(canonical: string, sessionId?: string, scope?: SessionCatalogScope, transcriptPath?: string): Promise<ProjectSessionCatalogResult> {
     if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
     if (this.options.catalogWorker !== false) {
-      return this.runWorker({ cwd: canonical, ...(sessionId ? { sessionId } : {}),
-        ...(scope ? { scope } : {}), ...(transcriptPath ? { transcriptPath } : {}) }).then(parseCatalog);
+      return this.runCatalogWorker({ cwd: canonical, sessionId, scope, transcriptPath }).then(parseCatalog);
     }
     const args = buildBridgeArguments({
       workspace: canonical,
@@ -752,32 +977,69 @@ export class ProjectSessionCatalog {
     return this.runOutput(canonical, args).then((output) => parseCatalog(output));
   }
 
-  private runWorker(query: CatalogWorkerQuery, lane = this.foregroundLane): Promise<string> {
+  private runCatalogWorker(query: CatalogWorkerQuery): Promise<string> {
+    // Reuse sequential reads. If directory discovery overlaps a selection,
+    // give each its own FIFO under the shared child limit.
+    const kind = query.sessionId ? 'session' : 'directory';
+    if (this.foregroundLane.queued === 0 && this.overlappingCatalogLane.queued === 0) {
+      const other = this.overlappingCatalogLane.worker;
+      if (other?.available && other.cwd === query.cwd && this.foregroundLane.worker?.cwd !== query.cwd) {
+        this.foregroundKind = kind === 'session' ? 'directory' : 'session';
+      } else {
+        this.foregroundKind = kind;
+      }
+    }
+    return this.runWorker(query, this.foregroundKind === kind ? this.foregroundLane : this.overlappingCatalogLane);
+  }
+
+  private runWorker(query: CatalogWorkerQuery, lane: CatalogWorkerLane, signal?: AbortSignal): Promise<string> {
     if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
+    if (signal?.aborted) return Promise.reject(signal.reason);
     if (this.catalogQueued >= MAX_QUEUED_CATALOG_OPERATIONS) return Promise.reject(new Error('session catalog is busy; try again shortly'));
     this.catalogQueued++;
+    lane.queued++;
+    let removeQueuedAbort: (() => void) | undefined;
+    const queuedAbort = signal && new Promise<never>((_resolve, reject) => {
+      const abort = () => reject(signal.reason);
+      signal.addEventListener('abort', abort, { once: true });
+      removeQueuedAbort = () => signal.removeEventListener('abort', abort);
+    });
     const operation = lane.tail.then(async () => {
+      removeQueuedAbort?.();
+      signal?.throwIfAborted();
       if (this.disposed) throw new Error('session catalog is disposed');
-      const worker = await this.getWorker(query.cwd, lane);
+      const candidate = this.getWorker(query.cwd, lane, query);
+      // Start a reused worker in this turn, before another lane can reclaim
+      // its idle process slot while the request is waiting in a microtask.
+      const worker = candidate instanceof CatalogWorker ? candidate : await candidate;
+      const abort = () => worker.cancel();
       try {
+        signal?.throwIfAborted();
+        signal?.addEventListener('abort', abort, { once: true });
         return await worker.request(query);
       } catch (error) {
         worker.retire();
         if (lane.worker === worker) lane.worker = undefined;
         throw error;
+      } finally {
+        signal?.removeEventListener('abort', abort);
       }
     });
     lane.tail = operation.then(() => undefined, () => undefined);
-    return operation.finally(() => { this.catalogQueued--; });
+    return (queuedAbort ? Promise.race([operation, queuedAbort]) : operation).finally(() => {
+      removeQueuedAbort?.();
+      this.catalogQueued--;
+      lane.queued--;
+    });
   }
 
-  private getWorker(canonical: string, lane: CatalogWorkerLane): Promise<CatalogWorker> {
+  private getWorker(canonical: string, lane: CatalogWorkerLane, query: CatalogWorkerQuery): CatalogWorker | Promise<CatalogWorker> {
     if (this.disposed) return Promise.reject(new Error('session catalog is disposed'));
     const bin = resolveServerBin({ serverBin: this.options.serverBin, isPackaged: this.options.isPackaged,
       resourcesPath: this.options.resourcesPath } as Omit<BridgeManagerOptions, 'launchConfig'>);
-    const env = { ...buildBridgeEnvironment(process.env), ...(this.options.configHome ? { LINGXI_CONFIG_DIR: this.options.configHome } : {}) };
+    const env = this.childEnvironment();
     const key = JSON.stringify([bin, Object.entries(env).sort(([left], [right]) => left.localeCompare(right))]);
-    if (lane.worker?.available && lane.key === key) return Promise.resolve(lane.worker);
+    if (lane.worker?.available && lane.key === key) return lane.worker;
     if (lane.pending) return lane.pending;
     lane.worker?.retire();
     lane.worker = undefined;
@@ -788,12 +1050,13 @@ export class ProjectSessionCatalog {
       const child = (this.options.spawnProcess ?? spawn)(bin, ['--session-catalog-worker-json'], {
         cwd: canonical, env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
       });
-      return new CatalogWorker(child, release, this.options.timeoutMs ?? 15_000, this.options.workerIdleMs ?? DEFAULT_WORKER_IDLE_MS);
-    }, this.options.timeoutMs).then((worker) => {
+      return new CatalogWorker(child, canonical, release, this.options.timeoutMs ?? 15_000, this.options.workerIdleMs ?? DEFAULT_WORKER_IDLE_MS);
+    }, this.options.timeoutMs, (query.sessionId && !query.historyLatest && !query.historyBefore && !query.historyImage && query.activityAfter === undefined && query.activityPreview === undefined) || query.workspaceEnvironment
+      ? 'selection' : 'default').then((worker) => {
       if (generation !== this.generation) {
         worker.retire();
         if (lane.pending === operation) lane.pending = undefined;
-        return this.getWorker(canonical, lane);
+        return this.getWorker(canonical, lane, query);
       }
       lane.worker = worker;
       lane.key = key;
@@ -803,25 +1066,38 @@ export class ProjectSessionCatalog {
     return operation;
   }
 
-  private runOutput(canonical: string, args: string[], input?: string, killOnTimeout = true): Promise<string> {
+  private childEnvironment(): NodeJS.ProcessEnv {
+    return { ...buildBridgeEnvironment(process.env), ...(this.options.configHome ? { LINGXI_CONFIG_DIR: this.options.configHome } : {}) };
+  }
+
+  private runOutput(
+    canonical: string,
+    args: string[],
+    input?: string,
+    kind: 'default' | 'durable-write' | 'provider-list' | 'selection' = 'default',
+    timeoutMs = this.options.timeoutMs ?? 15_000,
+    admission = catalogChildren,
+  ): Promise<string> {
     const bin = resolveServerBin({
       serverBin: this.options.serverBin,
       isPackaged: this.options.isPackaged,
       resourcesPath: this.options.resourcesPath,
     } as Omit<BridgeManagerOptions, 'launchConfig'>);
-    return catalogChildren.start((release) => new Promise<string>((resolve, reject) => {
+    const env = this.childEnvironment();
+    const killOnTimeout = kind !== 'durable-write';
+    const launch = () => admission.start((release) => new Promise<string>((resolve, reject) => {
       if (this.disposed) { release(); reject(new Error('session catalog is disposed')); return; }
       let child: ReturnType<typeof spawn>;
       try {
         child = (this.options.spawnProcess ?? spawn)(bin, args, {
           cwd: canonical,
-          env: { ...buildBridgeEnvironment(process.env), ...(this.options.configHome ? { LINGXI_CONFIG_DIR: this.options.configHome } : {}) },
+          env,
           stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
           windowsHide: true,
           detached: !killOnTimeout,
         });
       } catch (error) { release(); reject(error); return; }
-      const termination = new CatalogChildTermination(child, release);
+      const termination = new CatalogChildTermination(child, release, admission);
       if (input !== undefined) {
         child.stdin?.on('error', () => { /* Process close carries the bounded failure. */ });
         child.stdin?.end(input);
@@ -836,7 +1112,7 @@ export class ProjectSessionCatalog {
         settled = true;
         if (killOnTimeout) termination.stop(); else child.unref();
         reject(new Error(killOnTimeout ? 'session catalog timed out' : 'The metadata result is unconfirmed; its writer is still completing.'));
-      }, this.options.timeoutMs ?? 15_000);
+      }, timeoutMs);
       timeout.unref();
       child.stdout!.on('data', (chunk: Buffer | string) => {
         if (settled) return;
@@ -896,6 +1172,7 @@ export class ProjectSessionCatalog {
           reject(error instanceof Error ? error : new Error(String(error)));
         }
       });
-    }), this.options.timeoutMs);
+    }), this.options.timeoutMs, kind === 'selection' ? 'selection' : 'default');
+    return kind === 'provider-list' ? this.readProviderList(JSON.stringify([bin, canonical, env, input]), launch) : launch();
   }
 }

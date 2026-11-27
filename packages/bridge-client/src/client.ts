@@ -681,10 +681,25 @@ export class BridgeClient extends EventEmitter {
   }
 
   /** Read a committed recent display baseline; never performs a session resume. */
-  async captureTranscriptCheckpoint(sessionId: string): Promise<Extract<ClientEvent, { type: 'session_resumed' }>> {
+  captureTranscriptCheckpoint(sessionId: string): Promise<Extract<ClientEvent, { type: 'session_resumed' }>> {
+    return this.readTranscriptDisplay('desktop_transcript_checkpoint', sessionId, { session_id: sessionId });
+  }
+
+  /** Read the selected cold resume's display excerpt without completing the resume. */
+  async captureColdResumePreview(sessionId: string, transcriptPath: string, expectedMode: 'chat' | 'code',
+    signal: AbortSignal): Promise<Extract<ClientEvent, { type: 'session_resumed' }>> {
+    const event = await this.readTranscriptDisplay('desktop_cold_resume_preview', sessionId,
+      { session_id: sessionId, transcript_path: transcriptPath, expected_mode: expectedMode }, signal);
+    if (event.mode !== expectedMode) throw new Error('Invalid transcript preview mode.');
+    return event;
+  }
+
+  private async readTranscriptDisplay(method: 'desktop_transcript_checkpoint' | 'desktop_cold_resume_preview', sessionId: string,
+    params: { session_id: string; transcript_path?: string; expected_mode?: 'chat' | 'code' },
+    signal?: AbortSignal): Promise<Extract<ClientEvent, { type: 'session_resumed' }>> {
     const socket = this.ws;
     if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('Transcript checkpoints require a connected owner.');
-    const result = await this.request('desktop_transcript_checkpoint', { session_id: sessionId }, 30_000);
+    const result = await this.request(method, params, 30_000, undefined, signal);
     if (this.ws !== socket || socket.readyState !== WebSocket.OPEN) throw new Error('The transcript checkpoint connection changed.');
     const event = validateClientEvent(result);
     if (event.type !== 'session_resumed' || event.session_id !== sessionId) throw new Error('Invalid transcript checkpoint owner.');
@@ -696,14 +711,27 @@ export class BridgeClient extends EventEmitter {
     return event;
   }
 
-  async resumeSessionFromTranscript(sessionId: string, transcriptPath: string, expectedMode: 'chat' | 'code', signal?: AbortSignal): Promise<void> {
+  async resumeSessionFromTranscript(sessionId: string, transcriptPath: string, expectedMode: 'chat' | 'code',
+    signal?: AbortSignal, pageDisplay = false): Promise<{ historyBefore?: string; historyOverview?: Extract<ClientEvent, { type: 'session_resumed' }>['messages'] } | void> {
     // The Desktop resume owner pauses its deadline for live tool interactions.
     // Its signal replaces the fixed request deadline only for that owner.
-    const result = await this.request('resume_selected_session', { session_id: sessionId, transcript_path: transcriptPath, expected_mode: expectedMode },
+    const result = await this.request('resume_selected_session', {
+      session_id: sessionId, transcript_path: transcriptPath, expected_mode: expectedMode,
+      ...(pageDisplay ? { page_display: true } : {}),
+    },
       signal ? null : 30_000, undefined, signal);
     if (!result || typeof result !== 'object' || (result as { status?: unknown }).status !== 'ok') {
       throw new Error('invalid selected session resume response');
     }
+    const { history_before: before, history_overview: overview } = result as { history_before?: unknown; history_overview?: unknown };
+    if (before == null && overview === undefined) return;
+    if (!pageDisplay || (before != null && (typeof before !== 'string' || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/iu.test(before)))) {
+      throw new Error('invalid selected session resume history cursor');
+    }
+    const historyOverview = overview === undefined ? undefined
+      : validateClientEvent({ type: 'session_resumed', session_id: sessionId, mode: expectedMode, messages: overview });
+    if (historyOverview && historyOverview.type !== 'session_resumed') throw new Error('invalid selected session overview');
+    return { historyBefore: before ?? undefined, historyOverview: historyOverview?.messages };
   }
 
   /** Read immutable SDK ownership while this permission ask is still pending. */

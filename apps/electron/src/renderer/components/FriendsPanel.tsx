@@ -12,7 +12,7 @@ export interface FriendsPanelProps {
   locale: string;
   /** A friend link that was opened: looked up here and confirmed in a dialog, never redeemed on open (D8). */
   initialCode: string | undefined;
-  onCodeHandled(): void;
+  onCodeHandled(code: string): void;
   /** Show the Friends page. Pressing anything in the sidebar brings it forward, since the page can be showing something else (Apps, say) while the mode is Friends. */
   onShowFriends(): void;
 }
@@ -26,7 +26,7 @@ export function FriendsPanel({ friends, locale, initialCode, onCodeHandled, onSh
     // The capture sees the press before the control does, so the page is already the Friends page when the control opens a chat or a dialog.
     <div className="no-drag friends-sidebar" style={hostStyle} onClickCapture={onShowFriends}>
       <FriendsSidebar workspace={workspace} snapshot={snapshot} locale={locale} />
-      {initialCode ? <FriendLinkDialog workspace={workspace} locale={locale} code={initialCode} onClose={onCodeHandled} /> : null}
+      {initialCode ? <FriendLinkDialog key={initialCode} workspace={workspace} locale={locale} code={initialCode} onClose={() => onCodeHandled(initialCode)} /> : null}
     </div>
   );
 }

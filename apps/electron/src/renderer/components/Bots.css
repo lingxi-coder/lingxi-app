@@ -39,7 +39,8 @@
 .bots-empty h2 { color: var(--bots-text); }
 .bots-empty p { max-width: 460px; line-height: 1.7; font-size: 14px; margin: 12px 0 22px; }
 
-.bots-detail { max-width: 860px; display: flex; flex-direction: column; gap: 22px; }
+.bots-detail { max-width: 860px; min-width: 0; display: flex; flex-direction: column; gap: 20px; }
+.bots-detail-description { max-width: 70ch; color: var(--bots-muted); font-size: 13px; line-height: 1.6; overflow-wrap: break-word; }
 .bots-page .bots-back { align-self: flex-start; margin-left: -9px; color: var(--bots-muted); }
 .bots-detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
 .bots-detail-identity { min-width: 0; display: flex; align-items: flex-start; gap: 14px; }
@@ -72,19 +73,51 @@
 .desktop-chat-topbar-slot button[data-variant='primary'] { color: var(--tw-accent-fg); background: var(--tw-accent); border-color: transparent; }
 .desktop-chat-topbar-slot button[data-variant='primary']:hover:enabled { background: color-mix(in srgb, var(--tw-accent) 88%, var(--tw-fg)); }
 .desktop-chat-topbar-slot button[data-variant='danger'] { color: var(--tw-danger); }
-.bots-tabs { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 2px; }
-.bots-page .bots-tabs button[aria-selected='true'] { background: var(--bots-surface); color: var(--bots-accent); border-color: var(--bots-accent); }
-.bots-tab-badge { display: inline-block; min-width: 16px; margin-left: 6px; padding: 0 5px; border-radius: 8px; background: var(--bots-warn); color: var(--bots-background); font-size: 11px; font-weight: 600; line-height: 16px; text-align: center; }
+:is(.desktop-chat-topbar-slot, .bots-page) button.bots-detail-delete { border-color: transparent; }
+
+.bots-settings { container: bot-settings / inline-size; max-width: 69rem; margin-inline: auto; }
+.bots-settings-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.5rem; align-items: start; }
+.bots-settings-nav { min-width: 0; display: grid; gap: .5rem; }
+.bots-page .bots-settings-caption { color: var(--bots-muted); font-size: .75rem; font-weight: 600; line-height: 1.5; }
+.bots-tabs { display: flex; gap: .25rem; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; padding-block-end: .375rem; scrollbar-width: thin; }
+.bots-page .bots-tabs button {
+  display: flex; align-items: center; gap: .5rem; flex: none; min-block-size: 2.25rem; padding: .5rem .625rem;
+  border: 0; border-radius: .5rem; color: var(--bots-muted); font-size: .8125rem; line-height: 1.35; text-align: start; white-space: nowrap;
+  transition: none;
+}
+.bots-tab-icon { display: inline-flex; flex: none; }
+.bots-page .bots-tabs button[aria-selected='true'] { color: var(--bots-text); background: var(--bots-accent-bg); font-weight: 600; }
+.bots-tabs button[aria-selected='true'] .bots-tab-icon { color: var(--bots-accent); }
+.bots-page .bots-tabs button:focus-visible { outline: none; color: var(--bots-text); background: color-mix(in srgb, var(--bots-accent) 24%, var(--bots-background)); }
+
+@container bot-settings (min-width: 43rem) {
+  .bots-settings-layout { grid-template-columns: 11rem minmax(0, 1fr); gap: 2rem; }
+  .bots-settings-nav { position: sticky; inset-block-start: 1rem; }
+  .bots-page .bots-settings-caption { padding-inline: .625rem; }
+  .bots-tabs { flex-direction: column; padding: 0; overflow: visible; }
+  .bots-page .bots-tabs button { white-space: normal; }
+  .bots-tabs button[data-section-start] { margin-block-start: .5rem; }
+}
+@media (max-height: 32rem) {
+  .bots-settings-nav { position: static; }
+}
+
+.bots-tabpanel { min-width: 0; display: flex; flex-direction: column; gap: 1.25rem; }
+.bots-page .bots-detail-section-title { margin: 0; font-size: 1.5rem; line-height: 1.2; font-weight: 620; letter-spacing: -.028em; }
+/* How many folder requests wait, at the end of the Folders tab. */
+.bots-tab-badge { display: inline-block; min-width: 16px; margin-inline-start: auto; padding: 0 5px; border-radius: 8px; background: var(--bots-warn); color: var(--bots-background); font-size: 11px; font-weight: 600; line-height: 16px; text-align: center; }
 .bots-requests { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
 .bots-requests h2 { margin: 0; }
 .bots-request .bots-row-actions { flex-shrink: 0; }
-/* The tab on show lays out its parts as the page does; while the Bot is still being read it holds nothing and takes no room. */
-.bots-tabpanel { display: flex; flex-direction: column; gap: 22px; }
-.bots-tabpanel:empty { display: none; }
 
 .bots-fields { display: flex; flex-direction: column; gap: 18px; max-width: 720px; min-width: 0; border: 0; padding: 0; margin: 0; }
 .bots-field { display: flex; flex-direction: column; gap: 7px; font-size: 13px; }
 .bots-label { font-weight: 560; padding: 0; }
+.bots-detail .bots-general-fields { gap: 14px; width: 100%; }
+.bots-general-group { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.bots-detail .bots-general-group { padding: 20px; border: 1px solid var(--bots-line); border-radius: 14px; background: color-mix(in srgb, var(--bots-surface-hover) 45%, var(--bots-background)); }
+.bots-detail .bots-general-group .bots-label { font-weight: 600; }
+.bots-detail .bots-general-group :is(input, textarea, select):focus-visible { outline: none; background: color-mix(in srgb, var(--bots-accent) 13%, var(--bots-surface)); }
 .bots-page input, .bots-page textarea, .bots-page select { box-sizing: border-box; width: 100%; min-width: 0; font: inherit; font-size: 13px; color: inherit; background: var(--bots-surface); border: 1px solid var(--bots-border); border-radius: 9px; padding: 9px 11px; }
 .bots-page textarea { resize: vertical; line-height: 1.55; }
 .bots-page .bots-persona, .bots-page .bots-memory-text { font-family: ui-monospace, monospace; font-size: 12px; }
@@ -178,6 +211,49 @@
 .bots-viewer > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; }
 .bots-memory-content { margin: 0; max-height: 360px; overflow: auto; font: 12px/1.6 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 
+.bots-market, .bots-market-form { display: grid; gap: 1rem; min-width: 0; }
+.bots-market-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .625rem 1rem; }
+.bots-market-header .bots-detail-description { flex-basis: 100%; }
+.bots-market-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); align-items: start; gap: .875rem; }
+.bots-market-card {
+  display: grid; gap: .875rem; min-width: 0; padding: clamp(.875rem, 3cqi, 1.125rem);
+  border: 1px solid var(--bots-line); border-radius: .875rem;
+  background: color-mix(in srgb, var(--bots-surface-hover) 45%, var(--bots-background));
+}
+.bots-market-card h3 { margin: 0; font-size: .9375rem; line-height: 1.35; font-weight: 620; overflow-wrap: anywhere; }
+.bots-market-card :is(.bots-field, .bots-market-skills) { gap: .375rem; }
+.bots-market-card .bots-hint { overflow-wrap: anywhere; }
+.bots-market-skills { display: grid; min-width: 0; margin: 0; padding: 0; border: 0; font-size: .8125rem; }
+.bots-market-skills legend { margin-block-end: .375rem; }
+.bots-market-skill-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr)); gap: .125rem .375rem; }
+.bots-market-option {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: .5rem;
+  min-block-size: 2rem; padding: .25rem .375rem; border-radius: .375rem;
+  font-size: .8125rem; line-height: 1.5; overflow-wrap: anywhere; cursor: pointer;
+}
+.bots-page .bots-market input:is([type='checkbox'], [type='radio']) { width: auto; margin: 0; padding: 0; accent-color: var(--bots-accent); }
+.bots-market-option:hover { background: var(--bots-surface-hover); }
+.bots-market-option:has(input:checked) { background: var(--bots-accent-bg); }
+.bots-market-option:has(input:focus-visible) { background: color-mix(in srgb, var(--bots-accent) 24%, var(--bots-background)); }
+.bots-market-confirm { align-items: baseline; padding: .625rem; background: var(--bots-surface); }
+.bots-market-files { min-width: 0; border: 1px solid var(--bots-line); border-radius: .625rem; background: var(--bots-surface); }
+.bots-market-files details + details { border-block-start: 1px solid var(--bots-line); }
+.bots-market-files summary { padding: .625rem .75rem; cursor: pointer; font: .8125rem/1.4 ui-monospace, monospace; overflow-wrap: anywhere; }
+.bots-market-files pre { padding: 0 .75rem .75rem; }
+.bots-market-actions, .bots-market-footer { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.bots-market-footer { justify-content: space-between; }
+.bots-market :is(.bots-market-actions, .bots-market-footer) button { font-size: .8125rem; min-block-size: 2.125rem; }
+.bots-page .bots-market-header button { background: var(--bots-surface); border-color: transparent; }
+.bots-page .bots-market .bots-market-secondary { border-color: transparent; color: var(--bots-muted); }
+.bots-page .bots-market :is(input:where(:not([type='checkbox'], [type='radio'])), textarea, summary):focus-visible {
+  outline: none; background: color-mix(in srgb, var(--bots-accent) 16%, var(--bots-surface));
+}
+.bots-page .bots-market .bots-market-option input:focus-visible { outline: none; }
+.bots-tabpanel:focus-visible, .bots-market-card h3[tabindex]:focus { outline: none; }
+.bots-tabpanel:focus-visible > .bots-detail-section-title,
+.bots-tabpanel:focus-visible .bots-market-header > h2,
+.bots-market-card h3[tabindex]:focus-visible { color: var(--bots-accent); }
+
 .bots-savebar { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; max-width: 720px; padding: 14px 0; background: var(--bots-background); border-top: 1px solid var(--bots-line); }
 .bots-save-status { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .bots-dialog-body { display: flex; flex-direction: column; gap: 12px; color: var(--dialog-text-2); font-size: 13px; line-height: 1.7; }
@@ -196,6 +272,7 @@
 
 @media (max-width: 640px) {
   .bots-detail-header { flex-direction: column; }
+  .bots-detail .bots-general-group { padding: 16px; }
   .bots-folder-path { grid-column: 1 / -1; }
   .bots-folder-chat { grid-column: 1 / -1; justify-self: start; }
   .bots-slider { grid-template-columns: minmax(0, 1fr) 44px; }
@@ -204,6 +281,10 @@
 }
 @media (prefers-contrast: more) {
   .bots-page .bots-card, .bots-row, .bots-viewer, .bots-folder-list li { border-color: var(--bots-text); }
+  .bots-general-group, .bots-market-card { border-color: var(--bots-text); }
+  .bots-detail .bots-general-group :is(input, textarea, select):focus-visible, .bots-page .bots-tabs button:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
+  .bots-page .bots-market :is(input, textarea, summary):focus-visible,
+  .bots-page .bots-market .bots-market-option input:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -1,8 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { JsxEmit, ModuleKind, ScriptTarget, transpileModule } from 'typescript';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { isMetaProperty, isPropertyAccessExpression, JsxEmit, ModuleKind, ScriptTarget, transpileModule, visitEachChild, visitNode, type SourceFile, type TransformerFactory, type Visitor } from 'typescript';
 
 const packageRoot = fileURLToPath(new URL('../../../../packages/teams/', import.meta.url));
 const webRequire = createRequire(import.meta.url);
@@ -27,7 +27,18 @@ export function loadTeamsModule<T>(name: string): T {
 function load(path: string): Record<string, unknown> {
   const known = loaded.get(path);
   if (known) return known;
-  const compiled = transpileModule(readFileSync(path, 'utf8'), { fileName: path, compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2020, jsx: JsxEmit.ReactJSX, esModuleInterop: true } });
+  // Preserve the source URL used by shared components to locate bundled assets.
+  const sourceUrl: TransformerFactory<SourceFile> = context => {
+    const visit: Visitor = node => isPropertyAccessExpression(node) && isMetaProperty(node.expression) && node.name.text === 'url'
+      ? context.factory.createStringLiteral(pathToFileURL(path).href)
+      : visitEachChild(node, visit, context);
+    return source => visitNode(source, visit) as SourceFile;
+  };
+  const compiled = transpileModule(readFileSync(path, 'utf8'), {
+    fileName: path,
+    compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2020, jsx: JsxEmit.ReactJSX, esModuleInterop: true },
+    transformers: { before: [sourceUrl] },
+  });
   const module = { exports: {} as Record<string, unknown> };
   loaded.set(path, module.exports);
   const require = (id: string): unknown => {

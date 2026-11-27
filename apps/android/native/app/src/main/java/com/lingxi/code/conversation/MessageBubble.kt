@@ -9,7 +9,6 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,9 +24,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CheckBox
 import androidx.compose.material.icons.outlined.CheckBoxOutlineBlank
+import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -40,10 +41,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.onVisibilityChanged
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.res.stringResource
@@ -61,7 +64,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
-import com.lingxi.code.bindings.client.ImageRefDto
+import coil3.compose.AsyncImage
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.Pill
@@ -91,6 +94,8 @@ fun MessageBubble(
     /** Tool-use ids whose result body/diff is expanded — owned by `ChatState`. */
     expandedToolCalls: Set<String> = emptySet(),
     onToggleToolCall: (String) -> Unit = {},
+    remoteImageCacheKey: String = "",
+    loadRemoteImage: (suspend (String, Boolean) -> ByteArray)? = null,
     agents: List<SessionAgentUi> = emptyList(),
 ) {
     val t = LingXiTheme.palette
@@ -117,8 +122,8 @@ fun MessageBubble(
                     modifier = Modifier.widthIn(max = 700.dp)
                         .testTag("conversation.message.user.origin"))
             }
-            if (message.images.isNotEmpty()) {
-                AttachedImages(images = message.images)
+            if (message.images.isNotEmpty() || message.remoteImages.isNotEmpty()) {
+                AttachedImages(message, remoteImageCacheKey, loadRemoteImage)
             }
             message.visualizationContext?.let { VisualizationContextChipView(chip = it) }
             Row(horizontalArrangement = Arrangement.End) {
@@ -253,45 +258,57 @@ fun MessageBubble(
 /** Render user media before the prompt, matching the CLI's UserImage → UserText order. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun AttachedImages(images: List<ImageRefDto>) {
+private fun AttachedImages(
+    message: Message,
+    remoteImageCacheKey: String,
+    loadRemoteImage: (suspend (String, Boolean) -> ByteArray)?,
+) {
     val t = LingXiTheme.palette
-    var selectedImage by remember { mutableStateOf<ImageRefDto?>(null) }
-    selectedImage?.let { image ->
-        ImagePreviewDialog(ImagePreviewSource.Encoded(image.base64, image.mediaType), onDismiss = { selectedImage = null })
-    }
+    val context = LocalContext.current
+    val sizePx = with(LocalDensity.current) { chatThumbnailSize.roundToPx() }
+    var selectedImage by remember(remoteImageCacheKey) { mutableStateOf<ImagePreviewSource?>(null) }
+    selectedImage?.let { ImagePreviewDialog(it, onDismiss = { selectedImage = null }) }
     FlowRow(
         horizontalArrangement = Arrangement.spacedBy(7.dp),
         verticalArrangement = Arrangement.spacedBy(7.dp),
         modifier = Modifier.widthIn(max = 300.dp),
     ) {
-        images.forEachIndexed { index, image ->
-            val bitmap = remember(image.mediaType, image.base64) {
-                runCatching {
-                    val bytes = android.util.Base64.decode(image.base64, android.util.Base64.DEFAULT)
-                    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
-                }.getOrNull()
-            }
-            if (bitmap != null) {
-                Image(
-                    bitmap = bitmap,
-                    contentDescription = stringResource(R.string.chat_attached_image_fmt, index + 1),
+        val images = remember(message.id, message.images, message.remoteImages, remoteImageCacheKey, loadRemoteImage) {
+            chatImageThumbnails(message, remoteImageCacheKey, loadRemoteImage).toList()
+        }
+        images.forEachIndexed { index, thumbnail ->
+            val request = remember(context, thumbnail, sizePx) { thumbnail.request(context, sizePx) }
+            var loading by remember(thumbnail.key, request != null) { mutableStateOf(false) }
+            var painted by remember(thumbnail.key, request != null) { mutableStateOf(false) }
+            var visibleForProgress by remember(thumbnail.key) { mutableStateOf(false) }
+            val label = stringResource(R.string.chat_attached_image_fmt, index + 1)
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(chatThumbnailSize)
+                    .onVisibilityChanged(minDurationMs = 140, minFractionVisible = 0.01f) { visibleForProgress = it }
+                    .clip(RoundedCornerShape(11.dp))
+                    .clickable(enabled = thumbnail.preview != null, role = androidx.compose.ui.semantics.Role.Button) {
+                        selectedImage = thumbnail.preview
+                    }
+                    .background(t.surfaceActive)
+                    .border(0.5.dp, t.border, RoundedCornerShape(11.dp)),
+            ) {
+                if (!painted) {
+                    if (loading && visibleForProgress && android.animation.ValueAnimator.areAnimatorsEnabled()) {
+                        CircularProgressIndicator(Modifier.size(20.dp), color = t.text3, strokeWidth = 1.5.dp)
+                    } else {
+                        Icon(Icons.Outlined.Image, contentDescription = if (request == null) label else null, tint = t.text3, modifier = Modifier.size(20.dp))
+                    }
+                }
+                if (request != null) AsyncImage(
+                    model = request,
+                    contentDescription = label,
                     contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                    modifier = Modifier
-                        .size(116.dp)
-                        .clip(RoundedCornerShape(11.dp))
-                        .clickable(role = androidx.compose.ui.semantics.Role.Button) { selectedImage = image }
-                        .background(t.surfaceActive)
-                        .border(0.5.dp, t.border, RoundedCornerShape(11.dp)),
-                )
-            } else {
-                Text(
-                    text = "[Image #${index + 1}]",
-                    color = t.text3,
-                    fontSize = androidx.compose.material3.MaterialTheme.typography.labelMedium.fontSize,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(11.dp))
-                        .background(t.surfaceActive)
-                        .padding(horizontal = 10.dp, vertical = 12.dp),
+                    modifier = Modifier.matchParentSize(),
+                    onLoading = { loading = true; painted = false },
+                    onSuccess = { loading = false; painted = true },
+                    onError = { loading = false; painted = false },
                 )
             }
         }

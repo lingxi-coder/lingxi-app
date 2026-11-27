@@ -226,6 +226,7 @@ internal fun TeamConversationScreen(
         // Not in a friend chat, which has no Bots of its own to limit. The details give way to the editor.
         onBotScope = if (friend == null) ({ showDetails = false; showBotScope = true }) else null,
         triageBots = logBots, onTriageLog = if (logBots.isEmpty()) null else ({ card -> showDetails = false; triageBot = card }),
+        visualization = { workspace.messagingModel.visualization(conversation.id, it) },
     )
     triageBot?.let { card ->
         if (conversation != null) TeamTriageLogDialog(card, TeamTriageChat(conversation.id, label), workspace.messagingModel, onDenied = { triageDenied = triageDenied + it }) { triageBot = null }
@@ -547,6 +548,11 @@ private fun ConversationBody(
             )
         }
         if (!messaging.offline && editing == null && "user:$uid" in conversation.participants) {
+            if (conversation.kind == "channel") {
+                TeamVisualizationComposerButton(conversation.id, workspace.messagingModel) { id ->
+                    members.firstOrNull { it.uid == id }?.displayName?.takeIf(String::isNotBlank) ?: id
+                }
+            }
             TeamDatasetShareButton(conversation, workspace.messagingModel) { id ->
                 members.firstOrNull { it.uid == id }?.displayName?.takeIf(String::isNotBlank) ?: id
             }
@@ -674,7 +680,10 @@ private fun MessageCell(
                         Modifier.semantics(mergeDescendants = true) {
                             if (canAct) customActions = buildList {
                                 add(CustomAccessibilityAction(reply) { onReply(message); true })
-                                if (editable) { add(CustomAccessibilityAction(edit) { onEdit(message); true }); add(CustomAccessibilityAction(recall) { onRecall(message); true }) }
+                                if (editable) {
+                                    if (message.visualization == null) add(CustomAccessibilityAction(edit) { onEdit(message); true })
+                                    add(CustomAccessibilityAction(recall) { onRecall(message); true })
+                                }
                                 if (message.text.isNotEmpty()) add(CustomAccessibilityAction(copy) { onCopy(message); true })
                             }
                         },
@@ -735,6 +744,11 @@ private fun MessageCell(
                     }
                     // Attachments and their controls remain reachable independently of the message text.
                     if (message.files.isNotEmpty()) TeamMessageFiles(message, own, workspace, pictures)
+                    if (!message.recalled) message.visualization?.let { visualization ->
+                        val channels = messaging.cache?.conversations.orEmpty().filter { it.kind == "channel" && "user:$uid" in it.participants }
+                        TeamVisualizationCard(visualization, conversation.id, workspace.messagingModel, online = !messaging.offline,
+                            destinations = channels, person = personName)
+                    }
                     if (!message.recalled) (message.resourceRef as? DatasetResourceRef.PageVersion)?.let { reference ->
                         val context = androidx.compose.ui.platform.LocalContext.current
                         val uri = android.net.Uri.parse(com.lingxi.code.apps.LocalAppDatasetAccess.origin ?: "https://lingxios.net")
@@ -787,7 +801,7 @@ private fun MessageCell(
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
             DropdownMenuItem(text = { Text(reply) }, onClick = { menu = false; onReply(message) })
             if (editable) {
-                DropdownMenuItem(text = { Text(edit) }, onClick = { menu = false; onEdit(message) })
+                if (message.visualization == null) DropdownMenuItem(text = { Text(edit) }, onClick = { menu = false; onEdit(message) })
                 DropdownMenuItem(text = { Text(recall, color = MaterialTheme.colorScheme.error) }, onClick = { menu = false; onRecall(message) })
             }
             if (message.text.isNotEmpty()) DropdownMenuItem(text = { Text(copy) }, onClick = { menu = false; onCopy(message) })

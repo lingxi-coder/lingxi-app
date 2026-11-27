@@ -1,6 +1,7 @@
 import { createDatasetRender } from './dataset-render.mjs';
 import { getStorage } from 'firebase-admin/storage';
 import { createDatasetPages } from './dataset-pages.mjs';
+import { createTeamVisualizations } from './team-visualizations.mjs';
 import { createDatasetBrowserHttp } from './dataset-browser-bridge.mjs';
 import { readFileSync } from 'node:fs';
 import { initializeApp } from 'firebase-admin/app';
@@ -106,12 +107,20 @@ const datasetBrowserHandler = createDatasetBrowserHttp({
 const datasetPages = process.env.LINGXI_DATASET_PAGES_BUCKET ? createDatasetPages({
   db: teamsDb, bucket: getStorage(app).bucket(process.env.LINGXI_DATASET_PAGES_BUCKET), datasets: datasetGateway?.datasets,
 }) : undefined;
+const teamVisualizations = createTeamVisualizations({
+  db: teamsDb, bucket: process.env.LINGXI_DATASET_PAGES_BUCKET ? getStorage(app).bucket(process.env.LINGXI_DATASET_PAGES_BUCKET) : undefined,
+  core: datasetGateway?.command, channels: process.env.LINGXI_TEAM_VISUALIZATION_CHANNELS,
+});
+export const pruneTeamVisualizations = onSchedule({ schedule: 'every 5 minutes', timeZone: 'Etc/UTC',
+  region: 'us-central1', memory: '256MiB', timeoutSeconds: 240, maxInstances: 1,
+  serviceAccount: pushServiceAccount }, async () => { await teamVisualizations?.sweep(); });
 const renderOrigin = process.env.LINGXI_DATASET_RENDER_ORIGIN;
 const useRenderSecret = datasetStaging || !!renderOrigin;
 const renderKey = defineSecret('LINGXI_DATASET_RENDER_KEY');
 let renderDataset;
 const teamsHandler = createTeamsHandler({ store: new TeamsStore(teamsDb), friends: friendsStore,
   datasets: datasetGateway?.datasets, datasetCommand: datasetGateway?.command, datasetRuns: datasetGateway?.run, datasetPages: datasetPages?.execute,
+  visualizations: teamVisualizations,
   datasetRender: renderOrigin && datasetPages ? (...args) => (renderDataset ??= createDatasetRender({
     origin: renderOrigin, secret: renderKey.value(), pages: datasetPages, db: teamsDb,
   }))(...args) : undefined,
@@ -315,9 +324,9 @@ export const onInboxTeamPolicy = scopePolicyTrigger('teams', 'team');
 
 // Friend list summaries: a pair team's chat pointer and the owner's read mark are copied onto the friend cards, so clients
 // need no per-friend listener. The document paths name the pair chat itself, so ordinary Team conversations never invoke
-// these; the handlers still check the team (docs/FRIENDS.md). They are idempotent and monotonic, and the next event heals a lost one.
+// these; the handlers still check the team (docs/FRIENDS.md). Idempotent, monotonic updates allow event retry.
 const friendChat = `teams/{teamId}/conversations/${PAIR_CONVERSATION_ID}`;
-const friendTrigger = { database: '(default)', region: 'us-central1', memory: '256MiB', maxInstances: 2, serviceAccount: pushServiceAccount };
+const friendTrigger = { retry: true, database: '(default)', region: 'us-central1', memory: '256MiB', maxInstances: 2, serviceAccount: pushServiceAccount };
 export const onFriendChatUpdated = onDocumentUpdated({ document: friendChat, ...friendTrigger },
   event => mirrorFriendChat({ db: getFirestore(app), teamId: event.params.teamId, conversationId: PAIR_CONVERSATION_ID, after: event.data?.after.data() }));
 export const onFriendChatRead = onDocumentWritten({ document: `${friendChat}/reads/{uid}`, ...friendTrigger },

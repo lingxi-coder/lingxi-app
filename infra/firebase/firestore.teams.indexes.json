@@ -1,6 +1,14 @@
 {
   "indexes": [
     {
+      "collectionGroup": "friendHandleSearch",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "parts", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "handleLower", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "tasks",
       "queryScope": "COLLECTION",
       "fields": [

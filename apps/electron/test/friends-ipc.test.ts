@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 import ts from 'typescript';
+import { FriendApiError } from '../../../packages/teams/friends';
 
 // Objects made inside the module's context have another realm's prototypes; what is compared is their data.
 const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value ?? null));
@@ -16,16 +17,17 @@ function install() {
   vm.runInNewContext(source, {
     exports: exported,
     // The errors the fakes throw must be the module's `Error`s too.
-    Error,
+    Error, AbortController,
     require: (id: string) => {
       if (id === 'electron') return { ipcMain: { handle: (name: string, handler: never) => handlers.set(name, handler), removeHandler: (name: string) => removed.push(name) } };
+      if (id.includes('packages/teams/friends')) return { FriendApiError };
       throw new Error(id);
     },
   });
   const calls: unknown[][] = [];
-  let outcome: () => unknown = () => ({ ok: true });
+  let outcome: (...args: unknown[]) => unknown = () => ({ ok: true });
   const events = { rows: new Set<(event: { leaseId: string; rows: unknown[] }) => void>(), failed: new Set<(event: { leaseId: string; code: string }) => void>() };
-  const record = (name: string) => (...args: unknown[]) => { calls.push([name, ...args]); return outcome(); };
+  const record = (name: string) => (...args: unknown[]) => { calls.push([name, ...args]); return outcome(...args); };
   const service = {
     profile: record('profile'), execute: record('execute'), readProfile: record('readProfile'), watch: record('watch'), releaseWatches: record('releaseWatches'), close: record('close'),
     onRows: (callback: never) => { events.rows.add(callback); return () => events.rows.delete(callback); },
@@ -39,7 +41,7 @@ function install() {
   const windows = [window(7), window(8)];
   const stop = exported.installFriendsIpc(service, () => windows);
   const invoke = async (input: unknown, from = windows[0]!.from) => plain(await handlers.get('lingxi:friends')!(from, input)) as { value?: unknown; error?: string };
-  return { invoke, calls, sent, events, windows, stop, removed, fail(error: Error) { outcome = () => { throw error; }; } };
+  return { invoke, calls, sent, events, windows, stop, removed, respond(next: typeof outcome) { outcome = next; }, fail(error: Error) { outcome = () => { throw error; }; } };
 }
 
 test('only a main frame of one of the app\'s windows may call, and it must name the account', async () => {
@@ -72,6 +74,29 @@ test('a profile, an action and a friend\'s profile are the service\'s, for the a
   assert.deepEqual(await invoke({ type: 'profile', uid: 'alice' }), { error: 'SERVICE_UNAVAILABLE' }, 'anything else is a service failure, never its text');
   fail(new Error('handle taken'));
   assert.deepEqual(await invoke({ type: 'profile', uid: 'alice' }), { error: 'SERVICE_UNAVAILABLE' });
+});
+
+test('search cancellation is scoped to the originating window and account, and rate metadata crosses IPC', async () => {
+  const { invoke, respond, windows, fail, stop } = install();
+  let signal!: AbortSignal;
+  respond((_uid, _command, rawSignal) => new Promise((_resolve, reject) => {
+    signal = rawSignal as AbortSignal;
+    signal.addEventListener('abort', () => reject(new Error('ABORTED')), { once: true });
+  }));
+  const search = { type: 'searchHandles', requestId: 'search-0001', uid: 'alice', query: 'ali' };
+  const cancel = { type: 'cancelSearch', requestId: search.requestId, uid: search.uid };
+  const pending = invoke(search);
+  await invoke(cancel, windows[1]!.from);
+  await invoke({ ...cancel, uid: 'bob' });
+  assert.equal(signal.aborted, false);
+  await invoke(cancel);
+  assert.equal(signal.aborted, true);
+  assert.deepEqual(await pending, { error: 'ABORTED' });
+
+  fail(new FriendApiError('RATE_LIMITED', 429, 625));
+  assert.deepEqual(await invoke(search), { error: 'RATE_LIMITED', retryAfterMs: 625 });
+  respond(() => ({ ok: true }));
+  stop();
 });
 
 test('a watch is leased to the window that asked, validated, and released with it or by name', async () => {

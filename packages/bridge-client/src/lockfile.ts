@@ -9,8 +9,8 @@
  * `X-LingXi-Ide-Authorization` WS upgrade header.
  */
 
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { constants, readdirSync, readFileSync, statSync, type Stats } from 'node:fs';
+import { lstat, open, readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 
@@ -64,17 +64,55 @@ export function readLockfile(path: string): Lockfile {
 
 function parseLockfile(path: string, port: number, source: string): Lockfile {
   const body = JSON.parse(source) as LockfileBody;
-  if (typeof body.authToken !== 'string' || body.authToken.length === 0) {
+  if (typeof body?.authToken !== 'string' || body.authToken.length === 0) {
     throw new Error(`lockfile missing authToken: ${path}`);
   }
   return { path, port, body };
 }
 
+const MAX_PRIVATE_LOCKFILE_BYTES = 64 * 1024;
+
+function sameLockfile(before: Stats, after: Stats): boolean {
+  return after.isFile() && before.dev === after.dev && before.ino === after.ino
+    && before.size === after.size && before.mode === after.mode && before.uid === after.uid
+    && before.ctimeMs === after.ctimeMs && before.mtimeMs === after.mtimeMs;
+}
+
+async function readOwnerOnlyLockfile(path: string): Promise<string> {
+  const expected = await lstat(path);
+  if (!expected.isFile()) throw new Error('bridge lockfile is not a regular file');
+  if (expected.size > MAX_PRIVATE_LOCKFILE_BYTES) throw new Error('bridge lockfile is too large');
+  if (process.platform !== 'win32' && (expected.mode & 0o077) !== 0) {
+    throw new Error('bridge lockfile permissions are not owner-only');
+  }
+  if (process.getuid && expected.uid !== process.getuid()) throw new Error('bridge lockfile owner mismatch');
+
+  const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  try {
+    if (!sameLockfile(expected, await file.stat())) throw new Error('bridge lockfile changed while opening');
+    const bytes = Buffer.alloc(expected.size + 1);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await file.read(bytes, offset, bytes.length - offset, offset);
+      if (!bytesRead) break;
+      offset += bytesRead;
+    }
+    if (offset !== expected.size || !sameLockfile(expected, await lstat(path))) {
+      throw new Error('bridge lockfile changed while reading');
+    }
+    return bytes.subarray(0, offset).toString('utf8');
+  } finally {
+    await file.close();
+  }
+}
+
 /** Capture one connection's discovery file without blocking the host event loop. */
-export async function readLockfileAsync(path: string): Promise<Lockfile> {
+export async function readLockfileAsync(path: string, options?: { ownerOnly: boolean }): Promise<Lockfile> {
   const port = portFromFilename(path);
   if (port === null) throw new Error(`lockfile name not <port>.lock: ${path}`);
-  return parseLockfile(path, port, await readFile(path, 'utf8'));
+  if (options?.ownerOnly && port === 0) throw new Error('bridge lockfile port is invalid');
+  const source = options?.ownerOnly ? await readOwnerOnlyLockfile(path) : await readFile(path, 'utf8');
+  return parseLockfile(path, port, source);
 }
 
 /**

@@ -5,6 +5,10 @@ import { tr } from '../i18n/locale';
 import { AppsGlyph } from './LocalApps';
 import { Icon } from './Icon';
 
+export function DatasetGlyph({ size = 20 }: { size?: number }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" aria-hidden="true"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.75"/><path d="M4.5 5.5v13c0 1.52 3.36 2.75 7.5 2.75s7.5-1.23 7.5-2.75v-13"/><path d="M4.5 12c0 1.52 3.36 2.75 7.5 2.75s7.5-1.23 7.5-2.75"/></svg>;
+}
+
 export function LocalAppsSidebar({ groups, activeSessionId, chatVisible, libraryVisible, query, busy, error, loading = false,
   onLibrary, onCreate, onOpen, onEdit, onNewChat, onChat, onRetry }: {
   groups: readonly AppWorkspaceGroup[]; activeSessionId?: string; chatVisible: boolean; libraryVisible: boolean;

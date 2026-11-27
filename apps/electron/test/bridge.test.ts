@@ -1,14 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { BridgeClient } from '@lingxi/bridge-client';
-import type { ClientEvent } from '@lingxi/bridge-client';
+import type { ClientEvent, Lockfile, MediaSessionModeDto } from '@lingxi/bridge-client';
 
 import { SessionRuntime } from '../src/main/bridge.js';
+import type { BridgeLaunchConfig } from '../src/main/bridgeTypes.js';
 import {
   discoverExternalReusableBridge,
   discoverReusableBridge,
@@ -601,7 +604,7 @@ test('opening another session leaves the running session alive', async () => {
   }
 });
 
-test('reusable bridge discovery matches the exact session and workspace', () => {
+test('reusable bridge discovery matches the exact session and workspace', async () => {
   const bridgeRoot = temporaryDirectory();
   const launchDir = join(bridgeRoot, 'launch-existing');
   const workspace = '/workspace';
@@ -620,19 +623,19 @@ test('reusable bridge discovery matches the exact session and workspace', () => 
   try {
     const command = `/Applications/LingXi Code.app/Contents/Resources/bin/bridge-server --cwd ${workspace} --session-id ${sessionId} --trusted-workspace`;
     assert.deepEqual(
-      discoverReusableBridge(
+      await discoverReusableBridge(
         bridgeRoot,
         { projectPath: workspace, sessionId },
-        () => command,
+        async () => command,
       ),
       { launchDir, lockfilePath, pid: process.pid, ownedProcess: true },
     );
-    assert.equal(discoverReusableBridge(
+    assert.equal(await discoverReusableBridge(
       bridgeRoot,
       { projectPath: '/different', sessionId },
       () => command,
     ), undefined);
-    assert.equal(discoverReusableBridge(
+    assert.equal(await discoverReusableBridge(
       bridgeRoot,
       { projectPath: workspace, sessionId: '88888888-aaaa-4bbb-8ccc-dddddddddddd' },
       () => command,
@@ -642,7 +645,7 @@ test('reusable bridge discovery matches the exact session and workspace', () => 
   }
 });
 
-test('reusable bridge discovery never inspects the command of a dead lockfile pid', () => {
+test('reusable bridge discovery never inspects the command of a dead lockfile pid', async () => {
   const bridgeRoot = temporaryDirectory();
   const launchDir = join(bridgeRoot, 'launch-crashed');
   const workspace = '/workspace';
@@ -659,7 +662,7 @@ test('reusable bridge discovery never inspects the command of a dead lockfile pi
   try {
     let inspected = 0;
     const command = `/bridge-server --cwd ${workspace} --session-id ${sessionId}`;
-    assert.equal(discoverReusableBridge(
+    assert.equal(await discoverReusableBridge(
       bridgeRoot,
       { projectPath: workspace, sessionId },
       () => { inspected += 1; return command; },
@@ -671,7 +674,7 @@ test('reusable bridge discovery never inspects the command of a dead lockfile pi
   }
 });
 
-test('external bridge discovery accepts only the exact process workspace and session', () => {
+test('external bridge discovery accepts only the exact process workspace and session', async () => {
   const launchDir = temporaryDirectory();
   const ref = {
     projectPath: '/workspace with spaces',
@@ -690,21 +693,47 @@ test('external bridge discovery accepts only the exact process workspace and ses
   try {
     const command = `/bridge-server --cwd ${ref.projectPath} --bridge-dir ${launchDir} --session-id ${ref.sessionId} --trusted-workspace`;
     assert.deepEqual(
-      discoverExternalReusableBridge(ref, [{ pid: process.pid, ppid: 42, command }]),
+      await discoverExternalReusableBridge(ref, [{ pid: process.pid, ppid: 42, command }]),
       { launchDir, lockfilePath, pid: process.pid, ownedProcess: false },
     );
-    assert.equal(discoverExternalReusableBridge(
+    assert.equal(await discoverExternalReusableBridge(
       { ...ref, projectPath: '/different' },
       [{ pid: process.pid, ppid: 42, command }],
     ), undefined);
     assert.deepEqual(
-      discoverExternalReusableBridge(ref, [{ pid: process.pid, ppid: 1, command }]),
+      await discoverExternalReusableBridge(ref, [{ pid: process.pid, ppid: 1, command }]),
       { launchDir, lockfilePath, pid: process.pid, ownedProcess: true },
       'an orphaned bridge is safe for the current Desktop to replace if adoption is incompatible',
     );
   } finally {
     rmSync(launchDir, { recursive: true, force: true });
   }
+});
+
+test('disposing during process discovery prevents a late bridge launch', async (t) => {
+  const bridgeRoot = temporaryDirectory();
+  t.after(() => rmSync(bridgeRoot, { recursive: true, force: true }));
+  const lookupStarted = deferred();
+  const finishLookup = deferred<[]>();
+  let launchCalls = 0;
+  const runtime = new SessionRuntime({
+    bridgeRoot,
+    projectPath: '/workspace',
+    listProcessCommands: () => {
+      lookupStarted.resolve();
+      return finishLookup.promise;
+    },
+    launchConfig: () => {
+      launchCalls += 1;
+      throw new Error('disposed bridge launched');
+    },
+  });
+  const startup = assert.rejects(runtime.start(), /bridge launch superseded/);
+  await lookupStarted.promise;
+  const disposal = runtime.dispose();
+  finishLookup.resolve([]);
+  await Promise.all([startup, disposal]);
+  assert.equal(launchCalls, 0);
 });
 
 test('process command matching does not accept a session id prefix or another flag value', () => {
@@ -742,7 +771,7 @@ test('opening a session adopts its detached bridge instead of spawning a duplica
   const originalConnect = BridgeClient.prototype.connect;
   const originalResume = SessionRuntime.prototype.resumeOwnedSession;
   const startupCommands: unknown[] = [];
-  let launchCalls = 0;
+  let secretLoads = 0;
   let telemetryRevocations = 0;
   BridgeClient.prototype.connect = async function () {
     this.sendCommand = (command) => { startupCommands.push(command); };
@@ -756,15 +785,13 @@ test('opening a session adopts its detached bridge instead of spawning a duplica
   SessionRuntime.prototype.resumeOwnedSession = async function () {};
   const manager = new SessionRuntimeManager({ resolveSavedTranscript: async ref => ({ path: `/saved/${ref.sessionId}.jsonl`, mode: 'code' as const }),
     bridgeRoot,
-    listProcessCommands: () => [{
+    listProcessCommands: async () => [{
       pid: process.pid,
       ppid: 42,
       command: `/bridge-server --cwd ${ref.projectPath} --bridge-dir ${launchDir} --session-id ${ref.sessionId}`,
     }],
-    launchConfig: () => {
-      launchCalls += 1;
-      throw new Error('adoption must not assemble another process');
-    },
+    launchConfig: () => ({ workspace: ref.projectPath, trusted: true }),
+    loadPluginSecrets: async () => { secretLoads += 1; throw new Error('adoption must not load plugin secrets'); },
   });
 
   try {
@@ -772,7 +799,7 @@ test('opening a session adopts its detached bridge instead of spawning a duplica
     assert.equal(startupCommands.length, 2);
     assertAudioContextCommand(startupCommands[0]);
     assert.deepEqual(startupCommands[1], { type: 'get_context_manifest' });
-    assert.equal(launchCalls, 0);
+    assert.equal(secretLoads, 0);
     assert.equal(telemetryRevocations, 1, 'a newly adopted process honors default-off device policy');
     assert.equal(runtime.connectionState.status, 'connected');
     assert.strictEqual(manager.get(ref.sessionId), runtime);
@@ -1036,11 +1063,20 @@ test('restart surfaces launch failures instead of remaining stuck in restarting'
   });
 });
 
-test('lockfile polling ignores invalid candidates until a valid private lockfile appears', async () => {
+test('lockfile readiness wakes on a completed private lockfile without a polling tick', async (t) => {
   const diagnostics = new DiagnosticBuffer();
   const workspace = temporaryDirectory();
   const launchDir = temporaryDirectory();
-  const lockfilePath = join(launchDir, 'bridge.lock');
+  const lockfileName = '43127.lock';
+  const lockfilePath = join(launchDir, lockfileName);
+  const body = {
+    pid: process.pid,
+    workspaceFolders: [workspace],
+    ideName: 'LingXi-Bridge',
+    transport: 'ws',
+    runningInWindows: false,
+    authToken: '0123456789abcdef0123456789abcdef',
+  };
   const manager = new SessionRuntime({
     diagnostics,
     lockfileTimeoutMs: 500,
@@ -1051,27 +1087,128 @@ test('lockfile polling ignores invalid candidates until a valid private lockfile
 
   writeFileSync(lockfilePath, '{"pid":', { mode: 0o600 });
   chmodSync(lockfilePath, 0o600);
-  setTimeout(() => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const partialSeen = deferred();
+  const addDiagnostic = diagnostics.add.bind(diagnostics);
+  t.mock.method(diagnostics, 'add', (...args: Parameters<DiagnosticBuffer['add']>) => {
+    addDiagnostic(...args);
+    if (String(args[2]).includes('lockfile_ignored')) partialSeen.resolve();
+  });
+  let notify!: (event: 'rename' | 'change', name: string | null) => void;
+  const close = t.mock.fn();
+  const watcher = Object.assign(new EventEmitter(), { close });
+  const mockWatch = t.mock.method(fs, 'watch', ((_dir: string, _options: unknown, onChange: typeof notify) => {
+    notify = onChange;
+    return watcher;
+  }) as typeof fs.watch);
+  syncBuiltinESMExports();
+
+  try {
+    const waiting = (manager as any).waitForLockfile(launchDir, { workspace, trusted: true }, 1);
+    await partialSeen.promise;
+    writeFileSync(lockfilePath, JSON.stringify(body));
+    notify('change', lockfileName);
+    const resolved = await waiting;
+    assert.deepEqual(resolved, { path: lockfilePath, port: 43127, body });
+    assert.equal(close.mock.callCount(), 1);
+    const ignored = diagnostics.snapshot().map((entry) => JSON.parse(entry.message))
+      .find((entry) => entry.event === 'lockfile_ignored');
+    assert.equal(ignored?.file, lockfilePath);
+  } finally {
+    mockWatch.mock.restore();
+    syncBuiltinESMExports();
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(launchDir, { recursive: true, force: true });
+  }
+});
+
+test('lockfile readiness polls when directory watching is unavailable', async (t) => {
+  const root = temporaryDirectory();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const launchDir = join(root, 'late-launch');
+  const lockfilePath = join(launchDir, '43127.lock');
+  const manager = new SessionRuntime({ launchConfig: () => ({ workspace: root, trusted: true }) });
+  (manager as any).generation = 1;
+  (manager as any).child = { pid: process.pid };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const firstScan = deferred();
+  const readDirectory = fsPromises.readdir;
+  const mockReadDirectory = t.mock.method(fsPromises, 'readdir', (async (path: Parameters<typeof fsPromises.readdir>[0]) => {
+    if (path === launchDir && !existsSync(launchDir)) {
+      firstScan.resolve();
+      return [];
+    }
+    return readDirectory(path);
+  }) as typeof fsPromises.readdir);
+  syncBuiltinESMExports();
+  try {
+    const waiting = (manager as any).waitForLockfile(launchDir, { workspace: root, trusted: true }, 1);
+    await firstScan.promise;
+    await new Promise(resolve => setImmediate(resolve));
+    mkdirSync(launchDir, { mode: 0o700 });
     writeFileSync(lockfilePath, JSON.stringify({
       pid: process.pid,
-      workspaceFolders: [workspace],
+      workspaceFolders: [root],
       ideName: 'LingXi-Bridge',
       transport: 'ws',
       runningInWindows: false,
       authToken: '0123456789abcdef0123456789abcdef',
     }), { mode: 0o600 });
-    chmodSync(lockfilePath, 0o600);
-  }, 75);
+    t.mock.timers.tick(50);
+    assert.equal((await waiting).path, lockfilePath);
+  } finally {
+    mockReadDirectory.mock.restore();
+    syncBuiltinESMExports();
+  }
+});
+
+test('lockfile watch bursts share a pending read and a superseded engine cannot publish readiness', async (t) => {
+  const root = temporaryDirectory();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const basename = '43127.lock';
+  writeFileSync(join(root, basename), JSON.stringify({
+    pid: process.pid, workspaceFolders: [root], ideName: 'LingXi-Bridge', transport: 'ws',
+    runningInWindows: false, authToken: '0123456789abcdef0123456789abcdef',
+  }), { mode: 0o600 });
+  const manager = new SessionRuntime({ launchConfig: () => ({ workspace: root, trusted: true }) });
+  const runtime = manager as any;
+  runtime.generation = 1;
+  runtime.child = { pid: process.pid };
+  const started = deferred();
+  const release = deferred();
+  const readDirectory = fsPromises.readdir;
+  let reads = 0;
+  const mockReadDirectory = t.mock.method(fsPromises, 'readdir', (async (path: Parameters<typeof fsPromises.readdir>[0]) => {
+    if (path !== root) return readDirectory(path);
+    reads += 1;
+    started.resolve();
+    await release.promise;
+    return [basename];
+  }) as typeof fsPromises.readdir);
+  let notify!: (event: 'rename' | 'change', name: string | null) => void;
+  const close = t.mock.fn();
+  const watcher = Object.assign(new EventEmitter(), { close });
+  const mockWatch = t.mock.method(fs, 'watch', ((_dir: string, _options: unknown, callback: typeof notify) => {
+    notify = callback;
+    return watcher;
+  }) as typeof fs.watch);
+  syncBuiltinESMExports();
 
   try {
-    const resolved = await (manager as any).waitForLockfile(launchDir, { workspace, trusted: true }, 1);
-    assert.equal(resolved, lockfilePath);
-    const ignored = diagnostics.snapshot().map((entry) => JSON.parse(entry.message))
-      .find((entry) => entry.event === 'lockfile_ignored');
-    assert.equal(ignored?.file, lockfilePath);
+    const waiting = assert.rejects(runtime.waitForLockfile(root, { workspace: root, trusted: true }, 1), /bridge launch superseded/);
+    await started.promise;
+    for (let event = 0; event < 8; event++) notify('change', basename);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(reads, 1);
+    runtime.generation = 2;
+    release.resolve();
+    await waiting;
+    assert.equal(close.mock.callCount(), 1);
   } finally {
-    rmSync(workspace, { recursive: true, force: true });
-    rmSync(launchDir, { recursive: true, force: true });
+    release.resolve();
+    mockWatch.mock.restore();
+    mockReadDirectory.mock.restore();
+    syncBuiltinESMExports();
   }
 });
 
@@ -1102,6 +1239,141 @@ test('an engine that will not run without the sandbox it was asked for says so, 
     rmSync(workspace, { recursive: true, force: true });
     rmSync(launchDir, { recursive: true, force: true });
   }
+});
+
+for (const startup of ['cold', 'adoption-fallback', 'audio-error'] as const) {
+  test(`audio initialization overlaps ${startup} startup and settles before hello`, { timeout: 5_000 }, async (t) => {
+    const workspace = temporaryDirectory();
+    const launchDir = join(workspace, 'launch-owned');
+    const sessionId = '99999999-aaaa-4bbb-8ccc-dddddddddddd';
+    const lockfile: Lockfile = {
+      path: join(launchDir, '43127.lock'),
+      port: 43127,
+      body: {
+        pid: process.pid, workspaceFolders: [workspace], ideName: 'LingXi-Bridge', transport: 'ws',
+        runningInWindows: false, authToken: '0123456789abcdef0123456789abcdef',
+      },
+    };
+    mkdirSync(launchDir, { mode: 0o700 });
+    writeFileSync(lockfile.path, JSON.stringify(lockfile.body), { mode: 0o600 });
+    const engineStarted = deferred();
+    const engineReady = deferred();
+    const audioStarted = deferred();
+    const audioReady = deferred();
+    const handshakes: MediaSessionModeDto[][] = [];
+    const diagnostics = new DiagnosticBuffer();
+    let audioStarts = 0;
+    let secretLoads = 0;
+    let modes: MediaSessionModeDto[] = [];
+    const runtime = new SessionRuntime({
+      sessionId,
+      projectPath: workspace,
+      diagnostics,
+      ...(startup === 'adoption-fallback' ? {
+        bridgeRoot: join(workspace, 'bridge-root'),
+        listProcessCommands: async () => {
+          engineStarted.resolve();
+          await engineReady.promise;
+          return [{ pid: process.pid, ppid: 1, command: `/bridge-server --cwd ${workspace} --bridge-dir ${launchDir} --session-id ${sessionId}` }];
+        },
+      } : {}),
+      launchConfig: () => ({ workspace, trusted: true }),
+      loadPluginSecrets: async () => { secretLoads += 1; return {}; },
+      audioService: {
+        getCapabilities: () => ({ service_epoch: 3, support_revision: 1, supported_operations: ['record'], readiness: [], max_payload_bytes: 1_000_000 }),
+        getMediaSessionModes: () => modes,
+        initializeCapabilities: async () => {
+          audioStarts += 1;
+          audioStarted.resolve();
+          await audioReady.promise;
+          modes = ['audio'];
+        },
+        executeAudioRequest: async () => { throw new Error('unexpected audio request'); },
+        cancelAudioRequest: async () => {},
+        endAudioOwner: async () => {},
+        onEvent: () => () => {},
+      },
+    });
+    const internal = runtime as any;
+    t.mock.method(internal, 'createLaunchDirectory', () => launchDir);
+    t.mock.method(internal, 'spawnServer', () => Object.assign(new EventEmitter(), { pid: process.pid }));
+    t.mock.method(internal, 'waitForLockfile', async () => {
+      engineStarted.resolve();
+      await engineReady.promise;
+      return lockfile;
+    });
+    t.mock.method(internal, 'stopBridge', async () => {
+      internal.client = null;
+      internal.child = null;
+      internal.adoptedPid = undefined;
+    });
+    t.mock.method(BridgeClient.prototype, 'connect', async function (this: BridgeClient) {
+      handshakes.push((this as any).opts.mediaSessionModes);
+      if (startup === 'adoption-fallback' && handshakes.length === 1) throw new Error('stale adopted bridge');
+      this.sendCommand = () => {};
+      return { server_name: 'fixture', protocol_version: '0.2.0', capabilities: { client_protocol_version: '11.0.0' } } as never;
+    });
+    t.after(async () => {
+      engineReady.resolve();
+      audioReady.resolve();
+      await runtime.dispose();
+      rmSync(workspace, { recursive: true, force: true });
+    });
+
+    const starting = runtime.start();
+    await Promise.all([engineStarted.promise, audioStarted.promise]);
+    engineReady.resolve();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(handshakes, [], 'hello must wait for the initial capability snapshot');
+    if (startup === 'audio-error') audioReady.reject(new Error('helper unavailable'));
+    else audioReady.resolve();
+    await starting;
+
+    assert.equal(audioStarts, 1);
+    assert.equal(secretLoads, 1);
+    const expected = startup === 'audio-error' ? [[]] : startup === 'adoption-fallback' ? [['audio'], ['audio']] : [['audio']];
+    assert.deepEqual(handshakes, expected);
+    assert.equal(runtime.connectionState.status, 'connected');
+    if (startup === 'audio-error') assert.ok(diagnostics.snapshot().some(entry => entry.message.includes('audio capability initialization failed')));
+  });
+}
+
+test('cold engine resolves plugin secrets while workspace configuration is still loading', { timeout: 5_000 }, async (t) => {
+  const workspace = temporaryDirectory();
+  const settingsReady = deferred();
+  const secretsStarted = deferred();
+  const pluginSecrets = { 'weather@official': { apiKey: 'fixture-secret' } };
+  const spawnSentinel = new Error('mock engine spawn');
+  const runtime = new SessionRuntime({
+    projectPath: workspace,
+    resumeTranscriptPath: join(workspace, 'session.jsonl'),
+    prepareLaunchConfig: async () => {
+      await settingsReady.promise;
+      return () => ({ workspace, trusted: true });
+    },
+    launchConfig: () => { throw new Error('expected to reuse the prepared settings'); },
+    loadPluginSecrets: async () => {
+      secretsStarted.resolve();
+      return pluginSecrets;
+    },
+  });
+  const internal = runtime as any;
+  const spawn = t.mock.method(internal, 'spawnServer', (config: BridgeLaunchConfig) => {
+    assert.deepEqual(config.pluginSecrets, pluginSecrets);
+    throw spawnSentinel;
+  });
+  t.after(async () => {
+    settingsReady.resolve();
+    await runtime.dispose();
+    rmSync(workspace, { recursive: true, force: true });
+  });
+
+  const starting = assert.rejects(runtime.start(), spawnSentinel);
+  await secretsStarted.promise;
+  assert.equal(spawn.mock.callCount(), 0);
+  settingsReady.resolve();
+  await starting;
+  assert.equal(spawn.mock.callCount(), 1);
 });
 
 test('privileged bridge access re-checks current workspace trust before use', () => {

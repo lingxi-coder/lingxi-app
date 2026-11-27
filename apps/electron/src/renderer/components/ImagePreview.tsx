@@ -1,20 +1,64 @@
 import { DESKTOP_BRIDGE_GLOBAL } from '../../shared/desktopBridge';
+import { isHistoryImageReference, type SessionImageSize } from '../../shared/sessionHistory';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { ComposerImageThumbnail } from '../../../../../packages/chat-ui/ComposerSurface';
+import { SessionThumbnail } from '../../../../../packages/chat-ui/SessionThumbnail';
 import { useI18n } from '../i18n/useI18n';
 import { Icon } from './Icon';
 
 interface ImagePreviewProps {
   src: string;
   alt: string;
+  sessionId?: string;
   style?: CSSProperties;
   imageStyle?: CSSProperties;
   composerAttachment?: boolean;
 }
 
+async function loadHistoryImage(sessionId: string, reference: string, size: SessionImageSize, signal?: AbortSignal) {
+  const bridge = window[DESKTOP_BRIDGE_GLOBAL];
+  if (!bridge?.loadSessionImage) throw new Error('History image is unavailable');
+  signal?.throwIfAborted();
+  const requestId = signal && typeof bridge.cancelSessionImage === 'function' ? crypto.randomUUID() : undefined;
+  const cancel = () => { if (requestId) void bridge.cancelSessionImage(requestId).catch(() => undefined); };
+  signal?.addEventListener('abort', cancel, { once: true });
+  try {
+    const { mediaType, base64 } = await bridge.loadSessionImage(sessionId, reference, size, requestId);
+    signal?.throwIfAborted();
+    return `data:${mediaType};base64,${base64}`;
+  } finally {
+    signal?.removeEventListener('abort', cancel);
+  }
+}
+
+function useOriginalImageSource(src: string, sessionId: string | undefined) {
+  const [result, setResult] = useState<{ key: string; url: string | null }>();
+  const historical = isHistoryImageReference(src);
+  const key = historical ? JSON.stringify([sessionId, src]) : '';
+  useEffect(() => {
+    if (!historical || !sessionId) return;
+    let cancelled = false;
+    void loadHistoryImage(sessionId, src, 'original').then(
+      (url) => { if (!cancelled) setResult({ key, url }); },
+      () => { if (!cancelled) setResult({ key, url: null }); },
+    );
+    return () => { cancelled = true; };
+  }, [historical, key, sessionId, src]);
+  return historical ? (result?.key === key ? result.url : undefined) : src;
+}
+
+export function SessionImageThumbnail({ src, alt, sessionId, style }: Pick<ImagePreviewProps, 'src' | 'alt' | 'sessionId' | 'style'>) {
+  const { tr } = useI18n();
+  const historical = isHistoryImageReference(src);
+  const load = useCallback((signal: AbortSignal) => loadHistoryImage(sessionId!, src, 'thumbnail', signal), [sessionId, src]);
+  return <SessionThumbnail src={historical ? undefined : src} load={historical && sessionId ? load : undefined}
+    alt={alt} style={style} placeholder={<Icon name="image" size={16} />}
+    loadingLabel={tr('desktop_image_loading')} failedLabel={tr('desktop_image_failed')} />;
+}
+
 /** Mount the modal only while viewing; transcript thumbnails stay inexpensive. */
-export function ImagePreview({ src, alt, style, imageStyle, composerAttachment }: ImagePreviewProps) {
+export function ImagePreview({ src, alt, sessionId, style, imageStyle, composerAttachment }: ImagePreviewProps) {
   const { tr } = useI18n();
   const [open, setOpen] = useState(false);
   const close = useCallback(() => setOpen(false), []);
@@ -23,9 +67,9 @@ export function ImagePreview({ src, alt, style, imageStyle, composerAttachment }
       aria-label={tr('desktop_image_open', alt)} aria-haspopup="dialog" onClick={() => setOpen(true)}>
       {composerAttachment
         ? <ComposerImageThumbnail key={src} src={src} />
-        : <img src={src} alt={alt} style={imageStyle} draggable={false} />}
+        : <SessionImageThumbnail src={src} alt={alt} sessionId={sessionId} style={imageStyle} />}
     </button>
-    {open && createPortal(<ImageViewer key={src} src={src} alt={alt} onClose={close} />, document.body)}
+    {open && createPortal(<ImageViewer key={src} source={src} sessionId={sessionId} alt={alt} onClose={close} />, document.body)}
   </>;
 }
 
@@ -39,8 +83,9 @@ function downloadName(src: string, alt: string): string {
   return `${alt || 'image'}${extension ? `.${extension === 'svg+xml' ? 'svg' : extension === 'jpeg' ? 'jpg' : extension}` : ''}`;
 }
 
-function ImageViewer({ src, alt, onClose }: { src: string; alt: string; onClose(): void }) {
+function ImageViewer({ source, sessionId, alt, onClose }: { source: string; sessionId?: string; alt: string; onClose(): void }) {
   const { tr } = useI18n();
+  const src = useOriginalImageSource(source, sessionId);
   const dialog = useRef<HTMLDialogElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const viewport = useRef<HTMLDivElement>(null);
@@ -152,7 +197,7 @@ function ImageViewer({ src, alt, onClose }: { src: string; alt: string; onClose(
     }}>
     <div className="image-viewer-actions">
       <button type="button" className="image-viewer-control" disabled={saving || !ready} aria-busy={saving}
-        onClick={async () => { setSaving(true); setSaveFailed(false); try { await window[DESKTOP_BRIDGE_GLOBAL]!.saveImage({ dataUrl: src, suggestedName: downloadName(src, alt) }); } catch { setSaveFailed(true); } finally { setSaving(false); } }}
+        onClick={async () => { if (!src) return; setSaving(true); setSaveFailed(false); try { await window[DESKTOP_BRIDGE_GLOBAL]!.saveImage({ dataUrl: src, suggestedName: downloadName(src, alt) }); } catch { setSaveFailed(true); } finally { setSaving(false); } }}
         aria-label={tr('desktop_image_download')} title={tr('desktop_image_download')}>
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" /></svg>
       </button>
@@ -187,11 +232,12 @@ function ImageViewer({ src, alt, onClose }: { src: string; alt: string; onClose(
           zoom(fit < 1 ? 1 : 2, { x: event.clientX - rect.left - rect.width / 2, y: event.clientY - rect.top - rect.height / 2 });
         }
       }}>
-      {!ready && <div className="image-viewer-status" role={failed ? 'alert' : 'status'}>{tr(failed ? 'desktop_image_failed' : 'desktop_image_loading')}</div>}
-      <img className="image-viewer-image" src={src} alt={alt} draggable={false}
+      {!ready && <div className={failed || src === null ? 'image-viewer-status' : 'image-viewer-status session-image-loading-status'}
+        role={failed || src === null ? 'alert' : 'status'}>{tr(failed || src === null ? 'desktop_image_failed' : 'desktop_image_loading')}</div>}
+      {src && <img className="image-viewer-image" src={src} alt={alt} decoding="async" draggable={false}
         onLoad={(event) => { setNatural({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight }); }}
         onError={() => setFailed(true)}
-        style={{ width: natural.width || undefined, height: natural.height || undefined, visibility: ready ? 'visible' : 'hidden', transform: `translate(${x}px, ${y}px) scale(${scale})` }} />
+        style={{ width: natural.width || undefined, height: natural.height || undefined, visibility: ready ? 'visible' : 'hidden', transform: `translate(${x}px, ${y}px) scale(${scale})` }} />}
     </div>
     {saveFailed && <div className="image-viewer-status" role="alert">{tr('image_preview_save_failed')}</div>}
     <div className="image-viewer-zoom" role="group" aria-label={tr('desktop_image_zoom')}>

@@ -428,6 +428,16 @@ private struct ProviderAccountDetailPage: View {
                         }
                     }
                 }
+                if account.providerId == "openai", account.executionBindingId == "openai", account.authKind == "api_key" {
+                    Section {
+                        Toggle("provider_account_additional_openai_models", isOn: Binding(
+                            get: { account.additionalOpenaiModels ?? false },
+                            set: { run(.init(action: "set_additional_openai_models", accountId: accountId, enabled: $0)) }
+                        ))
+                    } footer: {
+                        Text("provider_account_additional_openai_models_desc")
+                    }
+                }
                 Section {
                     Button("provider_account_remove", role: .destructive) { confirmingDelete = true }
                 }

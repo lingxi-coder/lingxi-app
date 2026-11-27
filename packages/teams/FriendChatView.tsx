@@ -7,6 +7,7 @@ import { chatEnded, FRIEND_CHAT } from './friends.js';
 import type { FriendChat } from './friends-workspace.js';
 import type { FriendsViewProps } from './FriendsSidebar';
 import { CreationBanner, TeamConversationView } from './TeamConversationView';
+import { friendsErrorText } from './errors.js';
 import { Avatar, Icon, PopupMenu, type MenuItem, type RenderMarkdown } from './ui';
 import type { TeamsWorkspace } from './workspace.js';
 import { useTeamsText } from './i18n.js';
@@ -33,10 +34,16 @@ export function FriendChatView(props: FriendChatViewProps): ReactElement | null 
   if (chat.ended) return <Unavailable locale={locale} onBack={() => workspace.show('home')} />;
   if (!chat.workspace) return <section className="tw-scope tw-conv tw-conv-empty">
     {hasTopbar ? <ChatPageHeading title={chat.name} /> : null}
-    <p className="tw-empty-line" role="status">{t('teams_loading')}</p>
+    {snapshot.loadError ? <div className="tw-empty">
+      <p role="alert">{friendsErrorText(snapshot.loadError, locale)}</p>
+      <div className="tw-empty-actions">
+        <button type="button" onClick={workspace.retry}>{t('common_retry')}</button>
+        <button type="button" onClick={() => workspace.show('home')}>{t('remote_back')}</button>
+      </div>
+    </div> : <p className="tw-empty-line" role="status">{t('teams_loading')}</p>}
   </section>;
   // Another friend is another chat: what the view holds (the open panel, the welcome) is not carried over.
-  return <PairChat key={chat.uid} {...props} chat={chat} pair={chat.workspace} />;
+  return <PairChat key={chat.teamId ?? chat.uid} {...props} chat={chat} pair={chat.workspace} />;
 }
 
 function Unavailable({ locale, onBack }: { locale: string; onBack(): void }): ReactElement {
@@ -85,6 +92,9 @@ function PairChat({ notificationTarget,workspace, snapshot, renderAvatar, render
     </section>;
   }
   const friendChat = conversation.id === FRIEND_CHAT;
+  const targetMatches = notificationTarget
+    && (!notificationTarget.key || notificationTarget.key === `team:${view.team?.id}:${conversation.id}`)
+    && (notificationTarget.generation === undefined || notificationTarget.generation === view.team?.generation);
   const close = () => { setPanel(false); botsRef.current?.focus(); };
   // D22: the friend's header and menu belong to the friend chat alone; a Bot chat is the plain Teams view with a way back.
   const actions = <>
@@ -95,7 +105,7 @@ function PairChat({ notificationTarget,workspace, snapshot, renderAvatar, render
   return <div className="tw-friends-chat">
     <div className="tw-friends-thread">
       {welcome ? <p className="tw-banner" role="status">{nowFriends(chat.name, locale)}</p> : null}
-      <TeamConversationView notificationTarget={notificationTarget} workspace={pair} snapshot={view} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} locale={locale} now={now}
+      <TeamConversationView notificationTarget={targetMatches ? notificationTarget : undefined} workspace={pair} snapshot={view} renderAvatar={renderAvatar} renderMarkdown={renderMarkdown} locale={locale} now={now}
         friend={friendChat ? { uid: chat.uid, name: chat.name, handle: chat.handle, actions, onOpenProfile: () => setProfile(true) } : undefined}
         onBack={friendChat ? undefined : toChat} />
     </div>
@@ -121,6 +131,6 @@ function FriendMenu({ workspace, chat, locale, onProfile }: Pick<FriendsViewProp
     <button ref={moreRef} type="button" className="tw-icon-btn" aria-haspopup="menu" aria-expanded={menu} aria-label={t('tw_more')} title={t('tw_more')}
       onClick={() => setMenu(value => !value)}><Icon name="more" /></button>
     {menu ? <PopupMenu label={chat.name} items={items} anchor={moreRef} align="end" onClose={restore => { setMenu(false); if (restore) moreRef.current?.focus(); }} /> : null}
-    {dialog === 'remove' || dialog === 'block' ? <FriendLeaveDialog workspace={workspace} locale={locale} uid={chat.uid} name={chat.name} action={dialog} onClose={close} /> : null}
+    {dialog === 'remove' || dialog === 'block' ? <FriendLeaveDialog workspace={workspace} locale={locale} uid={chat.uid} teamId={chat.teamId} name={chat.name} action={dialog} onClose={close} /> : null}
   </div>;
 }

@@ -149,6 +149,7 @@ struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
     var dataRef: TeamDataRef? = nil
     var resourceRef: DatasetResourceRef? = nil
     var resourceGrant: String? = nil
+    var visualization: TeamVisualizationReference? = nil
     /// The files to show: none on a recalled message.
     var files: [TeamMessageAttachment] { recalled == true ? [] : attachments ?? [] }
     /// The request to show under this message, if it is one a Bot made and it can be read.
@@ -246,7 +247,15 @@ struct TeamMessageProjection: Codable, Equatable, Sendable {
     var commands: [TeamExecutionIntent]? = nil
 
 }
-struct TeamMessageFailure: Error { let code: String }
+struct TeamMessageFailure: Error {
+    let code: String
+    let retryAfterMs: Int?
+
+    init(code: String, retryAfterMs: Int? = nil) {
+        self.code = code
+        self.retryAfterMs = retryAfterMs
+    }
+}
 
 /// Only pending HTTP commands survive restart. Firestore owns the message cache.
 actor TeamCommandFiles {

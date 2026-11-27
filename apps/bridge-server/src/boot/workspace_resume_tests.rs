@@ -411,16 +411,60 @@ async fn private_resume_owns_foreground_adapter_approval_without_a_chat_turn() {
     let bound = Box::pin(assemble(cfg)).await.unwrap();
     let lifecycle = bound.session_lifecycle();
     let (endpoint, mut socket) = connect(bound.connection).await;
+    let copy = cwd
+        .join("other-workspace")
+        .join(selected.file_name().unwrap());
+    std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    std::fs::copy(&selected, &copy).unwrap();
+    for (request, path, mode) in [(6, &copy, "code"), (7, &selected, "chat")] {
+        let (_, response) = call(
+            &mut socket,
+            request,
+            "desktop_cold_resume_preview",
+            projection(
+                serde_json::json!({"session_id":id,"transcript_path":path,"expected_mode":mode}),
+            ),
+        )
+        .await;
+        assert!(response.error.is_some(), "{response:?}");
+    }
+    let selection = projection(
+        serde_json::json!({"session_id":id,"transcript_path":selected,"expected_mode":"code"}),
+    );
+    let before_preview = std::fs::read(&selected).unwrap();
     send(
         &mut socket,
-        2,
-        "resume_selected_session",
-        projection(
-            serde_json::json!({"session_id":id,"transcript_path":selected,"expected_mode":"code"}),
-        ),
+        8,
+        "desktop_cold_resume_preview",
+        selection.clone(),
     )
     .await;
-    let (mut events, permission) = wait_for_permission(&mut socket).await;
+    send(&mut socket, 2, "resume_selected_session", selection.clone()).await;
+    let mut events = Vec::new();
+    let (mut preview, mut permission) = (None, None);
+    while preview.is_none() || permission.is_none() {
+        match next_frame(&mut socket).await {
+            Frame::Response(response) if response.id == 8 => preview = Some(response),
+            Frame::PermissionRequest(request) => permission = Some(request),
+            Frame::Event(ClientEvent::SessionResumed { .. }) | Frame::Response(_) => {
+                panic!("the real resume must wait for the deferred approval")
+            }
+            Frame::Event(event) => events.push(event),
+            _ => {}
+        }
+    }
+    let preview = preview.unwrap();
+    assert!(preview.error.is_none(), "{preview:?}");
+    let preview = preview.result.unwrap();
+    assert_eq!(preview.string_at("/type"), Some("session_resumed"));
+    assert_eq!(preview.string_at("/session_id"), Some(id.as_str()));
+    assert_eq!(preview.string_at("/mode"), Some("code"));
+    assert!(preview
+        .to_json_string()
+        .unwrap()
+        .contains("pending user approval"));
+    assert_eq!(std::fs::read(&selected).unwrap(), before_preview);
+    let permission = permission.unwrap();
     let owner = permission
         .owner
         .as_ref()
@@ -464,9 +508,15 @@ async fn private_resume_owns_foreground_adapter_approval_without_a_chat_turn() {
         event,
         ClientEvent::TurnStarted { .. } | ClientEvent::TurnEnded { .. }
     )));
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, ClientEvent::SessionResumed { .. })));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ClientEvent::SessionResumed { .. }))
+            .count(),
+        1
+    );
+    let (_, consumed) = call(&mut socket, 9, "desktop_cold_resume_preview", selection).await;
+    assert!(consumed.error.is_some(), "{consumed:?}");
     let (_, retired) = call(
         &mut socket,
         5,

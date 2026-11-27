@@ -60,7 +60,7 @@ async function main() {
     result.connectedSend = await run(`window.welcomeStartupFixture.sent[1][0] === 'new-session' && window.welcomeStartupFixture.sent[1][1] === 'Draft while new session starts'`);
     await enter('Draft in the existing session', false);
     await run(`document.querySelector('.sidebar-primary-action').click()`);
-    await wait(`document.querySelector('main').innerText.includes('What should we build today?') && document.querySelector('.sidebar-primary-action').disabled`);
+    await wait(`window.welcomeStartupFixture.newSessionPending && document.querySelector('main').innerText.includes('What should we build today?') && ${send}.disabled`);
     await enter('Draft belonging to the failed session', false);
     await run('window.welcomeStartupFixture.failNewSession()');
     await wait(`!document.querySelector('.sidebar-primary-action').disabled && document.body.innerText.includes('fixture engine startup failed')`);

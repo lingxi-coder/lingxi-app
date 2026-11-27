@@ -3,7 +3,7 @@
 import type { SidebarMode } from '../../shared/settings';
 
 /** The pages of the main area. */
-export type AppPage = 'chat' | 'messages' | 'scheduled' | 'apps' | 'changes' | 'bots' | 'teams' | 'friends';
+export type AppPage = 'chat' | 'messages' | 'scheduled' | 'apps' | 'datasets' | 'changes' | 'bots' | 'teams' | 'friends';
 
 /**
  * Home shows the chat view; Apps, Teams and Friends have their own library pages.
@@ -13,18 +13,18 @@ export function pageForMode(mode: SidebarMode, current: { page: AppPage; botChat
   if (mode === 'home') return 'chat';
   if (mode === 'teams') return 'teams';
   if (mode === 'friends') return 'friends';
-  if (mode === 'apps') return current.page === 'chat' && current.appChat ? 'chat' : 'apps';
+  if (mode === 'apps') return (current.page === 'chat' && current.appChat) ? 'chat' : 'apps';
   return current.page === 'chat' && current.botChat ? 'chat' : 'bots';
 }
 
 /**
  * The mode that goes with the page now on screen, for the few pages that name
- * one: the Apps, Teams, Friends and Bots pages select their corresponding workspaces. Every
+ * one: the Apps (and their Datasets), Teams, Friends and Bots pages select their corresponding workspaces. Every
  * other page keeps the mode as it is. Bots that cannot run here are not a mode.
  */
 export function reconcileSidebarMode(mode: SidebarMode, page: AppPage, botsAvailable: boolean, unifiedInbox = false): SidebarMode {
   if (unifiedInbox && mode === 'home' && (page === 'teams' || page === 'friends')) return mode;
-  if (page === 'apps') return 'apps';
+  if (page === 'apps' || page === 'datasets') return 'apps';
   if (page === 'teams') return 'teams';
   if (page === 'friends') return 'friends';
   if (page === 'bots') return botsAvailable ? 'bots' : 'home';

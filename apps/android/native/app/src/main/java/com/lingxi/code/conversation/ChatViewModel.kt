@@ -1550,7 +1550,6 @@ class ChatViewModel(
     }
 
     /** Rows of the followed session's user prompts, by the turn the desktop assigned. */
-    private val externalPromptRows = mutableMapOf<Long, String>()
 
     /** Provisional rows of prompts this device sent, by outgoing prompt id. */
     private val externalOutgoingRows = mutableMapOf<String, String>()
@@ -1595,7 +1594,6 @@ class ChatViewModel(
             is ExternalFeedItem.Base -> {
                 if (!applyActivatedSession(item.session)) return false
                 if (sessionOwnerRejected) return true
-                externalPromptRows.clear()
                 externalOutgoingRows.clear()
                 item.title?.let { title ->
                     _state.update { it.copy(session = it.session.copy(title = title)) }
@@ -1604,14 +1602,8 @@ class ChatViewModel(
             is ExternalFeedItem.OlderMessages ->
                 _state.update { it.copy(messages = item.messages + it.messages) }
             is ExternalFeedItem.UserPrompt -> {
-                val row = Message(role = Role.User, text = item.text, originLabel = item.originLabel)
-                externalPromptRows[item.turnId] = row.id
+                val row = Message(role = Role.User, text = item.text, originLabel = item.originLabel, remoteImages = item.images)
                 _state.update { it.copy(isNew = false, messages = it.messages + row) }
-            }
-            is ExternalFeedItem.PromptImages -> externalPromptRows[item.turnId]?.let { rowId ->
-                _state.update { state ->
-                    state.copy(messages = state.messages.map { if (it.id == rowId) it.copy(images = item.images) else it })
-                }
             }
             is ExternalFeedItem.Event -> reduceClientEvent(item.event)
             is ExternalFeedItem.Outgoing -> reduceExternalOutgoing(item.prompts)
@@ -3595,7 +3587,22 @@ class ChatViewModel(
     fun resendLast() {
         if (_state.value.streaming) return
         val lastUser = _state.value.messages.lastOrNull { it.role == Role.User } ?: return
-        send(lastUser.text, images = lastUser.images)
+        val remote = source as? RemoteConversationSource
+        if (remote == null || lastUser.remoteImages.isEmpty()) {
+            send(lastUser.text, images = lastUser.images)
+            return
+        }
+        viewModelScope.launch {
+            val images = try {
+                lastUser.remoteImages.map { image ->
+                    remote.readImage(image.url, thumbnail = null).let {
+                        ImageRefDto(it.mediaType, java.util.Base64.getEncoder().encodeToString(it.bytes))
+                    }
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { return@launch }
+            if (source === remote && !_state.value.streaming) send(lastUser.text, images = images)
+        }
     }
 
     /**

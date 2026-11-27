@@ -1,6 +1,5 @@
 package com.lingxi.code.friends
 
-import android.content.Intent
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -12,13 +11,17 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -34,6 +37,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -46,14 +50,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lingxi.code.R
 import com.lingxi.code.teams.TeamsSheet
-import com.lingxi.code.teams.rememberCopyToClipboard
-import com.lingxi.code.theme.ConfirmDialog
 import com.lingxi.code.theme.PersonAvatar
-import kotlinx.coroutines.delay
+import java.util.Locale
 
 /**
- * Add friend (docs/FRIENDS-CLIENTS.md D6): my friend link, then one field that finds somebody by username, email address or
- * another person's friend link. Asking for the profile on every open also creates the first friend code (D2).
+ * Add friend (docs/FRIENDS-CLIENTS.md D6): live username search, and exact email or link lookup.
  */
 @Composable
 internal fun AddFriendScreen(
@@ -62,18 +63,21 @@ internal fun AddFriendScreen(
     showBack: Boolean,
     onClose: () -> Unit,
     onOpenChat: (String) -> Unit,
-    onLoadProfile: () -> Unit,
-    onRotateCode: () -> Unit,
-    onRevokeCode: () -> Unit,
     onLookup: (FriendProof) -> Unit,
+    onSearchHandles: (String, Boolean) -> Unit,
+    onSelect: (LookupResult) -> Unit,
+    onBackToResults: () -> Unit,
     onConfirm: (note: String) -> Unit,
     onClear: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    LaunchedEffect(Unit) { onLoadProfile() }
     // Leaving the screen drops the card, the code and any request id (D8, D18).
     DisposableEffect(Unit) { onDispose { onClear() } }
-    var query by rememberSaveable { mutableStateOf("") }
+    var query by remember(state.uid) { mutableStateOf("") }
+    val proof = searchProof(query)
+    LaunchedEffect(state.uid, proof, lookup.coolingDown) {
+        if (proof is FriendProof.Handle && !lookup.coolingDown) onSearchHandles(proof.handle, true)
+    }
     // A friendship made here (redeem, accept, a mutual request) opens the chat (D7).
     LaunchedEffect(lookup.outcome) {
         val outcome = lookup.outcome
@@ -86,102 +90,76 @@ internal fun AddFriendScreen(
             Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            MyFriendLink(state, onRetry = onLoadProfile, onRotate = onRotateCode, onRevoke = onRevokeCode)
-            FindSomeone(lookup = lookup, query = query, onQuery = { query = it; onClear() }, onLookup = onLookup, onConfirm = onConfirm, onOpenChat = onOpenChat)
+            FindSomeone(lookup = lookup, query = query, proof = proof, onQuery = {
+                if (proof == null || searchProof(it) != proof) onClear()
+                query = it
+            }, onLookup = { proof ->
+                if (proof is FriendProof.Handle) onSearchHandles(proof.handle, false) else onLookup(proof)
+            }, onSelect = onSelect, onBackToResults = onBackToResults, onConfirm = onConfirm, onOpenChat = onOpenChat)
         }
-    }
-}
-
-/** *My friend link* (D6): copy, share, reset and turn off; with no link, create one. The disclosure always sits under the card. */
-@Composable
-private fun MyFriendLink(state: FriendsState, onRetry: () -> Unit, onRotate: () -> Unit, onRevoke: () -> Unit) {
-    val profile = state.profile
-    val copy = rememberCopyToClipboard(stringResource(R.string.friends_clip_link))
-    val context = LocalContext.current
-    val shareMessage = stringResource(R.string.friends_link_share_message)
-    val shareTitle = stringResource(R.string.friends_link_share)
-    var copied by remember { mutableStateOf(false) }
-    var confirm by remember { mutableStateOf("") }
-    LaunchedEffect(copied) { if (copied) { delay(2_000); copied = false } }
-
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Surface(Modifier.fillMaxWidth().testTag(FriendsTags.LINK_CARD), shape = MaterialTheme.shapes.medium, tonalElevation = 1.dp) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(stringResource(R.string.friends_link_title), style = MaterialTheme.typography.titleSmall)
-                val code = profile?.friendCode
-                when {
-                    profile == null && state.profileOp.error == null -> CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-                    profile == null -> Row(verticalAlignment = Alignment.CenterVertically) {
-                        FriendsErrorText(state.profileOp.error!!, Modifier.weight(1f).testTag(FriendsTags.PROFILE_ERROR))
-                        TextButton(onClick = onRetry) { Text(stringResource(R.string.common_retry)) }
-                    }
-                    code == null -> {
-                        Text(stringResource(R.string.friends_link_is_off), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Button(onClick = onRotate, enabled = !state.linkOp.busy, modifier = Modifier.testTag(FriendsTags.LINK_CREATE)) { Text(stringResource(R.string.friends_link_create)) }
-                    }
-                    else -> {
-                        SelectionContainer { Text(code.link, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.MiddleEllipsis) }
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            OutlinedButton(onClick = { copy(code.link); copied = true }, modifier = Modifier.testTag(FriendsTags.LINK_COPY)) { Text(stringResource(R.string.friends_link_copy)) }
-                            OutlinedButton(
-                                onClick = {
-                                    val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, "$shareMessage ${code.link}")
-                                    runCatching { context.startActivity(Intent.createChooser(send, shareTitle)) }
-                                },
-                                modifier = Modifier.testTag(FriendsTags.LINK_SHARE),
-                            ) { Text(shareTitle) }
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            TextButton(onClick = { confirm = "reset" }, enabled = !state.linkOp.busy, modifier = Modifier.testTag(FriendsTags.LINK_RESET)) { Text(stringResource(R.string.friends_link_reset)) }
-                            TextButton(onClick = { confirm = "off" }, enabled = !state.linkOp.busy, modifier = Modifier.testTag(FriendsTags.LINK_OFF)) { Text(stringResource(R.string.friends_link_off), color = MaterialTheme.colorScheme.error) }
-                        }
-                        if (copied) Text(stringResource(R.string.friends_link_copied), Modifier.semantics { liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-                    }
-                }
-                state.linkOp.error?.let { FriendsErrorText(it) }
-            }
-        }
-        Text(stringResource(R.string.friends_link_disclosure), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-
-    if (confirm.isNotEmpty()) {
-        val resetting = confirm == "reset"
-        // U8: a title that names the act, what it does, a verb for the button in the error colour, and Cancel.
-        ConfirmDialog(
-            title = stringResource(if (resetting) R.string.friends_link_reset_title else R.string.friends_link_off_title),
-            body = stringResource(if (resetting) R.string.friends_link_reset_body else R.string.friends_link_off_body),
-            confirm = stringResource(if (resetting) R.string.friends_link_reset else R.string.friends_link_off), destructive = true,
-            onConfirm = { if (resetting) onRotate() else onRevoke(); confirm = "" },
-            onDismiss = { confirm = "" },
-        )
     }
 }
 
 /**
- * *Find someone* (D6, D7): one field for a username, an email address or a friend link. Return or the button looks up; nothing is looked up
- * while typing (lookups are rate limited), and editing the field drops the card.
+ * *Find someone* (D6, D7): usernames search while typing. Email and link lookup run on submit.
  */
+private fun searchProof(query: String): FriendProof? = when (val proof = FriendsLogic.classifyQuery(query)) {
+    is FriendProof.Handle -> proof.copy(handle = proof.handle.lowercase(Locale.ROOT))
+    else -> proof
+}
+
 @Composable
 private fun FindSomeone(
-    lookup: LookupState, query: String, onQuery: (String) -> Unit, onLookup: (FriendProof) -> Unit, onConfirm: (String) -> Unit, onOpenChat: (String) -> Unit,
+    lookup: LookupState, query: String, proof: FriendProof?, onQuery: (String) -> Unit,
+    onLookup: (FriendProof) -> Unit, onSelect: (LookupResult) -> Unit, onBackToResults: () -> Unit,
+    onConfirm: (String) -> Unit, onOpenChat: (String) -> Unit,
 ) {
-    val proof = FriendsLogic.classifyQuery(query)
+    val focusManager = LocalFocusManager.current
     val invalid = query.isNotBlank() && proof == null
     val busy = lookup.looking || lookup.confirming
+    val canSearch = !busy && (proof !is FriendProof.Handle || (lookup.matches.isNullOrEmpty() && !lookup.coolingDown))
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(stringResource(R.string.friends_search_title), style = MaterialTheme.typography.titleSmall)
         OutlinedTextField(
             value = query, onValueChange = onQuery, singleLine = true, enabled = !lookup.confirming, isError = invalid,
             placeholder = { Text(stringResource(R.string.friends_search_placeholder)) },
-            supportingText = if (invalid) ({ Text(stringResource(R.string.friends_search_hint)) }) else null,
+            leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+            trailingIcon = if (query.isEmpty()) null else ({
+                IconButton(onClick = { onQuery("") }, enabled = !lookup.confirming) {
+                    Icon(Icons.Outlined.Close, stringResource(R.string.friends_search_clear))
+                }
+            }),
+            shape = MaterialTheme.shapes.large,
+            supportingText = if (proof == null) ({ Text(stringResource(R.string.friends_search_hint)) }) else null,
             keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, keyboardType = KeyboardType.Uri, imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = { if (proof != null && !busy) onLookup(proof) }),
+            keyboardActions = KeyboardActions(onSearch = { if (proof != null && canSearch) onLookup(proof) }),
             modifier = Modifier.fillMaxWidth().testTag(FriendsTags.SEARCH_INPUT),
         )
-        Button(onClick = { proof?.let(onLookup) }, enabled = proof != null && !busy, modifier = Modifier.testTag(FriendsTags.SEARCH_ACTION)) {
+        Button(onClick = { proof?.let(onLookup) }, enabled = proof != null && canSearch, modifier = Modifier.testTag(FriendsTags.SEARCH_ACTION)) {
             if (lookup.looking) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) else Text(stringResource(R.string.friends_search_action))
         }
-        if (lookup.result == null) lookup.error?.let { FriendsErrorText(it, tag = FriendsTags.SEARCH_ERROR) }
+        val error = if (proof is FriendProof.Handle && lookup.coolingDown) FriendsError.RateLimited else lookup.error
+        if (lookup.result == null) error?.let { FriendsErrorText(it, tag = FriendsTags.SEARCH_ERROR) }
+        if (lookup.result != null && lookup.matches != null) {
+            TextButton(onClick = onBackToResults, enabled = !lookup.confirming) { Text(stringResource(R.string.friends_search_back)) }
+        }
+        lookup.matches?.takeIf { lookup.result == null }?.let { matches ->
+            if (matches.isEmpty()) Text(stringResource(R.string.friends_error_not_found))
+            matches.forEach { result ->
+                TextButton(onClick = {
+                    focusManager.clearFocus()
+                    onSelect(result)
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        PersonAvatar(result.uid, result.displayName, 32.dp)
+                        Column(Modifier.weight(1f)) {
+                            Text(result.displayName, color = MaterialTheme.colorScheme.onSurface)
+                            result.handle?.let { Text("@$it", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        }
+                        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
         FriendResultCard(lookup, onConfirm, onOpenChat)
     }
 }

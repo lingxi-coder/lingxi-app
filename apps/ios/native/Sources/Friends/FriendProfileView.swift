@@ -11,12 +11,15 @@ struct FriendProfileView: View {
     @State private var handle = ""
     @State private var findByHandle = true
     @State private var findByEmail = true
+    @State private var findByHandlePart = false
     @State private var saving = false
     @State private var error = ""
 
     private var changes: [String: Any] {
         guard let loaded else { return [:] }
-        return FriendsLogic.profileChanges(loaded, name: name, handle: handle, findByHandle: findByHandle, findByEmail: findByEmail)
+        var changes = FriendsLogic.profileChanges(loaded, name: name, handle: handle, findByHandle: findByHandle, findByEmail: findByEmail)
+        if findByHandlePart != (loaded.findByHandlePart ?? false) { changes["findByHandlePart"] = findByHandlePart }
+        return changes
     }
     /// An empty username means "leave as is": once set it can be changed but not removed.
     private var handleValid: Bool {
@@ -51,6 +54,11 @@ struct FriendProfileView: View {
                 Section {
                     Toggle("friends_profile_find_handle", isOn: $findByHandle)
                         .accessibilityIdentifier("friends.profile.findhandle")
+                        .onChange(of: findByHandle) { _, enabled in
+                            if !enabled { findByHandlePart = false }
+                        }
+                    Toggle("friends_profile_find_handle_part", isOn: $findByHandlePart)
+                        .disabled(!findByHandle || !FriendsLogic.isHandle(JSText.trim(handle)) || saving)
                     Toggle("friends_profile_find_email", isOn: $findByEmail)
                         .accessibilityIdentifier("friends.profile.findemail")
                 } footer: {
@@ -103,6 +111,7 @@ struct FriendProfileView: View {
         handle = profile.handle ?? ""
         findByHandle = profile.findByHandle
         findByEmail = profile.findByEmail
+        findByHandlePart = profile.findByHandlePart ?? false
     }
 
     private func save() {

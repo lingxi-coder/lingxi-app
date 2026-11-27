@@ -18,20 +18,22 @@ import type {
   RemoteImageRef,
   RemoteRecord,
   RemoteSeqRecord,
+  SessionAttachParams,
   SessionHistoryResult,
-  SessionActivityPreviewResult,
   SessionSnapshotParams,
 } from '@lingxi/bridge-client/remote';
+import { MESSAGE_MAX_BYTES } from '@lingxi/bridge-client/remote';
 
 import { CLIENT_EVENT_REMOTE_DISPOSITIONS, type RemoteEventDisposition } from '../../shared/clientCommands.js';
+import { isHistoryImageReference } from '../../shared/sessionHistory.js';
 import type { InteractionRecord, PromptJournalEntry, RemoteRuntimeView, SequencedRuntimeEventEnvelope } from '../bridgeTypes.js';
 
 /** One page of messages or records. */
 export const PAGE_MAX_BYTES = 256 * 1024;
-/** The base conversation is sent whole up to this size (images not counted), else only its tail. */
+/** JSON byte budget for the initial page. Larger messages remain pageable. */
 export const INITIAL_HISTORY_MAX_BYTES = 4 * 1024 * 1024;
-/** How many messages of a large conversation the snapshot keeps. */
-export const INITIAL_HISTORY_TAIL_MESSAGES = 200;
+/** Maximum number of base messages projected for the first screen. */
+export const INITIAL_HISTORY_TAIL_MESSAGES = 60;
 /** `input_json` and `result_json` longer than this are cut. */
 export const TOOL_FIELD_MAX_BYTES = 64 * 1024;
 /** An event larger than this is not sent. */
@@ -40,6 +42,11 @@ export const EVENT_MAX_BYTES = 1024 * 1024;
 type Message = MessageDto;
 
 const jsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), 'utf8');
+
+/** Leave room before the live base for older pages without changing the wire cursor. */
+export function remoteBaseOffset(view: RemoteRuntimeView): number {
+  return view.historyBefore ? 1_000_000_000 : 0;
+}
 
 export function eventDisposition(type: string): RemoteEventDisposition {
   return (CLIENT_EVENT_REMOTE_DISPOSITIONS as Record<string, RemoteEventDisposition | undefined>)[type] ?? 'withheld';
@@ -62,9 +69,12 @@ export type ParsedImageRef = { sessionId: string } & (
   | { kind: 'prompt'; sequence: number; index: number }
   | { kind: 'base'; message: number; index: number }
   | { kind: 'event'; sequence: number; index: number }
+  | { kind: 'history'; token: string; signature: string }
 );
 
 export function parseImageRef(ref: string): ParsedImageRef | undefined {
+  const history = /^([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}):h:([A-Za-z0-9_-]{1,360}):([A-Za-z0-9_-]{22})$/u.exec(ref);
+  if (history) return { sessionId: history[1]!, kind: 'history', token: history[2]!, signature: history[3]! };
   const match = /^([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}):([pme]):(\d{1,16}):(\d{1,4})$/i.exec(ref);
   if (!match) return undefined;
   const sessionId = match[1]!;
@@ -127,25 +137,19 @@ function mapBlock(block: MessageBlockDto, cuts: { any: boolean }): MessageBlockD
 
 /**
  * A message as a viewer receives it: thinking without its signature, tool
- * fields cut, images as references (an image that is not a `data:` URL is
- * left out; only the desktop knows what such a URL points at).
+ * fields cut, and locally resolvable images represented as remote references.
  */
-function mapMessage(message: Message, refFor: (index: number) => string, cuts: { any: boolean }): Message {
+export function mapMessage(message: Message, refFor: (index: number) => string, cuts: { any: boolean }): Message {
   const mapped: Message = { ...message, blocks: message.blocks.map((block) => mapBlock(block, cuts)) };
   if (message.images !== undefined) {
-    const images = message.images.flatMap((image, index) => (parseDataUrl(image.url) ? [{ media_type: image.media_type, url: refFor(index) }] : []));
+    const images = message.images.flatMap((image, index) => {
+      const url = (isHistoryImageReference(image.url) || parseDataUrl(image.url)) && refFor(index);
+      return url ? [{ media_type: image.media_type, url }] : [];
+    });
     if (images.length > 0) mapped.images = images;
     else delete mapped.images;
   }
   return mapped;
-}
-
-/** The base conversation of a view, as viewers receive it. */
-function baseMessages(view: RemoteRuntimeView): Message[] {
-  const base = view.base?.event;
-  if (base?.type !== 'session_resumed') return [];
-  const cuts = { any: false };
-  return base.messages.map((message, i) => mapMessage(message, (index) => baseImageRef(view.sessionId, i, index), cuts));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -253,12 +257,28 @@ export function coalesceRecords(records: readonly RemoteSeqRecord[]): RemoteSeqR
 }
 
 /**
+ * A delta requires the current base and a cursor inside the retained sequence range.
+ */
+export function canResume(
+  view: Pick<RemoteRuntimeView, 'epoch' | 'baseSequence' | 'lastSequence' | 'droppedThroughSequence'>,
+  resume: SessionAttachParams['resume'],
+): resume is NonNullable<SessionAttachParams['resume']> {
+  return resume !== undefined
+    && resume.epoch === view.epoch
+    && Number.isSafeInteger(resume.after_seq)
+    && resume.after_seq >= view.baseSequence
+    && resume.after_seq <= view.lastSequence
+    && resume.after_seq >= view.droppedThroughSequence;
+}
+
+/**
  * The records after `afterSeq`: what a viewer that holds everything up to it
  * is missing. For a snapshot `afterSeq` is the base's sequence, and the
  * latest state is sent whatever its sequence (`allState`): a model chosen
  * before the base is still the model.
  */
 export function recordsAfter(view: RemoteRuntimeView, afterSeq: number, allState = false, botAware = false): RemoteSeqRecord[] {
+  if (!allState && afterSeq === view.lastSequence) return [];
   const items: RemoteSeqRecord[] = [];
   const seen = new Set<number>();
   const add = (item: RemoteSeqRecord | undefined, any = false): void => {
@@ -277,12 +297,13 @@ export function recordsAfter(view: RemoteRuntimeView, afterSeq: number, allState
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Items grouped into pages of at most `limit` bytes of JSON; an item larger than that gets a page of its own. */
-export function pageBySize<T>(items: readonly T[], limit = PAGE_MAX_BYTES): T[][] {
+export function pageBySize<T>(items: readonly T[], limit = PAGE_MAX_BYTES, itemBytes: (item: T, index: number) => number = jsonBytes): T[][] {
   const pages: T[][] = [];
   let page: T[] = [];
   let size = 0;
-  for (const item of items) {
-    const bytes = jsonBytes(item);
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]!;
+    const bytes = itemBytes(item, index);
     if (page.length > 0 && size + bytes > limit) { pages.push(page); page = []; size = 0; }
     page.push(item);
     size += bytes;
@@ -291,16 +312,37 @@ export function pageBySize<T>(items: readonly T[], limit = PAGE_MAX_BYTES): T[][
   return pages;
 }
 
+function snapshotMessages(view: RemoteRuntimeView): { first: number; pages: Message[][] } {
+  const base = view.base?.event;
+  if (base?.type !== 'session_resumed') return { first: 0, pages: [] };
+
+  const firstTail = Math.max(0, base.messages.length - INITIAL_HISTORY_TAIL_MESSAGES);
+  const offset = remoteBaseOffset(view);
+  const messages: Message[] = [];
+  const sizes: number[] = [];
+  const cuts = { any: false };
+  let arrayBytes = 2; // Opening and closing brackets.
+  for (let index = base.messages.length - 1; index >= firstTail; index -= 1) {
+    const message = mapMessage(base.messages[index]!, image => baseImageRef(view.sessionId, offset + index, image), cuts);
+    const bytes = jsonBytes(message);
+    const nextBytes = arrayBytes + bytes + (messages.length > 0 ? 1 : 0);
+    if (nextBytes > INITIAL_HISTORY_MAX_BYTES) break;
+    arrayBytes = nextBytes;
+    messages.push(message);
+    sizes.push(bytes);
+  }
+  sizes.reverse();
+  return {
+    first: offset + base.messages.length - messages.length,
+    pages: pageBySize(messages.reverse(), PAGE_MAX_BYTES, (_message, index) => sizes[index]!),
+  };
+}
+
 /** A snapshot as the frames it is sent in, in order: `begin`, the `messages` pages, the `records` pages, `end`. */
 export function buildSnapshot(view: RemoteRuntimeView, botAware = false): SessionSnapshotParams[] {
   const sessionId = view.sessionId;
-  const all = baseMessages(view);
-  let first = 0;
-  if (all.length > INITIAL_HISTORY_TAIL_MESSAGES && jsonBytes(all) > INITIAL_HISTORY_MAX_BYTES) {
-    first = all.length - INITIAL_HISTORY_TAIL_MESSAGES;
-  }
-  const mode = view.base?.event.type === 'session_started' || view.base?.event.type === 'session_resumed'
-    ? view.base.event.mode : view.sessionMode;
+  const { first, pages } = snapshotMessages(view);
+  const mode = view.sessionMode;
   const frames: SessionSnapshotParams[] = [{
     phase: 'begin',
     session_id: sessionId,
@@ -308,7 +350,7 @@ export function buildSnapshot(view: RemoteRuntimeView, botAware = false): Sessio
     ...(mode !== undefined ? { session_mode: mode } : {}),
     first_message_index: first,
   }];
-  for (const messages of pageBySize(all.slice(first))) frames.push({ phase: 'messages', session_id: sessionId, messages });
+  for (const messages of pages) frames.push({ phase: 'messages', session_id: sessionId, messages });
   for (const records of pageBySize(recordsAfter(view, view.baseSequence, true, botAware))) frames.push({ phase: 'records', session_id: sessionId, records });
   frames.push({
     phase: 'end',
@@ -325,60 +367,67 @@ export function buildSnapshot(view: RemoteRuntimeView, botAware = false): Sessio
 export function historyPage(view: RemoteRuntimeView, beforeIndex: number, limit: number): SessionHistoryResult {
   const base = view.base?.event;
   const source = base?.type === 'session_resumed' ? base.messages : [];
-  const end = Math.max(0, Math.min(beforeIndex, source.length));
-  const start = Math.max(0, end - limit);
-  const cuts = { any: false };
-  const messages = source.slice(start, end).map((message, offset) => mapMessage(message, (index) => baseImageRef(view.sessionId, start + offset, index), cuts));
+  const offset = remoteBaseOffset(view);
+  const end = Math.max(0, Math.min(beforeIndex - offset, source.length));
+  const minimum = Math.max(0, end - limit);
+  const messages = historyTail(source, end, minimum, (row, image) => baseImageRef(view.sessionId, offset + row, image));
+  const start = offset + end - messages.length;
   return { messages, first_index: start, has_more: start > 0 };
 }
 
-/** An exact semantic result from the already attached source, with no history replay. */
-export function activityPreview(view: RemoteRuntimeView, uuids: readonly string[]): SessionActivityPreviewResult {
-  const ids = new Set(uuids);
-  if (!ids.size || ids.size > 16) return { available: false, messages: [] };
-  const found = new Map<string, Message>();
-  const add = (message: Message) => {
-    if (message.role !== 'assistant' || !message.transcript_uuid || !ids.has(message.transcript_uuid)) return;
-    const blocks = message.blocks.filter(block => block.type === 'text');
-    if (blocks.length)
-      found.set(message.transcript_uuid, { role: 'assistant', transcript_uuid: message.transcript_uuid, blocks });
-  };
-  const base = view.base?.event;
-  if (base?.type === 'session_resumed')
-    base.messages.forEach(add);
-  for (const envelope of view.events) {
-    if (envelope.event.type === 'message_complete' && envelope.event.message)
-      add(envelope.event.message);
+/** Keep the next cursor reachable even when a single message exceeds one page. */
+export function historyTail(source: readonly Message[], end: number, minimum: number,
+  imageRef: (row: number, image: number) => string): Message[] {
+  const messages: Message[] = [];
+  const cuts = { any: false };
+  let bytes = 2;
+  for (let row = end - 1; row >= minimum; row--) {
+    const message = mapMessage(source[row]!, image => imageRef(row, image), cuts);
+    const size = jsonBytes(message) + (messages.length ? 1 : 0);
+    if (bytes + size > INITIAL_HISTORY_MAX_BYTES) {
+      if (messages.length) break;
+      // Allow a single larger row if it can still fit the RPC envelope.
+      messages.push(size < MESSAGE_MAX_BYTES - 1024 ? message : {
+        role: message.role, transcript_uuid: message.transcript_uuid,
+        blocks: [{ type: 'text', text: 'This message exceeds the remote display limit. Open the chat on its Host to view it.' }],
+      });
+      break;
+    }
+    messages.push(message);
+    bytes += size;
   }
-  const messages = [...ids].flatMap(id => found.get(id) ?? []);
-  const blocks = messages.flatMap(message => message.blocks);
-  const characters = blocks.reduce((sum, block) => sum + (block.type === 'text' ? block.text.length : 0), 0);
-  if (found.size !== ids.size || blocks.length > 16 || characters > 32_768 || jsonBytes(messages) > PAGE_MAX_BYTES)
-    return { available: false, messages: [] };
-  return { available: true, messages };
+  return messages.reverse();
 }
 
-/** The image a reference stands for, while the runtime still holds its bytes. */
+function localImage(url: string | undefined) {
+  if (url === undefined) return undefined;
+  return isHistoryImageReference(url) ? { historyReference: url } : parseDataUrl(url);
+}
+
+/** Resolve a remote reference against the runtime's retained messages. */
 export function resolveImage(
   view: RemoteRuntimeView,
   ref: string,
   promptImage: (sequence: number, index: number) => { media_type: string; base64: string } | undefined,
-): { media_type: string; base64: string } | undefined {
+): { media_type: string; base64: string } | { historyReference: string } | undefined {
   const parsed = parseImageRef(ref);
   if (parsed === undefined || parsed.sessionId !== view.sessionId) return undefined;
   switch (parsed.kind) {
+    case 'history':
+      return undefined; // Archive tokens are verified by RemoteCommands.
     case 'prompt':
       return promptImage(parsed.sequence, parsed.index);
     case 'base': {
       const base = view.base?.event;
-      const url = base?.type === 'session_resumed' ? base.messages[parsed.message]?.images?.[parsed.index]?.url : undefined;
-      return url === undefined ? undefined : parseDataUrl(url);
+      const index = parsed.message - remoteBaseOffset(view);
+      const url = base?.type === 'session_resumed' ? base.messages[index]?.images?.[parsed.index]?.url : undefined;
+      return localImage(url);
     }
     case 'event': {
       const envelope = view.events.find((candidate) => candidate.sequence === parsed.sequence);
       const event = envelope?.event;
       const url = event?.type === 'message_complete' ? event.message?.images?.[parsed.index]?.url : undefined;
-      return url === undefined ? undefined : parseDataUrl(url);
+      return localImage(url);
     }
   }
 }

@@ -18,6 +18,8 @@ async function main() {
   const fixture = 'window.sessionOptimizationFixture';
   const search = 'document.querySelector(".session-picker input")';
   const list = 'document.querySelector(".session-picker-list")';
+  const transcript = 'document.getElementById("restored-transcript").textContent';
+  const preview = (requestId, text, mode = 'code') => js(`${fixture}.preview(${JSON.stringify(requestId)}, ${JSON.stringify(text)}, ${JSON.stringify(mode)})`);
   async function press(keyCode, modifiers = []) {
     web.sendInputEvent({ type: 'keyDown', keyCode, modifiers }); web.sendInputEvent({ type: 'keyUp', keyCode, modifiers });
     await settle();
@@ -96,14 +98,56 @@ async function main() {
     assert.equal(await js('document.activeElement.id'), 'open-picker');
     await js(`${fixture}.openDeferred(1)`);
     await wait(`${fixture}.state().sessionLoading && ${fixture}.state().pending.length === 1`);
+    const [firstRequest] = (await js(`${fixture}.state()`)).pending;
     await js(`${fixture}.openDeferred(2)`);
     await wait(`${fixture}.state().pending.length === 2`);
-    await js(`${fixture}.completeOpen(2)`);
-    await wait(`!${fixture}.state().sessionLoading && ${fixture}.state().activeSessionId === '00000000-0000-4000-8000-000000000002'`);
-    await js(`${fixture}.completeOpen(1)`); await settle();
-    assert.equal((await js(`${fixture}.state()`)).activeSessionId, '00000000-0000-4000-8000-000000000002');
+    const [, secondRequest] = (await js(`${fixture}.state()`)).pending;
+    const secondId = '00000000-0000-4000-8000-000000000002';
+    await preview(firstRequest, 'Stale preview from the first navigation');
+    await preview(secondRequest, 'Wrong mode preview', 'chat');
+    await settle();
+    assert.doesNotMatch(await js(transcript), /Stale preview|Wrong mode/);
+    await js(`${fixture}.requestApproval(${JSON.stringify(secondId)}, 41)`);
+    await wait(`${fixture}.state().pendingPermission === 41`);
+    await preview(secondRequest, 'Read-only preview for the active navigation');
+    await wait(`${transcript}.includes('Read-only preview for the active navigation')`);
+    const previewState = await js(`${fixture}.state()`);
+    assert.equal(previewState.ready, false);
+    assert.equal(previewState.sessionLoading, true);
+    assert.equal(previewState.authoritativeItems, 0);
+    assert.equal(previewState.pendingPermission, 41);
+    await js(`${fixture}.submit()`);
+    assert.deepEqual((await js(`${fixture}.state()`)).sent, previewState.sent);
+    await js(`${fixture}.approve(41)`);
+    assert.deepEqual((await js(`${fixture}.state()`)).approved, [{ sessionId: secondId, requestId: 41 }]);
+    await js(`${fixture}.resume(${JSON.stringify(secondId)}, 'Authoritative replay after resume')`);
+    await wait(`${fixture}.state().authoritativeItems === 1`);
+    assert.doesNotMatch(await js(transcript), /Authoritative replay/);
+    await js(`${fixture}.completeOpen(${JSON.stringify(secondRequest)})`);
+    await wait(`!${fixture}.state().sessionLoading && ${fixture}.state().activeSessionId === ${JSON.stringify(secondId)}`);
+    const finalTranscript = await js(transcript);
+    assert.doesNotMatch(finalTranscript, /Read-only preview/);
+    assert.equal(finalTranscript.match(/Authoritative replay after resume/g)?.length, 1);
+    await js(`${fixture}.completeOpen(${JSON.stringify(firstRequest)})`); await settle();
+    assert.equal((await js(`${fixture}.state()`)).activeSessionId, secondId);
+
+    await js(`${fixture}.openDuplicate(false)`);
+    await wait(`${fixture}.state().pending.length === 1`);
+    const [olderCopy] = (await js(`${fixture}.state()`)).pending;
+    await js(`${fixture}.openDuplicate(true)`);
+    await wait(`${fixture}.state().pending.length === 2`);
+    const [, selectedCopy] = (await js(`${fixture}.state()`)).pending;
+    await preview(olderCopy, 'Another copy of the same session');
+    await settle();
+    assert.doesNotMatch(await js(transcript), /Another copy|Authoritative replay/);
+    await preview(selectedCopy, 'Exactly the selected copy');
+    await wait(`${transcript}.includes('Exactly the selected copy')`);
+    await js(`${fixture}.completeOpen(${JSON.stringify(selectedCopy)})`);
+    await js(`${fixture}.completeOpen(${JSON.stringify(olderCopy)})`);
+    await wait(`!${fixture}.state().sessionLoading`);
+    assert.doesNotMatch(await js(transcript), /Exactly the selected copy|Another copy/);
     process.stdout.write(JSON.stringify({ stages, streamedUpdates: 90, fullResults: 5002, maximumMounted: Math.max(initial.mounted, manual.mounted, navigated.mounted),
-      activeDescendant: true, manualScroll: true, keyboard: true, narrowZoom: true, exactSource: true, overlappingNavigation: true }) + '\n');
+      activeDescendant: true, manualScroll: true, keyboard: true, narrowZoom: true, exactSource: true, overlappingNavigation: true, progressiveResume: true }) + '\n');
   } finally { win.destroy(); app.quit(); }
 }
 main().catch(error => { process.stderr.write(String(error.stack) + '\n'); app.exit(1); });

@@ -111,6 +111,7 @@ fn validate_remote_provider_account_request(request: &str) -> Result<(), RemoteF
             | "clear_credential"
             | "test"
             | "set_policy"
+            | "set_additional_openai_models"
     ) {
         return Err(RemoteFfiError::InvalidArgument {
             message: "unsupported account action".into(),
@@ -137,6 +138,7 @@ mod provider_account_rpc_tests {
             "logout",
             "test",
             "set_policy",
+            "set_additional_openai_models",
         ] {
             assert!(validate_remote_provider_account_request(
                 &serde_json::json!({"action":action,"expectedRevision":0}).to_string()
@@ -1474,6 +1476,7 @@ struct SentMarker {
     first_index: u64,
     records_len: usize,
     last_seq: Option<u64>,
+    showing_preview: bool,
 }
 
 impl SentMarker {
@@ -1484,6 +1487,7 @@ impl SentMarker {
             first_index: 0,
             records_len: 0,
             last_seq: None,
+            showing_preview: false,
         }
     }
 }
@@ -1524,8 +1528,21 @@ fn session_update(marker: &mut SentMarker, state: &SessionState) -> RemoteSessio
     };
     if state.status == SessionStatus::Loading {
         marker.replace = true;
+        let preview = state.preview.as_ref();
+        if let Some(preview) = preview {
+            if !marker.showing_preview {
+                update.replace = true;
+                update.session_mode = Some(preview.session_mode);
+                update.messages = preview.messages.clone();
+            }
+        } else if marker.showing_preview {
+            update.replace = true;
+            update.session_mode = None;
+        }
+        marker.showing_preview = preview.is_some();
         return update;
     }
+    marker.showing_preview = false;
     let older_by = marker.first_index.checked_sub(state.first_message_index);
     let same_base = state.first_message_index == marker.first_index
         && state.messages.len() == marker.messages_len;
@@ -2629,6 +2646,20 @@ impl RemoteControlCore {
             .fetch_image(&image_ref)
             .await
             .map_err(rpc_error)?;
+        image_from_data_url(&url)
+    }
+
+    /// A thumbnail for inline display, or the original bytes for the viewer.
+    pub async fn fetch_image_variant(
+        &self,
+        session_id: String,
+        image_ref: String,
+        thumbnail: bool,
+    ) -> Result<RemoteImageFfi, RemoteFfiError> {
+        use remote_control_client::messages::SessionImageSize;
+        let size = if thumbnail { SessionImageSize::Thumbnail } else { SessionImageSize::Original };
+        let url = self.controller(&session_id)?.fetch_image_with_size(&image_ref, Some(size))
+            .await.map_err(rpc_error)?;
         image_from_data_url(&url)
     }
 

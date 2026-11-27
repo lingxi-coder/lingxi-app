@@ -38,6 +38,8 @@ struct TeamConversationView: View {
     @State private var position = ScrollPosition(edge: .bottom)
     @State private var showDetails = false
     @State private var showDataset = false
+    @State private var showVisualization = false
+    @State private var canPublishVisualization = false
     @State private var showNotice = false
     @State private var recalling: TeamMessage?
     @State private var editing: TeamMessage?
@@ -205,9 +207,14 @@ struct TeamConversationView: View {
             stream(context, messages: messages)
             voicePanel
             if context.participant && !connectionOffline && editing == nil {
-                Button("teams_dataset_title") { showDataset = true }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal)
+                HStack {
+                    Button("teams_dataset_title") { showDataset = true }
+                    if conversation.kind == "channel" && canPublishVisualization {
+                        Button("teams_visualization_add") { showVisualization = true }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal)
             }
             TeamComposerView(
                 context: context, draft: $draft, editing: editing, answeringWait: answering(context) != nil, replying: replying(context, messages: messages), busy: workspace.messageBusy,
@@ -219,6 +226,15 @@ struct TeamConversationView: View {
                 onCancelEdit: endEdit, onCancelReply: { draft.replyToID = nil })
         }
         .sheet(isPresented: $showDataset) { TeamDatasetShareSheet(context: context) }
+        .task(id: "\(conversation.id):\(model.directoryReady):\(model.offline)") {
+            canPublishVisualization = false
+            guard conversation.kind == "channel", context.participant, !model.offline else { return }
+            let audience = try? await model.visualization(conversationId: conversation.id, body: ["action": "audience"])
+            if !Task.isCancelled { canPublishVisualization = audience != nil }
+        }
+        .sheet(isPresented: $showVisualization) {
+            TeamVisualizationComposer(conversation: conversation.id, model: context.model, person: context.userName)
+        }
         .toolbar {
             ToolbarItem(placement: .principal) {
                 let identity = HStack(spacing: 8) {
@@ -441,7 +457,7 @@ struct TeamConversationView: View {
                             TeamMessageCell(
                                 message: message, grouped: grouped, context: context, quote: quote(of: message, byID: byID, context: context),
                                 onReply: locked ? nil : { startReply($0) },
-                                onEdit: context.isMine(message) && context.participant && message.decision == nil ? { beginEdit($0) } : nil,
+                                onEdit: context.isMine(message) && context.participant && message.decision == nil && message.kind != "visualization" ? { beginEdit($0) } : nil,
                                 onRecall: context.isMine(message) && context.participant && message.decision == nil ? { recalling = $0 } : nil)
                             .id(row.key)
                         }

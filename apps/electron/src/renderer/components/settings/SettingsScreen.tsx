@@ -74,6 +74,9 @@ const ToolsAgent = eagerSettingsPages.ToolsAgent ?? bindSettingsPage('ToolsAgent
 const Voice = eagerSettingsPages.Voice ?? bindSettingsPage('Voice', settingsPageLoaders.Voice);
 import { provenanceDescription, provenanceLabel, type Provenance } from './rows';
 import { projectDirFromSnapshot, projectDisplayName } from './useEngineSettings';
+import { ExtensionCatalogTabs, extensionHubStyle } from './pages/ExtensionHub';
+import { useProjectSettingsBridge } from './projectSettingsBridge';
+import { projectKey, useExtensionScopes, type ExtensionScopeNavigation } from './extensionScopes';
 import type { SettingsSnapshot } from './useEngineSettings';
 
 /**
@@ -84,7 +87,7 @@ import type { SettingsSnapshot } from './useEngineSettings';
  * it as a tab a person could "write to" would lie about what happens next.
  */
 export type EditableLayer = Extract<Provenance, 'user' | 'project' | 'local'>;
-const EDITABLE_LAYERS: EditableLayer[] = ['user', 'project', 'local'];
+const VISIBLE_SETTINGS_LAYERS: EditableLayer[] = ['user', 'project'];
 
 const GROUP_ORDER: NavPage['group'][] = ['个人', '模型与服务', '编码', '高级'];
 
@@ -248,6 +251,9 @@ export interface PageContentProps {
   bridge: UseBridge;
   snapshot: SettingsSnapshot | null;
   editingLayer: EditableLayer;
+  extensionScopes?: ExtensionScopeNavigation;
+  settingsProject?: string;
+  onSelectSettingsProject?: (path: string) => void;
   onLayerLockChange?(locked: boolean): void;
   theme: ThemeMode;
   onTheme(value: ThemeMode): void;
@@ -335,7 +341,7 @@ function LayerSwitcher({ value, onChange, hasProject, locked = false }: {
         className="settings-segmented"
         style={{ display: 'inline-flex', padding: 3, gap: 2, borderRadius: 9, background: t.sidebarBg, border: `0.5px solid ${t.border}` }}
       >
-        {EDITABLE_LAYERS.map((layer) => {
+        {VISIBLE_SETTINGS_LAYERS.map((layer) => {
           const active = value === layer;
           const disabled = locked || layerDisabled(layer, hasProject);
           return (
@@ -372,18 +378,9 @@ function LayerSwitcher({ value, onChange, hasProject, locked = false }: {
   );
 }
 
-/**
- * 层切换器下面那块「这一层的值会落到哪」的说明，以及项目层/本地层归属哪个项目。
- *
- * 存在的理由：切换器只有三个裸标签（用户 / 项目 / 本地），既没说清每个词是什么
- * 意思，也没说「项目」指的是哪一个项目 —— 而这两件事都有真实后果。写进「项目」
- * 层的权限规则会随仓库提交给整个团队；写进「本地」层的不会。至于是哪个项目，
- * 答案只有引擎知道：`SettingsPaths.project_dir` 在 bridge-server 启动时由 `--cwd`
- * 定死，而桌面端每个会话各起一个引擎进程。所以项目名一律取自快照的 `files_json`
- * （`projectDirFromSnapshot`），不取渲染端的「当前项目」状态 —— 后者可以已经指向
- * 别处，那正是下面 `handleSwitch` 要处理的问题。
- */
-function LayerContext({ bridge, layer, projectDir, locked }: {
+/** Settings owns the chosen directory. Its file path stays visible even for projects with identical names. */
+function LayerContext({ bridge, layer, projectDir, locked, onProject }: {
+  onProject: (path: string) => void;
   bridge: UseBridge;
   layer: EditableLayer;
   projectDir: string | null;
@@ -391,65 +388,12 @@ function LayerContext({ bridge, layer, projectDir, locked }: {
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const projects = bridge.bootstrap?.settings.projects ?? [];
-  const catalogs = bridge.bootstrap?.projectCatalogs;
-  // 只有项目层和本地层的落盘位置取决于项目；用户层是本机全局的，给它标一个项目
-  // 名就是在暗示一个并不存在的作用域。
   const needsProject = layer !== 'user';
-
-  // 展开列表时预取每个项目的会话目录。`handleSwitch` 需要目标项目里的一个会话
-  // 才能真的把引擎换过去，而 `listProjectSessions` 的结果是异步回填进 bootstrap
-  // 的、同一次点击里读不到。`BetaDesktop.tsx` 展开项目时用的是同一套预取。
-  useEffect(() => {
-    if (!open) return;
-    for (const path of projects) {
-      if (!catalogs?.[path]) void bridge.listProjectSessions(path).catch(() => undefined);
-    }
-    // Depend on the stable METHOD, not on `bridge`: `useBridge()` returns a
-    // fresh object literal every render and the app re-renders on every engine
-    // event, so listing `bridge` re-fired this prefetch per event for every
-    // project whose catalog had not landed — and a listing that keeps failing
-    // is swallowed by `.catch`, so the retry storm never stops.
-  }, [open, projects, catalogs, bridge.listProjectSessions]);
-
-  const handleSwitch = async (path: string) => {
-    setError(null);
-    if (path === projectDir) { setOpen(false); return; }
-    setBusy(true);
-    try {
-      await bridge.activateProject(path);
-      // `activateProject` 单独用是不够的：它只写 `settings.activeProject`
-      // （`main/host.ts` 的 `selectWorkspaceInternal` 在 addProject=false 分支里
-      // 就只做这一件事），不开会话、不换活动会话、因而不换引擎进程。而项目层写到
-      // 哪个目录完全由引擎进程的 `--cwd` 决定。只调它的话，界面会显示已经切到 B，
-      // 下一次「项目」层写入却仍然落进 A 的 `.lingxi/settings.json`。
-      // 所以这里必须再落到该项目的一个会话上：有历史会话就打开最近的一个，
-      // 没有就新建 —— 两者都会以新项目为 `--cwd` 起一个引擎。
-      // `bridge` is this render's snapshot, so a catalog the prefetch above
-      // landed after that render is invisible here — and falling through to
-      // `newSession` would bury the project's real chats behind a stray empty
-      // one. Fetch it when the snapshot has nothing.
-      const sessions = bridge.bootstrap?.projectCatalogs?.[path]?.sessions
-        ?? (await bridge.listProjectSessions(path).catch(() => undefined))?.sessions
-        ?? [];
-      let latest: (typeof sessions)[number] | undefined;
-      for (const entry of sessions) {
-        const owner = bridge.bootstrap?.conversationSpaces.sessions.find((candidate) => candidate.sessionId === entry.uuid);
-        if (entry.mode !== bridge.bootstrap?.conversationSpaces.activeMode || (owner && owner.projectId !== path)) continue;
-        if (!latest || entry.modified_rfc3339 > latest.modified_rfc3339) latest = entry;
-      }
-      if (latest) {
-        if (!await bridge.openSession(path, latest.uuid, { scope: 'current', transcriptPath: latest.path })) throw new Error(tr('desktop_link_project_conversation_error'));
-      } else await bridge.newSession(path);
-      setOpen(false);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : tr('desktop_shell_switch_project_error'));
-    } finally {
-      setBusy(false);
-    }
-  };
+  function handleSwitch(path: string) {
+    onProject(path);
+    setOpen(false);
+  }
 
   return (
     <div data-testid="layer-context" style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -478,13 +422,13 @@ function LayerContext({ bridge, layer, projectDir, locked }: {
             type="button"
             data-testid="layer-project-switch"
             aria-expanded={open}
-            disabled={locked || busy}
+            disabled={locked}
             onClick={() => setOpen((previous) => !previous)}
             style={{
               padding: '4px 10px', borderRadius: 6, fontSize: 11.5, fontFamily: 'inherit',
               border: `0.5px solid ${t.border}`, background: t.surfaceHover,
-              color: locked || busy ? t.text4 : t.text2,
-              cursor: locked || busy ? 'not-allowed' : 'pointer',
+              color: locked ? t.text4 : t.text2,
+              cursor: locked ? 'not-allowed' : 'pointer',
             }}
           >{tr('settings_parity_switch_project')}</button>
         </div>
@@ -494,6 +438,8 @@ function LayerContext({ bridge, layer, projectDir, locked }: {
       {needsProject && !projectDir && (
         <div data-testid="layer-project-unknown" style={{ fontSize: 11.5, color: t.text4 }}>
           {tr('settings_parity_project_unknown')}
+          {projects.length > 0 && <button type="button" data-testid="layer-project-switch" disabled={locked}
+            aria-expanded={open} onClick={() => setOpen(!open)}>{tr('settings_parity_switch_project')}</button>}
         </div>
       )}
 
@@ -502,10 +448,6 @@ function LayerContext({ bridge, layer, projectDir, locked }: {
           display: 'flex', flexDirection: 'column', gap: 2, padding: 6,
           borderRadius: 8, background: t.surface, border: `0.5px solid ${t.border}`,
         }}>
-          {/* 这个后果必须先说：引擎是按会话起的，换设置的项目就等于换掉当前对话。 */}
-          <div data-testid="layer-project-switch-warning" style={{ fontSize: 11, color: t.warn, padding: '2px 6px 6px' }}>
-            {tr('settings_parity_switch_project_warning')}
-          </div>
           {projects.length === 0 && (
             <div style={{ fontSize: 11.5, color: t.text4, padding: '4px 6px' }}>
               {tr('desktop_shell_add_project_hint')}
@@ -516,14 +458,14 @@ function LayerContext({ bridge, layer, projectDir, locked }: {
               key={path}
               type="button"
               data-project-option={path}
-              disabled={busy}
-              onClick={() => void handleSwitch(path)}
+              disabled={locked}
+              onClick={() => handleSwitch(path)}
               style={{
                 display: 'flex', alignItems: 'center', gap: 8, width: '100%',
                 padding: '6px 8px', borderRadius: 6, border: 'none', textAlign: 'left',
                 background: path === projectDir ? t.surfaceActive : 'transparent',
                 color: t.text2, fontFamily: 'inherit', fontSize: 12,
-                cursor: busy ? 'wait' : 'pointer',
+                cursor: locked ? 'default' : 'pointer',
               }}
             >
               <span style={{ fontWeight: 600, flexShrink: 0 }}>{projectDisplayName(path)}</span>
@@ -540,12 +482,6 @@ function LayerContext({ bridge, layer, projectDir, locked }: {
           ))}
         </div>
       )}
-
-      {error && (
-        <div role="alert" data-testid="layer-project-error" style={{ fontSize: 11.5, color: t.danger }}>
-          {error}
-        </div>
-      )}
     </div>
   );
 }
@@ -558,7 +494,7 @@ function NavIcon({ name, pageId }: { name: string; pageId: string }) {
 }
 
 export function SettingsScreen({
-  bridge, theme, onTheme, onClose, initialPageId, initialProviderId, pendingModelReference, linkRequest,
+  bridge: liveBridge, theme, onTheme, onClose, initialPageId, initialProviderId, pendingModelReference, linkRequest,
 }: SettingsScreenProps) {
   const { locale } = useI18n();
   const t = useT();
@@ -584,7 +520,7 @@ export function SettingsScreen({
   const [query, setQuery] = useState('');
   const [editingLayer, setEditingLayer] = useState<EditableLayer>(linkRequest?.scope === 'project' || linkRequest?.scope === 'local' ? linkRequest.scope : 'user');
   const [layerLockCount, setLayerLockCount] = useState(0);
-  const [snapshotRequestError, setSnapshotRequestError] = useState<{ sessionId: string | undefined; message: string } | null>(null);
+  const [snapshotRequestError, setSnapshotRequestError] = useState<{ owner: string | undefined; message: string } | null>(null);
   const snapshotRequestGeneration = useRef(0);
   const layerLocked = layerLockCount > 0;
 
@@ -597,10 +533,20 @@ export function SettingsScreen({
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
-  const activeSessionId = bridge.activeSession?.sessionId;
-  const hasProject = Boolean(bridge.bootstrap?.workspace?.path);
-  const engineReady = bridge.connected && Boolean(activeSessionId);
   const activePage = SETTINGS_NAV.find((candidate) => candidate.id === page) ?? SETTINGS_NAV[0];
+  const isExtensionPage = page === 'skills' || page === 'plugins' || page === 'mcp';
+  const projectPage = activePage.layered || isExtensionPage;
+  const [selectedProject, setSelectedProject] = useState<string>();
+  const registered = liveBridge.bootstrap?.settings.projects ?? [];
+  const liveSnapshot = useMemo(() => parseSettingsSnapshot(liveBridge.settingsSnapshotEvent), [liveBridge.settingsSnapshotEvent]);
+  const liveDir = projectDirFromSnapshot(liveSnapshot.snapshot);
+  const liveReady = liveBridge.connected && !liveBridge.sessionLoading && Boolean(liveBridge.activeSession?.sessionId);
+  const target = projectPage ? selectedProject ?? (!liveReady ? registered[0] : undefined) : undefined;
+  const detached = target && !(liveReady && liveDir && projectKey(liveDir) === projectKey(target)) ? target : undefined;
+  const bridge = useProjectSettingsBridge(liveBridge, detached);
+  const settingsOwner = detached ? `settings:${detached}` : liveBridge.activeSession?.sessionId;
+  const hasProject = Boolean(selectedProject || liveBridge.bootstrap?.workspace?.path || registered.length);
+  const engineReady = Boolean(detached || (bridge.connected && settingsOwner));
   const nav = useMemo(() => groupedNav(query), [query, locale]);
 
   useEffect(() => {
@@ -614,32 +560,23 @@ export function SettingsScreen({
     if (layerDisabled(editingLayer, hasProject)) setEditingLayer('user');
   }, [editingLayer, hasProject]);
 
-  // The shell owns the settings-snapshot lifecycle so every page reads the
-  // one parse of it rather than re-fetching and re-parsing the same wire event.
-  //
-  // Gated on `bridge.connected` and NOT `bridge.sessionLoading`: `command()`
-  // (the thing `refreshSettingsSnapshot` wraps) silently no-ops while a
-  // session is loading, and `activeSession` is already populated with the
-  // PENDING session during that window — so a naive `[activeSessionId]`
-  // dependency fires once, sends nothing, and never fires again once loading
-  // finishes (neither dependency changes), leaving the snapshot permanently
-  // null. Depending on `bridge.connected` makes this effect re-run exactly
-  // when loading finishes and the session is actually ready to answer.
+  // Refresh when a chat connection becomes ready or the settings directory changes.
+  // A late error belongs only to the owner that requested it.
   const refreshSnapshot = useCallback(async () => {
     const generation = ++snapshotRequestGeneration.current;
     setSnapshotRequestError(null);
     try { await bridge.refreshSettingsSnapshot(); }
     catch (cause) {
       if (generation === snapshotRequestGeneration.current) {
-        setSnapshotRequestError({ sessionId: activeSessionId, message: cause instanceof Error ? cause.message : tr('desktop_shell_settings_error') });
+        setSnapshotRequestError({ owner: settingsOwner, message: cause instanceof Error ? cause.message : tr('desktop_shell_settings_error') });
       }
     }
-  }, [activeSessionId, bridge.refreshSettingsSnapshot]);
+  }, [settingsOwner, bridge.refreshSettingsSnapshot]);
   useEffect(() => {
-    if (!activeSessionId || !bridge.connected || bridge.sessionLoading) return;
+    if (!settingsOwner || !bridge.connected || bridge.sessionLoading) return;
     void refreshSnapshot();
     return () => { snapshotRequestGeneration.current += 1; };
-  }, [activeSessionId, bridge.connected, bridge.sessionLoading, refreshSnapshot]);
+  }, [settingsOwner, bridge.connected, bridge.sessionLoading, refreshSnapshot]);
 
   // Focus management for a dialog that claims `aria-modal="true"`: claiming
   // it while leaving focus (and Tab) free to wander the background would be
@@ -687,17 +624,19 @@ export function SettingsScreen({
   }, []);
 
   const { snapshot, error: snapshotError } = useMemo(
-    () => parseSettingsSnapshot(bridge.settingsSnapshotEvent),
-    [bridge.settingsSnapshotEvent],
+    () => detached ? parseSettingsSnapshot(bridge.settingsSnapshotEvent) : liveSnapshot,
+    [detached, bridge.settingsSnapshotEvent, liveSnapshot],
   );
-  // 「项目层这次写进哪个目录」只有正在答题的那个引擎知道 —— 见
-  // `projectDirFromSnapshot` 的注释。这里刻意不回落到 `bridge.bootstrap.workspace`
-  // 或 `settings.activeProject`：它们是**界面**的当前项目，和引擎的可以不是同一个，
-  // 拿它们顶上就会把「不知道」渲染成一个看起来确定、实际可能错的项目名。
+  // The snapshot identifies the directory that will receive project writes.
   const projectDir = projectDirFromSnapshot(snapshot);
-  const requestError = snapshotRequestError && snapshotRequestError.sessionId === activeSessionId ? snapshotRequestError.message : null;
+  const requestError = snapshotRequestError && snapshotRequestError.owner === settingsOwner ? snapshotRequestError.message : null;
   const settingsReadError = snapshotError ?? requestError;
 
+  const extensionScopes = useExtensionScopes(registered, page, selectedProject ?? projectDir ?? liveBridge.bootstrap?.workspace?.path ?? null,
+    editingLayer, setEditingLayer, setSelectedProject, () => {
+    setPageLinkRequest(undefined);
+    setInitialPluginId(undefined);
+  });
   let body: ReactNode;
   // Whether the body actually has something a layer switcher could target.
   // `false` for a page that will never exist here (not implemented) or one
@@ -712,11 +651,15 @@ export function SettingsScreen({
     body = <PagePlaceholder page={activePage} kind="not-implemented" />;
   } else if (activePage.needsEngine && !engineReady) {
     body = <EngineRequiredEmptyState page={activePage} />;
-  } else if (activePage.layered && !snapshot) {
+  } else if ((activePage.layered || detached) && !snapshot) {
     canWriteHere = true;
-    body = settingsReadError
+    const status = settingsReadError
       ? <div role="alert">{tr('desktop_shell_settings_unread')}<button type="button" onClick={() => void refreshSnapshot()}>{tr('common_retry')}</button></div>
       : <div role="status" data-testid="settings-snapshot-loading">{tr('desktop_shell_settings_loading')}</div>;
+    body = detached && isExtensionPage ? <div style={extensionHubStyle(t)}>
+      <ExtensionCatalogTabs label={navPageLabel(activePage)} scopes={extensionScopes} value={extensionScopes.view ?? 'public'} onChange={extensionScopes.setView} />
+      {status}
+    </div> : status;
   } else {
     canWriteHere = true;
     const Component = PAGE_CONTENT[activePage.id];
@@ -726,10 +669,13 @@ export function SettingsScreen({
         // gets a fresh page; ordinary snapshot refreshes keep unsaved input.
         <Suspense fallback={null}>
           <Component
-            key={`${activeSessionId ?? 'no-session'}:${editingLayer}`}
+            key={`${settingsOwner ?? 'no-session'}:${editingLayer}`}
             bridge={bridge}
             snapshot={snapshot}
             editingLayer={editingLayer}
+            extensionScopes={isExtensionPage ? extensionScopes : undefined}
+            settingsProject={selectedProject}
+            onSelectSettingsProject={extensionScopes.selectProject}
             theme={theme}
             onTheme={onTheme}
             onNavigate={navigatePage}
@@ -747,7 +693,7 @@ export function SettingsScreen({
       )
       : <PagePlaceholder page={activePage} kind="not-wired" />;
   }
-  const showLayerSwitcher = activePage.layered && canWriteHere;
+  const showLayerSwitcher = !isExtensionPage && activePage.layered && canWriteHere;
   const pageTitle = navPageLabel(activePage);
 
   return (
@@ -755,6 +701,7 @@ export function SettingsScreen({
       ref={panelRef}
       // Exclude the sidebar/titlebar drag regions still mounted behind settings.
       className="settings-screen no-drag"
+      data-macos={globalThis.window?.lingxi?.platform === 'darwin' || undefined}
       role="dialog"
       aria-modal="true"
       aria-label={tr('settings_title_main')}
@@ -776,7 +723,7 @@ export function SettingsScreen({
           <div className="settings-sidebar-controls">
             <button ref={backRef} type="button" aria-label={tr('desktop_back')} onClick={requestClose}
               className="settings-back-button"
-              style={{ width: '100%', minHeight: 36, display: 'flex', alignItems: 'center', gap: 9,
+              style={{ minHeight: 36, display: 'flex', alignItems: 'center', gap: 9,
                 marginBottom: 8, padding: '7px 10px', border: 0, borderRadius: 8, background: t.surfaceActive,
                 color: t.text, font: 'inherit', fontSize: 14, textAlign: 'left', cursor: 'pointer' }}>
               <Icon name="arrowLeft" size={17} stroke={1.8} />
@@ -843,7 +790,7 @@ export function SettingsScreen({
         <div className="settings-content-viewport">
           <div ref={contentScrollRef} className="settings-content-scroll settings-scroll-area">
             <div className={page === 'computer-use' ? 'settings-content-inner settings-computer-use-content' : 'settings-content-inner'}>
-              {page !== 'computer-use' && page !== 'provider-credentials' && <div className="settings-page-header" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
+              {page !== 'computer-use' && page !== 'provider-credentials' && <div className="settings-page-header" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: isExtensionPage ? 10 : 18 }}>
                 <div>
                   <div className="settings-page-title" style={{ fontSize: 20, fontWeight: 550, letterSpacing: '-0.025em' }}>{pageTitle}</div>
                 </div>
@@ -852,7 +799,7 @@ export function SettingsScreen({
                 )}
               </div>}
               {showLayerSwitcher && (
-                <LayerContext bridge={bridge} layer={editingLayer} projectDir={projectDir} locked={layerLocked} />
+                <LayerContext bridge={bridge} layer={editingLayer} projectDir={selectedProject ?? projectDir} locked={layerLocked} onProject={setSelectedProject} />
               )}
               {settingsReadError && (
                 <div data-testid="settings-snapshot-error" role="alert" style={{

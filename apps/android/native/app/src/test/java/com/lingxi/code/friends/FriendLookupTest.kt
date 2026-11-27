@@ -4,6 +4,7 @@ import com.lingxi.code.teams.TeamMessageFailure
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -47,6 +48,50 @@ class FriendLookupTest {
     }
 
     // --- looking up -------------------------------------------------------------------------------------------
+
+    @Test fun handleSearchWaitsForTheServerCooldownAndKeepsResultsWhenGoingBack() = runTest {
+        val h = Harness(this)
+        h.answer = { throw TeamMessageFailure("RATE_LIMITED", 429, 600) }
+        h.lookup.searchHandles("ann", false)
+        runCurrent()
+        assertTrue(h.state.coolingDown)
+        h.lookup.clear()
+        h.lookup.searchHandles("any", false)
+        advanceTimeBy(599)
+        runCurrent()
+        assertEquals(1, h.calls.size)
+        advanceTimeBy(1)
+        runCurrent()
+        assertFalse(h.state.coolingDown)
+
+        h.answer = { JSONObject().put("results", org.json.JSONArray().put(found("none"))) }
+        h.lookup.searchHandles("ann", false)
+        runCurrent()
+        val matches = requireNotNull(h.state.matches)
+        h.lookup.select(matches.single())
+        assertEquals(matches.single(), h.state.result)
+        h.lookup.clearSelection()
+        assertNull(h.state.result)
+        assertEquals(matches, h.state.matches)
+        h.lookup.searchHandles("ann", false)
+        runCurrent()
+        assertEquals(2, h.calls.size)
+    }
+
+    @Test fun anEmptyUsernameSearchCanBeRetriedExplicitlyWithoutRepeatingAutoSearch() = runTest {
+        val h = Harness(this)
+        h.answer = { JSONObject().put("results", org.json.JSONArray()) }
+        h.lookup.searchHandles("ann", false)
+        runCurrent()
+        h.lookup.searchHandles("ann", true)
+        advanceUntilIdle()
+        assertEquals(1, h.calls.size)
+        h.answer = { JSONObject().put("results", org.json.JSONArray().put(found("none"))) }
+        h.lookup.searchHandles("ann", false)
+        runCurrent()
+        assertEquals(2, h.calls.size)
+        assertEquals("ann", h.state.matches?.single()?.handle)
+    }
 
     @Test fun aLookupOnlyFillsTheCardAndSendsNothingElse() = runTest {
         val h = Harness(this)

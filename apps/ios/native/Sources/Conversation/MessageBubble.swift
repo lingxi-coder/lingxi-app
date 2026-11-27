@@ -1,16 +1,46 @@
 import SwiftUI
+import Nuke
+import NukeUI
 import UIKit
+
+struct SessionImageLoader: Sendable {
+    let cacheKey: String
+    let sessionID: String
+    let load: @Sendable (String, Bool) async throws -> Data
+
+    func request(for image: MessageImage, thumbnail: Bool) -> Nuke.ImageRequest? {
+        let reference = image.url
+        guard reference.hasPrefix(sessionID + ":") else { return nil }
+        return Nuke.ImageRequest(id: "\(cacheKey):\(thumbnail):\(reference)", data: {
+            try await load(reference, thumbnail)
+        }, options: [.disableDiskCache])
+    }
+}
+
+private struct SessionImageLoaderKey: EnvironmentKey {
+    static let defaultValue: SessionImageLoader? = nil
+}
+
+extension EnvironmentValues {
+    var sessionImageLoader: SessionImageLoader? {
+        get { self[SessionImageLoaderKey.self] }
+        set { self[SessionImageLoaderKey.self] = newValue }
+    }
+}
 
 private struct MessageImages: View {
     @Environment(\.theme) private var t
+    @Environment(\.sessionImageLoader) private var loader
     let images: [MessageImage]
+    let rowKey: UUID
     @State private var selectedImage: MessageImage?
+    @State private var visible = false
 
     var body: some View {
         ScrollView(.horizontal) {
             HStack(alignment: .bottom, spacing: 7) {
-                ForEach(images) { image in
-                    Button { selectedImage = image } label: { imageView(image) }
+                ForEach(Array(images.enumerated()), id: \.element.id) { index, image in
+                    Button { selectedImage = image } label: { imageView(image, index: index) }
                         .buttonStyle(.plain)
                         .accessibilityLabel(String(localized: "chat_preview_attached_image"))
                         .accessibilityIdentifier("image-preview.open")
@@ -19,57 +49,55 @@ private struct MessageImages: View {
         }
         .scrollIndicators(.hidden)
         .frame(maxWidth: 320, alignment: .trailing)
+        .onScrollVisibilityChange(threshold: 0.01) { visible = $0 }
         .fullScreenCover(item: $selectedImage) { image in
-            NativeImagePreview(source: image.url, mediaType: image.mediaType)
+            NativeImagePreview(source: image.url, mediaType: image.mediaType,
+                               originalRequest: loader?.request(for: image, thumbnail: false))
         }
     }
 
-    @ViewBuilder
-    private func imageView(_ image: MessageImage) -> some View {
-        if let decoded = decodedImage(image.url) {
-            Image(uiImage: decoded)
-                .resizable()
-                .scaledToFill()
-                .frame(width: 116, height: 116)
-                .clipped()
-                .background(t.surfaceActive)
-                .clipShape(RoundedRectangle(cornerRadius: 11))
-                .overlay(RoundedRectangle(cornerRadius: 11).stroke(t.border, lineWidth: 0.5))
-                .accessibilityLabel(String(localized: "chat_attached_image"))
-        } else if let url = URL(string: image.url) {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case let .success(content):
-                    content.resizable().scaledToFill()
-                default:
-                    placeholder
-                }
+    private func imageView(_ image: MessageImage, index: Int) -> some View {
+        LazyImage(request: SessionThumbnailRequests.request(for: image, rowKey: rowKey, index: index, loader: loader)) { state in
+            if let content = state.image {
+                content.resizable().scaledToFill()
+            } else {
+                SessionThumbnailPlaceholder(showProgress: visible && state.isLoading)
             }
-            .frame(width: 116, height: 116)
-            .clipped()
-            .background(t.surfaceActive)
-            .clipShape(RoundedRectangle(cornerRadius: 11))
-            .overlay(RoundedRectangle(cornerRadius: 11).stroke(t.border, lineWidth: 0.5))
-            .accessibilityLabel(String(localized: "chat_attached_image"))
-        } else {
-            placeholder
         }
+        .frame(width: 116, height: 116)
+        .clipped()
+        .background(t.surfaceActive)
+        .clipShape(RoundedRectangle(cornerRadius: 11))
+        .overlay(RoundedRectangle(cornerRadius: 11).stroke(t.border, lineWidth: 0.5))
+        .accessibilityLabel(String(localized: "chat_attached_image"))
     }
 
-    private var placeholder: some View {
-        Text(String(localized: "chat_image_placeholder"))
-            .font(.caption)
-            .foregroundStyle(t.text3)
-            .frame(width: 116, height: 116)
-            .background(t.surfaceActive)
-            .clipShape(RoundedRectangle(cornerRadius: 11))
-    }
+}
 
-    private func decodedImage(_ url: String) -> UIImage? {
-        guard url.hasPrefix("data:"), let comma = url.firstIndex(of: ",") else { return nil }
-        let encoded = String(url[url.index(after: comma)...])
-        guard let data = Data(base64Encoded: encoded, options: .ignoreUnknownCharacters) else { return nil }
-        return UIImage(data: data)
+private struct SessionThumbnailPlaceholder: View {
+    @Environment(\.theme) private var t
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var spinning = false
+    let showProgress: Bool
+
+    private var animate: Bool { showProgress && !reduceMotion }
+
+    var body: some View {
+        Group {
+            if animate && spinning {
+                ProgressView().controlSize(.small).tint(t.text3)
+            } else {
+                Text(String(localized: "chat_image_placeholder"))
+                    .font(.caption)
+                    .foregroundStyle(t.text3)
+            }
+        }
+        .task(id: animate) {
+            spinning = false
+            guard animate else { return }
+            do { try await Task.sleep(for: .milliseconds(140)) } catch { return }
+            if !Task.isCancelled { spinning = true }
+        }
     }
 }
 
@@ -119,7 +147,7 @@ struct MessageBubble: View, Equatable {
                     VisualizationContextChipView(chip: chip)
                 }
                 if !message.images.isEmpty {
-                    MessageImages(images: message.images)
+                    MessageImages(images: message.images, rowKey: message.transcriptUUID ?? message.id)
                 }
                 HStack(alignment: .top, spacing: 0) {
                     Spacer(minLength: 0)
@@ -174,7 +202,7 @@ struct MessageBubble: View, Equatable {
             HStack(alignment: .top, spacing: 0) {
                 VStack(alignment: .leading, spacing: 8) {
                     if let tag = message.tag { Pill(text: tag, color: t.accent) }
-                    if !message.images.isEmpty { MessageImages(images: message.images) }
+                    if !message.images.isEmpty { MessageImages(images: message.images, rowKey: message.transcriptUUID ?? message.id) }
                     assistantContent
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(

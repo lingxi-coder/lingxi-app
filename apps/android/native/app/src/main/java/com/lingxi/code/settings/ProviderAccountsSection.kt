@@ -133,6 +133,23 @@ internal fun ProviderAccountsSection(bindingId: String, repository: ProviderAcco
                     trailing = { com.lingxi.code.components.LXToggle(checked = account.enabled, enabled = !busy,
                         onCheckedChange = { execute("set_enabled", JSONObject().put("accountId", account.accountId).put("enabled", it)) }) },
                 )
+                if (account.providerId == "openai" && account.executionBindingId == "openai" && account.authKind == "api_key") {
+                    SettingsRow(
+                        label = stringResource(R.string.provider_account_additional_openai_models),
+                        sub = stringResource(R.string.provider_account_additional_openai_models_desc),
+                        chevron = false,
+                        trailing = {
+                            com.lingxi.code.components.LXToggle(
+                                checked = account.additionalOpenaiModels,
+                                enabled = !busy,
+                                onCheckedChange = { enabled ->
+                                    execute("set_additional_openai_models",
+                                        JSONObject().put("accountId", account.accountId).put("enabled", enabled))
+                                },
+                            )
+                        },
+                    )
+                }
                 if (state.lastSelectedAccountId == account.accountId) Text(
                     stringResource(R.string.provider_account_last_selected) + state.lastSelectedModel?.let { " · $it" }.orEmpty(),
                     color = palette.accent, modifier = Modifier.padding(horizontal = 12.dp),

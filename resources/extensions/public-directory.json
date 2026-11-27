@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-11-20",
+  "updatedAt": "2026-11-25",
   "items": [
     {
       "id": "chrome-devtools",
@@ -513,7 +513,7 @@
       "kind": "mcp",
       "name": "Figma",
       "publisher": "Figma",
-      "category": "development",
+      "category": "design",
       "platforms": [
         "macos",
         "windows",
@@ -559,7 +559,8 @@
           "ja": "このデザインの情報を使って画面を実装してください。",
           "ko": "이 디자인의 컨텍스트를 활용해 인터페이스 구현을 도와주세요."
         }
-      ]
+      ],
+      "icon": "pencil"
     },
     {
       "id": "dbhub",
@@ -839,7 +840,7 @@
       "kind": "plugin",
       "name": "Frontend Design",
       "publisher": "Anthropic",
-      "category": "development",
+      "category": "design",
       "platforms": [
         "macos",
         "windows",
@@ -879,7 +880,8 @@
           "ja": "このページの文字組み、余白、操作のフィードバックを改善してください。",
           "ko": "이 페이지의 타이포그래피, 간격, 상호작용 피드백을 개선해 주세요."
         }
-      ]
+      ],
+      "icon": "layout"
     },
     {
       "id": "document-skills",
@@ -1361,6 +1363,490 @@
           "zh-Hant": "為 Supabase 上的多租戶應用程式設計資料表和索引。",
           "ja": "Supabase 上のマルチテナントアプリ向けにテーブルとインデックスを設計してください。",
           "ko": "Supabase에서 멀티테넌트 앱에 쓸 테이블과 인덱스를 설계해 주세요."
+        }
+      ]
+    },
+    {
+      "id": "ui-ux-pro-max",
+      "kind": "plugin",
+      "name": "UI UX Pro Max",
+      "publisher": "nextlevelbuilder",
+      "category": "design",
+      "icon": "palette",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Choose a color palette, type pairing and layout for a new interface.",
+        "zh-Hans": "为新界面挑选配色、字体搭配和布局。",
+        "zh-Hant": "為新介面挑選配色、字體搭配和版面配置。",
+        "ja": "新しい画面の配色、フォントの組み合わせ、レイアウトを選びます。",
+        "ko": "새 화면의 색상 팔레트, 글꼴 조합과 레이아웃을 고릅니다."
+      },
+      "requirements": {
+        "en": "Searching the bundled design library requires Python 3 in the execution environment.",
+        "zh-Hans": "搜索随包提供的设计资料需要运行环境支持 Python 3。",
+        "zh-Hant": "搜尋隨附的設計資料需要執行環境支援 Python 3。",
+        "ja": "付属のデザイン資料を検索するには、実行環境に Python 3 が必要です。",
+        "ko": "내장 디자인 자료를 검색하려면 실행 환경에 Python 3가 필요합니다."
+      },
+      "sourceUrl": "https://github.com/nextlevelbuilder/ui-ux-pro-max-skill",
+      "documentationUrl": "https://github.com/nextlevelbuilder/ui-ux-pro-max-skill#readme",
+      "marketplace": {
+        "source": "nextlevelbuilder/ui-ux-pro-max-skill",
+        "name": "ui-ux-pro-max-skill",
+        "plugin": "ui-ux-pro-max"
+      },
+      "skills": [
+        "ui-ux-pro-max"
+      ],
+      "examples": [
+        {
+          "en": "Suggest two accessible color and type combinations for this settings page.",
+          "zh-Hans": "为这个设置页推荐两组易于阅读的配色和字体。",
+          "zh-Hant": "為這個設定頁推薦兩組易於閱讀的配色和字體。",
+          "ja": "この設定画面に合う、読みやすい配色と書体の組み合わせを2案ください。",
+          "ko": "이 설정 화면에 어울리는 읽기 쉬운 색상과 글꼴 조합 두 가지를 제안해 주세요."
+        }
+      ]
+    },
+    {
+      "id": "anthropic-design",
+      "kind": "plugin",
+      "name": "Design",
+      "publisher": "Anthropic",
+      "category": "design",
+      "icon": "pencil",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Review an interface, refine its copy and prepare a developer handoff.",
+        "zh-Hans": "评审界面、打磨交互文案，并整理开发交付说明。",
+        "zh-Hant": "審查介面、調整互動文案，並整理開發交付說明。",
+        "ja": "画面と文言をレビューし、開発者向けの引き継ぎ資料をまとめます。",
+        "ko": "화면과 문구를 검토하고 개발자에게 전달할 명세를 정리합니다."
+      },
+      "sourceUrl": "https://github.com/anthropics/knowledge-work-plugins/tree/main/design",
+      "documentationUrl": "https://github.com/anthropics/knowledge-work-plugins/blob/main/design/README.md",
+      "marketplace": {
+        "source": "anthropics/knowledge-work-plugins",
+        "name": "knowledge-work-plugins",
+        "plugin": "design"
+      },
+      "skills": [
+        "design-critique",
+        "accessibility-review",
+        "design-system",
+        "ux-copy",
+        "user-research",
+        "research-synthesis",
+        "design-handoff"
+      ],
+      "examples": [
+        {
+          "en": "Review the accessibility of this form and rewrite its error messages.",
+          "zh-Hans": "检查这个表单的无障碍体验，并改写错误提示。",
+          "zh-Hant": "檢查這個表單的無障礙體驗，並改寫錯誤提示。",
+          "ja": "このフォームのアクセシビリティを確認し、エラー文を改善してください。",
+          "ko": "이 양식의 접근성을 검토하고 오류 메시지를 다듬어 주세요."
+        }
+      ]
+    },
+    {
+      "id": "shadcn-ui",
+      "kind": "mcp",
+      "name": "shadcn/ui",
+      "publisher": "shadcn",
+      "category": "design",
+      "icon": "layout",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "version": "4.23.1",
+      "description": {
+        "en": "Find components and examples in shadcn registries for your interface.",
+        "zh-Hans": "在 shadcn 组件库中查找适合当前界面的组件和示例。",
+        "zh-Hant": "在 shadcn 元件庫中尋找適合目前介面的元件與範例。",
+        "ja": "shadcn のレジストリから画面に合うコンポーネントと使用例を探します。",
+        "ko": "shadcn 레지스트리에서 화면에 맞는 컴포넌트와 예제를 찾습니다."
+      },
+      "requirements": {
+        "en": "Requires Node.js 20.18.1 or later and npm on the desktop host.",
+        "zh-Hans": "桌面主机需要 Node.js 20.18.1 或更高版本及 npm。",
+        "zh-Hant": "桌面主機需要 Node.js 20.18.1 或更新版本及 npm。",
+        "ja": "デスクトップに Node.js 20.18.1 以降と npm が必要です。",
+        "ko": "데스크톱에 Node.js 20.18.1 이상과 npm이 필요합니다."
+      },
+      "sourceUrl": "https://github.com/shadcn-ui/ui",
+      "documentationUrl": "https://ui.shadcn.com/docs/mcp",
+      "mcp": {
+        "name": "shadcn",
+        "config": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "shadcn@4.23.1",
+            "mcp"
+          ]
+        }
+      },
+      "examples": [
+        {
+          "en": "Find a searchable combobox and show how to use it in this form.",
+          "zh-Hans": "找一个支持搜索的组合框，并展示它在这个表单中的用法。",
+          "zh-Hant": "找一個支援搜尋的組合方塊，並示範如何用在這個表單。",
+          "ja": "検索できるコンボボックスを探し、このフォームでの使い方を示してください。",
+          "ko": "검색 가능한 콤보 상자를 찾아 이 양식에 사용하는 예를 보여 주세요."
+        }
+      ]
+    },
+    {
+      "id": "deepwiki",
+      "kind": "mcp",
+      "name": "DeepWiki",
+      "publisher": "Cognition",
+      "category": "development",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Ask questions about a public repository and explore its documentation.",
+        "zh-Hans": "查询公开仓库的文档，了解代码如何组织。",
+        "zh-Hant": "查詢公開儲存庫的文件，了解程式碼如何組織。",
+        "ja": "公開リポジトリのドキュメントを調べ、コードの構成について質問できます。",
+        "ko": "공개 저장소 문서를 살펴보고 코드 구조에 대해 질문합니다."
+      },
+      "requirements": {
+        "en": "Works with indexed public repositories without an account.",
+        "zh-Hans": "可直接查询已建立索引的公开仓库，无需账号。",
+        "zh-Hant": "可直接查詢已建立索引的公開儲存庫，無需帳號。",
+        "ja": "索引が作成された公開リポジトリをアカウントなしで利用できます。",
+        "ko": "색인된 공개 저장소는 계정 없이 조회할 수 있습니다."
+      },
+      "sourceUrl": "https://deepwiki.com",
+      "documentationUrl": "https://docs.devin.ai/work-with-devin/deepwiki-mcp",
+      "mcp": {
+        "name": "deepwiki",
+        "config": {
+          "type": "http",
+          "url": "https://mcp.deepwiki.com/mcp"
+        }
+      },
+      "examples": [
+        {
+          "en": "Show where this public repository defines its routing layer.",
+          "zh-Hans": "这个公开仓库的路由逻辑在哪里？",
+          "zh-Hant": "這個公開儲存庫的路由邏輯在哪裡？",
+          "ja": "この公開リポジトリでルーティングを定義している場所を教えてください。",
+          "ko": "이 공개 저장소에서 라우팅을 정의한 위치를 알려 주세요."
+        }
+      ]
+    },
+    {
+      "id": "sentry",
+      "kind": "mcp",
+      "name": "Sentry",
+      "publisher": "Sentry",
+      "category": "development",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Investigate application errors and performance issues in a Sentry project.",
+        "zh-Hans": "查看 Sentry 项目中的应用错误和性能问题。",
+        "zh-Hant": "查看 Sentry 專案中的應用程式錯誤與效能問題。",
+        "ja": "Sentry プロジェクトのアプリエラーとパフォーマンスの問題を調べます。",
+        "ko": "Sentry 프로젝트에서 앱 오류와 성능 문제를 조사합니다."
+      },
+      "requirements": {
+        "en": "Authorize a Sentry account with access to the project using OAuth.",
+        "zh-Hans": "需要通过 OAuth 授权有项目访问权限的 Sentry 账号。",
+        "zh-Hant": "需要透過 OAuth 授權有專案存取權的 Sentry 帳號。",
+        "ja": "プロジェクトにアクセスできる Sentry アカウントで OAuth 認証してください。",
+        "ko": "프로젝트 접근 권한이 있는 Sentry 계정으로 OAuth 인증이 필요합니다."
+      },
+      "sourceUrl": "https://github.com/getsentry/sentry-mcp",
+      "documentationUrl": "https://mcp.sentry.dev/",
+      "mcp": {
+        "name": "sentry",
+        "config": {
+          "type": "http",
+          "url": "https://mcp.sentry.dev/mcp"
+        }
+      },
+      "examples": [
+        {
+          "en": "Which errors first appeared after our last release?",
+          "zh-Hans": "上次发布后首次出现了哪些错误？",
+          "zh-Hant": "上次發佈後首次出現了哪些錯誤？",
+          "ja": "前回のリリース後に初めて発生したエラーはどれですか？",
+          "ko": "지난 릴리스 이후 처음 발생한 오류를 알려 주세요."
+        }
+      ]
+    },
+    {
+      "id": "pr-review-toolkit",
+      "kind": "plugin",
+      "name": "PR Review Toolkit",
+      "publisher": "Anthropic",
+      "category": "development",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Review a pull request for test gaps, error handling and type design.",
+        "zh-Hans": "审查拉取请求中的测试遗漏、错误处理和类型设计。",
+        "zh-Hant": "審查提取要求中的測試遺漏、錯誤處理與型別設計。",
+        "ja": "プルリクエストのテスト漏れ、エラー処理、型設計をレビューします。",
+        "ko": "풀 리퀘스트의 테스트 누락, 오류 처리와 타입 설계를 검토합니다."
+      },
+      "sourceUrl": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/pr-review-toolkit",
+      "documentationUrl": "https://github.com/anthropics/claude-plugins-official/blob/main/plugins/pr-review-toolkit/README.md",
+      "marketplace": {
+        "source": "anthropics/claude-plugins-official",
+        "name": "claude-plugins-official",
+        "plugin": "pr-review-toolkit"
+      },
+      "examples": [
+        {
+          "en": "Review this change for error paths that lack tests.",
+          "zh-Hans": "检查这次改动中哪些错误路径还缺少测试。",
+          "zh-Hant": "檢查這次變更中哪些錯誤路徑仍缺少測試。",
+          "ja": "この変更でテストされていないエラー経路を調べてください。",
+          "ko": "이 변경에서 테스트가 빠진 오류 경로를 찾아 주세요."
+        }
+      ]
+    },
+    {
+      "id": "anthropic-productivity",
+      "kind": "plugin",
+      "name": "Productivity",
+      "publisher": "Anthropic",
+      "category": "productivity",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Organize tasks, plan the day and keep track of project context.",
+        "zh-Hans": "整理待办事项、安排当天工作，并记录项目背景。",
+        "zh-Hant": "整理待辦事項、安排當天工作，並記錄專案背景。",
+        "ja": "タスクと一日の予定を整理し、プロジェクトの背景を記録します。",
+        "ko": "할 일을 정리하고 하루를 계획하며 프로젝트 맥락을 기록합니다."
+      },
+      "sourceUrl": "https://github.com/anthropics/knowledge-work-plugins/tree/main/productivity",
+      "documentationUrl": "https://github.com/anthropics/knowledge-work-plugins/blob/main/productivity/README.md",
+      "marketplace": {
+        "source": "anthropics/knowledge-work-plugins",
+        "name": "knowledge-work-plugins",
+        "plugin": "productivity"
+      },
+      "skills": [
+        "task-management",
+        "memory-management",
+        "start",
+        "update"
+      ],
+      "examples": [
+        {
+          "en": "Turn these meeting notes into a task list for the week.",
+          "zh-Hans": "把这些会议记录整理成本周的待办清单。",
+          "zh-Hant": "把這些會議紀錄整理成本週的待辦清單。",
+          "ja": "この議事録から今週のタスクリストを作ってください。",
+          "ko": "이 회의록을 바탕으로 이번 주 할 일 목록을 만들어 주세요."
+        }
+      ]
+    },
+    {
+      "id": "pixelfx",
+      "kind": "plugin",
+      "name": "PixelFX",
+      "publisher": "Patch",
+      "category": "graphics",
+      "icon": "pixels",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Choose from 244 pixel effects, change their palettes and export sprite sheets.",
+        "zh-Hans": "从 244 个像素特效中选取火焰、天气或魔法效果，调整配色并导出精灵图集。",
+        "zh-Hant": "從 244 個像素特效中挑選火焰、天氣或魔法效果，調整配色並匯出精靈圖集。",
+        "ja": "244 種類のピクセルエフェクトから選び、配色を変えてスプライトシートに書き出せます。",
+        "ko": "244가지 픽셀 효과에서 원하는 효과를 골라 색상을 바꾸고 스프라이트 시트로 내보냅니다."
+      },
+      "requirements": {
+        "en": "Rendering and exporting locally requires Node.js and the project’s npm dependencies.",
+        "zh-Hans": "本地渲染和导出需要 Node.js 及项目的 npm 依赖。",
+        "zh-Hant": "本機算繪與匯出需要 Node.js 及專案的 npm 相依套件。",
+        "ja": "ローカルでの描画と書き出しには Node.js とプロジェクトの npm 依存パッケージが必要です。",
+        "ko": "로컬 렌더링과 내보내기에는 Node.js와 프로젝트의 npm 의존성이 필요합니다."
+      },
+      "sourceUrl": "https://github.com/patch-gg/pixelfx",
+      "documentationUrl": "https://github.com/patch-gg/pixelfx#readme",
+      "previewUrl": "https://patch-gg.github.io/pixelfx/",
+      "marketplace": {
+        "source": "patch-gg/pixelfx",
+        "name": "pixelfx",
+        "plugin": "pixelfx"
+      },
+      "skills": [
+        "pixelfx"
+      ],
+      "examples": [
+        {
+          "en": "Make a blue torch flame loop and export it as a sprite sheet for Godot.",
+          "zh-Hans": "做一个蓝色火把的循环动画，导出 Godot 可用的精灵图集。",
+          "zh-Hant": "製作藍色火把的循環動畫，匯出成 Godot 可用的精靈圖集。",
+          "ja": "青い松明のループアニメーションを作り、Godot 用のスプライトシートに書き出してください。",
+          "ko": "파란 횃불의 반복 애니메이션을 만들어 Godot용 스프라이트 시트로 내보내 주세요."
+        }
+      ]
+    },
+    {
+      "id": "threejs-skills",
+      "kind": "plugin",
+      "name": "Three.js Skills",
+      "publisher": "emiliodominguez",
+      "category": "graphics",
+      "icon": "cube",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux",
+        "android",
+        "ios"
+      ],
+      "description": {
+        "en": "Build interactive 3D scenes with Three.js or React Three Fiber, from lighting and materials to glTF model optimization.",
+        "zh-Hans": "用 Three.js 或 React Three Fiber 搭建可交互的 3D 场景，调整灯光、材质并优化 glTF 模型。",
+        "zh-Hant": "使用 Three.js 或 React Three Fiber 建立互動式 3D 場景，調整燈光、材質並最佳化 glTF 模型。",
+        "ja": "Three.js や React Three Fiber でインタラクティブな 3D シーンを作り、照明や素材、glTF モデルを調整します。",
+        "ko": "Three.js 또는 React Three Fiber로 인터랙티브 3D 장면을 만들고 조명, 재질과 glTF 모델을 최적화합니다."
+      },
+      "sourceUrl": "https://github.com/emiliodominguez/threejs-skills",
+      "documentationUrl": "https://github.com/emiliodominguez/threejs-skills#readme",
+      "marketplace": {
+        "source": "emiliodominguez/threejs-skills",
+        "name": "threejs-skills",
+        "plugin": "threejs-skills"
+      },
+      "skills": [
+        "threejs",
+        "threejs-fundamentals",
+        "threejs-geometry",
+        "threejs-materials",
+        "threejs-lighting",
+        "threejs-textures",
+        "threejs-shaders",
+        "threejs-animation",
+        "threejs-interaction",
+        "threejs-loaders",
+        "threejs-model-inspect",
+        "threejs-model-fix",
+        "threejs-model-optimize",
+        "threejs-model-animate",
+        "threejs-model-customize",
+        "threejs-model-generate",
+        "threejs-asset-pipeline",
+        "threejs-assets",
+        "threejs-performance",
+        "threejs-postprocessing",
+        "threejs-react-three-fiber",
+        "threejs-physics",
+        "threejs-scroll",
+        "threejs-scene-doctor",
+        "threejs-splats",
+        "threejs-upgrade",
+        "threejs-webxr",
+        "web3d-model-viewer"
+      ],
+      "examples": [
+        {
+          "en": "Load this glTF model and let me rotate it with touch or a mouse.",
+          "zh-Hans": "加载这个 glTF 模型，让我能用触摸或鼠标旋转查看。",
+          "zh-Hant": "載入這個 glTF 模型，讓我能用觸控或滑鼠旋轉檢視。",
+          "ja": "この glTF モデルを読み込み、タッチやマウス操作で回転できるようにしてください。",
+          "ko": "이 glTF 모델을 불러와 터치나 마우스로 돌려볼 수 있게 해 주세요."
+        }
+      ]
+    },
+    {
+      "id": "threejs-mcp",
+      "kind": "mcp",
+      "name": "Three.js MCP",
+      "publisher": "Model Context Protocol",
+      "category": "graphics",
+      "icon": "cube",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "version": "2.0.4",
+      "description": {
+        "en": "Look up Three.js APIs and examples. MCP Apps hosts can also display interactive scenes.",
+        "zh-Hans": "查询 Three.js API 和代码示例。在支持 MCP Apps 的客户端还可预览可交互的场景。",
+        "zh-Hant": "查詢 Three.js API 與程式碼範例。在支援 MCP Apps 的用戶端還可預覽互動場景。",
+        "ja": "Three.js の API とコード例を参照します。MCP Apps 対応クライアントではシーンのプレビューも表示できます。",
+        "ko": "Three.js API와 코드 예제를 조회합니다. MCP Apps를 지원하는 클라이언트에서는 장면 미리보기도 가능합니다."
+      },
+      "requirements": {
+        "en": "Requires Node.js 20 or later and npm on the desktop host. Interactive previews require MCP Apps support.",
+        "zh-Hans": "桌面主机需要 Node.js 20 或更高版本及 npm。交互预览需要客户端支持 MCP Apps。",
+        "zh-Hant": "桌面主機需要 Node.js 20 或更新版本及 npm。互動預覽需要用戶端支援 MCP Apps。",
+        "ja": "デスクトップに Node.js 20 以降と npm が必要です。対話型プレビューには MCP Apps 対応が必要です。",
+        "ko": "데스크톱에 Node.js 20 이상과 npm이 필요합니다. 인터랙티브 미리보기에는 MCP Apps 지원이 필요합니다."
+      },
+      "sourceUrl": "https://github.com/modelcontextprotocol/ext-apps/tree/main/examples/threejs-server",
+      "documentationUrl": "https://github.com/modelcontextprotocol/ext-apps/tree/main/examples/threejs-server#readme",
+      "mcp": {
+        "name": "threejs",
+        "config": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "@modelcontextprotocol/server-threejs@2.0.4",
+            "--stdio"
+          ]
+        }
+      },
+      "examples": [
+        {
+          "en": "Show me a Three.js example with a rotating object and orbit controls.",
+          "zh-Hans": "给我一个包含旋转物体和轨道控制器的 Three.js 示例。",
+          "zh-Hant": "給我一個包含旋轉物件和軌道控制器的 Three.js 範例。",
+          "ja": "回転するオブジェクトと OrbitControls を使う Three.js の例を示してください。",
+          "ko": "회전하는 오브젝트와 궤도 컨트롤을 사용하는 Three.js 예제를 보여 주세요."
         }
       ]
     }

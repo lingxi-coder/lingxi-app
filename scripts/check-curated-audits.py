@@ -29,8 +29,7 @@ SNAPSHOT_HASHES = {
 KNOWN_GIT_FORKS = {
     "askama_derive", "askama_parser", "git2", "libgit2-sys", "libssh2-sys",
     "icu_collator", "lingxi-hyper", "lingxi-hyper-rustls", "lingxi-hyper-util",
-    "lingxi-reqwest", "mbedtls-sys", "nix", "platform-pty", "syntect",
-    "webrtc", "xcap",
+    "lingxi-reqwest", "mbedtls-sys", "platform-pty", "syntect", "xcap",
 }
 RECORD_COUNTS = {"embark-studios.toml": 3, "isrg.toml": 6, "zcash.toml": 4}
 CURATED_IMPORTS = {
@@ -214,15 +213,8 @@ def validate_lock(root: Path, snapshots: dict[str, Counter], policies: dict) -> 
         require(isinstance(source, str), f"{name}: invalid Cargo.lock source")
         if not source.startswith("git+"):
             continue
-        policy_key = name
-        if name == "nix":
-            version = package.get("version")
-            _repository, separator, revision = source.rpartition("#")
-            require(isinstance(version, str) and bool(version), "nix: missing locked version")
-            require(separator == "#" and re.fullmatch(r"[0-9a-f]{40}", revision) is not None, "nix: expected a full Git commit in Cargo.lock")
-            policy_key = f"nix:{version}@git:{revision}"
-        policy = policies.get(policy_key, {})
-        require(policy.get("audit-as-crates-io") is True, f"{name}: missing audit-as-crates-io policy {policy_key}")
+        policy = policies.get(name, {})
+        require(policy.get("audit-as-crates-io") is True, f"{name}: missing audit-as-crates-io policy {name}")
     for alias, name in CURATED_IMPORTS.items():
         peer = name.removesuffix(".toml")
         section = peers.get(alias, {})

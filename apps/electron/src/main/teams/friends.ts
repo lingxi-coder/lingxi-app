@@ -1,9 +1,9 @@
 import { EventEmitter } from 'node:events';
 import { firestoreBlock, firestoreFriendCard, firestoreFriendName, firestoreTeamOffer } from '../../../../../packages/teams/firestore';
-import { friendsTransport, type BlockEntry, type FriendCard, type FriendProfile, type FriendsCommand, type FriendsResult, type TeamOffer } from '../../../../../packages/teams/friends';
+import { FriendApiError, friendsTransport, type BlockEntry, type FriendCard, type FriendProfile, type FriendsCommand, type FriendsResult, type TeamOffer } from '../../../../../packages/teams/friends';
 import type { Account, TeamsService } from './service.js';
 
-const ACTIONS = new Set(['profile', 'lookup', 'request', 'redeem', 'accept', 'decline', 'cancel', 'remove', 'block', 'unblock', 'rotateCode', 'revokeCode',
+const ACTIONS = new Set(['profile', 'lookup', 'searchHandles', 'request', 'redeem', 'accept', 'decline', 'cancel', 'remove', 'block', 'unblock', 'rotateCode', 'revokeCode',
   'offerTeam', 'acceptOffer', 'declineOffer']);
 /** The three collections the renderer may watch: `users/{uid}/friends`, `users/{uid}/blocks` and `users/{uid}/teamOffers`. */
 export type FriendsCollection = 'friends' | 'blocks' | 'teamOffers';
@@ -18,6 +18,7 @@ export class FriendsService {
   private uid?: string;
   private authenticationEpoch: number;
   private epoch = 0;
+  private handleSearchRetryUntil = 0;
   private readonly leases = new Map<string, { uid: string; collection: FriendsCollection }>();
   private readonly stops = new Map<string, () => void>();
   private readonly stopAccount: () => void;
@@ -33,9 +34,23 @@ export class FriendsService {
 
   profile(expectedUid: string): Promise<FriendProfile> { return this.request(expectedUid, '/profile'); }
 
-  async execute<C extends FriendsCommand>(expectedUid: string, command: C): Promise<FriendsResult<C>> {
+  async execute<C extends FriendsCommand>(expectedUid: string, command: C, signal?: AbortSignal): Promise<FriendsResult<C>> {
     if (!command || typeof command !== 'object' || !ACTIONS.has(command.action)) throw new Error('INVALID_INPUT');
-    return this.request(expectedUid, '', command);
+    if (command.action !== 'searchHandles') return this.request(expectedUid, '', command, signal);
+    const epoch = this.begin(expectedUid);
+    signal?.throwIfAborted();
+    const wait = this.handleSearchRetryUntil - Date.now();
+    if (wait > 0) throw new FriendApiError('RATE_LIMITED', 429, wait);
+    try {
+      return await this.request(expectedUid, '', command, signal);
+    } catch (error) {
+      this.assert(expectedUid, epoch);
+      if (error instanceof FriendApiError && error.code === 'RATE_LIMITED') {
+        const retry = Math.max(1, Math.min(60_000, error.retryAfterMs ?? 60_000));
+        this.handleSearchRetryUntil = Math.max(this.handleSearchRetryUntil, Date.now() + retry);
+      }
+      throw error;
+    }
   }
 
   /** D10: a friend's `profiles/{uid}`, read once; `null` when it cannot be read. */
@@ -102,6 +117,7 @@ export class FriendsService {
   /** D19: another account (or none) ends every watch, and each renderer is told so it can drop what it holds. */
   private reset(): void {
     this.epoch++;
+    this.handleSearchRetryUntil = 0;
     const ended = [...this.leases.keys()];
     for (const leaseId of ended) this.release(leaseId);
     for (const leaseId of ended) this.events.emit('failed', { leaseId, code: 'INVALID_SESSION' });
@@ -125,7 +141,7 @@ export class FriendsService {
   }
 
   /** A call whose token and answer both belong to the account it was made for. */
-  private async request<T>(expectedUid: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(expectedUid: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const epoch = this.begin(expectedUid);
     const transport = friendsTransport(this.base, async () => {
       this.assert(expectedUid, epoch);
@@ -133,7 +149,7 @@ export class FriendsService {
       this.assert(expectedUid, epoch);
       return token;
     });
-    const result = await transport<T>(path, body);
+    const result = await transport<T>(path, body, signal);
     this.assert(expectedUid, epoch);
     return result;
   }

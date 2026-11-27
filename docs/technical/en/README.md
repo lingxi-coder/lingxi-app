@@ -40,6 +40,8 @@ Bilingual system and SDK documentation for the current working tree. Generated f
 
 - [Teams, chats and messages](teams.md) — Create a team, start a conversation, send a message or work with a shared Bot.
 - [Personal and shared Bots](bots.md) — Create a persistent assistant, choose who can use it and check a missing reply.
+- [Friends](friends.md) — Add a friend, chat one-to-one, share a Bot with a friend or invite a friend to a team.
+- [Datasets](datasets.md) — Create a Dataset, share it into a conversation with fixed, latest or editable access, connect a data source and bind data to apps, pages, Bots and tasks.
 - [Publish and share Local Apps](local-apps.md) — Release to your Apps library, share an installable copy or use your running desktop app from a paired device.
 - [Models](models.md) — Pick a model for this session. LingXi keeps the choice in your config directory.
 - [Remote control](remote-control.md) — Open a session on your own computer from a signed-in browser. The computer has to approve the browser first.

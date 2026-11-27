@@ -185,7 +185,7 @@ export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: Pa
         </Row>
       </Card>
 
-      <Card title={tr('desktop_settings_459132b9d0')}>
+      {!bridge.settingsOnly && <Card title={tr('desktop_settings_459132b9d0')}>
         <Row title={tr('desktop_settings_945680cc85')} desc={tr('desktop_settings_3e7e38b36d')} align="center">
           <button type="button" onClick={() => void bridge.refreshAgents()} style={ghostButtonStyle(t)}>{tr('settings_linux_refresh_button')}</button>
         </Row>
@@ -202,7 +202,7 @@ export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: Pa
             {null}
           </Row>
         ))}
-      </Card>
+      </Card>}
 
       {saveError && <div role="alert" style={{ color: t.danger, fontSize: 12.5 }}>{saveError}</div>}
     </>

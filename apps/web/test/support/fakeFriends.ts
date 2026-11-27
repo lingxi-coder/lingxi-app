@@ -51,10 +51,10 @@ export class FakeFriends {
       if (this.profileError) throw new TeamsApiError(this.profileError, 503);
       return structuredClone(this.profile);
     },
-    execute: async <C extends FriendsCommand>(command: C): Promise<FriendsResult<C>> => {
+    execute: async <C extends FriendsCommand>(command: C, signal?: AbortSignal): Promise<FriendsResult<C>> => {
       this.commands.push(structuredClone(command));
       const reply = this.replies.get(command.action);
-      const value = typeof reply === 'function' ? reply(command) : reply;
+      const value = typeof reply === 'function' ? reply(command, signal) : reply;
       if (value instanceof Error) throw value;
       return (value ?? this.defaultReply(command)) as FriendsResult<C>;
     },
@@ -72,6 +72,7 @@ export class FakeFriends {
   }
   private defaultReply(command: FriendsCommand): unknown {
     switch (command.action) {
+      case 'searchHandles': return { results: [] };
       case 'request': return { uid: 'via' in command && command.via === 'team' ? command.uid : 'other', state: 'outgoing' };
       case 'redeem': return { state: 'friends', uid: 'other', teamId: pairTeamId('other') };
       case 'accept': return { state: 'friends', teamId: pairTeamId(command.otherUid) };
@@ -84,6 +85,9 @@ export class FakeFriends {
   }
   lookup(result: Partial<LookupResult> & { uid: string }): void {
     this.replies.set('lookup', { displayName: NAME(result.uid), relation: 'none', ...result });
+  }
+  searchHandles(...results: (Partial<LookupResult> & { uid: string; handle: string })[]): void {
+    this.replies.set('searchHandles', { results: results.map(result => ({ displayName: NAME(result.uid), relation: 'none', ...result })) });
   }
   /** Failing with a code, the way a rejected request does. */
   fail(action: string, code: string, status = 409): void { this.replies.set(action, new TeamsApiError(code, status)); }

@@ -13,6 +13,9 @@ import type { TeamsFirestoreSession, TeamsFirestoreOptions } from './firestore.j
 import type { TeamDataProof, TeamDatasetOffer } from './process.js';
 import type { DatasetBotScope } from '../../../../../packages/teams/dataset-run.js';
 import type { DatasetTaskProgram } from './datasetTasks.js';
+import { parseVisualizationArtifact } from '../../../../../packages/teams/visualization.js';
+import { uploadVisualizationParts, type VisualizationUpload } from '../../../../../packages/teams/visualization-transfer.js';
+import type { OpenBotVisualization } from './privateStore.js';
 
 export interface Account {
   snapshot(): { user: { uid: string } | null };
@@ -183,6 +186,7 @@ export class TeamsService {
     return result;
   }
   async datasets<T>(expectedUid: string, request: Record<string, unknown>): Promise<T> {
+    if (request.action === 'teamVisualization') return this.checked<T>(expectedUid, '/visualizations', request.request);
     return request.action === 'page' ? this.checked<T>(expectedUid, '/dataset-pages', request.request) : this.checked<T>(expectedUid, '/datasets', request);
   }
   async data<T>(input: DataRequest, expectedUid: string): Promise<T> {
@@ -344,7 +348,7 @@ export class TeamsService {
     return result;
   }
 
-  async hostMessages<T>(context: TeamAccountContext, command: Record<string, unknown>): Promise<T> {
+  async hostMessages<T>(context: TeamAccountContext, command: Record<string, unknown>, openVisualization?: OpenBotVisualization): Promise<T> {
     this.assertHostContext(context);
     if (command.schemaVersion !== 1 || ![
       'listSharedBots', 'publishSharedBot', 'heartbeatDeployment', 'activateDeployment', 'listHostTasks',
@@ -370,6 +374,36 @@ export class TeamsService {
     // still hand the permit to the connector, which saves it under the sending account and ends the task. Every other answer is discarded once the account moved on.
     // The context was asserted just above with no await since, so the request is sent under it.
     if (command.action === 'startTask' || command.action === 'continueTask') return this.request<T>('/messages', command, true);
+    if (command.action === 'completeTask' && command.payload && typeof command.payload === 'object' && 'visualization' in command.payload) {
+      const { visualization, ...payload } = command.payload;
+      const artifact = typeof (payload as Record<string, unknown>).taskId === 'string'
+        ? parseVisualizationArtifact(visualization, (payload as { taskId: string }).taskId) : undefined;
+      const completion = { ...command, payload };
+      const file = artifact && await openVisualization?.(artifact).catch(() => undefined);
+      const call = <V>(path: string, body: Record<string, unknown>) => {
+        this.assertHostContext(context);
+        return this.checked<V>(context.uid, path, body);
+      };
+      if (!artifact || !file) return call<T>('/messages', completion);
+      try {
+        const { bindings } = artifact.parts[0].data;
+        const parts = [{ mediaType: 'application/json', data: { version: 2, package: file.transfer.package, bindings } }];
+        const body = { action: 'completeBot', completion, artifact: { artifactId: artifact.artifactId, name: artifact.name, parts } };
+        const response = await call<VisualizationUpload | { status: 'completed'; result: T }>('/visualizations', { ...body, stage: 'prepare' });
+        if (response.status === 'completed') return response.result;
+        const { teamId, conversationId, generation } = response;
+        try {
+          await uploadVisualizationParts(<V>(part: Record<string, unknown>) =>
+            call<V>('/visualizations', { ...part, teamId, conversationId, generation }), file.transfer, response);
+        } catch (error) {
+          // The commit path can settle this task as text if the channel limit was lowered.
+          if (!(error instanceof TeamsApiError) || error.code !== 'VISUALIZATION_TOO_LARGE') throw error;
+        }
+        const finished = await call<{ status: 'completed'; result: T }>('/visualizations', { ...body, stage: 'commit' });
+        if (finished.status !== 'completed') throw new Error('INVALID_DATA');
+        return finished.result;
+      } finally { await file.close(); }
+    }
     const result = await this.checked<T>(context.uid, '/messages', command); this.assertHostContext(context); return result;
   }
   /** UI and every Bot read through the same UID/project message service and SDK cache. */

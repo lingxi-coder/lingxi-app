@@ -13,6 +13,11 @@ interface StoredSpaces {
   sessions: OwnedConversation[];
 }
 
+interface ConversationRegistry {
+  value: StoredSpaces;
+  ownersById: ReadonlyMap<string, OwnedConversation>;
+}
+
 const mode = (value: unknown): value is ConversationSpace => value === 'chat' || value === 'code';
 const path = (value: unknown): value is string => typeof value === 'string' && value.length > 0
   && value.length <= 32_768 && !value.includes('\0') && isAbsolute(value);
@@ -45,7 +50,7 @@ function empty(): StoredSpaces {
     navigation: { chat: { projectId: null }, code: { projectId: null } } };
 }
 
-function decode(value: unknown): StoredSpaces {
+function decode(value: unknown): ConversationRegistry {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid conversation spaces.');
   const input = value as Record<string, unknown>;
   const keys = new Set(['version', 'activeMode', 'projects', 'trustedWorkspaces', 'sessions', 'navigation']);
@@ -62,8 +67,13 @@ function decode(value: unknown): StoredSpaces {
   }
   if (input.trustedWorkspaces.some((workspace) => !path(workspace))
     || new Set(input.trustedWorkspaces).size !== input.trustedWorkspaces.length) throw new Error('Invalid trusted workspaces.');
-  const sessions = input.sessions.map(owner);
-  if (new Set(sessions.map((entry) => entry.sessionId)).size !== sessions.length) {
+  const ownersById = new Map<string, OwnedConversation>();
+  const sessions = input.sessions.map(row => {
+    const entry = owner(row);
+    ownersById.set(entry.sessionId, entry);
+    return entry;
+  });
+  if (ownersById.size !== sessions.length) {
     throw new Error('Duplicate conversation owner.');
   }
   const navigation = {} as Record<ConversationSpace, SpaceNavigation>;
@@ -73,22 +83,33 @@ function decode(value: unknown): StoredSpaces {
     const row = raw as Record<string, unknown>;
     if (!(row.projectId === null || path(row.projectId))) throw new Error('Invalid conversation navigation.');
     const session = row.session === undefined ? undefined : owner(row.session);
+    const registered = session && ownersById.get(session.sessionId);
     if (session && (session.mode !== space || session.projectId !== row.projectId
-      || !sessions.some((candidate) => same(candidate, session) && candidate.mode === session.mode && candidate.projectId === session.projectId))) {
+      || !registered || registered.projectPath !== session.projectPath || registered.mode !== space || registered.projectId !== session.projectId)) {
       throw new Error('Conversation navigation does not match its owner.');
     }
     navigation[space] = { projectId: row.projectId, ...(session ? { session } : {}) };
   }
-  return { version: 2, activeMode: input.activeMode, projects,
-    trustedWorkspaces: input.trustedWorkspaces as string[], navigation, sessions };
+  return {
+    value: { version: 2, activeMode: input.activeMode, projects,
+      trustedWorkspaces: input.trustedWorkspaces as string[], navigation, sessions },
+    ownersById,
+  };
 }
 
 /** Device-local project visibility and immutable logical conversation ownership. */
 export class ConversationSpaceStore {
   readonly globalWorkspaces: Readonly<Record<ConversationSpace, string>>;
   private readonly file: string;
-  private value: StoredSpaces;
+  private registry: ConversationRegistry;
   private pending: Promise<void> = Promise.resolve();
+
+  private get value(): StoredSpaces { return this.registry.value; }
+  get activeMode(): ConversationSpace { return this.value.activeMode; }
+  get activeSession(): OwnedConversation | undefined {
+    const session = this.value.navigation[this.activeMode].session;
+    return session && structuredClone(session);
+  }
 
   constructor(userData: string, workspaceRoot = join(userData, 'workspaces')) {
     this.file = join(userData, 'conversation-spaces.v2.json');
@@ -104,10 +125,10 @@ export class ConversationSpaceStore {
       return realpathSync.native(directory);
     };
     this.globalWorkspaces = { chat: workspace('chat'), code: workspace('code') };
-    try { this.value = decode(JSON.parse(readFileSync(this.file, 'utf8'))); }
+    try { this.registry = decode(JSON.parse(readFileSync(this.file, 'utf8'))); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      this.value = empty();
+      this.registry = { value: empty(), ownersById: new Map() };
     }
   }
 
@@ -149,8 +170,8 @@ export class ConversationSpaceStore {
     const next = structuredClone(this.value);
     change(next);
     const checked = decode(next);
-    await this.write(checked);
-    this.value = checked;
+    await this.write(checked.value);
+    this.registry = checked;
   }
 
   addProject(project: string, space: ConversationSpace): Promise<void> {
@@ -185,12 +206,12 @@ export class ConversationSpaceStore {
   }
 
   find(ref: Pick<OwnedConversation, 'projectPath' | 'sessionId'>): OwnedConversation | undefined {
-    const match = this.value.sessions.find((entry) => same(entry, ref));
-    return match ? structuredClone(match) : undefined;
+    const match = this.registry.ownersById.get(ref.sessionId.toLowerCase());
+    return match && match.projectPath === ref.projectPath ? structuredClone(match) : undefined;
   }
 
   findBySessionId(sessionId: string): OwnedConversation | undefined {
-    const match = this.value.sessions.find((entry) => entry.sessionId === sessionId.toLowerCase());
+    const match = this.registry.ownersById.get(sessionId.toLowerCase());
     return match ? structuredClone(match) : undefined;
   }
 
@@ -243,8 +264,8 @@ export class ConversationSpaceStore {
         && navigation.projectId === existing.projectId && navigation.session && same(navigation.session, moved)) {
         return authorize(() => commit(moved));
       }
-      const previous = this.value;
-      const next = structuredClone(previous);
+      const previous = this.registry;
+      const next = structuredClone(previous.value);
       next.sessions = next.sessions.map((entry) => same(entry, existing) ? moved : entry);
       next.activeMode = moved.mode;
       for (const space of ['chat', 'code'] as const) {
@@ -252,7 +273,7 @@ export class ConversationSpaceStore {
       }
       next.navigation[moved.mode] = { projectId: moved.projectId, session: moved };
       const checked = decode(next);
-      const temporary = await this.stage(checked);
+      const temporary = await this.stage(checked.value);
       const backup = `${this.file}.rollback`;
       let hadFile = true, preserveBackup = false;
       try {
@@ -262,13 +283,13 @@ export class ConversationSpaceStore {
           // This short publication stays synchronous so authority cannot be
           // revoked between its final check, ownership and runtime activation.
           renameSync(temporary, this.file);
-          this.value = checked;
+          this.registry = checked;
           try { return commit(structuredClone(moved)); }
           catch (error) {
             try {
               if (hadFile) renameSync(backup, this.file);
               else unlinkSync(this.file);
-              this.value = previous;
+              this.registry = previous;
             } catch (rollbackError) {
               preserveBackup = true;
               throw new AggregateError([error, rollbackError], 'Conversation selection failed and its previous registry could not be restored.');

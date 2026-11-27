@@ -261,6 +261,26 @@ test('sidebar renders global pins before projects and limits each project sessio
   assert.match(markup, /disabled/); // project actions remain independently guarded by project activity
 });
 
+test('Datasets sits directly below Apps and has its own current-page mark', () => {
+  const markup = renderToStaticMarkup(React.createElement(
+    Theme.Provider,
+    { value: tokens(true) },
+    React.createElement(BetaSidebar, {
+      bridge: bridgeFixture() as any,
+      onOpenSettings() {},
+      sidebarMode: 'apps',
+      datasets: true,
+      onOpenDatasets() {},
+    }),
+  ));
+  const rail = markup.slice(markup.indexOf('aria-label="Main navigation"'), markup.indexOf('</nav>'));
+  const buttons = [...rail.slice(0, rail.indexOf('desktop-rail-divider')).matchAll(/<button[^>]*>/g)].map(match => match[0]);
+  const [apps, datasets] = buttons.slice(-2);
+  assert.match(apps, /aria-label="Apps"/);
+  assert.doesNotMatch(apps, /aria-current/);
+  assert.match(datasets, /aria-current="page" aria-label="Datasets"/);
+});
+
 test('sidebar exposes a bounded drag handle for resizing', () => {
   assert.equal(clampSidebarWidth(SIDEBAR_MIN_WIDTH - 40), SIDEBAR_MIN_WIDTH);
   assert.equal(clampSidebarWidth(318), 318);

@@ -19,6 +19,7 @@ import { TeamPrivateStore, digest, validateTeamModelRoute, type AppCallOutcome, 
 import { runTeamHost, runResult, LOCAL_APPS_OFFERED, DELEGATES_OFFERED, DELEGATION_REQUEST_BYTES, OPERATION_BYTES, TeamHostFailure, type TeamHostProcessOptions, type TeamHostResult, type TeamRunResult, type TeamTaskCheckpoint, type TeamTaskWait, type TeamContinuation, type BotChatScope, type TeamOperation, type TeamOperationOutcome } from './process.js';
 import type { TeamDataProof, TeamDatasetOffer } from './process.js';
 import type { LocalTeamHost, TeamAccountContext } from './service.js';
+import type { OpenBotVisualization } from './privateStore.js';
 import type { PrivatePreviewLease, PrivatePreviewPage, PrivatePreviewProof } from './dataPreview.js';
 import { bidOf, cooldownUnseen, triageReply, type ReplyDecision } from './replyTriage.js';
 
@@ -30,7 +31,7 @@ export interface TeamHostApi {
   hostDataOffers?(context: TeamAccountContext, proof: TeamDataProof): Promise<TeamDatasetOffer[]>;
   hostDataOperation?(context: TeamAccountContext, proof: TeamDataProof, accessVersion: number,
     operation: Record<string, unknown>, stepId?: string): Promise<Record<string, unknown>>;
-  hostMessages<T>(context: TeamAccountContext, command: Record<string, unknown>): Promise<T>;
+  hostMessages<T>(context: TeamAccountContext, command: Record<string, unknown>, openVisualization?: OpenBotVisualization): Promise<T>;
   hostReadChat(context: TeamAccountContext, request: ChatReadRequest): Promise<ChatReadResult>;
   list(uid: string): Promise<{ teams: TeamSummary[] }>;
   onChanged(callback: (event: { invalidated?: boolean }) => void): () => void;
@@ -85,6 +86,7 @@ interface HostTask extends TeamTaskView { messageId: string; messageSeq: number;
 interface TaskContext { privateDataSource?: string; sourceLastChangeSeq?: number; task: HostTask & { epoch?: number }; physicalDispatchesSpent?: number; messageId: string; messageSeq: number; inputs: Array<{ grantId: string; resourceId: string; digest: string }>;
   /** `prepareTask` only: what kind of Chat the task is in. */ conversationKind?: string;
   /** `prepareTask` only: the names of the other Bots the same message asked. Information for the run, never an instruction. */ coMentioned?: string[];
+  visualizations?: true;
   deployment: { deploymentId: string; definitionDigest: string; accountEpoch: number; capabilities?: { durableWait?: boolean } };
   /** Present when the Bot has a shared list and this deployment records its writes. */ sharedList?: SharedListOffer;
   /** The other Bots of the Chat the run may hand part of the request to, as the service offers them for this attempt. */ delegates?: unknown;
@@ -363,7 +365,9 @@ export class TeamConnector implements LocalTeamHost {
     const revision = this.revision;
     // A Bot offered as a hosted service is published in the service's own scope: the same commands, named with `serviceId`. `binding.teamId` is then the service's id.
     const scope = isServiceId(binding.teamId) ? { serviceId: binding.teamId } : { teamId: binding.teamId };
-    try { return await this.options.service.hostMessages<T>(c, { schemaVersion: 1, commandId, ...scope, generation: binding.generation, action, payload }); }
+    const openVisualization = action === 'completeTask' && payload.visualization
+      ? (artifact: Parameters<OpenBotVisualization>[0]) => this.options.privateStore.openBotVisualization(c.uid, artifact) : undefined;
+    try { return await this.options.service.hostMessages<T>(c, { schemaVersion: 1, commandId, ...scope, generation: binding.generation, action, payload }, openVisualization); }
     catch (error) {
       // Only a friendship's team: an ordinary team the person left is skipped by the `list()` check in `discover()`. A reset since the call began owns the set.
       if (revision === this.revision && binding.teamId.startsWith(PAIR_PREFIX) && error instanceof TeamsApiError && error.status === 403 && error.code === 'MEMBERSHIP_REQUIRED') this.ended.add(binding.teamId);
@@ -1079,7 +1083,13 @@ export class TeamConnector implements LocalTeamHost {
     // Only the host that asked holds the session and the wait. Without them the task is left to expire.
     if (!record?.wait || record.wait.waitId !== resume.waitId) throw new Error('WAIT_STATE_MISSING');
     const environment = { paths: await this.options.privateStore.owner(c.uid), bins: this.options.binaries() }; assert();
-    const checkpoint = await this.checkpoint(record,snapshot,environment,assert);
+    const [inspection, answer] = await Promise.allSettled([
+      this.checkpoint(record,snapshot,environment,assert),
+      // A wait for another Bot is answered by the service's record, not by a message of the Chat: there is nothing to read.
+      'answerMessageId' in resume ? this.options.service.hostReadChat(c,{teamId:b.teamId,generation:b.generation,conversationId:task.conversationId,mode:'byId',messageId:resume.answerMessageId}) : undefined,
+    ]); assert();
+    if (inspection.status === 'rejected') throw inspection.reason;
+    const checkpoint = inspection.value;
     if (!checkpoint.continuable || checkpoint.wait?.waitId !== resume.waitId) throw new Error('NOT_CONTINUABLE');
     let answered: SavedExecution;
     if (checkpoint.wait.kind === 'delegation') {
@@ -1091,8 +1101,8 @@ export class TeamConnector implements LocalTeamHost {
       answered={...record,answered:{waitId:resume.waitId,...told}};
     } else {
       if (!('answerMessageId' in resume)) throw new Error('SOURCE_CHANGED');
-      const read = await this.options.service.hostReadChat(c,{teamId:b.teamId,generation:b.generation,conversationId:task.conversationId,mode:'byId',messageId:resume.answerMessageId}); assert();
-      const message = read.messages.find(candidate => candidate.messageId === resume.answerMessageId);
+      if (answer.status === 'rejected') throw answer.reason;
+      const message = answer.value?.messages.find(candidate => candidate.messageId === resume.answerMessageId);
       if (!message || message.seq !== resume.answerSeq || message.waitId !== resume.waitId || message.recalled || !message.text.trim() || Buffer.byteLength(message.text) > 8192) throw new Error('SOURCE_CHANGED');
       // An approval is continued only with a decision, a question only with an answer in words.
       const approval = checkpoint.wait.kind === 'tool_approval';
@@ -1105,10 +1115,19 @@ export class TeamConnector implements LocalTeamHost {
   /** One more attempt of a task this host already ran: after its worker was interrupted (`recovery`) or its question was answered (`answer`). The server grants each at most once. */
   private async resume(c: TeamAccountContext, b: SharedBotBinding, record: SavedExecution, snapshot: TeamPersonaSnapshot, checkpoint: TeamTaskCheckpoint, reason: 'answer' | 'recovery', environment: HostEnvironment, signal: AbortSignal) {
     const assert = () => { this.assert(c); signal.throwIfAborted(); };
-    const accounts = await this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles); assert(); if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
-    const payload = {...this.hostFields(b),taskId:record.taskId,expectedEpoch:record.epoch,checkpointDigest:checkpoint.checkpointDigest,reason,dispatchedRequests:Math.max(record.dispatched,checkpoint.dispatchesObserved)};
-    const context=await this.command<TaskContext>(c,b,reason==='answer'?'prepareTask':'validateTask',{...this.hostFields(b),taskId:record.taskId,
-      ...(reason==='recovery'?{permitId:record.payload.permitId,expectedLastChangeSeq:record.lastChangeSeq}:{})});assert();
+    assert();
+    const fields = {...this.hostFields(b),taskId:record.taskId};
+    const [accountRead, taskRead] = await Promise.allSettled([
+      this.options.modelAccounts(snapshot.credential_id,snapshot.model_provider,snapshot.provider_account_profiles),
+      this.command<TaskContext>(c,b,reason==='answer'?'prepareTask':'validateTask',{...fields,
+        ...(reason==='recovery'?{permitId:record.payload.permitId,expectedLastChangeSeq:record.lastChangeSeq}:{})}),
+    ]); assert();
+    if (accountRead.status === 'rejected') throw accountRead.reason;
+    const accounts = accountRead.value;
+    if (!accounts) throw new Error('TEAM_MODEL_UNAVAILABLE');
+    if (taskRead.status === 'rejected') throw taskRead.reason;
+    const context = taskRead.value;
+    const payload = {...fields,expectedEpoch:record.epoch,checkpointDigest:checkpoint.checkpointDigest,reason,dispatchedRequests:Math.max(record.dispatched,checkpoint.dispatchesObserved)};
     const pending=this.grantIntent(b,record,context,'continueTask',payload,checkpoint);
     if(!await this.options.privateStore.compareExecution(c.uid,record,pending))return;
     const next=await this.sendGrant(c,b,pending);if(!next){this.deferred.set(record.taskId,this.now()+(this.options.retryMs??5000));return;}
@@ -1119,13 +1138,22 @@ export class TeamConnector implements LocalTeamHost {
   }
   private async execute(c: TeamAccountContext, b: SharedBotBinding, task: HostTask, snapshot: TeamPersonaSnapshot, bot: { name: string; description: string }, earlier: number[], signal: AbortSignal) {
     const assert = () => { this.assert(c); signal.throwIfAborted(); };
-    const fields = {...this.hostFields(b),taskId:task.taskId}, environment = { paths: await this.options.privateStore.owner(c.uid), bins: this.options.binaries() }, { paths, bins } = environment; assert();
-    const prepared = await this.command<TaskContext>(c,b,'prepareTask',fields).catch(async error => {
+    assert();
+    const fields = {...this.hostFields(b),taskId:task.taskId};
+    const [owner, taskRead] = await Promise.allSettled([
+      this.options.privateStore.owner(c.uid).then(paths => ({ paths, bins: this.options.binaries() })),
+      this.command<TaskContext>(c,b,'prepareTask',fields),
+    ]); assert();
+    if (owner.status === 'rejected') throw owner.reason;
+    if (taskRead.status === 'rejected') {
       // An unasked task whose message was edited or recalled leaves the queue, so the earlier ones it would have superseded are judged themselves.
+      const error = taskRead.reason;
       if (task.optional !== true || !(error instanceof TeamsApiError && error.code === 'TASK_REVOKED')) throw error;
-      await this.decline(c,b,task.taskId,'revoked'); return undefined;
-    }); assert();
-    if (!prepared) return;
+      await this.decline(c,b,task.taskId,'revoked');
+      return;
+    }
+    const prepared = taskRead.value;
+    const environment = owner.value, { paths, bins } = environment;
     if (prepared.privateDataSource) return this.admitPrivatePreview(c,b,task,snapshot,prepared,environment,signal);
     const scope: BotChatScope = { teamId:b.teamId, sharedBotId:b.sharedBotId, conversationId:task.conversationId, sessionEpoch:b.sessionEpoch };
     const sourceScope = {teamId:b.teamId,generation:b.generation,conversationId:task.conversationId}, kind = prepared.conversationKind ?? 'group';
@@ -1188,6 +1216,8 @@ export class TeamConnector implements LocalTeamHost {
       ask:prepared.deployment?.capabilities?.durableWait === true && CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) && !unasked,
       ...(unasked ? { unasked: true } : {}), ...(mayDecline ? { mayDecline: true } : {}), ...(soft ? { addressed: true as const } : {}), ...(hold ? { hold: true as const } : {}),
       ...(together.length ? { coMentioned: together } : {}),
+      // A reply the maintainer approves first is text: the service takes a chart only with a reply that is posted at once (`completeTask`).
+      ...(!hold && prepared.visualizations === true && prepared.conversationKind === 'channel' ? { visualizations: true } : {}),
       ...(files.length ? { files: files.map(({ attachmentId, sha256 }) => ({ attachmentId, sha256 })) } : {}),
       ...(CONTINUABLE_PROTOCOLS.includes(snapshot.model_protocol) && runList(prepared.sharedList,unasked) ? { list: runList(prepared.sharedList,unasked)! } : {}),
       ...(delegates ? { delegates } : {}) };
@@ -1367,7 +1397,7 @@ export class TeamConnector implements LocalTeamHost {
               text: JSON.stringify({ resource, data: JSON.parse(content) }) })),
           ],deadlineAt:record.deadlineAt,
           model,credentials:providerAccountEnvelope(accounts,snapshot.provider_account_profiles),...(continuation ? { continuation } : {}),...(record.ask ? { askRequester: true } : {}),...(record.list ? { sharedList: record.list } : {}),...(record.delegates ? { delegates: record.delegates } : {}),...(record.mayDecline ? { mayDecline: true, ...(record.unasked !== true || record.addressed === true ? { addressed: true } : {}) } : {}),
-          ...(offers.length ? { sharedData: offers } : {}),
+          ...(offers.length ? { sharedData: offers } : {}), ...(record.visualizations ? { visualizations: true as const } : {}),
           ...(localApps.length ? { localApps } : {}),
           limits:{max_turns:20,context_window_tokens:2000000,output_tokens_per_request:4096,physical_dispatches:Math.max(1,DISPATCH_LIMIT-record.dispatched)}},
         operate:operation => {
@@ -1631,7 +1661,9 @@ export class TeamConnector implements LocalTeamHost {
     const payload = {...record.payload,outcome:declined?'declined':result.status==='completed'?'completed':'failed',text:record.privateData || declined ? '' : result.text || 'The assistant could not complete this request.',finishedAt:result.finishedAt,
       outputAudience:{mode:'published_inputs'},usage:totalUsage(record.usage,result.usage,record.recoveries>0),
       // A finished run was given these files as model input: the worker refuses a batch whose files it cannot show the model.
-      ...(!record.privateData && result.status==='completed' && record.files?.length ? { readFiles: record.files } : {}),...(!record.privateData && result.document && !declined ? {document:{title:result.document.title,body:result.document.markdown}} : {})};
+      ...(!record.privateData && result.status==='completed' && record.files?.length ? { readFiles: record.files } : {}),
+      ...(!record.privateData && record.visualizations && result.status === 'completed' && result.visualization ? { visualization: result.visualization } : {}),
+      ...(!record.privateData && result.document && !declined ? {document:{title:result.document.title,body:result.document.markdown}} : {})};
     // Only what would have been posted waits for the maintainer: a Bot that chose silence, a failure (the host's own included) and a task on private data have no reply to approve.
     const held = record.hold === true && !record.privateData && payload.outcome === 'completed';
     const delivery: SavedDelivery = {schemaVersion:1,teamId:record.teamId,generation:record.generation,taskId:record.taskId,deadlineAt:record.deadlineAt,commandId:record.commandId,

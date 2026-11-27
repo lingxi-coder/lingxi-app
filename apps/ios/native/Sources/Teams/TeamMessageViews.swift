@@ -262,6 +262,16 @@ struct TeamMessageCell: View {
             if !message.files.isEmpty {
                 GridRow { TeamMessageFilesView(message: message, context: context) }
             }
+            if !recalled, message.kind == "visualization", let visualization = message.visualization,
+               visualization.page?.id == message.id {
+                let channels = (context.model.cache?.conversations ?? []).filter {
+                    $0.kind == "channel" && $0.participants.contains("user:\(context.uid)")
+                }
+                GridRow {
+                    TeamVisualizationView(reference: visualization, conversation: context.conversation.id, model: context.model,
+                                          destinations: channels, person: context.userName)
+                }
+            }
             if !recalled, let reference = message.dataRef, reference.valid {
                 GridRow {
                     Button("teams_data_open") { openedData = reference }

@@ -35,6 +35,7 @@ struct FriendCard: Equatable, Identifiable, Sendable {
     let lastReadSeq: Int
     /// The Teams pointer to the newest message; `nil` = no message yet.
     let lastMessage: TeamLastMessage?
+    var version: String? = nil
 
     var id: String { uid }
     /// `max(0, lastSeq - lastReadSeq)`; `lastChangeSeq` is the backend's ordering token and never counts.
@@ -60,13 +61,13 @@ struct FriendCard: Equatable, Identifiable, Sendable {
         return FriendCard(
             uid: uid, state: state, displayName: data["displayName"] as? String ?? "", handle: nonEmpty(data["handle"]), note: nonEmpty(data["note"]),
             sinceMs: data["since"].flatMap(millis) ?? 0, teamId: teamId, generation: generation, lastSeq: lastSeq, lastReadSeq: lastReadSeq,
-            lastMessage: lastMessage)
+            lastMessage: lastMessage, version: nonEmpty(data["version"]))
     }
 
     func renamed(_ name: String, handle: String?) -> FriendCard {
         FriendCard(
             uid: uid, state: state, displayName: name, handle: handle, note: note, sinceMs: sinceMs, teamId: teamId, generation: generation,
-            lastSeq: lastSeq, lastReadSeq: lastReadSeq, lastMessage: lastMessage)
+            lastSeq: lastSeq, lastReadSeq: lastReadSeq, lastMessage: lastMessage, version: version)
     }
 }
 
@@ -95,6 +96,7 @@ struct TeamOffer: Equatable, Identifiable, Sendable {
     let fromName: String
     /// When the offer lapses, epoch milliseconds: strictly after now means live. The role is always `member`.
     let expiresAtMs: Int64
+    var version: String? = nil
 
     var id: String { teamId }
 
@@ -103,7 +105,7 @@ struct TeamOffer: Equatable, Identifiable, Sendable {
     static func parse(id: String, data: [String: Any], millis: (Any) -> Int64?) -> TeamOffer? {
         guard !id.isEmpty, data["teamId"] is String, let teamName = data["teamName"] as? String, let fromUid = data["fromUid"] as? String,
               let fromName = data["fromName"] as? String, let expiresAtMs = data["expiresAt"].flatMap(millis) else { return nil }
-        return TeamOffer(teamId: id, teamName: teamName, fromUid: fromUid, fromName: fromName, expiresAtMs: expiresAtMs)
+        return TeamOffer(teamId: id, teamName: teamName, fromUid: fromUid, fromName: fromName, expiresAtMs: expiresAtMs, version: nonEmpty(data["version"]))
     }
 }
 
@@ -119,12 +121,13 @@ struct FriendProfile: Decodable, Equatable, Sendable {
     let handle: String?
     let findByHandle: Bool
     let findByEmail: Bool
+    var findByHandlePart: Bool? = nil
     /// The one active friend link, `nil` when it is turned off.
     let friendCode: Code?
 
     /// The same profile with another friend link (`rotateCode` returned one, `revokeCode` removed it).
     func replacing(friendCode: Code?) -> FriendProfile {
-        FriendProfile(uid: uid, displayName: displayName, handle: handle, findByHandle: findByHandle, findByEmail: findByEmail, friendCode: friendCode)
+        FriendProfile(uid: uid, displayName: displayName, handle: handle, findByHandle: findByHandle, findByEmail: findByEmail, findByHandlePart: findByHandlePart, friendCode: friendCode)
     }
 }
 
@@ -134,6 +137,7 @@ struct FriendLookupResult: Decodable, Equatable, Sendable {
     let displayName: String
     let handle: String?
     let relation: FriendRelation
+    var version: String? = nil
 }
 
 /// What a command answers: `request` (`uid`, `state`, `teamId` once it was mutual), `accept` (`state`, `teamId`), `redeem`

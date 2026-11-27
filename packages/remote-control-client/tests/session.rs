@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use client::protocol::commands::ImageRefDto;
 use client::protocol::listings::SessionModeDto;
 use remote_control_client::messages::{
-    PermissionModeId, RemoteRecord, RemoteSeqRecord, SessionSnapshotParams,
+    PermissionModeId, RemoteRecord, RemoteSeqRecord, SessionPreviewParams, SessionSnapshotParams,
 };
 use remote_control_client::rpc::{RemoteErrorCode, RpcError};
 use remote_control_client::session::{
@@ -133,6 +133,57 @@ fn attach_snapshot(
         "session.attach" => Ok(json!({ "mode": "snapshot", "epoch": epoch })),
         _ => Ok(json!({})),
     }
+}
+
+#[tokio::test]
+async fn cold_preview_stays_read_only_until_the_authoritative_snapshot() {
+    struct DelayedAttach(Arc<tokio::sync::Notify>);
+
+    #[async_trait]
+    impl SessionIo for DelayedAttach {
+        async fn request(
+            &self,
+            method: &str,
+            params: Option<Value>,
+            _: Option<Duration>,
+        ) -> Result<Value, RpcError> {
+            if method == "session.attach" {
+                assert_eq!(params.unwrap()["preview"], json!(true));
+                self.0.notified().await;
+                return Ok(json!({ "mode": "snapshot", "epoch": "e1" }));
+            }
+            Ok(json!({}))
+        }
+        async fn notify(&self, _: &str, _: Option<Value>) {}
+        fn connected(&self) -> bool {
+            true
+        }
+    }
+
+    let ready = Arc::new(tokio::sync::Notify::new());
+    let controller = SessionController::new("s1", Arc::new(DelayedAttach(Arc::clone(&ready))));
+    controller.activate();
+    settle().await;
+    let preview: SessionPreviewParams = serde_json::from_value(json!({
+        "session_id": "s1", "session_mode": "code",
+        "messages": [{"role": "user", "blocks": [{"type": "text", "text": "Saved preview"}]}],
+    }))
+    .unwrap();
+    controller.handle_preview(preview.clone());
+    let state = controller.state();
+    assert_eq!(state.status, SessionStatus::Loading);
+    assert_eq!(state.preview, Some(preview));
+    assert!(state.session_mode.is_none());
+    assert!(state.messages.is_empty());
+    assert!(controller.send_prompt("too early", vec![]).await.is_err());
+    feed(&controller, full_snapshot("e1", 0, 2));
+    ready.notify_one();
+    settle().await;
+    let state = controller.state();
+    assert_eq!(state.status, SessionStatus::Live);
+    assert_eq!(state.session_mode, Some(SessionModeDto::Code));
+    assert!(state.preview.is_none());
+    assert_eq!(state.messages.len(), 2);
 }
 
 #[tokio::test]
@@ -1679,6 +1730,31 @@ async fn images_are_fetched_once_and_validated() {
         3,
         "a foreign session reference never reaches the host"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn thumbnail_and_original_are_requested_separately() {
+    use remote_control_client::messages::SessionImageSize;
+    const CHUNK: usize = 1024 * 1024;
+    let io = FakeIo::new(|method, params| {
+        assert_eq!(method, "image.get");
+        assert_eq!(params["ref"], "s1:m:0:0");
+        match (params["size"].as_str(), params["offset"].as_u64()) {
+            (Some("thumbnail"), None) => Ok(json!({ "media_type": "image/png", "base64": "AQID" })),
+            (Some("original"), None) => Ok(json!({ "media_type": "image/png", "base64": "A".repeat(CHUNK), "next_offset": CHUNK })),
+            (Some("original"), Some(offset)) if offset == CHUNK as u64 =>
+                Ok(json!({ "media_type": "image/png", "base64": "QUJD" })),
+            _ => panic!("unexpected image range"),
+        }
+    });
+    let controller = SessionController::new("s1", io.clone());
+    feed(&controller, full_snapshot("e1", 0, 2));
+    let reference = "s1:m:0:0";
+    let thumbnail = controller.fetch_image_with_size(reference, Some(SessionImageSize::Thumbnail)).await.unwrap();
+    assert_eq!(thumbnail, "data:image/png;base64,AQID");
+    let original = controller.fetch_image_with_size(reference, Some(SessionImageSize::Original)).await.unwrap();
+    assert_eq!(original, format!("data:image/png;base64,{}QUJD", "A".repeat(CHUNK)));
+    assert_eq!(io.calls("image.get").len(), 3);
 }
 
 #[tokio::test(start_paused = true)]

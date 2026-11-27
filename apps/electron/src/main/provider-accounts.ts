@@ -273,6 +273,12 @@ export class DesktopProviderAccounts {
   }
   async snapshot(): Promise<ProviderAccountSnapshot> {
     let snapshot = await this.options.registry({ action: 'list', expectedRevision: 0 });
+    // There are no credential references to check or reconcile in this
+    // revision. The registry has already projected the empty directory.
+    if (snapshot.accounts.length === 0) {
+      this.latestSnapshot = snapshot;
+      return snapshot;
+    }
     try {
       let present = new Set<string>();
       let pendingRefresh = new Set<string>();

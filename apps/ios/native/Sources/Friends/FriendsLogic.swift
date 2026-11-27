@@ -58,6 +58,7 @@ enum FriendsLogic {
     static let codeLength = 32
     /// The one conversation of a pair team.
     static let chatConversationID = "friend_chat"
+    static let legacyVersion = "legacy-v1"
     /// The name the backend gives a profile that has none; the Friends root asks for a better one (D3).
     static let placeholderName = "Member"
 
@@ -202,7 +203,11 @@ enum FriendsLogic {
     /// the `requestId` minted at that tap and the note (200 characters at most, none for a code).
     static func confirmBody(_ proof: FriendProof, lookup: FriendLookupResult, requestId: String, note: String) -> [String: String] {
         if case let .code(code) = proof { return ["action": "redeem", "code": code, "requestId": requestId] }
-        if lookup.relation == .incoming { return ["action": "accept", "otherUid": lookup.uid] }
+        if lookup.relation == .incoming {
+            var body = ["action": "accept", "otherUid": lookup.uid]
+            body["expectedVersion"] = lookup.version
+            return body
+        }
         var body = ["action": "request", "requestId": requestId]
         switch proof {
         case let .handle(handle): body["via"] = "handle"; body["handle"] = handle
@@ -262,6 +267,7 @@ enum FriendsLogic {
         case "RATE_LIMITED": "friends_error_rate_limited"
         case "FRIEND_LIMIT": "friends_error_friend_limit"
         case "REQUEST_LIMIT": "friends_error_request_limit"
+        case "RECIPIENT_REQUEST_LIMIT": "friends_error_recipient_request_limit"
         case "HANDLE_TAKEN": "friends_error_handle_taken"
         case "REQUEST_UNAVAILABLE": "friends_error_request_unavailable"
         case "STALE_REQUEST": "friends_error_stale_request"

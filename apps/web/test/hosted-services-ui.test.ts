@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { type TestContext } from 'node:test';
 import { createElement } from 'react';
+import type { HostedServicesProps } from '../../../packages/teams/HostedServices';
 import type { HostedServicesApi, PublishedService, ServiceCommand, ServiceMessage, ServiceView } from '../../../packages/teams/hosted-service';
 import { loadTeamsModule } from './support/loadTeamsModule';
 import { mount, scenario, textOf, withDom } from './support/workspacePage';
@@ -82,6 +83,12 @@ async function open(context: TestContext, f: ReturnType<typeof fake>, more: Reco
   return { page, field, tick };
 }
 const sentActions = (f: ReturnType<typeof fake>) => f.state.sent.filter(c => !['list', 'sync', 'history','listTasks'].includes(c.action)).map(c => c.action);
+function addSession(f: ReturnType<typeof fake>, id: string, text: string) {
+  const messageId = `message-${id}`;
+  f.state.sessions.push({ id, title: id });
+  f.state.messages.set(id, [{ id: messageId, seq: 1, changeSeq: 1, text, createdAt: '2026-11-13T00:00:00.000Z', author: { kind: 'user', uid } }]);
+  f.state.changes.set(id, [messageId]);
+}
 
 scenario('a link names a service; anything else is not looked up', async () => {
   assert.equal(serviceIdFrom(` https://lingxios.net/services/${serviceId} `), serviceId);
@@ -155,6 +162,203 @@ scenario('a service that cannot answer says why, and its sessions stay readable'
   const { page } = await open(context, f, { initialServiceId: serviceId });
   assert.match(page.text(), /The publisher’s computer is offline/u);
   assert.match(page.text(), /The service cannot answer right now\. You can still read your sessions\./u);
+});
+
+scenario('history appears before task and entitlement reads and a stalled sync does not delay proven actions', async context => {
+  const f = fake(); f.state.view = { ...f.state.view, entered: true, generation: 1 };
+  addSession(f, 'session-001', 'Existing authenticated history');
+  let releaseTasks!: () => void, releaseStatus!: () => void, releaseSync!: () => void;
+  const tasksPending = new Promise<void>(resolve => { releaseTasks = resolve; });
+  const statusPending = new Promise<void>(resolve => { releaseStatus = resolve; });
+  const syncPending = new Promise<void>(resolve => { releaseSync = resolve; });
+  context.after(() => { releaseTasks(); releaseStatus(); releaseSync(); });
+  const services = f.api.services, messages = f.api.serviceMessages;
+  let statusReads = 0;
+  f.api.services = async <T,>(command: ServiceCommand) => {
+    if (command.action === 'getService' && ++statusReads > 1) await statusPending;
+    return services<T>(command);
+  };
+  f.api.serviceMessages = async <T,>(command: Parameters<typeof messages>[0]) => {
+    if (command.action === 'listTasks') await tasksPending;
+    if (command.action === 'sync') await syncPending;
+    return messages<T>(command);
+  };
+  const { page } = await open(context, f, { initialServiceId: serviceId, initialSessionId: 'session-001', refreshMs: { answering: 60_000, idle: 60_000 } });
+  assert.match(page.text(), /Existing authenticated history/u);
+  await page.type(page.oneByLabel('Message'), 'Send after the checks');
+  assert.equal(page.oneByLabel('Send').props.disabled, true);
+  await page.submit(page.oneByClass('hosted-service-composer'));
+  assert.deepEqual(sentActions(f), []);
+  await page.during(releaseStatus);
+  assert.equal(page.oneByLabel('Send').props.disabled, true, 'the waiting task snapshot still determines how to send');
+  await page.during(releaseTasks);
+  assert.equal(page.oneByLabel('Send').props.disabled, false, 'the first authenticated history page establishes the exact session');
+  await page.submit(page.oneByClass('hosted-service-composer'));
+  assert.deepEqual(sentActions(f), ['submit']);
+});
+
+scenario('a discovered active task accelerates an already scheduled conversation sync', async context => {
+  const f = fake(); f.state.view = { ...f.state.view, entered: true, generation: 1 };
+  addSession(f, 'session-001', 'An earlier session');
+  const idle = 10_123, answering = 2_123;
+  const scheduled = new Map<ReturnType<typeof setTimeout>, { run: () => void; delay: number }>();
+  const setTimer = globalThis.setTimeout, clearTimer = globalThis.clearTimeout;
+  context.mock.method(globalThis, 'setTimeout', ((run: () => void, delay?: number) => {
+    if (delay !== idle && delay !== answering) return setTimer(run, delay);
+    const handle = setTimer(() => {}, 60_000);
+    scheduled.set(handle, { run, delay });
+    return handle;
+  }) as typeof setTimeout);
+  context.mock.method(globalThis, 'clearTimeout', (handle: ReturnType<typeof setTimeout>) => {
+    scheduled.delete(handle);
+    clearTimer(handle);
+  });
+  context.after(() => { for (const handle of scheduled.keys()) clearTimer(handle); });
+  const messages = f.api.serviceMessages;
+  let releaseTasks!: () => void;
+  const pending = new Promise<void>(resolve => { releaseTasks = resolve; });
+  context.after(releaseTasks);
+  f.api.serviceMessages = async <T,>(command: Parameters<typeof messages>[0]) => {
+    if (command.action === 'listTasks') await pending;
+    return messages<T>(command);
+  };
+  const { page } = await open(context, f, { initialServiceId: serviceId, initialSessionId: 'session-001', refreshMs: { idle, answering } });
+  assert.deepEqual([...scheduled.values()].map(timer => timer.delay), [idle, idle]);
+  f.state.tasks.push({ taskId: 'task-00001', conversationId: 'session-001', state: 'running', createdAt: 1 });
+  await page.during(releaseTasks);
+  assert.deepEqual([...scheduled.values()].map(timer => timer.delay), [answering, answering, answering]);
+  const syncs = () => f.state.sent.filter(command => command.action === 'sync').length;
+  const before = syncs();
+  await page.during(() => {
+    for (const [handle, timer] of [...scheduled]) {
+      scheduled.delete(handle);
+      clearTimer(handle);
+      timer.run();
+    }
+  });
+  assert.ok(syncs() > before);
+});
+
+scenario('explicit creation needs entitlement while implicit creation waits for the session list', async context => {
+  const f = fake(); f.state.view = { ...f.state.view, entered: true, generation: 1 };
+  addSession(f, 'session-001', 'An earlier session');
+  let release!: () => void;
+  const listPending = new Promise<void>(resolve => { release = resolve; });
+  context.after(release);
+  const messages = f.api.serviceMessages;
+  f.api.serviceMessages = async <T,>(command: Parameters<typeof messages>[0]) => {
+    const response = await messages<T>(command);
+    if (command.action === 'list') await listPending;
+    return response;
+  };
+  const { page } = await open(context, f, { initialServiceId: serviceId });
+  await page.type(page.oneByLabel('Message'), 'A draft');
+  assert.equal(page.oneByLabel('Send').props.disabled, true);
+  await page.submit(page.oneByClass('hosted-service-composer'));
+  assert.deepEqual(sentActions(f), []);
+  await page.click(page.oneByLabel('New session'));
+  const expected = f.state.sent.find(command => command.action === 'createConversation').payload.conversationId;
+  assert.equal(page.oneByLabel('Session').props.value, expected);
+  await page.during(release);
+  assert.equal(page.oneByLabel('Session').props.value, expected);
+  assert.equal(f.state.sent.filter(command => command.action === 'list').length, 1);
+});
+
+scenario('a transient status failure keeps history, and a stalled sync does not mask entitlement loss', async context => {
+  const f = fake(); f.state.view = { ...f.state.view, entered: true, generation: 1 };
+  addSession(f, 'session-001', 'Private session history');
+  const services = f.api.services, messages = f.api.serviceMessages;
+  let release!: () => void;
+  const syncPending = new Promise<void>(resolve => { release = resolve; });
+  context.after(release);
+  f.api.serviceMessages = async <T,>(command: Parameters<typeof messages>[0]) => {
+    if (command.action === 'sync') await syncPending;
+    return messages<T>(command);
+  };
+  let statusReads = 0, unavailable = true;
+  f.api.services = async <T,>(command: ServiceCommand) => {
+    if (command.action === 'getService' && ++statusReads > 1 && unavailable) throw new ApiError('NETWORK');
+    return services<T>(command);
+  };
+  const { page, tick } = await open(context, f, { initialServiceId: serviceId, initialSessionId: 'session-001' });
+  assert.match(page.text(), /Private session history/u);
+  assert.equal(page.oneByClass('tw-top-connection').props['data-kind'], 'error');
+  await page.type(page.oneByLabel('Message'), 'Pending text');
+  assert.equal(page.oneByLabel('Send').props.disabled, true);
+  unavailable = false;
+  await page.click(page.button('Retry'));
+  assert.equal(page.oneByLabel('Send').props.disabled, false);
+  f.state.view = { ...f.state.view, entered: false, generation: undefined };
+  await tick();
+  assert.doesNotMatch(page.text(), /Private session history|Pending text/u);
+  assert.equal(page.byLabel('Send').length, 0);
+  assert.match(page.text(), /agree to its terms first/u);
+});
+
+scenario('a late history response is discarded after switching away and back to the same session', async context => {
+  const f = fake(); f.state.view = { ...f.state.view, entered: true, generation: 1 };
+  addSession(f, 'session-001', 'Superseded first view');
+  addSession(f, 'session-002', 'Second session');
+  const messages = f.api.serviceMessages;
+  let release!: () => void, first = true;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  context.after(release);
+  f.api.serviceMessages = async <T,>(command: Parameters<typeof messages>[0]) => {
+    const result = await messages<T>(command);
+    if (command.action === 'history' && command.conversationId === 'session-001' && first) {
+      first = false;
+      await gate;
+    }
+    return result;
+  };
+  const { page } = await open(context, f, { initialServiceId: serviceId, initialSessionId: 'session-001', refreshMs: { answering: 60_000, idle: 60_000 } });
+  const picker = page.oneByLabel('Session');
+  const change = (value: string) => picker.props.onChange({ target: { value } });
+  f.state.messages.get('session-001')![0] = { ...f.state.messages.get('session-001')![0]!, text: 'Current first view' };
+  await page.during(() => { change('session-002'); change('session-001'); });
+  assert.match(page.text(), /Current first view/u);
+  await page.during(release);
+  assert.doesNotMatch(page.text(), /Superseded first view|Second session/u);
+});
+
+scenario('changing service links or accounts discards the old scope and its delayed results', async context => {
+  const f = fake(); f.state.view = { ...f.state.view, entered: true, generation: 1 };
+  addSession(f, 'session-001', 'Old account private history');
+  const nextServiceId = 's_travel_0002';
+  let releaseOldLookup!: () => void;
+  const oldLookup = new Promise<void>(resolve => { releaseOldLookup = resolve; });
+  context.after(releaseOldLookup);
+  const calls = f.api.services;
+  f.api.services = async <T,>(command: ServiceCommand) => {
+    if (command.action !== 'getService') return calls<T>(command);
+    if (command.serviceId === serviceId) {
+      await oldLookup;
+      return { ...f.state.view, name: 'Superseded service' } as T;
+    }
+    return { ...f.state.view, serviceId: nextServiceId, name: 'Current service' } as T;
+  };
+  withDom(context);
+  let route: HostedServicesProps = { api: f.api, uid, locale: 'en', initialServiceId: serviceId, initialSessionId: 'session-001', refreshMs: { answering: 60_000, idle: 60_000 } };
+  const listeners = new Set<() => void>();
+  const routeStore = { getSnapshot: () => route, subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; } };
+  const page = await mount(routeStore, props => createElement(HostedServices, props));
+  context.after(() => page.unmount());
+  const navigate = async (patch: Partial<HostedServicesProps>) => page.during(() => {
+    route = { ...route, ...patch };
+    for (const listener of listeners) listener();
+  });
+  await navigate({ initialServiceId: nextServiceId });
+  assert.match(page.text(), /Current service.*Old account private history/us);
+  await page.during(releaseOldLookup);
+  assert.doesNotMatch(page.text(), /Superseded service/u);
+
+  const other = fake();
+  const otherCalls = other.api.services;
+  other.api.services = async <T,>(command: ServiceCommand) => command.action === 'getService'
+    ? { ...other.state.view, serviceId: nextServiceId, name: 'Current service' } as T : otherCalls<T>(command);
+  await navigate({ uid: 'other-caller', api: other.api });
+  assert.doesNotMatch(page.text(), /Old account private history/u);
+  assert.ok(page.has('Agree and open'));
 });
 
 scenario('a hosted Bot can resync immediately from the connection control', async context => {

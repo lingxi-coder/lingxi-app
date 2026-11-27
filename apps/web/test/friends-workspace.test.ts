@@ -193,6 +193,22 @@ test('what a confirmation sends: a request with the trimmed note, an accept for 
   assert.equal((fake.commands[0] as { code: string }).code, code.code);
 });
 
+test('a late confirmation reports success without reopening chat after leaving Add Friend', async context => {
+  const { fake, workspace, snapshot } = friendsFixture();
+  context.after(() => workspace.close());
+  workspace.show('add');
+  let complete!: (value: unknown) => void;
+  fake.replies.set('accept', () => new Promise(resolve => { complete = resolve; }));
+  const pending = workspace.confirm({ kind: 'handle', handle: 'bob', expectedUid: 'bob' },
+    { uid: 'bob', displayName: 'Bob', handle: 'bob', relation: 'incoming' }, '');
+  workspace.show('profile');
+  workspace.show('add');
+  complete({ state: 'friends', teamId: pairTeamId('bob') });
+  assert.deepEqual(await pending, { done: 'friends', name: 'Bob' });
+  assert.equal(snapshot().page, 'add');
+  assert.equal(snapshot().chat, undefined);
+});
+
 test('a request that answers friends (a mutual request) opens the chat; one that answers outgoing only says it was sent', async context => {
   const { fake, workspace, snapshot } = friendsFixture();
   context.after(() => workspace.close());

@@ -1,6 +1,7 @@
 package com.lingxi.code.teams
 
 import android.content.Intent
+import org.json.JSONObject
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -314,11 +315,13 @@ internal fun ConversationDetailsSheet(
     onBotScope: (() -> Unit)? = null,
     /** The Bots of this Chat whose auto-reply log this person reads here (the ones they maintain that answer on their own in it), and what opens one of them; null where the Chat has none. */
     triageBots: List<TeamBotCard> = emptyList(), onTriageLog: ((TeamBotCard) -> Unit)? = null,
+    visualization: (suspend (JSONObject) -> JSONObject)? = null,
 ) {
     TeamsSheet(stringResource(R.string.teams_conversation_details), onDismiss) {
         DetailIdentity(label, conversationSubtitle(conversation, bots)) {
             ConversationLead(conversation, members, bots, uid, strings, 56.dp, label)
         }
+        if (conversation.kind == "channel" && online && visualization != null) TeamVisualizationSettings(conversation.id, visualization)
         if (unread > 0 && online) TextButton(onClick = { onMarkRead(); onDismiss() }) { Text(stringResource(R.string.teams_mark_read)) }
         val participants = TeamsListLogic.conversationParticipants(conversation, members, bots, uid, strings)
         if (participants.isNotEmpty()) Text(

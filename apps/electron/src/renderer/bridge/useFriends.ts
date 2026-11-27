@@ -1,6 +1,6 @@
 import { DESKTOP_BRIDGE_GLOBAL } from '../../shared/desktopBridge';
 import { useMemo } from 'react';
-import type { DesktopFriendsApi, FriendsApi } from '../../../../../packages/teams/friends';
+import { FriendApiError, type DesktopFriendsApi, type FriendsApi, type FriendsCommand, type FriendsResult } from '../../../../../packages/teams/friends';
 import { useFriendsWorkspace, type UseFriends } from '../../../../../packages/teams/useFriendsWorkspace';
 import { useAccountState } from './useAccountState';
 import { desktopTeamsApi } from './useTeams';
@@ -9,7 +9,19 @@ import { desktopTeamsApi } from './useTeams';
 export function desktopFriendsApi(desktop: DesktopFriendsApi, uid: string): FriendsApi {
   return {
     profile: () => desktop.profile(uid),
-    execute: command => desktop.execute(uid, command),
+    async execute<C extends FriendsCommand>(command: C, signal?: AbortSignal): Promise<FriendsResult<C>> {
+      if (!signal || command.action !== 'searchHandles' || !desktop.cancelSearch || !desktop.searchHandles) return desktop.execute(uid, command);
+      signal.throwIfAborted();
+      const requestId = crypto.randomUUID();
+      const cancel = () => { void desktop.cancelSearch?.(uid, requestId).catch(() => undefined); };
+      signal.addEventListener('abort', cancel, { once: true });
+      try {
+        const outcome = await desktop.searchHandles(uid, command.query, requestId);
+        if (outcome.error || !outcome.value) throw new FriendApiError(outcome.error ?? 'SERVICE_UNAVAILABLE', outcome.error === 'RATE_LIMITED' ? 429 : 503, outcome.retryAfterMs);
+        return outcome.value as FriendsResult<C>;
+      }
+      finally { signal.removeEventListener('abort', cancel); }
+    },
     watchCards: (next, failed) => desktop.watchCards(uid, next, failed),
     watchBlocks: (next, failed) => desktop.watchBlocks(uid, next, failed),
     watchOffers: (next, failed) => desktop.watchOffers(uid, next, failed),

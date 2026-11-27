@@ -13,7 +13,7 @@ import { useT } from '../../../theme/ThemeContext';
 import type { EditableLayer, PageContentProps } from '../SettingsScreen';
 import { boolFromLayer } from '../layerFields';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
-import { ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, extensionHubStyle, useExtensionHubDialogFocus, useExtensionHubNavigation } from './ExtensionHub';
+import { ExtensionCatalogTabs, ExtensionHubLayout, ExtensionHubHeader, ExtensionIcon, ExtensionRecommendationCard, ExtensionRecommendationGroups, extensionHubStyle, useExtensionCategoryFilter, useExtensionCatalogView, useExtensionHubDialogFocus, useExtensionHubNavigation } from './ExtensionHub';
 import { MarkdownContent } from '../../MarkdownContent';
 import {
   asBoolean,
@@ -91,14 +91,15 @@ function sourceScope(source: string): 'user' | 'project' | null {
   return source === 'user' || source === 'project' ? source : null;
 }
 
-function skillCatalogFromBridge(bridge: PageContentProps['bridge']): SkillCatalogEnvelope {
+function skillCatalogFromBridge(bridge: PageContentProps['bridge'], projectDir?: string | null): SkillCatalogEnvelope {
   const fromEvent = parseEventEnvelope<SkillCatalogEnvelope>(bridge.skillCatalogEvent?.catalog_json, {});
   if (Array.isArray(fromEvent.entries) || Array.isArray(fromEvent.trash)) return fromEvent;
+  const projectRoot = (projectDir ?? bridge.activeSession?.projectPath)?.replace(/\\/g, '/').replace(/\/+$/, '');
   return {
     entries: (bridge.skillsEvent?.skills ?? []).map((skill) => ({
       id: skill.source_dir,
       name: skill.name,
-      source: skill.source_dir.includes('/.lingxi/skills/') ? 'project' : 'user',
+      source: projectRoot && skill.source_dir.replace(/\\/g, '/').startsWith(`${projectRoot}/`) ? 'project' : 'user',
       rootDir: skill.source_dir.replace(/\/[^/]+$/, ''),
       directory: skill.source_dir,
       writable: false,
@@ -137,11 +138,11 @@ function defaultCreateScope(editingLayer: EditableLayer): 'user' | 'project' {
   return editingLayer === 'project' ? 'project' : 'user';
 }
 
-export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNavigate, onClose, onRegisterNavigationRequest, onRegisterCloseRequest, linkRequest }: PageContentProps) {
+export function Skills({ bridge, extensionScopes, snapshot, editingLayer, onJumpToLayer, onNavigate, onClose, onRegisterNavigationRequest, onRegisterCloseRequest, linkRequest }: PageContentProps) {
   const t = useT();
   const { locale } = useI18n();
   const model = skillsPageModel({ skills: bridge.skillsEvent?.skills });
-  const catalog = useMemo(() => skillCatalogFromBridge(bridge), [bridge.skillCatalogEvent?.catalog_json, bridge.skillsEvent?.skills, locale]);
+  const catalog = useMemo(() => skillCatalogFromBridge(bridge, extensionScopes?.projectDir), [bridge.skillCatalogEvent?.catalog_json, bridge.skillsEvent?.skills, bridge.activeSession?.projectPath, extensionScopes?.projectDir, locale]);
   const document = useMemo(() => skillDocumentFromBridge(bridge), [bridge.skillDocumentEvent?.document_json]);
   const adminAvailable = typeof (bridge as { skillAdmin?: unknown }).skillAdmin === 'function';
   const skillOperation = bridge.configurationOperations?.skill ?? null;
@@ -151,6 +152,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   const appliedLink = useRef<string>();
   const creatingSkill = useRef(false);
   const [search, setSearch] = useState('');
+  const [catalogTab, setCatalogTab] = useExtensionCatalogView(extensionScopes, catalog.entries?.length ? 'personal' : 'public');
   const [draftContent, setDraftContent] = useState('');
   const [draftCreateName, setDraftCreateName] = useState('');
   const [draftCreateScope, setDraftCreateScope] = useState<'user' | 'project'>(defaultCreateScope(editingLayer));
@@ -194,12 +196,15 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   const activeSkills = catalog.entries ?? [];
   const trashedSkills = catalog.trash ?? [];
   const visibleQuery = search.trim().toLowerCase();
+  const inScope = (entry: SkillCatalogItem) => editingLayer === 'project' ? entry.source === 'project' : entry.source !== 'project';
+  const scopedSkills = activeSkills.filter(inScope);
+  const scopedTrash = trashedSkills.filter(inScope);
   const filteredSkills = visibleQuery
-    ? activeSkills.filter((entry) => `${entry.name} ${entry.description ?? ''} ${entry.whenToUse ?? ''} ${entry.directory} ${entry.source}`.toLowerCase().includes(visibleQuery))
-    : activeSkills;
+    ? scopedSkills.filter((entry) => `${entry.name} ${entry.description ?? ''} ${entry.whenToUse ?? ''} ${entry.directory} ${entry.source}`.toLowerCase().includes(visibleQuery))
+    : scopedSkills;
   const filteredTrash = visibleQuery
-    ? trashedSkills.filter((entry) => `${entry.name} ${entry.directory}`.toLowerCase().includes(visibleQuery))
-    : trashedSkills;
+    ? scopedTrash.filter((entry) => `${entry.name} ${entry.directory}`.toLowerCase().includes(visibleQuery))
+    : scopedTrash;
 
   useEffect(() => {
     if (selection.kind === 'create' || selection.kind === 'list' || selection.kind === 'recommendation') return;
@@ -216,6 +221,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
       creatingSkill.current = false;
       setDraftCreateName('');
       setDraftCreateContent('---\ndescription: \n---\n');
+      setCatalogTab('personal');
       setSelection({ kind: 'skill', id: document.id });
     }
   }, [activeSkills, document, selection.kind, draftCreateName]);
@@ -231,8 +237,12 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
     } else if (bridge.skillCatalogEvent || bridge.skillsEvent) {
       appliedLink.current = linkRequest.requestId;
       const matches = activeSkills.filter(skill => (skill.id === linkRequest.id || skill.name === linkRequest.id) && (!linkRequest.scope || skill.source === linkRequest.scope));
-      if (matches.length === 1) setSelection({ kind: 'skill', id: matches[0]!.id });
-      else setPageError(matches.length ? tr('desktop_extension_skill_ambiguous') : tr('desktop_extension_skill_unavailable'));
+      if (matches.length === 1) {
+        setCatalogTab('personal');
+        setSelection({ kind: 'skill', id: matches[0]!.id });
+      } else {
+        setPageError(matches.length ? tr('desktop_extension_skill_ambiguous') : tr('desktop_extension_skill_unavailable'));
+      }
     }
   }, [linkRequest, activeSkills, bridge.skillCatalogEvent, bridge.skillsEvent]);
   const selectedSkill = selection.kind === 'skill' ? activeSkills.find((entry) => entry.id === selection.id) ?? null : null;
@@ -585,11 +595,12 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
       : selectedSkill?.name ?? tr('desktop_extension_skill_details');
 
   const sourceLabels: Record<string, string> = { user: tr('desktop_personal'), project: tr('cron_run_project_label'), builtin: tr('settings_voice_backend_system'), system: tr('settings_voice_backend_system'), plugin: tr('desktop_extension_plugins'), managed: tr('settings_parity_managed_layer') };
-  const sources = [...new Set(activeSkills.map((entry) => entry.source))];
+  const sources = [...new Set(scopedSkills.map((entry) => entry.source))];
   const activeSource = sources.includes(sourceFilter) ? sourceFilter : sources[0];
   const sourceSkills = filteredSkills.filter((entry) => entry.source === activeSource);
-  const recommendedSkills = publicSkillRecommendations.filter((entry) => !visibleQuery || [
-    entry.name, entry.publisher, ...(entry.skills ?? []), publicExtensionText(entry.description, locale),
+  const categoryFilter = useExtensionCategoryFilter(publicSkillRecommendations);
+  const recommendedSkills = categoryFilter.items.filter((entry) => !visibleQuery || [
+    entry.name, entry.publisher, tr(`extension_directory_category_${entry.category}`), ...(entry.skills ?? []), publicExtensionText(entry.description, locale),
     publicExtensionText(entry.requirements, locale),
   ].join(' ').toLowerCase().includes(visibleQuery));
   const pluginCatalog = parseEventEnvelope<{ marketplaces?: Array<{ name: string; source_json?: string }>; installed?: Array<{ id: string }> }>(bridge.pluginCatalogEvent?.catalog_json, {});
@@ -610,49 +621,76 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
   return (
     <ExtensionHubLayout>
       {closePrompt}
-      {pageError && selection.kind === 'list' && <div role="alert">{pageError}</div>}
       {linkRequest?.payload && selection.kind === 'create' && <p role="status">{tr('desktop_extension_skill_import')}</p>}
-      <ExtensionHubHeader title={tr('settings_title_skills')} description={tr('desktop_extension_skill_description')} search={search} onSearch={setSearch} actions={<>
-        <button type="button" onClick={handleReload} disabled={reloading} className="extension-hub-icon-button" aria-label={reloading ? tr('desktop_extension_reloading_skills') : tr('desktop_extension_reload_skills')}><ExtensionGlyph name="refresh" size={16} /></button>
-        <button type="button" onClick={() => setShowSettings(!showSettings)} className="extension-hub-icon-button" aria-label={tr('desktop_extension_skill_settings')} aria-expanded={showSettings}><ExtensionGlyph name="cog" size={16} /></button>
-        <button type="button" onClick={() => requestSelection({ kind: 'create' })} className="extension-hub-primary">{tr('workspace_confirm_add')} <ExtensionGlyph name="plus" size={14} /></button>
+      <ExtensionHubHeader filter={catalogTab === 'public' ? categoryFilter : undefined} title={tr('settings_title_skills')} search={search} onSearch={setSearch} actions={<>
+        <button type="button" onClick={handleReload} disabled={reloading} className="extension-hub-icon-button" aria-label={reloading ? tr('desktop_extension_reloading_skills') : tr('desktop_extension_reload_skills')} title={reloading ? tr('desktop_extension_reloading_skills') : tr('desktop_extension_reload_skills')}><ExtensionGlyph name="refresh" size={16} /></button>
+        <button type="button" onClick={() => setShowSettings(!showSettings)} className="extension-hub-icon-button" aria-label={tr('desktop_extension_skill_settings')} title={tr('desktop_extension_skill_settings')} aria-expanded={showSettings}><ExtensionGlyph name="cog" size={16} /></button>
+        <button type="button" onClick={() => requestSelection({ kind: 'create' })} className="extension-hub-primary"><ExtensionGlyph name="plus" size={14} />{tr('desktop_extension_new_skill')}</button>
       </>} />
       <DomainOperationBanner t={t} operation={skillOperation} fallbackDomainLabel={tr('settings_title_skills')} />
       {pageError && selection.kind === 'list' && <div role="alert" style={noteStyle(t, 'danger')}>{pageError}</div>}
       {selection.kind === 'list' && navigationPrompt}
-      <section className="extension-catalog-section extension-skills-recommended" aria-labelledby="recommended-skills-title">
-        <h2 id="recommended-skills-title" className="extension-hub-group-title">{tr('desktop_extension_recommended_skills')}</h2>
-        <p className="extension-recommendations-note">{tr('desktop_extension_skill_pack_note')}</p>
-        <div className="extension-hub-list">
-          {recommendedSkills.map((entry) => {
-            const installed = isPublicExtensionInstalled(entry, pluginCatalog);
-            return <article key={entry.id} className="extension-hub-row extension-recommendation-row">
-            <ExtensionIcon kind="skill" />
-            <button type="button" className="extension-hub-row-copy extension-hub-row-open" aria-label={tr('desktop_extension_view_details_named', entry.name)} onClick={() => requestSelection({ kind: 'recommendation', id: entry.id })}>
-              <span className="extension-hub-row-title">{entry.name}</span>
-              <span className="extension-hub-row-description">{publicExtensionText(entry.description, locale)}</span>
-              <span className="extension-recommendation-meta">{entry.publisher} · {entry.skills!.slice(0, 4).join(', ')}{entry.skills!.length > 4 ? '…' : ''}</span>
-            </button>
-            <button type="button" className={installed ? 'extension-hub-danger' : 'extension-hub-primary'} onClick={() => requestHubNavigation('plugins', publicExtensionNavigationId(entry, installed ? 'uninstall' : 'add'))} aria-label={tr(installed ? 'desktop_extension_uninstall_named' : 'desktop_extension_add_skill_pack_named', entry.name)}>
+      {showSettings && selection.kind === 'list' && <details open className="extension-hub-secondary-settings">
+        <summary>{tr('desktop_extension_claude_sync')}</summary>
+        <Card>
+          <FieldProvenanceNotice snapshot={snapshot} fieldKey="syncClaudeAiSkills" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
+          <Row title={tr('desktop_extension_claude_sync')} desc={catalog.sync_claude_ai_note && catalog.sync_claude_ai_note !== 'Stored only. Claude.ai cloud sync is not wired on desktop.' ? catalog.sync_claude_ai_note : tr('desktop_extension_sync_unavailable')} align="center">
+            <Toggle value={syncDraft} onChange={setSyncDraft} label={tr('desktop_extension_claude_sync')} disabled={savingSync} />
+          </Row>
+          <Row title={tr('settings_save')} desc={tr('desktop_extension_layered_sync')} align="center">
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                type="button"
+                disabled={savingSync || !syncHasChanges}
+                onClick={() => {
+                  setSavingSync(true);
+                  setPageError(null);
+                  void bridge.updateEngineSettings(editingLayer, { syncClaudeAiSkills: syncDraft })
+                    .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_sync_save_failed')))
+                    .finally(() => setSavingSync(false));
+                }}
+                style={ghostButtonStyle(t, savingSync || !syncHasChanges)}
+              >
+                {tr('settings_save')}
+              </button>
+              <button type="button" disabled={savingSync || !syncHasChanges} onClick={() => setSyncDraft(syncEnabled)} style={ghostButtonStyle(t, savingSync || !syncHasChanges, true)}>
+                {tr('common_cancel')}
+              </button>
+            </div>
+          </Row>
+        </Card>
+      </details>}
+
+      <ExtensionCatalogTabs scopes={extensionScopes} locked={detailDirty || syncHasChanges || savingSync} label={tr('settings_title_skills')} value={catalogTab} onChange={setCatalogTab} />
+      {catalogTab === 'public' && <div className="extension-skills-recommended">
+        <ExtensionRecommendationGroups items={recommendedSkills}>{(entry) => {
+          const installed = isPublicExtensionInstalled(entry, pluginCatalog);
+          return <ExtensionRecommendationCard key={entry.id} item={entry} kind="skill"
+            onOpen={() => requestSelection({ kind: 'recommendation', id: entry.id })}
+            status={installed ? tr('apps_installed') : undefined}
+            action={<button type="button" className={installed ? 'extension-hub-danger' : 'extension-hub-primary'}
+              aria-label={tr(installed ? 'desktop_extension_uninstall_named' : 'desktop_extension_add_skill_pack_named', entry.name)}
+              onClick={() => requestHubNavigation('plugins', publicExtensionNavigationId(entry, installed ? 'uninstall' : 'add'))}>
               <ExtensionGlyph name={installed ? 'trash' : 'plus'} size={14} />{tr(installed ? 'plugins_action_uninstall' : 'workspace_confirm_add')}
-            </button>
-          </article>; })}
-        </div>
+            </button>} />;
+        }}</ExtensionRecommendationGroups>
         {!recommendedSkills.length && <div className="extension-hub-empty">{tr('desktop_extension_no_skill_results')}</div>}
-      </section>
+      </div>}
+      {catalogTab === 'personal' && <>
       <section className="extension-catalog-section extension-skills-installed">
         <h2 className="extension-hub-group-title">{tr('apps_installed')}</h2>
         {skillRows(showAllInstalled || search ? filteredSkills : filteredSkills.slice(0, 6))}
         {!filteredSkills.length && <div className="extension-hub-empty">{search ? tr('desktop_extension_no_skill_results') : tr('desktop_extension_first_skill')}</div>}
         {filteredSkills.length > 6 && !search && <button type="button" className="extension-see-more" onClick={() => setShowAllInstalled(!showAllInstalled)}>{showAllInstalled ? tr('chat_tool_show_less') : tr('desktop_extension_more_skills', filteredSkills.length - 6)}</button>}
       </section>
-      {sources.length > 0 && <section className="extension-catalog-section extension-skills-sources">
+      {sources.length > 1 && <section className="extension-catalog-section extension-skills-sources">
         <nav className="extension-catalog-tabs" aria-label={tr('desktop_extension_skill_sources')}>{sources.map((source) => <button key={source} type="button" aria-pressed={activeSource === source} onClick={() => { setSourceFilter(source); setShowAllSource(false); }}>{sourceLabels[source] ?? source}</button>)}</nav>
         {skillRows(showAllSource || search ? sourceSkills : sourceSkills.slice(0, 6))}
         {!sourceSkills.length && <div className="extension-hub-empty">{tr('desktop_extension_no_source_skills')}</div>}
         {sourceSkills.length > 6 && !search && <button type="button" className="extension-see-more" onClick={() => setShowAllSource(!showAllSource)}>{showAllSource ? tr('chat_tool_show_less') : tr('desktop_extension_more_skills', sourceSkills.length - 6)}</button>}
       </section>}
-      {filteredTrash.length > 0 && <details className="extension-hub-marketplaces">
+      </>}
+      {catalogTab === 'personal' && filteredTrash.length > 0 && <details className="extension-hub-marketplaces">
         <summary>{tr('desktop_extension_trash_count', filteredTrash.length)}</summary>
         <div className="extension-hub-list">
           {filteredTrash.map((entry) => (
@@ -696,45 +734,14 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer, onNaviga
           </div>
           {selection.kind === 'skill' && !editingDocument && <footer className="extension-detail-footer">
             <button type="button" className="extension-hub-danger" disabled={!selectedDocument?.writable && !selectedSkill?.pluginOwner} aria-describedby={uninstallDisabledReason ? 'skill-uninstall-readonly-reason' : undefined} onClick={() => selectedSkill?.pluginOwner ? requestHubNavigation('plugins', selectedSkill.pluginOwner) : handleTrashSkill()}>{tr('apps_action_uninstall')}</button>
-            <button type="button" className="extension-hub-primary" disabled={tryingSkill || !!selectedSkill?.parseError || !selectedDocument} onClick={() => {
+            {!bridge.settingsOnly && <button type="button" className="extension-hub-primary" disabled={tryingSkill || !!selectedSkill?.parseError || !selectedDocument} onClick={() => {
               if (!selectedSkill) return;
               setTryingSkill(true);
               void bridge.runSlashCommand(`/${selectedSkill.name}`, []).then((accepted) => { if (accepted) onClose(); }).catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_skill_start_failed'))).finally(() => setTryingSkill(false));
-            }}><ExtensionGlyph name="chat" size={16} />{tr('desktop_extension_try_now')}</button>
+            }}><ExtensionGlyph name="chat" size={16} />{tr('desktop_extension_try_now')}</button>}
           </footer>}
         </section>
       </div>}
-
-      {showSettings && selection.kind === 'list' && <details open className="extension-hub-secondary-settings">
-        <summary>{tr('desktop_extension_claude_sync')}</summary>
-        <Card>
-          <FieldProvenanceNotice snapshot={snapshot} fieldKey="syncClaudeAiSkills" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
-          <Row title={tr('desktop_extension_claude_sync')} desc={catalog.sync_claude_ai_note && catalog.sync_claude_ai_note !== 'Stored only. Claude.ai cloud sync is not wired on desktop.' ? catalog.sync_claude_ai_note : tr('desktop_extension_sync_unavailable')} align="center">
-            <Toggle value={syncDraft} onChange={setSyncDraft} label={tr('desktop_extension_claude_sync')} disabled={savingSync} />
-          </Row>
-          <Row title={tr('settings_save')} desc={tr('desktop_extension_layered_sync')} align="center">
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button
-                type="button"
-                disabled={savingSync || !syncHasChanges}
-                onClick={() => {
-                  setSavingSync(true);
-                  setPageError(null);
-                  void bridge.updateEngineSettings(editingLayer, { syncClaudeAiSkills: syncDraft })
-                    .catch((cause: unknown) => setPageError(cause instanceof Error ? cause.message : tr('desktop_extension_sync_save_failed')))
-                    .finally(() => setSavingSync(false));
-                }}
-                style={ghostButtonStyle(t, savingSync || !syncHasChanges)}
-              >
-                {tr('settings_save')}
-              </button>
-              <button type="button" disabled={savingSync || !syncHasChanges} onClick={() => setSyncDraft(syncEnabled)} style={ghostButtonStyle(t, savingSync || !syncHasChanges, true)}>
-                {tr('common_cancel')}
-              </button>
-            </div>
-          </Row>
-        </Card>
-      </details>}
 
       {!adminAvailable && selection.kind === 'list' && <details className="extension-hub-secondary-settings">
         <summary>{tr('desktop_extension_compatibility_view')}</summary>

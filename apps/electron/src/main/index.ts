@@ -35,11 +35,12 @@ import { accountSessionDiagnosticScope, brokerAccountSessionStore } from './acco
 import firebaseConfig from '../shared/firebaseConfig.json';
 import { ScheduledTaskService } from './scheduled.js';
 import { GitService } from './git.js';
-import { app, BrowserWindow, dialog, Menu, net, powerMonitor, powerSaveBlocker, protocol, session as electronSession, shell, Notification, type Session } from 'electron';
+import { app, BrowserWindow, dialog, Menu, net, powerMonitor, powerSaveBlocker, protocol, safeStorage, session as electronSession, shell, Notification, type Session } from 'electron';
 import { applicationMenuTemplate } from './applicationMenu.js';
 import { CH_APPLICATION_MENU } from '../shared/applicationMenu.js';
 import { installDesktopUpdates } from './desktopUpdates.js';
 import { desktopUpdateManifestUrl } from '../shared/productConfig.js';
+import { seedDefaultPluginMarketplaces } from './defaultPluginMarketplaces.js';
 import { CH_BOTS_PROMPT_SENT, CH_BOTS_TASKS_CHANGED, CH_BOTS_WORKSPACE_REQUESTS_CHANGED, type BotPromptSentUi, type BotTasksChangedUi, type BotWorkspaceRequestsChangedUi } from '../shared/bots.js';
 import { join } from 'node:path';
 import { dirname } from 'node:path';
@@ -71,7 +72,7 @@ import { BotTasks } from './bots/taskService.js';
 import { WorkspaceRequests } from './bots/workspaceRequests.js';
 import { SessionGateway } from './remoteControl/sessionGateway.js';
 import type { RemoteBotFolderSource } from './remoteControl/remoteBots.js';
-import { activityPreview } from './remoteControl/snapshot.js';
+import { historyTail } from './remoteControl/snapshot.js';
 import { LocalAppsGateway } from './remoteControl/localAppsGateway.js';
 import { createRemoteLocalAppsDelegate } from './remoteControl/localAppsBindings.js';
 import { LocalAppRtc } from './local-apps/remoteRtc.js';
@@ -607,12 +608,19 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     broker: credentialBroker ?? systemDecisionCredentials(userData), accounts: accountId => providerAccounts?.launchApiKeyAccount(accountId, 'openai', 'openai') ?? Promise.resolve(undefined),
     changed: snapshot => host?.sendToWindows(CH_DECISION_CHANGED, snapshot),
   });
+  // A chat of a Bot may work in any of the Bot's folders: which chats are its is the Bot's record, not where they are.
+  const resolveSavedTranscript = (ref: SessionRef) => bots?.ownsSession(ref)
+    ? bots.resolveSavedTranscript(ref) : resolveSavedConversationTranscript(settings, sessionCatalog, ref);
   bridge = new SessionRuntimeManager({
     getTelemetryConfig: () => settings.getTelemetryConfig(),
     // A Bot's working directory is not a project: it has its own configuration home and grants.
     workspaceSettings: async (projectPath, ref) => {
       if (bots?.ownsSession({ projectPath, sessionId: ref.sessionId })) return bots.launchSettings(projectPath, ref.sessionId);
+      const startedAt = performance.now();
       const config = await sessionCatalog.workspaceSettings(projectPath);
+      diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_phase', {
+        phase: 'workspace_settings', sessionId: ref.sessionId, durationMs: Math.round(performance.now() - startedAt),
+      }));
       const additionalDirectories = ref.projectId ? settings.getProjectAdditionalFolders(ref.projectId) : [];
       return additionalDirectories.length ? { ...config, additionalDirectories } : config;
     },
@@ -624,15 +632,14 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       if (bots?.ownsSession(ref)) return (await bots.resolveSavedTranscript(ref))?.mode;
       return undefined;
     },
-    resolveSavedTranscript: (ref) => bots?.ownsSession(ref)
-      ? bots.resolveSavedTranscript(ref) : resolveSavedConversationTranscript(settings, sessionCatalog, ref),
+    resolveSavedTranscript,
     captureSessionSource: async (ref, runtime, scheduled) => {
       if (bots?.ownsSession(ref)) return bots.captureSessionSource(ref, runtime);
       if (!host) throw new Error('Desktop host is unavailable.');
       return host.rememberCreatedSessionSource(ref, runtime, scheduled);
     },
     notifier,
-    onInboxActivity: (ref) => { sessionCatalog.invalidate(ref.projectPath); },
+    onInboxActivity: (ref) => { sessionCatalog.invalidate(ref.projectPath, { preserveImages: true }); },
     onCronRunRequested: (runtime, event) => scheduled ? scheduled.run(runtime, event.run_id, event.task) : Promise.reject(new Error('Scheduled task service unavailable')),
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
@@ -707,37 +714,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         ? resumeModel ?? bots?.modelFor(workspace, ref.sessionId) ?? configured.model
         : settings.getSessionModel(ref) ?? resumeModel ?? configured.model;
       const startedAt = Date.now();
-      // History does not need account credentials. The connected runtime
-      // hydrates them in parallel with replay; prompts await that hydration.
-      const phase = async <T>(name: string, load: () => Promise<T>, fallback: T): Promise<T> => {
-        const phaseStartedAt = Date.now();
-        try {
-          const value = await load();
-          diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_phase', {
-            durationMs: Date.now() - phaseStartedAt,
-            parallel: true,
-            phase: name,
-            projectPath: workspace,
-            sessionId: ref.sessionId,
-          }));
-          return value;
-        } catch (error) {
-          diagnostics.add('warn', 'host', diagnosticEvent('session_launch_config_phase_failed', {
-            durationMs: Date.now() - phaseStartedAt,
-            error: sanitizeDiagnostic(error),
-            phase: name,
-            projectPath: workspace,
-            sessionId: ref.sessionId,
-          }));
-          return fallback;
-        }
-      };
-      const pluginSecrets = await phase('plugin_secrets', () => resolveSessionLaunchPluginSecrets(credentialBroker), {});
       diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_ready', {
         durationMs: Date.now() - startedAt,
         parallel: true,
         model,
-        pluginSecretCount: Object.values(pluginSecrets).reduce((count, values) => count + Object.keys(values).length, 0),
         projectPath: workspace,
         providerAccountCount: providerAccounts?.latestSnapshot?.accounts.length ?? 0,
         providerAccountsDeferred: true,
@@ -763,11 +743,33 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
         scheduledController: scheduled?.isControllerSession(workspace, ref.sessionId) ?? false,
         providerAccountHome: productPaths.brandHome,
         providerAccountBackend: `desktop-broker:${credentialBroker?.credentialChannel ?? 'development'}`,
-        pluginSecrets,
         model,
         apiBaseUrl: configured.apiBaseUrl,
       };
     },
+    loadPluginSecrets: credentialBroker ? async (ref) => {
+      const startedAt = Date.now();
+      try {
+        const secrets = await resolveSessionLaunchPluginSecrets(credentialBroker);
+        diagnostics.add('info', 'host', diagnosticEvent('session_launch_config_phase', {
+          durationMs: Date.now() - startedAt,
+          parallel: true,
+          phase: 'plugin_secrets',
+          projectPath: ref.projectPath,
+          sessionId: ref.sessionId,
+        }));
+        return secrets;
+      } catch (error) {
+        diagnostics.add('warn', 'host', diagnosticEvent('session_launch_config_phase_failed', {
+          durationMs: Date.now() - startedAt,
+          error: sanitizeDiagnostic(error),
+          phase: 'plugin_secrets',
+          projectPath: ref.projectPath,
+          sessionId: ref.sessionId,
+        }));
+        return {};
+      }
+    } : undefined,
   });
   host = new HostController(
     settings,
@@ -827,7 +829,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   }
   const account = new AccountService(accountConfig, credentialBroker
     ? brokerAccountSessionStore(credentialBroker, diagnosticAccountScope)
-    : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc')), url => shell.openExternal(url));
+    : accountSessionStore(join(app.getPath('userData'), 'firebase-account.enc'), safeStorage), url => shell.openExternal(url));
   host.attachAccount(account, undefined, new ProviderVaultLinks(app.getPath('userData')));
   const teamsService = new TeamsService(account, accountConfig, teamsOrigin);
   const datasetOrigin = process.env.LINGXI_DATASET_PRODUCT_ORIGIN ?? teamsOrigin;
@@ -845,7 +847,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   });
   inboxService = new InboxService({
     account, teams: teamsService, userData,
-    sourceCredentials: accountSessionStore(join(userData, 'inbox', 'source-credentials.enc')),
+    sourceCredentials: accountSessionStore(join(userData, 'inbox', 'source-credentials.enc'), safeStorage),
     isFocused: () => windowFocused,
     notificationsEnabled: () => settings.getPublic().notifications?.enabled !== false,
     localSessions: async () => {
@@ -875,10 +877,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     activityPreview: async (ref, through) => {
       const row = await sessionCatalog.find(ref.projectPath, ref.sessionId);
       if (!row) throw new Error('SOURCE_ACCESS_REQUIRED');
-      const page = await sessionCatalog.readActivity(ref.projectPath, ref.sessionId, row.path, through - 1);
-      const runtime = bridge?.get(ref.sessionId);
-      if (!runtime || runtime.projectPath !== ref.projectPath) return { available: false, messages: [] };
-      return activityPreview(runtime.remoteView(), page.items.find(item => item.cursor === through)?.resultUuids ?? []);
+      return sessionCatalog.readActivityPreview(ref.projectPath, ref.sessionId, row.path, through);
     },
     notify: notice => {
       if (!Notification.isSupported()) return;
@@ -927,16 +926,44 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
     policy,
     bots: () => bots,
     botFolders: () => remoteBotFolders,
+    previewOf: async ref => {
+      const source = await resolveSavedTranscript(ref);
+      if (!source) return undefined;
+      const page = await sessionCatalog.readLatestHistory(ref.projectPath, ref.sessionId, source.path, source.mode);
+      if (!page || !page.messages.length) return undefined;
+      // A preview is display only. Its image slots have no downloadable refs
+      // until the authoritative runtime snapshot replaces the preview.
+      const messages = historyTail(page.messages, page.messages.length, 0,
+        (row, image) => [ref.sessionId, 'v', row, image].join(':'));
+      return { session_id: ref.sessionId, session_mode: source.mode, messages };
+    },
     commands: new RemoteCommands({
       providerAccounts,
       authorizeProviderAccounts: viewer => remoteControlOn() && policy.allows() && account.snapshot().user?.uid === viewer.account_uid,
       allowAlwaysAllow: () => policy.allowAlwaysAllow(),
       echo: (echo) => remoteUi?.echo(echo),
       codec: nativeImageCodec,
+      readHistory: async (runtime, before, limit) => {
+        const owner = runtimes.get(runtime.sessionId);
+        if (!owner || owner !== runtime) throw new Error('The transcript owner is unavailable');
+        const workspace = await owner.getWorkspaceState();
+        if (runtimes.get(runtime.sessionId) !== owner || !workspace.transcript_path) throw new Error('The transcript owner changed');
+        return sessionCatalog.readHistory(owner.projectPath, owner.sessionId, workspace.transcript_path, before, limit);
+      },
+      readHistoryImage: async (runtime, reference, size, signal) => {
+        const owner = runtimes.get(runtime.sessionId);
+        if (!owner || owner !== runtime) throw new Error('The image session is unavailable');
+        return sessionCatalog.readRuntimeImage(owner, reference, size, signal);
+      },
       clock: systemClock,
     }),
     titleOf: async (ref) => (await sessionCatalog.find(ref.projectPath, ref.sessionId))?.title,
     activityOf: async (ref) => (await sessionCatalog.find(ref.projectPath, ref.sessionId))?.activity_json ?? undefined,
+    activityPreview: async (ref, through) => {
+      const row = await sessionCatalog.find(ref.projectPath, ref.sessionId);
+      if (!row) throw new Error('SOURCE_ACCESS_REQUIRED');
+      return sessionCatalog.readActivityPreview(ref.projectPath, ref.sessionId, row.path, through);
+    },
     activityPage: async (ref, after) => {
       const row = await sessionCatalog.find(ref.projectPath, ref.sessionId);
       if (!row) throw new Error('SOURCE_ACCESS_REQUIRED');
@@ -1040,6 +1067,13 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   } });
   host.attachGit(git);
   host.registerIpc();
+  // Guest partitions can install their scheme, network and permission rules while
+  // independent services recover. Wait for both before the first normal window.
+  const guestRuntimes = bridge;
+  const guestPartitionsReady = Promise.allSettled([
+    () => installVisualizationSession(electronSession.fromPartition(VISUALIZATION_PARTITION), guestRuntimes.visualizations),
+    () => installPrivatePageSession(electronSession.fromPartition(PRIVATE_PAGE_PARTITION), guestRuntimes.pages),
+  ].map(async install => install()));
   if (productPaths) {
     let teamBotStore: BotStore | undefined;
     // The Bots live beside the app's other data and keep clear of the default configuration home.
@@ -1272,11 +1306,10 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
       }
     }
   }
-  try {
-    await installVisualizationSession(electronSession.fromPartition(VISUALIZATION_PARTITION), bridge.visualizations);
-    await installPrivatePageSession(electronSession.fromPartition(PRIVATE_PAGE_PARTITION), bridge.pages);
-  } catch (error) {
-    diagnostics.add('warn', 'host', `inline visualizations unavailable: ${sanitizeDiagnostic(error)}`);
+  for (const result of await guestPartitionsReady) {
+    if (result.status === 'rejected') {
+      diagnostics.add('warn', 'host', `inline content setup failed: ${sanitizeDiagnostic(result.reason)}`);
+    }
   }
   deepLinkProjects = () => settings.getPublic().projects;
   resolveDeepLinkSession = async (sessionId, requestedPath, requestedKey) => {
@@ -1301,6 +1334,18 @@ if (hasSingleInstanceLock) void app.whenReady().then(async () => {
   });
   // Read once, here: the system says "opened at login" only for the start that it did.
   if (!loginItem.openedInBackground()) createWindow();
+  void seedDefaultPluginMarketplaces({
+    brandHome: productPaths.brandHome,
+    pluginAdmin: command => sessionCatalog.projectSettings(app.getPath('home'), { type: 'plugin_admin', command }),
+    onAdded: () => {
+      const active = settings.getPublic().activeSession;
+      const runtime = active && bridge?.get(active.sessionId);
+      if (runtime?.connectionState.status === 'connected') {
+        void runtime.dispatchCommand({ type: 'plugin_admin', command: { action: 'get_catalog' } }).catch(() => undefined);
+      }
+    },
+    onError: (source, error) => diagnostics.add('warn', 'host', `Could not register the default marketplace ${source}: ${sanitizeDiagnostic(error)}`),
+  }).catch(error => diagnostics.add('warn', 'host', `Default plugin marketplaces could not be loaded: ${sanitizeDiagnostic(error)}`));
   if (app.isPackaged) {
     desktopUpdates.start();
     powerMonitor.on('resume', () => { void desktopUpdates?.check(); });

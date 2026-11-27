@@ -364,7 +364,7 @@ export class RemoteControlService {
 
   private hostInfo(): RemoteHostInfo {
     const { name, platform, app_version } = this.options.host();
-    return { name, platform, app_version };
+    return { name, platform, app_version, cancel_image_requests: true };
   }
 
   // ───────────────────────────────────────────────────────────────────────────

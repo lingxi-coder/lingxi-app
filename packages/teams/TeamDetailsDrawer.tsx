@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent, type PointerEve
 import { messageErrorText, teamsErrorText } from './errors.js';
 import type { TeamCommand, TeamMember, TeamRole } from './index.js';
 import { BotDirectory } from './BotDirectory';
+import { ChannelVisualizationSettings } from './ChannelVisualizationSettings.js';
 import { canInviteFriends } from './friends.js';
 import { Avatar, ConversationLead, Dialog, Icon, platformNotice, rovingIndex, TeamMark, type DrawerTab, type RenderAvatar } from './ui';
 import type { TeamsSnapshot, TeamsWorkspace } from './workspace.js';
@@ -254,6 +255,10 @@ export function TeamDetailsDrawer({ workspace, snapshot, tab, onTabChange, width
       <ConversationLead conversation={conversation} label={chatLabel} snapshot={snapshot} locale={locale} size={32} render={renderAvatar} />
       <div className="tw-drawer-title"><p>{t('teams_conversation_details')}</p><strong>{chatLabel}</strong></div>
     </div> : null}
+    {conversation?.kind === 'channel' && workspace.api.datasets && !snapshot.offline && (
+      <ChannelVisualizationSettings key={team.id + ':' + conversation.id} api={workspace.api} locale={locale}
+        scope={{ teamId: team.id, generation: team.generation, conversationId: conversation.id }} />
+    )}
     {snapshot.error ? <p role="alert" className="tw-error tw-drawer-error">{teamsErrorText(snapshot.error, locale)}</p> : null}
     <div className="tw-tabs" role="tablist" aria-label={t('teams_team_details')} onKeyDown={tabKey}>
       {tabs.map(value => <button key={value} type="button" role="tab" id={`${id}-tab-${value}`} aria-selected={value === current} aria-controls={`${id}-panel`} tabIndex={value === current ? 0 : -1}

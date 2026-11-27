@@ -132,6 +132,7 @@ interface RemoteClientPort {
     suspend fun sessionActivityPage(sessionId: String, after: ULong): String = error("remote activity unavailable")
     suspend fun sessionActivityPreview(sessionId: String, through: ULong): String = error("remote activity preview unavailable")
     suspend fun fetchImage(sessionId: String, imageRef: String): com.lingxi.code.bindings.android.RemoteImageFfi
+    suspend fun fetchImageVariant(sessionId: String, imageRef: String, thumbnail: Boolean) = fetchImage(sessionId, imageRef)
     suspend fun sendPrompt(sessionId: String, text: String, images: List<com.lingxi.code.bindings.android.RemotePromptImageFfi>)
     suspend fun retryPrompt(sessionId: String, promptId: String)
     suspend fun dismissPrompt(sessionId: String, promptId: String)
@@ -900,6 +901,8 @@ private class ManagerSessionPort(
     override suspend fun sessionActivityPage(after: ULong) = operation { it.sessionActivityPage(sessionId, after) }
     override suspend fun sessionActivityPreview(through: ULong) = operation { it.sessionActivityPreview(sessionId, through) }
     override suspend fun fetchImage(imageRef: String) = operation { it.fetchImage(sessionId, imageRef) }
+    override suspend fun fetchImageVariant(imageRef: String, thumbnail: Boolean) =
+        operation { it.fetchImageVariant(sessionId, imageRef, thumbnail) }
     override suspend fun sendPrompt(text: String, images: List<RemotePromptImageFfi>) =
         operation { it.sendPrompt(sessionId, text, images) }
     override suspend fun retryPrompt(promptId: String) = operation { it.retryPrompt(sessionId, promptId) }
@@ -1027,6 +1030,8 @@ internal class FfiRemoteClientPort(private val client: AndroidRemoteControlClien
     override suspend fun sessionActivityPage(sessionId: String, after: ULong) = client.sessionActivityPage(sessionId, after)
     override suspend fun sessionActivityPreview(sessionId: String, through: ULong) = client.sessionActivityPreview(sessionId, through)
     override suspend fun fetchImage(sessionId: String, imageRef: String) = client.fetchImage(sessionId, imageRef)
+    override suspend fun fetchImageVariant(sessionId: String, imageRef: String, thumbnail: Boolean) =
+        client.fetchImageVariant(sessionId, imageRef, thumbnail)
     override suspend fun sendPrompt(
         sessionId: String,
         text: String,

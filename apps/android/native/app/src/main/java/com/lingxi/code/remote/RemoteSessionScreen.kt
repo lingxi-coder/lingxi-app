@@ -356,7 +356,8 @@ internal fun RemoteSessionScreen(
                 }
             }
         }
-        val ownerMode = meta.sessionMode
+        val preview = meta.preview
+        val ownerMode = meta.sessionMode ?: preview?.mode
         if (reattaching) {
             Text(reattachError ?: stringResource(R.string.remote_session_loading), color = t.text3,
                 modifier = Modifier.weight(1f).padding(16.dp))
@@ -385,9 +386,14 @@ internal fun RemoteSessionScreen(
             RemoteFilesPanel(manager, hostId, sessionId, enabled = meta.phase == com.lingxi.code.bindings.android.RemoteSessionPhaseFfi.LIVE)
             ChatScreen(
                 modifier = Modifier.weight(1f),
-                state = state,
+                state = if (preview == null) state else state.copy(
+                    messages = preview.messages, isNew = false, sessionReady = false, sessionTransitioning = false,
+                ),
+                readOnly = preview != null,
+                remoteImageCacheKey = "${remote.source.imageCacheScope}:${meta.imageRevision}",
+                loadRemoteImage = if (preview == null) { ref, thumbnail -> remote.source.readImage(ref, thumbnail).bytes } else null,
                 inboxActivityCursor = inboxRow?.sourceCursor ?: 0,
-                onInboxVisibleMessages = if (inboxRow != null && !state.streaming) { rendered ->
+                onInboxVisibleMessages = if (preview == null && inboxRow != null && !state.streaming) { rendered ->
                     val current = maxOf(inboxRow.baselineCursor, inboxRow.readThrough, assistantActivity?.baseline ?: 0)
                     val through = if (assistantActivity != null && assistantActivity.cursor == inboxRow.sourceCursor &&
                         inboxRow.sourceCursor == current + 1 && assistantActivity.headMessageId in rendered) {
@@ -397,7 +403,9 @@ internal fun RemoteSessionScreen(
                     }
                     if (through > current) inbox.mutate(com.lingxi.code.inbox.InboxOperation.read(inboxRow, through, observeFailure = false), inboxRow, automatic = true)
                 } else null,
-                onInboxJumpLatest = { inboxRow?.let { inbox.mutate(com.lingxi.code.inbox.InboxOperation.read(it), it) } },
+                onInboxJumpLatest = {
+                    if (preview == null) inboxRow?.let { inbox.mutate(com.lingxi.code.inbox.InboxOperation.read(it), it) }
+                },
                 onSend = { chat.send(it) },
                 onSendWithAttachment = { text, _ ->
                     chat.send(text, images = attachments.map { ImageRefDto(it.mediaType, it.base64) })

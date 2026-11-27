@@ -12,6 +12,7 @@
 //! are kept by the same [`RemoteClient`].
 
 use std::collections::{BTreeMap, HashMap};
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -23,6 +24,7 @@ use client::protocol::events::ClientEvent;
 use client::protocol::listings::SessionModeDto;
 use client::protocol::message::MessageDto;
 use client::protocol::permission::PermissionResponseDto;
+use lru::LruCache;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -31,10 +33,10 @@ use tokio::task::JoinHandle;
 use crate::connection::{ConnectionListener, ConnectionPhase, ConnectionState, ViewerConnection};
 use crate::encoding::random_id;
 use crate::messages::{
-    methods, ImageGetResult, ModelsListResult, PermissionModeId, PromptSendResult, RemoteCursor,
+    methods, ImageGetParams, ImageGetResult, ModelsListResult, PermissionModeId, PromptSendResult, RemoteCursor,
     RemotePending, RemotePromptOrigin, RemoteRecord, RemoteSeqRecord, RemoteSessionSummary,
-    RemoteTurnState, SessionAttachResult, SessionHistoryResult, SessionSnapshotParams,
-    SessionsChangedParams, SessionsListResult,
+    RemoteTurnState, SessionAttachResult, SessionHistoryResult, SessionImageSize, SessionPreviewParams,
+    SessionSnapshotParams, SessionsChangedParams, SessionsListResult,
 };
 use crate::rpc::{RemoteErrorCode, RpcError};
 use crate::text::display_text;
@@ -168,6 +170,8 @@ pub struct SessionState {
     pub session_id: String,
     /// Conversation mode from the authoritative snapshot or later live events.
     pub session_mode: Option<SessionModeDto>,
+    /// Provisional history for display while a fresh attach is loading.
+    pub preview: Option<SessionPreviewParams>,
     /// Where it stands.
     pub status: SessionStatus,
     /// Why the attach failed.
@@ -199,6 +203,7 @@ impl SessionState {
         Self {
             session_id: session_id.to_owned(),
             session_mode: None,
+            preview: None,
             status: SessionStatus::Loading,
             error: None,
             messages: Vec::new(),
@@ -270,6 +275,7 @@ impl Core {
             let mut state = SessionState::new(&self.state.session_id);
             state.status = self.state.status;
             state.error = self.state.error.clone();
+            state.preview = self.state.preview.clone();
             state
         } else {
             self.state.clone()
@@ -284,7 +290,7 @@ struct SessionInner {
     listeners: Mutex<Vec<(u64, Arc<dyn SessionListener>)>>,
     next_listener: AtomicU64,
     delivery: mpsc::UnboundedSender<SessionState>,
-    images: Mutex<HashMap<String, String>>,
+    images: Mutex<LruCache<String, String>>,
 }
 
 /// One session. Cheap to clone.
@@ -337,7 +343,7 @@ impl SessionController {
             listeners: Mutex::new(Vec::new()),
             next_listener: AtomicU64::new(1),
             delivery,
-            images: Mutex::new(HashMap::new()),
+            images: Mutex::new(LruCache::new(NonZeroUsize::new(24).unwrap())),
         });
         let weak: Weak<SessionInner> = Arc::downgrade(&inner);
         tokio::spawn(async move {
@@ -438,6 +444,9 @@ impl SessionController {
             }
             core.active = false;
             core.attach_id += 1;
+            if core.state.preview.is_some() {
+                self.inner.commit(&mut core, |s| s.preview = None);
+            }
             if let Some(timer) = core.reset_timer.take() {
                 timer.abort();
             }
@@ -500,6 +509,27 @@ impl SessionController {
     // -----------------------------------------------------------------------
     // From the desktop (called by `RemoteClient`, public for custom routing)
     // -----------------------------------------------------------------------
+
+    /// A read-only saved tail. Admission still requires a complete snapshot.
+    pub fn handle_preview(&self, preview: SessionPreviewParams) {
+        let mut core = self.inner.core.lock().expect("core");
+        if preview.session_id != self.inner.session_id
+            || is_team_approval(&preview.session_id)
+            || !core.active
+            || !core.awaiting_attach
+            || core.mode_conflicted
+            || core.cursor.is_some()
+            || core.assembly.is_some()
+            || core.state.preview.is_some()
+            || core.state.status != SessionStatus::Loading
+            || core.state.session_mode.is_some_and(|mode| mode != preview.session_mode)
+            || preview.messages.is_empty()
+            || preview.messages.len() > 200
+        {
+            return;
+        }
+        self.inner.commit(&mut core, |s| s.preview = Some(preview));
+    }
 
     /// A `session.snapshot` notification.
     pub fn handle_snapshot(&self, params: SessionSnapshotParams) {
@@ -787,6 +817,7 @@ impl SessionController {
         }
         self.inner.commit(&mut core, |s| {
             s.status = SessionStatus::Loading;
+            s.preview = None;
             s.messages.clear();
             s.records.clear();
             s.first_message_index = 0;
@@ -1148,6 +1179,17 @@ impl SessionController {
 
     /// The bytes of an image the desktop keeps, as a `data:` URL; fetched once.
     pub async fn fetch_image(&self, image_ref: &str) -> Result<String, RpcError> {
+        self.fetch_image_with_size(image_ref, None).await
+    }
+
+    /// The requested representation. Native image libraries cache explicit variants.
+    pub async fn fetch_image_with_size(
+        &self,
+        image_ref: &str,
+        size: Option<SessionImageSize>,
+    ) -> Result<String, RpcError> {
+        const MAX_BASE64: usize = 28 * 1024 * 1024;
+        const MAX_CHUNK: usize = 1024 * 1024;
         let epoch = {
             let core = self.inner.core.lock().expect("core");
             require_writable(&core, self.inner.io.connected())?;
@@ -1160,46 +1202,53 @@ impl SessionController {
                     "The image belongs to a different remote session.",
                 ));
             }
-            if let Some(url) = self.inner.images.lock().expect("images").get(image_ref) {
-                return Ok(url.clone());
+            if size.is_none() {
+                if let Some(url) = self.inner.images.lock().expect("images").get(image_ref) {
+                    return Ok(url.clone());
+                }
             }
             core.cursor.as_ref().map(|c| c.0.epoch.clone())
         };
-        let result: ImageGetResult = parse(
-            self.inner
-                .io
-                .request(methods::IMAGE_GET, Some(json!({ "ref": image_ref })), None)
-                .await?,
-        )?;
-        let valid_base64 = !result.base64.is_empty()
-            && result
-                .base64
-                .trim_end_matches('=')
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
-            && result.base64.len() - result.base64.trim_end_matches('=').len() <= 2;
-        if !is_supported_image_media_type(&result.media_type) || !valid_base64 {
-            return Err(RpcError::new(
-                RemoteErrorCode::Internal,
-                "unsupported image",
-            ));
+        let mut request = ImageGetParams { image_ref: image_ref.into(), size, offset: None };
+        let mut data = String::new();
+        let mut media_type = None::<String>;
+        loop {
+            let result: ImageGetResult = parse(self.inner.io
+                .request(methods::IMAGE_GET, Some(json!(&request)), None).await?)?;
+            let core = self.inner.core.lock().expect("core");
+            if require_writable(&core, self.inner.io.connected()).is_err()
+                || core.cursor.as_ref().map(|c| c.0.epoch.as_str()) != epoch.as_deref()
+            {
+                return Err(RpcError::new(RemoteErrorCode::Closed, "session changed while fetching image"));
+            }
+            let unpadded = result.base64.trim_end_matches('=');
+            let length = data.len() + result.base64.len();
+            if !is_supported_image_media_type(&result.media_type)
+                || media_type.as_ref().is_some_and(|mime| mime != &result.media_type)
+                || unpadded.is_empty()
+                || !unpadded.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+                || result.base64.len() - unpadded.len() > 2
+                || length > MAX_BASE64
+            {
+                return Err(RpcError::new(RemoteErrorCode::Internal, "unsupported image"));
+            }
+            data.push_str(&result.base64);
+            if let Some(next) = result.next_offset {
+                if size != Some(SessionImageSize::Original) || next != length
+                    || result.base64.len() != MAX_CHUNK || unpadded.len() != MAX_CHUNK
+                {
+                    return Err(RpcError::new(RemoteErrorCode::Internal, "invalid image range"));
+                }
+                request.offset = Some(next);
+                media_type = Some(result.media_type);
+                continue;
+            }
+            let url = format!("data:{};base64,{data}", result.media_type);
+            if size.is_none() && data.len() <= MAX_CHUNK {
+                self.inner.images.lock().expect("images").put(image_ref.to_owned(), url.clone());
+            }
+            return Ok(url);
         }
-        let url = format!("data:{};base64,{}", result.media_type, result.base64);
-        let core = self.inner.core.lock().expect("core");
-        if require_writable(&core, self.inner.io.connected()).is_err()
-            || core.cursor.as_ref().map(|c| c.0.epoch.as_str()) != epoch.as_deref()
-        {
-            return Err(RpcError::new(
-                RemoteErrorCode::Closed,
-                "session changed while fetching image",
-            ));
-        }
-        self.inner
-            .images
-            .lock()
-            .expect("images")
-            .insert(image_ref.to_owned(), url.clone());
-        Ok(url)
     }
 }
 
@@ -1459,6 +1508,9 @@ impl SessionInner {
     /// so listener order is the order of changes.
     fn commit(&self, core: &mut Core, change: impl FnOnce(&mut SessionState)) {
         change(&mut core.state);
+        if core.state.status != SessionStatus::Loading {
+            core.state.preview = None;
+        }
         if core.approval_response == ApprovalResponse::Consumed {
             core.state.pending.permissions.clear();
         }
@@ -1499,7 +1551,7 @@ impl SessionInner {
 
     /// One attach; `true` asks for another one without resuming.
     async fn attach_once(self: &Arc<Self>) -> bool {
-        let (id, resume) = {
+        let (id, resume, preview) = {
             let mut core = self.core.lock().expect("core");
             if !core.active || core.mode_conflicted || !self.io.connected() {
                 return false;
@@ -1517,17 +1569,21 @@ impl SessionInner {
             core.snapshot_finished_during_attach = false;
             self.commit(&mut core, |s| {
                 s.status = SessionStatus::Loading;
+                s.preview = None;
                 s.error = None;
             });
             let resume = core
                 .cursor
                 .as_ref()
                 .map(|c| json!({ "epoch": c.0.epoch, "after_seq": c.0.seq }));
-            (core.attach_id, resume)
+            let preview = core.state.session_mode.is_none() && !is_team_approval(&self.session_id);
+            (core.attach_id, resume, preview)
         };
         let mut params = json!({ "session_id": self.session_id });
         if let Some(resume) = resume {
             params["resume"] = resume;
+        } else if preview {
+            params["preview"] = json!(true);
         }
         let result = self
             .io
@@ -2244,6 +2300,11 @@ impl RemoteClient {
             .cloned();
         let Some(controller) = controller else { return };
         match method {
+            methods::SESSION_PREVIEW => {
+                if let Ok(preview) = serde_json::from_value(params.clone()) {
+                    controller.handle_preview(preview);
+                }
+            }
             methods::SESSION_SNAPSHOT => {
                 if let Ok(snapshot) = serde_json::from_value(params.clone()) {
                     controller.handle_snapshot(snapshot);

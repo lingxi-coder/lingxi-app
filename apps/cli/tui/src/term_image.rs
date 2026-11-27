@@ -10,7 +10,7 @@
 //! carries a `source_path` and the terminal is graphics-capable.
 
 /// An inline-image protocol a terminal may support.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ImageProtocol {
     /// The kitty graphics protocol (kitty, WezTerm, Konsole).
     Kitty,

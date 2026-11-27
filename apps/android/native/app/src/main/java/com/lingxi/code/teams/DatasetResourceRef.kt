@@ -12,7 +12,7 @@ internal sealed interface DatasetResourceRef {
 
     companion object {
         const val PROTOCOL_VERSION = 2
-        const val CONTRACT_SHA256 = "b8c48b561b817dc203e0bed096ecd60314d0aab7cc5b9ab08facd45e1cc3ba73"
+        const val CONTRACT_SHA256 = "6cd49a190a7186495ff12756d050110b3c983eb09104a9708df30f163810b9fc"
         private val idPattern = Regex("[A-Za-z0-9_-]{1,64}")
         private val digestPattern = Regex("[a-f0-9]{64}")
 

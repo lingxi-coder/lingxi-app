@@ -28,6 +28,7 @@ struct ProviderAccount: Codable, Equatable, Identifiable {
     let authKind: String
     let executionBindingId: String
     let enabled: Bool
+    var additionalOpenaiModels: Bool?
     let userPriority: UInt32
     let configRevision: UInt64
     let identityGeneration: UInt64

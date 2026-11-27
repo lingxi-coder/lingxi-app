@@ -108,7 +108,7 @@ internal fun EngineSettingsPage(route: String, bridge: SettingsEngineBridge, onR
             Text(stringResource(R.string.settings_diagnostics_merged_keys_fmt, snapshot.mergedKeys.orEmpty().joinToString().ifBlank { none }))
             return@Column
         }
-        SingleChoiceRow(listOf("user", "project", "local", "managed"), layer, { layer = it })
+        SingleChoiceRow(listOf("user", "project", "managed"), layer, { layer = it })
         Text(settingsLabel("${layer}_layer_desc"), color = LingXiTheme.palette.text4)
         if (isProjectScopedLayer(layer)) {
             val projectDirectory = projectDirectoryFromFiles(snapshot.filesJson, configDirName)

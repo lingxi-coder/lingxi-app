@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactElement } from 'react';
 import { LookupCard, nowFriends, requestSentTo } from './AddFriendView';
 import { friendsErrorText, offerErrorText } from './errors.js';
 import { friendCollator, invitePicker, type LookupResult, type Proof } from './friends.js';
@@ -7,19 +7,30 @@ import type { TeamMember, TeamSummary } from './index.js';
 import { Avatar, Dialog, type RenderAvatar } from './ui';
 import { intlTag, useTeamsText } from './i18n.js';
 
+function useDialogActivity(workspace: FriendsWorkspace, key: string) {
+  const instance = useMemo(() => ({ active: false }), [workspace, key]);
+  useLayoutEffect(() => {
+    instance.active = true;
+    return () => { instance.active = false; };
+  }, [instance]);
+  return instance;
+}
+
 /** Runs one lookup when the dialog opens. `undefined` while it runs. */
 function useLookup(workspace: FriendsWorkspace, proof: Proof): { result: LookupResult } | { error: string } | undefined {
-  const [outcome, setOutcome] = useState<{ result: LookupResult } | { error: string }>();
+  const [outcome, setOutcome] = useState<{
+    workspace: FriendsWorkspace; key: string; value: { result: LookupResult } | { error: string }
+  }>();
   const key = JSON.stringify(proof);
   useEffect(() => {
     let live = true;
     setOutcome(undefined);
-    void workspace.lookup(proof).then(value => { if (live) setOutcome(value); });
+    void workspace.lookup(proof).then(value => { if (live) setOutcome({ workspace, key, value }); });
     return () => { live = false; };
   // The proof is read once per key.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace, key]);
-  return outcome;
+  return outcome?.workspace === workspace && outcome.key === key ? outcome.value : undefined;
 }
 
 /**
@@ -29,18 +40,21 @@ function useLookup(workspace: FriendsWorkspace, proof: Proof): { result: LookupR
 export function FriendLinkDialog({ workspace, locale, code, onClose }: { workspace: FriendsWorkspace; locale: string; code: string; onClose(): void }): ReactElement {
   const t = useTeamsText(locale);
   const proof: Proof = { kind: 'code', code };
+  const activity = useDialogActivity(workspace, code);
+  const close = () => { activity.active = false; onClose(); };
   const found = useLookup(workspace, proof);
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
   const result = found && 'result' in found ? found.result : undefined;
   const confirm = async () => {
     if (!result) return;
     setBusy(true); setError('');
-    const outcome = await workspace.confirm(proof, result, '');
+    const outcome = await workspace.confirm(proof, result, '', () => activity.active);
+    if (!activity.active) return;
     setBusy(false);
-    if ('error' in outcome) setError(outcome.error); else onClose();
+    if ('error' in outcome) setError(outcome.error); else close();
   };
-  const cancel = <button type="button" data-autofocus onClick={onClose}>{t('common_cancel')}</button>;
-  return <Dialog title={result && result.relation !== 'friends' ? t('friends_confirm_title_fmt', result.displayName) : result ? result.displayName : t('friends_add')} onClose={onClose}>
+  const cancel = <button type="button" data-autofocus onClick={close}>{t('common_cancel')}</button>;
+  return <Dialog title={result && result.relation !== 'friends' ? t('friends_confirm_title_fmt', result.displayName) : result ? result.displayName : t('friends_add')} onClose={close}>
     <div className="tw-form">
       {!found ? <p className="tw-hint" role="status">{t('teams_loading')}</p>
         : 'error' in found ? <>
@@ -49,7 +63,7 @@ export function FriendLinkDialog({ workspace, locale, code, onClose }: { workspa
         </>
         : result!.relation === 'friends' ? <>
           <p>{t('friends_relation_friends')}</p>
-          <div className="tw-dialog-actions">{cancel}<button type="button" className="tw-primary" onClick={() => { workspace.openChat(result!.uid); onClose(); }}>{t('friends_open_chat')}</button></div>
+          <div className="tw-dialog-actions">{cancel}<button type="button" className="tw-primary" onClick={() => { workspace.openChat(result!.uid); close(); }}>{t('friends_open_chat')}</button></div>
         </> : <>
           <p>{t('friends_confirm_link_body')}</p>
           {error ? <p role="alert" className="tw-error">{friendsErrorText(error, locale)}</p> : null}
@@ -65,16 +79,19 @@ export function MemberFriendDialog({ workspace, locale, teamId, member, renderAv
 }): ReactElement {
   const t = useTeamsText(locale);
   const proof: Proof = { kind: 'team', teamId, uid: member.uid };
+  const key = JSON.stringify(proof);
+  const activity = useDialogActivity(workspace, key);
+  const close = () => { activity.active = false; onClose(); };
   const found = useLookup(workspace, proof);
   const [done, setDone] = useState('');
-  return <Dialog title={t('friends_add')} onClose={onClose}>
+  return <Dialog title={t('friends_add')} onClose={close}>
     <div className="tw-form">
       {done ? <p role="status">{done}</p>
         : !found ? <p className="tw-hint" role="status">{t('teams_loading')}</p>
         : 'error' in found ? <p role="alert" className="tw-error">{friendsErrorText(found.error, locale)}</p>
-        : <LookupCard workspace={workspace} locale={locale} proof={proof} result={found.result} renderAvatar={renderAvatar}
-          onDone={outcome => outcome ? setDone(outcome.done === 'sent' ? requestSentTo(outcome.name, locale) : nowFriends(outcome.name, locale)) : onClose()} />}
-      <div className="tw-dialog-actions"><button type="button" data-autofocus={done ? '' : undefined} onClick={onClose}>{done ? t('common_close') : t('common_cancel')}</button></div>
+        : <LookupCard key={key} workspace={workspace} locale={locale} proof={proof} result={found.result} renderAvatar={renderAvatar} stillActive={() => activity.active}
+          onDone={outcome => outcome ? setDone(outcome.done === 'sent' ? requestSentTo(outcome.name, locale) : nowFriends(outcome.name, locale)) : close()} />}
+      <div className="tw-dialog-actions"><button type="button" data-autofocus={done ? '' : undefined} onClick={close}>{done ? t('common_close') : t('common_cancel')}</button></div>
     </div>
   </Dialog>;
 }
@@ -107,14 +124,15 @@ export function FriendProfileDialog({ workspace, uid, name, handle, since, local
  * D10: Remove friend and Block ask once. The title names the person, the body says what follows, Cancel is always there and the
  * confirming button is the danger one. A failure is shown under the body and the dialog stays; success closes it.
  */
-export function FriendLeaveDialog({ workspace, locale, uid, name, action, onClose }: {
-  workspace: FriendsWorkspace; locale: string; uid: string; name: string; action: 'remove' | 'block'; onClose(): void;
+export function FriendLeaveDialog({ workspace, locale, uid, teamId, name, action, onClose }: {
+  workspace: FriendsWorkspace; locale: string; uid: string; teamId?: string; name: string; action: 'remove' | 'block'; onClose(): void;
 }): ReactElement {
   const t = useTeamsText(locale);
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const [version] = useState(teamId);
   const leave = async () => {
     setBusy(true); setError('');
-    const code = await workspace.leave(uid, action);
+    const code = await workspace.leave(uid, action, version);
     setBusy(false); setError(code);
     if (!code) onClose();
   };

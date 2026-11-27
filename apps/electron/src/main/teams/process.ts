@@ -5,6 +5,7 @@ import { existsSync, lstatSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import type { TaskUsage } from '../../../../../packages/teams/execution.js';
 import type { TeamDataRef, TeamModelRoute } from './privateStore.js';
+import { parseVisualizationArtifact, type VisualizationArtifact } from '../../../../../packages/teams/visualization.js';
 
 export interface BotChatScope { teamId: string; sharedBotId: string; conversationId: string; sessionEpoch: number }
 export interface BotChatCursor { scope: BotChatScope | null; sessionRevision: number; lastMessageSeq: number; lastChangeSeq: number; bootstrapFromSeq: number }
@@ -32,6 +33,7 @@ export interface TeamHostBootstrap {
   /** The other Bots of the Chat this run may hand part of the request to (`run` and `continue`), by shared Bot id: at most `DELEGATES_OFFERED`, and left out when there are none.
    * A request to one that waits for no reply goes through the `delegate` operation; one that waits is the run's pause (`wait.kind` `delegation`). */
   delegates?: Array<{ id: string; name: string; description?: string }>;
+  visualizations?: true;
   /** Nobody asked the Bot for this task (`run` and `continue`): offer it the tool that leaves the message unanswered. */
   mayDecline?: boolean;
   /** With `mayDecline` only: the member wrote this message to the Bot directly (a Bot DM), so the Bot answers unless it plainly needs no answer. */
@@ -46,6 +48,7 @@ export interface TeamTaskWait { waitId: string; kind: 'human_input' | 'tool_appr
 export interface TeamRunResult {
   /** `declined`: the Bot chose not to answer; `text` is empty and there is no document. */
   status: 'inspected' | 'not_found' | 'completed' | 'failed' | 'waiting' | 'declined'; cursor: BotChatCursor; text?: string; finishedAt?: number;
+  visualization?: VisualizationArtifact;
   document?: { operationId: string; deliveryId: string; title: string; markdown: string; sha256: string };
   /** `dispatchedRequests` counts every attempt of the task, `attemptDispatchedRequests` this process only. */
   dispatchedRequests?: number; attemptDispatchedRequests?: number; deniedTools?: number; usage?: TaskUsage;
@@ -247,7 +250,9 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
           if (!wait(value.wait) || typeof value.checkpointDigest !== 'string' || !DIGEST.test(value.checkpointDigest) || !count(value.pausedAt) || !count(value.dispatchedRequests)) throw new Error('TEAM_HOST_PROTOCOL');
         }
         // A result recorded by an earlier runtime has no per-attempt count.
-        else exact(value,['version','type','status','cursor','text','finishedAt','dispatchedRequests','deniedTools','usage'],['document','attemptDispatchedRequests']);
+        else exact(value,['version','type','status','cursor','text','finishedAt','dispatchedRequests','deniedTools','usage'],['document','attemptDispatchedRequests','visualization']);
+        if (value.visualization !== undefined && (value.status !== 'completed' || kind === 'run_private')) throw new Error('TEAM_HOST_PROTOCOL');
+        const visualization = parseVisualizationArtifact(value.visualization, options.bootstrap.taskId);
         if (!cursor(value.cursor)
           || (['completed','failed','declined'].includes(value.status) && (typeof value.text !== 'string' || Buffer.byteLength(value.text) > 8192 || !Number.isSafeInteger(value.finishedAt)))
           || (value.status === 'declined' && (value.text !== '' || value.document !== undefined))
@@ -267,7 +272,7 @@ export async function runTeamHost(options: TeamHostProcessOptions): Promise<Team
               || usage.costMicros !== undefined && (!Number.isSafeInteger(usage.costMicros) || (usage.costMicros as number)<0)
               || usage.currency !== undefined && (typeof usage.currency !== 'string' || !/^[A-Z]{3}$/u.test(usage.currency))) throw new Error('TEAM_HOST_PROTOCOL'); }
         }
-        result = { status: value.status, cursor: value.cursor, ...(value.usage !== undefined ? { usage: value.usage } : {}), ...(value.text !== undefined ? { text: value.text } : {}), ...(value.document !== undefined ? { document: value.document } : {}), ...(value.finishedAt !== undefined ? { finishedAt: value.finishedAt } : {}), ...(value.dispatchedRequests !== undefined ? { dispatchedRequests: value.dispatchedRequests } : {}),
+        result = { status: value.status, cursor: value.cursor, ...(value.usage !== undefined ? { usage: value.usage } : {}), ...(value.text !== undefined ? { text: value.text } : {}), ...(value.document !== undefined ? { document: value.document } : {}), ...(visualization ? { visualization } : {}), ...(value.finishedAt !== undefined ? { finishedAt: value.finishedAt } : {}), ...(value.dispatchedRequests !== undefined ? { dispatchedRequests: value.dispatchedRequests } : {}),
           ...(value.attemptDispatchedRequests !== undefined ? { attemptDispatchedRequests: value.attemptDispatchedRequests } : {}), ...(value.deniedTools !== undefined ? { deniedTools: value.deniedTools } : {}),
           ...(value.status === 'waiting' ? { wait: value.wait, checkpointDigest: value.checkpointDigest, pausedAt: value.pausedAt } : {}) } as TeamRunResult;
       } else if (value.type === 'error') {

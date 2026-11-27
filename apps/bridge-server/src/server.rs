@@ -40,6 +40,7 @@
 //! directly on the pump; multi-client fan-out is later work.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 
@@ -62,8 +63,10 @@ use client::adapter::{
 use client::protocol::commands::{ClientCommand, ImageRefDto, UiSurfaceDto};
 use client::protocol::computer_access::{ComputerAccessRequestDto, ComputerAccessResponseDto};
 use client::protocol::events::{ClientEvent, ErrorKindDto};
+use client::protocol::listings::SessionModeDto;
 use client::protocol::permission::{PermissionKindDto, PermissionRequest, PermissionResponseDto};
 use client::protocol::text::ClientTextDto;
+use lingxi_core::host::session_context::ConversationMode;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use msgqueue::{
     join_prompt_values, MessageQueueManager, QueuePriority, QueueSource, QueuedCommand,
@@ -5871,6 +5874,104 @@ impl FramePump for BridgeConnection {
                     };
                     if let Some(sink) = self.out.lock().await.as_ref() {
                         let _ = sink.send(response);
+                    }
+                    return;
+                }
+                if method == "desktop_cold_resume_preview" {
+                    #[derive(serde::Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct PreviewRequest {
+                        session_id: uuid::Uuid,
+                        transcript_path: PathBuf,
+                        expected_mode: ConversationMode,
+                    }
+                    let admitted = async {
+                        let request = deserialize_source::<PreviewRequest>(&params)
+                            .map_err(|_| "invalid desktop cold resume preview request")?;
+                        if !request.transcript_path.is_absolute() {
+                            return Err(
+                                "desktop cold resume preview requires an absolute transcript path"
+                                    .into(),
+                            );
+                        }
+                        let _handoff = self.turn_handoff.try_lock().map_err(|_| {
+                            "desktop cold resume preview requires the idle session owner"
+                        })?;
+                        if self.turn_running.load(Ordering::SeqCst)
+                            || self.transition_active.load(Ordering::SeqCst)
+                        {
+                            return Err(
+                                "desktop cold resume preview requires the idle session owner"
+                                    .into(),
+                            );
+                        }
+                        let router = self
+                            .router
+                            .as_ref()
+                            .ok_or("desktop cold resume preview is unavailable")?;
+                        let permit = self
+                            .transcript_checkpoint_reads
+                            .clone()
+                            .try_acquire_owned()
+                            .map_err(|_| {
+                                "a desktop transcript checkpoint is already in progress"
+                            })?;
+                        // Retain the exact snapshot while this ordered frame still owns
+                        // admission. The following resume can consume its proof and run
+                        // deferred actions independently of projection and serialization.
+                        let preview = router
+                            .prepare_cold_resume_preview(
+                                request.session_id,
+                                &request.transcript_path,
+                                request.expected_mode,
+                            )
+                            .await?;
+                        Ok::<_, String>((request, preview, permit))
+                    }
+                    .await;
+                    match admitted {
+                        Err(error) => {
+                            let _ = out.send(Self::error_response(id, error));
+                        }
+                        Ok((request, preview, permit)) => {
+                            let response_order = self.out.clone();
+                            tokio::spawn(async move {
+                                let _permit = permit;
+                                let result = tokio::task::spawn_blocking(move || {
+                                    const MAX_PREVIEW_BYTES: usize = 2 * 1024 * 1024;
+                                    let event = ClientEvent::SessionResumed {
+                                        session_id: request.session_id.to_string(),
+                                        mode: match request.expected_mode {
+                                            ConversationMode::Chat => SessionModeDto::Chat,
+                                            ConversationMode::Code => SessionModeDto::Code,
+                                        },
+                                        messages: preview.messages(),
+                                    };
+                                    let json = serde_json::to_string(&event)
+                                        .map_err(|error| error.to_string())?;
+                                    if json.len() > MAX_PREVIEW_BYTES {
+                                        return Err(
+                                            "desktop cold resume preview is too large".into()
+                                        );
+                                    }
+                                    Utf16JsonProjection::parse(&json)
+                                        .map_err(|error| error.to_string())
+                                })
+                                .await
+                                .map_err(|error| error.to_string())
+                                .and_then(|result| result);
+                                let response = match result {
+                                    Ok(result) => Frame::Response(BridgeResponse {
+                                        id,
+                                        result: Some(result),
+                                        error: None,
+                                    }),
+                                    Err(error) => Self::error_response(id, error),
+                                };
+                                let _delivery = response_order.lock().await;
+                                let _ = out.send(response);
+                            });
+                        }
                     }
                     return;
                 }

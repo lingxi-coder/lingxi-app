@@ -47,6 +47,9 @@ packages:
   GoogleSignIn:
     url: https://github.com/google/GoogleSignIn-iOS.git
     exactVersion: 9.2.0
+  Nuke:
+    url: https://github.com/kean/Nuke.git
+    exactVersion: 12.9.0
 
 targets:
   LingxiCode:
@@ -71,7 +74,11 @@ targets:
         buildPhase: resources
       - path: ../../../resources/extensions/public-directory.json
         buildPhase: resources
+      - path: ../../../resources/extension-artwork/drawable-nodpi
+        buildPhase: resources
       - path: ../../../resources/mermaid/mermaid.html
+        buildPhase: resources
+      - path: ../../../resources/team-visualization/assets/team-visualization.html
         buildPhase: resources
     dependencies:
       - package: ZIPFoundation
@@ -87,6 +94,10 @@ targets:
         product: FirebaseCrashlytics
       - package: GoogleSignIn
         product: GoogleSignIn
+      - package: Nuke
+        product: Nuke
+      - package: Nuke
+        product: NukeUI
       - target: ConversationWidget
         embed: true
       # UniFFI FFI static-library xcframework: exports the harness_runtime /

@@ -41,7 +41,7 @@ setInterval(() => {}, 1000);
   const internal = runtime as any;
   // Only the wire handshake is stubbed; launch configuration, spawn and lifecycle
   // are real, and a separate child records the environment it actually received.
-  internal.waitForLockfile = async () => '/unused-test-handshake';
+  internal.waitForLockfile = async () => ({ path: '/unused-test-handshake' });
   internal.connectBridgeClient = async () => internal.setState({ status: 'connected' });
   async function childEnvironment() {
     const path = join(internal.launchDir, 'environment.json');

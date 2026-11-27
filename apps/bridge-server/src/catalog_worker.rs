@@ -26,7 +26,22 @@ struct Request {
     scope: Option<String>,
     transcript_path: Option<PathBuf>,
     history_before: Option<super::history_page::Cursor>,
+    history_limit: Option<usize>,
+    history_image: Option<super::history_image::ImageRequest>,
+    #[serde(default)]
+    history_latest: bool,
     activity_after: Option<u64>,
+    activity_preview: Option<u64>,
+    #[serde(default)]
+    prepare_open: bool,
+    #[serde(default, deserialize_with = "workspace_environment_flag")]
+    workspace_environment: Option<bool>,
+}
+
+fn workspace_environment_flag<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
+    bool::deserialize(deserializer).map(Some)
 }
 
 #[derive(Serialize)]
@@ -199,15 +214,92 @@ impl CatalogWorker {
         {
             return Err("invalid session catalog worker request".into());
         }
+        if request
+            .history_limit
+            .is_some_and(|limit| !(1..=200).contains(&limit))
+            || (request.history_limit.is_some() && request.history_before.is_none())
+            || request.activity_preview.is_some_and(|cursor| cursor == 0)
+            || (request.activity_preview.is_some()
+                && (request.activity_after.is_some()
+                    || request.history_before.is_some()
+                    || request.history_latest
+                    || request.history_image.is_some()
+                    || request.scope.is_some()
+                    || request.prepare_open
+                    || request.workspace_environment.is_some()))
+        {
+            return Err("Invalid catalog read operation".into());
+        }
         let cwd = tokio::fs::canonicalize(&request.cwd)
             .await
             .map_err(|_| "session catalog workspace is unavailable".to_string())?;
+        if let Some(enabled) = request.workspace_environment {
+            if !enabled
+                || request.session_id.is_some()
+                || request.scope.is_some()
+                || request.transcript_path.is_some()
+                || request.history_before.is_some()
+                || request.history_image.is_some()
+                || request.history_latest
+                || request.activity_after.is_some()
+                || request.prepare_open
+            {
+                return Err("invalid workspace environment request".into());
+            }
+            // The one-shot command resolves relative configuration paths against this cwd.
+            let process_cwd = std::env::current_dir()
+                .map_err(|_| "workspace environment working directory is unavailable")?;
+            if tokio::fs::canonicalize(&process_cwd).await.ok() != Some(cwd) {
+                return Err("workspace environment requires the worker's launch directory".into());
+            }
+            let output = super::workspace_environment_json(&process_cwd).await?;
+            if output.len() > MAX_OUTPUT_BYTES {
+                return Err("workspace environment output is too large".into());
+            }
+            return Ok(output);
+        }
         let home = if self.home.is_absolute() {
             self.home.clone()
         } else {
             cwd.join(&self.home)
         };
-        if let Some(after) = request.activity_after {
+        if request.prepare_open
+            && (request.transcript_path.is_none()
+                || request.session_id.is_none()
+                || request.scope.is_none()
+                || request.history_before.is_some()
+                || request.history_image.is_some()
+                || request.history_latest
+                || request.activity_after.is_some())
+        {
+            return Err("an open preview requires an exact catalog selection".into());
+        }
+        if request.history_latest || request.history_image.is_some() {
+            if request.scope.is_some() || request.history_before.is_some() || request.activity_after.is_some()
+                || (request.history_latest && request.history_image.is_some()) {
+                return Err("Invalid history read operation".into());
+            }
+            let source = request.transcript_path.as_deref().ok_or("History requires an exact source")?;
+            let id = request.session_id.as_deref()
+                .and_then(|id| uuid::Uuid::parse_str(id).ok()).ok_or("Invalid history session")?;
+            let source = super::history_page::LatestSource::open(&home, source, id)?;
+            let operation = request.history_image.clone();
+            return tokio::task::spawn_blocking(move || {
+                if let Some(operation) = operation {
+                    let asset = super::history_image::read(source, operation)?;
+                    return serde_json::to_string(&asset).map_err(|error| error.to_string());
+                }
+                let body = serde_json::to_string(&source.read(id)?).map_err(|error| error.to_string())?;
+                if body.len() > super::history_page::MAX_PREVIEW_BYTES {
+                    return Err("History preview exceeds the output limit".into());
+                }
+                Ok(body)
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        }
+        let (activity_after, activity_preview) = (request.activity_after, request.activity_preview);
+        if activity_after.is_some() || activity_preview.is_some() {
             let id = request
                 .session_id
                 .as_deref()
@@ -224,8 +316,14 @@ impl CatalogWorker {
                 return Err("Activity source is outside the session catalog".into());
             }
             return tokio::task::spawn_blocking(move || {
-                let page =
-                    session::jsonl::activity::page(&source, after).map_err(|e| e.to_string())?;
+                if let Some(cursor) = activity_preview {
+                    let messages = session::jsonl::activity::preview(&source, cursor).map_err(|e| e.to_string())?;
+                    return serde_json::to_string(&messages.into_iter().map(|message| {
+                        serde_json::json!({"uuid": message.uuid, "at": message.at, "blocks": message.blocks})
+                    }).collect::<Vec<_>>()).map_err(|e| e.to_string());
+                }
+                let page = session::jsonl::activity::page(&source, activity_after.unwrap_or_default())
+                    .map_err(|e| e.to_string())?;
                 serde_json::to_string(&page).map_err(|e| e.to_string())
             })
             .await
@@ -241,8 +339,9 @@ impl CatalogWorker {
                 .as_deref()
                 .and_then(|id| uuid::Uuid::parse_str(id).ok())
                 .ok_or("Invalid history session")?;
+            let limit = request.history_limit;
             let page = tokio::task::spawn_blocking(move || {
-                super::history_page::read(&source, session_id, cursor)
+                super::history_page::read_limited(&source, session_id, cursor, limit)
             })
             .await
             .map_err(|error| error.to_string())??;
@@ -268,10 +367,45 @@ impl CatalogWorker {
                 .as_deref()
                 .ok_or_else(|| "selected session id is required".to_string())?;
             let scope = scope.ok_or_else(|| "selected session scope is required".to_string())?;
-            super::validate_selected_transcript_identity(source, id)?;
+            let uuid = super::validate_selected_transcript_identity(source, id)?;
+            let preview_source = request
+                .prepare_open
+                .then(|| super::history_page::LatestSource::open(&home, source, uuid).ok())
+                .flatten();
             // Exact-source requests still capture/revalidate the selected source;
             // they never resolve a cached UUID winner or a substitute transcript.
-            super::list_selected_session_json_from_in_scope(&cwd, &home, id, source, scope).await?
+            let catalog =
+                super::list_selected_session_json_from_in_scope(&cwd, &home, id, source, scope)
+                    .await?;
+            if !request.prepare_open {
+                catalog
+            } else {
+                // A missing row must never expose a page from a different scope.
+                let has_row = serde_json::from_str::<serde_json::Value>(&catalog)
+                    .ok()
+                    .and_then(|result| result["sessions"].as_array().map(|rows| !rows.is_empty()))
+                    .unwrap_or(false);
+                let preview = match preview_source.filter(|_| has_row) {
+                    Some(source) => tokio::task::spawn_blocking(move || {
+                        source
+                            .read(uuid)
+                            .ok()
+                            .filter(|page| !page.messages.is_empty())
+                            .and_then(|page| serde_json::to_string(&page).ok())
+                            .filter(|page| page.len() <= super::history_page::MAX_PREVIEW_BYTES)
+                    })
+                    .await
+                    .ok()
+                    .flatten(),
+                    None => None,
+                };
+                // Both fragments are module-generated JSON. Preserve escaped
+                // UTF-16 units in transcript text when framing them together.
+                format!(
+                    r#"{{"catalog":{catalog},"preview":{}}}"#,
+                    preview.as_deref().unwrap_or("null")
+                )
+            }
         } else {
             let fs = self.filesystem(cwd.clone(), home.clone());
             // Discovery and revision/alias checks still run on every request.
@@ -355,7 +489,8 @@ async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                     .map_err(|_| "failed to encode session catalog worker error".to_string())?,
             ),
         };
-        write_response(&mut output, request.id, kind, &body).await?;
+        let limit = if request.history_image.is_some() { super::history_image::MAX_IMAGE_OUTPUT } else { MAX_OUTPUT_BYTES };
+        write_response(&mut output, request.id, kind, &body, limit).await?;
         output
             .flush()
             .await
@@ -371,12 +506,13 @@ async fn write_response<W: AsyncWrite + Unpin>(
     id: u64,
     kind: &'static str,
     body: &str,
+    limit: usize,
 ) -> Result<(), String> {
     if id == 0
         || id > 9_007_199_254_740_991
         || !matches!(kind, "output" | "error")
         || body.is_empty()
-        || body.len() > MAX_OUTPUT_BYTES
+        || body.len() > limit
     {
         return Err("invalid session catalog worker response".into());
     }
@@ -419,10 +555,10 @@ mod tests {
     async fn raw_response_keeps_json_bytes_unicode_surrogates_and_embedded_newlines() {
         let body = "{\n\"text\":\"中文🧪\\ud800\\udc00\\ud800\\\"\\\\\\n\"\n}";
         let mut output = Vec::new();
-        write_response(&mut output, 1, "output", body)
+        write_response(&mut output, 1, "output", body, MAX_OUTPUT_BYTES)
             .await
             .unwrap();
-        write_response(&mut output, 2, "error", "\"scoped error\"")
+        write_response(&mut output, 2, "error", "\"scoped error\"", MAX_OUTPUT_BYTES)
             .await
             .unwrap();
         let responses = decode_responses(&output);
@@ -443,7 +579,7 @@ mod tests {
             (1, "output", "x".repeat(MAX_OUTPUT_BYTES + 1)),
         ] {
             let mut output = Vec::new();
-            assert!(write_response(&mut output, id, kind, &body).await.is_err());
+            assert!(write_response(&mut output, id, kind, &body, MAX_OUTPUT_BYTES).await.is_err());
             assert!(output.is_empty());
         }
         let root = tempfile::tempdir().unwrap();
@@ -458,6 +594,60 @@ mod tests {
                 .is_err());
             assert!(output.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn committed_inbox_result_can_be_read_after_600_newer_rows() {
+        use session::jsonl::durable_writer::DurableTranscriptWriter;
+        use session::jsonl::{JsonlMessage, JsonlWriter, activity};
+        use serde_json::json;
+
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("workspace");
+        let home = root.path().join("config");
+        std::fs::create_dir(&cwd).unwrap();
+        let home = {
+            std::fs::create_dir(&home).unwrap();
+            home.canonicalize().unwrap()
+        };
+        let session_id = uuid::Uuid::new_v4();
+        let transcript = session::jsonl::session_path(&home, cwd.to_str().unwrap(), &session_id.to_string());
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, "").unwrap();
+        let state = home.join("state");
+        std::fs::create_dir(&state).unwrap();
+        let fs = Arc::new(crate::HostFileSystem::new(home.clone()));
+        let writer = JsonlWriter::new(transcript.clone(), fs)
+            .with_durable_lock(Arc::new(DurableTranscriptWriter::open(state).unwrap()));
+        writer.bootstrap_session_message_identity_snapshot(&transcript).await.unwrap();
+        let result_id = uuid::Uuid::new_v4();
+        let result: JsonlMessage = serde_json::from_value(json!({
+            "type": "assistant", "uuid": result_id, "sessionId": session_id,
+            "timestamp": "2026-11-16T16:00:00Z",
+            "message": { "id": "old", "role": "assistant", "stop_reason": "end_turn",
+                "content": [{ "type": "text", "text": "Committed old result" }] }
+        })).unwrap();
+        writer.append_batch(&[result]).await.unwrap();
+        activity::finish_turn(&transcript, Some("old"), None, false).unwrap();
+        let through = activity::summary(&transcript).unwrap().unwrap().cursor;
+        assert!(through > 0);
+        let newer = (0..600).map(|index| serde_json::from_value::<JsonlMessage>(json!({
+            "type": "user", "uuid": uuid::Uuid::new_v4(), "sessionId": session_id,
+            "message": { "role": "user", "content": format!("newer {index}") }
+        })).unwrap()).collect::<Vec<_>>();
+        writer.append_batch(&newer).await.unwrap();
+
+        let input = format!("{}\n", json!({
+            "version": 2, "id": 1, "cwd": cwd, "sessionId": session_id,
+            "transcriptPath": transcript, "activityPreview": through,
+        }));
+        let mut output = Vec::new();
+        serve(input.as_bytes(), &mut output, home).await.unwrap();
+        let responses = decode_responses(&output);
+        assert_eq!(responses[0].0["kind"], "output");
+        let body: serde_json::Value = serde_json::from_slice(responses[0].1).unwrap();
+        assert_eq!(body[0]["uuid"], result_id.to_string());
+        assert_eq!(body[0]["blocks"][0], json!("Committed old result".encode_utf16().collect::<Vec<_>>()));
     }
 
     #[test]
@@ -518,6 +708,44 @@ mod tests {
         assert_eq!(lines[1].0["id"], 2);
         let catalog: serde_json::Value = serde_json::from_slice(lines[1].1).unwrap();
         assert_eq!(catalog, serde_json::json!({"version":1,"sessions":[]}));
+    }
+
+    #[tokio::test]
+    async fn workspace_environment_requires_a_dedicated_request_in_the_worker_directory() {
+        use serde_json::json;
+
+        let root = tempfile::tempdir().unwrap();
+        let mut worker = CatalogWorker::new(root.path().join("home"));
+        let mut query = json!({"version": 2, "id": 1, "cwd": std::env::current_dir().unwrap(), "workspaceEnvironment": true});
+        for (field, value) in [
+            ("sessionId", json!("11111111-2222-4333-8444-555555555555")),
+            ("scope", json!("current")),
+            ("transcriptPath", json!(root.path())),
+            (
+                "historyBefore",
+                json!({"uuid": "11111111-2222-4333-8444-555555555555"}),
+            ),
+            ("activityAfter", json!(0)),
+            ("workspaceEnvironment", json!(false)),
+        ] {
+            let mut invalid = query.clone();
+            invalid[field] = value;
+            let request = serde_json::from_value(invalid).unwrap();
+            assert_eq!(
+                worker.list(&request).await.unwrap_err(),
+                "invalid workspace environment request"
+            );
+        }
+        query["cwd"] = json!(root.path());
+        let other_project = serde_json::from_value(query.clone()).unwrap();
+        assert_eq!(
+            worker.list(&other_project).await.unwrap_err(),
+            "workspace environment requires the worker's launch directory"
+        );
+        for invalid in [json!(null), json!("true")] {
+            query["workspaceEnvironment"] = invalid;
+            assert!(serde_json::from_value::<Request>(query.clone()).is_err());
+        }
     }
 
     #[tokio::test]

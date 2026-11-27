@@ -736,6 +736,7 @@ async fn account_injection_tombstones_removed_records_and_rejects_stale_snapshot
             secret_ref: format!("acct.{id}"),
         },
         enabled: true,
+        additional_openai_models: false,
         user_priority: priority,
         config_revision: 1,
         identity_generation: 1,
@@ -2648,7 +2649,10 @@ async fn session_agent_route_never_follows_a_symlinked_transcript_root() {
 }
 
 #[tokio::test]
-async fn resume_session_replays_adopts_and_emits_full_transcript() {
+async fn resume_session_adopts_history_and_keeps_older_rows_available_by_cursor() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
     let root = tempfile::tempdir().unwrap();
     let session_id = seed_replay_session(root.path());
     let handle = Arc::new(ResumingHandle::new());
@@ -2704,12 +2708,6 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
     assert_eq!(adopted.4.loaded_tool_names, vec!["DeferredTool"]);
     assert_eq!(adopted.4.transcript_only_message_ids.len(), 1);
     assert_eq!(adopted.4.compact_summary_message_ids.len(), 1);
-    // `lower_transcript` FOLDS the `is_compact_summary` user row into the
-    // PRECEDING message's `CompactBoundary` block (see
-    // `client-adapter/src/lowering.rs`, and the DTO's own doc: "Full compact
-    // summary paired from the transcript-only summary row"). So the 3 adopted
-    // history messages lower to 2 client messages — this assertion still
-    // expected the pre-fold count.
     let events = sink.events().await;
     let [ClientEvent::SessionResumed {
         session_id: emitted_id,
@@ -2729,30 +2727,50 @@ async fn resume_session_replays_adopts_and_emits_full_transcript() {
     assert_eq!(emitted_id, &session_id);
     assert_eq!(mode, &SessionModeDto::Code);
     assert_eq!(model, "claude-opus-4-1");
-    assert_eq!(
-        messages.len(),
-        4,
-        "the UI transcript keeps pre-compaction messages while the engine history stays compacted"
-    );
-    assert!(messages.iter().any(|message| message.blocks.iter().any(|block| matches!(
-        block,
-        client::protocol::message::MessageBlockDto::Text { text } if text.display() == "pre-compaction question"
-    ))));
-    assert!(messages.iter().any(|message| {
-        message.blocks.iter().any(|block| matches!(
-        block,
-        client::protocol::message::MessageBlockDto::Text { text } if text.display() == "pre-compaction answer"
-    ))
-    }));
-    // Assert the fold HAPPENED rather than the row simply being dropped —
-    // a count alone cannot tell those two apart.
+    assert_eq!(messages.len(), 2);
+    let cursor = messages[0].transcript_uuid.as_deref().unwrap();
+    assert_eq!(cursor, "dddddddd-4444-4444-8444-dddddddddddd");
+    assert_eq!(messages[1].transcript_uuid.as_deref(), adopted.2.as_deref());
     assert!(
-        messages.iter().flat_map(|m| &m.blocks).any(|b| matches!(
+        messages[0].blocks.iter().any(|b| matches!(
             b,
             client::protocol::message::MessageBlockDto::CompactBoundary { summary, .. }
                 if !summary.is_empty()
         )),
         "the folded summary must survive into a CompactBoundary block"
+    );
+
+    // Page backwards from the boundary actually delivered to the client.
+    let home = root.path().join(".lingxi");
+    let source = session::jsonl::session_path(&home, &root.path().to_string_lossy(), &session_id);
+    let query = serde_json::json!({
+        "version": 2, "id": 1, "cwd": root.path(), "sessionId": session_id,
+        "transcriptPath": source, "historyBefore": { "uuid": cursor }
+    });
+    let mut worker = Command::new(env!("CARGO_BIN_EXE_bridge-server"))
+        .arg("--session-catalog-worker-json")
+        .env("LINGXI_CONFIG_DIR", home)
+        .current_dir(root.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(worker.stdin.take().unwrap(), "{query}").unwrap();
+    let output = worker.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let wire = String::from_utf8(output.stdout).unwrap();
+    let (header, body) = wire.split_once('\n').unwrap();
+    let header: serde_json::Value = serde_json::from_str(header).unwrap();
+    assert_eq!(header["kind"], "output");
+    let page: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(page["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        page["messages"][0]["blocks"][0]["text"],
+        "pre-compaction question"
+    );
+    assert_eq!(
+        page["messages"][1]["blocks"][0]["text"],
+        "pre-compaction answer"
     );
 }
 

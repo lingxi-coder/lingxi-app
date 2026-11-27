@@ -69,7 +69,8 @@ internal object TeamHttp {
                         val code = error?.optJSONObject("error")?.optString("code")?.takeIf(String::isNotBlank)
                             ?: error?.optString("code")?.takeIf(String::isNotBlank)
                             ?: when (status) { 401 -> "UNAUTHENTICATED"; 403 -> "PERMISSION_DENIED"; else -> "SERVICE_UNAVAILABLE" }
-                        throw TeamMessageFailure(code, status)
+                        val retryAfterMs = error?.optJSONObject("error")?.optLong("retryAfterMs")?.takeIf { it > 0 }
+                        throw TeamMessageFailure(code, status, retryAfterMs)
                     }
                     val value = JSONObject(bodyText)
                     if (finished.compareAndSet(false, true)) continuation.resume(value)

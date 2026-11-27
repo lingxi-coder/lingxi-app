@@ -1398,12 +1398,6 @@ impl NativeRemoteMediaSession {
             {
                 MediaSessionState::Reconnecting
             }
-            webrtc::peer_connection::RTCPeerConnectionState::Connecting
-            | webrtc::peer_connection::RTCPeerConnectionState::New
-            | webrtc::peer_connection::RTCPeerConnectionState::Unspecified
-            | webrtc::peer_connection::RTCPeerConnectionState::Disconnected => {
-                MediaSessionState::Preparing
-            }
             webrtc::peer_connection::RTCPeerConnectionState::Failed => MediaSessionState::Failed,
             webrtc::peer_connection::RTCPeerConnectionState::Closed
                 if self.stopped.load(Ordering::Acquire) =>
@@ -1411,6 +1405,9 @@ impl NativeRemoteMediaSession {
                 MediaSessionState::Ended
             }
             webrtc::peer_connection::RTCPeerConnectionState::Closed => MediaSessionState::Failed,
+            // New, Unspecified, Connecting, Disconnected before the first
+            // connection, and any state a later webrtc release adds.
+            _ => MediaSessionState::Preparing,
         };
         self.set_state(mapped);
     }

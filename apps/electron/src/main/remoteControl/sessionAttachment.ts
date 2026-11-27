@@ -15,6 +15,7 @@ import type { RemoteViewerChannel } from './gateway.js';
 import type { RemoteRuntime } from './remoteRuntime.js';
 import {
   buildSnapshot,
+  canResume,
   coalesceRecords,
   recordForEvent,
   recordForInteraction,
@@ -37,20 +38,6 @@ export interface SessionAttachmentDeps {
 
 type Resume = SessionAttachParams['resume'];
 
-/**
- * Whether a viewer that holds everything up to `resume` can be given just what
- * came after: it is the same base, the position is one the runtime has really
- * reached, and nothing after it has been forgotten.
- */
-export function canResume(view: RemoteRuntimeView, resume: Resume): resume is NonNullable<Resume> {
-  return resume !== undefined
-    && resume.epoch === view.epoch
-    && Number.isSafeInteger(resume.after_seq)
-    && resume.after_seq >= view.baseSequence
-    && resume.after_seq <= view.lastSequence
-    && resume.after_seq >= view.droppedThroughSequence;
-}
-
 const pendingSignature = (pending: RemotePending): string => JSON.stringify(pending);
 
 export class SessionAttachment {
@@ -63,6 +50,7 @@ export class SessionAttachment {
   private batch: RemoteSeqRecord[] = [];
   private timer: unknown;
   private resnapshot = false;
+  private awaitingReadiness = false;
   private lastPending = '';
   private closed = false;
   private foregroundNow = false;
@@ -91,9 +79,14 @@ export class SessionAttachment {
    */
   attach(resume: Resume): SessionAttachResult {
     this.unobserve?.();
-    const view = this.runtime.remoteView();
+    const view = this.runtime.remoteView(resume);
     this.unobserve = this.runtime.observeRemote((observation) => this.observe(observation));
     this.lastPending = pendingSignature(view.pending);
+    if (!this.runtime.remoteActionReady) {
+      this.awaitingReadiness = true;
+      this.resnapshot = true;
+      return { mode: 'snapshot', epoch: view.epoch };
+    }
     if (canResume(view, resume)) {
       for (const { seq, record } of recordsAfter(view, resume.after_seq, false, this.botAware)) this.sendRecord(seq, record);
       return { mode: 'delta', epoch: view.epoch, pending: view.pending };
@@ -141,6 +134,19 @@ export class SessionAttachment {
         this.close('ended');
         this.onEnded?.();
         return;
+      case 'action_readiness':
+        if (observation.ready) {
+          if (this.resnapshot) this.schedule();
+        } else if (!this.awaitingReadiness) {
+          this.awaitingReadiness = true;
+          this.resnapshot = true;
+          this.batch = [];
+          // Begin moves viewers to loading while leaving the visible transcript in place.
+          this.channel.notify('session.snapshot', {
+            phase: 'begin', session_id: this.sessionId, epoch: this.runtime.remoteView().epoch, first_message_index: 0,
+          });
+        }
+        return;
       case 'state':
         return;
     }
@@ -163,7 +169,9 @@ export class SessionAttachment {
     this.timer = undefined;
     if (this.closed) return;
     if (this.resnapshot) {
+      if (!this.runtime.remoteActionReady) return;
       this.resnapshot = false;
+      this.awaitingReadiness = false;
       this.batch = [];
       const view = this.runtime.remoteView();
       this.lastPending = pendingSignature(view.pending);
@@ -177,10 +185,12 @@ export class SessionAttachment {
 
   /** The base changed (`/clear`, a restarted engine): what the viewer holds is stale. A fresh snapshot follows once things settle. */
   private baseChanged(): void {
-    if (!this.resnapshot) this.channel.notify('session.reset', { session_id: this.sessionId });
+    if (this.runtime.remoteActionReady) {
+      if (!this.resnapshot) this.channel.notify('session.reset', { session_id: this.sessionId });
+      this.schedule();
+    }
     this.resnapshot = true;
     this.batch = [];
-    this.schedule();
   }
 
   private pendingChanged(): void {

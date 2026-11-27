@@ -64,3 +64,28 @@ test('transcript checkpoint cannot cross a socket replacement or a disconnect', 
   await rejected;
   assert.equal(internal.pendingResponses.size, 0);
 });
+
+test('cold resume preview is a cancellable correlated read of the selected mode and path', async () => {
+  const live: ClientEvent[] = [];
+  const path = '/saved/selected.jsonl';
+  let responseMode = 'code';
+  const { client, internal } = wire((frame, deliver) => {
+    assert.equal(frame.payload.method, 'desktop_cold_resume_preview');
+    assert.deepEqual(frame.payload.params, { session_id: sessionId, transcript_path: path, expected_mode: 'code' });
+    deliver({ type: 'response', payload: { id: frame.payload.id, result: { ...checkpoint, mode: responseMode } } });
+  });
+  client.on('event', event => live.push(event));
+  const preview = () => client.captureColdResumePreview(sessionId, path, 'code', new AbortController().signal);
+  assert.deepEqual(await preview(), checkpoint);
+  responseMode = 'chat';
+  await assert.rejects(preview(), /preview mode/);
+  assert.deepEqual(live, []);
+  assert.equal(internal.pendingResponses.size, 0);
+
+  const unanswered = wire(() => {});
+  const controller = new AbortController();
+  const pending = unanswered.client.captureColdResumePreview(sessionId, path, 'code', controller.signal);
+  controller.abort();
+  await assert.rejects(pending, /was aborted/);
+  assert.equal(unanswered.internal.pendingResponses.size, 0);
+});

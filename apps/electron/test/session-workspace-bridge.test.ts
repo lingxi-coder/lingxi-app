@@ -22,6 +22,8 @@ import { CH_SESSION_WORKSPACE, SESSION_PICKER_EVENT } from '../src/shared/sessio
 import { PermissionPrompt } from '../src/renderer/components/PermissionPrompt';
 import { AskUserQuestionPrompt } from '../src/renderer/components/AskUserQuestionPrompt';
 import { ComputerAccessPrompt } from '../src/renderer/components/ComputerAccessPrompt';
+import { conversationFromMessages } from '../src/renderer/bridge/conversation';
+import { recentTranscript } from '../src/shared/sessionHistory';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
 
@@ -105,7 +107,7 @@ test('App exposes pending resume permission, question and computer approvals whi
   }
 });
 
-test('App suspends the picker and releases its background only while a loading target needs approval', () => {
+test('App releases the picker background for approvals and the current read-only preview', () => {
   let backgroundActive: ts.Expression | undefined;
   const visit = (node: ts.Node): void => {
     // The first boundary owns the app shell; Settings has a separate boundary
@@ -120,12 +122,17 @@ test('App suspends the picker and releases its background only while a loading t
     ts.forEachChild(node, visit);
   };
   visit(appSource); assert.ok(backgroundActive);
-  const context: any = { sessionPicker: { id: 1 }, settingsRoute: null,
+  const context: any = { sessionPicker: { id: 1 }, settingsRoute: null, page: 'teams', assistantNoticeTarget: null,
     bridge: { projectCreationOpen: false, sessionLoading: true, pendingPermission: null, pendingAskUserQuestion: null, pendingComputerAccess: null } };
+  const evaluatePreviewSurface = () => {
+    for (const name of ['pickerPreview', 'sessionPickerSuspended', 'showTranscript']) {
+      evaluate(`globalThis.${name} = ` + initializer(appSource, name), context);
+    }
+    evaluate('globalThis.backgroundActive = ' + backgroundActive!.getText(appSource), context);
+  };
   for (const request of ['pendingPermission', 'pendingAskUserQuestion', 'pendingComputerAccess']) {
     context.bridge[request] = { request_id: 7 };
-    evaluate('globalThis.sessionPickerSuspended = ' + initializer(appSource, 'sessionPickerSuspended'), context);
-    evaluate('globalThis.backgroundActive = ' + backgroundActive.getText(appSource), context);
+    evaluatePreviewSurface();
     assert.equal(context.sessionPickerSuspended, true, request);
     assert.equal(context.backgroundActive, false, request);
     context.bridge.projectCreationOpen = true;
@@ -134,13 +141,25 @@ test('App suspends the picker and releases its background only while a loading t
     context.bridge.projectCreationOpen = false;
     context.bridge[request] = null;
   }
-  evaluate('globalThis.sessionPickerSuspended = ' + initializer(appSource, 'sessionPickerSuspended'), context);
-  evaluate('globalThis.backgroundActive = ' + backgroundActive.getText(appSource), context);
+  evaluatePreviewSurface();
   assert.equal(context.sessionPickerSuspended, false);
   assert.equal(context.backgroundActive, true, 'the in-flight picker resumes after its request is answered');
+  context.bridge.sessionResumePreview = { pickerRequestId: 2 };
+  evaluatePreviewSurface();
+  assert.equal(context.sessionPickerSuspended, false, 'another picker attempt cannot uncover this picker');
+  context.bridge.sessionResumePreview = { pickerRequestId: 1 };
+  evaluatePreviewSurface();
+  assert.equal(context.sessionPickerSuspended, true);
+  assert.equal(context.backgroundActive, false);
+  assert.equal(context.showTranscript, true);
+  assert.equal(context.page, 'teams', 'preview does not commit page navigation');
+  context.bridge.sessionResumePreview = undefined;
+  evaluatePreviewSurface();
+  assert.equal(context.sessionPickerSuspended, false);
+  assert.equal(context.showTranscript, false, 'clearing the preview restores the previous surface');
   context.bridge.sessionLoading = false;
   context.bridge.pendingPermission = { request_id: 7 };
-  evaluate('globalThis.sessionPickerSuspended = ' + initializer(appSource, 'sessionPickerSuspended'), context);
+  evaluatePreviewSurface();
   assert.equal(context.sessionPickerSuspended, false, 'ordinary active-session cards do not dismiss an unrelated picker');
 });
 
@@ -184,6 +203,7 @@ test('a newer session open supersedes a pending load and ignores its late succes
     const context: any = {
       useCallback: (fn: unknown) => fn, nextOperationId,
       navigationOperationRef: { current: 0 }, pendingSessionRef: { current: null }, sessionLoadingRef: { current: false },
+      clearResumePreview() {},
       removedRuntimeIds: { current: new Set() }, setSessionReady() {}, setPendingSession() {}, setError() {},
       applyBootstrap: (snapshot: unknown) => snapshots.push(snapshot), capture: (error: unknown) => errors.push(error),
       isCurrentNavigationOperation: (operation: number) => operation === context.navigationOperationRef.current,
@@ -352,6 +372,7 @@ test('useBridge transports a picker selection while retaining the standard openS
     useCallback: (fn: unknown) => fn,
     host: { openSession: async (...args: unknown[]) => { calls.push(args); return snapshot; } },
     beginNavigationOperation: () => 1, pendingSessionRef: { current: null }, sessionLoadingRef: { current: false },
+    clearResumePreview() {},
     removedRuntimeIds: { current: new Set() }, setSessionReady() {}, setPendingSession() {}, setError() {},
     isCurrentNavigationOperation: () => true, applyBootstrap: (value: unknown) => snapshots.push(value),
     capture: (cause: unknown) => { throw cause; },
@@ -366,6 +387,71 @@ test('useBridge transports a picker selection while retaining the standard openS
   assert.equal(await context.open('/current', 'unrelated'), false, 'a different acknowledged UUID cannot become an authoring target');
 });
 
+test('read-only preview matches the exact open attempt, even for two copies with the same UUID', async () => {
+  const sessionId = '11111111-2222-4333-8444-555555555555';
+  const first = deferred<unknown>(), second = deferred<unknown>();
+  let request = 0, published: any = null;
+  const calls: unknown[][] = [], selected: unknown[] = [];
+  const context: any = {
+    useCallback: (fn: unknown) => fn, nextOperationId, conversationFromMessages, recentTranscript,
+    crypto: { randomUUID: () => `token-${++request}` },
+    host: { onSessionResumePreview() {}, openSessionWithPreview: (...args: unknown[]) => {
+      calls.push(args);
+      return args[4] === 'token-1' ? first.promise : second.promise;
+    } },
+    bootstrapRef: { current: { conversationSpaces: { activeMode: 'code' } } },
+    navigationOperationRef: { current: 0 }, pendingSessionRef: { current: null }, sessionLoadingRef: { current: false },
+    resumePreviewRequest: { current: null }, setResumePreview: (value: unknown) => { published = value; },
+    removedRuntimeIds: { current: new Set() }, setSessionReady() {}, setPendingSession() {}, setError() {},
+    isCurrentNavigationOperation: (operation: number) => operation === context.navigationOperationRef.current,
+    applyBootstrap: (snapshot: unknown) => selected.push(snapshot), capture(cause: unknown) { throw cause; },
+  };
+  for (const name of ['clearResumePreview', 'acceptResumePreview', 'beginNavigationOperation', 'openSession']) {
+    evaluate(`globalThis.${name} = ` + initializer(bridgeSource, name), context);
+  }
+  const a = { scope: 'all', transcriptPath: '/path/other.jsonl' };
+  const b = { scope: 'all', transcriptPath: '/path/chosen.jsonl' };
+  const openingA = context.openSession('/alias', sessionId, a);
+  const openingB = context.openSession('/alias', sessionId, b, undefined, undefined, undefined, 57);
+  assert.deepEqual(calls, [['/alias', sessionId, a, undefined, 'token-1'], ['/alias', sessionId, b, undefined, 'token-2']]);
+
+  const show = (requestId: string, mode: string, text: string, id = sessionId) => context.acceptResumePreview({
+    requestId, session: { projectPath: '/canonical', sessionId: id, mode },
+    messages: [{ role: 'assistant', blocks: [{ type: 'text', text }] }],
+  });
+  show('token-1', 'code', 'stale transcript');
+  show('token-2', 'chat', 'wrong mode');
+  show('token-2', 'code', 'wrong owner', 'different-session');
+  assert.equal(published, null);
+  show('token-2', 'code', 'selected transcript');
+  assert.equal(published.pickerRequestId, 57);
+  assert.equal(published.conversation.sessionKey, sessionId);
+  assert.equal(published.conversation.items[0].text, 'selected transcript');
+  const preview = published.conversation;
+  show('token-2', 'code', 'duplicate receipt');
+  assert.equal(published.conversation, preview);
+  assert.equal(context.sessionLoadingRef.current, true);
+
+  const live = { items: [] };
+  context.bridge = { sessionLoading: true, sessionResumePreview: { conversation: preview }, conversation: live };
+  evaluate('globalThis.transcript = ' + initializer(appSource, 'displayedTranscript'), context);
+  assert.equal(context.transcript, preview);
+  const snapshot = { revision: 2, activeSession: { projectPath: '/canonical', sessionId } };
+  second.resolve(snapshot);
+  await openingB;
+  assert.equal(context.sessionLoadingRef.current, false);
+  assert.equal(published, null);
+  context.bridge.sessionLoading = false;
+  evaluate('globalThis.transcript = ' + initializer(appSource, 'displayedTranscript'), context);
+  assert.equal(context.transcript, live);
+  show('token-2', 'code', 'late receipt');
+  assert.equal(published, null);
+
+  first.resolve({ revision: 1, activeSession: { projectPath: '/different', sessionId } });
+  assert.equal(await openingA, false);
+  assert.deepEqual(selected, [snapshot]);
+});
+
 test('Local App open retains the displayed owner until the host confirms its source', async () => {
   const gate = deferred<any>(), calls: unknown[] = [], pending: unknown[] = [], snapshots: unknown[] = [];
   const current = { projectPath: '/original', sessionId: 'A' };
@@ -374,6 +460,7 @@ test('Local App open retains the displayed owner until the host confirms its sou
     useCallback: (fn: unknown) => fn, bootstrapRef: { current: { activeSession: current, settings: {} } },
     host: { openSession: (...args: unknown[]) => { calls.push(args); return gate.promise; } },
     beginNavigationOperation: () => 1, pendingSessionRef: { current: null }, sessionLoadingRef: { current: false },
+    clearResumePreview() {},
     removedRuntimeIds: { current: new Set() }, setSessionReady() {}, setPendingSession: (value: unknown) => pending.push(value), setError() {},
     isCurrentNavigationOperation: () => true, applyBootstrap: (value: unknown) => snapshots.push(value), capture(error: unknown) { throw error; },
   };
@@ -563,6 +650,7 @@ function catalogNavigationHarness() {
     pendingCatalogMutations: { current: new Map() }, setCatalogMutationRevision() {},
     isCurrentNavigationOperation: (id: number) => isLatestOperation(id, context.navigationOperationRef.current),
     completeTrackedSpeech() {}, setSessionReady() {}, setPendingSession() {}, setError() {},
+    clearResumePreview() {},
     capture: (cause: unknown) => { throw cause; },
     setRuntimeStates: (update: (previous: unknown) => Map<unknown, unknown>) => { runtimes = update(runtimes); },
     setBootstrap: (update: unknown) => {
@@ -927,7 +1015,7 @@ test('the composer reports a local workspace failure against its original sessio
       context.draftSessionId.current = 'B';
       throw new Error('Directory does not exist.');
     } },
-    clearComposer: () => {}, setImageNotice: (value: unknown) => notices.push(value),
+    clearComposer: () => {}, setSendFailure() {}, setImageNotice: (value: unknown) => notices.push(value),
     bridge: { running: false, desktop: { slashCommands: [] },
       beginLocalCommand: async () => {},
       emitCommandOutput: (...args: unknown[]) => output.push(args),
@@ -950,7 +1038,7 @@ test('a delayed local resume is canceled when its originating session changes be
       activeSessionId: 'A', draftSessionId: { current: 'A' }, voiceState: 'idle',
       ALL_DESKTOP_COMMANDS, resolveDesktopCommand, desktopCommandIsShadowed,
       commandContext: { resumeSession: (query: string) => resumed.push(query) },
-      clearComposer() {}, setImageNotice() {},
+      clearComposer() {}, setSendFailure() {}, setImageNotice() {},
       bridge: { running: false, desktop: { slashCommands: [] }, beginLocalCommand: () => admission.promise,
         emitCommandOutput: (...args: unknown[]) => output.push(args) },
     };

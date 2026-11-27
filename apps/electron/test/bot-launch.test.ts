@@ -149,7 +149,7 @@ setInterval(() => {}, 1000);
   });
   const runtime = await manager.ensure({ projectPath: f.store.workspaceDir(bot.bot_id), sessionId: SESSION }, false);
   const internal = runtime as any;
-  internal.waitForLockfile = async () => '/unused-test-handshake';
+  internal.waitForLockfile = async () => ({ path: '/unused-test-handshake' });
   internal.connectBridgeClient = async () => internal.setState({ status: 'connected' });
   await runtime.start();
   const path = join(internal.launchDir, 'launch.json');

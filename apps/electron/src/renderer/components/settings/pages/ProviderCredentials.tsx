@@ -206,7 +206,7 @@ export function ProviderCredentials({ bridge, onLayerLockChange, initialProvider
         }}>{tr('common_retry')}</button>}
     </ProviderFeedback>
     {bridge.providerAccounts
-      ? <ProviderAccounts key={selectedProvider.id} api={bridge.providerAccounts} provider={selectedProvider} running={bridge.running || applying} onConfigured={configured} usageRows={bridge.cost?.by_account} cloudSyncable={VAULT_PRESET_IDS.has(logicalProviderId(selectedProvider.id))} />
+      ? <ProviderAccounts key={selectedProvider.id} api={bridge.providerAccounts} provider={selectedProvider} running={bridge.running || applying} onConfigured={configured} onModelsChanged={() => bridge.refreshModelPicker('settings')} usageRows={bridge.cost?.by_account} cloudSyncable={VAULT_PRESET_IDS.has(logicalProviderId(selectedProvider.id))} />
       : <ProviderFeedback error={tr('provider_accounts_status_error')} />}
     {providerCatalogEntry && <details className="provider-settings-disclosure">
       <summary>

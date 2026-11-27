@@ -17,6 +17,14 @@ enum SettingsPage: Hashable {
 }
 
 extension SettingsPage {
+    var contentTopPadding: CGFloat {
+        switch self {
+        case .skills, .skillDetail, .skillDirectory, .plugins, .pluginDetail, .pluginsAdvanced,
+             .mcpList, .mcpEdit, .linkedMcp, .linkedSkill: 8
+        default: 16
+        }
+    }
+
     /// Pages built on a native `List`/`Form` scroll themselves; the host's
     /// ScrollView-and-padding wrapper would collapse them to zero height.
     var ownsScrolling: Bool {
@@ -254,7 +262,7 @@ struct SettingsHost: View {
                 }
                 SettingsPages(store: store, host: self, page: page)
             }
-                .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 28)
+                .padding(.horizontal, 16).padding(.top, page.contentTopPadding).padding(.bottom, 28)
         }
         .scrollDismissesKeyboard(.interactively)
         .id(pageKey(for: page))

@@ -101,6 +101,14 @@ export interface RemoteLease {
   release(): void;
 }
 
+type ResumePreviewEvent = Extract<ClientEvent, { type: 'session_resumed' }>;
+export type ResumePreviewListener = (event: ResumePreviewEvent) => void;
+
+interface OpeningSessionPreview {
+  listeners: Set<ResumePreviewListener>;
+  result?: { runtime: SessionRuntime; event: ResumePreviewEvent };
+}
+
 
 
 /**
@@ -114,6 +122,7 @@ export class SessionRuntimeManager {
   private readonly openingSessions = new Map<string, {
     projectPath: string; transcriptPath?: string; mode?: RuntimeSessionMode;
     promise: Promise<SessionRuntime>; activationModes: Set<RuntimeSessionMode | undefined>;
+    preview?: OpeningSessionPreview;
   }>();
   private readonly restartingSessions = new Map<string, Set<Promise<void>>>();
   private readonly backgroundSessionLeases = new Map<string, number>();
@@ -464,7 +473,8 @@ export class SessionRuntimeManager {
     }
   }
 
-  openSession(ref: SessionRef, empty = false, resumeModel?: string, activate = true, transcriptPath?: string, remountControls?: string, durableDraftTitle?: string): Promise<SessionRuntime> {
+  openSession(ref: SessionRef, empty = false, resumeModel?: string, activate = true, transcriptPath?: string, remountControls?: string,
+    durableDraftTitle?: string, onPreview?: ResumePreviewListener): Promise<SessionRuntime> {
     assertSessionRef(ref);
     this.assertProjectNotClosing(ref.projectPath);
     const existing = this.runtimes.get(ref.sessionId);
@@ -481,6 +491,14 @@ export class SessionRuntimeManager {
       if (pending.projectPath !== ref.projectPath) throw new Error('session id is owned by a different project');
       if (transcriptPath && pending.transcriptPath !== transcriptPath) throw new Error('another transcript selection is being opened');
       if (ref.mode && pending.mode && ref.mode !== pending.mode) throw new Error('session mode does not match its owner');
+      if (onPreview && !empty && transcriptPath && pending.preview) {
+        const listener: ResumePreviewListener = event => {
+          if (!ref.mode || event.mode === ref.mode) onPreview(event);
+        };
+        const result = pending.preview.result;
+        if (!result) pending.preview.listeners.add(listener);
+        else if (this.runtimes.get(ref.sessionId) === result.runtime) this.deliverResumePreview(listener, result.event);
+      }
       if (activate) pending.activationModes.add(ref.mode);
       if (ref.mode && !pending.mode) return pending.promise.then(runtime => {
         if (runtime.sessionMode !== ref.mode) throw new Error('session mode does not match its owner');
@@ -497,7 +515,7 @@ export class SessionRuntimeManager {
       const release = this.retainBackgroundSession(ref);
       return Promise.all([...restarting].map(operation => operation.catch(() => undefined))).then(() => {
         if (this.runtimes.get(ref.sessionId) !== existing) throw new Error('session runtime was replaced while opening');
-        return this.openSession(ref, empty, resumeModel, activate, transcriptPath, remountControls, durableDraftTitle);
+        return this.openSession(ref, empty, resumeModel, activate, transcriptPath, remountControls, durableDraftTitle, onPreview);
       }).finally(release);
     }
     if (!existing && resumeModel) this.sessionModelHints.set(ref.sessionId, resumeModel);
@@ -510,7 +528,9 @@ export class SessionRuntimeManager {
       return Promise.resolve(existing);
     }
 
-    const promise = this.openSessionInternal(ref, existing, empty, transcriptPath, remountControls, durableDraftTitle).then((runtime) => {
+    const preview: OpeningSessionPreview | undefined = !empty && transcriptPath
+      ? { listeners: new Set(onPreview ? [onPreview] : []) } : undefined;
+    const promise = this.openSessionInternal(ref, existing, empty, transcriptPath, remountControls, durableDraftTitle, preview).then((runtime) => {
       runtime.completeWorkspaceRemount();
       if (transcriptPath) this.sessionTranscriptPaths.set(ref.sessionId, transcriptPath);
       const requested = this.openingSessions.get(ref.sessionId)?.activationModes;
@@ -520,12 +540,18 @@ export class SessionRuntimeManager {
     const trackedPromise = promise.finally(() => {
       if (this.openingSessions.get(ref.sessionId)?.promise === trackedPromise) this.openingSessions.delete(ref.sessionId);
     });
-    this.openingSessions.set(ref.sessionId, { projectPath: ref.projectPath, transcriptPath, mode: ref.mode,
+    this.openingSessions.set(ref.sessionId, { projectPath: ref.projectPath, transcriptPath, mode: ref.mode, preview,
       promise: trackedPromise, activationModes: new Set(activate ? [ref.mode] : []) });
     return trackedPromise;
   }
 
-  private async openSessionInternal(ref: SessionRef, existing: SessionRuntime | undefined, empty: boolean, transcriptPath?: string, remountControls?: string, durableDraftTitle?: string): Promise<SessionRuntime> {
+  private deliverResumePreview(listener: ResumePreviewListener, event: ResumePreviewEvent): void {
+    try { listener(event); }
+    catch (error) { this.opts.diagnostics?.add('warn', 'host', `session resume preview delivery failed: ${sanitizeDiagnostic(error)}`); }
+  }
+
+  private async openSessionInternal(ref: SessionRef, existing: SessionRuntime | undefined, empty: boolean, transcriptPath?: string,
+    remountControls?: string, durableDraftTitle?: string, preview?: OpeningSessionPreview): Promise<SessionRuntime> {
     let runtime: SessionRuntime | undefined;
     const previousTranscriptPath = this.sessionTranscriptPaths.get(ref.sessionId);
     try {
@@ -562,11 +588,12 @@ export class SessionRuntimeManager {
         }
         runtime = existing;
       } else {
-        const expectedMode = ref.mode ?? (!empty ? await this.opts.resolveSessionMode?.(ref) : undefined);
+        const modeSource = ref.mode ?? (!empty ? await this.opts.resolveSessionMode?.(ref) : undefined);
+        const expectedMode = typeof modeSource === 'string' ? modeSource : modeSource?.mode;
         if (!empty && !expectedMode) throw new Error('The session mode is unavailable.');
         if (empty && !expectedMode) throw new Error('The session creation mode is unavailable.');
         if (!empty && !transcriptPath && !this.sessionTranscriptPaths.get(ref.sessionId)) {
-          const saved = await this.opts.resolveSavedTranscript?.(ref);
+          const saved = typeof modeSource === 'object' ? modeSource : await this.opts.resolveSavedTranscript?.(ref);
           if (saved) {
             if (saved.mode !== expectedMode) throw new Error('session mode does not match its saved source');
             transcriptPath = saved.path;
@@ -587,7 +614,19 @@ export class SessionRuntimeManager {
           }
         }
       }
-      if (runtime.needsSessionResume || (!empty && !runtime.recoveredLiveConnection)) await runtime.resumeOwnedSession(transcriptPath);
+      if (runtime.needsSessionResume || (!empty && !runtime.recoveredLiveConnection)) {
+        const owner = runtime;
+        const onPreview: ResumePreviewListener | undefined = preview?.listeners.size ? event => {
+          if (preview.result || this.runtimes.get(ref.sessionId) !== owner || event.session_id !== ref.sessionId
+            || (ref.mode && event.mode !== ref.mode)) return;
+          preview.result = { runtime: owner, event };
+          const listeners = [...preview.listeners];
+          preview.listeners.clear();
+          for (const listener of listeners) this.deliverResumePreview(listener, event);
+        } : undefined;
+        if (onPreview) await runtime.resumeOwnedSession(transcriptPath, onPreview);
+        else await runtime.resumeOwnedSession(transcriptPath);
+      }
       return runtime;
     } catch (error) {
       if (transcriptPath) {
@@ -1012,6 +1051,7 @@ export class SessionRuntimeManager {
   private runtimeOptions(ref: SessionRef): BridgeManagerOptions {
     const {
       launchConfig,
+      loadPluginSecrets,
       accessState,
       onModelChanged,
       onModelSelected,
@@ -1030,18 +1070,14 @@ export class SessionRuntimeManager {
       workspaceSettings,
       ...base
     } = this.opts;
-    return {
-      ...base,
-      sessionId: ref.sessionId,
-      projectPath: ref.projectPath,
-      expectedSessionMode: ref.mode,
-      resumeTranscriptPath: this.sessionTranscriptPaths.get(ref.sessionId),
-      envelopeEvents: true,
-      launchConfig: async () => {
-        const config = await launchConfig(ref, this.sessionModelHints.get(ref.sessionId));
+    const prepareLaunchConfig = async () => {
+      const [config, settings] = await Promise.all([
+        launchConfig(ref, this.sessionModelHints.get(ref.sessionId)),
+        workspaceSettings?.(ref.projectPath, ref),
+      ]);
+      return () => {
         const initialProjectRoot = this.sessionProjectRoots.get(ref.sessionId) ?? config.initialProjectRoot ?? ref.projectPath;
         this.sessionProjectRoots.set(ref.sessionId, initialProjectRoot);
-        const settings = await workspaceSettings?.(ref.projectPath, ref);
         const environment = settings ? {
           ...this.sessionSettingsEnvironment.get(ref.sessionId),
           ...settings.environment,
@@ -1055,7 +1091,18 @@ export class SessionRuntimeManager {
         return { ...config, ...owner, settingsEnvironment: environment, initialProjectRoot,
           additionalDirectories: this.sessionDirectoryGrants.get(ref.sessionId) ?? settings?.additionalDirectories,
           promptDirectories: this.sessionPromptDirectories.get(ref.sessionId) };
-      },
+      };
+    };
+    return {
+      ...base,
+      sessionId: ref.sessionId,
+      projectPath: ref.projectPath,
+      expectedSessionMode: ref.mode,
+      resumeTranscriptPath: this.sessionTranscriptPaths.get(ref.sessionId),
+      envelopeEvents: true,
+      prepareLaunchConfig,
+      launchConfig: async () => (await prepareLaunchConfig())(),
+      ...(loadPluginSecrets ? { loadPluginSecrets: () => loadPluginSecrets(ref) } : {}),
       ...(onModelSelected ? { onModelSelected: (model: string) => onModelSelected(ref, model) } : {}),
       ...(getSavedModel ? { getSavedModel: () => getSavedModel(ref) } : {}),
       ...(getSavedPermissionMode ? { getSavedPermissionMode: () => getSavedPermissionMode(ref) } : {}),

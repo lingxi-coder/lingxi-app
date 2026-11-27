@@ -52,6 +52,23 @@ function Fixture() {
   const [projectCatalogs, setProjectCatalogs] = useState<Record<string, { sessions: Array<{ uuid: string; title: string; modified_rfc3339: string; message_count: number }> }>>({});
   // Ref, not state: `state()` reads it and a state update here would have to
   // join the reporter effect's dep list just to be observable.
+  const projectReads = useRef<string[]>([]);
+  const heldScope = useRef<{ path: string; resume?: () => void }>();
+  const projectSettings = useCallback<import('../../src/shared/projectSettings').ProjectSettingsRequest>(async (path, cmd) => {
+    projectReads.current.push(path + ':' + cmd.type);
+    if (heldScope.current?.path === path && cmd.type === 'refresh_listings') {
+      await new Promise<void>(resolve => { heldScope.current!.resume = resolve; });
+    }
+    if (cmd.type === 'mcp_admin') {
+      return [{ type: 'mcp_configuration_snapshot', snapshot_json: JSON.stringify({ scopes: [
+        { scope: 'project', path: path + '/.mcp.json', revision_sha256: 'b'.repeat(64), raw_json: JSON.stringify({ mcpServers: {
+          [path.split('/').pop() + '-only']: { type: 'http', url: 'https://example.org/mcp' },
+        } }) },
+      ] }) }];
+    }
+    return [{ type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}',
+      files_json: JSON.stringify([{ layer: 'project', path: path + '/.lingxi/settings.json' }]), layers_json: '{"project":{}}' }];
+  }, []);
   const navCalls = useRef<string[]>([]);
   const extensionCalls = useRef<Array<{ domain: string; command: Record<string, unknown> }>>([]);
   const [hookOperation, setHookOperation] = useState<ConfigurationOperationEvent>();
@@ -59,6 +76,10 @@ function Fixture() {
   const pluginAdmin = useCallback(async (command: Record<string, unknown>) => {
     extensionCalls.current.push({ domain: 'plugin', command });
     const payload = typeof command.payload_json === 'string' ? JSON.parse(command.payload_json) : {};
+    if (command.action === 'preview_operation' && payload.action === 'marketplace_add') {
+      if (payload.source === 'denied/marketplace') throw new Error('Marketplace source is blocked.');
+      return { details_json: JSON.stringify({ action: payload.action, target: payload.source, requiresConfirmation: true }) };
+    }
     if (command.action === 'apply_operation' && payload.action === 'uninstall') return { details_json: JSON.stringify({ credentialCleanup: { pluginId: payload.plugin, lastScopeRemoved: true } }) };
   }, []);
   const mcpAdmin = useCallback(async (command: Record<string, unknown>) => { extensionCalls.current.push({ domain: 'mcp', command }); }, []);
@@ -145,7 +166,8 @@ function Fixture() {
     setCredentialWrites(values => [...values, providerId]);
   } }), []);
   const bridge = {
-    activeSession: { projectPath: '/test/project', sessionId: activeSessionId },
+    projectSettings,
+    activeSession: activeSessionId ? { projectPath: '/test/project', sessionId: activeSessionId } : undefined,
     providerSettings, providerSettingsApplyPending,
     bootstrap: {
       // `settings`/`diagnostics`/`runtimes`/`versions` below only matter to
@@ -280,10 +302,10 @@ function Fixture() {
     // 记录而不是空实现：设置页的项目切换器必须**既**激活项目**又**真的把引擎
     // 落到那个项目上（`activateProject` 单独用只改元数据，不换引擎进程）。
     // 只有把三个调用都记下来，场景才能证明这件事，而不是只证明「点了没报错」。
-    activateProject: async (path: string) => { navCalls.current.push(`activate:${path}`); return null; },
-    openSession: async (path: string, sessionId: string) => { navCalls.current.push(`open:${path}:${sessionId}`); },
-    newSession: async (path?: string) => { navCalls.current.push(`new:${path ?? ''}`); },
-    listProjectSessions: async (path: string) => { navCalls.current.push(`list:${path}`); },
+    activateProject: async (path: string) => { navCalls.current.push(`activate:${path}`); return { path }; },
+    openSession: async (path: string, sessionId: string) => { navCalls.current.push(`open:${path}:${sessionId}`); return true; },
+    newSession: async (path?: string) => { navCalls.current.push(`new:${path ?? ''}`); return 'new-session'; },
+    listProjectSessions: async (path: string) => { navCalls.current.push(`list:${path}`); return projectCatalogs[path] ?? { sessions: [] }; },
     setThemePreference: noopAsyncVoid,
     // `voice` (Task 9 of the desktop-audio-capability plan) joined the
     // `page-content` scenario's list alongside the Task 18 pages — same
@@ -361,6 +383,8 @@ function Fixture() {
         throw new Error(`Settings page ${id} did not finish rendering`);
       },
       setExtensionCatalogs,
+      holdProjectRead: (path: string) => { heldScope.current = { path }; },
+      releaseProjectRead: () => { heldScope.current?.resume?.(); heldScope.current = undefined; },
       setHasProject,
       setConnected,
       setSessionLoading,
@@ -433,7 +457,7 @@ function Fixture() {
         return el ? (el.__lingxiTestMarker ?? null) : 'element-not-found';
       },
       setSettingsFiles: (files: unknown[]) => {
-        setSettingsSnapshotEvent({ type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}', files_json: JSON.stringify(files) } as SettingsSnapshotEvent);
+        setSettingsSnapshotEvent(previous => ({ type: 'settings_snapshot', effective_json: '{}', provenance_json: '{}', ...previous, files_json: JSON.stringify(files) } as SettingsSnapshotEvent));
       },
       setProjectList: (
         paths: string[],
@@ -471,6 +495,8 @@ function Fixture() {
         hasProjectPicker: Boolean(document.querySelector('[data-testid="layer-project-picker"]')),
         projectSwitchWarning: document.querySelector('[data-testid="layer-project-switch-warning"]')?.textContent ?? null,
         navCalls: [...navCalls.current],
+        projectReads: [...projectReads.current],
+        activeChat: activeSessionId,
         extensionCalls: [...extensionCalls.current],
         hasBanner: Boolean(document.querySelector('[data-testid="settings-pending-banner"]')),
         placeholderKind: document.querySelector('[data-testid="page-placeholder"]')?.getAttribute('data-placeholder-kind') ?? null,
@@ -489,7 +515,7 @@ function Fixture() {
       }),
     };
     return () => { delete window.__settingsScreenTest; };
-  }, [refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch, lastProviderSettingsPatch, providerSettings, credentialWrites, providerAccountSnapshot, settingsSnapshotEvent, extensionCatalogs]);
+  }, [activeSessionId, refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch, lastProviderSettingsPatch, providerSettings, credentialWrites, providerAccountSnapshot, settingsSnapshotEvent, extensionCatalogs]);
 
   return (
     <Theme.Provider value={tokens(fixtureTheme === 'dark')}>
@@ -513,6 +539,8 @@ declare global {
     __settingsScreenTest?: {
       selectPage(id: string): Promise<void>;
       setExtensionCatalogs(catalogs: { plugins?: object | null; skills?: object; document?: object; mcp?: object }): void;
+      holdProjectRead(path: string): void;
+      releaseProjectRead(): void;
       setHasProject(value: boolean): void;
       setConnected(value: boolean): void;
       setSessionLoading(value: boolean): void;
@@ -554,6 +582,8 @@ declare global {
         hasProjectPicker: boolean;
         projectSwitchWarning: string | null;
         navCalls: string[];
+        projectReads: string[];
+        activeChat: string;
         extensionCalls: Array<{ domain: string; command: Record<string, unknown> }>;
         hasBanner: boolean;
         placeholderKind: string | null;

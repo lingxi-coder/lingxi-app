@@ -596,7 +596,7 @@ async fn run_repl_with_resume(
     tracing::info!(
         event = telemetry::tengu::orchestrator::REPL_SESSION_STARTED,
         session_id = %session_id,
-        started_at = %chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        started_at = %format!("{:.0}", jiff::Timestamp::now()),
     );
 
     let sigint = SigintSource::spawn();

@@ -112,11 +112,11 @@ export const serviceScope = {
     // Concurrency: the tasks last counted for this caller and for the service, less those that have ended since.
     const mine = root.collection('active').doc(identity.uid), all = root.collection('active').doc('_service');
     const [mineDoc, allDoc] = await tx.getAll(mine, all);
-    const stillLive = async ids => {
-      const docs = ids.length ? await tx.getAll(...ids.map(taskId => root.collection('tasks').doc(taskId))) : [];
-      return ids.filter((_, index) => docs[index].exists && live.has(liveState(docs[index].data())));
-    };
-    const [own, everyone] = [await stillLive(mineDoc.data()?.taskIds ?? []), await stillLive(allDoc.data()?.taskIds ?? [])];
+    const ownIds = mineDoc.data()?.taskIds ?? [], serviceIds = allDoc.data()?.taskIds ?? [];
+    const taskIds = [...new Set([...ownIds, ...serviceIds])];
+    const tasks = taskIds.length ? await tx.getAll(...taskIds.map(taskId => root.collection('tasks').doc(taskId))) : [];
+    const liveIds = new Set(tasks.filter(doc => doc.exists && live.has(liveState(doc.data()))).map(doc => doc.id));
+    const own = ownIds.filter(id => liveIds.has(id)), everyone = serviceIds.filter(id => liveIds.has(id));
     return response => {
       const added = response.tasks.map(task => task.taskId);
       if (own.length + added.length > service.limits.userConcurrent) deny(429, 'SERVICE_USER_BUSY');
@@ -238,11 +238,15 @@ export class HostedBotServices {
   async view(tx, root, service, self, user, now) {
     if (service.publisher === user) return publisherView(service);
     const botDoc = await tx.get(root.collection('sharedBots').doc(service.sharedBotId)), bot = botDoc.data();
-    const deployment = bot ? (await tx.get(root.collection('deployments').doc(bot.identity.activeDeploymentId))).data() : undefined;
-    // The ledger's own daily counters: one for the whole scope, one per person and generation.
-    const today = day(now), used = async key => (await tx.get(root.collection('requestQuotas').doc(hash(key)))).data()?.used ?? 0;
-    const serviceUsed = bot ? await used([today, 'team']) : 0;
-    const userUsed = bot && self ? await used([today, 'member', user, self.generation]) : 0;
+    const today = day(now), quotas = root.collection('requestQuotas');
+    const [deploymentDoc, serviceQuota, memberQuota] = bot ? await tx.getAll(
+      root.collection('deployments').doc(bot.identity.activeDeploymentId),
+      quotas.doc(hash([today, 'team'])),
+      ...(self ? [quotas.doc(hash([today, 'member', user, self.generation]))] : []),
+    ) : [];
+    const deployment = deploymentDoc?.data();
+    const serviceUsed = serviceQuota?.data()?.used ?? 0;
+    const userUsed = memberQuota?.data()?.used ?? 0;
     const availability = service.state !== 'active' ? 'withdrawn' : !service.online ? 'disabled'
       : !bot || bot.identity.state !== 'published' ? 'not_ready'
       : !deployment?.enabled || !deployment.ready || deployment.onlineUntil <= now ? 'host_offline'

@@ -42,17 +42,21 @@
         "../electron/src/*"
       ],
       "react": [
-        "./node_modules/@types/react"
+        "./node_modules/@types/react",
+        "./node_modules/react"
       ],
       "react/jsx-runtime": [
-        "./node_modules/@types/react/jsx-runtime"
+        "./node_modules/@types/react/jsx-runtime",
+        "./node_modules/react/jsx-runtime"
       ],
       "react-dom": [
         "./node_modules/@types/react-dom"
       ],
       "react/jsx-dev-runtime": [
-        "./node_modules/@types/react/jsx-dev-runtime"
+        "./node_modules/@types/react/jsx-dev-runtime",
+        "./node_modules/react/jsx-dev-runtime"
       ],
+      "qrcode-generator": ["./node_modules/qrcode-generator"],
       "firebase/*": [
         "./node_modules/firebase/*"
       ]

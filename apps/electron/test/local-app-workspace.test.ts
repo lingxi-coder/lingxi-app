@@ -31,6 +31,7 @@ test('Apps groups only native authoring projects, keeps distinct drafts and exac
   assert.match(markup, /aria-current="page"/);
   assert.match(markup, /First requirement/);
   assert.doesNotMatch(markup, /Projects and sessions/);
+  assert.doesNotMatch(markup, />Datasets</);
 });
 
 test('moving a Global Code chat into an App cwd does not turn it into an App project session', () => {

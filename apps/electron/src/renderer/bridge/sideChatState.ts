@@ -1,6 +1,6 @@
 import type { AskUserQuestionRequestDto, ClientEvent, PermissionRequest, ImageRefDto } from '@lingxi/bridge-client';
 import type { ImageAttachment } from './imageInput';
-import { promptWithFileMentions } from './fileMentions';
+import { promptWithFileMentions } from '../../shared/fileMentions';
 import { appendUserPrompt, conversationFromMessages, emptyConversation, reduceEvent, type ConversationState } from './conversation';
 import { emptyDesktopState, reduceDesktopEvent, type DesktopState } from './desktopState';
 

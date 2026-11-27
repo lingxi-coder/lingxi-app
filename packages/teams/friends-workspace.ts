@@ -1,12 +1,12 @@
 import type { TeamMember, TeamsApi } from './index.js';
 import {
-  badgeCount, compareBlocks, compareOffers, confirmBody, DEFAULT_MEMBER_NAME, definitive, FRIEND_CHAT, lookupBody, newRequestId, nextOfferExpiry,
+  FriendApiError, badgeCount, compareBlocks, compareOffers, confirmBody, DEFAULT_MEMBER_NAME, definitive, FRIEND_CHAT, lookupBody, newRequestId, nextOfferExpiry,
   type BlockEntry, type FriendCard, type FriendProfile, type FriendsApi, type FriendsCommand, type FriendsResult, type LookupResult, type Proof, type TeamOffer,
 } from './friends.js';
 import { TeamsWorkspace, type TeamsWorkspaceOptions } from './workspace.js';
 
 /** The pages of the Friends main area (D1). The chat is a page of its own, never mixed with the others. */
-export type FriendsPage = 'home' | 'chat' | 'add' | 'profile' | 'blocked';
+export type FriendsPage = 'home' | 'chat' | 'add' | 'me' | 'profile' | 'blocked';
 
 /** An open friend chat (D9). */
 export interface FriendChat {
@@ -14,6 +14,7 @@ export interface FriendChat {
   /** The friend's name for the header: refreshed by D10 if it was, else the card's; the last known one after the friendship ended. */
   name: string;
   handle?: string;
+  teamId?: string;
   /** The pair-pinned workspace. Absent while the friend's card has not arrived and after the friendship ended. */
   workspace: TeamsWorkspace | undefined;
   /** The friendship is over (the card is gone), or the person was never a friend: the view says `friends_chat_unavailable`. */
@@ -55,6 +56,7 @@ export interface FriendsSnapshot {
   readonly chat: FriendChat | undefined;
   /** Increments when the Requests section should be scrolled into view (a `friend/requests` link). */
   readonly requestsFocus: number;
+  readonly handleSearchRetryUntil?: number;
 }
 
 export interface FriendsWorkspaceOptions {
@@ -71,7 +73,7 @@ export type Confirmed = { error: string } | { done: 'sent' | 'friends'; name: st
 /** An error code, or `SERVICE_UNAVAILABLE` for a failure that has none (no answer, a timeout). */
 const codeOf = (error: unknown): string => error instanceof Error && /^[A-Z][A-Z_]{2,59}$/u.test(error.message) ? error.message : 'SERVICE_UNAVAILABLE';
 
-interface Chat extends FriendChat { teamId?: string; generation?: number; names?: string }
+interface Chat extends FriendChat { generation?: number; names?: string }
 
 /**
  * Everything the Friends views need from one signed-in account: the three owner-only listeners of D2 (and nothing per friend),
@@ -104,6 +106,9 @@ export class FriendsWorkspace {
   private profileError = '';
   private profileRun = 0;
   private page: FriendsPage = 'home';
+  private navigationVersion = 0;
+  private handleSearchRetryUntil = 0;
+  private handleSearchRetryTimer: ReturnType<typeof setTimeout> | undefined;
   private requestsFocus = 0;
   private chat: Chat | undefined;
   // D10: the profile's values for a friend, for the rest of the session. Cards are never written.
@@ -149,6 +154,7 @@ export class FriendsWorkspace {
   /** Show a page of the main area. Leaving the chat closes it. */
   readonly show = (page: Exclude<FriendsPage, 'chat'>): void => {
     if (this.closed) return;
+    this.navigationVersion++;
     this.dropChat(); this.page = page; this.settle();
   };
 
@@ -167,6 +173,7 @@ export class FriendsWorkspace {
     if (this.closed) return;
     if (this.chat?.uid !== uid) { this.dropChat(); this.chat = { uid, name: '', workspace: undefined, ended: false, joined, botsRequest: 0 }; }
     if (bots) this.chat!.botsRequest++;
+    this.navigationVersion++;
     this.page = 'chat'; this.settle();
   };
 
@@ -178,38 +185,71 @@ export class FriendsWorkspace {
     return 'error' in outcome ? outcome : { result: outcome.value };
   };
 
+  readonly searchHandles = async (query: string, signal?: AbortSignal): Promise<{ results: LookupResult[] } | { error: string; retryAfterMs?: number }> => {
+    const wait = this.handleSearchRetryUntil - Date.now();
+    if (wait > 0) return { error: 'RATE_LIMITED', retryAfterMs: wait };
+    const outcome = await this.call({ action: 'searchHandles', query }, signal);
+    if ('error' in outcome) {
+      if (!this.closed && outcome.retryAfterMs) {
+        this.handleSearchRetryUntil = Math.max(this.handleSearchRetryUntil, Date.now() + outcome.retryAfterMs);
+        this.scheduleHandleSearchCooldown();
+        this.publish();
+      }
+      return outcome;
+    }
+    return outcome.value;
+  };
+
+  private scheduleHandleSearchCooldown(): void {
+    clearTimeout(this.handleSearchRetryTimer);
+    const finish = () => {
+      const wait = this.handleSearchRetryUntil - Date.now();
+      if (wait > 0) {
+        this.handleSearchRetryTimer = setTimeout(finish, wait);
+        return;
+      }
+      this.handleSearchRetryTimer = undefined;
+      this.handleSearchRetryUntil = 0;
+      this.publish();
+    };
+    this.handleSearchRetryTimer = setTimeout(finish, Math.max(0, this.handleSearchRetryUntil - Date.now()));
+  }
+
   /**
    * The confirming tap of D7. A request or redeem carries a `requestId` minted here and reused only to retry this very
    * confirmation after an unknown outcome. A found `incoming` request is accepted instead (never for a code).
    * A made friendship opens the chat once the card arrives.
    */
-  readonly confirm = async (proof: Proof, found: LookupResult, note: string): Promise<Confirmed> => {
+  readonly confirm = async (proof: Proof, found: LookupResult, note: string, stillActive?: () => boolean): Promise<Confirmed> => {
+    const navigationVersion = this.navigationVersion;
     const accept = found.relation === 'incoming' && proof.kind !== 'code';
     const key = JSON.stringify([proof, found.uid, accept ? '' : note.trim()]);
     const id = this.attempt?.key === key ? this.attempt.id : newRequestId();
-    this.attempt = accept ? undefined : { key, id };
-    const outcome = accept ? await this.call({ action: 'accept', otherUid: found.uid }) : await this.call(confirmBody(proof, id, note));
-    if ('error' in outcome) {
-      if (definitive(outcome.error)) this.attempt = undefined;
-      return outcome;
-    }
-    this.attempt = undefined;
+    if (!accept) this.attempt = { key, id };
+    const outcome = accept
+      ? await this.call({ action: 'accept', otherUid: found.uid, ...(found.version ? { expectedVersion: found.version } : {}) })
+      : await this.call(confirmBody(proof, id, note));
+    if (!accept && this.attempt?.id === id && (!('error' in outcome) || definitive(outcome.error))) this.attempt = undefined;
+    if ('error' in outcome) return outcome;
     if ((outcome.value as { state: string }).state !== 'friends') return { done: 'sent', name: found.displayName };
-    this.openChat(found.uid, true);
+    if (navigationVersion === this.navigationVersion && (stillActive?.() ?? true)) this.openChat(found.uid, true);
     return { done: 'friends', name: found.displayName };
   };
 
   /** D4: answer a request from its row. The listener removes or changes the row. */
-  readonly respond = async (uid: string, action: 'accept' | 'decline' | 'cancel'): Promise<string> => {
-    const outcome = await this.call({ action, otherUid: uid });
+  readonly respond = async (uid: string, action: 'accept' | 'decline' | 'cancel', expectedVersion?: string): Promise<string> => {
+    const outcome = await this.call({ action, otherUid: uid, ...(expectedVersion ? { expectedVersion } : {}) });
     return 'error' in outcome ? outcome.error : '';
   };
 
   /** D10: end the friendship, or end it and block the person. On success the list is shown when it was this friend's chat that was open; from the list's row menu the open page stays. */
-  readonly leave = async (uid: string, action: 'remove' | 'block'): Promise<string> => {
-    const outcome = await this.call({ action, otherUid: uid });
+  readonly leave = async (uid: string, action: 'remove' | 'block', version?: string): Promise<string> => {
+    const navigation = this.navigationVersion;
+    const outcome = await this.call(action === 'remove' && version
+      ? { action, otherUid: uid, expectedVersion: version }
+      : { action, otherUid: uid });
     if ('error' in outcome) return outcome.error;
-    if (this.page === 'chat' && this.chat?.uid === uid) this.show('home');
+    if (navigation === this.navigationVersion && this.page === 'chat' && this.chat?.uid === uid) this.show('home');
     return '';
   };
 
@@ -246,14 +286,15 @@ export class FriendsWorkspace {
   };
 
   /** D27: join the team of an offer (its id is the team id). The Teams list follows from its own listener. */
-  readonly acceptOffer = async (teamId: string): Promise<string> => {
-    const outcome = await this.request(`acceptOffer ${teamId}`, requestId => ({ action: 'acceptOffer', offerId: teamId, requestId }));
+  readonly acceptOffer = async (teamId: string, expectedVersion?: string): Promise<string> => {
+    const outcome = await this.request(JSON.stringify(['acceptOffer', teamId, expectedVersion]),
+      requestId => ({ action: 'acceptOffer', offerId: teamId, requestId, ...(expectedVersion ? { expectedVersion } : {}) }));
     return 'error' in outcome ? outcome.error : '';
   };
 
   /** D27: decline a live offer or dismiss an expired one. It has no request id, so it is safe to repeat. */
-  readonly declineOffer = async (teamId: string): Promise<string> => {
-    const outcome = await this.call({ action: 'declineOffer', offerId: teamId });
+  readonly declineOffer = async (teamId: string, expectedVersion?: string): Promise<string> => {
+    const outcome = await this.call({ action: 'declineOffer', offerId: teamId, ...(expectedVersion ? { expectedVersion } : {}) });
     return 'error' in outcome ? outcome.error : '';
   };
 
@@ -282,6 +323,7 @@ export class FriendsWorkspace {
     if (this.closed) return;
     this.closed = true; this.watching++; this.profileRun++;
     clearTimeout(this.expiry);
+    clearTimeout(this.handleSearchRetryTimer);
     for (const stop of this.stops.splice(0)) stop();
     this.dropChat();
     this.listeners.clear();
@@ -289,12 +331,19 @@ export class FriendsWorkspace {
 
   // ── Internals ──
 
-  private async call<C extends FriendsCommand>(command: C): Promise<{ value: FriendsResult<C> } | { error: string }> {
+  private async call<C extends FriendsCommand>(command: C, signal?: AbortSignal): Promise<{ value: FriendsResult<C> } | { error: string; retryAfterMs?: number }> {
     if (this.closed) return { error: 'INVALID_SESSION' };
     try {
-      const value = await this.api.execute(command);
+      const value = await this.api.execute(command, signal);
       return this.closed ? { error: 'INVALID_SESSION' } : { value };
-    } catch (error) { return { error: codeOf(error) }; }
+    } catch (error) {
+      const code = codeOf(error);
+      if (command.action === 'searchHandles' && code === 'RATE_LIMITED') {
+        const retry = error instanceof FriendApiError ? error.retryAfterMs : undefined;
+        return { error: code, retryAfterMs: Math.max(1, Math.min(60_000, retry ?? 60_000)) };
+      }
+      return { error: code };
+    }
   }
 
   /** An offer action: `make` gets the request id of the request `key` names, which is kept for a retry only while its outcome is unknown. */
@@ -345,7 +394,7 @@ export class FriendsWorkspace {
     if (card) { chat.name = card.displayName; chat.handle = card.handle; }
     if (card?.state !== 'friends' || card.teamId === undefined || card.generation === undefined) {
       // Before the first snapshot, or while a just-made friendship's card is on its way, there is nothing to decide.
-      if (!this.loaded || (chat.joined && !chat.workspace)) return;
+      if (!this.loaded || this.loadError || (chat.joined && !chat.workspace)) return;
       chat.workspace?.close();
       chat.workspace = undefined; chat.ended = true;
       return;
@@ -383,8 +432,8 @@ export class FriendsWorkspace {
       badge: badgeCount(this.cards, this.offers, now),
       profile: this.profile, profileLoading: this.profileLoading, profileError: this.profileError,
       profileNameUnset: this.profile?.displayName === DEFAULT_MEMBER_NAME,
-      chat: chat && { uid: chat.uid, name: chat.name, handle: chat.handle, workspace: chat.workspace, ended: chat.ended, joined: chat.joined, botsRequest: chat.botsRequest },
-      requestsFocus: this.requestsFocus,
+      chat: chat && { uid: chat.uid, name: chat.name, handle: chat.handle, teamId: chat.teamId, workspace: chat.workspace, ended: chat.ended, joined: chat.joined, botsRequest: chat.botsRequest },
+      requestsFocus: this.requestsFocus, handleSearchRetryUntil: this.handleSearchRetryUntil,
     };
   }
 }

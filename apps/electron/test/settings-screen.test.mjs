@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
@@ -23,7 +23,10 @@ async function runScenario(scenario, fixtureTheme = process.env.LINGXI_SETTINGS_
     logLevel: 'error',
     server: { host: '127.0.0.1', port: 0, strictPort: false, hmr: false },
     plugins: [react()],
-    resolve: { alias: { '@renderer': resolve(electronRoot, 'src/renderer') } },
+    resolve: {
+      dedupe: ['react', 'react-dom', 'firebase', 'qrcode-generator'],
+      alias: { '@renderer': resolve(electronRoot, 'src/renderer') },
+    },
   });
   const temporaryUserData = mkdtempSync(join(tmpdir(), `lingxi-settings-screen-electron-${scenario}-`));
   const childOutput = [];
@@ -83,7 +86,10 @@ async function runScenario(scenario, fixtureTheme = process.env.LINGXI_SETTINGS_
 test('all settings pages fit macOS windows and name their switches', async () => {
   for (const theme of ['light', 'dark']) {
     const states = await runScenario('macos-audit', theme);
-    assert.equal(states.length, 40);
+    const pagesAt = width => states.filter(state => state.width === width).map(state => state.page);
+    const widePages = pagesAt(1000);
+    assert.ok(['skills', 'plugins', 'mcp'].every(page => widePages.includes(page)));
+    assert.deepEqual(pagesAt(760), widePages);
     assert.deepEqual(states.filter(state => state.overflow || state.bottomOverflow || state.unnamedSwitches || state.placeholder), [], `${theme}: layout or accessible names`);
   }
 });
@@ -91,12 +97,17 @@ test('all settings pages fit macOS windows and name their switches', async () =>
 test('recommended skills search, add their source and follow the chosen package before installation', async () => {
   for (const theme of ['light', 'dark']) {
     const result = await runScenario('extension-recommendations', theme);
-    assert.equal(result.initial.count, 4);
+    const { items } = JSON.parse(readFileSync(new URL('../../../resources/extensions/public-directory.json', import.meta.url), 'utf8'));
+    const packs = items.filter(item => item.skills?.length);
+    assert.deepEqual(result.initial.groups, ['design', 'graphics', 'development', 'database', 'productivity'].map(category =>
+      [category, packs.filter(item => item.category === category).length]));
+    assert.equal(result.pixelGallery, 'https://patch-gg.github.io/pixelfx/');
     assert.equal(result.initial.overflow, false);
     assert.equal(result.search, true);
     assert.equal(result.installed, true);
     assert.equal(result.narrow, true);
     assert.equal(result.mcpTemplate, true);
+    assert.deepEqual(result.mcpScopeOptions, ['user', 'project']);
     assert.deepEqual(result.details, { examples: 2, skills: 4, noMutations: true });
     assert.equal(result.copied, true);
     assert.equal(result.beforeUninstall, 2);
@@ -108,6 +119,8 @@ test('recommended skills search, add their source and follow the chosen package 
     assert.equal(result.removeMcp.scope, 'project');
     assert.equal(result.removeMcp.revision, 'p'.repeat(64));
     assert.deepEqual(JSON.parse(result.removeMcp.payload_json), { scope: 'project', name: 'notion' });
+    assert.equal(result.sourceFocused, true);
+    assert.deepEqual(result.review, { focused: true, source: 'anthropics/skills', leakedJson: false, hasInput: false });
     assert(result.beforePreview.every(({ command }) => command.action === 'get_catalog'));
     assert.equal(result.beforeConfirmation.filter(({ command }) => command.action === 'apply_operation').length, 0);
     assert.equal(result.selectedPackage.filter(({ command }) => command.action === 'apply_operation').length, 1);
@@ -134,9 +147,44 @@ test('settings controls expose focus, scope, saving and accessibility preference
   }
 });
 
+test('extension scope tabs list named projects after User and bind each view to its actual scope', async () => {
+  for (const theme of ['light', 'dark']) {
+    const result = await runScenario('extension-project-tabs', theme);
+    assert.deepEqual(result.withoutProjects, ['推荐', '用户']);
+    for (const page of Object.values(result.all)) {
+      assert.deepEqual(page.labels, ['推荐', '用户', 'LingXi', 'Breeze', 'client/demo', 'tools/demo']);
+    }
+    assert.deepEqual(result.all.skills.userItems, ['user skill']);
+    assert.deepEqual(result.all.skills.projectItems, ['project skill']);
+    assert.deepEqual(result.all.plugins.userItems, ['User plugin']);
+    assert.deepEqual(result.all.plugins.projectItems, ['Project plugin']);
+    assert.deepEqual(result.all.mcp.userItems, ['user server']);
+    assert.deepEqual(result.all.mcp.projectItems.sort(), ['local server', 'project server']);
+    assert.equal(result.waiting, true, 'the previous project is hidden while reading a different directory');
+    assert.equal(result.staleIsolated, true);
+    assert.equal(result.after.activeChat, result.before.activeChat);
+    assert.deepEqual(result.after.navCalls, []);
+    assert.equal(result.chatless.activeChat, '');
+    assert.deepEqual(result.chatless.navCalls, []);
+    assert.equal(result.projectManager.activeChat, '');
+    assert.deepEqual(result.projectManager.navCalls, []);
+    assert.equal(result.createScope, 'project');
+    assert.equal(result.fits, true);
+  }
+});
+
+test('plugin install counts appear only for plugins from the verified public source', async () => {
+  const result = await runScenario('plugin-install-counts');
+  assert.deepEqual(result, { recommended: true, alias: true, customHidden: true, missingHidden: true, detail: true });
+});
+
 test('recommendation badges verify source aliases and late catalogs preserve manual drafts', async () => {
   const result = await runScenario('recommendation-catalog-safety');
-  assert.deepEqual(result, { aliasInstalled: true, refreshed: true, differentSourceNotInstalled: true, retainedManualDraft: true });
+  assert.deepEqual(result, {
+    aliasInstalled: true, refreshed: true, differentSourceNotInstalled: true, retainedManualDraft: true,
+    errorKeptSource: true, longSourceFits: true, keepEditingFocused: true, restoredFocus: true, noApplyOnCancel: true,
+    removed: { action: 'marketplace_remove', name: 'my-skills', scope: 'user', confirmed: true },
+  });
 });
 
 test('expanded settings editors fit a narrow macOS window', async () => {
@@ -150,13 +198,13 @@ test('expanded settings editors fit a narrow macOS window', async () => {
 
 test('the layer switcher appears only on layered pages', async () => {
   const { permissions, diagnostics, mcp, customProviders } = await runScenario('layer-switcher');
-  assert.equal(permissions.hasLayerSwitcher, true, 'permissions is layered and must offer user/project/local');
+  assert.equal(permissions.hasLayerSwitcher, true, 'permissions is layered and must offer user/project');
   assert.equal(diagnostics.hasLayerSwitcher, false, 'diagnostics is client-owned and must not show a layer switcher');
   // `permissions` (编码, layered) vs `diagnostics` (高级, not layered) alone
   // cannot fail a regression that keys the switcher off `group === '编码'`
   // instead of `page.layered` — both pages agree on both properties. These
   // three are the ones that actually separate the two rules.
-  assert.equal(mcp.hasLayerSwitcher, false, 'mcp is inside 编码 but NOT layered — its own three-scope storage, no layer switcher');
+  assert.equal(mcp.hasLayerSwitcher, false, 'mcp is inside 编码 but NOT layered — its own storage, no layer switcher');
   assert.equal(customProviders.hasLayerSwitcher, false, 'custom providers use Host-wide settings');
 });
 
@@ -167,13 +215,20 @@ test('settings preserves content and scroll track insets while scrolling and swi
     assert.equal(result.dragRegionMode, 'drag');
     assert.equal(result.dragRegionHeight, '40px');
     assert.deepEqual(result.dragRegionEdges, [0, 88, 0]);
-    assert.equal(result.computerTop, 52, 'Computer Use starts at the shared top inset');
-    assert.equal(result.browserTop, 52, 'Browser breadcrumb starts at the shared top inset');
+    for (const page of result.extensionHeaders) {
+      assert.equal(page.top, 10, page.id);
+      assert.equal(page.hasIntro, false, page.id);
+      assert.ok(page.toolbarGap >= 0 && page.toolbarGap <= 12, `${page.id}: toolbar gap ${page.toolbarGap}px`);
+      assert.ok(page.controls.every((control) => control.hit && control.mode === 'no-drag'), page.id);
+    }
+    if (process.platform === 'darwin') assert.ok(result.backLeft >= 88);
+    assert.equal(result.computerTop, 10, 'Computer Use starts at the shared top inset');
+    assert.equal(result.browserTop, 10, 'Browser breadcrumb starts at the shared top inset');
     for (const [position, state] of Object.entries(result.layout)) {
       const context = `${theme} ${position}`;
-      assert.deepEqual(state.viewportInsets, { top: 40, right: 6, bottom: 8 }, `${context}: viewport clears the titlebar and window edges`);
-      assert.deepEqual(state.contentInsets, { top: 12, left: 32, right: 26, bottom: 32 }, `${context}: inner content keeps its padding`);
-      assert.equal(state.backTop, 52, `${context}: Back aligns with the start of the content`);
+      assert.deepEqual(state.viewportInsets, { top: 0, right: 6, bottom: 8 }, `${context}: viewport keeps the window edge insets`);
+      assert.deepEqual(state.contentInsets, { top: 10, left: 32, right: 26, bottom: 32 }, `${context}: inner content keeps its padding`);
+      assert.equal(state.backTop, 10, `${context}: Back aligns with the start of the content`);
       assert.ok(state.contentBottomClearance >= 32, `${context}: final content clears the bottom padding`);
       assert.deepEqual(state.sidebarInsets, { left: 6, right: 6, bottom: 8 }, `${context}: sidebar scroll track remains inset`);
       assert.equal(state.scrollPaddingTop, '0px', context);
@@ -246,20 +301,20 @@ test('provider drafts and pending credential writes do not survive switching ses
   assert.equal(result.state.hasLayerSwitcher, false, 'provider settings remain Host-wide');
 });
 
-test('project and local tabs are disabled with no project open, with the reason shown as visible text', async () => {
+test('the project tab requires an open project and the local tab is hidden', async () => {
   const { withoutProject, withProject } = await runScenario('project-tabs');
   assert.equal(withoutProject.userDisabled, false, 'the user layer needs no project and must stay editable');
   assert.equal(withoutProject.projectDisabled, true);
-  assert.equal(withoutProject.localDisabled, true);
+  assert.equal(withoutProject.localDisabled, null);
   // The reason must be visible TEXT, not just a `title=` tooltip: Chromium
   // does not dispatch the pointer events a native tooltip needs on a
   // DISABLED control, and a tooltip is invisible to keyboard/screen-reader
   // users regardless.
   assert.match(withoutProject.layerSwitcherReasonText ?? '', /项目/, 'the disabled reason must be visible text, not a title= tooltip');
   // And the disabling is really keyed on the project, not permanent: once one
-  // opens, both re-enable — proving the assertion above isn't just "always disabled".
+  // opens, the project tab becomes usable.
   assert.equal(withProject.projectDisabled, false);
-  assert.equal(withProject.localDisabled, false);
+  assert.equal(withProject.localDisabled, null);
   assert.equal(withProject.userDisabled, false);
   assert.equal(withProject.layerSwitcherReasonText, null, 'once a project is open there is nothing to explain');
 });
@@ -387,7 +442,7 @@ test('adding an allow rule dispatches exactly what capturePermissionEdit would p
   });
 });
 
-test('the layer switcher names the project the ENGINE reported, and switching it really re-points the engine', async () => {
+test('the layer picker changes the settings directory without opening, creating or activating a conversation', async () => {
   const { beforeSnapshot, onUserLayer, onProjectLayer, pickerOpen, afterSwitch } = await runScenario('layer-project');
 
   // 每一层都要有一句说明。三个裸标签（用户/项目/本地）不解释任何东西，而它们的
@@ -414,21 +469,11 @@ test('the layer switcher names the project the ENGINE reported, and switching it
     'with no snapshot yet the UI must say it does not know the project, not invent one');
 
   assert.equal(pickerOpen.hasProjectPicker, true, 'the switch button must open a project list');
-  assert.match(pickerOpen.projectSwitchWarning ?? '', /切换当前会话/,
-    'switching the settings project also switches the conversation — say so before it happens');
-
-  // 判据落在**调用序列**上，不是「点了没报错」：`activateProject` 只写元数据，
-  // 引擎进程的 `--cwd` 不会因它改变。所以必须还有一次 open/new 把引擎真的
-  // 落到新项目上，否则下一次「项目」层写入仍然写进旧项目的文件。
-  assert.ok(afterSwitch.navCalls.includes('activate:/test/other'),
-    `expected the project to be activated, got ${JSON.stringify(afterSwitch.navCalls)}`);
-  assert.ok(
-    afterSwitch.navCalls.some((entry) => entry.startsWith('open:/test/other:') || entry.startsWith('new:/test/other')),
-    `activateProject alone does not re-point the engine; expected an open/new session call, got ${JSON.stringify(afterSwitch.navCalls)}`,
-  );
-  // 有历史会话时打开最近的那个，而不是每切一次项目就凭空造一个空会话。
-  assert.ok(afterSwitch.navCalls.includes('open:/test/other:newest'),
-    `expected the most recently modified session to be opened, got ${JSON.stringify(afterSwitch.navCalls)}`);
+  assert.equal(pickerOpen.projectSwitchWarning, null);
+  assert.equal(afterSwitch.layerProjectPath, '/test/other');
+  assert.equal(afterSwitch.activeChat, beforeSnapshot.activeChat);
+  assert.deepEqual(afterSwitch.navCalls, []);
+  assert.ok(afterSwitch.projectReads.includes('/test/other:refresh_listings'));
 });
 
  test('Skills and MCP use separate list and detail pages with guarded back navigation', async () => {
@@ -462,8 +507,8 @@ test('Plugins, MCP and Skills share settings chrome while preserving catalogs, d
       assert.equal(state.legacyChromeCount, 0, `${context}: no separate Customize navigation is rendered`);
       assert.equal(state.duplicateHeadingCount, 0, `${context}: page content does not repeat the shell title`);
       assert.equal(state.nestedScrollCount, 0, `${context}: catalogs do not add a nested scroll surface`);
-      assert.equal(state.layerControlCount, state.page === 'mcp' ? 0 : 1, `${context}: layer controls follow the settings page contract`);
-      assert.equal(state.layerControlsVisible, state.page !== 'mcp', `${context}: layered controls are visible in the regular header`);
+      assert.equal(state.layerControlCount, 0, `${context}: scopes live in the catalog switcher`);
+      assert.equal(state.layerControlsVisible, false, context);
       assert.equal(state.horizontalOverflow, false, `${context}: content fits the window`);
     }
     assert.equal(beforeConfirm.filter(({ command }) => command.action === 'apply_operation').length, 0);

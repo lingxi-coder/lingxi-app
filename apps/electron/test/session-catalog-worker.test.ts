@@ -65,6 +65,311 @@ function processes() {
   return { calls, spawnProcess, get live() { return live; }, get peak() { return peak; } };
 }
 
+test('abandoning thumbnails cancels queued reads and retires a busy worker', { timeout: 5000 }, async t => {
+  const cwd = project(t), children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const transcript = join(cwd, `${uuid}.jsonl`);
+  writeFileSync(transcript, '');
+  const read = (index: number, signal?: AbortSignal) =>
+    catalog.readImage(cwd, uuid, transcript, `lingxi-history-image:${uuid}:${index}:png`, 'thumbnail', signal);
+
+  const busy = new AbortController(), queued = new AbortController();
+  const first = assert.rejects(read(0, busy.signal), /cancelled/);
+  while (!children.calls[0]?.queries.length) await nextTurn();
+  const second = assert.rejects(read(1, queued.signal), { name: 'AbortError' });
+  for (let turn = 0; turn < 5; turn++) await nextTurn();
+  queued.abort();
+  await second;
+  assert.equal(children.calls[0].queries.length, 1);
+
+  busy.abort();
+  await first;
+  const visible = read(2);
+  while (!children.calls[1]?.queries.length) await nextTurn();
+  assert.equal(children.calls[0].kills, 1);
+  assert.equal(children.calls[0].queries.length, 1);
+  assert.equal(children.calls[1].queries[0].historyImage.reference, `lingxi-history-image:${uuid}:2:png`);
+  const image = { mediaType: 'image/png', base64: 'AQID' };
+  children.calls[1].reply(JSON.stringify(image));
+  assert.deepEqual(await visible, image);
+  assert.deepEqual(await read(2), image);
+  assert.equal(children.calls[1].queries.length, 1);
+});
+
+test('a located thumbnail survives append, and refreshes after the source changes in place', { timeout: 5_000 }, async t => {
+  const cwd = project(t), children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const transcript = join(cwd, `${uuid}.jsonl`);
+  writeFileSync(transcript, 'first row\n');
+  const read = () => catalog.readImage(cwd, uuid, transcript, `lingxi-history-image:${uuid}:0:png:0:YWJj`, 'thumbnail');
+  const first = read();
+  while (!children.calls[0]?.queries.length) await nextTurn();
+  const child = children.calls[0];
+  child.reply(JSON.stringify({ mediaType: 'image/png', base64: 'AQID' }));
+  assert.equal((await first).base64, 'AQID');
+  appendFileSync(transcript, 'newer row\n');
+  catalog.invalidate(cwd, { preserveImages: true });
+  assert.equal((await read()).base64, 'AQID');
+  assert.equal(child.queries.length, 1);
+  writeFileSync(transcript, 'replacement\n');
+  const changed = read();
+  while (child.queries.length < 2) await nextTurn();
+  child.reply(JSON.stringify({ mediaType: 'image/png', base64: 'BAUG' }));
+  assert.equal((await changed).base64, 'BAUG');
+});
+
+test('durable Inbox activity can be read without a session runtime and keeps exact text', async t => {
+  const cwd = project(t), children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const transcript = join(cwd, `${uuid}.jsonl`);
+  const preview = catalog.readActivityPreview(cwd, uuid, transcript, 4);
+  await nextTurn();
+  const child = children.calls[0];
+  assert.equal(child.queries[0].activityPreview, 4);
+  child.reply(JSON.stringify([{ uuid, at: 40, blocks: [[65, 0xd800, 66]] }]));
+  assert.deepEqual(await preview, { available: true, messages: [
+    { role: 'assistant', transcript_uuid: uuid, sent_at_ms: 40, blocks: [{ type: 'text', text: 'A\ud800B' }] },
+  ] });
+});
+
+test('an exact cold selection shares its in-flight read and validates the page separately', async t => {
+  const cwd = project(t), children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const selection = { scope: 'current' as const, transcriptPath: row().path };
+  const first = catalog.selectForOpen(cwd, uuid, selection);
+  assert.equal(catalog.selectForOpen(cwd, uuid, selection), first);
+  await nextTurn();
+  const child = children.calls[0];
+  assert.equal(child.queries[0].transcriptPath, selection.transcriptPath);
+  assert.equal(child.queries[0].scope, selection.scope);
+  const messages = [{ role: 'user', transcript_uuid: uuid, blocks: [{ type: 'text', text: 'recent' }] }];
+  child.reply();
+  const firstResult = await first;
+  assert.equal(firstResult.session?.path, selection.transcriptPath);
+  assert.equal(catalog.selectForOpen(cwd, uuid, selection), first);
+  await nextTurn();
+  const history = children.calls[1];
+  assert.deepEqual(history.queries[0], { version: 2, id: 1, cwd, sessionId: uuid, transcriptPath: selection.transcriptPath, historyLatest: true });
+  history.reply(JSON.stringify({ messages, before: null }));
+  assert.deepEqual((await firstResult.preview)?.messages, messages);
+
+  await nextTurn();
+  const changed = catalog.selectForOpen(cwd, uuid, selection);
+  await nextTurn();
+  child.reply();
+  const next = await changed;
+  await nextTurn();
+  history.reply(JSON.stringify({ messages, before: { uuid: 'invalid' } }));
+  assert.equal(next.session?.path, selection.transcriptPath);
+  assert.equal(await next.preview, undefined);
+});
+
+test('exact cold open lets startup reuse the selected reader before preview takes a process slot', async t => {
+  const cwd = project(t), other = project(t), children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const open = catalog.selectForOpen(cwd, uuid, { scope: 'current', transcriptPath: row().path });
+  await nextTurn();
+  const selected = children.calls[0];
+  const listing = catalog.listComplete(other);
+  await nextTurn();
+  const directory = children.calls[1];
+  selected.reply();
+  const { preview } = await open;
+  const startup = catalog.workspaceSettings(cwd);
+  await nextTurn();
+  assert.equal(selected.queries.at(-1)?.workspaceEnvironment, true);
+  assert.equal(selected.kills, 0);
+  assert.equal(children.calls.length, 2);
+  const settings = { version: 1, config_home: cwd, environment: { FROM_DISK: 'one' } };
+  selected.reply(JSON.stringify(settings));
+  assert.deepEqual((await startup).environment, settings.environment);
+  directory.reply();
+  await listing;
+  await nextTurn();
+  const history = children.calls.find(call => call.queries.at(-1)?.historyLatest);
+  assert.ok(history);
+  const messages = [{ role: 'user', transcript_uuid: uuid, blocks: [{ type: 'text', text: 'recent' }] }];
+  history.reply(JSON.stringify({ messages, before: null }));
+  assert.deepEqual((await preview)?.messages, messages);
+});
+
+test('history images share an in-flight thumbnail and cache each variant separately', { timeout: 5_000 }, async t => {
+  const cwd = project(t), children = processes();
+  const transcript = join(cwd, `${uuid}.jsonl`);
+  writeFileSync(transcript, '{}\n');
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const reference = `lingxi-history-image:${uuid}:0:png`;
+  const thumbnail = { mediaType: 'image/png', base64: 'AQID' };
+  const original = { mediaType: 'image/png', base64: 'BAUG' };
+  const first = catalog.readImage(cwd, uuid, transcript, reference, 'thumbnail');
+  const second = catalog.readImage(cwd, uuid, transcript, reference, 'thumbnail');
+  for (let i = 0; i < 100 && !children.calls[0]?.queries.length; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  const child = children.calls[0];
+  assert.deepEqual(child.queries[0].historyImage, { reference, size: 'thumbnail' });
+  child.reply(JSON.stringify(thumbnail));
+  assert.deepEqual(await Promise.all([first, second]), [thumbnail, thumbnail]);
+  assert.deepEqual(await catalog.readImage(cwd, uuid, transcript, reference, 'thumbnail'), thumbnail);
+  assert.equal(child.queries.length, 1);
+
+  const requested = catalog.readImage(cwd, uuid, transcript, reference, 'original');
+  for (let i = 0; i < 100 && child.queries.length < 2; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.deepEqual(child.queries[1].historyImage, { reference, size: 'original' });
+  child.reply(JSON.stringify(original));
+  assert.deepEqual(await requested, original);
+});
+
+test('a reused selection worker claims its slot before a parallel reader can reclaim it', async t => {
+  const cwd = project(t), children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const selection = { scope: 'current' as const, transcriptPath: row().path };
+  const warm = catalog.select(cwd, uuid, selection);
+  await nextTurn();
+  const reader = children.calls[0];
+  reader.reply();
+  await warm;
+
+  const history = catalog.readHistory(cwd, uuid, selection.transcriptPath, { uuid });
+  await nextTurn();
+  const historyWorker = children.calls[1];
+  const selected = catalog.select(cwd, uuid, selection);
+  const listing = catalog.listComplete(cwd);
+  await nextTurn();
+  assert.equal(reader.queries.length, 2);
+  assert.equal(reader.kills, 0);
+  reader.reply();
+  assert.equal((await selected)?.uuid, uuid);
+  await nextTurn();
+  assert.equal(children.calls.length, 3);
+  children.calls[2].reply();
+  assert.equal((await listing).sessions.length, 1);
+  historyWorker.reply(JSON.stringify({ messages: [], before: null }));
+  await history;
+  assert.equal(children.peak, 2);
+});
+
+test('workspace launch settings reuse only an idle reader started in the requested cwd', async t => {
+  const cwd = project(t), other = project(t), children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const listing = catalog.listComplete(cwd);
+  await nextTurn();
+  const reader = children.calls[0];
+  const settings = { version: 1, config_home: cwd, environment: { FROM_DISK: 'one' } };
+  const concurrent = catalog.workspaceSettings(cwd);
+  await nextTurn();
+  assert.ok(children.calls[1].args.includes('--workspace-environment-json'));
+  children.calls[1].finish(settings);
+  await concurrent;
+  reader.reply();
+  await listing;
+  const same = catalog.workspaceSettings(cwd);
+  await nextTurn();
+  assert.deepEqual(reader.queries.at(-1), { version: 2, id: 2, cwd, workspaceEnvironment: true });
+  reader.reply(JSON.stringify(settings));
+  assert.deepEqual((await same).environment, settings.environment);
+
+  const different = catalog.workspaceSettings(other);
+  await nextTurn();
+  assert.ok(children.calls[2].args.includes('--workspace-environment-json'));
+  children.calls[2].finish({ ...settings, config_home: other });
+  assert.equal((await different).configHome, other);
+});
+
+test('plain account listings share queued reads, keep a slot for session startup and return independent snapshots', async t => {
+  const cwd = project(t), children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const list = () => catalog.providerAccountCommand({ action: 'list', expectedRevision: 0 });
+  const snapshot = (configRevision: number) => ({ storeScope: 'owner', configRevision, accounts: [], health: [] });
+  const first = list(), sameBatch = list();
+  await nextTurn();
+  assert.equal(children.calls.length, 1);
+
+  // These calls arrived after dispatch. Even an external registry mutation
+  // between the two batches must be visible to the second group.
+  const later = list(), sameLaterBatch = list();
+  const settings = catalog.workspaceSettings(cwd);
+  await nextTurn();
+  assert.equal(children.calls.length, 2);
+  assert.ok(children.calls[1].args.includes('--workspace-environment-json'));
+  children.calls[1].finish({ version: 1, config_home: cwd, environment: {} });
+  await settings;
+  children.calls[0].finish(snapshot(1));
+  const [a, b] = await Promise.all([first, sameBatch]);
+  assert.equal(a.configRevision, 1);
+  assert.notStrictEqual(a.accounts, b.accounts);
+  await nextTurn();
+  assert.equal(children.calls.length, 3);
+  children.calls[2].finish(snapshot(2));
+  assert.deepEqual((await Promise.all([later, sameLaterBatch])).map(row => row.configRevision), [2, 2]);
+
+  const retry = list();
+  await nextTurn();
+  children.calls[3].finish(snapshot(3));
+  assert.equal((await retry).configRevision, 3);
+  assert.equal(children.peak, 2);
+});
+
+test('credential presence, revision checks and mutations bypass queued metadata listings', async t => {
+  const children = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: children.spawnProcess });
+  t.after(() => catalog.dispose());
+  const plain = { action: 'list', expectedRevision: 0 } as const;
+  const read = catalog.providerAccountCommand(plain);
+  await nextTurn();
+  const after = catalog.providerAccountCommand(plain);
+  const presence = catalog.providerAccountCommand(plain, undefined, []);
+  const pinned = catalog.providerAccountCommand({ ...plain, expectedRevision: 8 });
+  const mutation = catalog.providerAccountCommand({ action: 'enable', accountId: uuid, enabled: false, expectedRevision: 8 });
+  const snapshot = (configRevision: number) => ({ storeScope: 'owner', configRevision, accounts: [], health: [] });
+  await nextTurn();
+  children.calls[1].finish(snapshot(7));
+  assert.equal((await presence).configRevision, 7);
+  await nextTurn();
+  children.calls[2].finish(snapshot(8));
+  assert.equal((await pinned).configRevision, 8);
+  await nextTurn();
+  children.calls[3].finish(snapshot(9));
+  assert.equal((await mutation).configRevision, 9);
+  children.calls[0].finish({ error: 'failed' });
+  await assert.rejects(read, /Provider account operation failed/);
+  await nextTurn();
+  children.calls[4].finish(snapshot(9));
+  assert.equal((await after).configRevision, 9);
+});
+
+test('real warm worker reads current workspace settings and preserves native merge errors',
+  { skip: !process.env.LINGXI_SESSION_CATALOG_TEST_BIN, timeout: 60_000 }, async t => {
+    const cwd = project(t), home = join(cwd, 'config');
+    mkdirSync(home);
+    const file = join(home, 'settings.json');
+    let spawns = 0;
+    const options = { serverBin: process.env.LINGXI_SESSION_CATALOG_TEST_BIN, configHome: home };
+    const catalog = new ProjectSessionCatalog({ ...options, spawnProcess: ((...args: Parameters<typeof spawn>) => {
+      spawns++;
+      return spawn(...args);
+    }) as typeof spawn });
+    const oneshot = new ProjectSessionCatalog({ ...options, catalogWorker: false });
+    t.after(() => { catalog.dispose(); oneshot.dispose(); });
+    await catalog.listComplete(cwd);
+    for (const value of ['first', 'updated']) {
+      writeFileSync(file, JSON.stringify({ env: { TEST_RESUME_SETTING: value } }));
+      const actual = await catalog.workspaceSettings(cwd);
+      assert.deepEqual(actual, await oneshot.workspaceSettings(cwd));
+      assert.equal(actual.environment.TEST_RESUME_SETTING, value);
+    }
+    assert.equal(spawns, 1);
+    writeFileSync(file, '{');
+    await assert.rejects(catalog.workspaceSettings(cwd), /workspace environment settings are unavailable/);
+  });
+
 test('history pages reuse their worker and validate that cursors advance', async t => {
   const cwd = project(t), process = processes();
   const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: process.spawnProcess });
@@ -130,6 +435,100 @@ test('held history for A cannot block exact selection for B across projects, and
   assert.deepEqual(await first, await same);
   historyWorker.reply(JSON.stringify({ messages: [], before: null }));
   assert.deepEqual(await history, await sameHistory);
+  assert.equal(process.peak, 2);
+});
+
+test('concurrent exact selection shares one read for the same scope and transcript', async t => {
+  const cwd = project(t), process = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: process.spawnProcess });
+  t.after(() => catalog.dispose());
+  const selection = { scope: 'current', transcriptPath: row().path } as const;
+  const otherPath = `/other/${uuid}.jsonl`;
+  const first = catalog.select(cwd, uuid, selection);
+  const same = catalog.select(cwd, uuid, selection);
+  const otherScope = catalog.select(cwd, uuid, { ...selection, scope: 'all' });
+  const otherSource = catalog.select(cwd, uuid, { ...selection, transcriptPath: otherPath });
+
+  await nextTurn();
+  const worker = process.calls[0];
+  worker.reply(output(uuid, 'current'));
+  await nextTurn();
+  assert.equal(worker.queries[1].scope, 'all');
+  const [firstRow, sameRow] = await Promise.all([first, same]);
+  assert.equal(firstRow?.title, 'current');
+  assert.deepEqual(firstRow, sameRow);
+  assert.notEqual(firstRow, sameRow);
+  worker.reply(output(uuid, 'all'));
+  assert.equal((await otherScope)?.title, 'all');
+
+  await nextTurn();
+  assert.equal(worker.queries[2].transcriptPath, otherPath);
+  worker.reply(JSON.stringify({ version: 1, sessions: [{ ...row(), path: otherPath }] }));
+  assert.equal((await otherSource)?.path, otherPath);
+
+  const fresh = catalog.select(cwd, uuid, selection);
+  await nextTurn();
+  assert.equal(worker.queries.length, 4);
+  worker.reply(output(uuid, 'updated'));
+  assert.equal((await fresh)?.title, 'updated');
+});
+
+test('selected transcripts resolve while directory scans are pending, in selection order', async t => {
+  const cwd = project(t), other = project(t), process = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: process.spawnProcess });
+  t.after(() => catalog.dispose());
+  const selection = { scope: 'repository', transcriptPath: row().path } as const;
+  const firstScan = catalog.list(cwd);
+  const nextScan = catalog.list(cwd, 'all');
+  const first = catalog.select(other, uuid, selection);
+  const same = catalog.select(other, uuid, selection);
+  const changedScope = catalog.select(other, uuid, { ...selection, scope: 'all' });
+  await nextTurn();
+  assert.equal(process.calls.length, 2);
+  const [scans, selections] = process.calls;
+  assert.deepEqual(scans.queries, [{ version: 2, id: 1, cwd, scope: 'current' }]);
+  assert.deepEqual(selections.queries, [{ version: 2, id: 1, cwd: other, sessionId: uuid, ...selection }]);
+  selections.reply(output(uuid, 'selected source'));
+  assert.deepEqual((await Promise.all([first, same])).map(hit => hit?.title), ['selected source', 'selected source']);
+  await nextTurn();
+  assert.equal(selections.queries.length, 2);
+  assert.equal(selections.queries[1].scope, 'all');
+  selections.reply(output(uuid, 'second selection'));
+  assert.equal((await changedScope)?.title, 'second selection');
+  scans.reply(output(uuid, 'directory'));
+  await firstScan;
+  await nextTurn();
+  assert.equal(scans.queries[1].scope, 'all');
+  scans.reply();
+  await nextScan;
+  assert.equal(process.peak, 2);
+});
+
+test('invalidation retires a selected-source worker without waiting for an older directory scan', async t => {
+  const cwd = project(t), process = processes();
+  const catalog = new ProjectSessionCatalog({ serverBin: '/bridge', spawnProcess: process.spawnProcess });
+  t.after(() => catalog.dispose());
+  const selection = { scope: 'current', transcriptPath: row().path } as const;
+  const oldScan = catalog.list(cwd);
+  const oldSelection = catalog.select(cwd, uuid, selection);
+  await nextTurn();
+  const [scan, selected] = process.calls;
+  catalog.invalidate(cwd);
+  const refreshed = catalog.select(cwd, uuid, selection);
+  selected.reply(output(uuid, 'previous revision'));
+  assert.equal((await oldSelection)?.title, 'previous revision');
+  await nextTurn();
+  assert.equal(selected.kills, 1);
+  assert.equal(process.calls.length, 3);
+  const current = process.calls[2];
+  assert.deepEqual(current.queries, [{ version: 2, id: 1, cwd, sessionId: uuid, ...selection }]);
+  current.reply(output(uuid, 'new revision'));
+  assert.equal((await refreshed)?.title, 'new revision');
+  scan.reply();
+  await oldScan;
+  catalog.dispose();
+  await nextTurn();
+  assert.equal(process.live, 0);
   assert.equal(process.peak, 2);
 });
 
@@ -502,6 +901,29 @@ test('disposal cancels retries on exit and queued writers still wait for close',
   assert.equal(process.peak, 2);
   await assert.rejects(readers[0].find(cwd, uuid), /disposed/);
 });
+
+test('real exact-open worker previews the newest page only within the selected scope',
+  { skip: !process.env.LINGXI_SESSION_CATALOG_TEST_BIN, timeout: 60_000 }, async t => {
+    const cwd = project(t), foreign = project(t), home = join(cwd, 'isolated-home');
+    const path = join(home, 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${uuid}.jsonl`);
+    const ids = Array.from({ length: 600 }, (_, index) => `10000000-0000-4000-8000-${String(index).padStart(12, '0')}`);
+    const rows = ids.map((id, index) => ({
+      type: 'user', uuid: id, sessionId: uuid, cwd, isSidechain: false, parentUuid: index ? ids[index - 1] : null,
+      timestamp: '2026-11-12T00:00:00Z', message: { role: 'user', content: `message ${index}` },
+    }));
+    const mode = { type: 'fixed-session-mode', sessionId: uuid, sessionMode: 'code', instructionEpoch: 0 };
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, [mode, ...rows].map(row => JSON.stringify(row)).join('\n') + '\n');
+    const catalog = new ProjectSessionCatalog({ serverBin: process.env.LINGXI_SESSION_CATALOG_TEST_BIN, configHome: home });
+    t.after(() => catalog.dispose());
+    const selection = { scope: 'current', transcriptPath: path } as const;
+    const result = await catalog.selectForOpen(cwd, uuid, selection);
+    assert.equal(result.session?.path, path);
+    const preview = await result.preview;
+    assert.deepEqual(preview?.messages.map(row => row.transcript_uuid), ids.slice(-60));
+    assert.equal(preview?.before?.uuid, ids[540]);
+    assert.deepEqual(await catalog.selectForOpen(foreign, uuid, selection), { session: undefined });
+  });
 
 test('real bridge history worker pages across compacts without gaps while the source grows',
   { skip: !process.env.LINGXI_SESSION_CATALOG_TEST_BIN, timeout: 60_000 }, async t => {

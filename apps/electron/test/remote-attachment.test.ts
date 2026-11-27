@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { LIVE_BATCH_MS, SessionAttachment, canResume } from '../src/main/remoteControl/sessionAttachment.js';
+import { LIVE_BATCH_MS, SessionAttachment } from '../src/main/remoteControl/sessionAttachment.js';
+import { canResume } from '../src/main/remoteControl/snapshot.js';
 import { FakeRuntime, RecordingChannel, newClock, permissionRequest, questionRequest } from './remote-session-helpers.js';
 
 function setup() {
@@ -125,6 +126,25 @@ test('a new base tells the viewer at once and sends a fresh snapshot by itself a
   runtime.push({ type: 'text_delta', text: 'more' } as any);
   clock.advance(LIVE_BATCH_MS);
   assert.deepEqual(channel.methods(), ['session.event']);
+});
+
+test('an attached viewer waits for restored controls even after the resume base arrives', () => {
+  const { runtime, channel, clock, attachment } = setup();
+  attachment.attach(undefined);
+  channel.clear();
+  runtime.setActionReady(false);
+  runtime.resume([{ role: 'user', blocks: [{ type: 'text', text: 'saved history' }] }]);
+  clock.advance(LIVE_BATCH_MS * 5);
+  const waiting = channel.of('session.snapshot');
+  assert.deepEqual(waiting.map(frame => frame.phase), ['begin']);
+  assert.equal(waiting[0].session_mode, undefined);
+  assert.equal(channel.of('session.reset').length, 0);
+  runtime.setActionReady(true);
+  clock.advance(LIVE_BATCH_MS);
+  const frames = channel.of('session.snapshot').slice(1);
+  assert.deepEqual(frames.map(frame => frame.phase), ['begin', 'messages', 'end']);
+  assert.equal(frames[0].session_mode, 'code');
+  assert.match(JSON.stringify(frames[1]), /saved history/);
 });
 
 test('two new bases in a row make one reset and one snapshot', () => {

@@ -161,12 +161,12 @@ test('friends rules: a team offer is readable only by its recipient, grants no a
   assert.equal((await assertSucceeds(getDocs(collection(mine, 'users/bob/teamOffers')))).size, 0);
 });
 
-test('friends rules: handles, friend codes, friendships, limits and request receipts have no client access at all', options, async () => {
-  await friends.profile(alice); await act(alice, { action: 'profile', handle: 'alice_w' });
+test('friends rules: handles, handle search, friend codes, friendships, limits and request receipts have no client access at all', options, async () => {
+  await friends.profile(alice); await act(alice, { action: 'profile', handle: 'alice_w', findByHandlePart: true });
   const code = (await friends.profile(alice)).friendCode.code;
   await befriend(bob, alice);
   await act(bob, { action: 'lookup', handle: 'alice_w' }); // spends a limit document
-  const sensitive = [`handles/alice_w`, `friendCodes/${sha(code)}`, `friendships/${pairKey('alice', 'bob')}`, `friendLimits/${sha('lookup:bob')}`];
+  const sensitive = [`handles/alice_w`, `friendHandleSearch/alice`, `friendCodes/${sha(code)}`, `friendships/${pairKey('alice', 'bob')}`, `friendLimits/${sha('lookup:bob')}`];
   const receipt = (await admin.collection('users/bob/friendRequests').get()).docs[0];
   assert.ok(receipt, 'the request left a receipt');
   sensitive.push(`users/bob/friendRequests/${receipt.id}`);
@@ -177,7 +177,7 @@ test('friends rules: handles, friend codes, friendships, limits and request rece
       await assertFails(setDoc(doc(client, path), { uid: 'carol' }));
       await assertFails(deleteDoc(doc(client, path)));
     }
-    for (const path of ['handles', 'friendCodes', 'friendships', 'friendLimits', 'users/bob/friendRequests']) await assertFails(getDocs(collection(client, path)));
+    for (const path of ['handles', 'friendHandleSearch', 'friendCodes', 'friendships', 'friendLimits', 'users/bob/friendRequests']) await assertFails(getDocs(collection(client, path)));
   }
   // The raw code lives only in the Admin-only document; no query shape reaches it.
   await assertFails(getDocs(query(collectionGroup(user('alice'), 'friendCodes'), where('code', '==', code))));

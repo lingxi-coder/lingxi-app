@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { friendsErrorText, offerErrorText } from './errors.js';
 import { FriendLeaveDialog, FriendProfileDialog } from './friend-dialogs';
-import { matchesFilter, friendCollator, offerExpiry, sectionCards, SECTION_ROWS, unreadOf, type FriendCard, type OfferAction, type TeamOffer } from './friends.js';
+import { matchesFilter, friendCollator, LEGACY_FRIEND_VERSION, offerExpiry, sectionCards, SECTION_ROWS, unreadOf, type FriendCard, type OfferAction, type TeamOffer } from './friends.js';
 import type { FriendsSnapshot, FriendsWorkspace } from './friends-workspace.js';
 import { formatListTime } from './stream.js';
 import { Avatar, Icon, PopupMenu, rovingKeys, TeamMark, UnreadBadge, useDocumentShown, type MenuItem, type RenderAvatar } from './ui';
@@ -82,6 +82,16 @@ export function FriendsSidebar({ workspace, snapshot, renderAvatar, locale, now 
       </div>
     </header>
 
+    {!searching && <div className="tw-friend-me" data-selected={snapshot.page === 'me'}>
+      <button type="button" className="tw-me-main" aria-current={snapshot.page === 'me' ? 'page' : undefined} onClick={() => workspace.show('me')}>
+        <Avatar identity={{ kind: 'user', id: snapshot.uid, name: snapshot.profile?.displayName ?? t('friends_me') }} size={40} render={renderAvatar} />
+        <span className="tw-person-text"><b>{t('friends_me')}</b>
+          <small>{snapshot.profile?.handle ? `@${snapshot.profile.handle}` : t('friends_my_card')}</small>
+        </span>
+        <Icon name="chevronRight" size={16} />
+      </button>
+    </div>}
+
     {snapshot.profileNameUnset ? <div className="tw-banner" role="status">
       <span>{t('friends_name_prompt')}</span>
       <button type="button" className="tw-link" onClick={() => workspace.show('profile')}>{t('friends_name_prompt_action')}</button>
@@ -123,7 +133,7 @@ export function FriendsSidebar({ workspace, snapshot, renderAvatar, locale, now 
 
     {dialog?.kind === 'profile' && dialogCard ? <FriendProfileDialog workspace={workspace} uid={dialogCard.uid} name={dialogCard.displayName} handle={dialogCard.handle}
       since={dialogCard.since} locale={tag} renderAvatar={renderAvatar} onClose={() => setDialog(undefined)} /> : null}
-    {dialog?.kind === 'remove' && dialogCard ? <FriendLeaveDialog workspace={workspace} locale={locale} uid={dialogCard.uid} name={dialogCard.displayName} action="remove"
+    {dialog?.kind === 'remove' && dialogCard ? <FriendLeaveDialog workspace={workspace} locale={locale} uid={dialogCard.uid} teamId={dialogCard.teamId} name={dialogCard.displayName} action="remove"
       onClose={() => setDialog(undefined)} /> : null}
   </nav>;
 }
@@ -174,7 +184,7 @@ function Requests({ title, cards, kind, workspace, locale, renderAvatar, onAccep
   const shown = all ? cards : cards.slice(0, SECTION_ROWS);
   const act = async (card: FriendCard, action: 'accept' | 'decline' | 'cancel') => {
     setBusy(card.uid); setFailed(undefined);
-    const code = await workspace.respond(card.uid, action);
+    const code = await workspace.respond(card.uid, action, card.version ?? LEGACY_FRIEND_VERSION);
     setBusy(undefined);
     if (code) setFailed({ uid: card.uid, code }); else if (action === 'accept') onAccepted?.(card.displayName);
   };
@@ -216,7 +226,7 @@ function Offers({ offers, now, tag, workspace, locale, onJoined }: {
   const shown = all ? offers : offers.slice(0, SECTION_ROWS);
   const act = async (offer: TeamOffer, action: 'acceptOffer' | 'declineOffer') => {
     setBusy(offer.teamId); setFailed(undefined);
-    const code = await (action === 'acceptOffer' ? workspace.acceptOffer(offer.teamId) : workspace.declineOffer(offer.teamId));
+    const code = await (action === 'acceptOffer' ? workspace.acceptOffer(offer.teamId, offer.version ?? LEGACY_FRIEND_VERSION) : workspace.declineOffer(offer.teamId, offer.version ?? LEGACY_FRIEND_VERSION));
     setBusy(undefined);
     if (code) setFailed({ teamId: offer.teamId, action, code }); else if (action === 'acceptOffer') onJoined(offer.teamName);
   };

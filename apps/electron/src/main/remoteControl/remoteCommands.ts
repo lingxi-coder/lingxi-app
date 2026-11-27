@@ -16,7 +16,8 @@ import type { ProviderAccountCommand } from '../../shared/providerAccounts.js';
  * - computer access is not here at all: it is granted on the desktop.
  */
 
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { LRUCache } from 'lru-cache';
 
 import type { ImageRefDto, PermissionResponseDto, ReasoningSelectionDto } from '@lingxi/bridge-client';
 import {
@@ -29,12 +30,14 @@ import {
 } from '@lingxi/bridge-client/remote';
 
 import { REMOTE_SLASH_COMMANDS } from '../../shared/clientCommands.js';
+import { isHistoryImageReference, type SessionImagePayload, type SessionImageSize, type TranscriptHistoryCursor, type TranscriptHistoryPage } from '../../shared/sessionHistory.js';
+import type { RemoteRuntimeView } from '../bridgeTypes.js';
 import { slashRequestEchoes } from '../bridgeEvents.js';
 import { isPermissionModeId, sanitizeDiagnostic } from '../host-utils.js';
 import { validateImageRefs, validatePrompt } from '../validation.js';
 import type { RemoteViewer } from './gateway.js';
 import type { RemoteRuntime } from './remoteRuntime.js';
-import { historyPage, resolveImage } from './snapshot.js';
+import { historyPage, mapMessage, parseImageRef, remoteBaseOffset, resolveImage } from './snapshot.js';
 
 /** The renderer shows this as a user row, marked as sent from another device. */
 export interface RemotePromptEcho {
@@ -65,6 +68,8 @@ export interface RemoteCommandsDeps {
   /** Told after a viewer's prompt has been sent, so the renderer can show it. */
   echo(echo: RemotePromptEcho): void;
   codec?: ImageCodec;
+  readHistoryImage?: (runtime: RemoteRuntime, reference: string, size: SessionImageSize, signal?: AbortSignal) => Promise<SessionImagePayload>;
+  readHistory?: (runtime: RemoteRuntime, before: TranscriptHistoryCursor, limit: number) => Promise<TranscriptHistoryPage>;
   clock: Clock;
   /** A random integer in 1…2^53−1. */
   randomTurnId?: () => number;
@@ -73,6 +78,11 @@ export interface RemoteCommandsDeps {
 export const MAX_PROMPT_IMAGES = 4;
 export const IMAGE_GET_MAX_SIDE = 1568;
 export const IMAGE_GET_MAX_BYTES = 2 * 1024 * 1024;
+const ORIGINAL_IMAGE_CHUNK = 1024 * 1024;
+const MAX_ORIGINAL_BASE64 = 28 * 1024 * 1024;
+const ORIGINAL_TRANSFER_BYTES = 64 * 1024 * 1024;
+const ORIGINAL_TRANSFER_LIMIT = 12;
+const ORIGINAL_TRANSFER_IDLE_MS = 15_000;
 /** A retry of a prompt with the same `client_request_id` within this long gets the first answer. */
 export const IDEMPOTENCY_WINDOW_MS = 5 * 60_000;
 export const IDEMPOTENCY_MAX_ENTRIES = 512;
@@ -123,13 +133,14 @@ function randomTurnIdFromCrypto(): number {
 export function fitImage(
   codec: ImageCodec | undefined,
   image: { media_type: string; base64: string },
+  maxSide = IMAGE_GET_MAX_SIDE,
 ): { media_type: string; base64: string } {
   const bytes = Buffer.from(image.base64, 'base64');
   const size = codec?.size(bytes);
   const longest = size === undefined ? 0 : Math.max(size.width, size.height);
-  if (bytes.length <= IMAGE_GET_MAX_BYTES && (size === undefined || longest <= IMAGE_GET_MAX_SIDE)) return image;
+  if (bytes.length <= IMAGE_GET_MAX_BYTES && (size === undefined || longest <= maxSide)) return image;
   if (codec === undefined || size === undefined) throw new RemoteRpcError('internal', 'the image is too large to send');
-  const factor = longest > IMAGE_GET_MAX_SIDE ? IMAGE_GET_MAX_SIDE / longest : 1;
+  const factor = longest > maxSide ? maxSide / longest : 1;
   const width = Math.max(1, Math.round(size.width * factor));
   const height = Math.max(1, Math.round(size.height * factor));
   const attempts: Array<{ type: 'png' } | { type: 'jpeg'; quality: number }> = [
@@ -150,8 +161,23 @@ interface SentPrompt {
   result: Promise<PromptSendResult>;
 }
 
+interface OriginalImageTransfer {
+  owner: object;
+  sessionId: string;
+  epoch: string;
+  ref: string;
+  controller: AbortController;
+  data: Promise<{ media_type: string; base64: Buffer }>;
+  bytes: number;
+  timer?: unknown;
+  readers: number;
+}
+
 export class RemoteCommands {
   private readonly sent = new Map<string, SentPrompt>();
+  private readonly originalImages = new Set<OriginalImageTransfer>();
+  private readonly archiveTokens = randomBytes(32);
+  private readonly archives = new WeakMap<RemoteRuntime, { epoch: string; cursors: LRUCache<number, TranscriptHistoryCursor> }>();
   private readonly randomTurnId: () => number;
 
   constructor(private readonly deps: RemoteCommandsDeps) {
@@ -178,7 +204,7 @@ export class RemoteCommands {
     const action = request.action;
     if (['begin_oauth', 'complete_oauth', 'cancel_oauth', 'reconnect'].includes(String(action)) || (action === 'add' && request.authKind === 'oauth'))
       throw new RemoteRpcError('forbidden', 'OAuth browser authorization must be completed on the execution Host.');
-    if (!['list', 'add', 'update', 'reorder', 'set_enabled', 'set_credential', 'clear_credential', 'remove', 'logout', 'test', 'set_policy'].includes(String(action))) throw invalid('Unsupported provider account operation.');
+    if (!['list', 'add', 'update', 'reorder', 'set_enabled', 'set_credential', 'clear_credential', 'remove', 'logout', 'test', 'set_policy', 'set_additional_openai_models'].includes(String(action))) throw invalid('Unsupported provider account operation.');
     const normalized = { ...request, action: action === 'set_enabled' ? 'enable' : action === 'set_credential' ? 'reconnect' : action === 'clear_credential' ? 'logout' : action } as unknown as ProviderAccountCommand;
     if (normalized.action === 'add' && normalized.authKind !== 'api_key') throw invalid('Unsupported account authentication method.');
     if (action === 'set_credential') {
@@ -438,24 +464,156 @@ export class RemoteCommands {
   // ───────────────────────────────────────────────────────────────────────────
 
   /** `session.history`. */
-  history(runtime: RemoteRuntime, value: unknown): SessionHistoryResult {
+  async history(runtime: RemoteRuntime, value: unknown): Promise<SessionHistoryResult> {
     const input = params(value);
     const before = input['before_index'];
     const limit = input['limit'];
     if (typeof before !== 'number' || !Number.isSafeInteger(before) || before < 0) throw invalid('invalid before_index');
     if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_HISTORY_LIMIT) throw invalid('invalid limit');
-    return historyPage(runtime.remoteView(), before, limit);
+    if (before === 0) return { messages: [], first_index: 0, has_more: false };
+    const view = runtime.remoteView();
+    const baseOffset = remoteBaseOffset(view);
+    if (!view.historyBefore || before > baseOffset) return historyPage(view, before, limit);
+    if (!this.deps.readHistory) throw invalid('Older history is unavailable');
+    let archive = this.archives.get(runtime);
+    if (archive?.epoch !== view.epoch) {
+      archive = { epoch: view.epoch, cursors: new LRUCache({ max: 512 }) };
+      this.archives.set(runtime, archive);
+    }
+    const cursor = before === baseOffset ? view.historyBefore : archive.cursors.get(before);
+    if (!cursor) throw invalid('History cursor expired. Reopen this chat to reload it.');
+    const page = await this.deps.readHistory(runtime, cursor, limit).catch(error => { throw refused(error); });
+    if (runtime.remoteView().epoch !== view.epoch) throw new RemoteRpcError('closed', 'The transcript changed.');
+    const messages = page.messages.map(message => mapMessage(message, index => {
+      const reference = message.images?.[index]?.url;
+      if (!isHistoryImageReference(reference)) return '';
+      const token = Buffer.from(reference).toString('base64url');
+      return [view.sessionId, 'h', token, this.archiveSignature(view, token)].join(':');
+    }, { any: false }));
+    const next = page.before;
+    const start = before - (next ? Math.max(1, messages.length) : messages.length);
+    if (next) archive.cursors.set(start, next);
+    return { messages, first_index: start, has_more: next !== null };
+  }
+
+  private archiveSignature(view: RemoteRuntimeView, token: string): string {
+    return createHmac('sha256', this.archiveTokens).update(JSON.stringify([view.sessionId, view.epoch, token]))
+      .digest().subarray(0, 16).toString('base64url');
+  }
+
+  private archiveImage(view: RemoteRuntimeView, ref: string): { historyReference: string } | undefined {
+    const parsed = parseImageRef(ref);
+    if (parsed?.kind !== 'history' || parsed.sessionId !== view.sessionId
+      || !timingSafeEqual(Buffer.from(parsed.signature), Buffer.from(this.archiveSignature(view, parsed.token)))) return undefined;
+    const reference = Buffer.from(parsed.token, 'base64url').toString('utf8');
+    return isHistoryImageReference(reference) ? { historyReference: reference } : undefined;
   }
 
   /** `image.get`, for a reference the session's records carried. */
-  imageGet(runtime: RemoteRuntime | undefined, value: unknown): ImageGetResult {
+  imageGet(runtime: RemoteRuntime | undefined, value: unknown, signal?: AbortSignal, owner?: object): ImageGetResult | Promise<ImageGetResult> {
     const input = params(value);
-    const ref = boundedString(input['ref'], 'ref', 128);
+    const ref = boundedString(input['ref'], 'ref', 448);
+    const size = input['size'];
+    const offset = input['offset'] ?? 0;
+    if (size !== undefined && size !== 'thumbnail' && size !== 'original') throw invalid('invalid image size');
+    if (typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0
+      || offset >= MAX_ORIGINAL_BASE64 || offset % ORIGINAL_IMAGE_CHUNK !== 0
+      || (size !== 'original' && offset !== 0)) throw invalid('invalid image offset');
     if (runtime === undefined) throw invalid('that image is no longer available');
-    const image = resolveImage(runtime.remoteView(), ref, (sequence, index) => runtime.promptImage(sequence, index));
+    const view = runtime.remoteView();
+    const image = resolveImage(view, ref, (sequence, index) => runtime.promptImage(sequence, index)) ?? this.archiveImage(view, ref);
     if (image === undefined) throw invalid('that image is no longer available');
-    const fitted = fitImage(this.deps.codec, image);
-    return { media_type: fitted.media_type, base64: fitted.base64 };
+    const result = (data: { media_type: string; base64: string }, alreadyThumbnail = false): ImageGetResult => {
+      if (size !== 'original') return alreadyThumbnail ? data : fitImage(this.deps.codec, data, size === 'thumbnail' ? 320 : undefined);
+      if (data.base64.length > MAX_ORIGINAL_BASE64 || offset >= data.base64.length) throw invalid('invalid original image range');
+      const end = offset + ORIGINAL_IMAGE_CHUNK;
+      return { media_type: data.media_type, base64: data.base64.slice(offset, end),
+        ...(end < data.base64.length ? { next_offset: end } : {}) };
+    };
+    if ('historyReference' in image) {
+      if (!this.deps.readHistoryImage) throw invalid('that image is no longer available');
+      if (size === 'original') {
+        const load = this.deps.readHistoryImage;
+        return this.readOriginal(owner ?? runtime, view, ref, offset,
+          transferSignal => load(runtime, image.historyReference, 'original', transferSignal), signal);
+      }
+      return this.deps.readHistoryImage(runtime, image.historyReference, size ?? 'original', signal)
+        .then(({ mediaType, base64 }) => result({ media_type: mediaType, base64 }, size === 'thumbnail'), (error: unknown) => {
+          signal?.throwIfAborted();
+          throw refused(error);
+        });
+    }
+    return result(image);
+  }
+
+  private async readOriginal(
+    owner: object, { sessionId, epoch }: { sessionId: string; epoch: string }, ref: string, offset: number,
+    load: (signal: AbortSignal) => Promise<SessionImagePayload>, signal?: AbortSignal,
+  ): Promise<ImageGetResult> {
+    signal?.throwIfAborted();
+    let transfer: OriginalImageTransfer | undefined;
+    for (const entry of this.originalImages) {
+      if (entry.owner !== owner || entry.sessionId !== sessionId) continue;
+      if (entry.epoch !== epoch) this.releaseOriginal(entry);
+      else if (entry.ref === ref) transfer = entry;
+    }
+    if (!transfer) {
+      // Account for the largest possible response until its size is known.
+      const used = [...this.originalImages].reduce((sum, entry) => sum + entry.bytes, 0);
+      if (this.originalImages.size >= ORIGINAL_TRANSFER_LIMIT || used + MAX_ORIGINAL_BASE64 > ORIGINAL_TRANSFER_BYTES)
+        throw new RemoteRpcError('capacity', 'Too many original images are being opened. Try again shortly.');
+      const controller = new AbortController();
+      const entry: OriginalImageTransfer = {
+        owner, sessionId, epoch, ref, controller, bytes: MAX_ORIGINAL_BASE64, readers: 0,
+        data: Promise.resolve().then(() => load(controller.signal)).then(({ mediaType, base64 }) => {
+          controller.signal.throwIfAborted();
+          if (base64.length > MAX_ORIGINAL_BASE64 || !base64.length) throw invalid('invalid original image range');
+          entry.bytes = base64.length;
+          return { media_type: mediaType, base64: Buffer.from(base64, 'ascii') };
+        }),
+      };
+      this.originalImages.add(entry);
+      transfer = entry;
+    }
+    const entry = transfer;
+    this.deps.clock.clearTimeout(entry.timer);
+    entry.timer = this.deps.clock.setTimeout(() => this.releaseOriginal(entry), ORIGINAL_TRANSFER_IDLE_MS);
+    entry.readers++;
+    const cancel = () => {
+      if (entry.readers === 1) this.releaseOriginal(entry);
+    };
+    signal?.addEventListener('abort', cancel, { once: true });
+    try {
+      const { media_type, base64 } = await entry.data;
+      signal?.throwIfAborted();
+      entry.controller.signal.throwIfAborted();
+      if (offset >= base64.length) throw invalid('invalid original image range');
+      const end = Math.min(offset + ORIGINAL_IMAGE_CHUNK, base64.length);
+      // Keep only the compressed transfer source between requests. Each reply
+      // owns its chunk, so it cannot hold the full image after the final read.
+      const result = { media_type, base64: base64.toString('ascii', offset, end) };
+      if (end < base64.length) return { ...result, next_offset: end };
+      this.releaseOriginal(entry, false);
+      return result;
+    } catch (error) {
+      if (!signal?.aborted) this.releaseOriginal(entry);
+      signal?.throwIfAborted();
+      throw refused(error);
+    } finally {
+      entry.readers--;
+      signal?.removeEventListener('abort', cancel);
+    }
+  }
+
+  clearImageTransfers(owner: object): void {
+    for (const entry of this.originalImages)
+      if (entry.owner === owner) this.releaseOriginal(entry);
+  }
+
+  private releaseOriginal(entry: OriginalImageTransfer, abort = true): void {
+    if (!this.originalImages.delete(entry)) return;
+    this.deps.clock.clearTimeout(entry.timer);
+    if (abort) entry.controller.abort();
   }
 
   private requireConnected(runtime: RemoteRuntime): void {

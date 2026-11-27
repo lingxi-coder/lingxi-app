@@ -1,8 +1,11 @@
 package com.lingxi.code.friends
 
+import com.lingxi.code.teams.TeamMessageFailure
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,6 +33,8 @@ internal data class LookupState(
     val confirming: Boolean = false,
     val error: FriendsError? = null,
     val outcome: FriendOutcome? = null,
+    val matches: List<LookupResult>? = null,
+    val coolingDown: Boolean = false,
 )
 
 /**
@@ -47,6 +52,7 @@ internal class FriendLookup(
     private val mutable = MutableStateFlow(LookupState())
     val state: StateFlow<LookupState> = mutable.asStateFlow()
     private var job: Job? = null
+    private var cooldownJob: Job? = null
     private var attempt: Attempt? = null
 
     /** The request id minted for a confirming tap, with what it was minted for. */
@@ -56,7 +62,7 @@ internal class FriendLookup(
     fun lookup(proof: FriendProof) {
         job?.cancel()
         attempt = null
-        mutable.value = LookupState(proof = proof, looking = true)
+        mutable.value = LookupState(proof = proof, looking = true, coolingDown = state.value.coolingDown)
         job = scope.launch {
             try {
                 val result = LookupResult.parse(post(FriendsLogic.lookupBody(proof)))
@@ -64,6 +70,52 @@ internal class FriendLookup(
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { mutable.update { it.copy(looking = false, error = FriendsError.of(error)) } }
         }
+    }
+
+    fun searchHandles(handle: String, debounce: Boolean) {
+        val current = state.value
+        if (current.coolingDown || current.looking || current.confirming) return
+        if (current.matches?.isNotEmpty() == true || (debounce && current.matches != null)) return
+        clear()
+        if (!debounce) mutable.update { it.copy(looking = true) }
+        job = scope.launch {
+            try {
+                if (debounce) delay(350)
+                mutable.update { it.copy(looking = true) }
+                val rows = post(mapOf("action" to "searchHandles", "query" to handle)).getJSONArray("results")
+                val matches = List(rows.length()) { LookupResult.parse(rows.getJSONObject(it)) }
+                coroutineContext.ensureActive()
+                mutable.value = LookupState(matches = matches)
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                coroutineContext.ensureActive()
+                val failure = FriendsError.of(error)
+                mutable.update { it.copy(looking = false, error = failure) }
+                if (failure == FriendsError.RateLimited) {
+                    val wait = ((error as? TeamMessageFailure)?.retryAfterMs ?: 60_000L).coerceIn(1L, 60_000L)
+                    mutable.update { it.copy(coolingDown = true) }
+                    cooldownJob?.cancel()
+                    cooldownJob = scope.launch {
+                        delay(wait)
+                        mutable.update { it.copy(coolingDown = false) }
+                    }
+                }
+            }
+        }
+    }
+
+    fun select(found: LookupResult) {
+        val handle = found.handle ?: return
+        val matches = state.value.matches ?: return
+        if (state.value.confirming || found !in matches) return
+        clearSelection()
+        mutable.update { it.copy(proof = FriendProof.Handle(handle, found.uid), result = found) }
+    }
+
+    fun clearSelection() {
+        if (state.value.confirming) return
+        attempt = null
+        mutable.update { it.copy(proof = null, result = null, error = null, outcome = null) }
     }
 
     /**
@@ -79,7 +131,11 @@ internal class FriendLookup(
         val body = when {
             found.relation == FriendRelation.Friends -> return
             proof is FriendProof.Code -> confirmation(proof, "")
-            found.relation == FriendRelation.Incoming -> mapOf("action" to "accept", "otherUid" to found.uid)
+            found.relation == FriendRelation.Incoming -> buildMap {
+                put("action", "accept")
+                put("otherUid", found.uid)
+                found.version?.let { put("expectedVersion", it) }
+            }
             found.relation == FriendRelation.Outgoing -> return
             else -> confirmation(proof, note)
         }
@@ -92,7 +148,12 @@ internal class FriendLookup(
                 if (outcome is FriendOutcome.NowFriends) awaitFriend(friendUid)
                 attempt = null
                 announce(outcome)
-                mutable.update { it.copy(confirming = false, outcome = outcome) }
+                mutable.update { current ->
+                    val matches = if (outcome is FriendOutcome.RequestSent) current.matches?.map { peer ->
+                        if (peer.uid == found.uid) peer.copy(relation = FriendRelation.Outgoing) else peer
+                    } else current.matches
+                    current.copy(confirming = false, outcome = outcome, matches = matches)
+                }
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) {
                 val failure = FriendsError.of(error)
@@ -113,6 +174,13 @@ internal class FriendLookup(
         job?.cancel()
         job = null
         attempt = null
-        mutable.value = LookupState()
+        mutable.value = LookupState(coolingDown = state.value.coolingDown)
+    }
+
+    fun reset() {
+        cooldownJob?.cancel()
+        cooldownJob = null
+        clear()
+        mutable.update { it.copy(coolingDown = false) }
     }
 }

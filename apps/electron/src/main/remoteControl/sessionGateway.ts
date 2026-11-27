@@ -34,6 +34,7 @@ import {
   type RemoteBotSummary,
   type RemoteSessionSummary,
   type SessionAttachParams,
+  type SessionPreviewParams,
 } from '@lingxi/bridge-client/remote';
 import type {
   MediaConnectionRequestDto,
@@ -54,7 +55,7 @@ import type { RemoteCommands } from './remoteCommands.js';
 import type { RemoteRuntime, RemoteRuntimes, RuntimeLease } from './remoteRuntime.js';
 import { SessionAttachment } from './sessionAttachment.js';
 import type { PromptFileReference, RemoteFileStore } from './fileStore.js';
-import { activityPreview, parseImageRef } from './snapshot.js';
+import { parseImageRef } from './snapshot.js';
 import { RemoteMediaRoutes } from './mediaRoutes.js';
 
 /** A session stays open this long after its last viewer detached. */
@@ -79,6 +80,8 @@ export interface SessionGatewayDeps {
   titleOf(ref: SessionRef): Promise<string | undefined>;
   activityOf?(ref: SessionRef): Promise<string | undefined>;
   activityPage?(ref: SessionRef, after: number): Promise<import('../../shared/inbox.js').AssistantActivityPage>;
+  activityPreview?(ref: SessionRef, through: number): Promise<import('../../shared/inbox.js').AssistantActivityPreview>;
+  previewOf?(ref: SessionRef): Promise<SessionPreviewParams | undefined>;
   /** The model a session that is not open will use. */
   modelOf?(ref: SessionRef): string | undefined;
   clock: Clock;
@@ -156,7 +159,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   // RemoteSessionGateway
   // ───────────────────────────────────────────────────────────────────────────
 
-  async handle(viewer: RemoteViewer, method: string, rawParams: unknown, channel: RemoteViewerChannel): Promise<unknown> {
+  async handle(viewer: RemoteViewer, method: string, rawParams: unknown, channel: RemoteViewerChannel, signal?: AbortSignal): Promise<unknown> {
     if (this.disposed) throw new RemoteRpcError('internal', 'remote sessions are not available');
     const state = this.stateOf(viewer, channel);
     const params = rawParams === undefined ? {} : rawParams;
@@ -213,29 +216,38 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
       case 'media.playback_receipt':
         this.mediaRoutes.recordPlaybackReceipt(viewer, params);
         return undefined;
-      case 'session.history':
-        return this.deps.commands.history(this.attachedRuntime(state, params), params);
+      case 'session.history': {
+        const runtime = this.attachedRuntime(state, params);
+        const attachment = state.attached.get(runtime.sessionId);
+        const page = await this.deps.commands.history(runtime, params);
+        if (this.disposed || state.closed || state.attached.get(runtime.sessionId) !== attachment
+          || this.attachedRuntime(state, params) !== runtime) throw new RemoteRpcError('not_approved', 'session attachment changed');
+        return page;
+      }
       case 'session.activity':
       case 'session.activityPreview': {
         const runtime = this.attachedRuntime(state, params);
         const attachment = state.attached.get(runtime.sessionId);
         const preview = method === 'session.activityPreview';
-        const through = (params as Json)?.['through'];
-        if (preview && (typeof through !== 'number' || !Number.isSafeInteger(through) || through < 1))
+        const cursor = (params as Json)?.[preview ? 'through' : 'after'];
+        if (typeof cursor !== 'number' || !Number.isSafeInteger(cursor) || cursor < (preview ? 1 : 0))
           throw new RemoteRpcError('invalid_params', 'invalid activity cursor');
-        const after = preview ? (through as number) - 1 : (params as Json)?.['after'];
-        if (typeof after !== 'number' || !Number.isSafeInteger(after) || after < 0) throw new RemoteRpcError('invalid_params', 'invalid activity cursor');
-        if (!this.deps.activityPage) throw new RemoteRpcError('invalid_params', 'activity positions unavailable');
+        const read = preview ? this.deps.activityPreview : this.deps.activityPage;
+        if (!read) throw new RemoteRpcError('invalid_params', 'activity positions unavailable');
         const ref = this.requireEnabled(viewer, runtime.sessionId);
-        const result = await this.deps.activityPage(ref, after);
+        const result = await read(ref, cursor);
         if (this.disposed || state.closed || state.attached.get(runtime.sessionId) !== attachment
           || this.attachedRuntime(state, params) !== runtime) throw new RemoteRpcError('not_approved', 'session attachment changed');
-        if (!preview) return result;
-        const entry = result.items.find(item => item.cursor === through);
-        return activityPreview(runtime.remoteView(), entry?.resultUuids ?? []);
+        return result;
       }
-      case 'image.get':
-        return this.deps.commands.imageGet(this.imageRuntime(viewer, params), params);
+      case 'image.get': {
+        const runtime = this.imageRuntime(viewer, params);
+        const epoch = runtime?.remoteView().epoch;
+        const result = await this.deps.commands.imageGet(runtime, params, signal, state);
+        if (this.disposed || state.closed || this.imageRuntime(viewer, params) !== runtime || runtime?.remoteView().epoch !== epoch)
+          throw new RemoteRpcError('not_approved', 'session authorization changed');
+        return result;
+      }
       case 'file.offer':
       case 'file.commit':
       case 'file.cancel':
@@ -250,11 +262,11 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
         return this.queueFile(state, String((params as Json)?.['transfer_id']), operation);
       }
       case 'prompt.send': {
-        const runtime = this.attachedRuntime(state, params);
+        const runtime = this.actionRuntime(state, params);
         const attachment = state.attached.get(runtime.sessionId);
         const authorizeOwner = () => {
           if (state.closed || this.disposed || state.attached.get(runtime.sessionId) !== attachment) throw new RemoteRpcError('not_approved', 'prompt attachment changed');
-          if (this.attachedRuntime(state, params) !== runtime) throw new RemoteRpcError('not_approved', 'prompt runtime changed');
+          if (this.actionRuntime(state, params) !== runtime) throw new RemoteRpcError('not_approved', 'prompt runtime changed');
         };
         const refs = (params as Json)?.['file_refs'];
         if (refs === undefined) return this.deps.commands.promptSend(runtime, viewer, params, undefined, authorizeOwner);
@@ -291,19 +303,19 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
         }
       }
       case 'turn.cancel':
-        return this.deps.commands.turnCancel(this.attachedRuntime(state, params), params);
+        return this.deps.commands.turnCancel(this.actionRuntime(state, params), params);
       case 'permission.respond':
-        return this.deps.commands.permissionRespond(this.attachedRuntime(state, params), params);
+        return this.deps.commands.permissionRespond(this.actionRuntime(state, params), params);
       case 'question.answer':
-        return this.deps.commands.questionAnswer(this.attachedRuntime(state, params), params);
+        return this.deps.commands.questionAnswer(this.actionRuntime(state, params), params);
       case 'question.cancel':
-        return this.deps.commands.questionCancel(this.attachedRuntime(state, params), params);
+        return this.deps.commands.questionCancel(this.actionRuntime(state, params), params);
       case 'controls.set_model':
-        return this.deps.commands.setModel(this.attachedRuntime(state, params), viewer, params);
+        return this.deps.commands.setModel(this.actionRuntime(state, params), viewer, params);
       case 'controls.set_reasoning':
-        return this.deps.commands.setReasoning(this.attachedRuntime(state, params), viewer, params);
+        return this.deps.commands.setReasoning(this.actionRuntime(state, params), viewer, params);
       case 'controls.set_permission_mode':
-        return this.deps.commands.setPermissionMode(this.attachedRuntime(state, params), viewer, params);
+        return this.deps.commands.setPermissionMode(this.actionRuntime(state, params), viewer, params);
       case 'models.list':
         return this.deps.commands.modelsList(this.modelsRuntime(state, params));
       default:
@@ -339,7 +351,8 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     const authorize = (): void => {
       if (state.closed || this.disposed) throw new Error('viewer closed');
       if (state.attached.get(session) !== attachment) throw new Error('file attachment changed');
-      this.attachedRuntime(state, { session_id: session });
+      if (method === 'file.offer' || method === 'file.commit') this.actionRuntime(state, { session_id: session });
+      else this.attachedRuntime(state, { session_id: session });
     };
     authorize();
     if (method === 'file.list') {
@@ -420,6 +433,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     const state = this.viewers.get(viewer.conn_id);
     if (state === undefined) return;
     state.closed = true;
+    this.deps.commands.clearImageTransfers(state);
     state.attaching.clear();
     for (const download of state.downloads.values()) download.controller.abort();
     this.viewers.delete(viewer.conn_id);
@@ -439,6 +453,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     this.open.clear();
     for (const state of [...this.viewers.values()]) {
       state.closed = true;
+      this.deps.commands.clearImageTransfers(state);
       state.attaching.clear();
       for (const download of state.downloads.values()) download.controller.abort();
       for (const sessionId of [...state.attached.keys()]) this.dropAttachment(state, sessionId, true);
@@ -499,10 +514,18 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
   /** The runtime of a session this viewer is attached to. */
   private attachedRuntime(state: ViewerState, params: unknown): RemoteRuntime {
     const sessionId = this.sessionIdOf(params);
-    this.requireEnabled(state.viewer, sessionId);
+    const ref = this.requireEnabled(state.viewer, sessionId);
     const attached = state.attached.get(sessionId);
     const runtime = attached === undefined ? undefined : this.deps.runtimes.get(sessionId);
-    if (attached === undefined || runtime === undefined) throw new RemoteRpcError('invalid_params', 'attach to the session first');
+    if (attached === undefined || runtime === undefined || attached.runtime !== runtime || runtime.projectPath !== ref.projectPath) {
+      throw new RemoteRpcError('invalid_params', 'attach to the session first');
+    }
+    return runtime;
+  }
+
+  private actionRuntime(state: ViewerState, params: unknown): RemoteRuntime {
+    const runtime = this.attachedRuntime(state, params);
+    if (!runtime.remoteActionReady) throw new RemoteRpcError('invalid_params', 'The session is still loading.');
     return runtime;
   }
 
@@ -549,8 +572,19 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     }
     const attempt = Symbol();
     state.attaching.set(sessionId, attempt);
+    let awaitingRuntime = true;
+    const existing = this.deps.runtimes.get(sessionId);
+    if ((rawParams as SessionAttachParams).preview === true && !resume
+      && !existing?.remoteActionReady) {
+      void this.deps.previewOf?.(ref).then(page => {
+        if (page?.session_id === sessionId && awaitingRuntime && !this.disposed && !state.closed
+          && state.attaching.get(sessionId) === attempt && this.reachable(state.viewer, sessionId)?.projectPath === ref.projectPath)
+          state.channel.notify('session.preview', page);
+      }).catch(() => undefined);
+    }
     try {
       const { entry, runtime } = await this.acquire(ref);
+      awaitingRuntime = false;
       // Detach, an unshare, or a newer attach may have superseded this request
       // while the runtime opened. A re-enabled session must not revive it.
       if (state.closed || this.disposed || this.reachable(state.viewer, sessionId) === undefined
@@ -769,11 +803,22 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
     try {
       entry.opening ??= this.deps.runtimes.openForRemote(ref).then((lease) => { entry.lease = lease; return lease; });
       const lease = await entry.opening;
+      if (!lease.runtime.remoteActionReady) {
+        // A cached lease keeps the owner alive across a restart. Join the
+        // manager's current open so its lifecycle completes before we attach.
+        const refreshed = await this.deps.runtimes.openForRemote(ref);
+        try {
+          if (refreshed.runtime !== lease.runtime) throw new Error('the session owner changed');
+        } finally { refreshed.release(); }
+      }
       return { entry, runtime: lease.runtime };
     } catch (error) {
-      entry.opening = undefined;
-      entry.refs -= 1;
-      if (entry.refs <= 0 && entry.lease === undefined && this.leases.get(ref.sessionId) === entry) this.leases.delete(ref.sessionId);
+      if (entry.lease !== undefined) this.release(entry);
+      else {
+        entry.opening = undefined;
+        entry.refs -= 1;
+        if (entry.refs <= 0 && this.leases.get(ref.sessionId) === entry) this.leases.delete(ref.sessionId);
+      }
       if (error instanceof RemoteCapacityError) throw new RemoteRpcError('capacity', 'too many sessions are open for remote devices');
       this.deps.diagnostics('warn', `could not open session ${ref.sessionId} for a remote device (${describeError(error)})`);
       throw new RemoteRpcError('internal', 'the session could not be opened');
@@ -910,6 +955,7 @@ export class SessionGateway implements RemoteSessionGateway, PushPresence {
       }
       case 'pending':
       case 'state':
+      case 'action_readiness':
         this.scheduleList();
         this.scheduleBotsFor(runtime);
         return;

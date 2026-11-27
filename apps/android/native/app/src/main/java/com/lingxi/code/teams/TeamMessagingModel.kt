@@ -20,6 +20,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -43,6 +45,11 @@ internal data class TeamMessagingState(val cache: TeamMessageCache? = null, val 
  * cards and runs. Owned by [TeamsWorkspace], which starts and stops it; [scope] runs on the main thread.
  */
 internal class TeamMessagingModel @JvmOverloads constructor(private val scope: CoroutineScope, storageDirectory: File, private val apiRoot: String = TEAMS_API_ROOT, private val auth: FirebaseAuth = FirebaseAuth.getInstance(), private val db: FirebaseFirestore = FirebaseFirestore.getInstance(), private val inbox: InboxController? = null) {
+    private data class VisualizationCard(val conversation: String, val message: String, val version: String)
+    private data class VisualizationLease(val expiresAt: Long, val results: Map<VisualizationCard, Boolean>)
+    private val visibleVisualizations = mutableMapOf<VisualizationCard, Int>()
+    private val visualizationLeases = mutableMapOf<String, VisualizationLease>()
+    private val visualizationChecks = Mutex()
     private val storage = TeamCommandStorage(storageDirectory)
     private val mutable = MutableStateFlow(TeamMessagingState())
     val state = mutable.asStateFlow()
@@ -146,6 +153,7 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
     }
     fun stop() {
         active = false; lifecycle++; job?.cancel(); retry?.cancel(); deadline?.cancel(); deadline = null; job = null; retry = null
+        visualizationLeases.clear(); visibleVisualizations.clear()
         listener?.remove(); readListener?.remove(); memberListener?.remove(); signalListener?.remove()
         listener = null; readListener = null; memberListener = null; signalListener = null
         historyJob?.cancel(); syncJob?.cancel(); membershipReady = false; selectionEpoch++; triageLooked.clear()
@@ -176,6 +184,7 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
     fun select(id: String) {
         val conversation = mutable.value.cache?.conversations?.firstOrNull { it.id == id }
         val epoch = ++selectionEpoch
+        visualizationLeases.clear(); visibleVisualizations.clear()
         val life = lifecycle
         messagesCached = true
         lastChange = conversation?.lastChangeSeq ?: 0
@@ -702,34 +711,81 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
         call(JSONObject().put("command", command).apply { if (operation != null) put("operation", operation) },
             lifecycle, dataConversation = conversationId)
 
-    suspend fun dataset(conversationId: String, body: JSONObject): JSONObject =
-        call(body, lifecycle, dataConversation = conversationId, dataset = true)
+    suspend fun dataset(conversationId: String, body: JSONObject, from: String = conversationId): JSONObject =
+        call(body, lifecycle, dataConversation = conversationId, dataset = true, sourceConversation = from)
+
+    suspend fun visualization(conversationId: String, body: JSONObject, from: String = conversationId): JSONObject =
+        call(body, lifecycle, seconds = 45, dataConversation = conversationId, visualization = true, sourceConversation = from)
+
+    fun observeVisualization(conversation: String, message: String, version: String): () -> Unit {
+        val card = VisualizationCard(conversation, message, version)
+        val epoch = selectionEpoch
+        visibleVisualizations[card] = (visibleVisualizations[card] ?: 0) + 1
+        return detach@{
+            if (epoch != selectionEpoch) return@detach
+            val count = visibleVisualizations[card] ?: 0
+            if (count > 1) visibleVisualizations[card] = count - 1 else visibleVisualizations.remove(card)
+            if (visibleVisualizations.keys.none { it.conversation == conversation }) visualizationLeases.remove(conversation)
+        }
+    }
+
+    suspend fun checkVisualization(conversation: String, message: String, version: String) {
+        val card = VisualizationCard(conversation, message, version)
+        val life = lifecycle
+        val epoch = selectionEpoch
+        visualizationChecks.withLock {
+            if (!selectionCurrent(life, epoch, conversation)) throw CancellationException()
+            val clock = android.os.SystemClock.elapsedRealtime()
+            val saved = visualizationLeases[conversation]?.takeIf { it.expiresAt > clock }
+            val results = saved?.results ?: buildMap {
+                val visible = visibleVisualizations.keys.filter { it.conversation == conversation }
+                for (batch in visible.chunked(40)) {
+                    val response = visualization(conversation, objectOf("action" to "checkBatch",
+                        "cards" to JSONArray(batch.map { objectOf("message" to it.message, "version" to it.version) })))
+                    val active = response.getJSONArray("active")
+                    if (active.length() != batch.size) throw TeamMessageFailure("INVALID_DATA")
+                    batch.forEachIndexed { index, key -> put(key, active.getBoolean(index)) }
+                }
+            }.also { checked ->
+                if (visibleVisualizations.keys.any { it.conversation == conversation }) {
+                    visualizationLeases[conversation] = VisualizationLease(android.os.SystemClock.elapsedRealtime() + 12000, checked)
+                }
+            }
+            if (results[card] == false) throw TeamMessageFailure("DATA_ACCESS_REQUIRED")
+        }
+    }
 
     fun datasetShareDestination(conversationId: String): Pair<JSONObject, Long> =
         JSONObject().put("team", teamId).put("conversation", conversationId) to generation
 
-    private suspend fun call(input: JSONObject, life: Long, seconds: Long = 20, dataConversation: String? = null, dataset: Boolean = false): JSONObject {
+    private suspend fun call(input: JSONObject, life: Long, seconds: Long = 20, dataConversation: String? = null,
+        dataset: Boolean = false, visualization: Boolean = false, sourceConversation: String? = dataConversation,
+    ): JSONObject {
         val owner = uid
+        val dataSelection = selectionEpoch
         val user = auth.currentUser
         if (!active || life != lifecycle || user?.uid != owner) throw TeamMessageFailure("INVALID_SESSION")
         val token = requireNotNull(user.getIdToken(false).await().token)
         if (!active || life != lifecycle || auth.currentUser?.uid != owner) throw TeamMessageFailure("INVALID_SESSION")
-        if (dataConversation != null && mutable.value.selected != dataConversation) throw TeamMessageFailure("CONVERSATION_REQUIRED")
+        if (sourceConversation != null && !selectionCurrent(life, dataSelection, sourceConversation)) throw TeamMessageFailure("CONVERSATION_REQUIRED")
         val body = JSONObject(input.toString())
-        if (!dataset) {
+        if (visualization) {
+            body.put("teamId", teamId).put("generation", generation).put("conversationId", dataConversation)
+        } else if (!dataset) {
             if (dataConversation == null) body.put("teamId", teamId).put("generation", generation)
             else body.put("scope", JSONObject().put("kind", "team").put("teamId", teamId)
                 .put("generation", generation).put("conversationId", dataConversation))
         }
         if (body.has("schemaVersion")) TeamExecutionContract.validate(body)
         val path = when {
+            visualization -> "visualizations"
             dataset -> "datasets"
             dataConversation != null -> "data"
             else -> "messages"
         }
         val result = TeamHttp.request("$apiRoot/v1/teams/$path", token, body, seconds)
         if (!active || life != lifecycle || auth.currentUser?.uid != owner) throw TeamMessageFailure("INVALID_SESSION")
-        if (dataConversation != null && mutable.value.selected != dataConversation) throw TeamMessageFailure("CONVERSATION_REQUIRED")
+        if (sourceConversation != null && !selectionCurrent(life, dataSelection, sourceConversation)) throw TeamMessageFailure("CONVERSATION_REQUIRED")
         return result
     }
 }

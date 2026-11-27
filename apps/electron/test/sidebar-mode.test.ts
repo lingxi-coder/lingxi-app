@@ -21,6 +21,15 @@ test('Apps is a first-level workspace and retains its own development chat', () 
   assert.equal(new SidebarModeSync().open({ saved: 'apps', page: 'chat', mode: 'home', botsAvailable: true }), 'apps');
 });
 
+test('the Datasets page belongs to the Apps workspace', () => {
+  assert.equal(reconcileSidebarMode('home', 'datasets', true), 'apps');
+  assert.equal(reconcileSidebarMode('home', 'datasets', true, true), 'apps');
+  assert.equal(pageForMode('apps', { page: 'datasets', botChat: false }), 'apps', 'choosing Apps from Datasets opens the App library');
+  assert.equal(pageForMode('home', { page: 'datasets', botChat: false }), 'chat');
+  assert.equal(pageForMode('teams', { page: 'datasets', botChat: false }), 'teams');
+  assert.equal(modeForSettledChat('apps', 'datasets', false), 'apps');
+});
+
 test('Home goes to the chat view and Teams to its page, from wherever the window is', () => {
   const pages: AppPage[] = ['chat', 'scheduled', 'apps', 'changes', 'bots', 'teams'];
   for (const page of pages) {

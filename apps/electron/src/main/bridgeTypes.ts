@@ -1,4 +1,5 @@
 import type { ProviderAccountSnapshot, ProviderAccountRouting } from '../shared/providerAccounts.js';
+import type { TranscriptHistoryCursor } from '../shared/sessionHistory.js';
 import type { RuntimeProviderAccountCredential } from './provider-accounts.js';
 import type {
   AudioCapabilitySnapshotDto,
@@ -10,12 +11,13 @@ import type {
   MediaDeviceResponseDto,
   MediaSessionModeDto,
   ClientEvent,
+  MessageDto,
   ConversationControlsDto,
   PermissionModeId,
 } from '@lingxi/bridge-client';
 import type { RemotePending, RemotePromptOrigin, RemoteRecord, RemoteTurnState } from '@lingxi/bridge-client/remote';
 import type { SessionRuntime } from './bridge.js';
-import type { ProcessCommand, listProcessCommands, readProcessCommand } from './bridgeDiscovery.js';
+import type { ProcessCommand } from './bridgeDiscovery.js';
 import { DiagnosticBuffer } from './host-utils.js';
 import type { HostNotifier } from './notifications.js';
 
@@ -120,6 +122,9 @@ export interface BridgeManagerOptions {
   isPackaged?: boolean;
   resourcesPath?: string;
   launchConfig: () => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
+  prepareLaunchConfig?: () => Promise<() => BridgeLaunchConfig>;
+  /** Resolve credentials only after discovery establishes that an engine must spawn. */
+  loadPluginSecrets?: () => Promise<NonNullable<BridgeLaunchConfig['pluginSecrets']>>;
   /** Provider ids whose shared secure-store status is cached after connect. */
   providerIds?: readonly string[];
   /** Synchronous trust snapshot used by privileged IPC checks. */
@@ -138,9 +143,9 @@ export interface BridgeManagerOptions {
   /** Bare persisted AudioConfigurationV4 JSON snapshot for the shared media router. */
   getMediaAudioConfigurationJson?: () => string;
   /** Internal process-inspection seam used to recover detached Desktop runtimes after a main-process restart. */
-  readProcessCommand?: (pid: number) => string | undefined;
+  readProcessCommand?: (pid: number) => string | undefined | Promise<string | undefined>;
   /** Internal process-table seam used to attach sessions still owned by another local Desktop/test host. */
-  listProcessCommands?: () => readonly ProcessCommand[];
+  listProcessCommands?: () => readonly ProcessCommand[] | Promise<readonly ProcessCommand[]>;
   onCronRunRequested?: (runtime: SessionRuntime, event: Extract<ClientEvent, { type: 'cron_run_requested' }>) => Promise<{ sessionId: string; summary: string }>;
   onModelChanged?: (model: string) => void;
   /** Persist only an explicitly requested, engine-confirmed model selection. */
@@ -192,6 +197,8 @@ export interface RuntimeEventEnvelope<T = unknown> {
 
 export interface SequencedRuntimeEventEnvelope<T = unknown> extends RuntimeEventEnvelope<T> {
   sequence: number;
+  historyBefore?: TranscriptHistoryCursor;
+  historyOverview?: MessageDto[];
   /** Replay-only equivalent span, inclusive through `sequence`. Live frames have no span. */
   replayFromSequence?: number;
 }
@@ -208,11 +215,14 @@ export interface SessionRuntimeSummary {
   runtimeVersions?: BridgeRuntimeVersions;
 }
 
-export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'getSavedPermissionMode' | 'onPermissionModeSelected' | 'getSavedFastMode' | 'onFastModeSelected' | 'onFirstPromptSent' | 'onPromptAdmitted' | 'onDurableSessionActivity' | 'onActivityChanged' | 'onInboxActivity' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
+type SavedSessionTranscript = { path: string; mode: RuntimeSessionMode };
+
+export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'loadPluginSecrets' | 'accessState' | 'onModelChanged' | 'onModelSelected' | 'getSavedModel' | 'getSavedPermissionMode' | 'onPermissionModeSelected' | 'getSavedFastMode' | 'onFastModeSelected' | 'onFirstPromptSent' | 'onPromptAdmitted' | 'onDurableSessionActivity' | 'onActivityChanged' | 'onInboxActivity' | 'sessionId' | 'projectPath' | 'envelopeEvents'> {
   onInboxActivity?: (ref: SessionRef) => void;
   /** What a session of a working directory is launched with; it is told which session, for settings that belong to the one. */
   workspaceSettings?: (projectPath: string, ref: SessionRef) => Promise<WorkspaceLaunchSettings>;
   launchConfig: (ref: SessionRef, resumeModel?: string) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
+  loadPluginSecrets?: (ref: SessionRef) => Promise<NonNullable<BridgeLaunchConfig['pluginSecrets']>>;
   accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };
   onModelChanged?: (ref: SessionRef, model: string) => void;
   onModelSelected?: (ref: SessionRef, model: string) => void;
@@ -222,9 +232,10 @@ export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions,
   onPermissionModeSelected?: (ref: SessionRef, mode: PermissionModeId) => void;
   getSavedFastMode?: (ref: SessionRef) => boolean | undefined;
   onFastModeSelected?: (ref: SessionRef, enabled: boolean) => void;
-  resolveSessionMode?: (ref: SessionRef) => Promise<RuntimeSessionMode | undefined>;
+  /** A mode resolved from the saved transcript may also return that validated source. */
+  resolveSessionMode?: (ref: SessionRef) => Promise<RuntimeSessionMode | SavedSessionTranscript | undefined>;
   /** Revalidate a previously selected transcript before a cold runtime opens it. */
-  resolveSavedTranscript?: (ref: SessionRef) => Promise<{ path: string; mode: RuntimeSessionMode } | undefined>;
+  resolveSavedTranscript?: (ref: SessionRef) => Promise<SavedSessionTranscript | undefined>;
   captureSessionSource?: (ref: SessionRef, runtime: SessionRuntime, scheduled: boolean) => Promise<string | undefined>;
   onFirstPromptSent?: (ref: SessionRef, isActive: boolean) => boolean | void;
   onPromptAdmitted?: (ref: SessionRef) => void;
@@ -305,6 +316,7 @@ export type RemoteObservation =
   /** A permission, question or computer-access request became pending or was settled. */
   | { type: 'pending' }
   | { type: 'state'; state: ConnectionState }
+  | { type: 'action_readiness'; ready: boolean }
   | { type: 'disposed' };
 
 export type RemoteObserver = (observation: RemoteObservation) => void;
@@ -324,6 +336,8 @@ export interface RemoteRuntimeView {
   /** Sequence of the base event; 0 while the runtime has none. */
   baseSequence: number;
   base: SequencedRuntimeEventEnvelope<ClientEvent> | undefined;
+  /** Exact transcript cursor preceding the retained display base. */
+  historyBefore?: TranscriptHistoryCursor;
   /** The retained transcript events after the base, in sequence order. */
   events: readonly SequencedRuntimeEventEnvelope<ClientEvent>[];
   /** The latest `model_changed`, `permission_mode_changed`, `conversation_controls_changed`, `fast_mode_changed` and `slash_command_catalog`. */

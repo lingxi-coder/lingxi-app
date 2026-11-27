@@ -136,9 +136,42 @@ test('a snapshot becomes the same rows the desktop shows, with prompts, extras a
   assert.equal(state.turn.running, true);
   assert.equal(state.pending.permissions[0]!.request_id, 9);
   assert.equal(state.controls?.qualified_model, 'p/model-a');
-  assert.deepEqual(script.attaches, [{ session_id: SESSION }], 'a first attach does not resume');
+  assert.deepEqual(script.attaches, [{ session_id: SESSION, preview: true }]);
 });
 
+test('a saved preview renders without confirming the mode or opening prompt actions', async () => {
+  const h = await harness();
+  const { client, controller } = await open(h);
+  const original = h.host.requestHandler!;
+  let finish!: () => void;
+  const ready = new Promise<void>(resolve => { finish = resolve; });
+  try {
+    h.host.requestHandler = async (method, params, conn) => {
+      if (method === 'session.attach') {
+        assert.equal((params as SessionAttachParams).preview, true);
+        await conn.notify('session.preview', {
+          session_id: SESSION, session_mode: 'code', messages: [message('user', 'Saved preview')],
+        });
+        await ready;
+      }
+      return original(method, params, conn);
+    };
+    controller.activate();
+    await waitFor(() => controller.getState().transcript.conversation.items.length > 0, 'the saved history');
+    assert.match(JSON.stringify(controller.getState().transcript.conversation.items), /Saved preview/);
+    assert.equal(controller.getState().status, 'loading');
+    assert.equal(controller.getState().sessionMode, undefined);
+    assert.equal(controller.getState().hasOlder, false);
+    assert.throws(() => controller.sendPrompt('too early'), /confirmed mode/);
+    finish();
+    await live(controller);
+    assert.doesNotMatch(JSON.stringify(controller.getState().transcript.conversation.items), /Saved preview/);
+    await controller.sendPrompt('ready');
+  } finally {
+    finish();
+    client.dispose();
+  }
+});
 test('live records apply in order, repeats are ignored, and early ones wait for the snapshot', async () => {
   const h = await harness();
   const { controller, script, conn } = await open(h);

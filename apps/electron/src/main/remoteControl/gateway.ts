@@ -40,7 +40,7 @@ export interface RemoteSessionGateway {
    * `ping`), requests and notifications alike. A protocol error is a thrown
    * `RemoteRpcError`; any other exception reaches the viewer as `internal`.
    */
-  handle(viewer: RemoteViewer, method: string, params: unknown, channel: RemoteViewerChannel): Promise<unknown>;
+  handle(viewer: RemoteViewer, method: string, params: unknown, channel: RemoteViewerChannel, signal?: AbortSignal): Promise<unknown>;
   /** The connection ended; called once, and only for a viewer that was approved. */
   viewerClosed(viewer: RemoteViewer): void;
 }

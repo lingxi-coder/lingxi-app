@@ -54,6 +54,9 @@ internal object FriendsTags {
     const val REQUESTS = "friends.requests"
     const val NOTICE = "friends.notice"
     const val ADD_SCREEN = "friends.addScreen"
+    const val ME = "friends.me"
+    const val ME_CARD = "friends.me.card"
+    const val LINK_QR = "friends.link.qr"
     const val LINK_CARD = "friends.linkCard"
     const val LINK_COPY = "friends.linkCopy"
     const val LINK_SHARE = "friends.linkShare"
@@ -112,6 +115,7 @@ internal fun friendsErrorRes(error: FriendsError): Int = when (error) {
     FriendsError.RateLimited -> R.string.friends_error_rate_limited
     FriendsError.FriendLimit -> R.string.friends_error_friend_limit
     FriendsError.RequestLimit -> R.string.friends_error_request_limit
+    FriendsError.RecipientRequestLimit -> R.string.friends_error_recipient_request_limit
     FriendsError.HandleTaken -> R.string.friends_error_handle_taken
     FriendsError.RequestUnavailable -> R.string.friends_error_request_unavailable
     FriendsError.StaleRequest -> R.string.friends_error_stale_request

@@ -69,6 +69,7 @@ pub use configuration_admin::mcp_bridge;
 pub use configuration_admin::plugin_admin;
 pub mod provider_accounts;
 pub mod provider_settings;
+pub mod project_settings;
 pub mod router;
 pub mod server;
 pub mod session_metadata;

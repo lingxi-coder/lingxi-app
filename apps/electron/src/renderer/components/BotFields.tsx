@@ -137,7 +137,8 @@ interface FieldsProps {
 export function BotGeneralFields({ draft, problems, models, disabled = false, onChange }: FieldsProps & { models: ModelChoices }) {
   const groups = groupModelReferences(models.references);
   const remaining = BOT_DESCRIPTION_MAX - draft.description.trim().length;
-  return <div className="bots-fields">
+  return <div className="bots-fields bots-general-fields">
+    <div className="bots-general-group">
     <Field label={tr('bots_field_name')} problem={problems.name ? problemText(problems.name) : undefined}>
       {(control) => <input {...control} value={draft.name} disabled={disabled} autoComplete="off" onChange={(event) => onChange({ name: event.target.value })} />}
     </Field>
@@ -145,6 +146,8 @@ export function BotGeneralFields({ draft, problems, models, disabled = false, on
       problem={problems.description ? problemText(problems.description) : undefined}>
       {(control) => <textarea {...control} rows={3} value={draft.description} disabled={disabled} onChange={(event) => onChange({ description: event.target.value })} />}
     </Field>
+    </div>
+    <div className="bots-general-group">
     <Field label={tr('bots_field_model')} hint={tr('bots_model_hint')}>
       {(control) => <select {...control} value={draft.model} disabled={disabled} onChange={(event) => onChange({ model: event.target.value })}>
         <option value="">{tr('bots_model_default')}</option>
@@ -158,6 +161,7 @@ export function BotGeneralFields({ draft, problems, models, disabled = false, on
         {draft.model && !models.references.includes(draft.model) ? <option value={draft.model}>{tr('bots_model_unavailable', draft.model)}</option> : null}
       </select>}
     </Field>
+    </div>
   </div>;
 }
 

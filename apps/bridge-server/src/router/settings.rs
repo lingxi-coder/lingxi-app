@@ -25,7 +25,7 @@ use std::path::PathBuf;
 /// `patch_json` is not valid JSON, or it parses to something other than a
 /// JSON object (a bare array/string/number/bool/null patch is rejected, not
 /// silently coerced).
-pub(super) fn parse_settings_patch(
+pub(crate) fn parse_settings_patch(
     patch_json: &str,
 ) -> Result<Vec<(String, Option<serde_json::Value>)>, String> {
     match serde_json::from_str::<serde_json::Value>(patch_json) {

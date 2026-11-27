@@ -63,7 +63,7 @@ export class RemoteRpcError extends Error {
 }
 
 /** Answers an inbound request: resolve with the result, or throw {@link RemoteRpcError}. */
-export type RpcRequestHandler = (method: string, params: unknown) => Promise<unknown> | unknown;
+export type RpcRequestHandler = (method: string, params: unknown, signal?: AbortSignal) => Promise<unknown> | unknown;
 
 /** Return asynchronous notification work to keep it admitted until it settles. Synchronous results are ignored. */
 export type RpcNotificationHandler = (method: string, params: unknown) => unknown;
@@ -85,11 +85,13 @@ export interface RpcPeerOptions {
 
 // Admission only: the owning handler still authorizes and validates each method.
 const CONTROL_REQUESTS = new Set(['turn.cancel', 'session.detach', 'permission.respond', 'question.answer', 'question.cancel']);
+const CANCEL_REQUEST = '$/cancelRequest';
 
 interface Pending {
   resolve(value: unknown): void;
   reject(error: Error): void;
   timer: unknown;
+  removeAbortListener(): void;
 }
 
 type Json = Record<string, unknown>;
@@ -128,6 +130,7 @@ export class RpcPeer {
   private readonly pending = new Map<string, Pending>();
   private readonly inbound = new Set<symbol>();
   private readonly inboundControl = new Set<symbol>();
+  private readonly inboundImages = new Map<string, AbortController>();
   private readonly maxConcurrentRequests: number;
   private readonly maxControlRequests: number;
   private requestHandler: RpcRequestHandler | undefined;
@@ -174,24 +177,32 @@ export class RpcPeer {
   /**
    * Send a request and wait for its result. Rejects with {@link RemoteRpcError}:
    * the peer's code, `timeout` after `timeoutMs`, or `closed`.
+   * A thumbnail signal sends cancellation to the peer and waits for its reply.
    */
-  request<T = unknown>(method: string, params?: unknown, options: { timeoutMs?: number } = {}): Promise<T> {
+  request<T = unknown>(method: string, params?: unknown, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<T> {
     if (this.ended) return Promise.reject(new RemoteRpcError('closed', this.endReason));
+    const signal = options.signal;
+    if (signal?.aborted) return Promise.reject(signal.reason);
     let text: string;
     try {
       const id = String(++this.nextId);
       text = JSON.stringify(params === undefined ? { id, method } : { id, method, params });
       return new Promise<T>((resolve, reject) => {
+        const cancel = () => { void this.notify(CANCEL_REQUEST, { id }).catch(() => undefined); };
+        const removeAbortListener = () => signal?.removeEventListener('abort', cancel);
         const timer = this.clock.setTimeout(() => {
           this.pending.delete(id);
+          removeAbortListener();
           reject(new RemoteRpcError('timeout', `${method} timed out`));
         }, options.timeoutMs ?? this.defaultTimeoutMs);
-        this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
+        this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer, removeAbortListener });
+        signal?.addEventListener('abort', cancel, { once: true });
         this.transport.send(text).catch((error: unknown) => {
           const entry = this.pending.get(id);
           if (entry === undefined) return;
           this.pending.delete(id);
           this.clock.clearTimeout(entry.timer);
+          entry.removeAbortListener();
           // A request the framing refuses (above 16 MiB) is the caller's fault; anything else means the transport is gone.
           entry.reject(
             !this.ended && error instanceof RemoteProtocolError
@@ -267,11 +278,14 @@ export class RpcPeer {
     this.keepaliveTimer = undefined;
     for (const entry of this.pending.values()) {
       this.clock.clearTimeout(entry.timer);
+      entry.removeAbortListener();
       entry.reject(new RemoteRpcError('closed', reason));
     }
     this.pending.clear();
     this.inbound.clear();
     this.inboundControl.clear();
+    for (const controller of this.inboundImages.values()) controller.abort(new RemoteRpcError('closed', reason));
+    this.inboundImages.clear();
   }
 
   private receive(text: string): void {
@@ -292,6 +306,13 @@ export class RpcPeer {
           return;
         }
         if (method === 'pong') return;
+        if (method === CANCEL_REQUEST) {
+          const params = message['params'];
+          if (isObject(params) && typeof params['id'] === 'string') {
+            this.inboundImages.get(params['id'])?.abort(new RemoteRpcError('closed', 'thumbnail request cancelled'));
+          }
+          return;
+        }
         const handler = this.notificationHandler;
         if (handler === undefined) return;
         const release = this.reserveInbound(method);
@@ -311,11 +332,19 @@ export class RpcPeer {
           if (!asynchronous) release();
         }
       } else if (typeof id === 'string') {
+        if (this.inboundImages.has(id)) return this.close('protocol_error');
         const release = this.reserveInbound(method);
         if (release === undefined) return this.close('capacity');
+        const params = message['params'];
+        const controller = method === 'image.get' && isObject(params) && params['size'] === 'thumbnail' ? new AbortController() : undefined;
+        if (controller) this.inboundImages.set(id, controller);
+        const complete = () => {
+          if (controller) this.inboundImages.delete(id);
+          release();
+        };
         // Keep the slot until the reply leaves the message queue, not merely
         // until the handler returns a potentially large result.
-        void this.answer(id, method, message['params']).then(release, release);
+        void this.answer(id, method, params, controller?.signal).then(complete, complete);
       } else {
         this.close('protocol_error');
       }
@@ -343,6 +372,7 @@ export class RpcPeer {
     if (entry === undefined) return; // answered too late: already timed out
     this.pending.delete(id);
     this.clock.clearTimeout(entry.timer);
+    entry.removeAbortListener();
     const { error } = message;
     if (error === undefined || error === null) {
       entry.resolve(message['result']);
@@ -353,11 +383,12 @@ export class RpcPeer {
     }
   }
 
-  private async answer(id: string, method: string, params: unknown): Promise<void> {
+  private async answer(id: string, method: string, params: unknown, signal?: AbortSignal): Promise<void> {
     let text: string;
     try {
       if (this.requestHandler === undefined) throw new RemoteRpcError('internal', 'no request handler');
-      const result = await this.requestHandler(method, params);
+      const result = await this.requestHandler(method, params, signal);
+      signal?.throwIfAborted();
       if (this.ended) return;
       text = JSON.stringify({ id, result: result === undefined ? null : result });
     } catch (error) {

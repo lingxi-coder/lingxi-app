@@ -6,8 +6,8 @@ import type { ClientEvent } from '@lingxi/bridge-client';
 import type { SequencedRuntimeEventEnvelope } from '../src/main/bridgeTypes.js';
 import { SessionRuntime } from '../src/main/bridge.js';
 import { replayCheckpointState, REPLAY_LIVE_TAIL_LIMIT, RuntimeEventReplay } from '../src/main/runtimeEventReplay.js';
-import { canResume, LIVE_BATCH_MS, SessionAttachment } from '../src/main/remoteControl/sessionAttachment.js';
-import { recordsAfter } from '../src/main/remoteControl/snapshot.js';
+import { LIVE_BATCH_MS, SessionAttachment } from '../src/main/remoteControl/sessionAttachment.js';
+import { buildSnapshot, canResume, recordsAfter } from '../src/main/remoteControl/snapshot.js';
 import { createRuntimeEventReplayBuffer, mergeRuntimeEventReplay } from '../src/preload/event-replay.js';
 import { emptyConversation, reduceEvent } from '../src/renderer/bridge/conversation.js';
 import { initialHistory } from '../src/shared/sessionHistory.js';
@@ -143,12 +143,44 @@ test('remote cursors in rewritten spans resnapshot while recent cursors receive 
   emit({ type: 'session_started', session_id: SESSION, mode: 'code' });
   for (let i = 0; i < 1_000; i++) emit({ type: 'text_delta', text: 'x' });
   const view = runtime.remoteView();
-  assert.equal(canResume(view, { epoch: view.epoch, after_seq: 500 }), false);
-  assert.equal(canResume(view, { epoch: view.epoch, after_seq: 900 }), true);
-  const suffix = recordsAfter(view, 900);
+  const stale = { epoch: view.epoch, after_seq: 500 };
+  const recent = { epoch: view.epoch, after_seq: 900 };
+  assert.equal(canResume(view, stale), false);
+  assert.equal(canResume(view, recent), true);
+  assert.deepEqual(runtime.remoteView(stale), view);
+  assert.deepEqual(runtime.remoteView({ epoch: view.epoch, after_seq: view.lastSequence + 1 }), view);
+  assert.deepEqual(runtime.remoteView({ epoch: view.epoch, after_seq: view.baseSequence - 1 }), view);
+  assert.deepEqual(runtime.remoteView({ epoch: view.epoch, after_seq: view.lastSequence }).events, []);
+  assert.deepEqual(runtime.remoteView({ epoch: view.epoch, after_seq: view.droppedThroughSequence }).events,
+    view.events.filter(event => event.sequence > view.droppedThroughSequence));
+
+  const deltaView = runtime.remoteView(recent);
+  assert.deepEqual(deltaView.events, view.events.filter(event => event.sequence > recent.after_seq));
+  const suffix = recordsAfter(deltaView, recent.after_seq);
   assert.equal(suffix.length, 1);
   assert.equal(suffix[0]?.seq, 1_001);
   assert.deepEqual(suffix[0]?.record, { type: 'event', event: { type: 'text_delta', text: 'x'.repeat(101) } });
+
+  const channel = new RecordingChannel();
+  const attachment = new SessionAttachment({ runtime, channel, clock: newClock() });
+  t.after(() => attachment.close());
+  assert.equal(attachment.attach(stale).mode, 'snapshot');
+  assert.deepEqual(channel.of('session.snapshot'), buildSnapshot(view));
+  channel.clear();
+  assert.equal(attachment.attach(recent).mode, 'delta');
+  assert.deepEqual(channel.records(), suffix);
+});
+
+test('a delta spanning retained entries and the wrapped raw tail preserves terminal order', () => {
+  const { replay, emit } = fixture();
+  for (let i = 0; i < 2 * REPLAY_LIVE_TAIL_LIMIT; i++) emit({ type: 'message_complete' });
+  const terminal = emit({ type: 'session_ended' });
+  const full = replay.snapshot().slice(1);
+  for (const cursor of [1, 17, REPLAY_LIVE_TAIL_LIMIT + 2, terminal.sequence - 1, terminal.sequence]) {
+    const suffix = replay.snapshotEvents(cursor);
+    assert.deepEqual(suffix, full.filter(event => event.sequence > cursor));
+    assert.equal(suffix.at(-1), cursor < terminal.sequence ? terminal : undefined);
+  }
 });
 
 test('source checkpoint overlays preserve plans, merged usage and pinned state without replaying stale totals', () => {
@@ -243,7 +275,9 @@ test('a quiet source checkpoint retires old spans without changing live renderer
   await flush();
   const after = runtime.remoteView();
   assert.notEqual(after.epoch, before.epoch);
-  assert.equal(canResume(after, { epoch: before.epoch, after_seq: before.lastSequence }), false);
+  const previousCursor = { epoch: before.epoch, after_seq: before.lastSequence };
+  assert.equal(canResume(after, previousCursor), false);
+  assert.deepEqual(runtime.remoteView(previousCursor), after, 'a source checkpoint restores a full view for the previous epoch');
   assert.deepEqual(delivered, deliveredBeforeCheckpoint, 'existing local renderer receives no replacement baseline');
   assert.equal(after.prompts, prompts, 'source refresh preserves prompt/image journal ownership');
   assert.equal(after.interactions, interactions, 'source refresh preserves interaction history');

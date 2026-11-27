@@ -2,7 +2,9 @@ import { DecisionToolBridge } from './decisionToolBridge.js';
 import { providerAccountRenewFailureCode } from './provider-accounts.js';
 import { SideChatRecovery } from './sideChatRecovery.js';
 import { replayCheckpointState, RuntimeEventReplay } from './runtimeEventReplay.js';
-import { recentTranscript } from '../shared/sessionHistory.js';
+import { canResume } from './remoteControl/snapshot.js';
+import { historyOverview, initialDisplayPage, initialHistory, recentTranscript } from '../shared/sessionHistory.js';
+import type { TranscriptHistoryCursor } from '../shared/sessionHistory.js';
 import { parseProviderAccountRouting } from '../shared/providerAccounts.js';
 import type { ProviderAccountConfiguration } from './session-catalog.js';
 import { DesktopTelemetry } from './telemetry.js';
@@ -60,23 +62,22 @@ import type {
   SetWorkingDirectoryRequest,
   SetWorkingDirectoryResult,
 } from '@lingxi/bridge-client';
+import type { SessionAttachParams } from '@lingxi/bridge-client/remote';
 import type { WebContents } from 'electron';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { fusionInvocation, pinFusionStrategy } from '../shared/fusionStrategy.js';
 import { REMOTE_STATE_EVENT_TYPES } from '../shared/clientCommands.js';
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { watch, type FSWatcher } from 'node:fs';
+import { chmod, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import {
-  discoverExternalReusableBridge,
-  discoverReusableBridge,
+  discoverSessionBridge,
   ignorableLockfileError,
-  listProcessCommands,
   lockfiles,
   processIsAlive,
-  readProcessCommand,
   resolveServerBin,
 } from './bridgeDiscovery.js';
 import {
@@ -162,6 +163,9 @@ interface PendingSessionResume {
   client: BridgeClient;
   sessionResumed: boolean;
   responseReceived: boolean;
+  historyBefore?: TranscriptHistoryCursor;
+  historyOverview?: Extract<ClientEvent, { type: 'session_resumed' }>['messages'];
+  replayAfterResponse?: () => void;
   controller: AbortController;
   activeTools: Set<string>;
   model?: string;
@@ -296,6 +300,7 @@ export class SessionRuntime {
   private resumeOperationInProgress = false;
   private sessionHasHistory = false;
   private ownedSessionResumeRequired = false;
+  private lastRemoteActionReady = false;
   private sessionIdentityCommitted = false;
   private eventSequence = 0;
   private replayCheckpointWanted = false;
@@ -1268,6 +1273,13 @@ export class SessionRuntime {
   /** A connected transport alone does not prove that owned history restored. */
   get needsSessionResume(): boolean { return this.ownedSessionResumeRequired; }
 
+  get remoteActionReady(): boolean {
+    return this.state.status === 'connected' && !this.isStarting && !this.resumeOperationInProgress
+      && !this.ownedSessionResumeRequired && !this.draftModeRestorationRequired && !this.changingWorkspace
+      && (!this.ownedTranscriptPath || this.sessionHasHistory || this.draftSessionMode !== undefined)
+      && !this.disposed && !this.disposing;
+  }
+
   get isStarting(): boolean { return this.startPromise !== null || this.automaticRecovery !== undefined; }
 
   /** Wait for existing lifecycle work without starting a stopped runtime. */
@@ -1387,12 +1399,18 @@ export class SessionRuntime {
   }
 
   replaySnapshot(): readonly SequencedRuntimeEventEnvelope<ClientEvent>[] {
-    return Object.freeze(this.replayEvents.snapshot().map((envelope) => Object.freeze({
-      sessionId: envelope.sessionId,
-      sequence: envelope.sequence,
-      ...(envelope.replayFromSequence !== undefined ? { replayFromSequence: envelope.replayFromSequence } : {}),
-      event: structuredClone(envelope.event),
-    })));
+    return Object.freeze(this.replayEvents.snapshot().map((envelope) =>
+      Object.freeze(structuredClone(this.desktopEvent(envelope)))));
+  }
+
+  private desktopEvent(envelope: SequencedRuntimeEventEnvelope<ClientEvent>): SequencedRuntimeEventEnvelope<ClientEvent> {
+    if (envelope.event.type !== 'session_resumed' || !this.ownedTranscriptPath) return envelope;
+    const { messages, before } = initialDisplayPage(envelope.event.messages);
+    if (messages.length === envelope.event.messages.length) return envelope;
+    const recent = recentTranscript(envelope.event.messages);
+    const overview = [...(envelope.historyOverview ?? []), ...historyOverview(recent.slice(0, recent.length - messages.length))];
+    return { ...envelope, event: { ...envelope.event, messages }, ...(before ? { historyBefore: before } : {}),
+      ...(overview.length ? { historyOverview: overview } : {}) };
   }
 
   // ── Remote Control ──────────────────────────────────────────────────────────
@@ -1413,25 +1431,28 @@ export class SessionRuntime {
   get remoteObserved(): boolean { return this.remoteObservers.size > 0; }
 
   /** Read the state a snapshot is built from. Synchronous, so it can be paired with {@link observeRemote} without a gap. */
-  remoteView(): RemoteRuntimeView {
-    const replay = this.replayEvents.snapshot();
-    const first = replay[0];
-    const base = first && TRANSCRIPT_REPLAY_BASE_EVENTS.has(first.event.type) ? first : undefined;
-    const controlsEvent = this.latestState.get('conversation_controls_changed')?.event;
-    return {
-      sessionId: this.sessionId,
-      ...(!this.draftModeRestorationRequired && !this.ownedSessionResumeRequired && this.sessionMode
-        ? { sessionMode: this.sessionMode } : {}),
-      runtimeId: this.runtimeId,
+  remoteView(resume?: SessionAttachParams['resume']): RemoteRuntimeView {
+    const position = {
       epoch: `${this.runtimeId}:${this.remoteBaseSequence}`,
       baseSequence: this.remoteBaseSequence,
+      droppedThroughSequence: Math.max(this.droppedThroughSequence, this.replayEvents.compactedThroughSequence),
+      lastSequence: this.eventSequence,
+    };
+    const controlsEvent = this.latestState.get('conversation_controls_changed')?.event;
+    const base = this.replayEvents.baseEnvelope;
+    const historyBefore = this.ownedTranscriptPath && base?.event.type === 'session_resumed'
+      ? base.historyBefore ?? initialHistory(base.event.messages).before : undefined;
+    return {
+      sessionId: this.sessionId,
+      ...(this.remoteActionReady && this.sessionMode ? { sessionMode: this.sessionMode } : {}),
+      runtimeId: this.runtimeId,
+      ...position,
       base,
-      events: replay.slice(base ? 1 : 0),
+      ...(historyBefore ? { historyBefore } : {}),
+      events: this.replayEvents.snapshotEvents(canResume(position, resume) ? resume.after_seq : undefined),
       state: [...this.latestState.values()],
       prompts: this.promptJournal,
       interactions: this.interactionRecords,
-      droppedThroughSequence: Math.max(this.droppedThroughSequence, this.replayEvents.compactedThroughSequence),
-      lastSequence: this.eventSequence,
       pending: this.remotePending(),
       turn: { running: this.turnActive, ...(this.activeTurnId !== undefined ? { turn_id: this.activeTurnId } : {}) },
       controls: controlsEvent?.type === 'conversation_controls_changed' ? controlsEvent.controls : undefined,
@@ -1543,11 +1564,14 @@ export class SessionRuntime {
     if (command.type === 'run_slash_command' && slashRequestEchoes(command.raw)) this.journalPrompt(command.raw.trim(), command.images, command.turn_id ?? 0, source);
   }
 
-  private eventEnvelope(event: ClientEvent, retain: boolean): SequencedRuntimeEventEnvelope<ClientEvent> {
+  private eventEnvelope(event: ClientEvent, retain: boolean,
+    history?: Pick<PendingSessionResume, 'historyBefore' | 'historyOverview'>): SequencedRuntimeEventEnvelope<ClientEvent> {
     const envelope = Object.freeze({
       sessionId: this.sessionId,
       sequence: ++this.eventSequence,
       event: structuredClone(event),
+      ...(history?.historyBefore ? { historyBefore: history.historyBefore } : {}),
+      ...(history?.historyOverview?.length ? { historyOverview: history.historyOverview } : {}),
     });
     if (TRANSCRIPT_REPLAY_BASE_EVENTS.has(event.type)) {
       this.replayEvents.reset(envelope);
@@ -1574,14 +1598,15 @@ export class SessionRuntime {
 
   private sendClientEvent(webContents: WebContents, event: ClientEvent, retain: boolean): void {
     const envelope = this.eventEnvelope(event, retain);
-    webContents.send(CH_EVENT, this.opts.envelopeEvents ? envelope : event);
+    webContents.send(CH_EVENT, this.opts.envelopeEvents ? this.desktopEvent(envelope) : event);
   }
 
-  private broadcastClientEvent(event: ClientEvent): void {
+  private broadcastClientEvent(event: ClientEvent,
+    history?: Pick<PendingSessionResume, 'historyBefore' | 'historyOverview'>): void {
     // SideChat events use the sequenced renderer channel. On reconnect the
     // renderer reconciles child state through side_chat_list / side_chat_get;
     // useBridge filters these events before parent conversation reducers.
-    const envelope = this.eventEnvelope(event, true);
+    const envelope = this.eventEnvelope(event, true, history);
     this.noteRemoteEvent(envelope);
     if (event.type === 'turn_started') {
       if (!this.replayStartedTurn || this.replayStartedTurn.turnId !== event.turn_id) {
@@ -1600,9 +1625,10 @@ export class SessionRuntime {
       this.broadcast(CH_EVENT, event);
       return;
     }
+    const desktop = this.desktopEvent(envelope);
     for (const webContents of this.targets.keys()) {
       if (webContents.isDestroyed()) this.targets.delete(webContents);
-      else webContents.send(CH_EVENT, envelope);
+      else webContents.send(CH_EVENT, desktop);
     }
   }
 
@@ -1637,6 +1663,11 @@ export class SessionRuntime {
   }
 
   private notifyActivityChanged(): void {
+    const ready = this.remoteActionReady;
+    if (ready !== this.lastRemoteActionReady) {
+      this.lastRemoteActionReady = ready;
+      this.notifyRemote({ type: 'action_readiness', ready });
+    }
     this.opts.onActivityChanged?.();
     this.queueReplayCheckpoint();
   }
@@ -1900,7 +1931,10 @@ export class SessionRuntime {
     });
     this.restartChain = starting;
     const completion = starting.finally(() => {
-      if (this.startPromise === completion) this.startPromise = null;
+      if (this.startPromise === completion) {
+        this.startPromise = null;
+        this.notifyActivityChanged();
+      }
     });
     this.startPromise = completion;
     // Account IO may involve Keychain, OAuth and other processes. It must
@@ -1928,7 +1962,7 @@ export class SessionRuntime {
     const lockfilePath = this.connectionLockfilePath;
     if (!lockfilePath) throw new Error('The running bridge has no known connection endpoint; no replacement was started.');
     const connectingGeneration = this.generation;
-    const lockfile = await readLockfileAsync(lockfilePath);
+    const lockfile = await readLockfileAsync(lockfilePath, { ownerOnly: true });
     if (this.disposed || connectingGeneration !== this.generation) throw new Error('bridge connection superseded');
     validateBridgeLockfile(lockfile.body, pid, this.projectPath || this.activeWorkspace || '');
     const client = this.client;
@@ -2121,11 +2155,13 @@ export class SessionRuntime {
     this.restartChain = operation;
     void operation.then(() => {
       this.automaticRecovery = undefined;
+      this.notifyActivityChanged();
       if (epoch === this.recoveryEpoch && (this.recoveryKind !== undefined || this.state.status === 'disconnected')) {
         this.scheduleAutomaticRecovery(this.recoveryKind ?? kind);
       }
     }, (error) => {
       this.automaticRecovery = undefined;
+      this.notifyActivityChanged();
       if (this.disposed || !this.desiredRunning || epoch !== this.recoveryEpoch) return;
       this.diagnostics.add('warn', 'host', `automatic engine recovery failed: ${sanitizeDiagnostic(error)}`);
       this.scheduleAutomaticRecovery(this.recoveryKind ?? kind);
@@ -2240,18 +2276,20 @@ export class SessionRuntime {
     let generation = ++this.generation;
     const startedAt = Date.now();
     this.startupDiagnostic('bridge_start_started', { generation });
+    let audioCapabilitiesReady: Promise<void> | undefined;
+    let launchConfigStartedAt = Date.now();
+    let preparedLaunch = this.ownedTranscriptPath && this.draftSessionMode === undefined
+      ? this.opts.prepareLaunchConfig?.() : undefined;
+    // Reattaching to a live sidecar needs no new launch settings.
+    void preparedLaunch?.catch(() => {});
     const bridgeRoot = this.opts.bridgeRoot;
     if (bridgeRoot && this.projectPath) {
       const ref = { projectPath: this.projectPath, sessionId: this.sessionId };
       const discoveryStartedAt = Date.now();
-      const reusable = discoverReusableBridge(
-        bridgeRoot,
-        ref,
-        this.opts.readProcessCommand ?? readProcessCommand,
-      ) ?? discoverExternalReusableBridge(
-        ref,
-        (this.opts.listProcessCommands ?? listProcessCommands)(),
-      );
+      const discovery = discoverSessionBridge(bridgeRoot, ref, this.opts);
+      audioCapabilitiesReady = this.prepareAudioCapabilities();
+      const reusable = await discovery;
+      if (this.disposed || generation !== this.generation) throw new Error('bridge launch superseded');
       this.startupDiagnostic('bridge_start_phase', {
         durationMs: Date.now() - discoveryStartedAt,
         generation,
@@ -2272,7 +2310,9 @@ export class SessionRuntime {
           && (!access.workspace || access.workspace === this.projectPath),
         );
         try {
-          await this.connectBridgeClient(reusable.lockfilePath, generation, false, publishConnected);
+          const lockfile = await readLockfileAsync(reusable.lockfilePath, { ownerOnly: true });
+          validateBridgeLockfile(lockfile.body, reusable.pid, this.projectPath);
+          await this.connectBridgeClient(lockfile.path, generation, false, publishConnected, lockfile, audioCapabilitiesReady);
           const telemetryConfig = this.opts.getTelemetryConfig?.() ?? resolveDesktopTelemetry({});
           this.telemetry = new DesktopTelemetry({ ...telemetryConfig, enabled: telemetryConfig.enabled && !this.telemetryRevoked }, this.opts.appVersion);
           if (!telemetryConfig.enabled || this.telemetryRevoked) {
@@ -2295,18 +2335,28 @@ export class SessionRuntime {
           await this.stopBridge();
           if (!reusable.ownedProcess) throw error;
           generation = ++this.generation;
+          preparedLaunch = undefined;
         }
       }
     }
 
-    const launchConfigStartedAt = Date.now();
-    const launch = await this.opts.launchConfig();
-    await this.telemetry?.shutdown();
+    const launchConfigWaitStartedAt = Date.now();
+    if (!preparedLaunch) launchConfigStartedAt = launchConfigWaitStartedAt;
+    if (this.disposed || generation !== this.generation) throw new Error('bridge launch superseded');
+    const [settings, pluginSecrets] = await Promise.all([
+      preparedLaunch ?? this.opts.launchConfig(),
+      this.opts.loadPluginSecrets?.(),
+      this.telemetry?.shutdown(),
+    ]);
+    if (this.disposed || generation !== this.generation) throw new Error('bridge launch superseded');
+    const config = typeof settings === 'function' ? settings() : settings;
+    const launch = pluginSecrets === undefined ? config : { ...config, pluginSecrets };
     const telemetryConfig = launch.telemetry ?? resolveDesktopTelemetry({});
     this.telemetry = new DesktopTelemetry({ ...telemetryConfig, enabled: telemetryConfig.enabled && !this.telemetryRevoked
       && !telemetryPrivacyDisabled(launch.settingsEnvironment ?? {}) }, this.opts.appVersion);
     this.startupDiagnostic('bridge_start_phase', {
       durationMs: Date.now() - launchConfigStartedAt,
+      waitMs: Date.now() - launchConfigWaitStartedAt,
       generation,
       phase: 'launch_config',
     });
@@ -2319,7 +2369,11 @@ export class SessionRuntime {
       throw new Error('bridge launch session id does not match the runtime');
     }
     this.activeWorkspaceTrusted = launch.trusted;
-    const bridgeDir = this.createLaunchDirectory();
+    const bridgeDir = await this.createLaunchDirectory();
+    if (this.disposed || generation !== this.generation) {
+      await this.removeLaunchDirectory();
+      throw new Error('bridge launch superseded');
+    }
 
     this.setState({ status: 'spawning' });
     this.sandboxRefusal = undefined;
@@ -2328,7 +2382,7 @@ export class SessionRuntime {
       child = this.spawnServer(launch, bridgeDir);
     } catch (error) {
       this.fail(error);
-      this.removeLaunchDirectory();
+      await this.removeLaunchDirectory();
       throw error;
     }
     this.child = child;
@@ -2357,7 +2411,9 @@ export class SessionRuntime {
 
     try {
       const lockfileStartedAt = Date.now();
-      const lockfilePath = await this.waitForLockfile(bridgeDir, launch, generation);
+      const waitingForLockfile = this.waitForLockfile(bridgeDir, launch, generation);
+      audioCapabilitiesReady ??= this.prepareAudioCapabilities();
+      const lockfile = await waitingForLockfile;
       this.startupDiagnostic('bridge_start_phase', {
         durationMs: Date.now() - lockfileStartedAt,
         generation,
@@ -2365,7 +2421,7 @@ export class SessionRuntime {
       });
       if (this.disposed) throw new Error('SessionRuntime is disposed');
       const connectStartedAt = Date.now();
-      await this.connectBridgeClient(lockfilePath, generation, true, publishConnected);
+      await this.connectBridgeClient(lockfile.path, generation, true, publishConnected, lockfile, audioCapabilitiesReady);
       if (this.freshOwnedSession) this.freshOwnedReplay = { client: this.requireClient(), generation };
       established = true;
       this.startupDiagnostic('bridge_start_completed', {
@@ -2383,17 +2439,22 @@ export class SessionRuntime {
     }
   }
 
-  private async connectBridgeClient(lockfilePath: string, generation: number, restorePermission = true, publishConnected = true, capturedLockfile?: Lockfile): Promise<void> {
+  private async prepareAudioCapabilities(): Promise<void> {
+    try {
+      await this.opts.audioService?.initializeCapabilities();
+    } catch (error) {
+      if (!this.disposed) this.diagnostics.add('warn', 'bridge', `audio capability initialization failed: ${sanitizeDiagnostic(error)}`);
+    }
+  }
+
+  private async connectBridgeClient(lockfilePath: string, generation: number, restorePermission = true, publishConnected = true, capturedLockfile?: Lockfile, audioCapabilitiesReady?: Promise<void>): Promise<void> {
     if (generation !== this.generation || this.disposed) throw new Error('bridge connection superseded');
     this.connectionLockfilePath = lockfilePath;
     this.setState({ status: 'connecting' });
     const startedAt = Date.now();
     this.startupDiagnostic('bridge_connect_started', { generation, restorePermission });
-    try {
-      await this.opts.audioService?.initializeCapabilities();
-    } catch (error) {
-      this.diagnostics.add('warn', 'bridge', `audio capability initialization failed: ${sanitizeDiagnostic(error)}`);
-    }
+    // Keep the initial hello complete while the optional helper starts alongside bridge discovery or boot.
+    await (audioCapabilitiesReady ?? this.prepareAudioCapabilities());
     if (generation !== this.generation || this.disposed) throw new Error('bridge connection superseded');
     const initialAudioCapabilities = this.opts.audioService?.getCapabilities();
     const initialMediaSessionModes = this.opts.audioService?.getMediaSessionModes?.() ?? [];
@@ -2494,12 +2555,12 @@ export class SessionRuntime {
     });
   }
 
-  private createLaunchDirectory(): string {
+  private async createLaunchDirectory(): Promise<string> {
     const root = this.opts.bridgeRoot ?? join(tmpdir(), 'lingxi-electron-bridge');
-    mkdirSync(root, { recursive: true, mode: 0o700 });
-    chmodSync(root, 0o700);
-    const directory = mkdtempSync(join(root, 'launch-'));
-    chmodSync(directory, 0o700);
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    await chmod(root, 0o700);
+    const directory = await mkdtemp(join(root, 'launch-'));
+    await chmod(directory, 0o700);
     this.launchDir = directory;
     return directory;
   }
@@ -2642,35 +2703,80 @@ export class SessionRuntime {
     attach(child.stderr, 'error');
   }
 
-  private waitForLockfile(dir: string, launch: BridgeLaunchConfig, generation: number): Promise<string> {
+  private waitForLockfile(dir: string, launch: BridgeLaunchConfig, generation: number): Promise<Lockfile> {
     const timeoutMs = this.opts.lockfileTimeoutMs ?? 15_000;
-    const deadline = Date.now() + timeoutMs;
-    return new Promise<string>((resolve, reject) => {
-      const tick = (): void => {
-        if (this.disposed || generation !== this.generation) return reject(new Error('bridge launch superseded'));
-        // An engine that would not start without a sandbox said so on its way out: that, and not a bare exit, is why it did not publish.
-        if (!this.child) return reject(new Error(this.sandboxRefusal ?? 'bridge-server exited before publishing a lockfile'));
-        for (const name of lockfiles(dir).sort((left, right) => left.localeCompare(right))) {
+    const child = this.child;
+    const invalidLaunch = (): Error | undefined => {
+      if (this.disposed || generation !== this.generation) return new Error('bridge launch superseded');
+      // An engine that would not start without a sandbox said so on its way out: that, and not a bare exit, is why it did not publish.
+      if (!child || child !== this.child) return new Error(this.sandboxRefusal ?? 'bridge-server exited before publishing a lockfile');
+      return undefined;
+    };
+    return new Promise<Lockfile>((resolve, reject) => {
+      let watcher: FSWatcher | undefined;
+      let poll: NodeJS.Timeout | undefined;
+      let timeout: NodeJS.Timeout | undefined;
+      let settled = false;
+      let scanning = false;
+      let changed = false;
+      const finish = (result: Lockfile | Error): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(poll);
+        clearTimeout(timeout);
+        watcher?.close();
+        if (result instanceof Error) reject(result);
+        else resolve(result);
+      };
+      const scan = async (): Promise<Lockfile | undefined> => {
+        for (const name of (await lockfiles(dir)).sort((left, right) => left.localeCompare(right))) {
+          if (settled) return undefined;
           const path = join(dir, name);
           try {
-            const metadata = lstatSync(path);
-            if (!metadata.isFile()) throw new Error('bridge lockfile is not a regular file');
-            if (metadata.size > 64 * 1024) throw new Error('bridge lockfile is too large');
-            if (process.platform !== 'win32' && (metadata.mode & 0o077) !== 0) {
-              throw new Error('bridge lockfile permissions are not owner-only');
-            }
-            if (process.getuid && metadata.uid !== process.getuid()) throw new Error('bridge lockfile owner mismatch');
-            validateBridgeLockfile(JSON.parse(readFileSync(path, 'utf8')), this.child.pid!, launch.workspace);
-            return resolve(path);
+            const lockfile = await readLockfileAsync(path, { ownerOnly: true });
+            validateBridgeLockfile(lockfile.body, child!.pid!, launch.workspace);
+            return lockfile;
           } catch (error) {
+            if (settled) return undefined;
             const failure = error instanceof Error ? error : new Error(String(error));
-            if (!ignorableLockfileError(failure)) return reject(failure);
+            if (!ignorableLockfileError(failure)) throw failure;
             this.diagnostics.add('warn', 'host', diagnosticEvent('lockfile_ignored', { file: path, reason: failure.message }));
           }
         }
-        if (Date.now() >= deadline) return reject(new Error(`timed out waiting for bridge lockfile`));
-        setTimeout(tick, 50);
+        return undefined;
       };
+      const tick = (): void => {
+        if (settled) return;
+        const invalid = invalidLaunch();
+        if (invalid) return finish(invalid);
+        // A watch event during a read requests one more scan. Polling and
+        // watch bursts share the same in-flight read for this launch.
+        if (scanning) { changed = true; return; }
+        clearTimeout(poll);
+        scanning = true;
+        changed = false;
+        void scan().then(lockfile => {
+          scanning = false;
+          if (settled) return;
+          const stale = invalidLaunch();
+          if (stale) return finish(stale);
+          if (lockfile) return finish(lockfile);
+          if (changed) tick();
+          else poll = setTimeout(tick, 50);
+        }, error => finish(error instanceof Error ? error : new Error(String(error))));
+      };
+      // Watch before scanning so creation cannot land between the two. Polling still
+      // covers missing notifications, incomplete writes and unsupported watchers.
+      try {
+        watcher = watch(dir, { persistent: false }, (_event, name) => {
+          if (name === null || name.endsWith('.lock')) tick();
+        });
+        watcher.on('error', () => {
+          watcher?.close();
+          watcher = undefined;
+        });
+      } catch { /* The bounded polling fallback handles unavailable file watching. */ }
+      timeout = setTimeout(() => finish(invalidLaunch() ?? new Error('timed out waiting for bridge lockfile')), timeoutMs);
       tick();
     });
   }
@@ -2688,10 +2794,33 @@ export class SessionRuntime {
     }
     // Restored usage is explicitly marked by the engine and may be separated
     // from SessionResumed by other connection events. Live deltas still need a turn.
-    client.on('event', async (event: ClientEvent) => {
+    let deferred: { owner: PendingSessionResume; events: ClientEvent[] } | undefined;
+    const onEvent = (event: ClientEvent) => {
       if (generation !== this.generation || client !== this.client || this.disposed) return;
       if (event.type === 'decision_request' || event.type === 'decision_cancel') {
         this.decisionToolBridge?.handle(event);
+        return;
+      }
+      const pending = this.currentResumeOwner();
+      if (deferred?.owner !== pending) deferred = undefined;
+      // The selected response carries the native display cursor. Hold the
+      // activation bundle together, including the controls that follow it.
+      if (this.opts.envelopeEvents && pending && !pending.responseReceived
+        && (event.type === 'session_resumed' || deferred)) {
+        if (!deferred) {
+          const events: ClientEvent[] = [];
+          deferred = { owner: pending, events };
+          pending.replayAfterResponse = () => {
+            deferred = undefined;
+            for (const queued of events) onEvent(queued);
+          };
+        }
+        if (deferred.events.length === 128) {
+          deferred = undefined;
+          this.rejectPendingSessionResume(new Error('selected resume produced too many pending activation events'), pending);
+        } else {
+          deferred.events.push(event);
+        }
         return;
       }
       // Attachment binding metadata is host-private and is not a renderer event.
@@ -3127,11 +3256,12 @@ export class SessionRuntime {
         || event.type === 'coordinator_status'
       ) this.notifyActivityChanged();
       this.updateNotifier(event);
-      this.broadcastClientEvent(event);
+      this.broadcastClientEvent(event, event.type === 'session_resumed' ? pending ?? undefined : undefined);
       // Renderer terminal cleanup is foreground-scoped. Re-deliver retained
       // background gates after that boundary using the existing permission IPC.
       if (event.type === 'turn_ended') this.replayBackgroundPermissions();
-    });
+    };
+    client.on('event', onEvent);
     client.on('mediaDeviceRequest', (request: MediaDeviceRequestEnvelopeDto) => {
       void this.dispatchMediaDeviceRequest(client, generation, request);
     });
@@ -4054,13 +4184,13 @@ export class SessionRuntime {
   }
 
   /** Resume the one session owned by this runtime and wait for engine proof. */
-  resumeOwnedSession(transcriptPath?: string): Promise<void> {
+  resumeOwnedSession(transcriptPath?: string, onPreview?: (event: Extract<ClientEvent, { type: 'session_resumed' }>) => void): Promise<void> {
     if (this.resumeOperationInProgress) return Promise.reject(new Error('session resume is already pending'));
     this.ownedSessionResumeRequired = true;
     const client = this.requireClient();
     const generation = this.generation;
     const selectedPath = transcriptPath ?? this.ownedTranscriptPath;
-    let selectedResponse: Promise<void> | undefined;
+    let selectedResponse: ReturnType<BridgeClient['resumeSessionFromTranscript']> | undefined;
     this.resumeOperationInProgress = true;
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -4089,13 +4219,26 @@ export class SessionRuntime {
       try {
         if (selectedPath) {
           if (!this.sessionMode) throw new Error('The session mode is unavailable.');
-          selectedResponse = client.resumeSessionFromTranscript(this.sessionId, selectedPath, this.sessionMode, pending.controller.signal);
-          void selectedResponse.then(() => {
+          if (onPreview && typeof client.captureColdResumePreview === 'function') {
+            // The private read is sent first so it can borrow the cold capture.
+            // Neither its result nor its failure delays the selected resume.
+            void client.captureColdResumePreview(this.sessionId, selectedPath, this.sessionMode, pending.controller.signal)
+              .then(event => {
+                if (this.currentResumeOwner() === pending && !pending.sessionResumed
+                  && event.session_id === pending.sessionId && event.mode === this.sessionMode) onPreview(event);
+              }).catch(() => undefined);
+          }
+          selectedResponse = client.resumeSessionFromTranscript(this.sessionId, selectedPath, this.sessionMode,
+            pending.controller.signal, this.opts.envelopeEvents === true);
+          void selectedResponse.then(result => {
             if (this.currentResumeOwner() !== pending) return;
+            if (result?.historyBefore) pending.historyBefore = { uuid: result.historyBefore };
+            if (result?.historyOverview) pending.historyOverview = historyOverview(result.historyOverview);
             pending.responseReceived = true;
+            pending.replayAfterResponse?.();
+            pending.replayAfterResponse = undefined;
             this.completePendingSessionResumeIfReady();
-          }, () => undefined);
-          void selectedResponse.catch((error: unknown) => {
+          }).catch((error: unknown) => {
             this.rejectPendingSessionResume(error instanceof Error ? error : new Error(String(error)), pending);
           });
         } else {
@@ -4165,6 +4308,7 @@ export class SessionRuntime {
       this.freshOwnedReplay = undefined;
     }
     this.draftModeRestorationRequired = false;
+    this.notifyActivityChanged();
   }
 
   private requestDraftModeSnapshot(): Promise<void> {
@@ -4470,7 +4614,7 @@ export class SessionRuntime {
     this.adoptedProcessOwned = false;
     if (adoptedPid && adoptedProcessOwned) await this.stopAdoptedBridge(adoptedPid, requestedExit);
     if (requestedExit) closeClient();
-    if (!adoptedPid || adoptedProcessOwned) this.removeLaunchDirectory();
+    if (!adoptedPid || adoptedProcessOwned) await this.removeLaunchDirectory();
     else this.launchDir = null;
     this.clearPendingSlashCommands();
   }
@@ -4505,11 +4649,11 @@ export class SessionRuntime {
     else child.kill(signal);
   }
 
-  private removeLaunchDirectory(): void {
+  private async removeLaunchDirectory(): Promise<void> {
     const launchDir = this.launchDir;
     this.launchDir = null;
     if (launchDir) {
-      try { rmSync(launchDir, { recursive: true, force: true }); } catch (error) { this.diagnostics.add('warn', 'host', error); }
+      try { await rm(launchDir, { recursive: true, force: true }); } catch (error) { this.diagnostics.add('warn', 'host', error); }
     }
   }
 

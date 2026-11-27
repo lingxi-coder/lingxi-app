@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { BridgeClient, SessionMetadataUnconfirmedError } from '@lingxi/bridge-client';
-import type { SetWorkingDirectoryRequest } from '@lingxi/bridge-client';
+import type { ClientEvent, SetWorkingDirectoryRequest } from '@lingxi/bridge-client';
 
 import { SessionRuntime } from '../src/main/bridge';
 import { isRuntimeRemovedState } from '../src/renderer/bridge/bridgeRuntimeState';
@@ -144,10 +144,10 @@ test('manager close and project removal preserve an owner with admitted audio', 
   assert.equal(manager.get(sessionId), undefined);
 });
 
-function selectedResumeRuntime(t: TestContext, timeoutMs = 1500) {
+function selectedResumeRuntime(t: TestContext, timeoutMs = 1500, envelopeEvents = false) {
   const runtime = new SessionRuntime({ sessionId, projectPath: '/project', sessionResumeTimeoutMs: timeoutMs,
-    launchConfig: () => ({ workspace: '/project', trusted: true, sessionId }) });
-  const acknowledgement = deferred<void>(), restored: string[] = [];
+    envelopeEvents, launchConfig: () => ({ workspace: '/project', trusted: true, sessionId }) });
+  const acknowledgement = deferred<void | { historyBefore?: string }>(), restored: string[] = [];
   const client = Object.assign(new WorkspaceClient(), {
     resumeSessionFromTranscript: (id: string, path: string) => {
       client.calls.push(['resume-selected', id, path]);
@@ -172,6 +172,67 @@ function resumeProof(client: WorkspaceClient, id = sessionId) {
   client.emit('event', { type: 'session_resumed', mode: 'code', session_id: id, messages: [] });
   client.emit('event', { type: 'model_changed', model: 'anthropic/restored-model' });
 }
+
+test('selected resume installs its native display cursor before publishing the replay base', async t => {
+  const { runtime, client, acknowledgement } = selectedResumeRuntime(t, 1500, true);
+  const uuid = '11111111-2222-4333-8444-555555555556';
+  const opening = runtime.resumeOwnedSession('/saved/session.jsonl');
+  resumeProof(client);
+  assert.equal(runtime.needsSessionResume, true);
+  assert.equal(runtime.replaySnapshot().some(row => row.event.type === 'session_resumed'), false);
+  acknowledgement.resolve({ historyBefore: uuid });
+  await opening;
+  assert.equal(runtime.needsSessionResume, false);
+  assert.deepEqual(runtime.replaySnapshot().find(row => row.event.type === 'session_resumed')?.historyBefore, { uuid });
+  assert.deepEqual(runtime.remoteView().historyBefore, { uuid });
+});
+
+test('cold resume publishes display history while the action gate and selected resume are still pending', async t => {
+  const f = selectedResumeRuntime(t);
+  type Preview = Extract<ClientEvent, { type: 'session_resumed' }>;
+  const display = deferred<Preview>();
+  const previews: Preview[] = [];
+  Object.assign(f.client, { captureColdResumePreview: (id: string, path: string, mode: string) => {
+    f.client.calls.push(['preview', id, path, mode]);
+    return display.promise;
+  } });
+  const selectedPath = '/saved/selected.jsonl';
+  const resuming = f.runtime.resumeOwnedSession(selectedPath, preview => previews.push(preview));
+  assert.deepEqual(f.client.calls.slice(0, 2), [
+    ['preview', sessionId, selectedPath, 'code'],
+    ['resume-selected', sessionId, selectedPath],
+  ]);
+  const excerpt = { type: 'session_resumed', session_id: sessionId, mode: 'code', messages: [] } satisfies Preview;
+  display.resolve(excerpt);
+  await nextTurn();
+  assert.deepEqual(previews, [excerpt]);
+  assert.equal(f.runtime.needsSessionResume, true);
+  assert.deepEqual(f.restored, []);
+  await assert.rejects(f.runtime.dispatchCommand({ type: 'get_conversation_controls' }), /being resumed/);
+
+  resumeProof(f.client);
+  f.acknowledgement.resolve(undefined);
+  await resuming;
+  assert.deepEqual(previews, [excerpt]);
+  assert.deepEqual(f.restored, ['model', 'permission', 'fast']);
+  assert.equal(f.runtime.needsSessionResume, false);
+});
+
+test('rejecting a selected resume fences off its late display preview', async t => {
+  const f = selectedResumeRuntime(t);
+  type Preview = Extract<ClientEvent, { type: 'session_resumed' }>;
+  const display = deferred<Preview>();
+  let previews = 0;
+  Object.assign(f.client, { captureColdResumePreview: () => display.promise });
+  const resuming = f.runtime.resumeOwnedSession('/saved/selected.jsonl', () => { previews++; });
+  const rejected = assert.rejects(resuming, /source changed/);
+  f.acknowledgement.reject(new Error('source changed'));
+  await rejected;
+  display.resolve({ type: 'session_resumed', session_id: sessionId, mode: 'code', messages: [] });
+  await nextTurn();
+  assert.equal(previews, 0);
+  assert.equal(f.runtime.needsSessionResume, true);
+});
 
 test('history resume completes while account hydration remains pending', async t => {
   const f = selectedResumeRuntime(t), internal = f.runtime as any;
@@ -740,14 +801,22 @@ test('a same-UUID remount overlays new tool environment while retaining its init
       configHome: '/owner-B', globalConfigPath: '/owner-B/global.toml' },
   };
   const lookups: string[] = [];
+  const firstConfigReady = deferred<void>();
   const manager = new SessionRuntimeManager({
-    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+    launchConfig: async (ref) => {
+      if (ref.projectPath === '/project') await firstConfigReady.promise;
+      return { workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true };
+    },
     workspaceSettings: async (projectPath) => { lookups.push(projectPath); return settings[projectPath]!; },
   });
   t.after(() => manager.dispose());
   manager.setSessionProjectRoot(sessionId, '/initial-project');
   const original = await manager.ensure({ projectPath: '/project', sessionId }, false);
-  const before = await (original as any).opts.launchConfig();
+  const preparing = (original as any).opts.launchConfig();
+  const lookupsWhilePending = [...lookups];
+  firstConfigReady.resolve();
+  const before = await preparing;
+  assert.deepEqual(lookupsWhilePending, ['/project']);
   assert.equal(before.initialProjectRoot, '/initial-project');
   assert.deepEqual(before.settingsEnvironment, settings['/project']!.environment);
   assert.equal(before.configHome, '/owner-A');
@@ -876,7 +945,7 @@ test('a wrong-session reconnect roster cannot release an admitted slash lease', 
   const lockfile = join(directory, '32123.lock');
   writeFileSync(lockfile, JSON.stringify({ pid: process.pid, workspaceFolders: ['/project'],
     ideName: 'LingXi-Bridge', transport: 'ws', runningInWindows: false,
-    authToken: '0123456789abcdef0123456789abcdef' }));
+    authToken: '0123456789abcdef0123456789abcdef' }), { mode: 0o600 });
   const source = { projectPath: '/project', sessionId }, target = { projectPath: '/next', sessionId: secondId };
   const runtime = await manager.ensure(source, false);
   const internal = runtime as any;
@@ -1174,6 +1243,72 @@ test('a concurrent opener can activate only the mode resolved for its session ow
   }
 });
 
+test('a cold remote open without a mode reuses the exact source that established it', async t => {
+  const saved = { path: '/saved/selected-copy.jsonl', mode: 'code' as const };
+  const originalStart = SessionRuntime.prototype.start, originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  SessionRuntime.prototype.start = async function () {
+    assert.equal((this as any).opts.resumeTranscriptPath, saved.path);
+    (this as any).setState({ status: 'connected' });
+  };
+  SessionRuntime.prototype.resumeOwnedSession = async function (path) { assert.equal(path, saved.path); };
+  t.after(() => { SessionRuntime.prototype.start = originalStart; SessionRuntime.prototype.resumeOwnedSession = originalResume; });
+
+  let reads = 0;
+  const manager = new SessionRuntimeManager({
+    launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+    resolveSessionMode: async () => { reads++; return saved; },
+    resolveSavedTranscript: async () => { reads++; return saved; },
+  });
+  t.after(() => manager.dispose());
+
+  const lease = await manager.openForRemote({ projectPath: '/bot', sessionId });
+  try {
+    assert.equal(lease.runtime.sessionMode, saved.mode);
+    assert.equal(reads, 1);
+  } finally {
+    lease.release();
+  }
+});
+
+test('matching pending opens share an opted-in preview and never project another transcript', async t => {
+  const selectedPath = '/saved/selected-copy.jsonl';
+  const originalStart = SessionRuntime.prototype.start, originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  const entered = deferred<void>(), finish = deferred<void>();
+  type Preview = Extract<ClientEvent, { type: 'session_resumed' }>;
+  let publish: ((event: Preview) => void) | undefined;
+  SessionRuntime.prototype.start = async function () { (this as any).setState({ status: 'connected' }); };
+  SessionRuntime.prototype.resumeOwnedSession = async function (path, onPreview) {
+    assert.equal(path, selectedPath);
+    publish = onPreview;
+    entered.resolve(undefined);
+    await finish.promise;
+  };
+  const manager = new SessionRuntimeManager({ launchConfig: ref => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }) });
+  t.after(async () => {
+    SessionRuntime.prototype.start = originalStart;
+    SessionRuntime.prototype.resumeOwnedSession = originalResume;
+    await manager.dispose();
+  });
+
+  const ref = { projectPath: '/project', sessionId, mode: 'code' as const };
+  const events: Array<[string, Preview]> = [];
+  const open = (label: string, path = selectedPath) => manager.openSession(ref, false, undefined, false, path,
+    undefined, undefined, event => { events.push([label, event]); });
+  const first = open('first');
+  try {
+    await entered.promise;
+    assert.equal(open('joiner'), first);
+    assert.throws(() => open('other-source', '/saved/other-copy.jsonl'), /another transcript selection/);
+    assert.ok(publish);
+    publish({ type: 'session_resumed', session_id: secondId, mode: 'code', messages: [] });
+    assert.deepEqual(events, []);
+    const preview: Preview = { type: 'session_resumed', session_id: sessionId, mode: 'code', messages: [] };
+    publish(preview);
+    assert.equal(open('late-joiner'), first);
+    assert.deepEqual(events, [['first', preview], ['joiner', preview], ['late-joiner', preview]]);
+  } finally { finish.resolve(undefined); await first; }
+});
+
 test('a replaced runtime releases a metadata receipt returned by its old capture', async (t) => {
   const { runtime } = connectedRuntime(t);
   const captured = deferred<any>();
@@ -1284,7 +1419,7 @@ test('shutdown reconnects for metadata drain without restoring a live Side Chat'
   const lockfile = join(directory, '32123.lock');
   writeFileSync(lockfile, JSON.stringify({ pid: process.pid, workspaceFolders: ['/project'],
     ideName: 'LingXi-Bridge', transport: 'ws', runningInWindows: false,
-    authToken: '0123456789abcdef0123456789abcdef' }));
+    authToken: '0123456789abcdef0123456789abcdef' }), { mode: 0o600 });
   const originalConnect = BridgeClient.prototype.connect, originalSend = BridgeClient.prototype.sendCommand;
   const hello = deferred<any>(), entered = deferred<void>(), write = deferred<void>();
   const sent: string[] = [];

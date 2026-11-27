@@ -4,6 +4,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { isDeepStrictEqual } from 'node:util';
 import { serviceScope } from './hosted-bot-service.mjs';
 import { authorizedTargets, inspectNotice } from './inbox-delivery.mjs';
+import { PAIR_CONVERSATION_ID } from './teams.mjs';
 import { messagePreview } from './team-message-preview.mjs';
 import {
   DAY,
@@ -163,7 +164,11 @@ async function friendCard(tx, account, row) {
     : null;
 }
 function writeFriendCount(tx, card, row) {
-  if (card && card.data().unreadCount !== row.unreadCount) tx.update(card.ref, { unreadCount: row.unreadCount });
+  if (!card || row.ref.conversationId !== PAIR_CONVERSATION_ID) return;
+  const { unreadCount, unreadConversationId } = card.data();
+  if (unreadCount !== row.unreadCount || unreadConversationId !== PAIR_CONVERSATION_ID) {
+    tx.update(card.ref, { unreadCount: row.unreadCount, unreadConversationId: PAIR_CONVERSATION_ID });
+  }
 }
 async function sourcePage(tx, thread, after, head) {
   if (after > head) deny(503, 'SOURCE_WATERMARK_REGRESSED');

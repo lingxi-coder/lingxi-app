@@ -16,7 +16,6 @@
 //! Windows — `--json` is a machine-readable mode).
 
 use async_trait::async_trait;
-use chrono::Utc;
 use client::protocol::text::ClientTextDto;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::Serialize;
@@ -168,7 +167,7 @@ impl JsonSink {
     }
 
     fn ts() -> String {
-        Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        format!("{:.0}", jiff::Timestamp::now())
     }
 }
 

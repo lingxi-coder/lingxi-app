@@ -1,5 +1,6 @@
 import { isResourceRef, type ResourceRef } from './dataset-resource.js';
 import { parseDataRef, type DataRef } from './lingxi-data.js';
+import { parseVisualization, type TeamVisualization } from './visualization.js';
 import type { Firestore, DocumentData, Query, QuerySnapshot } from 'firebase/firestore';
 import { ATTACHMENT_FILE_BYTES, ATTACHMENT_MESSAGE_FILES, ATTACHMENT_TYPES, type MessageAttachment } from './attachments.js';
 
@@ -14,6 +15,7 @@ export interface ChatSourceMessage {
   attachments?: MessageAttachment[];
   dataRef?: DataRef;
   resourceRef?: ResourceRef;
+  visualization?: { title: string; reference: TeamVisualization['reference']; bindings: Omit<TeamVisualization['bindings'][number], 'grant'>[] };
 }
 export type ChatReadRequest = { teamId: string; generation: number; conversationId: string } & (
   | { mode: 'recent'; throughSeq: number }
@@ -68,11 +70,14 @@ export function chatSourceMessage(messageId: string, data: DocumentData): ChatSo
   if (data.recalled !== true && data.dataRef != null && !dataRef) return fail('INVALID_DATA');
   const resourceRef = data.recalled ? undefined : data.resourceRef;
   if (resourceRef != null && (!isResourceRef(resourceRef) || dataRef)) return fail('INVALID_DATA');
+  const card = data.recalled ? undefined : parseVisualization(data.visualization, messageId);
+  const visualization = card && { title: card.title, reference: card.reference,
+    bindings: card.bindings.map(({ alias, mode, reference }) => ({ alias, mode, reference })) };
   return { messageId, seq: data.seq, changeSeq: data.changeSeq, changeId: data.changeId, text: data.text, author,
     createdAt: millis(data.createdAt), ...(data.editedAt !== undefined ? { editedAt: millis(data.editedAt) } : {}),
     ...(data.replyTo !== undefined ? { replyTo: data.replyTo } : {}), ...(data.recalled !== undefined ? { recalled: data.recalled } : {}),
     // A recalled message gave its files up with its text.
-    ...(dataRef ? { dataRef } : {}), ...(resourceRef ? { resourceRef } : {}),
+    ...(dataRef ? { dataRef } : {}), ...(resourceRef ? { resourceRef } : {}), ...(visualization ? { visualization } : {}),
     ...(data.attachments !== undefined && data.recalled !== true ? { attachments: attachments(data.attachments) } : {}),
     // A Bot's message names its task as `taskId`; the human answer to a Bot's question stores it as `sourceTaskId`.
     ...(data.taskId !== undefined ? { sourceTaskId: id(data.taskId) ? data.taskId : fail('INVALID_DATA') }

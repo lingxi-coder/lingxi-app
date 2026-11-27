@@ -1,5 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { DatasetPagePublisher } from '../../../../../packages/teams/DatasetPage.js';
+import { VisualizationComposer } from '../../../../../packages/teams/VisualizationComposer.js';
+import { visualizationLabels } from '../../../../../packages/teams/visualization.js';
 import { useTeamsText } from '../../../../../packages/teams/i18n.js';
 import type { TeamSummary } from '../../../../../packages/teams/index.js';
 import type { TeamConversation, TeamMessage } from '../../../../../packages/teams/messages.js';
@@ -31,6 +33,9 @@ export function PublishVisualization({ sessionId, reference, kind = 'visualizati
   const bridge = typeof window === 'undefined' ? undefined : window[DESKTOP_BRIDGE_GLOBAL];
   const api = useMemo(() => uid && bridge?.teams ? desktopTeamsApi(bridge.teams, uid) : undefined, [bridge, uid]);
   const selected = messages.find(message => message.id === messageId);
+  const channel = kind === 'visualization' && chats.find(entry => entry.id === chat && entry.kind === 'channel');
+  const visualization = useMemo(() => source ? JSON.parse(source) as { title: string; html: string } : undefined, [source]);
+  const labels = visualizationLabels(locale);
 
   useEffect(() => {
     if (!api || !team) return;
@@ -98,15 +103,16 @@ export function PublishVisualization({ sessionId, reference, kind = 'visualizati
   }
 
   if (!bridge?.teams) return null;
+  const action = kind === 'visualization' ? labels.add : t('tw_dataset_publish_page');
   return <>
     <button type="button" className="visualization-action" disabled={busy} onClick={() => void open()}
-      title={t('tw_dataset_publish_page')} aria-label={t('tw_dataset_publish_page')}>
+      title={action} aria-label={action}>
       <Icon name="page" size={16} />
     </button>
     <dialog ref={dialog} aria-labelledby={title} className="tw-scope tw-dialog tw-data-record" onClose={close}
       onCancel={event => { if (busy) event.preventDefault(); }}>
       <div className="tw-dialog-panel">
-        <h3 id={title}>{t('tw_dataset_publish_page')}</h3>
+        <h3 id={title}>{action}</h3>
         {failed && <p role="alert">{tr('teams_data_unavailable')}</p>}
         {busy && <progress />}
         {source && <label>{t('tw_dataset_team')} <select value={team?.id ?? ''} onChange={event => {
@@ -122,12 +128,15 @@ export function PublishVisualization({ sessionId, reference, kind = 'visualizati
           <option value="">{tr('common_none')}</option>
           {chats.map(item => <option key={item.id} value={item.id}>{item.title || item.id}</option>)}
         </select></label>}
-        {historyReady && <label>{t('tw_dataset_add')} <select value={messageId} onChange={event => setMessageId(event.currentTarget.value)}>
+        {channel && team && api && visualization && <VisualizationComposer key={chat} api={api} locale={locale}
+          source={visualization} scope={{ teamId: team.id, generation: team.generation, conversationId: chat }}
+          participantName={value => value} onPublished={() => dialog.current?.close()} />}
+        {!channel && historyReady && <label>{t('tw_dataset_add')} <select value={messageId} onChange={event => setMessageId(event.currentTarget.value)}>
           <option value="">{tr('common_none')}</option>
           {messages.map(item => <option value={item.id} key={item.id}>{item.text || item.id}</option>)}
         </select></label>}
-        {historyReady && !messages.length && <p>{t('tw_dataset_empty')}</p>}
-        {api && team && selected?.resourceGrant && selected.resourceRef && selected.resourceRef.kind !== 'pageVersion' &&
+        {!channel && historyReady && !messages.length && <p>{t('tw_dataset_empty')}</p>}
+        {!channel && api && team && selected?.resourceGrant && selected.resourceRef && selected.resourceRef.kind !== 'pageVersion' &&
           <DatasetPagePublisher key={selected.id} api={api} dataset={selected.resourceRef.dataset} via={selected.resourceGrant}
             locale={locale} generation={team.generation} destination={{ team: team.id, conversation: chat }} initialPackage={source} />}
         <form method="dialog"><button type="submit" className="tw-btn" disabled={busy}>{t('common_close')}</button></form>

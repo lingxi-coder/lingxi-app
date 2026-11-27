@@ -1,5 +1,19 @@
 /** Provider account settings and redacted health labels. */
 export const providerAccountsCatalog: Record<string, Record<string, string>> = {
+  "provider_accounts_additional_openai_models": {
+    "en": "Enable additional OpenAI models",
+    "zh-Hans": "启用更多 OpenAI 模型",
+    "zh-Hant": "啟用更多 OpenAI 模型",
+    "ja": "追加の OpenAI モデルを有効にする",
+    "ko": "추가 OpenAI 모델 사용"
+  },
+  "provider_accounts_additional_openai_models_desc": {
+    "en": "Show more GPT and reasoning models in Chat and Code for this API key. OpenAI account access and billing apply.",
+    "zh-Hans": "在 Chat 和 Code 中为此 API Key 显示更多 GPT 和推理模型。可用性和费用以 OpenAI 账户为准。",
+    "zh-Hant": "在 Chat 和 Code 中為此 API Key 顯示更多 GPT 和推理模型。可用性與費用以 OpenAI 帳戶為準。",
+    "ja": "この API キーで Chat と Code に追加の GPT モデルと推論モデルを表示します。利用可否と料金は OpenAI アカウントに従います。",
+    "ko": "이 API 키로 Chat 및 Code에서 추가 GPT 및 추론 모델을 표시합니다. 모델 이용 권한과 요금은 OpenAI 계정에 따릅니다."
+  },
   "provider_accounts_presets_only": {
     "en": "Provider presets are shown. Model availability is not loaded.",
     "zh-Hans": "正在显示提供商预设，模型可用性尚未加载。",

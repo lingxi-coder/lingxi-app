@@ -5,11 +5,13 @@ import { CH_DECISION, CH_DECISION_CHANGED, type DecisionApi } from '../shared/de
 import { DESKTOP_BRIDGE_GLOBAL } from '../shared/desktopBridge.js';
 import { CH_SESSION_RECOVERY, type SessionRecoveryDiagnostic } from '../shared/sessionRecovery.js';
 import type { ProviderAccountSnapshot } from '../shared/providerAccounts.js';
-import { CH_SESSION_HISTORY, type TranscriptHistoryCursor, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
+import { CH_SESSION_HISTORY, CH_SESSION_IMAGE, CH_SESSION_IMAGE_CANCEL, CH_SESSION_RESUME_PREVIEW, CH_STARTUP_RESTORE_CHANGED, type SessionHistoryPreview, type SessionImagePayload, type SessionImageSize, type SessionResumePreview, type TranscriptHistoryCursor, type TranscriptHistoryPage } from '../shared/sessionHistory.js';
 import type { ProviderAccountsApi } from '../shared/providerAccounts.js';
 import { CH_LOCAL_APPS, CH_LOCAL_APPS_CHANGED, type LocalAppsApi, type LocalAppEditRequest } from '../shared/localApps.js';
 import { CH_IMAGE_SAVE, type ImageSaveRequest } from '../shared/imageSave.js';
 import { CH_APPLICATION_ICON, type ApplicationIconApi } from '../shared/applicationIcon.js';
+import { CH_PROJECT_SETTINGS, type ProjectSettingsRequest } from '../shared/projectSettings.js';
+import { CH_PLUGIN_INSTALL_COUNTS, type PluginInstallCounts } from '../shared/pluginInstallCounts.js';
 import { CH_MCP_PREPARE, type McpPrepareApi } from '../shared/mcpPrepare.js';
 import { CH_DESKTOP_UPDATES, CH_DESKTOP_UPDATES_CHANGED, type DesktopUpdatesApi } from '../shared/desktopUpdates.js';
 import { CH_INTERFACE_LOCALE } from '../shared/interfaceLocale.js';
@@ -225,6 +227,7 @@ export interface DiagnosticEntry {
   message: string;
 }
 export interface BootstrapState {
+  startupSessionRestore?: SessionHistoryPreview;
   scheduledWorkspace?: string;
   conversationSpaces: ConversationSpacesSnapshot;
   settings: PublicSettings;
@@ -281,6 +284,8 @@ export interface LingxiApi {
   saveImage(request: ImageSaveRequest): Promise<boolean>;
   applicationIcon: ApplicationIconApi;
   mcpPrepare: McpPrepareApi;
+  projectSettings: ProjectSettingsRequest;
+  pluginInstallCounts(): Promise<PluginInstallCounts>;
   desktopUpdates: DesktopUpdatesApi;
   localApps: LocalAppsApi;
   onLocalAppEdit(listener: (app: LocalAppEditRequest) => void): () => void;
@@ -345,7 +350,12 @@ export interface LingxiApi {
   cancelSessionHandoff(requestId: string): Promise<void>;
   onConversationShown(callback: (snapshot: BootstrapState) => void): Unsubscribe;
   openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: ConversationSpace, authoringAppId?: string, authoringVersion?: number): Promise<BootstrapState>;
+  openSessionWithPreview?(projectPath: string, sessionId: string, selection: SessionOpenSelection | undefined, linkedMode: ConversationSpace | undefined, requestId: string): Promise<BootstrapState>;
+  onSessionResumePreview?(callback: (preview: SessionResumePreview) => void): Unsubscribe;
+  onStartupRestoreChanged?(callback: () => void): Unsubscribe;
   loadSessionHistory(sessionId: string, before: TranscriptHistoryCursor): Promise<TranscriptHistoryPage>;
+  loadSessionImage(sessionId: string, reference: string, size: SessionImageSize, requestId?: string): Promise<SessionImagePayload>;
+  cancelSessionImage(requestId: string): Promise<void>;
   prepareSessionMetadata(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionMetadataSelection>;
   releaseSessionMetadata(selection: SessionMetadataSelection): Promise<void>;
   preflightSessionArchive(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<CronJobDto[]>;
@@ -469,6 +479,8 @@ const api: LingxiApi = {
   },
   saveImage: request => ipcRenderer.invoke(CH_IMAGE_SAVE, request),
   applicationIcon: { get: bundleId => ipcRenderer.invoke(CH_APPLICATION_ICON, bundleId) },
+  projectSettings: (path, command) => ipcRenderer.invoke(CH_PROJECT_SETTINGS, path, command),
+  pluginInstallCounts: () => ipcRenderer.invoke(CH_PLUGIN_INSTALL_COUNTS),
   mcpPrepare: { prepare: request => ipcRenderer.invoke(CH_MCP_PREPARE, request) },
   desktopUpdates: {
     getState: () => ipcRenderer.invoke(CH_DESKTOP_UPDATES, 'get'),
@@ -584,6 +596,8 @@ const api: LingxiApi = {
     watchBlocks: (uid, next, failed) => watchFriends(uid, 'blocks', next, failed),
     watchOffers: (uid, next, failed) => watchFriends(uid, 'teamOffers', next, failed),
     readProfile: (uid, friendUid) => friendsRequest({ type: 'readProfile', uid, friendUid }),
+    searchHandles: (uid, query, requestId) => ipcRenderer.invoke('lingxi:friends', { type: 'searchHandles', uid, query, requestId }),
+    cancelSearch: (uid, requestId) => friendsRequest({ type: 'cancelSearch', uid, requestId }),
   },
   scheduled: {
     context: (scopeId) => ipcRenderer.invoke(CH_SCHEDULED, { action: 'context', scopeId }),
@@ -705,7 +719,11 @@ const api: LingxiApi = {
   prepareSessionHandoff: (sourceId, target, requestId, retry) => ipcRenderer.invoke(CH_SESSION_HANDOFF, sourceId, target, requestId, retry) as Promise<{ snapshot: BootstrapState; summary: string; requestId: string } | null>,
   cancelSessionHandoff: (requestId) => ipcRenderer.invoke(CH_SESSION_HANDOFF_CANCEL, requestId) as Promise<void>,
   onConversationShown: (callback) => subscribe(CH_CONVERSATION_SHOWN, callback),
+  onSessionResumePreview: (callback) => subscribe(CH_SESSION_RESUME_PREVIEW, callback),
+  onStartupRestoreChanged: (callback) => subscribe(CH_STARTUP_RESTORE_CHANGED, callback),
   loadSessionHistory: (sessionId, before) => ipcRenderer.invoke(CH_SESSION_HISTORY, sessionId, before),
+  loadSessionImage: (sessionId, reference, size, requestId) => ipcRenderer.invoke(CH_SESSION_IMAGE, sessionId, reference, size, requestId),
+  cancelSessionImage: (requestId) => ipcRenderer.invoke(CH_SESSION_IMAGE_CANCEL, requestId),
   openSession: (projectPath, sessionId, selection, linkedMode, authoringAppId, authoringVersion) => (authoringAppId !== undefined
     ? ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId, selection, linkedMode, authoringAppId, authoringVersion)
     : linkedMode !== undefined
@@ -713,6 +731,9 @@ const api: LingxiApi = {
     : selection === undefined
     ? ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId)
     : ipcRenderer.invoke(CH_SESSION_OPEN, projectPath, sessionId, selection)) as Promise<BootstrapState>,
+  openSessionWithPreview: (projectPath, sessionId, selection, linkedMode, requestId) => ipcRenderer.invoke(
+    CH_SESSION_OPEN, projectPath, sessionId, selection, linkedMode, undefined, undefined, requestId,
+  ) as Promise<BootstrapState>,
   prepareSessionMetadata: (projectPath, sessionId, selection) => ipcRenderer.invoke(CH_SESSION_METADATA_CAPTURE, projectPath, sessionId, selection) as Promise<SessionMetadataSelection>,
   releaseSessionMetadata: (selection) => ipcRenderer.invoke(CH_SESSION_METADATA_RELEASE, selection) as Promise<void>,
   preflightSessionArchive: (projectPath, sessionId, selection) => ipcRenderer.invoke(CH_SESSION_ARCHIVE_PREFLIGHT, projectPath, sessionId, selection) as Promise<CronJobDto[]>,

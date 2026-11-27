@@ -113,6 +113,9 @@ export interface TrackedSpeechEvent {
 }
 
 export interface UseBridge {
+  /** This settings surface targets files in a directory without a conversation runtime. */
+  settingsOnly?: boolean;
+  projectSettings?: import('../../shared/projectSettings.js').ProjectSettingsRequest;
   providerSettings?: Record<string, unknown>;
   providerSettingsLocked?: string[];
   providerSettingsError?: string;
@@ -142,6 +145,7 @@ export interface UseBridge {
   /** The Bot whose chat is displayed. A Bot's folder is not a project, so project-only parts of the window leave such a chat alone. */
   readonly activeBotId: string | undefined;
   readonly sessionLoading: boolean;
+  readonly sessionResumePreview?: { conversation: ConversationState; pickerRequestId?: number };
   readonly history: import('../../shared/sessionHistory.js').TranscriptHistoryState;
   loadMoreHistory(): Promise<void>;
   readonly connection: ConnectionState;
@@ -225,7 +229,7 @@ export interface UseBridge {
   touchSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<void>;
   renameSession(projectPath: string, sessionId: string, title: string, selection: SessionMetadataSelection): Promise<void>;
   setSessionPinned(session: SessionPinInput, pinned: boolean): Promise<void>;
-  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: import('../../shared/conversationSpaces').ConversationSpace, authoringAppId?: string, authoringVersion?: number): Promise<SessionRef | false>;
+  openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: import('../../shared/conversationSpaces').ConversationSpace, authoringAppId?: string, authoringVersion?: number, pickerRequestId?: number): Promise<SessionRef | false>;
   /** Show a chat of a Bot in the chat view; a new one when `sessionId` is absent, in the folder `workspaceId` names (the Bot's own if it is left out). Rejects with the reason it could not start. */
   openBotSession(botId: string, sessionId?: string, transcriptPath?: string, workspaceId?: string): Promise<import('../../shared/bots').BotSessionRefUi>;
   /** Follow the host, which made a chat of a Bot the displayed one on its own (the owner clicked a notification). */

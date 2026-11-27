@@ -1,6 +1,6 @@
 import type { DesktopInboxApi } from '../../shared/inbox.js';
 import type { ProviderAccountSnapshot } from '../../shared/providerAccounts.js';
-import type { TranscriptHistoryCursor, TranscriptHistoryPage } from '../../shared/sessionHistory.js';
+import type { SessionHistoryPreview, SessionImagePayload, SessionImageSize, SessionResumePreview, TranscriptHistoryCursor, TranscriptHistoryPage } from '../../shared/sessionHistory.js';
 import type { ProviderAccountsApi } from '../../shared/providerAccounts.js';
 import type { LocalAppsApi, LocalAppEditRequest } from '../../shared/localApps';
 import type { ProjectCreationPurpose, ProjectFolderSelection } from '../../shared/projectCreation';
@@ -22,6 +22,7 @@ import type {
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
   ImageRefDto,
+  MessageDto,
   NativeUiControlRequest,
   NativeUiControlResponseFor,
   PermissionResponseDto,
@@ -75,7 +76,11 @@ export interface RuntimeEventEnvelope<T = unknown> {
   sessionId: string;
   event: T;
 }
-export interface SequencedRuntimeEventEnvelope<T = unknown> extends RuntimeEventEnvelope<T> { sequence: number }
+export interface SequencedRuntimeEventEnvelope<T = unknown> extends RuntimeEventEnvelope<T> {
+  sequence: number;
+  historyBefore?: TranscriptHistoryCursor;
+  historyOverview?: MessageDto[];
+}
 export interface SessionRuntimeSummary {
   projectPath: string;
   sessionId: string;
@@ -123,6 +128,7 @@ export interface DiagnosticEntry {
   message: string;
 }
 export interface BootstrapState {
+  startupSessionRestore?: SessionHistoryPreview;
   scheduledWorkspace?: string;
   conversationSpaces: ConversationSpacesSnapshot;
   revision: number;
@@ -178,6 +184,8 @@ export interface VisualizationApi {
 }
 
 export interface LingxiApi {
+  projectSettings: import('../../shared/projectSettings.js').ProjectSettingsRequest;
+  pluginInstallCounts?(): Promise<import('../../shared/pluginInstallCounts.js').PluginInstallCounts>;
   decision: import('../../shared/decision').DecisionApi;
   computerSettings: import('../../shared/computerSettings').ComputerSettingsApi;
   saveImage(request: import('../../shared/imageSave').ImageSaveRequest): Promise<boolean>;
@@ -246,7 +254,12 @@ export interface LingxiApi {
   cancelSessionHandoff(requestId: string): Promise<void>;
   onConversationShown?(callback: (snapshot: BootstrapState) => void): Unsubscribe;
   openSession(projectPath: string, sessionId: string, selection?: SessionOpenSelection, linkedMode?: import('../../shared/conversationSpaces').ConversationSpace, authoringAppId?: string, authoringVersion?: number): Promise<BootstrapState>;
+  openSessionWithPreview?(projectPath: string, sessionId: string, selection: SessionOpenSelection | undefined, linkedMode: ConversationSpace | undefined, requestId: string): Promise<BootstrapState>;
+  onSessionResumePreview?(callback: (preview: SessionResumePreview) => void): Unsubscribe;
+  onStartupRestoreChanged?(callback: () => void): Unsubscribe;
   loadSessionHistory(sessionId: string, before: TranscriptHistoryCursor): Promise<TranscriptHistoryPage>;
+  loadSessionImage(sessionId: string, reference: string, size: SessionImageSize, requestId?: string): Promise<SessionImagePayload>;
+  cancelSessionImage(requestId: string): Promise<void>;
   prepareSessionMetadata(projectPath: string, sessionId: string, selection?: SessionOpenSelection): Promise<SessionMetadataSelection>;
   releaseSessionMetadata(selection: SessionMetadataSelection): Promise<void>;
   preflightSessionArchive(projectPath: string, sessionId: string, selection: SessionMetadataSelection): Promise<CronJobDto[]>;

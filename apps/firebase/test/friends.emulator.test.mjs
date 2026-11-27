@@ -7,7 +7,7 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { assertFails, assertSucceeds, initializeTestEnvironment } from '@firebase/rules-unit-testing';
 import { collection, doc, getDoc, getDocs } from 'firebase/firestore';
 import { z } from 'zod';
-import { FRIEND_LIMIT, FriendsStore, LOOKUP_LIMIT, LOOKUP_WINDOW_MS, OFFER_GRACE_MS, OFFER_LIMIT, OFFER_TTL_MS, OUTGOING_LIMIT, friendNotifier, pairKey, pairTeamId } from '../src/friends.mjs';
+import { FRIEND_LIMIT, INCOMING_LIMIT, FriendsStore, LOOKUP_LIMIT, LOOKUP_WINDOW_MS, OFFER_GRACE_MS, OFFER_LIMIT, OFFER_TTL_MS, OUTGOING_LIMIT, friendNotifier, pairKey, pairTeamId } from '../src/friends.mjs';
 import { PAIR_CONVERSATION_ID, TEAM_MEMBER_LIMIT, TeamsStore, USER_TEAM_LIMIT, createTeamsHandler } from '../src/teams.mjs';
 import { TeamMessagesStore } from '../src/team-messages.mjs';
 import { SharedBotsStore } from '../src/shared-bots.mjs';
@@ -87,7 +87,7 @@ async function consistent(a, b) {
 
 test('profile: first use creates the profile and one friend code; reading again changes nothing', options, async () => {
   const first = await friends.profile(alice);
-  assert.deepEqual(Object.keys(first).sort(), ['displayName', 'findByEmail', 'findByHandle', 'friendCode', 'uid']);
+  assert.deepEqual(Object.keys(first).sort(), ['displayName', 'findByEmail', 'findByHandle', 'findByHandlePart', 'friendCode', 'uid']);
   assert.deepEqual([first.uid, first.displayName, first.findByHandle, first.findByEmail], ['alice', 'Alice', true, true]);
   assert.match(first.friendCode.code, /^[A-Za-z0-9_-]{32}$/u);
   assert.equal(first.friendCode.link, `https://lingxios.net/open/friend/add?code=${first.friendCode.code}`);
@@ -104,6 +104,76 @@ test('profile: first use creates the profile and one friend code; reading again 
   // The default name comes from the token, falling back to Member.
   assert.equal((await friends.profile(dave)).displayName, 'Member');
   assert.equal((await friends.profile({ uid: 'long', name: `  ${'n'.repeat(100)} ` })).displayName, 'n'.repeat(80));
+});
+
+test('username search ranks the exact match and only discovers opted-in, unblocked accounts by substring', options, async () => {
+  await act(alice, { action: 'profile', handle: 'alice_mat', findByHandlePart: true });
+  await act(bob, { action: 'profile', handle: 'mat' });
+  await act(carol, { action: 'profile', handle: 'Format', findByHandlePart: true });
+  await act(dave, { action: 'profile', handle: 'matt_hidden' });
+  const search = async (query, actor = alice) => (await act(actor, { action: 'searchHandles', query })).results.map(result => result.handle);
+  assert.deepEqual(await search('MAT'), ['mat', 'Format']);
+  assert.deepEqual(await search('mat', dave), ['mat', 'alice_mat', 'Format']);
+  await act(alice, { action: 'block', otherUid: carol.uid });
+  assert.deepEqual(await search('mat'), ['mat']);
+  assert.deepEqual(await search('alice', carol), []);
+  await act(alice, { action: 'unblock', otherUid: carol.uid });
+  await act(carol, { action: 'profile', handle: 'maker' });
+  assert.deepEqual(await search('mat'), ['mat']);
+  assert.deepEqual(await search('ake'), ['maker']);
+  await act(carol, { action: 'profile', findByHandle: false });
+  await act(carol, { action: 'profile', findByHandle: true });
+  assert.deepEqual(await search('ake'), []);
+  assert.deepEqual(await search('maker'), ['maker']);
+  await assert.rejects(act(alice, { action: 'searchHandles', query: '.*' }), z.ZodError);
+});
+
+test('username search ranks prefixes before a full earlier-UID substring page and refills after blocking', options, async () => {
+  const interior = Array.from({ length: 25 }, (_, i) => ({ uid: `earlier_${i}`, handle: `zali_${i}` }));
+  await Promise.all(interior.map(({ uid, handle }) => act({ uid }, { action: 'profile', handle, findByHandlePart: true })));
+  await act(bob, { action: 'profile', handle: 'ali' });
+  const prefixes = Array.from({ length: 14 }, (_, i) => ({ uid: `later_${i}`, handle: `ali_${String(i).padStart(2, '0')}` }));
+  await Promise.all(prefixes.map(({ uid, handle }) => act({ uid }, { action: 'profile', handle, findByHandlePart: true })));
+  for (const { uid } of prefixes.slice(0, 11)) await db.doc(`users/alice/blocks/${uid}`).set({ at: now });
+
+  const { results } = await act(alice, { action: 'searchHandles', query: 'ali' });
+  assert.deepEqual(results.slice(0, 4).map(result => result.handle), ['ali', 'ali_11', 'ali_12', 'ali_13']);
+  assert.equal(results.length, 10);
+  assert.ok(results.slice(4).every(result => result.handle.startsWith('zali_')));
+});
+
+test('a full page budget of blocked prefixes leaves room for a visible substring', options, async () => {
+  const blocked = Array.from({ length: 25 }, (_, i) => ({ uid: `blocked_${i}`, handle: `ali_${i}` }));
+  await Promise.all(blocked.map(async ({ uid, handle }) => {
+    await act({ uid }, { action: 'profile', handle, findByHandlePart: true });
+    await db.doc(`users/alice/blocks/${uid}`).set({ at: now });
+  }));
+  await act(bob, { action: 'profile', handle: 'xali', findByHandlePart: true });
+  assert.deepEqual((await act(alice, { action: 'searchHandles', query: 'ali' })).results.map(row => row.uid), ['bob']);
+});
+
+test('live username search exposes its cooldown and preserves a rate record renewed during pruning', options, async () => {
+  const quota = db.doc(`friendLimits/${sha('handleSearch:alice')}`);
+  await quota.set({ expiresAt: new Date(now - 1), sentAt: [] });
+  const stale = await quota.get();
+  await quota.set({ expiresAt: new Date(now + 20_000), sentAt: Array(60).fill(now - 40_000) });
+  let page = 0;
+  await friends.sweep({ limit: () => ({ get: async () => page++ === 0 ? { docs: [stale] } : { empty: true } }) });
+  assert.ok((await quota.get()).exists);
+  await assert.rejects(act(alice, { action: 'searchHandles', query: 'ali' }), { status: 429, code: 'RATE_LIMITED', retryAfterMs: 20_000 });
+  now += 20_000;
+  assert.deepEqual(await act(alice, { action: 'searchHandles', query: 'ali' }), { results: [] });
+});
+
+test('a selected handle cannot send a request to the account that claimed it later', options, async () => {
+  await act(bob, { action: 'profile', handle: 'bobby' });
+  const { results: [selected] } = await act(alice, { action: 'searchHandles', query: 'bobby' });
+  await act(bob, { action: 'profile', handle: 'bobby2' });
+  await act(carol, { action: 'profile', handle: 'bobby' });
+  await rejects(act(alice, {
+    action: 'request', via: 'handle', handle: selected.handle, expectedUid: selected.uid, requestId: rid(),
+  }), 404, 'NOT_FOUND');
+  assert.equal(await data('users/alice/friends/carol'), undefined);
 });
 
 test('profile: name and discoverability edits stick; the handle is case-folded and swapped with its lock', options, async () => {
@@ -571,6 +641,44 @@ test('decline and cancel end a pending request on both sides; repeats and the wr
   assert.equal((await data(`friendships/${pairKey('alice', 'bob')}`)).epoch, 0, 'no friendship ever existed');
 });
 
+test('stale row actions keep replacement requests and friendships intact', options, async () => {
+  await friends.profile(bob);
+  await request(alice, bob);
+  const old = (await data('users/bob/friends/alice')).version;
+  await act(alice, { action: 'cancel', otherUid: bob.uid, expectedVersion: old });
+  await request(alice, bob);
+  const current = (await data('users/bob/friends/alice')).version;
+  assert.notEqual(current, old);
+  await rejects(act(alice, { action: 'cancel', otherUid: bob.uid, expectedVersion: old }), 409, 'STALE_REQUEST');
+  for (const action of ['accept', 'decline']) {
+    await rejects(act(bob, { action, otherUid: alice.uid, expectedVersion: old }), 409, 'STALE_REQUEST');
+  }
+  const accept = () => act(bob, { action: 'accept', otherUid: alice.uid, expectedVersion: current });
+  const { teamId } = await accept();
+  assert.equal((await accept()).teamId, teamId, 'same request is idempotent');
+  await act(bob, { action: 'remove', otherUid: alice.uid, expectedVersion: teamId });
+  await linked(alice, bob);
+  await rejects(act(bob, { action: 'remove', otherUid: alice.uid, expectedVersion: teamId }), 409, 'STALE_REQUEST');
+  assert.equal(await consistent(alice, bob), 'friends');
+});
+
+test('recipient request limit bounds new pending cards and frees room on decline', options, async () => {
+  await friends.profile(bob);
+  await request(carol, bob);
+  const batch = db.batch();
+  for (let i = 1; i < INCOMING_LIMIT; i++) {
+    batch.set(db.doc(`users/bob/friends/pending-${i}`), { state: 'incoming', displayName: 'Pending' });
+  }
+  await batch.commit();
+  await rejects(request(alice, bob), 409, 'RECIPIENT_REQUEST_LIMIT');
+  await act(bob, { action: 'decline', otherUid: carol.uid });
+  const races = await Promise.allSettled([request(alice, bob), request(dave, bob)]);
+  assert.equal(races.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal(races.find(result => result.status === 'rejected').reason.code, 'RECIPIENT_REQUEST_LIMIT');
+  const pending = await db.collection('users/bob/friends').where('state', '==', 'incoming').count().get();
+  assert.equal(pending.data().count, INCOMING_LIMIT);
+});
+
 test('mutual requests become one friendship — sequentially and when sent at the same moment', options, async () => {
   for (const user of [alice, bob, carol, dave]) await friends.profile(user);
   assert.equal((await request(bob, alice)).state, 'outgoing');
@@ -779,7 +887,7 @@ test('block: ends the friendship or request both ways, hides each side from the 
   assert.equal((await request(alice, bob)).state, 'outgoing');
 });
 
-test('block: the block keeps the person\'s name for the Blocked list — profile first, else the card, else Member — and a repeat keeps the first', options, async () => {
+test('block: the Blocked list shows previously visible metadata or Member — and a repeat keeps the first', options, async () => {
   for (const user of [alice, bob, carol]) await friends.profile(user);
   const entry = async other => { const { at, ...rest } = await data(`users/alice/blocks/${other}`); assert.ok(at.toMillis() > 0); return rest; };
   // A friend: the name and handle their profile has, in the document the owner reads on any device.
@@ -791,12 +899,12 @@ test('block: the block keeps the person\'s name for the Blocked list — profile
   await act(bob, { action: 'profile', displayName: 'Robert' });
   await act(alice, { action: 'block', otherUid: 'bob' });
   assert.deepEqual(await entry('bob'), { displayName: 'Bob', handle: 'Bob_B' });
-  // The profile wins over the name on the card from when the request was made.
+  // A pending request only permits the snapshot already in the caller's list.
   await request(carol, alice);
   assert.equal((await data('users/alice/friends/carol')).displayName, 'Carol');
   await act(carol, { action: 'profile', displayName: 'Caro' });
   await act(alice, { action: 'block', otherUid: 'carol' });
-  assert.deepEqual(await entry('carol'), { displayName: 'Caro' });
+  assert.deepEqual(await entry('carol'), { displayName: 'Carol' });
   // No profile: the card the owner already had names them. Here an incoming request from an account that never opened Friends.
   const erin = { uid: 'erin', name: 'Erin' };
   accounts.set(mail(erin), { uid: 'erin', emailVerified: true });
@@ -804,7 +912,8 @@ test('block: the block keeps the person\'s name for the Blocked list — profile
   assert.equal((await db.doc('profiles/erin').get()).exists, false);
   await act(alice, { action: 'block', otherUid: 'erin' });
   assert.deepEqual(await entry('erin'), { displayName: 'Erin' });
-  // Neither profile nor card: the same fallback as every other card, and a uid nobody has is accepted as before.
+  // A block with no visible card keeps a generic name, even for an existing profile.
+  await friends.profile(dave);
   await act(alice, { action: 'block', otherUid: 'dave' });
   await act(alice, { action: 'block', otherUid: 'nobody-here' });
   assert.deepEqual(await entry('dave'), { displayName: 'Member' });
@@ -813,11 +922,11 @@ test('block: the block keeps the person\'s name for the Blocked list — profile
   const mine = environment.authenticatedContext('alice').firestore();
   assert.equal((await assertSucceeds(getDoc(doc(mine, 'users/alice/blocks/bob')))).data().displayName, 'Bob');
   await assertFails(getDoc(doc(environment.authenticatedContext('bob').firestore(), 'users/alice/blocks/bob')));
-  // Lifting the block removes the entry with its name; blocking again takes the name as it is then.
+  // Lifting the block removes the entry. A later block has no friendship to read.
   await act(alice, { action: 'unblock', otherUid: 'bob' });
   assert.equal((await db.doc('users/alice/blocks/bob').get()).exists, false);
   await act(alice, { action: 'block', otherUid: 'bob' });
-  assert.deepEqual(await entry('bob'), { displayName: 'Robert', handle: 'Bob_B' });
+  assert.deepEqual(await entry('bob'), { displayName: 'Member' });
 });
 
 // ─── Team offers (F4) ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -839,10 +948,10 @@ test('offerTeam: a manager offers a team as one document in the friend\'s own co
   const first = await act(alice, command);
   assert.deepEqual(first, { offerId: 'team-alpha', expiresAt: new Date(now + OFFER_TTL_MS).toISOString() });
   const stored = await data('users/bob/teamOffers/team-alpha');
-  assert.deepEqual(Object.keys(stored).sort(), ['expiresAt', 'fromName', 'fromUid', 'role', 'teamId', 'teamName']);
+  assert.deepEqual(Object.keys(stored).sort(), ['expiresAt', 'fromName', 'fromUid', 'role', 'teamId', 'teamName', 'version']);
   assert.deepEqual([stored.teamId, stored.teamName, stored.fromUid, stored.fromName, stored.role, stored.expiresAt.toMillis()], ['team-alpha', 'Alpha', 'alice', 'Alice', 'member', now + OFFER_TTL_MS]);
   assert.deepEqual(await offersOf('alice'), [], 'the sender holds nothing');
-  assert.deepEqual(offerPushes(), [{ kind: 'offer', to: 'bob', from: 'alice', name: 'Alice', offerId: 'team-alpha', key: `${pairKey('alice', 'bob')}:${requestId}` }]);
+  assert.deepEqual(offerPushes(), [{ kind: 'offer', to: 'bob', from: 'alice', name: 'Alice', version: stored.version, offerId: 'team-alpha', key: `${pairKey('alice', 'bob')}:${requestId}` }]);
   // An offer grants nothing: the friend is not a member and has no team.
   assert.equal((await db.doc('teams/team-alpha/members/bob').get()).exists, false);
   assert.deepEqual((await teams.list('bob')).teams, []);
@@ -875,6 +984,26 @@ test('offerTeam: a manager offers a team as one document in the friend\'s own co
   assert.deepEqual(await offersOf('bob'), ['team-alpha', 'team-beta']);
   assert.equal(offerPushes().length, 3);
   assert.equal(await consistent(alice, bob), 'friends');
+});
+
+test('accepting or dismissing a replaced team offer leaves the new offer intact', options, async () => {
+  await befriend(alice, bob);
+  const teamId = 'versioned-team';
+  await makeTeam(alice, teamId);
+  const offer = () => offerOf(alice, teamId, bob);
+  await offer();
+  const path = `users/bob/teamOffers/${teamId}`;
+  const old = (await data(path)).version;
+  await act(bob, { action: 'declineOffer', offerId: teamId, expectedVersion: old });
+  await offer();
+  const current = (await data(path)).version;
+  assert.notEqual(current, old);
+  await rejects(act(bob, { action: 'declineOffer', offerId: teamId, expectedVersion: old }), 404, 'OFFER_UNAVAILABLE');
+  await rejects(act(bob, { action: 'acceptOffer', offerId: teamId, requestId: rid(), expectedVersion: old }), 404, 'OFFER_UNAVAILABLE');
+  assert.equal((await data(path)).version, current);
+  const join = { action: 'acceptOffer', offerId: teamId, requestId: rid(), expectedVersion: current };
+  assert.equal((await act(bob, join)).alreadyMember, false);
+  assert.equal((await act(bob, join)).alreadyMember, true);
 });
 
 test('offerTeam: only an owner or admin of an ordinary active team may offer, to a current friend who is not a member — each refusal has its own code and writes nothing', options, async () => {
@@ -950,6 +1079,7 @@ test('offerTeam: offers, requests and redeems share one budget of 30 per 10 minu
 
 test('acceptOffer: the friend joins through the same core as an invite link — a new generation, the team index, the member count and the signal — and the offer is gone', options, async () => {
   await befriend(bob, alice); await makeTeam(alice, 'team-alpha'); await offerOf(alice, 'team-alpha', bob);
+  const version = (await data('users/bob/teamOffers/team-alpha')).version;
   const requestId = rid(), command = { action: 'acceptOffer', offerId: 'team-alpha', requestId };
   assert.deepEqual(await act(bob, command), { teamId: 'team-alpha', generation: 1, alreadyMember: false });
   const member = await data('teams/team-alpha/members/bob');
@@ -960,7 +1090,7 @@ test('acceptOffer: the friend joins through the same core as an invite link — 
   assert.equal((await data('teams/team-alpha')).memberCount, 2);
   assert.ok((await data('teams/team-alpha/signals/membership')).updatedAt);
   assert.deepEqual(await offersOf('bob'), []);
-  assert.deepEqual(await data(`users/bob/teamJoinRequests/${requestId}`), { teamId: 'team-alpha', offerId: 'team-alpha', generation: 1 });
+  assert.deepEqual(await data(`users/bob/teamJoinRequests/${requestId}`), { teamId: 'team-alpha', offerId: 'team-alpha', generation: 1, version });
   assert.deepEqual((await teams.list('bob')).teams.map(team => [team.id, team.role, team.generation, team.memberCount]), [['team-alpha', 'member', 1, 2]]);
   // A replay is the same answer and changes nothing; another offer or a link join under the same id conflicts.
   assert.deepEqual(await act(bob, command), { teamId: 'team-alpha', generation: 1, alreadyMember: true });
@@ -1127,9 +1257,15 @@ test('push: a team offer notifies the friend once through the real notifier — 
   assert.ok(!JSON.stringify(message).includes('Secret Project'));
   await offerOf(alice, 'team-alpha', bob); // a repeat while live
   assert.equal(sent.length, before + 1);
+  const version = (await data('users/bob/teamOffers/team-alpha')).version;
   await act(bob, { action: 'declineOffer', offerId: 'team-alpha' });
-  await live({ kind: 'offer', to: 'bob', from: 'alice', name: 'Alice', offerId: 'team-alpha', key: 'late' }); // a late push for a declined offer
+  const late = () => live({ kind: 'offer', to: 'bob', from: 'alice', name: 'Alice', version, offerId: 'team-alpha', key: 'late' });
+  await late();
   assert.equal(sent.length, before + 1);
+  await offerOf(alice, 'team-alpha', bob);
+  await late();
+  assert.equal(sent.length, before + 2, 'only the replacement may notify');
+  await act(bob, { action: 'declineOffer', offerId: 'team-alpha' });
   broken = true;
   assert.equal((await offerOf(alice, 'team-beta', bob)).offerId, 'team-beta');
   assert.deepEqual(await offersOf('bob'), ['team-beta']);
@@ -1405,6 +1541,9 @@ test('HTTP: the Friends routes reuse the Teams handler\'s authentication and err
   assert.deepEqual([clash.status, await clash.json()], [409, { error: { code: 'HANDLE_TAKEN' } }]);
   for (let i = 0; i < LOOKUP_LIMIT; i++) await call('token-bob', '/v1/friends', 'POST', { action: 'lookup', handle: `missing_${i}` });
   const limited = await call('token-bob', '/v1/friends', 'POST', { action: 'lookup', handle: 'missing_over' });
+  await db.doc(`friendLimits/${sha('handleSearch:bob')}`).set({ sentAt: Array(60).fill(now - 40_000) });
+  const searchLimited = await call('token-bob', '/v1/friends', 'POST', { action: 'searchHandles', query: 'ali' });
+  assert.deepEqual([searchLimited.status, await searchLimited.json()], [429, { error: { code: 'RATE_LIMITED', retryAfterMs: 20_000 } }]);
   assert.deepEqual([limited.status, await limited.json()], [429, { error: { code: 'RATE_LIMITED' } }]);
   assert.equal((await call('token-bob', '/v1/friends/profile', 'POST', {})).status, 404);
   // Teams routes keep working beside them.

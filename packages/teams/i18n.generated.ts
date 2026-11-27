@@ -53,6 +53,7 @@ export type TeamsKey =
   | 'friends_error_offer_team_gone'
   | 'friends_error_offer_unavailable'
   | 'friends_error_rate_limited'
+  | 'friends_error_recipient_request_limit'
   | 'friends_error_request_limit'
   | 'friends_error_request_unavailable'
   | 'friends_error_session'
@@ -76,6 +77,7 @@ export type TeamsKey =
   | 'friends_link_off'
   | 'friends_link_off_body'
   | 'friends_link_off_title'
+  | 'friends_link_qr'
   | 'friends_link_reset'
   | 'friends_link_reset_body'
   | 'friends_link_reset_title'
@@ -84,9 +86,11 @@ export type TeamsKey =
   | 'friends_link_title'
   | 'friends_load_error'
   | 'friends_loading'
+  | 'friends_me'
   | 'friends_menu_block'
   | 'friends_menu_remove'
   | 'friends_menu_view_profile'
+  | 'friends_my_card'
   | 'friends_name_prompt'
   | 'friends_name_prompt_action'
   | 'friends_note_placeholder'
@@ -101,6 +105,7 @@ export type TeamsKey =
   | 'friends_profile_find_email'
   | 'friends_profile_find_footer'
   | 'friends_profile_find_handle'
+  | 'friends_profile_find_handle_part'
   | 'friends_profile_handle'
   | 'friends_profile_handle_hint'
   | 'friends_profile_name'
@@ -116,6 +121,8 @@ export type TeamsKey =
   | 'friends_requests_received'
   | 'friends_requests_sent'
   | 'friends_search_action'
+  | 'friends_search_back'
+  | 'friends_search_clear'
   | 'friends_search_hint'
   | 'friends_search_placeholder'
   | 'friends_search_title'
@@ -576,6 +583,31 @@ export type TeamsKey =
   | 'teams_usage_tokens_fmt'
   | 'teams_usage_tokens_total_fmt'
   | 'teams_uses'
+  | 'teams_visualization_add'
+  | 'teams_visualization_alias'
+  | 'teams_visualization_apply'
+  | 'teams_visualization_building'
+  | 'teams_visualization_collapse'
+  | 'teams_visualization_confirm'
+  | 'teams_visualization_conflict'
+  | 'teams_visualization_destination'
+  | 'teams_visualization_edit'
+  | 'teams_visualization_expand'
+  | 'teams_visualization_fields'
+  | 'teams_visualization_forward'
+  | 'teams_visualization_import'
+  | 'teams_visualization_limit'
+  | 'teams_visualization_partitions'
+  | 'teams_visualization_personal'
+  | 'teams_visualization_preview'
+  | 'teams_visualization_remove'
+  | 'teams_visualization_retry'
+  | 'teams_visualization_send'
+  | 'teams_visualization_shared'
+  | 'teams_visualization_source'
+  | 'teams_visualization_team'
+  | 'teams_visualization_title'
+  | 'teams_visualization_too_large'
   | 'teams_week'
   | 'teams_you'
   | 'tw_approval_approving'
@@ -983,7 +1015,12 @@ export type TeamsKey =
   | 'tw_turn_off'
   | 'tw_turn_on'
   | 'tw_unchanged'
-  | 'tw_unread_fmt';
+  | 'tw_unread_fmt'
+  | 'tw_visualization_current'
+  | 'tw_visualization_field'
+  | 'tw_visualization_html_only'
+  | 'tw_visualization_next'
+  | 'tw_visualization_unavailable';
 
 export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocale, string>>>> = {
   account_email: { en: 'Email', 'zh-Hans': '邮箱', 'zh-Hant': '電子郵件', ja: 'メールアドレス', ko: '이메일' },
@@ -1035,6 +1072,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   friends_error_offer_team_gone: { en: 'You are no longer a member of this team.', 'zh-Hans': '你已不在此团队中。', 'zh-Hant': '你已不在此團隊中。', ja: 'あなたはもうこのチームのメンバーではありません。', ko: '더 이상 이 팀의 구성원이 아닙니다.' },
   friends_error_offer_unavailable: { en: 'This invitation is no longer available.', 'zh-Hans': '此邀请已失效。', 'zh-Hant': '此邀請已失效。', ja: 'この招待は利用できなくなりました。', ko: '이 초대는 더 이상 사용할 수 없습니다.' },
   friends_error_rate_limited: { en: 'Too many lookups or requests. Try again in a few minutes.', 'zh-Hans': '查找或添加过于频繁，请几分钟后再试。', 'zh-Hant': '尋找或新增過於頻繁，請幾分鐘後再試。', ja: '検索やリクエストが多すぎます。数分後にもう一度お試しください。', ko: '검색 또는 요청이 너무 많습니다. 몇 분 후에 다시 시도하세요.' },
+  friends_error_recipient_request_limit: { en: 'This person has too many pending friend requests. Try again later.', 'zh-Hans': '对方待处理的好友请求已达上限，请稍后再试。', 'zh-Hant': '對方待處理的好友請求已達上限，請稍後再試。', ja: '相手の保留中のフレンドリクエストが上限に達しています。時間をおいてもう一度お試しください。', ko: '상대방의 대기 중인 친구 요청이 한도에 도달했습니다. 나중에 다시 시도하세요.' },
   friends_error_request_limit: { en: 'You have 50 requests waiting. Cancel one first.', 'zh-Hans': '待处理的请求已达 50 个，请先撤销一个。', 'zh-Hant': '待處理的請求已達 50 個，請先取消一個。', ja: '保留中のリクエストが50件あります。先に1件取り消してください。', ko: '대기 중인 요청이 50개입니다. 먼저 하나를 취소하세요.' },
   friends_error_request_unavailable: { en: 'That request is no longer available.', 'zh-Hans': '该请求已不存在。', 'zh-Hant': '該請求已不存在。', ja: 'このリクエストはもう利用できません。', ko: '이 요청은 더 이상 사용할 수 없습니다.' },
   friends_error_session: { en: 'Your session expired. Sign in again.', 'zh-Hans': '登录已过期，请重新登录。', 'zh-Hant': '登入已過期，請重新登入。', ja: 'セッションの期限が切れました。もう一度サインインしてください。', ko: '세션이 만료되었습니다. 다시 로그인하세요.' },
@@ -1058,6 +1096,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   friends_link_off: { en: 'Turn off link', 'zh-Hans': '关闭链接', 'zh-Hant': '關閉連結', ja: 'リンクを無効にする', ko: '링크 끄기' },
   friends_link_off_body: { en: 'No one can add you with it until you create a new one.', 'zh-Hans': '在你创建新链接之前，任何人都无法通过它添加你。', 'zh-Hant': '在你建立新連結之前，任何人都無法透過它新增你。', ja: '新しいリンクを作成するまで、このリンクで追加されることはありません。', ko: '새 링크를 만들 때까지 아무도 이 링크로 나를 추가할 수 없습니다.' },
   friends_link_off_title: { en: 'Turn off your friend link?', 'zh-Hans': '关闭好友链接？', 'zh-Hant': '關閉好友連結？', ja: '友だちリンクを無効にしますか？', ko: '친구 링크를 끌까요?' },
+  friends_link_qr: { en: 'Friend invite QR code', 'zh-Hans': '好友邀请二维码', 'zh-Hant': '好友邀請 QR 碼', ja: '友だち招待用QRコード', ko: '친구 초대 QR 코드' },
   friends_link_reset: { en: 'Reset link', 'zh-Hans': '重置链接', 'zh-Hant': '重設連結', ja: 'リンクをリセット', ko: '링크 재설정' },
   friends_link_reset_body: { en: 'The old link stops working immediately.', 'zh-Hans': '旧链接会立即失效。', 'zh-Hant': '舊連結會立即失效。', ja: '古いリンクはすぐに使えなくなります。', ko: '이전 링크는 즉시 사용할 수 없게 됩니다.' },
   friends_link_reset_title: { en: 'Reset your friend link?', 'zh-Hans': '重置好友链接？', 'zh-Hant': '重設好友連結？', ja: '友だちリンクをリセットしますか？', ko: '친구 링크를 재설정할까요?' },
@@ -1066,9 +1105,11 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   friends_link_title: { en: 'My friend link', 'zh-Hans': '我的好友链接', 'zh-Hant': '我的好友連結', ja: '自分の友だちリンク', ko: '내 친구 링크' },
   friends_load_error: { en: 'Couldn\'t load your friends. Check your connection and try again.', 'zh-Hans': '无法加载好友，请检查网络后重试。', 'zh-Hant': '無法載入好友，請檢查網路後重試。', ja: '友だちを読み込めませんでした。接続を確認してもう一度お試しください。', ko: '친구를 불러오지 못했습니다. 연결을 확인하고 다시 시도하세요.' },
   friends_loading: { en: 'Loading friends…', 'zh-Hans': '正在加载好友…', 'zh-Hant': '正在載入好友…', ja: '友だちを読み込み中…', ko: '친구를 불러오는 중…' },
+  friends_me: { en: 'Me', 'zh-Hans': '我', 'zh-Hant': '我', ja: '自分', ko: '나' },
   friends_menu_block: { en: 'Block', 'zh-Hans': '屏蔽', 'zh-Hant': '封鎖', ja: 'ブロック', ko: '차단' },
   friends_menu_remove: { en: 'Remove friend', 'zh-Hans': '删除好友', 'zh-Hant': '刪除好友', ja: '友だちを削除', ko: '친구 삭제' },
   friends_menu_view_profile: { en: 'View profile', 'zh-Hans': '查看资料', 'zh-Hant': '查看資料', ja: 'プロフィールを見る', ko: '프로필 보기' },
+  friends_my_card: { en: 'My card', 'zh-Hans': '我的名片', 'zh-Hant': '我的名片', ja: 'マイカード', ko: '내 프로필 카드' },
   friends_name_prompt: { en: 'Set your name so friends recognize you.', 'zh-Hans': '设置你的名字，好友才能认出你。', 'zh-Hant': '設定你的名字，好友才能認出你。', ja: '友だちが分かるように名前を設定しましょう。', ko: '친구가 알아볼 수 있도록 이름을 설정하세요.' },
   friends_name_prompt_action: { en: 'Set name', 'zh-Hans': '设置名字', 'zh-Hant': '設定名字', ja: '名前を設定', ko: '이름 설정' },
   friends_note_placeholder: { en: 'Add a note (optional)', 'zh-Hans': '添加留言（可选）', 'zh-Hant': '新增留言（選填）', ja: 'メモを追加（任意）', ko: '메모 추가(선택 사항)' },
@@ -1083,6 +1124,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   friends_profile_find_email: { en: 'Let people find me by email', 'zh-Hans': '允许通过邮箱找到我', 'zh-Hant': '允許透過電子郵件找到我', ja: 'メールアドレスで見つけられるようにする', ko: '이메일로 나를 찾을 수 있게 하기' },
   friends_profile_find_footer: { en: 'Only people who type your exact username or verified email can find you. Your email address is never shown.', 'zh-Hans': '只有输入你完整用户名或已验证邮箱的人才能找到你，你的邮箱地址不会被显示。', 'zh-Hant': '只有輸入你完整使用者名稱或已驗證電子郵件的人才能找到你，你的電子郵件地址不會被顯示。', ja: '正確なユーザー名または確認済みのメールアドレスを入力した人だけがあなたを見つけられます。メールアドレスは表示されません。', ko: '정확한 사용자 이름이나 인증된 이메일을 입력한 사람만 나를 찾을 수 있습니다. 이메일 주소는 표시되지 않습니다.' },
   friends_profile_find_handle: { en: 'Let people find me by username', 'zh-Hans': '允许通过用户名找到我', 'zh-Hant': '允許透過使用者名稱找到我', ja: 'ユーザー名で見つけられるようにする', ko: '사용자 이름으로 나를 찾을 수 있게 하기' },
+  friends_profile_find_handle_part: { en: 'Let people find me by part of my username', 'zh-Hans': '允许通过部分用户名找到我', 'zh-Hant': '允許透過部分使用者名稱找到我', ja: 'ユーザー名の一部で見つけられるようにする', ko: '사용자 이름의 일부로 나를 찾을 수 있게 하기' },
   friends_profile_handle: { en: 'Username', 'zh-Hans': '用户名', 'zh-Hant': '使用者名稱', ja: 'ユーザー名', ko: '사용자 이름' },
   friends_profile_handle_hint: { en: '3–24 letters, numbers or underscores. Once set, it can be changed but not removed.', 'zh-Hans': '3–24 位字母、数字或下划线。设置后可以修改，但不能移除。', 'zh-Hant': '3–24 個字母、數字或底線。設定後可以修改，但無法移除。', ja: '3〜24文字の英数字またはアンダースコア。設定後は変更できますが、削除はできません。', ko: '영문, 숫자, 밑줄 3~24자. 설정한 뒤에는 바꿀 수 있지만 삭제할 수는 없습니다.' },
   friends_profile_name: { en: 'Display name', 'zh-Hans': '显示名称', 'zh-Hant': '顯示名稱', ja: '表示名', ko: '표시 이름' },
@@ -1098,7 +1140,9 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   friends_requests_received: { en: 'Received', 'zh-Hans': '收到的请求', 'zh-Hant': '收到的請求', ja: '受信したリクエスト', ko: '받은 요청' },
   friends_requests_sent: { en: 'Sent', 'zh-Hans': '已发送的请求', 'zh-Hant': '已傳送的請求', ja: '送信したリクエスト', ko: '보낸 요청' },
   friends_search_action: { en: 'Look up', 'zh-Hans': '查找', 'zh-Hant': '尋找', ja: '検索', ko: '찾기' },
-  friends_search_hint: { en: 'Enter an exact @username, an email address or a friend link.', 'zh-Hans': '请输入完整的 @用户名、邮箱地址或好友链接。', 'zh-Hant': '請輸入完整的 @使用者名稱、電子郵件地址或好友連結。', ja: '正確な @ユーザー名、メールアドレス、または友だちリンクを入力してください。', ko: '정확한 @사용자 이름, 이메일 주소 또는 친구 링크를 입력하세요.' },
+  friends_search_back: { en: 'Back to results', 'zh-Hans': '返回搜索结果', 'zh-Hant': '返回搜尋結果', ja: '検索結果に戻る', ko: '검색 결과로 돌아가기' },
+  friends_search_clear: { en: 'Clear search', 'zh-Hans': '清空搜索', 'zh-Hant': '清除搜尋', ja: '検索をクリア', ko: '검색 지우기' },
+  friends_search_hint: { en: 'Enter at least 3 username characters, an email address or a friend link.', 'zh-Hans': '请输入至少 3 个用户名字符、邮箱地址或好友链接。', 'zh-Hant': '請輸入至少 3 個使用者名稱字元、電子郵件地址或好友連結。', ja: 'ユーザー名を3文字以上、メールアドレス、または友だちリンクを入力してください。', ko: '사용자 이름을 3자 이상 입력하거나 이메일 주소 또는 친구 링크를 입력하세요.' },
   friends_search_placeholder: { en: '@username, email or friend link', 'zh-Hans': '@用户名、邮箱或好友链接', 'zh-Hant': '@使用者名稱、電子郵件或好友連結', ja: '@ユーザー名、メールアドレス、友だちリンク', ko: '@사용자 이름, 이메일 또는 친구 링크' },
   friends_search_title: { en: 'Find someone', 'zh-Hans': '查找好友', 'zh-Hant': '尋找好友', ja: '友だちを探す', ko: '친구 찾기' },
   friends_section_offers: { en: 'Team invitations', 'zh-Hans': '团队邀请', 'zh-Hant': '團隊邀請', ja: 'チームへの招待', ko: '팀 초대' },
@@ -1558,6 +1602,31 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_usage_tokens_fmt: { en: '%1$d / %2$d tokens', 'zh-Hans': '%1$d / %2$d tokens', 'zh-Hant': '%1$d / %2$d tokens', ja: '%1$d / %2$d トークン', ko: '%1$d / %2$d 토큰' },
   teams_usage_tokens_total_fmt: { en: '%1$s tokens', 'zh-Hans': '%1$s tokens', 'zh-Hant': '%1$s tokens', ja: '%1$s トークン', ko: '%1$s 토큰' },
   teams_uses: { en: 'Uses', 'zh-Hans': '可用次数', 'zh-Hant': '可用次數', ja: '使用回数', ko: '사용 횟수' },
+  teams_visualization_add: { en: 'Add visualization', 'zh-Hans': '添加可视化', 'zh-Hant': '新增視覺化', ja: '可視化を追加', ko: '시각화 추가' },
+  teams_visualization_alias: { en: 'Binding name', 'zh-Hans': '绑定名称', 'zh-Hant': '繫結名稱', ja: 'バインディング名', ko: '바인딩 이름' },
+  teams_visualization_apply: { en: 'Apply changes', 'zh-Hans': '提交更改', 'zh-Hant': '套用變更', ja: '変更を適用', ko: '변경 적용' },
+  teams_visualization_building: { en: 'Preparing a fixed snapshot…', 'zh-Hans': '正在生成固定快照…', 'zh-Hant': '正在產生固定快照…', ja: '固定スナップショットを作成中…', ko: '고정 스냅샷 준비 중…' },
+  teams_visualization_collapse: { en: 'Collapse', 'zh-Hans': '收起', 'zh-Hant': '收合', ja: '折りたたむ', ko: '접기' },
+  teams_visualization_confirm: { en: 'Confirm data changes', 'zh-Hans': '确认数据更改', 'zh-Hant': '確認資料變更', ja: 'データの変更を確認', ko: '데이터 변경 확인' },
+  teams_visualization_conflict: { en: 'This record changed. Review the current values before applying.', 'zh-Hans': '记录已更新。请核对当前值后提交。', 'zh-Hant': '記錄已更新。請核對目前值後再提交。', ja: 'レコードが更新されました。現在の値を確認してから適用してください。', ko: '레코드가 변경되었습니다. 현재 값을 확인한 후 적용하세요.' },
+  teams_visualization_destination: { en: 'Destination channel', 'zh-Hans': '目标频道', 'zh-Hant': '目標頻道', ja: '転送先のチャンネル', ko: '대상 채널' },
+  teams_visualization_edit: { en: 'Edit together', 'zh-Hans': '共同编辑', 'zh-Hant': '共同編輯', ja: '共同編集', ko: '함께 편집' },
+  teams_visualization_expand: { en: 'Expand', 'zh-Hans': '展开', 'zh-Hant': '展開', ja: '展開', ko: '펼치기' },
+  teams_visualization_fields: { en: 'Visible fields', 'zh-Hans': '可见字段', 'zh-Hant': '可見欄位', ja: '表示フィールド', ko: '표시 필드' },
+  teams_visualization_forward: { en: 'Forward visualization', 'zh-Hans': '转发可视化', 'zh-Hant': '轉發視覺化', ja: '可視化を転送', ko: '시각화 전달' },
+  teams_visualization_import: { en: 'Import HTML', 'zh-Hans': '导入 HTML', 'zh-Hant': '匯入 HTML', ja: 'HTML を読み込む', ko: 'HTML 가져오기' },
+  teams_visualization_limit: { en: 'Visualization size limit (MiB)', 'zh-Hans': '可视化大小上限（MiB）', 'zh-Hant': '視覺化大小上限（MiB）', ja: 'ビジュアライゼーションの上限（MiB）', ko: '시각화 크기 한도(MiB)' },
+  teams_visualization_partitions: { en: 'Visible partitions', 'zh-Hans': '可见分区', 'zh-Hant': '可見分割區', ja: '表示パーティション', ko: '표시 파티션' },
+  teams_visualization_personal: { en: 'Personal data', 'zh-Hans': '个人数据', 'zh-Hant': '個人資料', ja: '個人データ', ko: '개인 데이터' },
+  teams_visualization_preview: { en: 'Preview', 'zh-Hans': '预览', 'zh-Hant': '預覽', ja: 'プレビュー', ko: '미리보기' },
+  teams_visualization_remove: { en: 'Remove', 'zh-Hans': '移除', 'zh-Hant': '移除', ja: '削除', ko: '제거' },
+  teams_visualization_retry: { en: 'Retry', 'zh-Hans': '重试', 'zh-Hant': '重試', ja: '再試行', ko: '다시 시도' },
+  teams_visualization_send: { en: 'Send visualization', 'zh-Hans': '发送可视化', 'zh-Hant': '傳送視覺化', ja: '可視化を送信', ko: '시각화 보내기' },
+  teams_visualization_shared: { en: 'Shared in this channel', 'zh-Hans': '频道已共享', 'zh-Hant': '頻道已分享', ja: 'チャンネルで共有済み', ko: '채널에 공유된 데이터' },
+  teams_visualization_source: { en: 'Data source', 'zh-Hans': '数据来源', 'zh-Hant': '資料來源', ja: 'データソース', ko: '데이터 소스' },
+  teams_visualization_team: { en: 'Team data', 'zh-Hans': '团队数据', 'zh-Hant': '團隊資料', ja: 'チームデータ', ko: '팀 데이터' },
+  teams_visualization_title: { en: 'Title', 'zh-Hans': '标题', 'zh-Hant': '標題', ja: 'タイトル', ko: '제목' },
+  teams_visualization_too_large: { en: 'This visualization exceeds the channel’s size limit.', 'zh-Hans': '此可视化超过了频道的大小上限。', 'zh-Hant': '此視覺化超過了頻道的大小上限。', ja: 'ビジュアライゼーションがチャンネルのサイズ上限を超えています。', ko: '시각화가 채널의 크기 한도를 초과했습니다.' },
   teams_week: { en: '7 days', 'zh-Hans': '7 天', 'zh-Hant': '7 天', ja: '7 日間', ko: '7일' },
   teams_you: { en: 'You', 'zh-Hans': '你', 'zh-Hant': '你', ja: 'あなた', ko: '나' },
   tw_approval_approving: { en: 'Approving…', 'zh-Hans': '正在批准…', 'zh-Hant': '正在核准…', ja: '承認中…', ko: '승인하는 중…' },
@@ -1966,4 +2035,9 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_turn_on: { en: 'Turn on', 'zh-Hans': '开启', 'zh-Hant': '開啟', ja: 'オンにする', ko: '켜기' },
   tw_unchanged: { en: 'unchanged', 'zh-Hans': '未更改', 'zh-Hant': '未變更', ja: '変更なし', ko: '변경 없음' },
   tw_unread_fmt: { en: '%1$s unread', 'zh-Hans': '%1$s 条未读', 'zh-Hant': '%1$s 則未讀', ja: '未読 %1$s 件', ko: '읽지 않음 %1$s개' },
+  tw_visualization_current: { en: 'Current value', 'zh-Hans': '当前值', 'zh-Hant': '目前值', ja: '現在の値', ko: '현재 값' },
+  tw_visualization_field: { en: 'Field', 'zh-Hans': '字段', 'zh-Hant': '欄位', ja: 'フィールド', ko: '필드' },
+  tw_visualization_html_only: { en: 'HTML only', 'zh-Hans': '纯 HTML', 'zh-Hant': '僅 HTML', ja: 'HTML のみ', ko: 'HTML만' },
+  tw_visualization_next: { en: 'New value', 'zh-Hans': '新值', 'zh-Hant': '新值', ja: '新しい値', ko: '새 값' },
+  tw_visualization_unavailable: { en: 'Visualization unavailable', 'zh-Hans': '可视化无法打开', 'zh-Hant': '無法開啟視覺化', ja: '可視化を開けません', ko: '시각화를 열 수 없습니다' },
 };

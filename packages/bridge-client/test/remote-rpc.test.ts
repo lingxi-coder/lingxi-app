@@ -8,6 +8,7 @@ import { test } from 'node:test';
 
 import { ManualClock } from '../src/remote/clock.js';
 import { RemoteProtocolError } from '../src/remote/errors.js';
+import { CancellableImageRequests } from '../src/remote/imageRequests.js';
 import { RemoteRpcError, REMOTE_ERROR_CODES, RpcPeer, type RemoteErrorCode } from '../src/remote/rpc.js';
 import { MessageTransport, type FragmentLink, type RemoteTransport } from '../src/remote/transport.js';
 import {
@@ -108,6 +109,57 @@ function rawPeer() {
 }
 
 const codeOf = (error: unknown): string | undefined => (error instanceof RemoteRpcError ? error.code : undefined);
+
+test('thumbnail cancellation reaches the peer and frees capacity after the handler acknowledges it', async () => {
+  const { a, b } = rpcPair();
+  let acknowledge: (() => void) | undefined;
+  b.onRequest((method, _params, signal) => {
+    if (method !== 'image.get' || !signal) return 'unaffected';
+    return new Promise(resolve => {
+      signal.addEventListener('abort', () => { acknowledge = () => resolve('late response'); }, { once: true });
+    });
+  });
+  const controller = new AbortController();
+  const result = a.request('image.get', { size: 'thumbnail' }, { signal: controller.signal });
+  let settled = false;
+  void result.then(() => { settled = true; }, () => { settled = true; });
+  await settle();
+  controller.abort();
+  await until(() => acknowledge !== undefined);
+  assert.equal(settled, false, 'local cancellation does not release a live transport request');
+  assert.equal(await a.request('image.get', { size: 'original' }), 'unaffected');
+  acknowledge!();
+  await assert.rejects(result, error => codeOf(error) === 'closed');
+});
+
+test('image subscribers share work and only the last subscriber aborts the load', async () => {
+  const cache = new CancellableImageRequests<string>(new Map());
+  const first = new AbortController();
+  const last = new AbortController();
+  let release: (() => void) | undefined;
+  let sourceSignal: AbortSignal | undefined;
+  let attempts = 0;
+  const load = (signal: AbortSignal) => new Promise<string>(resolve => {
+    attempts++;
+    sourceSignal = signal;
+    release = () => resolve('obsolete result');
+  });
+  const speculative = cache.fetch('key', load, first.signal);
+  const visible = cache.fetch('key', load, last.signal);
+  await until(() => release !== undefined);
+  first.abort();
+  await assert.rejects(speculative, { name: 'AbortError' });
+  assert.equal(attempts, 1);
+  assert.equal(sourceSignal?.aborted, false);
+  last.abort();
+  assert.equal(sourceSignal?.aborted, true);
+  const fresh = cache.fetch('key', async () => 'fresh result');
+  release!();
+  await assert.rejects(visible, { name: 'AbortError' });
+  assert.equal(await fresh, 'fresh result');
+  assert.equal(await cache.fetch('key', load), 'fresh result');
+  assert.equal(attempts, 1);
+});
 
 // ── MessageTransport ─────────────────────────────────────────────────────────
 

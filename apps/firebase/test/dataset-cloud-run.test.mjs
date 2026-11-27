@@ -92,6 +92,16 @@ test('a rolled-back Core requires gateway verification for commands and browser 
   assert.equal(verified, 2);
 });
 
+test('Dataset gateway requires the exact Core contract before forwarding', async () => {
+  const paths = [];
+  const gateway = createDatasetGateway('https://core.test', async url => {
+    paths.push(url.pathname);
+    return Response.json({ protocol: DATA_PROTOCOL_VERSION, contractSha256: '0'.repeat(64) });
+  });
+  await assert.rejects(gateway.command('fixture', { command: { action: 'describe' } }), { code: 'DATA_CONTRACT_MISMATCH' });
+  assert.deepEqual(paths, ['/v2/contract']);
+});
+
 test('Dataset limits apply to bytes before JSON parsing', async () => {
   const handle = createTeamsHandler({ store: { db: {} }, datasets: async () => assert.fail(),
     verifyToken: async () => assert.fail() });

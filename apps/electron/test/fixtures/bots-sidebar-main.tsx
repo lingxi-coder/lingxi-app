@@ -1,4 +1,5 @@
 import { DESKTOP_BRIDGE_GLOBAL } from '../../src/shared/desktopBridge';
+import type { BotMarketRequest } from '../../src/shared/botMarket';
 import { createRoot } from 'react-dom/client';
 import { App } from '../../src/renderer/App';
 import { fixtureAccountSnapshot } from './provider-accounts-mock';
@@ -57,6 +58,12 @@ const runtime = (session: { projectPath: string; sessionId: string }, botId?: st
     runtimes: [runtime({ projectPath, sessionId: 'project-session' }), ...botRuntimes.map((entry) => runtime(entry, entry.botId))],
     projectCatalogs: { [projectPath]: { sessions: [] } }, diagnostics: [], providerAccountSnapshot: fixtureAccountSnapshot(['openai']),
   }),
+  openSession: async (path: string, sessionId: string) => {
+    if (path !== projectPath || sessionId !== 'project-session') throw new Error('Unknown project session');
+    activeSession = { projectPath, sessionId, mode: 'code', projectId: projectPath };
+    settings.activeSession = activeSession;
+    return (window as any)[DESKTOP_BRIDGE_GLOBAL].bootstrap();
+  },
   updateSettings: async (patch: any) => {
     calls.push(['updateSettings', patch]);
     // Like the host: the sidebar keys left out of an update keep what they were, and a first update starts from the defaults.
@@ -81,7 +88,15 @@ const runtime = (session: { projectPath: string; sessionId: string }, botId?: st
     onSessionShown: () => () => {}, onPromptSent: () => () => {},
     persona: { get: async () => '', set: async () => {} },
     memory: { list: async () => [], read: async () => '', write: async () => {}, delete: async () => {} },
-    skills: { list: async () => [], delete: async () => {}, importFromUser: async () => ({ name: '', active: { received: 0, sent: 0 } }), listImportable: async () => [] },
+    skills: { list: async () => [{ name: 'weekly-notes' }, { name: 'meeting-summary' }, { name: 'project-handbook' }], delete: async () => {}, importFromUser: async () => ({ name: '', active: { received: 0, sent: 0 } }), listImportable: async () => [] },
+    market: async (request: BotMarketRequest) => {
+      calls.push(['market', request]);
+      if (request.action === 'prepare') return {
+        id: 'fixture-preview', digest: 'fixture-digest',
+        manifest: { name: 'Alpha', version: request.selection.version, license: request.selection.license },
+        files: [{ path: 'ROLE.md', text: 'Write clear weekly notes.' }],
+      };
+    },
     tasks: { list: async () => ({ tasks: [], truncated: false, active: { received: 0, sent: 0 } }), cancel: async () => {}, onChanged: () => () => {} },
     workspaceRequests: { list: async () => [], decide: async () => { throw new Error('Fixture: no request to answer.'); }, onChanged: () => () => {} },
     loginItem: { status: async () => ({ available: false, enabled: false, needsApproval: false }), set: async () => ({ available: false, enabled: false, needsApproval: false }), openSettings: async () => {} },

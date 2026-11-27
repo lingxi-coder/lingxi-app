@@ -56,6 +56,7 @@ final class RemoteConversationSource: ConversationSource {
     let sessionID: String
     let uid: String
     var sessionMode: SessionMode { model.sessionMode }
+    private(set) var previewMode: SessionMode?
     var isApprovalCapability: Bool { RemoteApprovalCapability.accepts(sessionID) }
     let isTemporaryConversation = true
     var model: ConversationModel { projection.model }
@@ -82,9 +83,8 @@ final class RemoteConversationSource: ConversationSource {
     @ObservationIgnored private var history: [MessageDto] = []
     @ObservationIgnored private var records: [RemoteSeqRecordFfi] = []
     @ObservationIgnored private var lastSequence: UInt64?
-    @ObservationIgnored private var imageTasks: [String: Task<Void, Never>] = [:]
-    @ObservationIgnored private var imageCache: [String: RemoteImageFfi] = [:]
-    @ObservationIgnored private var imageEpoch: UInt64 = 0
+    private let imageScope = UUID().uuidString
+    private var imageEpoch: UInt64 = 0
     @ObservationIgnored private var promptBotNames = RemotePromptBotNames()
     @ObservationIgnored private var valid = true
     @ObservationIgnored private var nextSendID: UInt64 = 1
@@ -141,17 +141,12 @@ final class RemoteConversationSource: ConversationSource {
     func suspendConnection() {
         guard valid else { return }
         imageEpoch &+= 1
-        for task in imageTasks.values { task.cancel() }
-        imageTasks.removeAll()
         phase = .offline
     }
 
     func invalidate() {
         valid = false
         imageEpoch &+= 1
-        for task in imageTasks.values { task.cancel() }
-        imageTasks.removeAll()
-        imageCache.removeAll()
         promptBotNames.removeAll()
         modeAdmission.invalidate()
         history = []
@@ -169,6 +164,16 @@ final class RemoteConversationSource: ConversationSource {
 
     func receive(_ update: RemoteSessionUpdateFfi) {
         guard valid, update.sessionId == sessionID else { return }
+        if !isApprovalCapability, !model.sessionModeKnown, update.phase == .loading, update.replace {
+            previewMode = update.messages.isEmpty ? nil : update.sessionMode.map { SessionMode(dto: $0) }
+            projection.replaceRemoteTranscript(previewMode == nil ? [] : update.messages, sessionID: sessionID)
+            setPhase(.loading)
+            return
+        }
+        if previewMode != nil, update.phase != .loading {
+            previewMode = nil
+            if !update.replace { projection.replaceRemoteTranscript([], sessionID: sessionID) }
+        }
         if let code = update.error?.code,
            code == "SESSION_MODE_OVERFLOW" || code == "SESSION_MODE_MISMATCH" {
             // The native client may reject while withholding Loading records;
@@ -240,6 +245,7 @@ final class RemoteConversationSource: ConversationSource {
     }
 
     private func setPhase(_ next: RemoteSessionPhaseFfi) {
+        if phase != next { imageEpoch &+= 1 }
         if phase == .live && next != .live { accountEpoch &+= 1 }
         phase = next
     }
@@ -258,9 +264,6 @@ final class RemoteConversationSource: ConversationSource {
             history = update.messages
             records = update.records
             lastSequence = update.records.last?.seq
-            for task in imageTasks.values { task.cancel() }
-            imageTasks.removeAll()
-            imageCache.removeAll()
             promptBotNames.removeAll()
             rebuild()
         } else {
@@ -276,7 +279,6 @@ final class RemoteConversationSource: ConversationSource {
         }
         projection.reconcileRemoteState(update)
         if let error = update.error { model.error = ConversationError(kind: .host, message: error.message) }
-        hydrateImages()
         if becameLive {
             model.error = nil
             perform { client in
@@ -313,28 +315,24 @@ final class RemoteConversationSource: ConversationSource {
         }
     }
 
-    private func hydrateImages() {
-        let references = Set(model.messages.flatMap(\.images).map(\.url).filter { $0.hasPrefix(sessionID + ":") })
-        for reference in references {
-            if let image = imageCache[reference] {
-                projection.hydrateRemoteImage(reference: reference, mediaType: image.mediaType, bytes: image.bytes)
-            } else if imageTasks[reference] == nil {
-                let epoch = imageEpoch
-                imageTasks[reference] = Task { [weak self] in
-                    guard let self else { return }
-                    do {
-                        guard let ticket = manager.connectionTicket(hostID: hostID, uid: uid) else { throw RemoteFfiError.NotConnected }
-                        let image = try await manager.withSessionClient(hostID: hostID, uid: uid, ticket: ticket) {
-                            try await $0.fetchImage(sessionId: sessionID, imageRef: reference)
-                        }
-                        guard valid, epoch == imageEpoch, !Task.isCancelled else { return }
-                        imageCache[reference] = image
-                        projection.hydrateRemoteImage(reference: reference, mediaType: image.mediaType, bytes: image.bytes)
-                    } catch { }
-                    if epoch == imageEpoch { imageTasks.removeValue(forKey: reference) }
-                }
-            }
+    var sessionImageLoader: SessionImageLoader {
+        let epoch = imageEpoch
+        return SessionImageLoader(cacheKey: "\(imageScope):\(epoch)", sessionID: sessionID) { [weak self] reference, thumbnail in
+            guard let self else { throw RemoteFfiError.NotConnected }
+            return try await self.loadSessionImage(reference, thumbnail: thumbnail, epoch: epoch)
         }
+    }
+
+    private func loadSessionImage(_ reference: String, thumbnail: Bool, epoch: UInt64) async throws -> Data {
+        guard canControl, epoch == imageEpoch, reference.hasPrefix(sessionID + ":"),
+              let ticket = manager.connectionTicket(hostID: hostID, uid: uid)
+        else { throw RemoteFfiError.NotConnected }
+        let image = try await manager.withSessionClient(hostID: hostID, uid: uid, ticket: ticket) {
+            try await $0.fetchImageVariant(sessionId: sessionID, imageRef: reference, thumbnail: thumbnail)
+        }
+        try Task.checkCancellation()
+        guard canControl, epoch == imageEpoch else { throw RemoteFfiError.NotConnected }
+        return image.bytes
     }
 
     private var canControl: Bool { valid && model.sessionModeKnown && phase == .live }

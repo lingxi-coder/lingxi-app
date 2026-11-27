@@ -30,6 +30,7 @@ data class ProviderAccountRow(
     val status: String,
     val reason: String?,
     val cooldownUntilMs: Long?,
+    val additionalOpenaiModels: Boolean = false,
 )
 
 data class ProviderDeviceAuthorization(val accountId: String, val userCode: String, val verificationUrl: String, val expiresInSeconds: Long)
@@ -369,6 +370,7 @@ internal fun decodeProviderAccounts(json: String): ProviderAccountsState {
                 accountId = account.getString("accountId"), providerId = account.getString("providerId"),
                 displayName = account.getString("displayName"), authKind = account.getString("authKind"),
                 executionBindingId = account.getString("executionBindingId"), enabled = account.getBoolean("enabled"),
+                additionalOpenaiModels = account.optBoolean("additionalOpenaiModels"),
                 userPriority = account.getLong("userPriority"), identityGeneration = account.getLong("identityGeneration"), status = status?.optString("status") ?: "unknown",
                 reason = status?.optString("reason")?.takeUnless { it.isBlank() || it == "null" },
                 cooldownUntilMs = status?.takeUnless { it.isNull("cooldownUntilMs") }?.optLong("cooldownUntilMs"),

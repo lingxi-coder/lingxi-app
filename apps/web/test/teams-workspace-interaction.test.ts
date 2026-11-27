@@ -105,6 +105,11 @@ scenario('composer: @ offers the Bots of the conversation, only a chosen Bot is 
   const page = await mount(workspace, conversationView(workspace)); context.after(() => page.unmount());
   const box = () => page.oneByLabel('Message');
   assert.equal(page.byClass('tw-mentions').length, 0);
+  await page.type(box(), 'hey');
+  await page.click(page.oneByLabel('Add to message'));
+  await page.click(page.find(node => node.props.role === 'menuitem' && textOf(node).includes('Mention (@)'))[0]);
+  assert.equal(page.editorText(), 'hey @');
+  assert.equal(page.byClass('tw-mentions').length, 1);
   await page.type(box(), 'hey @Fix', 8);
   const options = page.find(node => node.props.role === 'option');
   assert.deepEqual(options.map(textOf), ['FBFixture BotStatus unverified'], 'a missing availability projection is not presented as online');

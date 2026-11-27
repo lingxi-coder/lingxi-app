@@ -1,7 +1,7 @@
 package com.lingxi.code.teams
 
 /** Unsent state stays in the existing workspace draft, never a second message store. */
-internal data class ComposerDraft(val text: String = "", val replyToId: String? = null, val editingId: String? = null, val targets: Set<String> = emptySet(), val mentionEntities: List<TeamMentionEntity> = emptyList())
+internal data class ComposerDraft(val text: String = "", val replyToId: String? = null, val editingId: String? = null, val targets: Set<String> = emptySet(), val mentionEntities: List<TeamMentionEntity> = emptyList(), val formats: List<TeamMessageFormat> = emptyList())
 
 /** Why the composer cannot be used (SPEC-mobile-team-bot-ui section 8.3; mirrors `Composer.tsx`). */
 internal enum class ComposerLock { None, OwnerReading, BotHandedOver, BotUnverified, BotChecking, BotUnavailable }

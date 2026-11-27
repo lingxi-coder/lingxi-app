@@ -208,7 +208,8 @@ internal class TeamsWorkspace(
         if (draft == ComposerDraft()) drafts.remove(key) else drafts[key] = draft
         val value = if (draft == ComposerDraft()) null else JSONObject().put("text", draft.text)
             .put("replyTo", draft.replyToId).put("editingId", draft.editingId).put("targets", JSONArray(draft.targets.toList()))
-            .put("mentionEntities", JSONArray(draft.mentionEntities.map { it.json() })).toString()
+            .put("mentionEntities", JSONArray(draft.mentionEntities.map { it.json() }))
+            .put("formats", JSONArray(draft.formats.map { it.json() })).toString()
         draftWrites.launch {
             draftLock.withLock {
                 runCatching { kotlinx.coroutines.withContext(Dispatchers.IO) { inbox.store.setValue(owner, "draft:$key", value) } }
@@ -227,7 +228,8 @@ internal class TeamsWorkspace(
             if (currentUid != owner || key in editedDrafts) return@launch
             drafts[key] = ComposerDraft(restored.optString("text"), restored.stringOrNull("replyTo"),
                 restored.stringOrNull("editingId"), restored.optJSONArray("targets")?.strings()?.toSet().orEmpty(),
-                TeamMentionEntity.parse(restored.optJSONArray("mentionEntities"), restored.optString("text")))
+                TeamMentionEntity.parse(restored.optJSONArray("mentionEntities"), restored.optString("text")),
+                TeamMessageFormat.parse(restored.optJSONArray("formats"), restored.optString("text")))
         }
     }
 

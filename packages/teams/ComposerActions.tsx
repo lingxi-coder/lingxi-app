@@ -9,10 +9,11 @@ const actions = [
   ['underline', 'U', 'tw_format_underline'], ['strikeThrough', 'S', 'tw_format_strike'],
 ] as const;
 
-export function ComposerActions({ locale, onOpen, onAttach, onFormat, activeStyles }: {
+export function ComposerActions({ locale, onOpen, onAttach, onMention, onFormat, activeStyles }: {
   locale: string;
   onOpen(): void;
   onAttach?: (kind: 'photos' | 'files') => void;
+  onMention?: () => void;
   onFormat(action: FormatAction): void;
   activeStyles: number;
 }) {
@@ -41,9 +42,10 @@ export function ComposerActions({ locale, onOpen, onAttach, onFormat, activeStyl
     };
   }, [menu]);
 
+  const hasAddActions = Boolean(onAttach || onMention);
   const open = () => {
     onOpen();
-    setMenu(onAttach ? 'add' : 'format');
+    setMenu(hasAddActions ? 'add' : 'format');
   };
 
   const keys = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -61,7 +63,7 @@ export function ComposerActions({ locale, onOpen, onAttach, onFormat, activeStyl
         setMenu('format');
         break;
       case 'ArrowLeft':
-        if (menu !== 'format' || !onAttach) return;
+        if (menu !== 'format' || !hasAddActions) return;
         setMenu('add');
         break;
       case 'Escape':
@@ -95,19 +97,24 @@ export function ComposerActions({ locale, onOpen, onAttach, onFormat, activeStyl
       onClick={() => { if (menu) { setMenu(undefined); trigger.current?.focus(); } else open(); }}><Icon name="plus" size={19} /></button>
     {menu ? <div id={id} role="menu" aria-label={menu === 'add' ? label : format} className="tw-compose-menu" data-page={menu} key={menu}>
       {menu === 'add' ? <>
-        <button type="button" role="menuitem" tabIndex={-1} onClick={() => attach('photos')}>
-          <span className="tw-compose-menu-icon"><Icon name="image" size={17} /></span>{t('teams_file_add_photos')}
-        </button>
-        <button type="button" role="menuitem" tabIndex={-1} title={t('tw_composer_attach')}
-          onClick={() => attach('files')}>
-          <span className="tw-compose-menu-icon"><Icon name="clip" size={17} /></span>{t('teams_file_add')}
-        </button>
+        {onAttach ? <>
+          <button type="button" role="menuitem" tabIndex={-1} onClick={() => attach('photos')}>
+            <span className="tw-compose-menu-icon"><Icon name="image" size={17} /></span>{t('teams_file_add_photos')}
+          </button>
+          <button type="button" role="menuitem" tabIndex={-1} title={t('tw_composer_attach')}
+            onClick={() => attach('files')}>
+            <span className="tw-compose-menu-icon"><Icon name="clip" size={17} /></span>{t('teams_file_add_documents')}
+          </button>
+        </> : null}
+        {onMention ? <button type="button" role="menuitem" tabIndex={-1} onClick={() => { setMenu(undefined); onMention(); }}>
+          <span className="tw-compose-menu-icon" aria-hidden="true">@</span>{t('teams_composer_mention')}
+        </button> : null}
         <button type="button" role="menuitem" tabIndex={-1} aria-haspopup="menu" onClick={() => setMenu('format')}>
           <span className="tw-compose-menu-icon tw-compose-menu-letters" aria-hidden="true">Aa</span>{format}
           <span className="tw-compose-menu-next" aria-hidden="true">›</span>
         </button>
       </> : <>
-        {onAttach ? <button type="button" role="menuitem" tabIndex={-1} className="tw-compose-menu-back" onClick={() => setMenu('add')}>
+        {hasAddActions ? <button type="button" role="menuitem" tabIndex={-1} className="tw-compose-menu-back" onClick={() => setMenu('add')}>
           <span aria-hidden="true">‹</span>{t('remote_back')}
         </button> : null}
         {actions.map(([action, glyph, title]) => {

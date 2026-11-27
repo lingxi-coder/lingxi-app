@@ -296,6 +296,7 @@ export type TeamsKey =
   | 'teams_composer_lock_bot_unavailable'
   | 'teams_composer_lock_bot_unverified'
   | 'teams_composer_lock_owner_reading'
+  | 'teams_composer_mention'
   | 'teams_composer_mention_options'
   | 'teams_composer_note_bot_dm'
   | 'teams_composer_note_group'
@@ -368,7 +369,7 @@ export type TeamsKey =
   | 'teams_error_reply_superseded'
   | 'teams_error_sync_failed'
   | 'teams_expiry'
-  | 'teams_file_add'
+  | 'teams_file_add_documents'
   | 'teams_file_add_photos'
   | 'teams_file_error_count'
   | 'teams_file_error_damaged'
@@ -1384,6 +1385,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_composer_lock_bot_unavailable: { en: 'This Bot is not available to you right now.', 'zh-Hans': '此 Bot 目前对你不可用。', 'zh-Hant': '此 Bot 目前對你不可用。', ja: 'この Bot は現在利用できません。', ko: '이 Bot은 지금 사용할 수 없습니다.' },
   teams_composer_lock_bot_unverified: { en: 'Bot availability could not be verified. Reconnect to check.', 'zh-Hans': '未能确认 Bot 可用状态，请联网后重试。', 'zh-Hant': '未能確認 Bot 可用狀態，請連線後重試。', ja: 'Bot の利用可否を確認できませんでした。再接続して確認してください。', ko: 'Bot 사용 가능 여부를 확인하지 못했습니다. 다시 연결해 확인하세요.' },
   teams_composer_lock_owner_reading: { en: 'You can read this conversation because you maintain its Bot, but only participants can send messages.', 'zh-Hans': '你因维护其中的 Bot 而可阅读此会话，但只有参与者可以发送消息。', 'zh-Hant': '你因維護其中的 Bot 而可閱讀此會話，但只有參與者可以傳送訊息。', ja: 'あなたはこの会話に含まれる Bot のメンテナーなので閲覧できますが、メッセージを送れるのは参加者だけです。', ko: '이 대화에 포함된 Bot의 메인테이너이므로 읽을 수 있지만, 메시지는 참가자만 보낼 수 있습니다.' },
+  teams_composer_mention: { en: 'Mention (@)', 'zh-Hans': '提及 (@)', 'zh-Hant': '提及 (@)', ja: 'メンション (@)', ko: '멘션 (@)' },
   teams_composer_mention_options: { en: 'Mention suggestions', 'zh-Hans': '提及候选', 'zh-Hant': '提及候選', ja: 'メンション候補', ko: '멘션 후보' },
   teams_composer_note_bot_dm: { en: 'Messages ask this Bot automatically. Its maintainer can read this conversation.', 'zh-Hans': '发送消息会请求此 Bot。其维护者可阅读此会话。', 'zh-Hant': '傳送訊息會請求此 Bot。其維護者可閱讀此會話。', ja: 'メッセージを送ると、この Bot に自動で依頼されます。メンテナーはこの会話を読めます。', ko: '메시지를 보내면 이 Bot에게 자동으로 요청됩니다. 메인테이너가 이 대화를 읽을 수 있습니다.' },
   teams_composer_note_group: { en: 'Type @ to ask a Bot. Only Bots chosen from the list run.', 'zh-Hans': '输入 @ 请求 Bot。仅从列表中选择的 Bot 会执行。', 'zh-Hant': '輸入 @ 請求 Bot。僅從清單中選擇的 Bot 會執行。', ja: 'Bot に依頼するには @ を入力します。一覧から選んだ Bot だけが実行されます。', ko: 'Bot에게 요청하려면 @를 입력하세요. 목록에서 선택한 Bot만 실행됩니다.' },
@@ -1456,7 +1458,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_error_reply_superseded: { en: 'Someone wrote in the chat again, so the reply was dropped.', 'zh-Hans': '有人在会话中再次发言，这条回复已丢弃。', 'zh-Hant': '有人在對話中再次發言，這則回覆已捨棄。', ja: 'チャットで誰かが再び書き込んだため、この返信は破棄されました。', ko: '채팅에서 누군가 다시 글을 써서 이 답장은 폐기되었습니다.' },
   teams_error_sync_failed: { en: 'Could not sync messages. Check your connection and try again.', 'zh-Hans': '消息同步未完成，请检查网络后重试。', 'zh-Hant': '訊息同步未完成，請檢查網路後重試。', ja: 'メッセージを同期できませんでした。接続を確認してもう一度お試しください。', ko: '메시지를 동기화하지 못했습니다. 연결을 확인한 후 다시 시도하세요.' },
   teams_expiry: { en: 'Expires in', 'zh-Hans': '有效期', 'zh-Hant': '有效期限', ja: '有効期間', ko: '유효 기간' },
-  teams_file_add: { en: 'Add files', 'zh-Hans': '添加文件', 'zh-Hant': '加入檔案', ja: 'ファイルを追加', ko: '파일 추가' },
+  teams_file_add_documents: { en: 'Choose Files', 'zh-Hans': '选取文件', 'zh-Hant': '選擇檔案', ja: 'ファイルを選択', ko: '파일 선택' },
   teams_file_add_photos: { en: 'Photo Library', 'zh-Hans': '照片图库', 'zh-Hant': '照片圖庫', ja: '写真ライブラリ', ko: '사진 보관함' },
   teams_file_error_count: { en: 'A message carries up to five files.', 'zh-Hans': '一条消息最多带五个文件。', 'zh-Hant': '一則訊息最多帶五個檔案。', ja: '1 件のメッセージに添付できるファイルは 5 個までです。', ko: '메시지 하나에 파일은 최대 5개입니다.' },
   teams_file_error_damaged: { en: 'The file could not be read whole. Try again.', 'zh-Hans': '未能完整读取文件，请重试。', 'zh-Hant': '未能完整讀取檔案，請重試。', ja: 'ファイルを完全に読み取れませんでした。もう一度お試しください。', ko: '파일을 온전히 읽지 못했습니다. 다시 시도하세요.' },

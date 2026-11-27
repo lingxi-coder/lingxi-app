@@ -289,7 +289,7 @@ class TeamsTabUiTest {
                             conversation = conversation, label = "Ann", uid = uid, messaging = state, draft = draft, replyTo = null, editing = null, replyAuthor = "",
                             members = roster,
                             onDraft = { draft = it }, onCancelReply = { events += "cancelReply" }, onCancelEdit = { events += "cancelEdit" },
-                            onSend = { sent, targets, _, done -> events += "send:$sent:$targets"; done() },
+                            onSend = { sent, targets, _, _, done -> events += "send:$sent:$targets"; done() },
                         )
                     }
                 }
@@ -361,6 +361,7 @@ class TeamsTabUiTest {
 
     @Test fun askingABotPicksItFromTheListAndKeepsItAsAChip() {
         showComposer(conversation("g", "group", "Crew chat", listOf("user:u1", "user:u2", helper.sharedBotId), 1, 1, base))
+        rule.onNodeWithTag(TeamsTags.ATTACH).performClick()
         rule.onNodeWithTag(TeamsTags.ASK_BOT).performClick()
         rule.waitForIdle()
         rule.onNodeWithText("Helper").performClick()

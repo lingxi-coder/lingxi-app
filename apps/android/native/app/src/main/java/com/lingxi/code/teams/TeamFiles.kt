@@ -8,6 +8,7 @@ import android.graphics.ImageDecoder
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -24,7 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
-import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.PictureAsPdf
@@ -84,9 +85,10 @@ internal object TeamFileReader {
     /** A picture that has to be made into a JPEG is read up to this size; a larger one is refused as too large. */
     private const val PICTURE_BYTES = 64 * 1024 * 1024
 
-    suspend fun read(context: Context, uris: List<Uri>): List<TeamChosenFile> = withContext(Dispatchers.IO) { uris.map { read(context.contentResolver, it) } }
+    suspend fun read(context: Context, uris: List<Uri>, photos: Boolean = false): List<TeamChosenFile> =
+        withContext(Dispatchers.IO) { uris.map { read(context.contentResolver, it, photos) } }
 
-    private fun read(resolver: ContentResolver, uri: Uri): TeamChosenFile {
+    private fun read(resolver: ContentResolver, uri: Uri, photo: Boolean): TeamChosenFile {
         var name = uri.lastPathSegment ?: "file"; var size = -1L
         runCatching {
             resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { row ->
@@ -95,7 +97,7 @@ internal object TeamFileReader {
         }
         // A provider that does not know a file's kind says "octet-stream": the name decides then.
         val type = resolver.getType(uri).orEmpty().let { if (it == "application/octet-stream") "" else it }
-        val picture = type.startsWith("image/")
+        val picture = photo || type.startsWith("image/")
         fun refused(code: String) = TeamChosenFile(name, type, ByteArray(0), code)
         return try {
             // A file over the limit is refused before it is read.
@@ -141,21 +143,96 @@ private fun fileIcon(mime: String): ImageVector = when (mime) {
 
 // --- the unsent files above the message box ---------------------------------------------------------
 
-/** The "add files" button of the message box: the system's file chooser, for pictures, PDFs and text files. */
+/** The message attachment menu opens the system photo or document picker. */
 @Composable
-internal fun TeamAttachButton(enabled: Boolean, onChosen: (List<TeamChosenFile>) -> Unit) {
+internal fun TeamAttachButton(
+    enabled: Boolean,
+    onChosen: ((List<TeamChosenFile>) -> Unit)?,
+    canAttach: Boolean,
+    onMention: (() -> Unit)?,
+    onFormat: (TeamTextStyle) -> Unit,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var reading by remember { mutableStateOf(false) }
-    val chooser = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+    var expanded by remember { mutableStateOf(false) }
+    var showFormats by remember { mutableStateOf(false) }
+
+    fun read(uris: List<Uri>, photos: Boolean = false) {
+        if (uris.isEmpty()) return
         reading = true
-        scope.launch { try { onChosen(TeamFileReader.read(context.applicationContext, uris)) } finally { reading = false } }
+        scope.launch {
+            try { onChosen?.invoke(TeamFileReader.read(context.applicationContext, uris, photos)) }
+            finally { reading = false }
+        }
     }
-    val label = stringResource(R.string.teams_file_add)
-    IconButton(enabled = enabled && !reading, onClick = { chooser.launch(TeamAttachments.CHOOSER_TYPES) }, modifier = Modifier.testTag(TeamsTags.ATTACH)) {
-        // The button keeps its name while the files are being read.
-        if (reading) CircularProgressIndicator(Modifier.size(20.dp).semantics { contentDescription = label }, strokeWidth = 2.dp) else Icon(Icons.Outlined.AttachFile, label)
+
+    val photos = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(TeamAttachments.MESSAGE_FILES)) { uris ->
+        read(uris, photos = true)
+    }
+    val documents = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        read(uris)
+    }
+    val label = stringResource(R.string.teams_composer_add)
+    Box {
+        IconButton(enabled = enabled && !reading, onClick = { showFormats = false; expanded = true }, modifier = Modifier.testTag(TeamsTags.ATTACH)) {
+            if (reading) {
+                CircularProgressIndicator(Modifier.size(20.dp).semantics { contentDescription = label }, strokeWidth = 2.dp)
+            } else {
+                Icon(Icons.Outlined.Add, label)
+            }
+        }
+        DropdownMenu(expanded = expanded && enabled && !reading, onDismissRequest = { expanded = false }) {
+            if (showFormats) {
+                DropdownMenuItem(text = { Text(stringResource(R.string.remote_back)) }, onClick = { showFormats = false })
+                for (style in TeamTextStyle.entries) {
+                    val labelId = when (style) {
+                        TeamTextStyle.Bold -> R.string.teams_format_bold
+                        TeamTextStyle.Italic -> R.string.teams_format_italic
+                        TeamTextStyle.Underline -> R.string.teams_format_underline
+                        TeamTextStyle.Strike -> R.string.teams_format_strike
+                    }
+                    DropdownMenuItem(text = { Text(stringResource(labelId)) }, onClick = {
+                        expanded = false
+                        onFormat(style)
+                    })
+                }
+            } else {
+                if (onChosen != null) {
+                    DropdownMenuItem(
+                        enabled = canAttach,
+                        text = { Text(stringResource(R.string.teams_file_add_photos)) },
+                        leadingIcon = { Icon(Icons.Outlined.Image, contentDescription = null) },
+                        onClick = {
+                            expanded = false
+                            photos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        },
+                    )
+                    DropdownMenuItem(
+                        enabled = canAttach,
+                        text = { Text(stringResource(R.string.teams_file_add_documents)) },
+                        leadingIcon = { Icon(Icons.AutoMirrored.Outlined.InsertDriveFile, contentDescription = null) },
+                        onClick = {
+                            expanded = false
+                            documents.launch(TeamAttachments.CHOOSER_TYPES)
+                        },
+                    )
+                }
+                if (onMention != null) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.teams_composer_mention)) },
+                        leadingIcon = { Text("@") },
+                        modifier = Modifier.testTag(TeamsTags.ASK_BOT),
+                        onClick = { expanded = false; onMention() },
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.teams_composer_format)) },
+                    leadingIcon = { Text("Aa") },
+                    onClick = { showFormats = true },
+                )
+            }
+        }
     }
 }
 

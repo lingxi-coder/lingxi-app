@@ -98,6 +98,7 @@ internal data class TeamMessage(val id: String, val seq: Long, val authorUid: St
     val readFiles: List<TeamReadFile> = emptyList(),
     val dataRef: TeamDataRef? = null, val resourceRef: DatasetResourceRef? = null, val resourceGrant: String? = null,
     val mentionEntities: List<TeamMentionEntity> = emptyList(),
+    val formats: List<TeamMessageFormat> = emptyList(),
     val visualization: TeamVisualizationReference? = null) {
     /** The files to show: none on a recalled message. */
     val files: List<TeamMessageAttachment> get() = if (recalled) emptyList() else attachments
@@ -117,6 +118,7 @@ internal data class TeamMessage(val id: String, val seq: Long, val authorUid: St
             TeamReadFile.list(v.optJSONArray("readFiles")), TeamDataRef.parse(v.optJSONObject("dataRef")),
             if (v.isNull("resourceRef")) null else DatasetResourceRef.parse(v.getJSONObject("resourceRef")) ?: throw TeamMessageFailure("INVALID_DATA"),
             v.stringOrNull("resourceGrant"), TeamMentionEntity.parse(v.optJSONArray("mentionEntities"), v.getString("text")),
+            TeamMessageFormat.parse(v.optJSONArray("formats"), v.getString("text")),
             if (v.optString("kind") == "visualization" && !v.optBoolean("recalled"))
                 TeamVisualizationReference.parse(v.optJSONObject("visualization"), v.getString("id")) else null)
     } }

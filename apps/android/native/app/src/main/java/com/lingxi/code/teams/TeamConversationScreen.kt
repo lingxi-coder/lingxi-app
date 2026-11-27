@@ -563,7 +563,7 @@ private fun ConversationBody(
             onDraft = ::setDraft, onCancelReply = { setDraft(draft.copy(replyToId = null)) }, onCancelEdit = { editingId = null },
             voiceTarget = workspace.draftKey(conversationId),
             readDraft = { workspace.draft(conversationId) },
-            onSend = { text, targets, mentions, done ->
+            onSend = { text, targets, mentions, formats, done ->
                 val editingMessage = editing
                 val submittedDraft = workspace.draft(conversationId)
                 // A reply to a Bot's question that still waits for the viewer is its answer: it continues that task and asks no Bot.
@@ -571,7 +571,8 @@ private fun ConversationBody(
                 // The files are this conversation's draft's, read at the moment of sending: no other conversation's are ever sent here.
                 val sending = if (editingMessage == null && waitId == null) workspace.draftFiles.value[workspace.draftKey(conversationId)].orEmpty() else emptyList()
                 workspace.messagingModel.queue(if (editingMessage == null) "create" else "edit", text, editingMessage?.id, if (editingMessage == null) draft.replyToId else null, if (waitId == null) targets else emptyList(), waitId,
-                    files = sending, conversationId = conversationId, mentionEntities = mentions.takeIf { it.isNotEmpty() || editingMessage?.mentionEntities?.isNotEmpty() == true }) {
+                    files = sending, conversationId = conversationId, mentionEntities = mentions.takeIf { it.isNotEmpty() || editingMessage?.mentionEntities?.isNotEmpty() == true },
+                    formats = formats.takeIf { it.isNotEmpty() || editingMessage?.formats?.isNotEmpty() == true }) {
                     workspace.filesSent(conversationId, sending.map { it.uploadId })
                     if (editingMessage != null) {
                         editingId = null
@@ -723,13 +724,8 @@ private fun MessageCell(
                         if (message.recalled) Text(stringResource(R.string.teams_message_recalled), style = MaterialTheme.typography.bodyMedium, fontStyle = FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         else if (message.text.isEmpty() && message.files.isNotEmpty()) Unit // A message of files alone has no text line.
                         else if (TeamsBotText.rendersMarkdown(message.authorKind, message.recalled)) AIText(markdown = body, modifier = Modifier.fillMaxWidth().testTag("teams.message.body.${message.id}"), onOpenLink = rememberTeamBotLinkOpener())
-                        else if (message.mentionEntities.isEmpty()) Text(body, style = MaterialTheme.typography.bodyLarge)
-                        else Text(buildAnnotatedString {
-                            append(body)
-                            for (entity in TeamMentionEntity.valid(message.mentionEntities, body)) {
-                                addStyle(SpanStyle(fontWeight = FontWeight.SemiBold), entity.offset, entity.offset + entity.length)
-                            }
-                        }, style = MaterialTheme.typography.bodyLarge)
+                        else if (message.mentionEntities.isEmpty() && message.formats.isEmpty()) Text(body, style = MaterialTheme.typography.bodyLarge)
+                        else Text(styledTeamMessage(body, message.mentionEntities, message.formats), style = MaterialTheme.typography.bodyLarge)
                         val edited = message.editedAt != null && !message.recalled
                         val time = TeamsStreamLogic.formatClock(message.createdAtMs)
                         if (edited || time.isNotEmpty()) Row(
@@ -832,6 +828,20 @@ internal fun BotTag() {
     )
 }
 
+private fun styledTeamMessage(
+    body: String,
+    mentions: List<TeamMentionEntity>,
+    formats: List<TeamMessageFormat>,
+) = buildAnnotatedString {
+    append(body)
+    for (entity in TeamMentionEntity.valid(mentions, body)) {
+        addStyle(SpanStyle(fontWeight = FontWeight.SemiBold), entity.offset, entity.offset + entity.length)
+    }
+    if (TeamMessageFormat.valid(formats, body)) {
+        for (run in formats) addStyle(run.span(), run.offset, run.end)
+    }
+}
+
 /** A command saved on this device and not yet confirmed (or rejected): the existing outbox semantics, ids and journals unchanged. */
 @Composable
 private fun LocalCommandRow(item: StreamItem.Local, tick: androidx.compose.runtime.State<Long>, onCopy: (String) -> Unit, onDiscard: () -> Unit) {
@@ -852,7 +862,11 @@ private fun LocalCommandRow(item: StreamItem.Local, tick: androidx.compose.runti
                 Modifier.widthIn(max = 544.dp).align(Alignment.CenterEnd).teamBubble(own = true, grouped = false),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                if (body.isNotEmpty()) Text(body, style = MaterialTheme.typography.bodyMedium)
+                if (body.isNotEmpty()) {
+                    val mentions = TeamMentionEntity.parse(payload.optJSONArray("mentionEntities"), body)
+                    val formats = TeamMessageFormat.parse(payload.optJSONArray("formats"), body)
+                    Text(styledTeamMessage(body, mentions, formats), style = MaterialTheme.typography.bodyMedium)
+                }
                 Text(status, style = MaterialTheme.typography.labelSmall, color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
                 if (intent.optString("error") == "MENTION_TARGET_REQUIRED" && payload.optString("text").isNotEmpty()) {
                     TextButton(onClick = { onCopy(payload.getString("text")) }) { Text(stringResource(R.string.chat_message_copy)) }

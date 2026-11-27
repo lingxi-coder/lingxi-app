@@ -297,6 +297,25 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
     change();
   };
 
+  const insertMention = () => {
+    const node = input.current;
+    if (!node) return;
+    const current = latest.current;
+    const range = actionSelection.current?.range;
+    const { start, end } = range && node.contains(range.commonAncestorContainer)
+      ? readMessageEditor(node, range) : { start: current.text.length, end: current.text.length };
+    const before = current.text.slice(0, start);
+    const token = !before || /\s$/u.test(before) ? '@' : ' @';
+    actionSelection.current = undefined;
+    caretTo.current = start + token.length;
+    setDismissed(-1);
+    setActive(0);
+    node.focus();
+    update(before + token + current.text.slice(end),
+      replaceMentionRanges(current.entities, start, end, token.length),
+      replaceEditorFormats(current.formats, start, end, token.length));
+  };
+
   const pick = (candidate: typeof candidates[number]) => {
     if (!mention) return;
     if ('bot' in candidate) {
@@ -434,6 +453,8 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
           </> : null}
           <ComposerActions locale={locale} onOpen={openActions}
             onAttach={editing || answering ? undefined : kind => (kind === 'photos' ? photoPicker : picker).current?.click()}
+            onMention={canMention && ((roster.members.length > 0 && entities.length < MAX_MEMBER_MENTIONS)
+              || (askable && targets.length < MAX_TARGETS)) ? insertMention : undefined}
             onFormat={applyFormat} activeStyles={activeStyles} />
         </div>
         {bytes > MESSAGE_BYTES * 0.9 ? <span className="tw-count" data-over={bytes > MESSAGE_BYTES} role="status">{bytes.toLocaleString(intlTag(locale))} / {MESSAGE_BYTES.toLocaleString(intlTag(locale))}</span> : null}

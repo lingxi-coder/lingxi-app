@@ -31,6 +31,7 @@ struct TeamComposerDraft: Codable, Equatable, Sendable {
     /// Bot keys chosen with `@`, in the order they were chosen.
     var targets: [String] = []
     var mentionEntities: [TeamMentionEntity]? = nil
+    var formats: [TeamMessageFormat]? = nil
     var isEmpty: Bool { text.isEmpty && replyToID == nil && targets.isEmpty }
     static func key(uid: String, teamID: String, generation: Int, conversationID: String) -> String {
         "\(uid):\(teamID):\(generation):\(conversationID)"

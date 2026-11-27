@@ -2770,6 +2770,13 @@
     <string name="teams_error_mention_target">有被提及的成員已無法使用。請將訊息複製到新草稿並更新提及。</string>
     <string name="teams_composer_mention">提及 (@)</string>
     <string name="teams_composer_mention_options">提及候選</string>
+    <string name="teams_composer_add">加入訊息</string>
+    <string name="teams_composer_format">文字格式</string>
+    <string name="teams_format_bold">粗體</string>
+    <string name="teams_format_italic">斜體</string>
+    <string name="teams_format_underline">底線</string>
+    <string name="teams_format_strike">刪除線</string>
+    <string name="teams_format_limit">這則訊息的個別格式過多。</string>
     <string name="teams_composer_ask_bot">請求 Bot (@)</string>
     <string name="teams_composer_bots_asked">將請求的 Bot</string>
     <string name="teams_composer_bots_can_ask">可請求的 Bot</string>

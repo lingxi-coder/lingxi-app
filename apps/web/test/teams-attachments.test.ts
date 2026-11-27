@@ -146,7 +146,7 @@ async function openGroup(context: Parameters<Parameters<typeof scenario>[1]>[0],
 scenario('Files are chosen, upload at once, and go out with the message; what cannot be sent says why (L2, L3)', async context => {
   const { workspace, page, service, choose, chips, sendButton, submits, pickerClicks, box } = await openGroup(context);
   await page.click(page.oneByLabel('Add to message'));
-  assert.equal(page.button('Add files').props.role, 'menuitem');
+  assert.equal(page.button('Choose Files').props.role, 'menuitem');
   assert.equal(page.button('Photo Library').props.role, 'menuitem');
   assert.equal(sendButton().props.disabled, true);
   const photo = bytesOf(5000, 3), notes = new TextEncoder().encode('Gate 12, 13:05');

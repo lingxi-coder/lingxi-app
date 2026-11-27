@@ -73,7 +73,7 @@ internal fun TeamComposer(
     conversation: TeamMessageConversation, label: String, uid: String, messaging: TeamMessagingState, draft: ComposerDraft,
     replyTo: TeamMessage?, editing: TeamMessage?, replyAuthor: String,
     onDraft: (ComposerDraft) -> Unit, onCancelReply: () -> Unit, onCancelEdit: () -> Unit,
-    onSend: (text: String, targets: List<String>, mentions: List<TeamMentionEntity>, done: () -> Unit) -> Unit, modifier: Modifier = Modifier,
+    onSend: (text: String, targets: List<String>, mentions: List<TeamMentionEntity>, formats: List<TeamMessageFormat>, done: () -> Unit) -> Unit, modifier: Modifier = Modifier,
     members: List<TeamMember> = emptyList(),
     /** The files of the unsent message and the chosen ones that were not taken. Empty while a message is edited or a Bot's question is answered: neither carries files, and the files wait in the draft. */
     files: List<TeamDraftFile> = emptyList(), refusals: List<TeamFileRefusal> = emptyList(),
@@ -107,10 +107,12 @@ internal fun TeamComposer(
     var entities by remember(field) {
         mutableStateOf(if (editing != null) editing.mentionEntities else draft.mentionEntities)
     }
+    var formats by remember(field) { mutableStateOf(editing?.formats ?: draft.formats) }
+    var typingStyle by remember(field) { mutableStateOf<Pair<Int, Int>?>(null) }
     var trackedText by remember(field) { mutableStateOf(text) }
     val editEvents = remember(field) { Channel<TeamEditorEdit>(Channel.UNLIMITED) }
-    val persistDraft by rememberUpdatedState<(String, Set<String>, List<TeamMentionEntity>) -> Unit> { value, targets, mentions ->
-        if (editing == null) onDraft(readDraft().copy(text = value, targets = targets, mentionEntities = mentions))
+    val persistDraft by rememberUpdatedState<(String, Set<String>, List<TeamMentionEntity>, List<TeamMessageFormat>) -> Unit> { value, targets, mentions, styles ->
+        if (editing == null) onDraft(readDraft().copy(text = value, targets = targets, mentionEntities = mentions, formats = styles))
     }
     val readLatestDraft by rememberUpdatedState(readDraft)
 
@@ -118,9 +120,18 @@ internal fun TeamComposer(
         val shifted = edit.replacements.fold(entities) { remaining, (range, inserted) ->
             TeamMentionEntity.replacing(remaining, range.min, range.max, inserted)
         }
+        val pending = typingStyle
+        var nextTyping: Pair<Int, Int>? = null
+        for ((range, inserted) in edit.replacements) {
+            val explicit = pending?.takeIf { it.first == range.min && range.collapsed }?.second
+            formats = TeamMessageFormat.replace(formats, range.min, range.max, inserted,
+                explicit ?: TeamMessageFormat.styleAt(formats, if (range.collapsed) range.min else range.min + 1))
+            if (explicit != null) nextTyping = (range.min + inserted) to explicit
+        }
+        typingStyle = nextTyping
         entities = shifted
         trackedText = edit.text
-        persistDraft(edit.text, readLatestDraft().targets, shifted)
+        persistDraft(edit.text, readLatestDraft().targets, shifted, formats)
     }
 
     fun finishUserEdits() {
@@ -129,8 +140,10 @@ internal fun TeamComposer(
         val latest = field.text.toString()
         if (trackedText != latest) {
             entities = TeamMentionEntity.shifted(entities, trackedText, latest, caretAfter = field.selection.end)
+            formats = TeamMessageFormat.shift(formats, trackedText, latest)
+            typingStyle = null
             trackedText = latest
-            persistDraft(latest, readLatestDraft().targets, entities)
+            persistDraft(latest, readLatestDraft().targets, entities, formats)
         }
     }
 
@@ -140,7 +153,7 @@ internal fun TeamComposer(
     LaunchedEffect(field) {
         snapshotFlow { field.text.toString() }.collect { finishUserEdits() }
     }
-    LaunchedEffect(draft.text, draft.mentionEntities, field) {
+    LaunchedEffect(draft.text, draft.mentionEntities, draft.formats, field) {
         if (editing == null) {
             finishUserEdits()
             val latest = readDraft()
@@ -149,6 +162,7 @@ internal fun TeamComposer(
                 selection = TextRange(length)
             }
             entities = latest.mentionEntities
+            formats = latest.formats
             trackedText = latest.text
         }
     }
@@ -180,17 +194,24 @@ internal fun TeamComposer(
     // A group or channel takes a message for a Bot whose Desktop is off, and its task waits for the Desktop (rule 6); a Bot DM says no at once.
     val waitsForHost = conversation.kind != "bot_dm"
     val blockedBots = TeamBotEntry.blockedRequests(requestTargets, bots, editing != null || answeringWait, waitsForHost)
-    val canSend = TeamAttachments.canSend(text, files) && !messaging.submitting && blockedBots.isEmpty() && (editing != null || (staleTargets.isEmpty() && !staleBotDm))
+    val validFormats = TeamMessageFormat.valid(formats, text)
+    val canSend = validFormats && TeamAttachments.canSend(text, files) && !messaging.submitting && blockedBots.isEmpty() && (editing != null || (staleTargets.isEmpty() && !staleBotDm))
     val hasAskableBots = askable && bots.any { it.selectable && "shared_bot:${it.sharedBotId}" in conversation.participants }
     fun update(value: String, caret: TextRange = TextRange(value.length), targets: Set<String> = draft.targets,
-               mentions: List<TeamMentionEntity> = entities) {
+               mentions: List<TeamMentionEntity> = entities, replaced: TextRange? = null) {
+        if (replaced != null || trackedText != value) {
+            formats = if (replaced != null) TeamMessageFormat.replace(formats, replaced.min, replaced.max,
+                value.length - trackedText.length + replaced.length)
+            else TeamMessageFormat.shift(formats, trackedText, value, typing = 0)
+            typingStyle = null
+        }
         field.edit {
             if (asCharSequence().toString() != value) replace(0, length, value)
             selection = caret
         }
         entities = mentions
         trackedText = value
-        persistDraft(value, targets, mentions)
+        persistDraft(value, targets, mentions, formats)
     }
 
     // Spoken words are added to the box, to be read, changed and sent by hand. A message being changed is another box.
@@ -222,7 +243,7 @@ internal fun TeamComposer(
                                 val selected = TeamMentionEntity(member.uid, at.start, label.length)
                                 val shifted = TeamMentionEntity.replacing(entities, at.start, end, label.length + separator.length)
                                 val caret = at.start + label.length + if (separator.isNotEmpty() || rest.startsWith(' ')) 1 else 0
-                                update(next, TextRange(caret), mentions = (shifted + selected).sortedBy { it.offset })
+                                update(next, TextRange(caret), mentions = (shifted + selected).sortedBy { it.offset }, replaced = TextRange(at.start, end))
                             },
                             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
@@ -243,7 +264,7 @@ internal fun TeamComposer(
                                 val cleaned = TeamsComposeLogic.withoutMention(currentText, at.start, end)
                                 val removed = currentText.length - cleaned.length
                                 val shifted = TeamMentionEntity.replacing(entities, at.start, at.start + removed, 0)
-                                update(cleaned, TextRange(at.start.coerceAtMost(cleaned.length)), draft.targets + bot.sharedBotId, shifted)
+                                update(cleaned, TextRange(at.start.coerceAtMost(cleaned.length)), draft.targets + bot.sharedBotId, shifted, replaced = TextRange(at.start, at.start + removed))
                             },
                             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
@@ -317,6 +338,11 @@ internal fun TeamComposer(
                         editEvents.trySend(TeamEditorEdit(asCharSequence().toString(), ranges))
                     }
                 },
+                outputTransformation = {
+                    if (TeamMessageFormat.valid(formats, asCharSequence().toString())) {
+                        for (run in formats) addStyle(run.span(), run.offset, run.end)
+                    }
+                },
                 textStyle = MaterialTheme.typography.bodyLarge.copy(color = palette.text),
                 cursorBrush = SolidColor(palette.accent),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp)
@@ -329,28 +355,41 @@ internal fun TeamComposer(
                 },
             )
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                if (onChooseFiles != null) TeamAttachButton(enabled = files.size < TeamAttachments.MESSAGE_FILES && !messaging.submitting, onChosen = onChooseFiles)
-                if (canMention) {
-                    IconButton(
-                        enabled = !messaging.submitting && ((roster.isNotEmpty() && entities.size < TeamMentionEntity.LIMIT)
-                            || (hasAskableBots && editing == null && draft.targets.size < TeamsComposeLogic.MAX_TARGETS)),
-                        onClick = {
-                            finishUserEdits()
-                            val currentText = field.text.toString()
-                            val start = field.selection.min
-                            val end = field.selection.max
-                            val before = currentText.substring(0, start)
-                            val token = if (before.isEmpty() || before.last().isWhitespace()) "@" else " @"
-                            val shifted = TeamMentionEntity.replacing(entities, start, end, token.length)
-                            update(before + token + currentText.substring(end), TextRange(start + token.length), mentions = shifted)
-                            focus.requestFocus()
-                        },
-                        modifier = Modifier.testTag(TeamsTags.ASK_BOT),
-                    ) {
-                        val description = stringResource(R.string.teams_composer_mention)
-                        Text("@", Modifier.semantics { contentDescription = description }, style = MaterialTheme.typography.titleMedium)
-                    }
-                }
+                val canInsertMention = canMention && ((roster.isNotEmpty() && entities.size < TeamMentionEntity.LIMIT) ||
+                    (editing == null && hasAskableBots && draft.targets.size < TeamsComposeLogic.MAX_TARGETS))
+                TeamAttachButton(
+                    enabled = !messaging.submitting,
+                    onChosen = onChooseFiles,
+                    canAttach = files.size < TeamAttachments.MESSAGE_FILES,
+                    onMention = if (canInsertMention) ({
+                        finishUserEdits()
+                        val currentText = field.text.toString()
+                        val range = field.selection
+                        val before = currentText.substring(0, range.min)
+                        val token = if (before.isEmpty() || before.last().isWhitespace()) "@" else " @"
+                        val shifted = TeamMentionEntity.replacing(entities, range.min, range.max, token.length)
+                        update(before + token + currentText.substring(range.max), TextRange(range.min + token.length),
+                            mentions = shifted, replaced = range)
+                        focus.requestFocus()
+                    }) else null,
+                    onFormat = { style ->
+                        finishUserEdits()
+                        val range = field.selection
+                        if (range.collapsed) {
+                            val current = typingStyle?.takeIf { it.first == range.start }?.second
+                                ?: TeamMessageFormat.styleAt(formats, range.start)
+                            typingStyle = range.start to (current xor style.bit)
+                        } else {
+                            val next = TeamMessageFormat.toggle(formats, range.min, range.max, style.bit)
+                            if (TeamMessageFormat.valid(next, field.text.toString())) {
+                                formats = next
+                                persistDraft(field.text.toString(), readLatestDraft().targets, entities, formats)
+                            }
+                            typingStyle = null
+                        }
+                        focus.requestFocus()
+                    },
+                )
                 Spacer(Modifier.weight(1f))
                 if (voice != null) TeamVoiceButton(voice, enabled = !messaging.submitting)
                 ComposerSendButton(
@@ -362,22 +401,27 @@ internal fun TeamComposer(
                         finishUserEdits()
                         val submitted = field.text.toString()
                         val submittedEntities = entities
+                        val submittedFormats = formats
+                        if (!TeamMessageFormat.valid(submittedFormats, submitted)) return@ComposerSendButton
                         val mentions = if (canMention) TeamMentionEntity.valid(submittedEntities, submitted)
                             .filter { "user:${it.userId}" in conversation.participants } else emptyList()
-                        onSend(submitted, if (editing == null && askable && !answeringWait) draft.targets.sorted() else emptyList(), mentions) {
-                            if (field.text.toString() == submitted && entities == submittedEntities) {
+                        onSend(submitted, if (editing == null && askable && !answeringWait) draft.targets.sorted() else emptyList(), mentions, submittedFormats) {
+                            if (field.text.toString() == submitted && entities == submittedEntities && formats == submittedFormats) {
                                 field.edit {
                                     replace(0, length, "")
                                     selection = TextRange.Zero
                                 }
                                 trackedText = ""
                                 entities = emptyList()
+                                formats = emptyList()
+                                typingStyle = null
                             }
                         }
                     },
                 )
             }
         }
+        if (!validFormats) Text(stringResource(R.string.teams_format_limit), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         if (tooLong) Text(stringResource(R.string.teams_composer_too_long), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         val note = when {
             files.any { it.state == TeamDraftFile.State.Failed } -> R.string.teams_file_note_failed

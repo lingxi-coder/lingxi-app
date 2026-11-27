@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// The message box at the bottom of an open conversation (spec §6.3; Desktop `Composer.tsx`). A growing field
 /// (1 to 6 lines; return is a new line, sending is the button), the reply and edit bars, the Bots that will be
@@ -32,6 +33,7 @@ struct TeamComposerView: View {
     let onCancelReply: () -> Void
 
     @State private var selection: NSRange?
+    @State private var typingStyle: (caret: Int, style: Int)?
     /// The `@` the viewer dismissed the picker for (UTF-16 offset); the picker stays closed until the `@` changes.
     @State private var dismissedMention = -1
 
@@ -137,6 +139,10 @@ struct TeamComposerView: View {
         }
         .background(.bar)
         .onChange(of: rosterSource, initial: true) { _, source in indexRoster(source) }
+        .onChange(of: editing?.id) { _, _ in
+            selection = nil
+            typingStyle = nil
+        }
     }
 
     static func lockKey(_ lock: ComposerLock) -> String {
@@ -297,6 +303,7 @@ struct TeamComposerView: View {
                                                    insertedLength: label.utf16.count + separator.utf16.count)
         entities.append(.init(userId: member.uid, offset: mention.start, length: label.utf16.count))
         draft.mentionEntities = entities.sorted { $0.offset < $1.offset }
+        replaceFormats(in: mention.start..<end, count: label.utf16.count + separator.utf16.count)
         draft.text = next
         let nextCaret = mention.start + label.utf16.count + (!separator.isEmpty || rest.hasPrefix(" ") ? 1 : 0)
         selection = NSRange(location: nextCaret, length: 0)
@@ -307,12 +314,28 @@ struct TeamComposerView: View {
         let range = edited.map { $0.location..<NSMaxRange($0) }
         draft.mentionEntities = TeamMentionEntity.shifted(draft.mentionEntities ?? [], from: draft.text, to: text,
                                                          selection: range, caretAfter: range == nil ? caretAfter : nil)
+        if range != nil || !draft.text.utf16.elementsEqual(text.utf16) {
+            let changed = range ?? TeamMessageFormat.editRange(from: draft.text, to: text)
+            let count = changed.count + text.utf16.count - draft.text.utf16.count
+            let pending = typingStyle
+            let explicit = pending.flatMap { changed.isEmpty && $0.caret == changed.lowerBound ? $0.style : nil }
+            replaceFormats(in: changed, count: count,
+                           style: explicit ?? TeamMessageFormat.style(at: changed.isEmpty ? changed.lowerBound : changed.lowerBound + 1, in: draft.formats ?? []))
+            typingStyle = explicit.map { (changed.lowerBound + count, $0) }
+        }
         draft.text = text
+    }
+
+    private func replaceFormats(in range: Range<Int>, count: Int, style: Int = 0) {
+        let next = TeamMessageFormat.replacing(draft.formats ?? [], range: range, count: count, insertedStyle: style)
+        draft.formats = next.isEmpty ? nil : next
+        typingStyle = nil
     }
 
     private func applyReplacement(_ text: String, range: Range<Int>, insertedLength: Int) {
         draft.mentionEntities = TeamMentionEntity.replacing(draft.mentionEntities ?? [], start: range.lowerBound,
                                                            end: range.upperBound, insertedLength: insertedLength)
+        replaceFormats(in: range, count: insertedLength)
         draft.text = text
     }
 
@@ -333,6 +356,42 @@ struct TeamComposerView: View {
         focused = true
     }
 
+    private func applyFormat(_ style: TeamTextStyle) {
+        let start = min(selection?.location ?? caret, caret)
+        let runs = draft.formats ?? []
+        if start == caret {
+            let current = typingStyle.flatMap { $0.caret == caret ? $0.style : nil } ?? TeamMessageFormat.style(at: caret, in: runs)
+            typingStyle = (caret, current ^ style.rawValue)
+        } else {
+            let next = TeamMessageFormat.toggling(style.rawValue, in: start..<caret, runs: runs)
+            if TeamMessageFormat.isValid(next, in: draft.text) { draft.formats = next.isEmpty ? nil : next }
+            typingStyle = nil
+        }
+        focused = true
+    }
+
+    private func attributes(for style: Int, font: UIFont, color: UIColor) -> [NSAttributedString.Key: Any] {
+        var traits: UIFontDescriptor.SymbolicTraits = []
+        if style & 1 != 0 { traits.insert(.traitBold) }
+        if style & 2 != 0 { traits.insert(.traitItalic) }
+        let face = font.fontDescriptor.withSymbolicTraits(traits).map { UIFont(descriptor: $0, size: font.pointSize) } ?? font
+        return [.font: face, .foregroundColor: color,
+                .underlineStyle: style & 4 != 0 ? NSUnderlineStyle.single.rawValue : 0,
+                .strikethroughStyle: style & 8 != 0 ? NSUnderlineStyle.single.rawValue : 0]
+    }
+
+    private func styledEditor(_ text: String, font: UIFont, color: UIColor) -> NSAttributedString {
+        let result = NSMutableAttributedString(string: text, attributes: attributes(for: 0, font: font, color: color))
+        let runs = draft.formats ?? []
+        if TeamMessageFormat.isValid(runs, in: text) {
+            for run in runs {
+                result.setAttributes(attributes(for: run.style, font: font, color: color),
+                                     range: NSRange(location: run.offset, length: run.length))
+            }
+        }
+        return result
+    }
+
     // MARK: Field
 
     private var placeholder: String {
@@ -345,26 +404,17 @@ struct TeamComposerView: View {
         ComposerTextInput(text: $draft.text, isFocused: $focused, placeholder: placeholder,
                           textColor: theme.text, hintColor: theme.text4, argumentHint: { _, _ in nil },
                           onSubmit: onSend, onAcceptSuggestion: nil, selection: $selection, onEdit: updateText,
-                          submitsOnReturn: false, maxLines: 6, accessibilityIdentifier: "teams.composer.input")
+                          styledText: styledEditor, submitsOnReturn: false, maxLines: 6, accessibilityIdentifier: "teams.composer.input")
             .padding(.horizontal, 6).padding(.vertical, 2)
             .onChange(of: draft.text) { _, _ in dismissedMention = -1 }
     }
 
     private var toolbar: some View {
         HStack(spacing: 0) {
-            if let onChooseFiles {
-                TeamAttachButton(disabled: files.count >= TeamAttachments.messageFiles, onChosen: onChooseFiles)
-            }
-            if canMention {
-                Button(action: insertAt) {
-                    Image(systemName: "at").font(.system(size: 18)).foregroundStyle(theme.text2)
-                }
-                .buttonStyle(ComposerActionButtonStyle())
-                .disabled((roster.isEmpty || (draft.mentionEntities?.count ?? 0) >= TeamMentionEntity.limit)
-                          && (!askable || draft.targets.count >= TeamsComposeLogic.maxTargets))
-                .accessibilityLabel(Text("teams_composer_mention"))
-                .accessibilityIdentifier("teams.composer.ask")
-            }
+            let canInsertMention = canMention && ((!roster.isEmpty && (draft.mentionEntities?.count ?? 0) < TeamMentionEntity.limit)
+                || (askable && draft.targets.count < TeamsComposeLogic.maxTargets))
+            TeamAttachButton(disabled: busy, canAttach: files.count < TeamAttachments.messageFiles,
+                             onChosen: onChooseFiles, onMention: canInsertMention ? insertAt : nil, onFormat: applyFormat)
             Spacer(minLength: 4)
             Button(action: onVoice) {
                 Image(systemName: listening ? "stop.fill" : "mic").font(.system(size: 18)).foregroundStyle(theme.text2)
@@ -372,7 +422,7 @@ struct TeamComposerView: View {
             .buttonStyle(ComposerActionButtonStyle())
             .accessibilityLabel(Text(LocalizedStringKey(listening ? "composer_stop_recording" : "composer_record")))
             .accessibilityIdentifier("teams.composer.voice")
-            let canSend = !busy && availabilityBlock == nil && TeamAttachments.canSend(text: draft.text, files: files)
+            let canSend = !busy && availabilityBlock == nil && TeamMessageFormat.isValid(draft.formats ?? [], in: draft.text) && TeamAttachments.canSend(text: draft.text, files: files)
             Button(action: onSend) {
                 ComposerTurnActionIcon(systemName: editing != nil ? "checkmark" : "arrow.up", symbolSize: 15, background: theme.accent)
             }
@@ -393,6 +443,9 @@ struct TeamComposerView: View {
         }
         ForEach(hostWaiting) { bot in
             Text("teams_bot_offline_wait \(bot.name)").font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("teams.composer.hostwait.\(bot.sharedBotId)")
+        }
+        if !TeamMessageFormat.isValid(draft.formats ?? [], in: draft.text) {
+            Text("teams_format_limit").font(.caption).foregroundStyle(.red)
         }
         if tooLong {
             Text("teams_composer_too_long").font(.caption).foregroundStyle(.red)

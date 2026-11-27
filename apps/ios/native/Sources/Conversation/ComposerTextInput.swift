@@ -17,6 +17,7 @@ struct ComposerTextInput: UIViewRepresentable {
     var historyMessages: [String] = []
     var selection: Binding<NSRange?>? = nil
     var onEdit: ((String, NSRange?, Int) -> Void)? = nil
+    var styledText: ((String, UIFont, UIColor) -> NSAttributedString)? = nil
     var submitsOnReturn = true
     var maxLines = 5
     var accessibilityIdentifier = "composer.input"
@@ -37,7 +38,8 @@ struct ComposerTextInput: UIViewRepresentable {
         coordinator.parent = self
         coordinator.updating = true
         let font = UIFont.preferredFont(forTextStyle: .body)
-        view.updateAppearance(font: font, textColor: UIColor(textColor), hintColor: UIColor(hintColor))
+        let color = UIColor(textColor)
+        view.updateAppearance(font: font, textColor: color, hintColor: UIColor(hintColor), stylesText: styledText != nil)
         view.placeholderLabel.text = placeholder
         view.textView.returnKeyType = submitsOnReturn ? .send : .default
         view.textView.allowsShiftReturn = submitsOnReturn
@@ -47,7 +49,27 @@ struct ComposerTextInput: UIViewRepresentable {
         view.textView.configureHistory(sessionKey: historySessionKey, messages: historyMessages)
         view.textView.accessibilityLabel = onEdit == nil ? String(localized: "composer_placeholder") : placeholder
 
-        if !(view.textView.text ?? "").utf16.elementsEqual(text.utf16) {
+        let textChanged = !(view.textView.text ?? "").utf16.elementsEqual(text.utf16)
+        if let styledText, view.textView.markedTextRange == nil {
+            let styled = styledText(text, font, color)
+            if textChanged || !styled.isEqual(to: view.textView.attributedText ?? NSAttributedString()) {
+                let previousSelection = view.textView.selectedRange
+                if textChanged {
+                    coordinator.pendingEdit = nil
+                    view.textView.attributedText = styled
+                    view.textView.selectedRange = NSRange(location: styled.length, length: 0)
+                } else {
+                    let storage = view.textView.textStorage
+                    storage.beginEditing()
+                    styled.enumerateAttributes(in: NSRange(location: 0, length: styled.length)) { attributes, range, _ in
+                        storage.setAttributes(attributes, range: range)
+                    }
+                    storage.endEditing()
+                    view.textView.selectedRange = previousSelection
+                }
+                view.scrollSelectionAfterLayout = true
+            }
+        } else if styledText == nil, textChanged {
             coordinator.pendingEdit = nil
             view.textView.text = text
             view.textView.selectedRange = NSRange(location: text.utf16.count, length: 0)
@@ -68,7 +90,7 @@ struct ComposerTextInput: UIViewRepresentable {
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: ComposerInputView, context: Context) -> CGSize? {
         guard let width = proposal.width, width > 0 else { return nil }
-        let lineHeight = uiView.textView.font?.lineHeight ?? 19
+        let lineHeight = UIFont.preferredFont(forTextStyle: .body).lineHeight
         let height = uiView.textView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
         return CGSize(width: width, height: ceil(min(max(height, lineHeight), lineHeight * CGFloat(maxLines))))
     }
@@ -225,11 +247,13 @@ final class ComposerInputView: UIView {
         onMoveToWindow?()
     }
 
-    func updateAppearance(font: UIFont, textColor: UIColor, hintColor: UIColor) {
+    func updateAppearance(font: UIFont, textColor: UIColor, hintColor: UIColor, stylesText: Bool) {
         // Reapplying the font on every draft update needlessly rewrites the
         // editor's attributed text, including an active IME composition.
-        if textView.font != font { textView.font = font }
-        if textView.textColor != textColor { textView.textColor = textColor }
+        if !stylesText || textView.textStorage.length == 0 {
+            if textView.font != font { textView.font = font }
+            if textView.textColor != textColor { textView.textColor = textColor }
+        }
         placeholderLabel.font = font
         placeholderLabel.textColor = hintColor
         hintLabel.font = font

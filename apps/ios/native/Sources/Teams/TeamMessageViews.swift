@@ -349,8 +349,8 @@ struct TeamMessageCell: View {
                     .teamBotLinkPolicy()
             } else {
                 let body = context.text(of: message)
-                if let entities = message.mentionEntities, !entities.isEmpty {
-                    Text(mentionedText(body, entities: entities))
+                if message.mentionEntities?.isEmpty == false || message.formats?.isEmpty == false {
+                    Text(styledTeamMessage(body, entities: message.mentionEntities ?? [], formats: message.formats ?? []))
                 } else {
                     Text(body)
                 }
@@ -360,22 +360,6 @@ struct TeamMessageCell: View {
         .accessibilityLabel(Text(verbatim: spokenLabel(identity, name: name, clock: clock)))
         .accessibilityIdentifier("teams.message.body.\(message.id)")
         .modifier(MessageActionsAccessibility(message: message, recalled: recalled, onReply: onReply, onEdit: onEdit, onRecall: onRecall))
-    }
-
-    private func mentionedText(_ text: String, entities: [TeamMentionEntity]) -> AttributedString {
-        let units = Array(text.utf16)
-        let valid = TeamMentionEntity.valid(entities, in: units)
-        guard !valid.isEmpty else { return AttributedString(text) }
-        var styled = AttributedString(), end = 0
-        for entity in valid {
-            styled += AttributedString(String(decoding: units[end..<entity.offset], as: UTF16.self))
-            end = entity.offset + entity.length
-            var mention = AttributedString(String(decoding: units[entity.offset..<end], as: UTF16.self))
-            mention.font = .body.weight(.semibold)
-            styled += mention
-        }
-        styled += AttributedString(String(decoding: units[end...], as: UTF16.self))
-        return styled
     }
 
     /// "Ann, Bot, 10:32, Sam, Hello there, Sure, Edited": author, Bot tag, time, the quote, the text, the edit mark.
@@ -518,6 +502,29 @@ private struct TeamBubbleSurface: ViewModifier {
     }
 }
 
+private func styledTeamMessage(_ text: String, entities: [TeamMentionEntity], formats: [TeamMessageFormat]) -> AttributedString {
+    let units = Array(text.utf16)
+    let mentions = TeamMentionEntity.valid(entities, in: units)
+    let runs = TeamMessageFormat.isValid(formats, in: text) ? formats : []
+    let endpoints = runs.flatMap { [$0.offset, $0.end] } + mentions.flatMap { [$0.offset, $0.offset + $0.length] }
+    let boundaries = Set([0, units.count] + endpoints).sorted()
+    var result = AttributedString()
+    for (start, end) in zip(boundaries, boundaries.dropFirst()) {
+        let style = TeamMessageFormat.style(at: end, in: runs)
+        let mentioned = mentions.contains { start >= $0.offset && end <= $0.offset + $0.length }
+        var part = AttributedString(String(decoding: units[start..<end], as: UTF16.self))
+        if style & 1 != 0 || mentioned || style & 2 != 0 {
+            var font = Font.body
+            if style & 1 != 0 { font = font.bold() } else if mentioned { font = font.weight(.semibold) }
+            part.font = style & 2 != 0 ? font.italic() : font
+        }
+        if style & 4 != 0 { part.underlineStyle = .single }
+        if style & 8 != 0 { part.strikethroughStyle = .single }
+        result += part
+    }
+    return result
+}
+
 // MARK: - Unsent commands
 
 /// A message, edit or recall that is saved on this device and not confirmed yet. It keeps its identity
@@ -537,9 +544,15 @@ struct TeamOutboxCell: View {
                     Text(LocalizedStringKey(status)).font(.caption).foregroundStyle(intent.error == nil ? Color.secondary : Color.orange)
                     switch intent.operation {
                     case "recall": Text("teams_message_recall").foregroundStyle(.secondary)
-                    case "edit": Text(String(localized: "teams_message_edit") + ": " + intent.text).foregroundStyle(.secondary)
+                    case "edit":
+                        let prefix = AttributedString(String(localized: "teams_message_edit") + ": ")
+                        Text(prefix + styledTeamMessage(intent.text, entities: intent.mentionEntities ?? [], formats: intent.formats ?? []))
+                            .foregroundStyle(.secondary)
                     default:
-                        if !intent.text.isEmpty { Text(intent.text).foregroundStyle(.secondary) }
+                        if !intent.text.isEmpty {
+                            Text(styledTeamMessage(intent.text, entities: intent.mentionEntities ?? [], formats: intent.formats ?? []))
+                                .foregroundStyle(.secondary)
+                        }
                         if let names = intent.attachmentNames, !names.isEmpty {
                             Label(names.joined(separator: ", "), systemImage: "paperclip").font(.footnote).foregroundStyle(.secondary)
                         }

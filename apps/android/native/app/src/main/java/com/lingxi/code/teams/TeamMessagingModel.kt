@@ -547,7 +547,7 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
      */
     fun queue(operation: String, text: String, messageId: String? = null, replyTo: String? = null, targets: List<String> = emptyList(), waitId: String? = null,
               files: List<TeamDraftFile> = emptyList(), conversationId: String? = null,
-              mentionEntities: List<TeamMentionEntity>? = null, onSuccess: () -> Unit = {}) {
+              mentionEntities: List<TeamMentionEntity>? = null, formats: List<TeamMessageFormat>? = null, onSuccess: () -> Unit = {}) {
         if (mutable.value.submitting) return
         mutable.update { it.copy(submitting = true) }; val life = lifecycle
         launchOperation {
@@ -555,10 +555,14 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
                 val carries = operation == "create" && waitId == null && files.isNotEmpty()
                 if (files.isNotEmpty() && (!carries || files.size > TeamAttachments.MESSAGE_FILES || files.any { it.state != TeamDraftFile.State.Ready } || conversationId != mutable.value.selected)) throw TeamMessageFailure("INVALID_INPUT")
                 if (!active || mutable.value.revoked || mutable.value.selected.isEmpty() || (operation != "recall" && ((text.isBlank() && !carries) || text.toByteArray(Charsets.UTF_8).size > 8192))) throw TeamMessageFailure("INVALID_INPUT")
+                val hasBody = !(carries && text.isBlank())
+                if (formats != null && !TeamMessageFormat.valid(formats, text)) throw TeamMessageFailure("INVALID_INPUT")
+                val runs = formats?.let { JSONArray(if (hasBody) it.map(TeamMessageFormat::json) else emptyList()) }
                 if (waitId != null) {
                     if (operation != "create") throw TeamMessageFailure("INVALID_INPUT")
                     val changeId = UUID.randomUUID().toString()
                     val payload = JSONObject().put("conversationId", mutable.value.selected).put("waitId", waitId).put("messageId", UUID.randomUUID().toString()).put("changeId", changeId).put("text", text)
+                    if (runs != null) payload.put("formats", runs)
                     commit(life) { it.copy(outbox = it.outbox + executionCommand("answerWait", payload, changeId)) }; onSuccess(); refresh()
                     return@launchOperation
                 }
@@ -576,10 +580,12 @@ internal class TeamMessagingModel @JvmOverloads constructor(private val scope: C
                 replyTo?.let { intent.put("replyTo", it) }
                 val entities = mentionEntities?.let { JSONArray(it.map { entity -> entity.json() }) }
                 if (entities != null) intent.put("mentionEntities", entities)
+                if (runs != null) intent.put("formats", runs)
                 val command = if (targetsForSubmit.isNotEmpty() || carries) {
                     val payload = JSONObject().put("conversationId", intent.getString("conversationId")).put("messageId", intent.getString("messageId")).put("changeId", intent.getString("changeId")).put("text", said).put("targets", JSONArray(targetsForSubmit.distinct().sorted()))
                     replyTo?.let { payload.put("replyTo", it) }
                     if (entities != null) payload.put("mentionEntities", entities)
+                    if (runs != null) payload.put("formats", runs)
                     if (carries) payload.put("attachments", JSONArray(files.map { it.uploadId }))
                     executionCommand("submit", payload, intent.getString("changeId")).also { if (carries) it.put("attachmentNames", JSONArray(files.map { file -> file.name })) }
                 } else intent

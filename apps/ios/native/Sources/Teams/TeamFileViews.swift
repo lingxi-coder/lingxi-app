@@ -95,7 +95,10 @@ enum TeamFileStore {
 /// The "add files" button of the message box: pictures from the photo library or documents from Files.
 struct TeamAttachButton: View {
     let disabled: Bool
-    let onChosen: ([TeamChosenFile]) -> Void
+    let canAttach: Bool
+    let onChosen: (([TeamChosenFile]) -> Void)?
+    let onMention: (() -> Void)?
+    let onFormat: (TeamTextStyle) -> Void
 
     @State private var showPhotos = false
     @State private var showDocuments = false
@@ -104,17 +107,31 @@ struct TeamAttachButton: View {
 
     var body: some View {
         Menu {
-            Button("teams_file_add_photos", systemImage: "photo.on.rectangle") { showPhotos = true }
-            Button("teams_file_add_documents", systemImage: "folder") { showDocuments = true }
+            if onChosen != nil {
+                Button("teams_file_add_photos", systemImage: "photo.on.rectangle") { showPhotos = true }
+                    .disabled(!canAttach || reading)
+                Button("teams_file_add_documents", systemImage: "folder") { showDocuments = true }
+                    .disabled(!canAttach || reading)
+            }
+            if let onMention {
+                Button("teams_composer_mention", systemImage: "at", action: onMention)
+                    .accessibilityIdentifier("teams.composer.ask")
+            }
+            Menu("teams_composer_format", systemImage: "textformat") {
+                ForEach(TeamTextStyle.allCases, id: \.rawValue) { style in
+                    Button(LocalizedStringKey(style.title), systemImage: style.symbol) { onFormat(style) }
+                }
+            }
+            .menuOrder(.fixed)
         } label: {
             Group {
-                if reading { ProgressView() } else { Image(systemName: "paperclip").font(.title3.weight(.medium)) }
+                if reading { ProgressView() } else { Image(systemName: "plus").font(.title3.weight(.medium)) }
             }
             .minimumHitTarget()
         }
-        .disabled(disabled || reading)
-        .accessibilityLabel(Text("teams_file_add"))
-        .accessibilityHint(Text("teams_file_add_hint"))
+        .menuOrder(.fixed)
+        .disabled(disabled)
+        .accessibilityLabel(Text("teams_composer_add"))
         .accessibilityIdentifier("teams.composer.attach")
         .photosPicker(isPresented: $showPhotos, selection: $photos, maxSelectionCount: TeamAttachments.messageFiles, matching: .images)
         .onChange(of: photos) { _, items in
@@ -133,7 +150,7 @@ struct TeamAttachButton: View {
         Task {
             let files = await load()
             reading = false
-            onChosen(files)
+            onChosen?(files)
         }
     }
 }

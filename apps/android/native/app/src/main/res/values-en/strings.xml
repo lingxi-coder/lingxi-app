@@ -2770,6 +2770,13 @@
     <string name="teams_error_mention_target">A mentioned member is no longer available. Copy the message into a new draft and update the mention.</string>
     <string name="teams_composer_mention">Mention (@)</string>
     <string name="teams_composer_mention_options">Mention suggestions</string>
+    <string name="teams_composer_add">Add to message</string>
+    <string name="teams_composer_format">Text Format</string>
+    <string name="teams_format_bold">Bold</string>
+    <string name="teams_format_italic">Italic</string>
+    <string name="teams_format_underline">Underline</string>
+    <string name="teams_format_strike">Strikethrough</string>
+    <string name="teams_format_limit">This message has too many separate formatting changes.</string>
     <string name="teams_composer_ask_bot">Ask a Bot (@)</string>
     <string name="teams_composer_bots_asked">Bots that will be asked</string>
     <string name="teams_composer_bots_can_ask">Bots you can ask</string>

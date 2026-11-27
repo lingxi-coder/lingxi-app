@@ -27,7 +27,7 @@ final class TeamMessagingModel {
     @ObservationIgnored private var visualizationLeases: [String: (until: ContinuousClock.Instant, results: [VisualizationCard: Bool])] = [:]
 
     static let conversationFields: Set<String> = ["kind", "title", "participants", "lastSeq", "lastChangeSeq", "lastMessage", "sharedBotId", "autoReply", "botScopes"]
-    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "mentionEntities", "targets", "taskId", "taskIds", "artifactId", "waitId", "approval", "decision", "dataRef", "resourceRef", "resourceGrant", "visualization"]
+    private static let messageFields: Set<String> = ["seq", "author", "kind", "text", "replyTo", "createdAt", "editedAt", "recalled", "changeSeq", "changeId", "mentions", "mentionEntities", "formats", "targets", "taskId", "taskIds", "artifactId", "waitId", "approval", "decision", "dataRef", "resourceRef", "resourceGrant", "visualization"]
     private(set) var cache: TeamMessageProjection?
     private(set) var offline = true
     private(set) var error = ""
@@ -645,13 +645,14 @@ final class TeamMessagingModel {
     }
     /// `waitId` makes a new message the answer to a Bot's question: it asks no Bot and starts no task.
     /// `files`: checked uploads of this conversation that a new message carries; it may then have no text.
-    func queue(operation: String, text: String, messageId: String? = nil, replyTo: String? = nil, targets: [String] = [], waitId: String? = nil, files: [TeamDraftFile] = [], mentionEntities: [TeamMentionEntity]? = nil) async throws {
+    func queue(operation: String, text: String, messageId: String? = nil, replyTo: String? = nil, targets: [String] = [], waitId: String? = nil, files: [TeamDraftFile] = [], mentionEntities: [TeamMentionEntity]? = nil, formats: [TeamMessageFormat]? = nil) async throws {
         let carries = operation == "create" && waitId == nil && !files.isEmpty
         guard active, !revoked, !selected.isEmpty, files.isEmpty || carries, files.count <= TeamAttachments.messageFiles, files.allSatisfy({ $0.state == .ready }),
               operation == "recall" || ((carries || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) && text.utf8.count <= 8192) else { throw TeamMessageFailure(code: "INVALID_INPUT") }
+        guard TeamMessageFormat.isValid(formats ?? [], in: text) else { throw TeamMessageFailure(code: "INVALID_INPUT") }
         if let waitId {
             guard operation == "create" else { throw TeamMessageFailure(code: "INVALID_INPUT") }
-            let intent = TeamMessageIntent(teamId: teamId, generation: generation, conversationId: selected, messageId: messageId ?? UUID().uuidString, changeId: UUID().uuidString, operation: operation, text: text, replyTo: replyTo, waitId: waitId)
+            let intent = TeamMessageIntent(teamId: teamId, generation: generation, conversationId: selected, messageId: messageId ?? UUID().uuidString, changeId: UUID().uuidString, operation: operation, text: text, replyTo: replyTo, waitId: waitId, formats: formats)
             try await commit { $0.outbox.append(intent) }; refresh(); return
         }
         if operation == "create" {
@@ -664,7 +665,8 @@ final class TeamMessagingModel {
             throw TeamMessageFailure(code: blocked == .quota_exhausted ? "REQUEST_QUOTA_EXCEEDED" : "HOST_UNAVAILABLE")
         }
         let intent = TeamMessageIntent(teamId: teamId, generation: generation, conversationId: selected, messageId: messageId ?? UUID().uuidString, changeId: UUID().uuidString, operation: operation, text: carries && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : text, replyTo: replyTo, targets: resolvedTargets ?? nil,
-                                       attachments: carries ? files.map(\.uploadId) : nil, attachmentNames: carries ? files.map(\.name) : nil, mentionEntities: mentionEntities)
+                                       attachments: carries ? files.map(\.uploadId) : nil, attachmentNames: carries ? files.map(\.name) : nil, mentionEntities: mentionEntities,
+                                       formats: text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : formats)
         try await commit { $0.outbox.append(intent) }; refresh()
     }
     func pause(_ bot: TeamBotCard) async throws {

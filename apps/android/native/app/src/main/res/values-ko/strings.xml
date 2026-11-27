@@ -2770,6 +2770,13 @@
     <string name="teams_error_mention_target">멘션한 멤버를 더 이상 선택할 수 없습니다. 메시지를 새 초안에 복사하고 멘션을 업데이트하세요.</string>
     <string name="teams_composer_mention">멘션 (@)</string>
     <string name="teams_composer_mention_options">멘션 후보</string>
+    <string name="teams_composer_add">메시지에 추가</string>
+    <string name="teams_composer_format">텍스트 서식</string>
+    <string name="teams_format_bold">굵게</string>
+    <string name="teams_format_italic">기울임꼴</string>
+    <string name="teams_format_underline">밑줄</string>
+    <string name="teams_format_strike">취소선</string>
+    <string name="teams_format_limit">이 메시지의 개별 서식이 너무 많습니다.</string>
     <string name="teams_composer_ask_bot">Bot에게 요청 (@)</string>
     <string name="teams_composer_bots_asked">요청할 Bot</string>
     <string name="teams_composer_bots_can_ask">요청할 수 있는 Bot</string>

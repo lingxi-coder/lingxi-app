@@ -45,6 +45,7 @@ struct TeamConversationView: View {
     @State private var editing: TeamMessage?
     @State private var savedText: String?
     @State private var savedMentions: [TeamMentionEntity]?
+    @State private var savedFormats: [TeamMessageFormat]?
     @State private var draft = TeamComposerDraft()
     @State private var draftLoaded = false
     @State private var ownedDraftKey = ""
@@ -105,7 +106,7 @@ struct TeamConversationView: View {
         // Another account, another team, or the viewer's membership changed: what was being said is dropped, not moved.
         .onChange(of: workspace.draftKey(conversationID)) { _, _ in
             voice?.close()
-            editing = nil; savedText = nil; savedMentions = nil
+            editing = nil; savedText = nil; savedMentions = nil; savedFormats = nil
             loadDraft()
         }
         .onChange(of: workspace.draft(for: conversationID)) { _, value in
@@ -653,12 +654,13 @@ struct TeamConversationView: View {
     private func beginEdit(_ message: TeamMessage) {
         // Words still being spoken were for the message set aside, not for the one being changed.
         voice?.cancelDictation()
-        if editing == nil { savedText = draft.text; savedMentions = draft.mentionEntities }
+        if editing == nil { savedText = draft.text; savedMentions = draft.mentionEntities; savedFormats = draft.formats }
         editing = message
         draft.replyToID = nil
         draft.targets = []
         draft.text = message.text
         draft.mentionEntities = message.mentionEntities
+        draft.formats = TeamMessageFormat.isValid(message.formats ?? [], in: message.text) ? message.formats : nil
         composerFocused = true
     }
 
@@ -667,7 +669,8 @@ struct TeamConversationView: View {
         editing = nil
         draft.text = savedText ?? ""
         draft.mentionEntities = savedMentions
-        savedText = nil; savedMentions = nil
+        draft.formats = savedFormats
+        savedText = nil; savedMentions = nil; savedFormats = nil
     }
 
     private func send(_ context: TeamConversationContext) async {
@@ -681,16 +684,18 @@ struct TeamConversationView: View {
             .filter { context.conversation.participants.contains("user:\($0.userId)") }
         // The files are this conversation's draft's, read at the moment of sending: no other conversation's are ever sent here.
         let files = changing == nil && waitId == nil ? workspace.files(for: conversationID) : []
-        guard TeamAttachments.canSend(text: body, files: files) else { return }
+        let runs = submittedDraft.formats ?? []
+        guard TeamAttachments.canSend(text: body, files: files), TeamMessageFormat.isValid(runs, in: body) else { return }
+        let formats = !runs.isEmpty || changing?.formats?.isEmpty == false ? runs : nil
         let sent = await workspace.run {
             let model = context.model
-            if let waitId { try await model.queue(operation: "create", text: body, replyTo: reply, waitId: waitId); return }
+            if let waitId { try await model.queue(operation: "create", text: body, replyTo: reply, waitId: waitId, formats: formats); return }
             // A Bot the viewer picked may have been revoked since: the draft is never sent with a stale target.
             if changing == nil, targets.contains(where: { key in !model.bots.contains { $0.sharedBotId == key && $0.selectable } }) {
                 throw TeamMessageFailure(code: "BOT_USE_REQUIRED")
             }
             guard model.selected == conversationID else { throw TeamMessageFailure(code: "INVALID_INPUT") }
-            try await model.queue(operation: changing == nil ? "create" : "edit", text: body, messageId: changing?.id, replyTo: reply, targets: changing == nil ? targets : [], files: files, mentionEntities: !entities.isEmpty || changing?.mentionEntities?.isEmpty == false ? entities : nil)
+            try await model.queue(operation: changing == nil ? "create" : "edit", text: body, messageId: changing?.id, replyTo: reply, targets: changing == nil ? targets : [], files: files, mentionEntities: !entities.isEmpty || changing?.mentionEntities?.isEmpty == false ? entities : nil, formats: formats)
         }
         guard sent, ownedDraftKey == ownerKey, workspace.draftKey(conversationID) == ownerKey, workspace.messaging === context.model else { return }
         workspace.filesSent(files.map(\.uploadId), in: conversationID)
@@ -700,9 +705,10 @@ struct TeamConversationView: View {
         } else {
             if draft.targets == targets { draft.targets = [] }
             // Both text and mentions can change while the message is being saved.
-            if draft.text == body && draft.mentionEntities == submittedDraft.mentionEntities {
+            if draft.text == body && draft.mentionEntities == submittedDraft.mentionEntities && draft.formats == submittedDraft.formats {
                 draft.text = ""
                 draft.mentionEntities = nil
+                draft.formats = nil
             }
         }
         if reply != nil, draft.replyToID == reply { draft.replyToID = nil }

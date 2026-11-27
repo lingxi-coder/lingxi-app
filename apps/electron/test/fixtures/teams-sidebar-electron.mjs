@@ -43,6 +43,14 @@ const rail = name => `.desktop-nav-rail [aria-label="${name}"]`;
 const railTeams = '.desktop-nav-rail .desktop-rail-teams';
 const sidebar = '.teams-sidebar';
 const row = id => `${sidebar} [data-row="${id}"]`;
+const channelDetails = '.desktop-window-toolbar button[aria-pressed][aria-label="Channel details"]';
+const pickDrawerTab = title => run(`Array.from(document.querySelectorAll('.tw-drawer [role="tab"]')).find(tab => tab.textContent.trim() === ${JSON.stringify(title)}).click()`);
+async function openTeamSettings() {
+  await click(`${sidebar} .tw-switcher`);
+  await wait(`document.querySelector('${sidebar} [role="menu"]')`);
+  await run(`Array.from(document.querySelectorAll('${sidebar} [role="menuitem"]')).find(item => item.textContent.trim() === 'Team members & settings').click()`);
+  await wait(`document.querySelector('.tw-drawer[aria-label="Team details"]')`);
+}
 // The marked buttons of the rail; the Teams button is named with its unread count, which these checks are not about.
 const marked = () => run(`Array.from(document.querySelectorAll('.desktop-nav-rail button[data-active]')).map(button => button.getAttribute('aria-label').replace(/^Teams, \\d+ unread$/, 'Teams'))`);
 const shown = selector => run(`document.querySelector(${JSON.stringify(selector)})?.getClientRects().length > 0`);
@@ -93,9 +101,8 @@ try {
     assert.equal(await run(`document.querySelector('${composerFocusInput}').matches(':focus-visible')`), true);
     assert.deepEqual(await editorBackground(), idleBackground, 'focusing the composer adds no background');
     assert.notEqual(await run(`getComputedStyle(document.querySelector('.tw-compose-box')).borderTopColor`), idleBorder, 'the existing border indicates focus');
-    await click('.desktop-window-toolbar button[aria-label="Team details"]');
-    await wait(`document.querySelector('.tw-drawer [role="tab"]')`);
-    await run(`Array.from(document.querySelectorAll('.tw-drawer [role="tab"]')).find(tab => tab.textContent.trim() === 'Bots').click()`);
+    await openTeamSettings();
+    await pickDrawerTab('Bots');
     const botCard = '.tw-drawer .team-directory-card';
     const botDetails = `${botCard} details`;
     await wait(`document.querySelector('${botDetails}')`);
@@ -150,7 +157,7 @@ try {
   assert.equal(await run(`document.querySelector('${railTeams} .desktop-rail-count').getAttribute('aria-hidden')`), 'true', 'the digits are not read out as well');
   assert.equal(await run(`document.querySelector('${railTeams}').title`), 'Teams, 4 unread');
   assert.deepEqual(await run(`Array.from(document.querySelectorAll('.desktop-nav-rail button')).map(button => button.getAttribute('aria-label'))`),
-    ['Chats', 'Projects', 'Bots', 'Teams, 4 unread', 'Friends', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
+    ['Messages', 'Projects', 'Bots', 'Teams, 4 unread', 'Friends', 'Apps', 'Datasets', 'Scheduled tasks', 'Review changes', 'Settings']);
   result.railBadge = true;
 
   // Teams mode: the workspace's own sidebar, the Teams page beside it, and the mode saved.
@@ -263,17 +270,21 @@ try {
   assert.equal(await shown('.tw-drawer'), false);
   await click('.desktop-window-toolbar .tw-conv-identity-button');
   await wait(`document.querySelector('.teams-page > .tw-drawer')`);
-  assert.equal(await run(`document.querySelector('.desktop-window-toolbar button[aria-label="Team details"]').getAttribute('aria-pressed')`), 'true');
-  assert.equal(await run(`document.querySelector('.tw-drawer h2').textContent`), 'Acme');
-  assert.equal(await run(`document.querySelector('.tw-drawer-chat strong').textContent`), 'general');
-  const memberActions = '.tw-drawer .tw-member-actions';
-  const memberRowHeight = () => run(`document.querySelector('${memberActions}').getBoundingClientRect().height`);
-  const collapsedHeight = await memberRowHeight();
-  assert.equal(await run(`document.querySelector('${memberActions}').open`), false);
-  await click(`${memberActions} summary`);
-  await wait(`document.querySelector('${memberActions}').open`);
-  assert.ok(await memberRowHeight() > collapsedHeight, 'actions expand in place below the member');
-  await click(`${memberActions} summary`);
+  assert.equal(await run(`document.querySelector(${JSON.stringify(channelDetails)}).getAttribute('aria-pressed')`), 'true');
+  assert.equal(await run(`document.querySelector('.tw-drawer h2').textContent`), 'general');
+  assert.equal(await run(`document.querySelector('.tw-drawer .tw-drawer-title p').textContent`), 'Channel · 2 members');
+  assert.equal(await shown('.tw-drawer-footer'), false);
+  assert.doesNotMatch(await run(`document.querySelector('.desktop-window-toolbar .tw-conv-head').innerText`), /Add data/);
+  await pickDrawerTab('Channel settings');
+  const setting = '.tw-drawer .tw-channel-setting';
+  await wait(`document.querySelector('${setting}')`);
+  assert.doesNotMatch(await run(`document.querySelector('.tw-drawer').textContent`), /Visualization size limit/);
+  await run(`document.querySelector('${setting}').focus()`);
+  await click(setting);
+  await wait(`document.querySelector('.tw-drawer dialog[open]')`);
+  win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+  win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+  await wait(`!document.querySelector('.tw-drawer dialog[open]') && document.activeElement === document.querySelector('${setting}')`);
   assert.equal(await drawerWidth(), 360, 'the panel\'s own default, when none was chosen');
   await run(`(() => { const handle = document.querySelector('.tw-resize'); handle.focus(); handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true })); })()`);
   await wait(`document.querySelector('.tw-drawer').getBoundingClientRect().width === 376`);
@@ -301,20 +312,26 @@ try {
   // The header's button is the one control for the panel: the sidebar's row of the team switcher holds the switcher alone, and the team menu has the entry.
   assert.equal(await run(`document.querySelectorAll('${sidebar} .tw-sidebar-head button').length`), 1);
   assert.equal(await run(`Boolean(document.querySelector('${sidebar} [aria-label="Team members & settings"]'))`), false);
-  await click(`${sidebar} .tw-switcher`);
-  await wait(`document.querySelector('${sidebar} [role="menu"]')`);
-  await run(`Array.from(document.querySelectorAll('${sidebar} [role="menuitem"]')).find(item => item.textContent.trim() === 'Team members & settings').click()`);
-  await wait(`document.querySelector('.tw-drawer')`);
+  await openTeamSettings();
+  assert.equal(await run(`document.querySelector('.tw-drawer h2').textContent`), 'Acme');
+  const memberActions = '.tw-drawer .tw-member-actions';
+  const memberRowHeight = () => run(`document.querySelector('${memberActions}').getBoundingClientRect().height`);
+  const collapsedHeight = await memberRowHeight();
+  assert.equal(await run(`document.querySelector('${memberActions}').open`), false);
+  await click(`${memberActions} summary`);
+  await wait(`document.querySelector('${memberActions}').open`);
+  assert.ok(await memberRowHeight() > collapsedHeight, 'actions expand in place below the member');
+  await click(`${memberActions} summary`);
   await menuAction('team-details');
   await wait(`!document.querySelector('.tw-drawer')`);
   // Off the Teams page the menu item does nothing: it must not have opened the panel behind the chat.
-  await click(rail('Chats'));
+  await click(rail('Messages'));
   await wait(`!document.querySelector('${sidebar}') && document.querySelector('.sidebar-new-chat')`);
   await menuAction('team-details');
   await delay(150);
   await click(railTeams);
   await wait(`document.querySelector('.teams-conversation .tw-msg')`);
-  assert.equal(await shown('.tw-drawer'), false, 'the item was ignored on Chats');
+  assert.equal(await shown('.tw-drawer'), false, 'the item was ignored on Messages');
   result.drawerMenu = true;
 
   // Apps owns a separate workspace; Teams restores the selected conversation.
@@ -408,7 +425,7 @@ try {
   assert.deepEqual(await writes(), [], 'bringing the mode back is not a change to save');
   await click(row('chan-general'));
   await wait(`document.querySelector('.teams-conversation .tw-msg')`);
-  await click('.desktop-window-toolbar button[aria-label="Team details"]');
+  await click(channelDetails);
   await wait(`document.querySelector('.tw-drawer')`);
   assert.equal(await drawerWidth(), 420);
   await delay(600);
@@ -485,10 +502,12 @@ try {
       await wait(`document.querySelectorAll('.teams-conversation .tw-msg').length === 7`);
       await delay(500);
       await snap(`teams-${theme}.png`);
-      await click('.desktop-window-toolbar button[aria-label="Team details"]');
+      await click(channelDetails);
       await wait(`document.querySelector('.tw-drawer')`);
       await delay(500);
       await snap(`teams-drawer-${theme}.png`);
+      await pickDrawerTab('Channel settings');
+      await snap(`teams-channel-settings-${theme}.png`);
       await load(`?saved=bots&theme=${theme}`);
       await wait(`document.querySelector('.bots-page')?.getClientRects().length > 0 && document.querySelectorAll('nav[aria-label="Bots"] button[aria-expanded]:not([aria-haspopup])').length === 3`);
       await delay(500);
@@ -508,9 +527,8 @@ try {
     await wait(`document.querySelectorAll('${sidebar} [data-row]').length === 4`);
     await click(row('chan-general'));
     await wait(`document.querySelectorAll('.teams-conversation .tw-msg').length === 7`);
-    await click('.desktop-window-toolbar button[aria-label="Team details"]');
-    await wait(`document.querySelector('.tw-drawer')`);
-    await run(`Array.from(document.querySelectorAll('.tw-drawer .tw-tab')).find(tab => tab.textContent.trim() === 'Bots').click()`);
+    await openTeamSettings();
+    await pickDrawerTab('Bots');
     await delay(500);
     await snap('teams-drawer-bots-light.png');
     await setViewport(900, 700);

@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { DrawerTab } from '../../../../../packages/teams/ui';
+import type { DrawerTab, DrawerTarget } from '../../../../../packages/teams/ui';
 
 /** How long the width must stay as it is before it is written to the settings file: a drag changes it on every pointer move. */
 const SAVE_AFTER_MS = 400;
 
 export interface TeamsDrawer {
-  open: boolean;
+  target: DrawerTarget | undefined;
   tab: DrawerTab;
   /** The width to draw at: the one chosen in this window, else the saved one, else none (the panel's own default). */
   width: number | undefined;
-  toggle(): void;
-  /** Open on a tab; without one, on the tab it was last on. */
+  toggle(target?: DrawerTarget): void;
+  /** Open team management on the requested tab. */
   show(tab?: DrawerTab): void;
   close(): void;
   setTab(tab: DrawerTab): void;
@@ -23,8 +23,9 @@ export interface TeamsDrawer {
  * and not at all when it is what the file holds already.
  */
 export function useTeamsDrawer({ savedWidth, save }: { savedWidth: number | undefined; save(width: number): void }): TeamsDrawer {
-  const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<DrawerTab>('members');
+  const [target, setTarget] = useState<DrawerTarget>();
+  const [teamTab, setTeamTab] = useState<DrawerTab>('members');
+  const [conversationTab, setConversationTab] = useState<DrawerTab>('members');
   const [chosen, setChosen] = useState<number>();
   const saved = useRef(savedWidth);
   saved.current = savedWidth;
@@ -50,8 +51,11 @@ export function useTeamsDrawer({ savedWidth, save }: { savedWidth: number | unde
     return () => { window.removeEventListener('pagehide', flush); flush(); };
   }, [flush]);
 
-  const toggle = useCallback(() => setOpen((current) => !current), []);
-  const show = useCallback((next?: DrawerTab) => { setOpen(true); if (next) setTab(next); }, []);
-  const close = useCallback(() => setOpen(false), []);
-  return { open, tab, width: chosen ?? savedWidth, toggle, show, close, setTab, setWidth };
+  const toggle = useCallback((next?: DrawerTarget) => {
+    setTarget(current => current && (!next || current === next) ? undefined : next ?? 'conversation');
+  }, []);
+  const show = useCallback((next?: DrawerTab) => { setTarget('team'); if (next) setTeamTab(next); }, []);
+  const close = useCallback(() => setTarget(undefined), []);
+  const [tab, setTab] = target === 'conversation' ? [conversationTab, setConversationTab] as const : [teamTab, setTeamTab] as const;
+  return { target, tab, width: chosen ?? savedWidth, toggle, show, close, setTab, setWidth };
 }

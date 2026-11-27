@@ -57,7 +57,7 @@ export function TeamPane({ teams: { workspace, snapshot }, teamId, conversationI
       <TeamConversationView workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown}
         detailsOpen={drawer.open} onToggleDetails={() => setDrawer(current => ({ ...current, open: !current.open }))} />
     </div>
-    {drawer.open ? <TeamDetailsDrawer workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} tab={drawer.tab}
+    {drawer.open ? <TeamDetailsDrawer target="conversation" workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} tab={drawer.tab}
       onTabChange={tab => setDrawer(current => ({ ...current, tab }))} onClose={() => setDrawer(current => ({ ...current, open: false }))} onAddFriend={friends ? setAdding : undefined} /> : null}
     {adding && friends && snapshot.team ? <MemberFriend friends={friends} teams={workspace.api} uid={snapshot.uid} teamId={snapshot.team.id} member={adding} locale={locale} onClose={() => setAdding(undefined)} /> : null}
   </div>;

@@ -144,6 +144,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   const t = useTeamsText(locale);
   const hasTopbar = useContext(ChatTopbarTarget) !== undefined;
   const uid = snapshot.uid, messages = snapshot.messages, tag = intlTag(locale);
+  const channel = conversation.kind === 'channel';
   const minute = Math.floor((now === undefined ? Date.now() : typeof now === 'number' ? now : now.getTime()) / 60_000);
   const [startId, setStartId] = useState<string>();
   const [loadingEarlier, setLoadingEarlier] = useState(false);
@@ -391,8 +392,9 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
     if (await workspace.run(() => workspace.api.messages(executionCommand(scope, 'revokeAttachment', { attachmentId: target.attachmentId, changeId: crypto.randomUUID() })))) setTakeBack(undefined);
   };
   const subtitle = conversationSubtitle(conversation, snapshot, locale);
-  const auto = friend ? { bots: [], on: [] } : autoReplyBots(conversation, snapshot);
-  const limitable = friend ? [] : scopedBots(conversation, snapshot);
+  const hasChannelSettings = channel && !!onToggleDetails;
+  const auto = friend || hasChannelSettings ? { bots: [], on: [] } : autoReplyBots(conversation, snapshot);
+  const limitable = friend || hasChannelSettings ? [] : scopedBots(conversation, snapshot);
   const logBots = friend ? [] : triageBots(conversation, snapshot.bots, uid, team.generation).filter(bot => !triageDenied.includes(bot.sharedBotId));
   // A friendship's Bot DM (D22) has no link of its own: its pair team is not one the Teams workspace opens.
   // The header offers the conversation's link, which opens it in the app where installed and on the web otherwise; a
@@ -410,7 +412,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
           {friend ? friend.handle ? <p>@{friend.handle}</p> : null : subtitle ? <p>{subtitle}</p> : null}
         </div>
         {friend?.onOpenProfile || (!friend && onToggleDetails) ? <button type="button" className="tw-conv-identity-button"
-          aria-label={t(friend ? 'friends_menu_view_profile' : 'teams_conversation_details')}
+          aria-label={t(friend ? 'friends_menu_view_profile' : channel ? 'tw_channel_details' : 'teams_conversation_details')}
           aria-expanded={friend ? undefined : !!detailsOpen} aria-haspopup={friend ? 'dialog' : undefined}
           onClick={friend ? friend.onOpenProfile : onToggleDetails} /> : null}
       </div>
@@ -424,7 +426,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
         {participant && !lock && !snapshot.offline && conversation.kind === 'channel' &&
           <VisualizationComposer api={workspace.api} scope={{ ...scope, conversationId: conversation.id }} locale={locale}
             participantName={uid => snapshot.directory.find(member => member.uid === uid)?.displayName ?? uid} />}
-        {participant && !lock && !snapshot.offline && <DatasetConversationPicker
+        {!channel && participant && !lock && !snapshot.offline && <DatasetConversationPicker
           api={workspace.api} destination={{ team: team.id, conversation: conversation.id }} generation={team.generation}
           sharedBot={conversationBot}
           locale={locale} participantName={uid => snapshot.directory.find(member => member.uid === uid)?.displayName
@@ -432,20 +434,20 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
         {participant && !snapshot.offline && maintainedBot && <BotDatasetTaskSettings
           key={conversation.id + ':' + maintainedBot.revision} api={workspace.api} locale={locale} name={maintainedBot.name}
           scope={{ team: team.id, conversation: conversation.id, bot: maintainedBot.sharedBotId }} />}
-        {!friend && <ConversationData api={workspace.api} scope={{ kind: 'team', ...scope, conversationId: conversation.id }} locale={locale}
+        {!channel && !friend && <ConversationData api={workspace.api} scope={{ kind: 'team', ...scope, conversationId: conversation.id }} locale={locale}
           shareReport={participant && !lock && !snapshot.offline && conversation.kind !== 'bot_dm'
             ? link => workspace.run(() => model.queue('create', link)) : undefined}
           share={participant && !lock && !snapshot.offline && conversation.kind !== 'bot_dm'
             ? (reference, text) => workspace.run(() => model.queue('create', text, undefined, undefined, [], [], reference))
             : undefined}/>}
-        {!friend && participant && !lock && !snapshot.offline && <PrivatePreviewRequest key={conversation.id}
+        {!channel && !friend && participant && !lock && !snapshot.offline && <PrivatePreviewRequest key={conversation.id}
           api={workspace.api} scope={{ kind: 'team', ...scope, conversationId: conversation.id }} locale={locale}
           request={offer => workspace.run(() => model.queue('create', 'Private data preview requested.', undefined,
             undefined, [offer.sharedBotId], [], undefined, offer.source))} />}
         {auto.bots.length ? <button type="button" className="tw-icon-btn" aria-pressed={auto.on.length > 0} aria-label={t('teams_auto_reply_title')} title={t('teams_auto_reply_title')} onClick={() => setAutoReplyOpen(true)}><Icon name="bot" /></button> : null}
         {limitable.length ? <button type="button" className="tw-icon-btn" aria-label={t('teams_bot_scope_title')} title={t('teams_bot_scope_title')} onClick={() => setBotScopeOpen(true)}><Icon name="sliders" /></button> : null}
         {logBots.length ? <button type="button" className="tw-icon-btn" aria-label={t('teams_triage_title')} title={t('teams_triage_title')} onClick={() => setTriageOpen(true)}><Icon name="clock" /></button> : null}
-        {onToggleDetails && !friend ? <button type="button" className="tw-icon-btn" aria-pressed={!!detailsOpen} aria-label={t('teams_team_details')} title={t('teams_team_details')} onClick={onToggleDetails}><Icon name="panel" /></button> : null}
+        {onToggleDetails && !friend ? <button type="button" className="tw-icon-btn" aria-pressed={!!detailsOpen} aria-label={t(channel ? 'tw_channel_details' : 'teams_team_details')} title={t(channel ? 'tw_channel_details' : 'teams_team_details')} onClick={onToggleDetails}><Icon name="panel" /></button> : null}
       </div>
     </header></ChatTopbarHeader>
     {readError?<p role="status">{locale.startsWith('zh')?'已读状态暂时无法同步':'Read status could not sync'}</p>:null}

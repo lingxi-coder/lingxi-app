@@ -484,7 +484,7 @@ test('conversation view: header, stream with day and unread dividers, grouped ru
   assert.equal(count(markup, /aria-label="Reply"/g), 6, 'every message that is not recalled can be answered');
   assert.equal(count(markup, /aria-label="Edit"/g), 1, 'only the viewer\'s own'); assert.equal(count(markup, /aria-label="Recall"/g), 1);
   assert.match(markup, /aria-label="Mark as read" title="Mark as read"><svg/);
-  assert.match(markup, /aria-pressed="false" aria-label="Team details"/);
+  assert.match(markup, /aria-pressed="false" aria-label="Channel details"/);
   assert.match(markup, /<textarea[^>]*aria-label="Message"[^>]*placeholder="Message #general"/); assert.match(markup, /Type @ to ask a Bot/);
   assert.match(markup, /aria-label="Mention \(@\)"/); assert.match(markup, /class="tw-primary tw-send" disabled="" aria-label="Send"/, 'nothing to send yet');
   assert.doesNotMatch(markup, /tw-jump/, 'pinned to the newest message: no jump button');

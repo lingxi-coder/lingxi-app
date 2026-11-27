@@ -10,7 +10,7 @@ import '../../../../packages/teams/styles';
 import { TeamConversationView } from '../../../../packages/teams/TeamConversationView';
 import { TeamDetailsDrawer } from '../../../../packages/teams/TeamDetailsDrawer';
 import { TeamSidebar } from '../../../../packages/teams/TeamSidebar';
-import type { DrawerTab, RenderMarkdown } from '../../../../packages/teams/ui';
+import type { DrawerTab, DrawerTarget, RenderMarkdown } from '../../../../packages/teams/ui';
 import { useTeamsWorkspace, type UseTeams } from '../../../../packages/teams/useTeamsWorkspace';
 import { InviteFriends } from '../friends/InviteFriends';
 import { MemberFriend } from '../friends/MemberFriend';
@@ -44,7 +44,9 @@ export function TeamsWorkspaceView({ api, uid, ...layout }: LayoutProps & { api:
  */
 export function TeamsWorkspaceLayout({ teams: { workspace, snapshot }, locale, invite, onInviteHandled, onInviteResolved, friends }: LayoutProps & { teams: UseTeams }) {
   const t = useTeamsText(locale);
-  const [drawer, setDrawer] = useState<{ open: boolean; tab: DrawerTab }>({ open: false, tab: 'members' });
+  const [drawer, setDrawer] = useState<DrawerTarget>();
+  const [teamTab, setTeamTab] = useState<DrawerTab>('members');
+  const [conversationTab, setConversationTab] = useState<DrawerTab>('members');
   const [adding, setAdding] = useState<TeamMember>();
   const [inviting, setInviting] = useState(false);
   const [invited, setInvited] = useState<string[]>();
@@ -55,19 +57,20 @@ export function TeamsWorkspaceLayout({ teams: { workspace, snapshot }, locale, i
     <div className="teams-web-body" data-pane={activePane}>
       <div className="teams-web-sidebar">
         <TeamSidebar workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} initialInvite={invite} onInviteHandled={onInviteHandled} onInviteResolved={() => { setPane('conversation'); onInviteResolved?.(); }}
-          onOpenSettings={tab => setDrawer(current => ({ open: true, tab: tab ?? current.tab }))} onConversationSelected={() => setPane('conversation')} />
+          onOpenSettings={tab => { if (tab) setTeamTab(tab); setDrawer('team'); }} onConversationSelected={() => setPane('conversation')} />
       </div>
       <div className="teams-web-conversation">
         {activePane === 'conversation' ? <ChatTopbarControl><button type="button" className="teams-web-back" onClick={() => {
           setPane('list');
-          setDrawer(current => ({ ...current, open: false }));
+          setDrawer(undefined);
         }}>{t('tw_back_conversations')}</button></ChatTopbarControl> : null}
         {invited ? <InviteNotice names={invited} locale={locale} onDone={() => setInvited(undefined)} /> : null}
-        <TeamConversationView notificationTarget={noticeTargetFromSearch(typeof location==='undefined'?'':location.search)} workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown} detailsOpen={drawer.open}
-          onToggleDetails={() => setDrawer(current => ({ ...current, open: !current.open }))} />
+        <TeamConversationView notificationTarget={noticeTargetFromSearch(typeof location==='undefined'?'':location.search)} workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown}
+          detailsOpen={drawer === 'conversation'} onToggleDetails={() => setDrawer(current => current === 'conversation' ? undefined : 'conversation')} />
       </div>
-      {drawer.open ? <TeamDetailsDrawer workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} tab={drawer.tab}
-        onTabChange={tab => setDrawer(current => ({ ...current, tab }))} onClose={() => setDrawer(current => ({ ...current, open: false }))} onAddFriend={friends ? setAdding : undefined} onInviteFriends={friends ? () => setInviting(true) : undefined} /> : null}
+      {drawer ? <TeamDetailsDrawer target={drawer} workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar}
+        tab={drawer === 'team' ? teamTab : conversationTab} onTabChange={drawer === 'team' ? setTeamTab : setConversationTab}
+        onClose={() => setDrawer(undefined)} onAddFriend={friends ? setAdding : undefined} onInviteFriends={friends ? () => setInviting(true) : undefined} /> : null}
       {adding && friends && snapshot.team ? <MemberFriend friends={friends} teams={workspace.api} uid={snapshot.uid} teamId={snapshot.team.id} member={adding} locale={locale} onClose={() => setAdding(undefined)} /> : null}
       {inviting && friends && snapshot.team ? <InviteFriends friends={friends} teams={workspace.api} uid={snapshot.uid} team={snapshot.team} members={snapshot.directory} locale={locale}
         refreshMembers={() => void workspace.refresh()} onClose={names => { setInviting(false); setInvited(names.length ? names : undefined); }} /> : null}

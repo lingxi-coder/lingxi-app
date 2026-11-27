@@ -24,7 +24,7 @@ import type { InboxNoticeTarget } from '../../../../../packages/inbox/contracts'
 export const renderTeamMarkdown: RenderMarkdown = text => <MarkdownContent text={text} trustedHtml={false} botProposals={false} externalLinksOnly />;
 
 /**
- * The Teams page: the open conversation, and the details of its team beside it when the panel is open. The sidebar
+ * The Teams page: the open conversation and its details panel. The sidebar
  * (`TeamsSidebar`) is the other half; both read the one workspace the window holds. This is a separate chunk, so
  * the conversation and the Bot cards in it load when the page is first shown and not when the window opens.
  * A member of the team can be added as a friend (D15) and, by a manager, friends can be invited to it (D26) once the window has a
@@ -62,9 +62,9 @@ export function TeamsMain({ teams, friends, locale, drawer, services, inboxTarge
       <div className="teams-conversation">
         {invited ? <InviteNotice names={invited} locale={locale} onDone={() => setInvited(undefined)} /> : null}
         <TeamConversationView workspace={workspace} snapshot={snapshot} locale={locale} notificationTarget={notificationTarget} renderAvatar={renderTeamAvatar} renderMarkdown={renderTeamMarkdown}
-          detailsOpen={drawer.open} onToggleDetails={drawer.toggle} />
+          detailsOpen={drawer.target === 'conversation'} onToggleDetails={() => drawer.toggle('conversation')} />
       </div>
-      {drawer.open ? <TeamDetailsDrawer workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar}
+      {drawer.target ? <TeamDetailsDrawer target={drawer.target} workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar}
         tab={drawer.tab} onTabChange={drawer.setTab} width={drawer.width} onWidthChange={drawer.setWidth} onClose={drawer.close}
         onAddFriend={friends.workspace ? setAdding : undefined} onInviteFriends={friends.workspace ? () => setInviting(true) : undefined} /> : null}
       {adding && friends.workspace && snapshot.team ? <MemberFriendDialog workspace={friends.workspace} locale={locale} teamId={snapshot.team.id} member={adding}

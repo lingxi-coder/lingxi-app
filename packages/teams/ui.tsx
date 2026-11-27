@@ -286,7 +286,8 @@ export function rovingKeys(event: KeyboardEvent<HTMLElement>, selector = '[data-
 // ─── Shared wording ─────────────────────────────────────────────────────────
 
 /** Which tab of the details drawer to show. */
-export type DrawerTab = 'members' | 'invites' | 'bots';
+export type DrawerTab = 'members' | 'invites' | 'bots' | 'settings';
+export type DrawerTarget = 'team' | 'conversation';
 
 /** Who can read Team data. Shown wherever a person creates, joins or opens a team, and on the conversation header and the details panel. */
 export const platformNotice = (locale: string): string => teamsText(locale)('teams_disclosure');

@@ -1,4 +1,5 @@
 import { DESKTOP_BRIDGE_GLOBAL } from '../../src/shared/desktopBridge';
+import { BOT_REPLY_THRESHOLDS_DEFAULT, type BotUi } from '../../src/shared/bots';
 import { fixtureConversationSpaces } from './conversation-spaces-mock';
 import { createRoot } from 'react-dom/client';
 import { App } from '../../src/renderer/App';
@@ -22,7 +23,7 @@ const ago = (minutes: number) => new Date(now - minutes * MINUTE).toISOString();
 
 // ---- Teams ----
 const fake = new FakeTeams();
-const ownerBot = botCard();
+const ownerBot = botCard({ autoReply: { daily: 7 } });
 const sharedBotIdentity = `shared_bot:${ownerBot.sharedBotId}`;
 fake.teams = [team('team-aaaa', { name: 'Acme', role: 'owner', memberCount: 3 }), team('team-bbbb', { name: 'Beta', generation: 2, memberCount: 2 })];
 fake.bots = [ownerBot];
@@ -100,7 +101,12 @@ const bots = [
   { botId: 'beta', name: 'Beta', description: 'Reviews changes', createdAt: now - 800 * MINUTE, updatedAt: now, revision: 1, workspaces: [], lastActivityAt: now - 3 * MINUTE },
   // A personal Bot keeps its local identity after being published as a SharedBot.
   { botId: ownerBot.instanceId, name: ownerBot.name, description: ownerBot.description, createdAt: now - 700 * MINUTE, updatedAt: now, revision: 1, workspaces: [], lastActivityAt: now - 10 * MINUTE },
-];
+].map((bot): BotUi => ({
+  ...bot,
+  sandbox: { enabled: true, allowedDomains: [] },
+  scope: { localApps: [], datasets: [] },
+  autoReply: { policy: '', keywords: [], cooldownSec: 0, thresholds: BOT_REPLY_THRESHOLDS_DEFAULT, approval: 'never' },
+}));
 const chats: Record<string, ReturnType<typeof chat>[]> = {
   alpha: [chat('a-1', 'Plan the launch', 30), chat('a-2', 'Weekly notes', 60), chat('a-3', 'Draft the post', 90)],
   beta: [chat('b-1', 'Review the diff', 3)],

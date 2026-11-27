@@ -508,6 +508,17 @@
 .tw-scope .tw-tab { flex: 1; min-inline-size: 0; border: 1px solid transparent; border-radius: 8px; padding: 4px; overflow-wrap: anywhere; }
 .tw-scope .tw-tab[aria-selected='true'] { font-weight: 700; border-color: var(--tw-line); background: var(--tw-surface); color: var(--tw-fg); }
 .tw-drawer-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 8px 14px 16px; }
+.tw-channel-settings { display: grid; gap: 2px; }
+.tw-scope button.tw-channel-setting {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px;
+  min-height: 44px; padding: 8px 10px; border: 0; border-radius: 9px; text-align: start; overflow-wrap: anywhere;
+}
+.tw-scope button.tw-channel-setting:focus-visible { outline: 0; background: var(--tw-selected); color: var(--tw-accent-text); }
+.tw-channel-setting svg:last-child { color: var(--tw-muted); }
+@media (forced-colors: active) {
+  .tw-scope button.tw-channel-setting:focus-visible { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+  .tw-channel-setting:focus-visible svg:last-child { color: inherit; }
+}
 .tw-drawer-footer { flex: none; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 10px; justify-content: space-between; border-top: 1px solid var(--tw-line); padding: 8px 12px 10px; }
 .tw-panel-disclosure { max-width: 100%; color: var(--tw-muted); }
 .tw-panel-disclosure[open] { flex: 1 0 100%; }

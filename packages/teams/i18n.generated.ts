@@ -597,7 +597,6 @@ export type TeamsKey =
   | 'teams_visualization_fields'
   | 'teams_visualization_forward'
   | 'teams_visualization_import'
-  | 'teams_visualization_limit'
   | 'teams_visualization_partitions'
   | 'teams_visualization_personal'
   | 'teams_visualization_preview'
@@ -707,6 +706,9 @@ export type TeamsKey =
   | 'tw_botdir_undo_replace'
   | 'tw_botdir_will_replace_fmt'
   | 'tw_botdir_will_stop'
+  | 'tw_channel_details'
+  | 'tw_channel_no_settings'
+  | 'tw_channel_settings'
   | 'tw_checking'
   | 'tw_composer_answering_fmt'
   | 'tw_composer_attach'
@@ -1617,7 +1619,6 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_visualization_fields: { en: 'Visible fields', 'zh-Hans': '可见字段', 'zh-Hant': '可見欄位', ja: '表示フィールド', ko: '표시 필드' },
   teams_visualization_forward: { en: 'Forward visualization', 'zh-Hans': '转发可视化', 'zh-Hant': '轉發視覺化', ja: '可視化を転送', ko: '시각화 전달' },
   teams_visualization_import: { en: 'Import HTML', 'zh-Hans': '导入 HTML', 'zh-Hant': '匯入 HTML', ja: 'HTML を読み込む', ko: 'HTML 가져오기' },
-  teams_visualization_limit: { en: 'Visualization size limit (MiB)', 'zh-Hans': '可视化大小上限（MiB）', 'zh-Hant': '視覺化大小上限（MiB）', ja: 'ビジュアライゼーションの上限（MiB）', ko: '시각화 크기 한도(MiB)' },
   teams_visualization_partitions: { en: 'Visible partitions', 'zh-Hans': '可见分区', 'zh-Hant': '可見分割區', ja: '表示パーティション', ko: '표시 파티션' },
   teams_visualization_personal: { en: 'Personal data', 'zh-Hans': '个人数据', 'zh-Hant': '個人資料', ja: '個人データ', ko: '개인 데이터' },
   teams_visualization_preview: { en: 'Preview', 'zh-Hans': '预览', 'zh-Hant': '預覽', ja: 'プレビュー', ko: '미리보기' },
@@ -1727,6 +1728,9 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_botdir_undo_replace: { en: 'Undo replace', 'zh-Hans': '撤销替换', 'zh-Hant': '復原替換', ja: '置き換えを元に戻す', ko: '교체 실행 취소' },
   tw_botdir_will_replace_fmt: { en: 'will be replaced by %1$s', 'zh-Hans': '将替换为 %1$s', 'zh-Hant': '將替換為 %1$s', ja: '%1$s に置き換えられます', ko: '%1$s(으)로 교체됩니다' },
   tw_botdir_will_stop: { en: 'will stop being shared', 'zh-Hans': '将停止共享', 'zh-Hant': '將停止共享', ja: '共有を停止します', ko: '공유가 중지됩니다' },
+  tw_channel_details: { en: 'Channel details', 'zh-Hans': '频道详情', 'zh-Hant': '頻道詳情', ja: 'チャンネルの詳細', ko: '채널 상세 정보' },
+  tw_channel_no_settings: { en: 'There are no Bot settings for this channel.', 'zh-Hans': '此频道暂无 Bot 设置。', 'zh-Hant': '此頻道目前沒有 Bot 設定。', ja: 'このチャンネルには Bot 設定がありません。', ko: '이 채널에는 Bot 설정이 없습니다.' },
+  tw_channel_settings: { en: 'Channel settings', 'zh-Hans': '频道设置', 'zh-Hant': '頻道設定', ja: 'チャンネル設定', ko: '채널 설정' },
   tw_checking: { en: 'Checking…', 'zh-Hans': '检查中…', 'zh-Hant': '檢查中…', ja: '確認中…', ko: '확인 중…' },
   tw_composer_answering_fmt: { en: 'Replying to %1$s’s question', 'zh-Hans': '回复 %1$s 的问题', 'zh-Hant': '回覆 %1$s 的問題', ja: '%1$s の質問に返信中', ko: '%1$s 님의 질문에 답장 중' },
   tw_composer_attach: { en: 'Add pictures, PDFs or text files (up to 5, 10 MB each)', 'zh-Hans': '添加图片、PDF 或文本文件（最多 5 个，每个不超过 10 MB）', 'zh-Hant': '新增圖片、PDF 或純文字檔（最多 5 個，每個不超過 10 MB）', ja: '画像、PDF、テキストファイルを追加（最大5件、各10 MBまで）', ko: '사진, PDF 또는 텍스트 파일 추가(최대 5개, 각 10 MB까지)' },

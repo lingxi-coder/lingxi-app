@@ -2,17 +2,18 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent, type PointerEve
 import { messageErrorText, teamsErrorText } from './errors.js';
 import type { TeamCommand, TeamMember, TeamRole } from './index.js';
 import { BotDirectory } from './BotDirectory';
-import { ChannelVisualizationSettings } from './ChannelVisualizationSettings.js';
+import { ChannelSettings } from './ChannelSettings';
 import { canInviteFriends } from './friends.js';
-import { Avatar, ConversationLead, Dialog, Icon, platformNotice, rovingIndex, TeamMark, type DrawerTab, type RenderAvatar } from './ui';
+import { Avatar, ConversationLead, Dialog, Icon, platformNotice, rovingIndex, TeamMark, type DrawerTab, type DrawerTarget, type RenderAvatar } from './ui';
 import type { TeamsSnapshot, TeamsWorkspace } from './workspace.js';
-import { conversationLabel } from './workspace.js';
+import { conversationLabel, conversationParticipants } from './workspace.js';
 import { intlTag, useTeamsText } from './i18n.js';
 
 export const DRAWER_MIN = 280;
 export const DRAWER_MAX = 480;
 export const DRAWER_DEFAULT = 360;
 const STEP = 16, STEP_LARGE = 48;
+const CHANNEL_TABS: readonly DrawerTab[] = ['members', 'settings'];
 
 /** A drawer width kept within its limits. Anything that is not a finite number becomes the default. */
 export const clampDrawerWidth = (width: number): number => Number.isFinite(width) ? Math.min(DRAWER_MAX, Math.max(DRAWER_MIN, Math.round(width))) : DRAWER_DEFAULT;
@@ -37,6 +38,7 @@ export const canManageMember = (viewerRole: TeamRole, viewerUid: string, member:
 export interface TeamDetailsDrawerProps {
   workspace: TeamsWorkspace;
   snapshot: TeamsSnapshot;
+  target?: DrawerTarget;
   /** The shown tab, when the host keeps it; otherwise the drawer does. */
   tab?: DrawerTab;
   onTabChange?(tab: DrawerTab): void;
@@ -57,10 +59,10 @@ export interface TeamDetailsDrawerProps {
 interface Confirmation { command: TeamCommand; title: string; body: string; confirm: string; /** A destructive act gets the danger button; a change of role the primary one. */ danger: boolean }
 
 /**
- * The right column: the active chat, the team's member directory and settings.
+ * The right column for channel details or team management.
  * The left edge is a resize handle (280 to 480 pixels). Escape closes the panel.
  */
-export function TeamDetailsDrawer({ workspace, snapshot, tab, onTabChange, width: controlledWidth, defaultWidth, onWidthChange, onClose, renderAvatar, locale, onAddFriend, onInviteFriends }: TeamDetailsDrawerProps): ReactElement | null {
+export function TeamDetailsDrawer({ workspace, snapshot, target = 'team', tab, onTabChange, width: controlledWidth, defaultWidth, onWidthChange, onClose, renderAvatar, locale, onAddFriend, onInviteFriends }: TeamDetailsDrawerProps): ReactElement | null {
   const t = useTeamsText(locale);
   const tag = intlTag(locale);
   const id = useId();
@@ -74,6 +76,8 @@ export function TeamDetailsDrawer({ workspace, snapshot, tab, onTabChange, width
   const [uses, setUses] = useState(1), [ttl, setTtl] = useState(86400), [inviteRole, setInviteRole] = useState<'member' | 'admin'>('member');
   const [notice, setNotice] = useState('');
   const team = snapshot.team, detail = snapshot.detail, uid = snapshot.uid;
+  const conversation = target === 'conversation' ? snapshot.conversation : undefined;
+  const channel = conversation?.kind === 'channel' ? conversation : undefined;
 
   // Focus moves into the drawer when it opens and back to where it came from when it closes.
   useEffect(() => {
@@ -84,11 +88,11 @@ export function TeamDetailsDrawer({ workspace, snapshot, tab, onTabChange, width
   // Leaving, deleting, or losing the team leaves nothing to show.
   useEffect(() => { if (!team) closing.current(); }, [team]);
   // A change of account or membership invalidates what the person was about to confirm.
-  useEffect(() => { setConfirmation(undefined); }, [snapshot.authority]);
+  useEffect(() => { setConfirmation(undefined); }, [snapshot.authority, target, channel?.id]);
   useEffect(() => { setNotice(''); }, [snapshot.selectedTeamId]);
 
   if (!team) return null;
-  const tabs = drawerTabs(team.role);
+  const tabs = channel ? CHANNEL_TABS : drawerTabs(team.role);
   const requested = tab ?? ownTab;
   const current: DrawerTab = tabs.includes(requested) ? requested : 'members';
   const width = clampDrawerWidth(controlledWidth ?? ownWidth);
@@ -99,7 +103,7 @@ export function TeamDetailsDrawer({ workspace, snapshot, tab, onTabChange, width
   };
   const choose = (next: DrawerTab) => { setOwnTab(next); onTabChange?.(next); };
   const role = (value: TeamRole) => ({ owner: t('teams_owner'), admin: t('teams_admin'), member: t('teams_member') })[value];
-  const tabLabel = (value: DrawerTab) => ({ members: t('teams_members'), invites: t('teams_invites'), bots: t('remote_bots') })[value];
+  const tabLabel = (value: DrawerTab) => ({ members: t('teams_members'), invites: t('teams_invites'), bots: t('remote_bots'), settings: t('tw_channel_settings') })[value];
 
   const ask = (command: TeamCommand, title: string, body: string, confirm: string, danger = true) => setConfirmation({ command, title, body, confirm, danger });
   const confirmNow = async () => {
@@ -139,7 +143,7 @@ export function TeamDetailsDrawer({ workspace, snapshot, tab, onTabChange, width
   };
   const escape = (event: KeyboardEvent<HTMLElement>) => {
     // A confirmation or a menu inside the drawer takes Escape first.
-    if (event.key === 'Escape' && !event.defaultPrevented && !confirmation) { event.stopPropagation(); onClose(); }
+    if (event.key === 'Escape' && !event.defaultPrevented && !confirmation && !(event.target as HTMLElement | null)?.closest?.('dialog')) { event.stopPropagation(); onClose(); }
   };
 
   const copy = (link: string) => {
@@ -147,11 +151,37 @@ export function TeamDetailsDrawer({ workspace, snapshot, tab, onTabChange, width
     if (!navigator.clipboard) { fail(); return; }
     navigator.clipboard.writeText(link).then(done, fail);
   };
-  const conversation = snapshot.conversation;
   const chatLabel = conversation ? conversationLabel(conversation, snapshot.directory, uid, { bots: snapshot.bots, locale }) : undefined;
+  const channelPeople = channel ? channel.participants.length ? conversationParticipants(channel, snapshot.directory, snapshot.bots, uid, locale)
+    : snapshot.directory.map(member => ({ kind: 'user' as const, id: member.uid, name: member.displayName || t('teams_member'), self: member.uid === uid })) : [];
+  const memberCount = channel ? channelPeople.filter(person => person.kind === 'user').length : team.memberCount;
+  const memberCountText = t(memberCount === 1 ? 'teams_members_count_one_fmt' : 'teams_members_count_other_fmt', memberCount);
+  const detailsLabel = t(channel ? 'tw_channel_details' : 'teams_team_details');
   const members = detail?.members ?? [];
   const invites = detail?.invites ?? [];
   const body = (): ReactElement => {
+    if (channel) {
+      if (current === 'settings') return <ChannelSettings key={`${uid}:${team.id}:${team.generation}:${channel.id}:${snapshot.authority}`}
+        workspace={workspace} snapshot={snapshot} conversation={channel} scope={{ teamId: team.id, generation: team.generation }} locale={locale} />;
+      return <ul className="tw-people" aria-label={t('teams_members')}>
+        {channelPeople.map(person => {
+          const member = person.kind === 'user' && !person.self ? snapshot.directory.find(candidate => candidate.uid === person.id) : undefined;
+          const identity = <>
+            <Avatar identity={person} size={40} render={renderAvatar} />
+            <div className="tw-person-text"><b>{person.name}</b>{person.self && person.name !== t('teams_you') ? <small>{t('teams_you')}</small>
+              : person.kind === 'bot' ? <small>{t('teams_bot_tag')}</small> : null}</div>
+          </>;
+          return <li key={`${person.kind}:${person.id}`}>
+            {member && onAddFriend ? <details className="tw-member-actions">
+              <summary className="tw-person-row" aria-label={`${person.name} · ${t('tw_more')}`}>
+                {identity}<span className="tw-person-more"><Icon name="more" /></span>
+              </summary>
+              <div className="tw-person-actions"><button type="button" onClick={() => onAddFriend(member)}>{t('friends_add')}</button></div>
+            </details> : <div className="tw-person-row">{identity}</div>}
+          </li>;
+        })}
+      </ul>;
+    }
     if (current === 'bots') {
       return <div className="tw-embed">
         <BotDirectory key={`${uid}:${team.id}:${team.generation}:${snapshot.authority}`} api={workspace.api} uid={uid} team={team} members={snapshot.directory} bots={snapshot.bots} locale={locale} busy={snapshot.messageBusy} renderAvatar={renderAvatar}
@@ -239,40 +269,37 @@ export function TeamDetailsDrawer({ workspace, snapshot, tab, onTabChange, width
     </div>;
   };
 
-  return <aside className="tw-scope tw-drawer" role="complementary" aria-label={t('teams_team_details')} style={{ width }} onKeyDown={escape}>
+  return <aside className="tw-scope tw-drawer" role="complementary" aria-label={detailsLabel} style={{ width }} onKeyDown={escape}>
     <div className="tw-resize" role="separator" aria-orientation="vertical" aria-label={t('tw_team_resize')}
       aria-valuemin={DRAWER_MIN} aria-valuemax={DRAWER_MAX} aria-valuenow={width} tabIndex={0}
       onPointerDown={resizeDown} onPointerMove={resizeMove} onPointerUp={resizeUp} onPointerCancel={resizeUp} onKeyDown={resizeKey} />
     <header className="tw-drawer-head">
-      <TeamMark id={team.id} name={team.name} size={56} />
+      {channel && chatLabel ? <ConversationLead conversation={channel} label={chatLabel} snapshot={snapshot} locale={locale} size={40} render={renderAvatar} />
+        : <TeamMark id={team.id} name={team.name} size={56} />}
       <div className="tw-drawer-title">
-        <h2 ref={heading} tabIndex={-1}>{team.name}</h2>
-        <p>{role(team.role)} · {t(team.memberCount === 1 ? 'teams_members_count_one_fmt' : 'teams_members_count_other_fmt', team.memberCount)}</p>
+        <h2 ref={heading} tabIndex={-1}>{channel ? chatLabel : team.name}</h2>
+        <p>{channel ? t('teams_conversation_channel') : role(team.role)}{channel && !memberCount ? '' : ` · ${memberCountText}`}</p>
       </div>
       <button type="button" className="tw-icon-btn" aria-label={t('tw_team_close_details')} title={t('tw_team_close_details')} onClick={onClose}><Icon name="x" /></button>
     </header>
-    {conversation && chatLabel ? <div className="tw-drawer-chat">
+    {conversation && !channel && chatLabel ? <div className="tw-drawer-chat">
       <ConversationLead conversation={conversation} label={chatLabel} snapshot={snapshot} locale={locale} size={32} render={renderAvatar} />
       <div className="tw-drawer-title"><p>{t('teams_conversation_details')}</p><strong>{chatLabel}</strong></div>
     </div> : null}
-    {conversation?.kind === 'channel' && workspace.api.datasets && !snapshot.offline && (
-      <ChannelVisualizationSettings key={team.id + ':' + conversation.id} api={workspace.api} locale={locale}
-        scope={{ teamId: team.id, generation: team.generation, conversationId: conversation.id }} />
-    )}
-    {snapshot.error ? <p role="alert" className="tw-error tw-drawer-error">{teamsErrorText(snapshot.error, locale)}</p> : null}
-    <div className="tw-tabs" role="tablist" aria-label={t('teams_team_details')} onKeyDown={tabKey}>
+    {!channel && snapshot.error ? <p role="alert" className="tw-error tw-drawer-error">{teamsErrorText(snapshot.error, locale)}</p> : null}
+    <div className="tw-tabs" role="tablist" aria-label={detailsLabel} onKeyDown={tabKey}>
       {tabs.map(value => <button key={value} type="button" role="tab" id={`${id}-tab-${value}`} aria-selected={value === current} aria-controls={`${id}-panel`} tabIndex={value === current ? 0 : -1}
         className="tw-tab" onClick={() => choose(value)}>{tabLabel(value)}</button>)}
     </div>
     <div className="tw-drawer-body" role="tabpanel" id={`${id}-panel`} aria-labelledby={`${id}-tab-${current}`} tabIndex={0}>{body()}</div>
-    <footer className="tw-drawer-footer">
+    {!channel ? <footer className="tw-drawer-footer">
       <details className="tw-panel-disclosure">
         <summary><Icon name="lock" size={15} />{t('tw_team_platform_readable')}</summary>
         <p className="tw-hint">{platformNotice(locale)}</p>
       </details>
       <button type="button" className="tw-link tw-danger-btn" disabled={snapshot.busy} onClick={leaveOrDelete}>{team.role === 'owner' ? t('teams_delete') : t('teams_leave')}</button>
-    </footer>
-    {confirmation ? <Dialog role="alertdialog" title={confirmation.title} description={confirmation.body} onClose={() => setConfirmation(undefined)}>
+    </footer> : null}
+    {!channel && confirmation ? <Dialog role="alertdialog" title={confirmation.title} description={confirmation.body} onClose={() => setConfirmation(undefined)}>
       <div className="tw-form">
         <div className="tw-dialog-actions">
           <button type="button" data-autofocus onClick={() => setConfirmation(undefined)}>{t('common_cancel')}</button>

@@ -568,10 +568,41 @@ scenario('drawer: revoking an invite asks first, and a confirmation can be cance
 });
 
 scenario('the conversation view toggles the details drawer through its header button', async context => {
-  const { workspace, snapshot } = await open(context);
+  const { workspace, snapshot } = await open(context, fake => {
+    fake.api.datasets = async () => { throw new Error('unexpected dataset request'); };
+  });
   workspace.selectConversation('chan-general'); await until(() => snapshot().messages.length === 3, 'the thread');
   let toggled = 0;
   const page = await mount(workspace, conversationView(workspace, { detailsOpen: true, onToggleDetails: () => { toggled++; } })); context.after(() => page.unmount());
-  const button = page.oneByLabel('Team details'); assert.equal(button.props['aria-pressed'], true);
+  const button = page.find(node => node.type === 'button' && node.props['aria-pressed'] === true && node.props['aria-label'] === 'Channel details')[0];
+  assert.ok(button);
+  assert.doesNotMatch(page.text(), /Add data/);
   await page.click(button); assert.equal(toggled, 1);
+});
+
+scenario('channel settings change Bot behavior for the active channel and stay separate from team management', async context => {
+  const { fake, workspace, snapshot } = await open(context, fake => {
+    fake.bots = [botCard({ autoReply: { daily: 7 }, scope: { localApps: [{ id: 'calendar', name: 'Calendar' }], datasets: [] } })];
+    fake.api.datasets = async () => { throw new Error('unexpected dataset request'); };
+  });
+  workspace.selectConversation('chan-general');
+  await until(() => snapshot().conversation?.id === 'chan-general' && !snapshot().offline, 'the channel');
+  const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer, { target: 'conversation', workspace, snapshot, locale: 'en', onClose() {} }));
+  context.after(() => page.unmount());
+  assert.match(page.text(), /general.*Channel · 2 members/);
+  assert.doesNotMatch(page.text(), /Acme|Invites|Delete team|Visualization size limit/);
+  assert.match(page.text(), /Bob.*Fixture Bot.*Alice/);
+  assert.doesNotMatch(page.text(), /Owner/, 'the remaining teammate is outside this channel');
+  await page.click(page.find(node => node.props.role === 'tab' && textOf(node) === 'Channel settings')[0]);
+  await page.click(page.button('What Bots can use in this chat'));
+  assert.match(page.text(), /Calendar/);
+  await page.click(page.button('Close'));
+  await page.click(page.button('Bots that answer on their own'));
+  const enabled = page.find(node => node.type === 'input' && node.props.type === 'checkbox' && textOf(node.parent) === 'Fixture Bot')[0];
+  await page.check(enabled);
+  await page.click(page.button('Save'));
+  assert.deepEqual(fake.commands.find(command => command.action === 'setConversationAutoReply')?.payload, {
+    conversationId: 'chan-general', expectedRevision: 0, targets: ['assistant-fixture'],
+  });
+  assert.equal(page.find(node => node.type === 'dialog').length, 0);
 });

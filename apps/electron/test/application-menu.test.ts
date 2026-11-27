@@ -56,17 +56,17 @@ test('the sidebar toggle has an accelerator that does not need the Command key o
   assert.equal(toggle.accelerator, 'Control+Alt+S');
 });
 
-test('the View menu shows or hides the details of the open team, after the sidebar toggle, sending its own action', () => {
+test('the View menu shows or hides details in Teams, after the sidebar toggle, sending its own action', () => {
   const actions: string[] = [];
   const view = viewItems(applicationMenuTemplate('darwin', action => actions.push(action), false));
-  const details = view.find(item => item.label === 'Show/Hide Team Details')!;
+  const details = view.find(item => item.label === 'Show/Hide Details in Teams')!;
   assert.ok(details, 'the item is in the menu');
   assert.equal(details.accelerator, 'Control+Command+I');
   (details.click as () => void)();
   assert.deepEqual(actions, ['team-details']);
   assert.ok(view.findIndex(item => item.label === 'Show/Hide Sidebar') < view.indexOf(details), 'it follows the sidebar toggle');
   for (const platform of ['win32', 'linux'] as const) {
-    const other = viewItems(applicationMenuTemplate(platform, () => {}, false)).find(item => item.label === 'Show/Hide Team Details')!;
+    const other = viewItems(applicationMenuTemplate(platform, () => {}, false)).find(item => item.label === 'Show/Hide Details in Teams')!;
     assert.equal(other.accelerator, 'Control+Alt+I', `${platform} does not need the Command key`);
   }
 });

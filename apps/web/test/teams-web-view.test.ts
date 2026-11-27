@@ -49,9 +49,11 @@ scenario('layout: sidebar and conversation side by side, with the details only w
   assert.deepEqual(page.find(node => node.props.role === 'tab').map(node => node.props['aria-selected']), [false, false, true], 'reopened where it was left');
   await page.click(page.oneByLabel('Close details'));
   workspace.selectConversation('chan-general'); await settle(); await page.during(() => undefined);
-  const toggle = () => page.find(node => node.type === 'button' && node.props['aria-label'] === 'Team details')[0]!;
+  const toggle = () => page.find(node => node.type === 'button' && node.props['aria-pressed'] !== undefined && node.props['aria-label'] === 'Channel details')[0]!;
   assert.equal(toggle().props['aria-pressed'], false);
   await page.click(toggle()); assert.equal(drawer().length, 1); assert.equal(toggle().props['aria-pressed'], true);
+  assert.equal(drawer()[0].props['aria-label'], 'Channel details');
+  assert.deepEqual(page.find(node => node.props.role === 'tab').map(textOf), ['Members', 'Channel settings']);
   await page.click(toggle()); assert.equal(drawer().length, 0);
 });
 
@@ -64,7 +66,7 @@ scenario('layout: on a phone the sidebar and the conversation take turns, and th
   await page.click(page.oneByClass('teams-web-back')); assert.equal(body().props['data-pane'], 'list');
   await page.click(page.find(node => node.props['data-row'] === 'chan-general')[0]);
   assert.equal(snapshot().selectedConversationId, 'chan-general'); assert.equal(body().props['data-pane'], 'conversation');
-  await page.click(page.oneByLabel('Team details'));
+  await page.click(page.oneByClass('tw-conv-identity-button'));
   assert.equal(page.find(node => node.type === 'aside').length, 1);
   await page.click(page.oneByClass('teams-web-back')); assert.equal(body().props['data-pane'], 'list');
   assert.equal(page.find(node => node.type === 'aside').length, 0, 'the details do not cover the list');

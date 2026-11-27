@@ -30,7 +30,7 @@ export function FriendBotsPanel({ id, pair, view, chat, locale, renderAvatar, on
       <button ref={closeRef} type="button" className="tw-icon-btn" aria-label={t('common_close')} title={t('common_close')} onClick={onClose}><Icon name="x" /></button>
     </header>
     <div className="tw-friends-bots-body tw-embed">
-      <BotDirectory key={`${view.uid}:${team.id}:${team.generation}`} friend={chat.name} api={pair.api} uid={view.uid} team={team} members={view.directory} bots={view.bots} locale={locale} busy={view.messageBusy}
+      <BotDirectory key={`${view.uid}:${team.id}:${team.generation}`} friend={chat.name} api={pair.api} uid={view.uid} team={team} members={view.directory} bots={view.bots} locale={locale} busy={view.messageBusy} renderAvatar={renderAvatar}
         status={view.botsUnverified ? t('teams_bots_unverified') : !view.botsLoaded ? t('teams_bots_loading') : ''}
         attempt={pair.attempt} onOpen={async bot => { await pair.startBotDm(bot); onClose(); }} onChanged={pair.refreshBots} onOpenChat={id => { pair.selectConversation(id); onClose(); }} />
       {view.actionError ? <p role="alert" className="tw-error">{messageErrorText(view.actionError, locale)}</p> : null}

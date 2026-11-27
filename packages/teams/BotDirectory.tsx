@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { executionCommand, sharedBotUsable, type LocalPublishableBot, type RequestQuotas, type SelectedSharedFile, type SharedBotCard, type UsePolicy, type PublishLocalBotInput, type PublishedKnowledge, type SharedList } from './execution.js';
 import type { TeamDetail, TeamsApi, TeamSummary } from './index.js';
 import { emptyBotScope, type PublishedBotScope } from './bot-scope.js';
-import { Dialog } from './ui';
+import { Dialog, type RenderAvatar } from './ui';
 import { BotScopeSummary } from './BotScopeSummary';
 import { SharedListDialog } from './SharedListDialog';
 import { TriageLogDialog } from './TriageLogDialog';
@@ -10,7 +10,7 @@ import { HeldRepliesButton } from './HeldRepliesDialog';
 import { maintainsBot } from './triage-log.js';
 import { SharedHostPanel } from './SharedHostPanel';
 import { BotHandover } from './BotHandover';
-import { BotMemberDetails, botAvailabilityText } from './BotMemberDetails';
+import { BotMemberDetails, SharedBotCardSummary } from './BotMemberDetails';
 import { useTeamsText } from './i18n.js';
 
 /**
@@ -18,11 +18,12 @@ import { useTeamsText } from './i18n.js';
  * the Bots of a friendship instead (D21, D23): no audience or quota lines on the cards and an audience that is fixed to the friend in the
  * wizard (the quotas stay editable). Ending a Bot's availability is Stop sharing (U1, U8) in both, with the same dialog.
  */
-export function BotDirectory({ api, uid, team, members, bots, locale, busy, status, attempt, onOpen, onChanged, friend, onExample, onOpenChat }: {
+export function BotDirectory({ api, uid, team, members, bots, locale, busy, status, attempt, onOpen, onChanged, friend, onExample, onOpenChat, renderAvatar }: {
   api: TeamsApi; uid: string; team: TeamSummary; members: TeamDetail['members']; bots: SharedBotCard[]; locale: string; busy: boolean; status: string;
   attempt(action: () => Promise<unknown>): Promise<void>; onOpen(bot: SharedBotCard): Promise<void>; onChanged(): Promise<void>; friend?: string; onExample?(bot: SharedBotCard, example: string): void;
   /** Take the person to a Chat, from the replies of their Bot that wait there. Without it the list of those replies does not offer the Chat. */
   onOpenChat?(conversationId: string): void;
+  renderAvatar?: RenderAvatar;
 }) {
   const t = useTeamsText(locale);
   const note = t('friends_bots_note');
@@ -103,9 +104,36 @@ export function BotDirectory({ api, uid, team, members, bots, locale, busy, stat
     {friend ? null : <><h3>{t('teams_bots_title')}</h3>
     <p className="teams-hint">{t('tw_botdir_intro')}</p></>}
     {status ? <p role="status">{status}</p> : null}
-    <ul className="team-bot-grid">{bots.map(bot => <li key={bot.sharedBotId} className="teams-card"><header><b>{bot.name}</b><span className="team-bot-presence" data-online={bot.ready}>{botAvailabilityText(bot, locale)}</span></header><p>{bot.description}</p><small>{t('tw_maintainer')}: {owner(bot.maintainer.uid)}</small><BotMemberDetails bot={bot} bots={bots} locale={locale} busy={busy} showAvailability={false} onExample={onExample ? example => onExample(bot, example) : undefined} />{bot.autoReply ? <p className="teams-hint">{t('tw_auto_reply_card')}</p> : null}
-      {friend ? null : <><p className="teams-hint">{bot.usePolicy.mode === 'all' ? t('tw_audience_all') : t('tw_audience_selected')}</p><p className="teams-hint">{t('tw_botdir_quota_line')} {bot.quotas.team} / {bot.quotas.member} / {bot.quotas.bot}</p></>}
-      <div className="teams-row-actions"><button disabled={busy || !sharedBotUsable(bot)} onClick={() => void attempt(() => onOpen(bot))}>{bot.permitted ? t('teams_bot_message') : t('teams_bot_not_permitted')}</button>{bot.sharedList && (bot.permitted || bot.maintainer.uid === uid) ? <button disabled={busy} onClick={() => setListOf(bot)}>{t('tw_list')}: {bot.sharedList.title}</button> : null}{maintainsBot(bot, uid, team.generation) && !!bot.autoReply && !denied.includes(bot.sharedBotId) ? <button disabled={busy} onClick={() => setTriageOf(bot)}>{t('teams_triage_title')}</button> : null}{maintainsBot(bot, uid, team.generation) ? <HeldRepliesButton api={api} scope={{ teamId: team.id, generation: team.generation }} bot={bot} locale={locale} busy={busy} onOpenChat={onOpenChat} /> : null}{bot.maintainer.uid === uid && bot.state === 'published' ? <button disabled={busy} onClick={() => setPausing(bot)}>{t('friends_share_bot_stop')}</button> : null}</div>{friend ? null : <BotHandover api={api} uid={uid} team={team} members={members} bot={bot} locale={locale} busy={busy} attempt={attempt} onChanged={onChanged} />}</li>)}</ul>
+    <ul className="team-bot-grid" role="list">{bots.map(bot => {
+      const maintains = bot.maintainer.uid === uid;
+      const handover = friend ? null : <BotHandover api={api} uid={uid} team={team} members={members} bot={bot} locale={locale} busy={busy} attempt={attempt} onChanged={onChanged} />;
+      return <li key={bot.sharedBotId} className="bot-card-surface team-directory-card">
+        <SharedBotCardSummary bot={bot} maintainer={owner(bot.maintainer.uid)} locale={locale} renderAvatar={renderAvatar} compact />
+        <div className="teams-row-actions tw-bot-card-actions">
+          {bot.permitted ? <button type="button" className="tw-primary" disabled={busy || !sharedBotUsable(bot)} onClick={() => void attempt(() => onOpen(bot))}>{t('teams_bot_message')}</button>
+            : <span className="teams-hint">{t('teams_bot_not_permitted')}</span>}
+          {bot.sharedList && (bot.permitted || maintains) ? <button type="button" disabled={busy} onClick={() => setListOf(bot)}>{t('tw_list')}: {bot.sharedList.title}</button> : null}
+          {maintainsBot(bot, uid, team.generation) && !!bot.autoReply && !denied.includes(bot.sharedBotId) ? <button type="button" disabled={busy} onClick={() => setTriageOf(bot)}>{t('teams_triage_title')}</button> : null}
+          {maintainsBot(bot, uid, team.generation) ? <HeldRepliesButton api={api} scope={{ teamId: team.id, generation: team.generation }} bot={bot} locale={locale} busy={busy} onOpenChat={onOpenChat} /> : null}
+        </div>
+        {bot.transfer ? handover : null}
+        <details className="tw-bot-card-details">
+          <summary>{t('drawer_workspace_details')}</summary>
+          <div className="tw-bot-card-content">
+            <BotMemberDetails bot={bot} bots={bots} locale={locale} busy={busy} showAvailability={false} onExample={onExample ? example => onExample(bot, example) : undefined} />
+            {bot.autoReply ? <p className="teams-hint">{t('tw_auto_reply_card')}</p> : null}
+            {friend ? null : <>
+              <p className="teams-hint">{bot.usePolicy.mode === 'all' ? t('tw_audience_all') : t('tw_audience_selected')}</p>
+              <p className="teams-hint">{t('tw_botdir_quota_line')} {bot.quotas.team} / {bot.quotas.member} / {bot.quotas.bot}</p>
+            </>}
+            {!bot.transfer ? handover : null}
+            {maintains && bot.state === 'published' ? <div className="teams-row-actions">
+              <button type="button" disabled={busy} onClick={() => setPausing(bot)}>{t('friends_share_bot_stop')}</button>
+            </div> : null}
+          </div>
+        </details>
+      </li>;
+    })}</ul>
     {!bots.length && !status ? <p>{friend ? t('friends_bots_none') : t('tw_botdir_empty')}</p> : null}
     {friend ? <p className="teams-hint">{note}</p> : null}
     {api.openBotMarket && !friend ? <button type="button" disabled={busy} onClick={() => void attempt(() => api.openBotMarket!())}>{t('tw_botdir_market')}</button> : null}

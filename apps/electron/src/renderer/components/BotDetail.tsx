@@ -67,7 +67,7 @@ export function activityLabel(activity: BotActivity): string {
 }
 
 export function BotStateChip({ activity }: { activity: BotActivity }) {
-  return <span className="bots-state" data-state={activity}>{activityLabel(activity)}</span>;
+  return <span className="bots-state bot-card-status" data-state={activity}>{activityLabel(activity)}</span>;
 }
 
 /** Where saving the draft stands, with the way out of a conflict. */

@@ -1021,8 +1021,17 @@ body {
   overflow: hidden;
 }
 .beta-composer .composer-command-marker { top: 7px; left: 12px; }
-.beta-composer:has(.beta-rich-prompt:focus) {
-  box-shadow: 0 8px 28px rgb(0 0 0 / 7%), 0 1px 4px rgb(0 0 0 / 4%) !important;
+.composer-input-view > :is(textarea, [contenteditable='true']):focus {
+  background: transparent;
+}
+.tw-compose-box:focus-within { box-shadow: none; }
+:is(.beta-composer, .tw-compose-box):has(.composer-input-view > :focus-visible) {
+  border-color: var(--desktop-accent, #0072df);
+}
+@media (forced-colors: active) {
+  :is(.beta-composer, .tw-compose-box):has(.composer-input-view > :focus-visible) {
+    border-color: Highlight;
+  }
 }
 .composer-toolbar > button,
 .composer-toolbar > div > button {

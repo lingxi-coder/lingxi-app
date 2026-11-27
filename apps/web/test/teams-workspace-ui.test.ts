@@ -279,8 +279,8 @@ test('the stylesheet: tokens reach dialogs, an outline is one token that clears 
   assert.match(touch, /\.tw-row-more[^{]*\{[^}]*min-width:\s*44px/, 'and so is the more button of a row');
   assert.match(touch, /select[^{]*\{[^}]*min-height:\s*44px/, 'and so are the fields');
   assert.match(css, /\.tw-row-lead\s*\{[^}]*(width|height):\s*40px/, 'a conversation leads with the avatar at the 40 step of the scale');
-  // What was said twice is said once: the look of a card, of the friends cards and of a bar.
-  assert.equal([...css.matchAll(/^[^\n{}]*\.teams-card[^\n{}]*\{[^}\n]*border-radius:\s*14px/gm)].length, 1, 'the look of a Bot card is one rule for the cards of the team and of the Member home');
+  const botCards = readFileSync(new URL('../../../packages/chat-ui/bot-card.css', import.meta.url), 'utf8');
+  assert.match(botCards, /:is\(\.bots-page, \.tw-scope\) \.bot-card-surface\s*\{[^}]*border-radius:/, 'personal and shared Bots use one card surface');
   assert.equal([...css.matchAll(/^\.tw-friends-card, \.tw-lookup \{[^}\n]*border-radius:\s*10px/gm)].length, 1, 'and the friends cards and the lookup share theirs');
   assert.equal([...css.matchAll(/^\.tw-conn, \.tw-banner \{[^}\n]*border-radius:\s*8px/gm)].length, 1, 'and so do the bars of the sidebar and of the conversation');
 });

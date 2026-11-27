@@ -66,6 +66,79 @@ async function assertDialogCentered() {
 }
 const result = {};
 try {
+  if (process.env.LINGXI_TEST_TEAM_BOT_UI === '1') {
+    await load('?saved=teams&theme=light');
+    await configureFixtureWindow(win);
+    await setViewport(1280, 850);
+    await win.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    await wait(`document.querySelector('${row('chan-general')}')`);
+    const homeCard = '.tw-member-home .bot-card-surface';
+    const cardAvatar = selector => run(`document.querySelector('${selector} img[data-agent-avatar]')?.dataset.agentAvatar`);
+    const cardRadius = selector => run(`getComputedStyle(document.querySelector('${selector}')).borderTopLeftRadius`);
+    await wait(`document.querySelector('${homeCard} .bot-card-name')`);
+    const sharedAvatar = await cardAvatar(homeCard);
+    assert.ok(sharedAvatar, 'Team home uses the published Bot avatar');
+    const sharedRadius = await cardRadius(homeCard);
+    await click(row('chan-general'));
+    const composerFocusInput = '.teams-conversation textarea[aria-label="Message"]';
+    await wait(`document.querySelector('${composerFocusInput}')`);
+    await run(`document.querySelector('${row('chan-general')}').focus()`);
+    const editorBackground = () => run(`(() => {
+      const style = getComputedStyle(document.querySelector('${composerFocusInput}'));
+      return [style.backgroundColor, style.backgroundImage];
+    })()`);
+    const idleBackground = await editorBackground();
+    const idleBorder = await run(`getComputedStyle(document.querySelector('.tw-compose-box')).borderTopColor`);
+    await run(`document.querySelector('${composerFocusInput}').focus()`);
+    assert.equal(await run(`document.querySelector('${composerFocusInput}').matches(':focus-visible')`), true);
+    assert.deepEqual(await editorBackground(), idleBackground, 'focusing the composer adds no background');
+    assert.notEqual(await run(`getComputedStyle(document.querySelector('.tw-compose-box')).borderTopColor`), idleBorder, 'the existing border indicates focus');
+    await click('.desktop-window-toolbar button[aria-label="Team details"]');
+    await wait(`document.querySelector('.tw-drawer [role="tab"]')`);
+    await run(`Array.from(document.querySelectorAll('.tw-drawer [role="tab"]')).find(tab => tab.textContent.trim() === 'Bots').click()`);
+    const botCard = '.tw-drawer .team-directory-card';
+    const botDetails = `${botCard} details`;
+    await wait(`document.querySelector('${botDetails}')`);
+    const botCardHeight = () => run(`document.querySelector('${botCard}').getBoundingClientRect().height`);
+    const collapsedBotHeight = await botCardHeight();
+    assert.equal(await run(`document.querySelector('${botDetails}').open`), false);
+    assert.equal(await run(`document.querySelector('${botCard} h4').textContent`), 'Fixture Bot');
+    assert.equal(await cardAvatar(botCard), sharedAvatar, 'the drawer uses the same Bot avatar as Team home');
+    assert.equal(await cardRadius(botCard), sharedRadius, 'the compact card shares the same surface styling');
+    assert.equal(await shown(`${botCard} .tw-bot-card-actions button`), true);
+    await click(`${botDetails} summary`);
+    assert.equal(await run(`document.querySelector('${botDetails}').open`), true);
+    assert.ok(await botCardHeight() > collapsedBotHeight, 'secondary Bot information expands in place');
+    await click(`${botDetails} summary`);
+    assert.equal(await botCardHeight(), collapsedBotHeight);
+
+    if (screenshots) {
+      mkdirSync(screenshots, { recursive: true });
+      await run(`document.querySelector('${composerFocusInput}').focus()`);
+      await run(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))`);
+      writeFileSync(join(screenshots, 'teams-bots-focused-composer.png'), (await win.webContents.capturePage()).toPNG());
+    }
+    await setViewport(900, 700);
+    await wait(`getComputedStyle(document.querySelector('.tw-drawer')).position === 'absolute'`);
+    assert.equal(await run(`document.querySelector('${botCard}').scrollWidth <= document.querySelector('${botCard}').clientWidth`), true, 'Bot actions fit the narrow drawer');
+    await setViewport(1280, 850);
+    await click(rail('Bots'));
+    const personalCard = '.bots-page .bots-card';
+    await wait(`document.querySelector('${personalCard} .bot-card-name')`);
+    assert.ok(await cardAvatar(personalCard), 'personal cards use the same avatar tile with local art');
+    assert.equal(await cardRadius(personalCard), sharedRadius, 'personal and shared Bots use the same card radius');
+    if (screenshots) {
+      await run(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))`);
+      writeFileSync(join(screenshots, 'personal-bots.png'), (await win.webContents.capturePage()).toPNG());
+    }
+    await click(personalCard);
+    await wait(`document.querySelector('.bots-detail-header h1')`);
+    assert.deepEqual(errors, []);
+    console.log(JSON.stringify({ teamBotUi: true }));
+    win.destroy(); app.exit(0);
+    return;
+  }
+
   // This fixture has no Inbox preload. The Teams rail reports the selected team's unread directory.
   // The unified Inbox fixture covers the account-wide Chats badge across sources.
   await load();
@@ -371,7 +444,7 @@ try {
   // their own views, using the local identity independently of publication.
   const avatarIn = selector => run(`document.querySelector(${JSON.stringify(selector)})?.querySelector('img[data-agent-avatar]')?.getAttribute('data-agent-avatar') ?? null`);
   const botRow = name => `nav[aria-label="Bots"] button[title="${name}"]`;
-  const cardAvatar = name => run(`Array.from(document.querySelectorAll('.bots-card')).find(card => card.querySelector('.bots-card-name').textContent === ${JSON.stringify(name)})?.querySelector('img[data-agent-avatar]')?.getAttribute('data-agent-avatar') ?? null`);
+  const cardAvatar = name => run(`Array.from(document.querySelectorAll('.bots-card')).find(card => card.querySelector('.bot-card-name').textContent === ${JSON.stringify(name)})?.querySelector('img[data-agent-avatar]')?.getAttribute('data-agent-avatar') ?? null`);
   await load('?saved=teams');
   await wait(`document.querySelectorAll('${sidebar} [data-row]').length === 4`);
   const botAvatar = await avatarIn(row('bot-chat'));
@@ -390,7 +463,7 @@ try {
   const others = [await avatarIn(botRow('Alpha')), await avatarIn(botRow('Beta'))];
   assert.equal(others.includes(personalBotAvatar) || others[0] === others[1], false, 'the other Bots have avatars of their own');
   assert.deepEqual([await cardAvatar('Alpha'), await cardAvatar('Beta')], others, 'a card and a row of the same Bot agree');
-  await run(`Array.from(document.querySelectorAll('.bots-card')).find(card => card.querySelector('.bots-card-name').textContent === 'Fixture Bot').click()`);
+  await run(`Array.from(document.querySelectorAll('.bots-card')).find(card => card.querySelector('.bot-card-name').textContent === 'Fixture Bot').click()`);
   await wait(`document.querySelector('.bots-detail-header h1')?.textContent === 'Fixture Bot'`);
   assert.equal(await run(`Boolean(document.querySelector('.desktop-window-toolbar .bots-detail-header'))`), true, 'Bot details use the outer toolbar');
   assert.equal(await avatarIn('.bots-detail-header'), personalBotAvatar, 'the Bot\'s own page');
@@ -421,7 +494,7 @@ try {
       await delay(500);
       await snap(`bots-${theme}.png`);
       // The Bot's own page and the title of a chat of the Bot, which carry the avatar of the cards and of the Teams views.
-      await run(`Array.from(document.querySelectorAll('.bots-card')).find(card => card.querySelector('.bots-card-name').textContent === 'Fixture Bot').click()`);
+      await run(`Array.from(document.querySelectorAll('.bots-card')).find(card => card.querySelector('.bot-card-name').textContent === 'Fixture Bot').click()`);
       await wait(`document.querySelector('.bots-detail-header h1')?.textContent === 'Fixture Bot'`);
       await delay(300);
       await snap(`bots-detail-${theme}.png`);

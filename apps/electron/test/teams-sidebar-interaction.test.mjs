@@ -11,20 +11,29 @@ import { createServer } from 'vite';
 
 // TEAMS_E2E_SCREENSHOTS=<directory> also leaves screenshots of the window there (light and dark, Teams and Bots).
 test('the Teams mode of the sidebar works in the whole window: rail count, conversations, stream, sending, details panel, View menu, invitation link, saved mode', async () => {
+  const result = await runFixture();
+  for (const name of ['railBadge', 'teamsMode', 'search', 'stream', 'sends', 'drawer', 'drawerMenu', 'appsWorkspace', 'pageForward', 'badgeFollowsReading', 'focus', 'invite', 'dialogs', 'restored', 'signedOut', 'cappedBadge', 'botAvatar']) assert.equal(result[name], true, name);
+});
+
+test('the Team Bots card discloses secondary details and composer focus keeps the editor background', async () => {
+  assert.equal((await runFixture({ LINGXI_TEST_TEAM_BOT_UI: '1' })).teamBotUi, true);
+});
+
+async function runFixture(fixtureEnv = {}) {
   const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
   const fixtureRoot = join(root, 'test/fixtures');
   const cacheDir = mkdtempSync(join(tmpdir(), 'lingxi-teams-sidebar-vite-'));
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-teams-sidebar-electron-'));
   const vite = await createServer({ root: fixtureRoot, cacheDir, configFile: false, logLevel: 'error',
-    server: { host: '127.0.0.1', port: 0, hmr: false }, plugins: [react()],
+    server: { host: '127.0.0.1', port: 0, hmr: false, fs: { allow: [resolve(root, '../..')] } }, plugins: [react()],
     optimizeDeps: { entries: ['teams-sidebar-fixture.html'] },
-    resolve: { alias: { '@renderer': resolve(root, 'src/renderer') }, dedupe: ['react', 'react-dom'] } });
+    resolve: { alias: { '@renderer': resolve(root, 'src/renderer') }, dedupe: ['react', 'react-dom', 'qrcode-generator'] } });
   let child;
   try {
     await vite.listen();
     const address = vite.httpServer.address();
     child = spawn(electronBinary, [join(fixtureRoot, 'teams-sidebar-electron.mjs'), `http://127.0.0.1:${address.port}/teams-sidebar-fixture.html`], {
-      cwd: root, env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0', ELECTRON_IS_DEV: '0', LINGXI_TEST_USER_DATA: userData }, stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: root, env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0', ELECTRON_IS_DEV: '0', LINGXI_TEST_USER_DATA: userData, ...fixtureEnv }, stdio: ['ignore', 'pipe', 'pipe'],
     });
     let output = ''; let errors = '';
     child.stdout.on('data', chunk => { output += chunk; });
@@ -34,12 +43,11 @@ test('the Teams mode of the sidebar works in the whole window: rail count, conve
       child.once('error', error => { clearTimeout(timeout); reject(error); });
       child.once('exit', code => { clearTimeout(timeout); code === 0 ? resolveResult() : reject(new Error(`Teams sidebar exited ${code}\n${errors}`)); });
     });
-    const result = JSON.parse(output.trim().split('\n').at(-1));
-    for (const name of ['railBadge', 'teamsMode', 'search', 'stream', 'sends', 'drawer', 'drawerMenu', 'appsWorkspace', 'pageForward', 'badgeFollowsReading', 'focus', 'invite', 'dialogs', 'restored', 'signedOut', 'cappedBadge', 'botAvatar']) assert.equal(result[name], true, name);
+    return JSON.parse(output.trim().split('\n').at(-1));
   } finally {
     if (child && child.exitCode === null) child.kill('SIGTERM');
     await vite.close();
     rmSync(cacheDir, { recursive: true, force: true });
     rmSync(userData, { recursive: true, force: true });
   }
-});
+}

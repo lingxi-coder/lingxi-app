@@ -154,7 +154,7 @@ export function TeamDetailsDrawer({ workspace, snapshot, tab, onTabChange, width
   const body = (): ReactElement => {
     if (current === 'bots') {
       return <div className="tw-embed">
-        <BotDirectory key={`${uid}:${team.id}:${team.generation}:${snapshot.authority}`} api={workspace.api} uid={uid} team={team} members={snapshot.directory} bots={snapshot.bots} locale={locale} busy={snapshot.messageBusy}
+        <BotDirectory key={`${uid}:${team.id}:${team.generation}:${snapshot.authority}`} api={workspace.api} uid={uid} team={team} members={snapshot.directory} bots={snapshot.bots} locale={locale} busy={snapshot.messageBusy} renderAvatar={renderAvatar}
           status={snapshot.botsUnverified ? t('teams_bots_unverified') : !snapshot.botsLoaded ? t('teams_bots_loading') : ''}
           attempt={workspace.attempt} onExample={(bot, example) => { void workspace.openBotExample(bot, example); }} onOpen={bot => workspace.startBotDm(bot)} onChanged={() => workspace.refreshBots()}
           onOpenChat={id => workspace.selectConversation(id)} />

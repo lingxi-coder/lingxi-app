@@ -1,9 +1,11 @@
+import { BotCardSummary } from '../chat-ui/BotCardSummary';
 import { botScopeNarrowed, effectiveBotScope } from './bot-scope.js';
 import { BotScopeSummary } from './BotScopeSummary';
 import { delegatesTo, delegationAccepts } from './delegation.js';
 import { sharedBotUsable, type SharedBotCard } from './execution.js';
 import { teamsText, tk, useTeamsText, type TeamsKey } from './i18n.js';
 import type { TeamConversation } from './messages.js';
+import { Avatar, type RenderAvatar } from './ui';
 
 /** What a member is told about a Bot's availability. `paused` is how the card of a Bot whose sharing was stopped reads (U1: "Sharing stopped"). */
 const AVAILABILITY: Record<NonNullable<SharedBotCard['availability']>, TeamsKey> = {
@@ -19,6 +21,17 @@ const AVAILABILITY: Record<NonNullable<SharedBotCard['availability']>, TeamsKey>
 export function botAvailabilityText(bot: SharedBotCard, locale: string): string {
   const state = bot.state === 'paused' ? 'paused' : bot.availability ?? 'unverified';
   return teamsText(locale)(Object.prototype.hasOwnProperty.call(AVAILABILITY, state) ? AVAILABILITY[state] : AVAILABILITY.unverified);
+}
+
+export function SharedBotCardSummary({ bot, maintainer, locale, renderAvatar, compact }: {
+  bot: SharedBotCard; maintainer: string; locale: string; renderAvatar?: RenderAvatar; compact?: boolean;
+}) {
+  const t = useTeamsText(locale);
+  const online = bot.state === 'published' && bot.availability === 'ready';
+  return <BotCardSummary heading={compact ? 'h4' : 'h3'} compact={compact} name={bot.name} description={bot.description}
+    avatar={<Avatar identity={{ kind: 'bot', id: bot.sharedBotId, name: bot.name }} size={compact ? 32 : 40} render={renderAvatar} />}
+    status={<span className="bot-card-status tw-bot-card-status" data-online={online}>{botAvailabilityText(bot, locale)}</span>}
+    metadata={`${t('tw_maintainer')}: ${maintainer}`} />;
 }
 
 /**

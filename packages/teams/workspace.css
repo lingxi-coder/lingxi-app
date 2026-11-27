@@ -555,10 +555,38 @@
 .tw-embed .team-bots { padding: 0; border: 0; margin: 0; }
 .tw-embed .team-bots h3 { margin: 0 0 8px; font-size: 13px; }
 .tw-embed .team-bot-grid { display: flex; flex-direction: column; gap: 8px; padding: 0; list-style: none; }
-.tw-embed .teams-card, .tw-member-home .teams-card { border: 1px solid var(--tw-line); border-radius: 14px; background: var(--tw-surface); }
+.tw-embed .team-bots > .team-bot-grid { margin-block: 10px; }
+.tw-embed .teams-card { border: 1px solid var(--tw-line); border-radius: 14px; background: var(--tw-surface); }
 .tw-embed .teams-card { display: flex; flex-direction: column; gap: 8px; padding: 14px; }
 .tw-embed .teams-card header { display: flex; justify-content: space-between; gap: 8px; }
 .tw-embed .team-bot-presence { font-size: 12px; color: var(--tw-muted); }
+.tw-embed .team-bot-presence[data-online='true'] { color: var(--tw-online); }
+.tw-scope .bot-card-surface {
+  --bot-card-border: var(--tw-line);
+  --bot-card-surface: var(--tw-surface);
+  --bot-card-line: var(--tw-line);
+  --bot-card-avatar-surface: var(--tw-bg);
+  --bot-card-muted: var(--tw-muted);
+  display: flex; flex-direction: column; gap: 10px; padding: 16px; overflow-wrap: anywhere;
+}
+.tw-scope .team-directory-card { padding: 14px; }
+.tw-bot-card-status[data-online='true'] { color: var(--tw-online); }
+.tw-bot-card-actions { align-items: center; }
+.tw-bot-card-actions button { max-inline-size: 100%; text-align: start; }
+.tw-bot-card-details { border-block-start: 1px solid var(--tw-line); padding-block-start: 4px; }
+.tw-bot-card-details > summary {
+  min-block-size: 28px; padding: 5px 6px; border-radius: 6px;
+  color: var(--tw-muted); font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.tw-bot-card-details > summary:is(:hover, :focus-visible) { background: var(--tw-hover); color: var(--tw-fg); }
+.tw-bot-card-details > summary:active { background: var(--tw-selected); }
+.tw-bot-card-content { display: grid; gap: 8px; padding-block-start: 6px; }
+.tw-bot-card-content .tw-bot-member-details { display: grid; gap: 4px; }
+.tw-bot-card-content .tw-bot-member-details ul { padding: 0; }
+.tw-bot-card-content .tw-bot-member-details button { justify-content: flex-start; }
+@media (pointer: coarse) {
+  .tw-bot-card-details > summary, .tw-bot-card-actions button { min-block-size: 44px; }
+}
 /* A Bot task's card (U4): the glyph and the state, one line under it, at most one action. Only Completed is green and only Failed red; the state is words as well. */
 .tw-scope .team-bot-run { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: 480px; padding: 8px 12px; border: 1px solid var(--tw-line); border-radius: 10px; background: var(--tw-surface); font-size: 12px; }
 .tw-run-state { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; }
@@ -599,7 +627,6 @@
 .tw-run-still { position: absolute; top: 0; left: 0; opacity: 0; }
 @keyframes tw-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .tw-run-spin { animation: none; opacity: 0; } .tw-run-still { opacity: 1; } }
-.tw-embed .team-bot-presence[data-online='true'] { color: var(--tw-online); }
 .tw-embed .team-bot-host { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; padding: 12px 14px; border: 1px solid var(--tw-line); border-radius: 14px; background: var(--tw-surface); font-size: 12px; line-height: 1.5; }
 .tw-embed .team-bot-handover { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--tw-line); font-size: 12px; line-height: 1.5; }
 .tw-embed .team-bot-handover p { margin: 0; }
@@ -622,10 +649,9 @@
 .tw-member-home h2 { font-size: 19px; line-height: 1.25; letter-spacing: -0.02em; }
 .tw-member-home h2:not(:first-child) { margin-top: 12px; }
 .tw-member-home > p { color: var(--tw-muted); line-height: 1.6; }
-.tw-member-home .team-bot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; padding: 0; list-style: none; }
-.tw-member-home .teams-card { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 16px; }
-.tw-member-home .teams-card h3 { font-size: 14px; }
-.tw-member-home .teams-card p, .tw-member-home .teams-card small { color: var(--tw-muted); }
+.tw-member-home .team-bot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 16px; padding: 0; list-style: none; }
+.tw-member-home .bot-card-summary { flex: 1; }
+.tw-member-home .tw-bot-card-content .teams-hint { color: var(--tw-muted); font-size: 12px; line-height: 1.5; }
 .tw-member-home > ol > li > .team-bot-run { flex: 1 1 100%; }
 .tw-member-home > ol { list-style: none; padding: 0; }
 .tw-member-home > ol > li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 16px 0; border-bottom: 1px solid var(--tw-line); }
@@ -714,7 +740,8 @@ button.tw-lookup-who { text-align: start; }
 .tw-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 @media (prefers-contrast: more) {
-  .tw-row[data-selected='true'] .tw-row-main, .tw-compose-box, .tw-embed .teams-card, .tw-member-home .teams-card { border: 1px solid var(--tw-fg); }
+  .tw-row[data-selected='true'] .tw-row-main, .tw-compose-box, .tw-embed .teams-card { border: 1px solid var(--tw-fg); }
+  .tw-scope .bot-card-surface { --bot-card-border: var(--tw-fg); }
 }
 
 /* ── Bot services (Bots offered outside Teams): the list page and a caller's sessions ── */

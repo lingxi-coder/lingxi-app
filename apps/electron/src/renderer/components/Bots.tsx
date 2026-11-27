@@ -1,6 +1,7 @@
 import { useContext, useEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import { ChatTopbarHeader, ChatTopbarTarget } from '../../../../../packages/teams/ChatTopbar';
 import { Icon as ChatIcon } from '../../../../../packages/teams/ui';
+import { BotCardSummary } from '../../../../../packages/chat-ui/BotCardSummary';
 import type { BotSandboxAvailability, BotUi, BotsApi } from '../../shared/bots';
 import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
@@ -126,15 +127,13 @@ export function BotList({ state, activityOf, asking = () => 0, onNew, onOpen, on
 
 function BotCard({ bot, activity, asking, onOpen }: { bot: BotUi; activity: BotActivity; asking: number; onOpen(): void }) {
   return <li>
-    <button type="button" className="bots-card" onClick={onOpen}>
-      <span className="bots-avatar" aria-hidden="true"><AgentAvatar agentId={bot.botId} size={40} /></span>
-      <span className="bots-card-name">{bot.name}</span>
-      <span className="bots-card-description">{bot.description}</span>
-      <span className="bots-card-footer">
-        <BotStateChip activity={activity} />
-        {asking > 0 ? <span className="bots-state" data-state="waiting">{tr('bots_card_asking')}</span> : null}
-        <span className="bots-muted">{bot.lastActivityAt !== undefined ? tr('bots_last_active', relativeActivity(bot.lastActivityAt)) : tr('bots_no_chats_yet')}</span>
-      </span>
+    <button type="button" className="bots-card bot-card-surface" onClick={onOpen}>
+      <BotCardSummary avatar={<AgentAvatar agentId={bot.botId} size={40} />} name={bot.name} description={bot.description}
+        status={<>
+          <BotStateChip activity={activity} />
+          {asking > 0 ? <span className="bots-state bot-card-status" data-state="waiting">{tr('bots_card_asking')}</span> : null}
+        </>}
+        metadata={bot.lastActivityAt !== undefined ? tr('bots_last_active', relativeActivity(bot.lastActivityAt)) : tr('bots_no_chats_yet')} />
     </button>
   </li>;
 }

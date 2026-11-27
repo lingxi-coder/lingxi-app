@@ -22,15 +22,22 @@
 .bots-empty-line { color: var(--bots-muted); font-size: 13px; }
 
 .bots-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); gap: 16px; padding: 0; margin: 0; list-style: none; }
-.bots-page .bots-card { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; width: 100%; height: 100%; box-sizing: border-box; padding: 22px; text-align: left; border-radius: 16px; background: var(--bots-surface); box-shadow: 0 2px 10px rgb(0 0 0 / 3%); }
-.bots-page .bots-card:hover:not(:disabled) { border-color: color-mix(in srgb, var(--bots-accent) 40%, var(--bots-border)); box-shadow: 0 6px 20px rgb(0 0 0 / 7%); }
+.bots-page .bots-card {
+  --bot-card-border: var(--bots-border);
+  --bot-card-surface: var(--bots-surface);
+  --bot-card-line: var(--bots-line);
+  --bot-card-avatar-surface: var(--bots-background);
+  --bot-card-muted: var(--bots-muted);
+  display: flex; width: 100%; height: 100%; box-sizing: border-box; padding: 22px; text-align: start;
+}
+.bots-page .bots-card:hover:not(:disabled) { background: var(--bots-surface-hover); }
+.bots-card .bot-card-description {
+  min-block-size: 38px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
 /* The Bot's avatar (the one of the sidebar and the Teams views) on a tile; it holds a picture, never letters. */
 .bots-avatar { width: 46px; height: 46px; flex: none; display: grid; place-items: center; margin-bottom: 12px; border: 1px solid var(--bots-line); border-radius: 13px; background: var(--bots-background); }
-.bots-card-name { font-size: 16px; font-weight: 600; line-height: 1.3; letter-spacing: -.01em; overflow-wrap: anywhere; }
-.bots-card-description { min-height: 38px; color: var(--bots-muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.bots-card-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; width: 100%; margin-top: auto; padding-top: 16px; }
-.bots-state { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--bots-muted); white-space: nowrap; }
-.bots-state::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.bots-state { font-size: 11px; color: var(--bots-muted); white-space: nowrap; }
 .bots-state[data-state='working'] { color: var(--bots-ok); }
 .bots-state[data-state='waiting'] { color: var(--bots-warn); }
 .bots-background { display: flex; flex-direction: column; gap: 10px; max-width: 860px; margin-top: 34px; }

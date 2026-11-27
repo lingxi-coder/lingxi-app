@@ -117,7 +117,7 @@ export function TeamConversationView(props: TeamConversationViewProps): ReactEle
       <TopbarConnection snapshot={snapshot} workspace={props.workspace} locale={locale} />
     </header></ChatTopbarHeader> : null;
     if (snapshot.loading) return <>{chrome}<section className="tw-scope tw-conv tw-conv-empty"><p className="tw-empty-line" role="status">{t('teams_loading')}</p></section></>;
-    if (team && !snapshot.selectedConversationId && !snapshot.creation) return <>{chrome}<MemberHome key={`${snapshot.uid}:${team.id}:${team.generation}`} workspace={props.workspace} snapshot={snapshot} locale={locale} renderMarkdown={props.renderMarkdown} /></>;
+    if (team && !snapshot.selectedConversationId && !snapshot.creation) return <>{chrome}<MemberHome key={`${snapshot.uid}:${team.id}:${team.generation}`} workspace={props.workspace} snapshot={snapshot} locale={locale} renderAvatar={props.renderAvatar} renderMarkdown={props.renderMarkdown} /></>;
     return <>{chrome}<section className="tw-scope tw-conv tw-conv-empty">
       <div className="tw-empty"><h2>{title}</h2><p>{body}</p><p className="tw-hint">{platformNotice(locale)}</p></div>
       {snapshot.creation ? <CreationBanner workspace={props.workspace} snapshot={snapshot} locale={locale} /> : null}

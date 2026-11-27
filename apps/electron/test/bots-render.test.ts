@@ -104,8 +104,8 @@ test('each Bot shows its name, description, whether it is working, and when it w
   assert.match(html, /No chats yet/);
   assert.ok(!html.includes('No Bots yet'));
   assert.deepEqual(avatarsOf(html), ['b', 'c', 'a'].map(agentAvatarIndex), 'each card wears the avatar of its Bot\'s id, as in the sidebar and the Teams views');
-  assert.ok(!/class="bots-avatar"[^>]*>[^<]/.test(html), 'and no letter stands in for it');
-  assert.equal([...html.matchAll(/class="bots-avatar" aria-hidden="true"/g)].length, 3, 'the name beside it is what is read out');
+  assert.ok(!/class="bot-card-avatar"[^>]*>[^<]/.test(html), 'and no letter stands in for it');
+  assert.equal([...html.matchAll(/class="bot-card-avatar" aria-hidden="true"/g)].length, 3, 'the name beside it is what is read out');
 });
 
 // ---- Making a Bot ----

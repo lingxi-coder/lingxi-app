@@ -2,13 +2,13 @@ import type { TeamsSnapshot, TeamsWorkspace } from './workspace.js';
 import { sharedBotUsable } from './execution.js';
 import { useTeamTasks } from './bot-runs.js';
 import { BotRun } from './BotRunCards';
-import { BotMemberDetails } from './BotMemberDetails';
+import { BotMemberDetails, SharedBotCardSummary } from './BotMemberDetails';
 import { TaskReportExport } from './TaskReportExport';
 import { messageErrorText } from './errors.js';
-import type { RenderMarkdown } from './ui';
+import type { RenderAvatar, RenderMarkdown } from './ui';
 import { useTeamsText } from './i18n.js';
 
-export function MemberHome({ workspace, snapshot, locale, renderMarkdown }: { workspace: TeamsWorkspace; snapshot: TeamsSnapshot; locale: string; renderMarkdown?: RenderMarkdown }) {
+export function MemberHome({ workspace, snapshot, locale, renderAvatar, renderMarkdown }: { workspace: TeamsWorkspace; snapshot: TeamsSnapshot; locale: string; renderAvatar?: RenderAvatar; renderMarkdown?: RenderMarkdown }) {
   const t = useTeamsText(locale);
   const team = snapshot.team!;
   const scope = { teamId: team.id, generation: team.generation };
@@ -16,7 +16,18 @@ export function MemberHome({ workspace, snapshot, locale, renderMarkdown }: { wo
   return <section className="tw-scope tw-member-home"><h2>{t('teams_bots_title')}</h2><p>{t('tw_home_intro')}</p>
     {snapshot.botsUnverified ? <p role="alert">{t('tw_home_unverified')}</p> : null}
     <p className="tw-hint">{t('tw_home_costs')}</p>
-    <ul className="team-bot-grid">{snapshot.bots.map(bot => <li className="teams-card" key={bot.sharedBotId}><h3>{bot.name}</h3><p>{bot.description}</p><small>{t('tw_maintainer')}: {snapshot.directory.find(member => member.uid === bot.maintainer.uid)?.displayName ?? bot.maintainer.uid}</small><BotMemberDetails bot={bot} bots={snapshot.bots} locale={locale} busy={snapshot.messageBusy} onExample={example => void workspace.openBotExample(bot, example)} /><button disabled={snapshot.messageBusy || !sharedBotUsable(bot)} onClick={() => void workspace.openBotDm(bot)}>{t('tw_home_start')}</button></li>)}</ul>
+    <ul className="team-bot-grid" role="list">{snapshot.bots.map(bot => <li className="bot-card-surface" key={bot.sharedBotId}>
+      <SharedBotCardSummary bot={bot} maintainer={snapshot.directory.find(member => member.uid === bot.maintainer.uid)?.displayName ?? bot.maintainer.uid} locale={locale} renderAvatar={renderAvatar} />
+      <div className="tw-bot-card-actions">
+        <button type="button" className="tw-primary" disabled={snapshot.messageBusy || !sharedBotUsable(bot)} onClick={() => void workspace.openBotDm(bot)}>{t('tw_home_start')}</button>
+      </div>
+      <details className="tw-bot-card-details">
+        <summary>{t('drawer_workspace_details')}</summary>
+        <div className="tw-bot-card-content">
+          <BotMemberDetails bot={bot} bots={snapshot.bots} locale={locale} busy={snapshot.messageBusy} showAvailability={false} onExample={example => void workspace.openBotExample(bot, example)} />
+        </div>
+      </details>
+    </li>)}</ul>
     {!snapshot.bots.length && snapshot.botsLoaded ? <p>{t('tw_home_none')}</p> : null}
     <h2>{t('tw_home_recent')}</h2>{tasks.error ? <p role="alert">{messageErrorText(tasks.error, locale)}</p> : null}
     <TaskReportExport key={`${snapshot.uid}:${team.id}:${team.generation}:${snapshot.authority}`} workspace={workspace} snapshot={snapshot} locale={locale} />

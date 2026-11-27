@@ -24,6 +24,7 @@ export type TeamsKey =
   | 'desktop_dataset_task_review'
   | 'desktop_dataset_task_revoke'
   | 'desktop_dataset_task_revoked'
+  | 'drawer_workspace_details'
   | 'friends_add'
   | 'friends_block_body'
   | 'friends_block_title_fmt'
@@ -1043,6 +1044,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   desktop_dataset_task_review: { en: 'Review plan', 'zh-Hans': '审核方案', 'zh-Hant': '審核方案', ja: '計画を確認', ko: '계획 검토' },
   desktop_dataset_task_revoke: { en: 'Revoke Dataset approval', 'zh-Hans': '撤销 Dataset 许可', 'zh-Hant': '撤銷 Dataset 許可', ja: 'データセットの承認を取り消す', ko: '데이터세트 승인 취소' },
   desktop_dataset_task_revoked: { en: 'Dataset task approval revoked.', 'zh-Hans': '数据任务许可已撤销。', 'zh-Hant': '資料任務許可已撤銷。', ja: 'データセットタスクの承認を取り消しました。', ko: '데이터세트 작업 승인이 취소되었습니다.' },
+  drawer_workspace_details: { en: 'Details', 'zh-Hans': '详情', 'zh-Hant': '詳情', ja: '詳細', ko: '세부정보' },
   friends_add: { en: 'Add friend', 'zh-Hans': '添加好友', 'zh-Hant': '新增好友', ja: '友だちを追加', ko: '친구 추가' },
   friends_block_body: { en: 'They are also removed from your friends and the chat is deleted for both of you. Until you unblock them, they can\'t find you or send you requests.', 'zh-Hans': '同时会将对方从好友中移除，并对双方删除聊天记录。在你解除屏蔽之前，对方无法找到你或向你发送请求。', 'zh-Hant': '同時會將對方從好友中移除，並對雙方刪除聊天記錄。在你解除封鎖之前，對方無法找到你或向你傳送請求。', ja: '友だちからも削除され、チャットは双方から削除されます。ブロックを解除するまで、相手はあなたを見つけたりリクエストを送ったりできません。', ko: '친구에서도 삭제되고 대화가 양쪽 모두에서 삭제됩니다. 차단을 해제할 때까지 상대는 나를 찾거나 요청을 보낼 수 없습니다.' },
   friends_block_title_fmt: { en: 'Block “%1$s”?', 'zh-Hans': '屏蔽“%1$s”？', 'zh-Hant': '封鎖「%1$s」？', ja: '「%1$s」さんをブロックしますか？', ko: '“%1$s” 님을 차단할까요?' },

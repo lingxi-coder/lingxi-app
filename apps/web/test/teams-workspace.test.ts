@@ -4,7 +4,7 @@ import {
   TeamsWorkspace, compareConversations, conversationLabel, conversationParticipants, conversationPreview, markdownPlainText, pointerPreview, defaultConversationTitle, findBotDm, findDm, groupConversations, unreadCount,
   type TeamsSnapshot,
 } from '../../../packages/teams/workspace';
-import type { TeamConversation } from '../../../packages/teams/messages';
+import type { MessageCommand, TeamConversation } from '../../../packages/teams/messages';
 import { FakeTeams, botCard, conversation, memoryStorage, members, message, settle, team, uid, until } from './support/fakeTeams';
 
 // ── Pure helpers ──
@@ -537,6 +537,17 @@ test('Bot cards load with the team, reload on a Bot signal, and an unverifiable 
 test('createConversation puts the viewer first, trims the title and requires usable Bots', async context => {
   const { fake, workspace, snapshot } = workspaceFixture(value => { value.bots = [botCard(), botCard({ sharedBotId: 'owner:x:y', name: 'Off', permitted: false })]; });
   context.after(() => workspace.close());
+  const messages = fake.messages;
+  fake.messages = async <T>(command: MessageCommand) => {
+    const result = await messages<T>(command);
+    if (command.action === 'createConversation') {
+      const { conversationId, kind, title, participantUids } = command.payload;
+      const rows = fake.conversations.get(command.teamId) ?? [];
+      const participants = participantUids.map(uid => `user:${uid}`);
+      fake.conversations.set(command.teamId, [...rows, conversation(conversationId, { kind, title, participants })]);
+    }
+    return result;
+  };
   await until(() => snapshot().bots.length === 2 && snapshot().offline === false, 'load');
   assert.equal(await workspace.createConversation('group', '  Crew  ', ['bob'], ['owner:x:y']), false);
   assert.equal(snapshot().actionError, 'BOT_USE_REQUIRED'); assert.equal(fake.commands.some(value => value.action === 'create'), false);

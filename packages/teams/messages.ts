@@ -199,7 +199,18 @@ export class TeamMessaging {
   private emit() { if (!this.closed) for (const callback of this.callbacks) callback(); }
   private async commit(reduce: (old: MessageProjection) => MessageProjection): Promise<void> {
     const value = await this.storage.update(this.key, old => pendingCommands(this.revoked ? emptyProjection(this.uid, this.scope) : reduce({ ...this.state, ...this.validPending(old) })));
-    if (!this.closed) { this.state = { ...this.state, ...value }; this.emit(); }
+    this.applyPending(value);
+    this.emit();
+  }
+  private applyPending(value: PendingCommands): void {
+    if (this.closed) return;
+    const previousCreation = this.state.creation;
+    this.state = { ...this.state, ...value };
+    if (previousCreation && pendingPayload(previousCreation).conversationId === this.selected
+      && (!value.creation || pendingPayload(value.creation).conversationId !== this.selected)) {
+      // The command may settle in another window. Replace the watch to ignore directory results queued before settlement.
+      this.watch('replace');
+    }
   }
   private validPending(value: PendingCommands | undefined): PendingCommands {
     if (!value || value.version !== 2 || value.uid !== this.uid || value.teamId !== this.scope.teamId || value.generation !== this.scope.generation)
@@ -221,9 +232,9 @@ export class TeamMessaging {
   }
   private async reload(): Promise<void> {
     const value = await this.storage.load(this.key);
-    if (!this.closed) this.state = { ...this.state, ...this.validPending(value) };
+    if (!this.closed) this.applyPending(this.validPending(value));
   }
-  private watch(): void {
+  private watch(mode: 'overlap' | 'replace' = 'overlap'): void {
     const previous = this.stopWatch;
     this.stopWatch = undefined;
     const version = ++this.watchVersion;
@@ -234,13 +245,14 @@ export class TeamMessaging {
     // settles to offline even when the SDK only produces cached snapshots.
     this.connectionTimeout = setTimeout(() => { this.connecting = false; this.emit(); }, 10000);
     try {
+      if (mode === 'replace') previous?.();
       const stop = this.api.watchMessages(this.scope, this.selected, snapshot => {
         if (version === this.watchVersion) this.receive(snapshot);
       });
       if (this.closed || version !== this.watchVersion) stop();
       else this.stopWatch = stop;
     } finally {
-      previous?.();
+      if (mode === 'overlap') previous?.();
     }
   }
   private finishConnecting(): void { clearTimeout(this.connectionTimeout); this.connectionTimeout = undefined; this.connecting = false; }
@@ -475,11 +487,14 @@ export class TeamMessaging {
       });
       if (creation) {
         const command = creation.command;
+        const conversationId = pendingPayload(creation).conversationId;
+        const unselectedWatchVersion = this.selected ? undefined : this.watchVersion;
         try {
           await this.api.messages(command);
           if (this.closed) return;
-          await this.commit(old => ({ ...old, creation: undefined }));
-          if (!this.selected) this.selected = ('payload' in command ? command.payload.conversationId : command.conversationId);
+          await this.commit(old => old.creation && pendingPayload(old.creation).conversationId === conversationId
+            ? { ...old, creation: undefined } : old);
+          if (!this.closed && unselectedWatchVersion === this.watchVersion) this.select(conversationId);
         } catch (error) {
           if (isRevokedAccessError(error)) throw error;
           const isPermanent = isPermanentMessageError(error) || error instanceof Error && ['CONVERSATION_REJECTED', 'PARTICIPANT_REQUIRED'].includes(error.message);

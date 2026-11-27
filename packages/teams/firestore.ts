@@ -184,6 +184,7 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
   let stopMessages: (() => void) | undefined;
   let selectedAllowed = false;
   const root = ['teams', scope.teamId] as const;
+  const memberConversations = query(collection(db, ...root, 'conversations'), where('memberUids', 'array-contains', uid));
   const selectedPath = [...root, 'conversations', conversationId] as const;
   const head = conversationId ? recentMessagesQuery(sdk, db, scope, conversationId) : undefined;
   // Start the SDK cache read while the membership and directory listeners confirm access.
@@ -331,7 +332,7 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
       membershipLease(uid,scope,0);emit({kind:'error',fromCache:snapshot.metadata.fromCache,error:'STALE_MEMBERSHIP'});close();
     }
   }, fail));
-  stops.push(onSnapshot(query(collection(db, ...root, 'conversations'), where('memberUids', 'array-contains', uid), sdk.limit(50)),
+  stops.push(onSnapshot(query(memberConversations, sdk.limit(50)),
     { includeMetadataChanges: true }, snapshot => {
       if (closed) return;
       let conversations: TeamConversation[];
@@ -351,13 +352,15 @@ export function watchFirestoreMessages(sdk: typeof import('firebase/firestore'),
         stopExact?.();stopExact=undefined;exact=undefined;exactReady=true;
       } else if(!stopExact){
         exactReady=false;
-        // A conversation selected from a later inbox page can lie outside this bounded source directory.
-        stopExact=onSnapshot(doc(db,...root,'conversations',conversationId),{includeMetadataChanges:true},snap=>{
+        // The selected channel may be outside the first page or still being created.
+        // A membership-filtered query can return an empty result while the create is in flight.
+        const selectedQuery = query(memberConversations, orderBy(sdk.documentId()), sdk.startAt(conversationId), sdk.endAt(conversationId));
+        stopExact=onSnapshot(selectedQuery,{includeMetadataChanges:true},snap=>{
           if(closed)return;
-          if(!snap.exists() && snap.metadata.fromCache)return;
+          if(snap.empty && snap.metadata.fromCache)return;
           try {
-            const data=snap.data();
-            exact=data?.memberUids?.includes(uid)?decode(snap.id,data):undefined;
+            const row = snap.docs[0];
+            exact = row ? decode(row.id, row.data()) : undefined;
             exactReady=true;updateDirectory();
           } catch {emit({kind:'error',fromCache:snap.metadata.fromCache,error:'INVALID_DATA'});close();}
         },fail);

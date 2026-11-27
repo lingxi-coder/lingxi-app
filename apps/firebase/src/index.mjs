@@ -100,6 +100,9 @@ const datasetOrigin = process.env.LINGXI_DATASET_ORIGIN;
 const datasetGateway = createDatasetGateway(datasetOrigin,
   datasetOrigin && process.env.LINGXI_DATASET_PRIVATE_RUN === '1' ? createPrivateDatasetFetch(datasetOrigin) : fetch,
   token => getAuth(app).verifyIdToken(token, true));
+const productDataOrigin = process.env.LINGXI_DATA_PRODUCT_ORIGIN;
+const productData = createProductDataTransport(productDataOrigin,
+  productDataOrigin && process.env.LINGXI_DATA_PRODUCT_PRIVATE_RUN === '1' ? createPrivateDatasetFetch(productDataOrigin) : fetch);
 const datasetBrowserHandler = createDatasetBrowserHttp({
   origin: process.env.LINGXI_DATASET_BROWSER_ORIGIN,
   call: datasetGateway?.browser,
@@ -125,7 +128,7 @@ const teamsHandler = createTeamsHandler({ store: new TeamsStore(teamsDb), friend
   datasetRender: renderKey && renderOrigin && datasetPages ? (...args) => (renderDataset ??= createDatasetRender({
     origin: renderOrigin, secret: renderKey.value(), pages: datasetPages, db: teamsDb,
   }))(...args) : undefined,
-  data: createProductDataTransport(process.env.LINGXI_DATA_PRODUCT_ORIGIN),
+  data: productData,
   verifyToken: token => getAuth(app).verifyIdToken(token, true),
   createCustomToken: uid => getAuth(app).createCustomToken(uid),
   origins: browserOrigins });

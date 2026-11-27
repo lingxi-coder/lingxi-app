@@ -927,7 +927,7 @@ export function App() {
             }} />
           {page === 'friends' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('friends_loading')}</p>}><FriendsPage friends={friends} locale={locale} notificationTarget={conversationNoticeTarget} /></Suspense>}
           <div style={{ display: page === 'apps' ? 'contents' : 'none' }}><LocalApps sidebarTarget={pageSidebar} visible={page === 'apps'} onCreate={() => openLocalAppChat()} onDevelopmentBlocked={() => setLocalAppNavigationError(tr('local_app_development_requires_code'))} canDevelop={bridge.bootstrap?.conversationSpaces.activeMode === 'code' && !bridge.sessionLoading} /></div>
-          {page === 'datasets' && <LocalAppDatasets locale={locale} teamsTheme={teamsTheme}
+          {page === 'datasets' && <LocalAppDatasets locale={locale} teamsTheme={teamsTheme} sidebarTarget={sidebarCollapsed ? null : pageSidebar}
             workspace={teams.workspace && teams.snapshot ? { uid: teams.snapshot.uid, api: teams.workspace.api, teams: teams.snapshot.teams } : undefined} />}
           {bots.available && botsApi && <div style={{ display: page === 'bots' ? 'contents' : 'none' }}>
             <Bots visible={page === 'bots'} bots={bots} api={botsApi} bridge={bridge}

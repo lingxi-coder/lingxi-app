@@ -21,9 +21,19 @@ function jsonObject(input: FormDataEntryValue | null): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+export type PersonalDatasetCatalog = {
+  datasets: readonly string[];
+  selected: string;
+  status: 'loading' | 'ready' | 'error';
+  busy: boolean;
+  onSelect(dataset: string): void;
+  onRetry(): void;
+};
+
 type PersonalDataPage = {
   heading: ReactNode;
   icon: ReactNode;
+  renderCatalog?(catalog: PersonalDatasetCatalog): ReactNode;
   labels: Record<'newDataset' | 'create' | 'cancel' | 'loading' | 'loadFailed' | 'opening' | 'openFailed' | 'retry'
     | 'empty' | 'emptyHint' | 'dataset' | 'choose' | 'records' | 'noRecords' | 'schemaHelp' | 'schemaInvalid'
     | 'createFailed' | 'addRecord' | 'publish', string>;
@@ -81,7 +91,7 @@ function PersonalDataBody({ api, data: requestData, uid, teams, locale, chatRepl
   const createHeading = useId();
   const schemaInput = useId();
   const [datasets, setDatasets] = useState<string[]>([]);
-  const [catalog, setCatalog] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [catalog, setCatalog] = useState<PersonalDatasetCatalog['status']>('loading');
   const [selected, setSelected] = useState('');
   const [openFailed, setOpenFailed] = useState(false);
   const [active, setActive] = useState<{ dataset: string; description: DataDescription; page: DataRecordPage; templates: DataTemplateView[] }>();
@@ -96,6 +106,7 @@ function PersonalDataBody({ api, data: requestData, uid, teams, locale, chatRepl
   const [createError, setCreateError] = useState<'json' | 'request'>();
   const busy = pending > 0;
   const labels = page?.labels;
+  const renderCatalog = page?.renderCatalog;
   const zh = locale.toLowerCase().startsWith('zh');
   const eligible = teams.filter(entry => entry.role === 'admin' || entry.role === 'owner');
   const target = eligible.find(entry => entry.id === team);
@@ -138,10 +149,10 @@ function PersonalDataBody({ api, data: requestData, uid, teams, locale, chatRepl
     try {
       const result = await requestData<{ datasets: VisibleDataSet[] }>({ scope: personal, command: { action: 'datasets' } });
       if (life.current !== mark) return;
-      setDatasets(result.datasets.map(entry => entry.dataset));
+      const next = result.datasets.map(entry => entry.dataset);
+      setDatasets(next);
       setCatalog('ready');
-      const first = result.datasets[0];
-      if (page && first && !selection.current) selectDataset(first.dataset);
+      if (page && !next.includes(selection.current)) selectDataset(next[0] ?? '');
     } catch {
       if (life.current === mark) setCatalog('error');
     }
@@ -366,12 +377,15 @@ function PersonalDataBody({ api, data: requestData, uid, teams, locale, chatRepl
         {createForm}
       </dialog>
     </>}
-    {catalog === 'loading' && <p className="personal-dataset-progress" role="status">{labels?.loading ?? (zh ? '正在载入数据集…' : 'Loading datasets…')}</p>}
-    {catalog === 'error' && <div className="personal-dataset-notice">
-      <p role="alert">{labels?.loadFailed ?? (zh ? '无法载入数据集。' : 'Could not load datasets.')}</p>
-      <button type="button" disabled={busy} onClick={() => void readCatalog()}>{retry}</button>
-    </div>}
-    {(!page || datasets.length > 0) && picker}
+    {renderCatalog ? renderCatalog({ datasets, selected, status: catalog, busy,
+      onSelect: selectDataset, onRetry: () => void readCatalog() }) : <>
+      {catalog === 'loading' && <p className="personal-dataset-progress" role="status">{labels?.loading ?? (zh ? '正在载入数据集…' : 'Loading datasets…')}</p>}
+      {catalog === 'error' && <div className="personal-dataset-notice">
+        <p role="alert">{labels?.loadFailed ?? (zh ? '无法载入数据集。' : 'Could not load datasets.')}</p>
+        <button type="button" disabled={busy} onClick={() => void readCatalog()}>{retry}</button>
+      </div>}
+      {(!page || datasets.length > 0) && picker}
+    </>}
     {!page && <details><summary>{zh ? '用 JSON Schema 新建数据集' : 'Create a dataset from JSON Schema'}</summary>{createForm}</details>}
     {page && catalog === 'ready' && !datasets.length && <div className="personal-dataset-empty">
       <span className="personal-dataset-empty-icon">{page.icon}</span>
@@ -385,7 +399,7 @@ function PersonalDataBody({ api, data: requestData, uid, teams, locale, chatRepl
     {feedback && <p className="personal-dataset-action-message" role={feedback.role}>{feedback.text}</p>}
     {active && (page ? <div className="personal-dataset-detail" key={active.dataset}>
       <section className="personal-dataset-records" aria-label={page.labels.records}>
-        <h2>{page.labels.records}</h2>
+        <h2>{renderCatalog ? active.dataset : page.labels.records}</h2>
         {records}
         {addRecord}
       </section>

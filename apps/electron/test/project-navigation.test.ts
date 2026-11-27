@@ -261,7 +261,7 @@ test('sidebar renders global pins before projects and limits each project sessio
   assert.match(markup, /disabled/); // project actions remain independently guarded by project activity
 });
 
-test('Datasets sits directly below Apps and has its own current-page mark', () => {
+test('Datasets has its own sidebar and sits directly below Apps in the rail', () => {
   const markup = renderToStaticMarkup(React.createElement(
     Theme.Provider,
     { value: tokens(true) },
@@ -271,6 +271,7 @@ test('Datasets sits directly below Apps and has its own current-page mark', () =
       sidebarMode: 'apps',
       datasets: true,
       onOpenDatasets() {},
+      modePanel: () => React.createElement('nav', { 'aria-label': 'App library' }),
     }),
   ));
   const rail = markup.slice(markup.indexOf('aria-label="Main navigation"'), markup.indexOf('</nav>'));
@@ -279,6 +280,8 @@ test('Datasets sits directly below Apps and has its own current-page mark', () =
   assert.match(apps, /aria-label="Apps"/);
   assert.doesNotMatch(apps, /aria-current/);
   assert.match(datasets, /aria-current="page" aria-label="Datasets"/);
+  assert.match(markup, /class="desktop-page-sidebar"/);
+  assert.doesNotMatch(markup, /aria-label="App library"/);
 });
 
 test('sidebar exposes a bounded drag handle for resizing', () => {

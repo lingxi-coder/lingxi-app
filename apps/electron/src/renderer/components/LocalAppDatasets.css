@@ -1,3 +1,45 @@
+.dataset-sidebar {
+  flex: 1;
+  min-inline-size: 0;
+  overflow: auto;
+  padding: .75rem .625rem;
+  color: var(--apps-text);
+}
+
+.dataset-sidebar h2 { margin: 0 .5rem .625rem; font-size: .8125rem; font-weight: 600; }
+.dataset-sidebar ul { margin: 0; padding: 0; list-style: none; }
+.dataset-sidebar li + li { margin-block-start: .125rem; }
+.dataset-sidebar p { margin: .5rem; color: var(--apps-muted); font-size: .8125rem; overflow-wrap: anywhere; }
+
+.dataset-sidebar button {
+  display: flex;
+  align-items: center;
+  gap: .625rem;
+  min-block-size: 2.25rem;
+  padding: .375rem .625rem;
+  border: 0;
+  border-radius: .5rem;
+  background: transparent;
+  color: var(--apps-text);
+  font: inherit;
+  font-size: .8125rem;
+  text-align: start;
+  cursor: pointer;
+}
+
+.dataset-sidebar .dataset-sidebar-item { inline-size: 100%; font-weight: 500; }
+.dataset-sidebar-item svg { flex: none; }
+.dataset-sidebar-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dataset-sidebar button:hover { background: var(--apps-hover); }
+.dataset-sidebar button[aria-current='page'] { color: var(--apps-accent); background: var(--apps-tint); font-weight: 650; }
+.dataset-sidebar button:is(:focus-visible, :active) { outline: none; background: var(--apps-active); }
+.dataset-sidebar button:is([aria-disabled='true'], :disabled) { cursor: wait; }
+.dataset-sidebar-error button { margin-inline: .5rem; background: var(--apps-hover); }
+
+@media (forced-colors: active) {
+  .dataset-sidebar button:is(:focus-visible, [aria-current='page']) { outline: 1px solid Highlight; outline-offset: -1px; }
+}
+
 .local-app-datasets .local-app-datasets-panel {
   max-inline-size: 62rem;
   max-block-size: none;
@@ -164,7 +206,7 @@
 }
 
 .personal-dataset-records { display: grid; grid-template-columns: minmax(0, 1fr); gap: .75rem; padding: 1rem; }
-.personal-dataset-records h2 { font-size: 1rem; font-weight: 650; }
+.personal-dataset-records h2 { font-size: 1rem; font-weight: 650; overflow-wrap: anywhere; }
 .personal-dataset-records > button { justify-self: start; }
 .personal-dataset-records-empty { padding-block: .375rem; }
 .personal-dataset-records .tw-data-table-scroll { border-radius: .5rem; }

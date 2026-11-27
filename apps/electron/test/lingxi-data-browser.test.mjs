@@ -4,13 +4,13 @@ import { resolve } from 'node:path';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
-import { createProductDataBrowserFixture } from '../../firebase/test/lingxi-data-browser-fixture.mjs';
 
-test('Desktop Datasets distinguishes load errors, empty states and record management', {
+test('Desktop Datasets lists datasets in the sidebar and opens their records', {
   skip: !process.env.LINGXI_TEST_PLAYWRIGHT_MODULE, timeout: 30000,
 }, async t => {
   const bundle = await build({ write: false, outfile: 'workspace.js', bundle: true, jsx: 'automatic', platform: 'browser', format: 'esm',
     nodePaths: [resolve('node_modules')], stdin: { sourcefile: 'workspace.tsx', resolveDir: resolve('.'), loader: 'tsx', contents: `
+      import { useState } from 'react';
       import { createRoot } from 'react-dom/client';
       import '../../packages/teams/styles.ts';
       import './src/renderer/components/LocalApps.css';
@@ -26,9 +26,19 @@ test('Desktop Datasets distinguishes load errors, empty states and record manage
         if (!response.ok) throw new Error('Service unavailable');
         return response.json();
       }};
-      createRoot(document.querySelector('#app')).render(<Theme.Provider value={palette}>
-        <LocalAppDatasets workspace={{ uid: 'user', api, teams: [] }} locale="en" teamsTheme={teamsThemeVariables(palette)} />
-      </Theme.Provider>);
+      function Workspace() {
+        const [sidebarTarget, setSidebarTarget] = useState(null);
+        const [collapsed, setCollapsed] = useState(false);
+        return <Theme.Provider value={palette}>
+          <button onClick={() => setCollapsed(value => !value)}>Toggle sidebar</button>
+          <div className="workspace">
+            {!collapsed && <aside ref={setSidebarTarget} />}
+            <LocalAppDatasets workspace={{ uid: 'user', api, teams: [] }} locale="en"
+              teamsTheme={teamsThemeVariables(palette)} sidebarTarget={sidebarTarget} />
+          </div>
+        </Theme.Provider>;
+      }
+      createRoot(document.querySelector('#app')).render(<Workspace />);
     ` } });
   const scripts = new Map(bundle.outputFiles.map(file => ['/' + file.path.split('/').at(-1), file.text]));
   const { chromium } = await import(pathToFileURL(process.env.LINGXI_TEST_PLAYWRIGHT_MODULE).href);
@@ -41,21 +51,22 @@ test('Desktop Datasets distinguishes load errors, empty states and record manage
   const createOperations = [];
   let schema;
   const dataset = 'inventory';
+  const otherDataset = 'recipes';
   const records = [];
   let releaseCatalog;
   const pendingCatalog = new Promise(resolve => { releaseCatalog = resolve; });
   await page.route('https://datasets.test/**', async route => {
     const path = new URL(route.request().url()).pathname;
     if (path === '/') return route.fulfill({ contentType: 'text/html', body: `<!doctype html><meta charset="utf-8">
-      <style>*{box-sizing:border-box;margin:0;padding:0}body{font:13px/1.5 system-ui}dialog{margin:auto}</style>
-      <link rel="stylesheet" href="/workspace.css"><main id="app"></main><script type="module" src="/workspace.js"></script>` });
+      <style>*{box-sizing:border-box;margin:0;padding:0}body{font:13px/1.5 system-ui}dialog{margin:auto}.workspace{display:flex}aside{flex:0 0 220px}</style>
+      <link rel="stylesheet" href="/workspace.css"><div id="app"></div><script type="module" src="/workspace.js"></script>` });
     if (scripts.has(path)) return route.fulfill({ contentType: path.endsWith('.css') ? 'text/css' : 'text/javascript', body: scripts.get(path) });
     if (path !== '/data') return route.fulfill({ status: 404 });
     const { command, operation } = route.request().postDataJSON();
     switch (command.action) {
       case 'datasets':
         if (++catalogReads === 1) { await pendingCatalog; return route.fulfill({ status: 503 }); }
-        return route.fulfill({ json: { datasets: schema ? [{ dataset, access: 'manage' }] : [] } });
+        return route.fulfill({ json: { datasets: schema ? [dataset, otherDataset].map(id => ({ dataset: id, access: 'manage' })) : [] } });
       case 'create':
         createOperations.push(operation);
         schema = command.schema;
@@ -64,7 +75,9 @@ test('Desktop Datasets distinguishes load errors, empty states and record manage
       case 'describe':
         if (++descriptions === 1) return route.fulfill({ status: 503 });
         return route.fulfill({ json: { schema, epoch: 1, schemaVersion: 1, rules: {} } });
-      case 'list': return route.fulfill({ json: { records, cursor: null } });
+      case 'list': return route.fulfill({ json: { records: command.dataset === dataset ? records : [
+        { id: 'bread', record: { revision: 1, schemaVersion: 1, value: { title: 'Sourdough' } } },
+      ], cursor: null } });
       case 'templateViews': return route.fulfill({ json: { views: [] } });
       case 'put':
         records.push({ id: command.record, record: { revision: 1, schemaVersion: 1, value: command.value } });
@@ -74,11 +87,12 @@ test('Desktop Datasets distinguishes load errors, empty states and record manage
   });
 
   await page.goto('https://datasets.test/');
-  await page.getByRole('status').filter({ hasText: 'Loading datasets' }).waitFor();
+  const sidebar = page.getByRole('complementary').getByRole('navigation', { name: 'Datasets' });
+  await sidebar.getByRole('status').filter({ hasText: 'Loading datasets' }).waitFor();
   releaseCatalog();
-  await page.getByRole('alert').filter({ hasText: 'Could not load datasets.' }).waitFor();
+  await sidebar.getByRole('alert').filter({ hasText: 'Could not load datasets.' }).waitFor();
   assert.equal(await page.getByRole('combobox', { name: 'Dataset' }).count(), 0);
-  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await sidebar.getByRole('button', { name: 'Retry', exact: true }).click();
   await page.getByRole('heading', { name: 'No datasets yet' }).waitFor();
 
   const trigger = page.getByRole('button', { name: 'New dataset' });
@@ -105,7 +119,8 @@ test('Desktop Datasets distinguishes load errors, empty states and record manage
   await page.getByText('This dataset has no records yet.').waitFor();
   assert.equal(createOperations.length, 2);
   assert.equal(createOperations[0], createOperations[1]);
-  assert.equal(await page.getByRole('combobox', { name: 'Dataset' }).inputValue(), dataset);
+  assert.equal(await sidebar.getByRole('button', { name: dataset }).getAttribute('aria-current'), 'page');
+  assert.equal(await page.getByRole('combobox', { name: 'Dataset' }).count(), 0);
 
   await page.getByText('Add record', { exact: true }).click();
   await page.getByRole('textbox', { name: 'Record ID' }).fill('sample');
@@ -113,17 +128,36 @@ test('Desktop Datasets distinguishes load errors, empty states and record manage
   await page.getByRole('button', { name: 'Save record' }).click();
   await page.getByRole('cell', { name: 'Field notebook' }).waitFor();
   assert.equal(await page.getByRole('textbox', { name: 'Record ID' }).isVisible(), false);
-  await page.setViewportSize({ width: 340, height: 660 });
-  assert.equal(await page.locator('body').evaluate(element => element.scrollWidth === element.clientWidth), true);
   await page.getByText('Publish to Team', { exact: true }).click();
   await page.getByRole('button', { name: 'Preview publication audience' }).waitFor();
   await page.reload();
   await page.getByRole('cell', { name: 'Field notebook' }).waitFor();
+  await page.getByRole('heading', { name: dataset }).waitFor();
+  const otherRow = sidebar.getByRole('button', { name: otherDataset });
+  await otherRow.focus();
+  await page.keyboard.press('Enter');
+  await page.getByRole('cell', { name: 'Sourdough' }).waitFor();
+  assert.equal(await otherRow.getAttribute('aria-current'), 'page');
+  assert.equal(await otherRow.evaluate(element => element === document.activeElement), true);
+  assert.equal(await page.getByRole('cell', { name: 'Field notebook' }).count(), 0);
+
+  await page.getByRole('button', { name: 'Toggle sidebar' }).click();
+  await sidebar.waitFor({ state: 'hidden' });
+  await page.setViewportSize({ width: 340, height: 660 });
+  assert.equal(await page.locator('body').evaluate(element => element.scrollWidth === element.clientWidth), true);
+  const picker = page.getByRole('combobox', { name: 'Dataset' });
+  assert.equal(await picker.inputValue(), otherDataset);
+  await picker.selectOption(dataset);
+  await page.getByRole('cell', { name: 'Field notebook' }).waitFor();
+  await page.getByRole('button', { name: 'Toggle sidebar' }).click();
+  await sidebar.waitFor();
+  assert.equal(await sidebar.getByRole('button', { name: dataset }).getAttribute('aria-current'), 'page');
 });
 
 test('Desktop and Web open a custom record view, recover a conflict and import a Chat schema', {
   skip: !process.env.LINGXI_DATA_FIXTURE || !process.env.LINGXI_TEST_PLAYWRIGHT_MODULE, timeout: 45000,
 }, async t => {
+  const { createProductDataBrowserFixture } = await import('../../firebase/test/lingxi-data-browser-fixture.mjs');
   const fixture = JSON.parse(await readFile(process.env.LINGXI_DATA_FIXTURE, 'utf8'));
   const product = await createProductDataBrowserFixture(fixture);
   t.after(() => product.close());

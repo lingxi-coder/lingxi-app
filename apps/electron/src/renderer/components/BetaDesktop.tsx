@@ -499,7 +499,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   useEffect(() => { if (projectListVisible) setProjectsVisited(true); }, [projectListVisible]);
   const homePage = sidebarMode === 'home' && !apps && !scheduled && !changes;
   // Every sidebar mode (Home, Bots, Teams, Apps) narrows its list with the sidebar's search box (`modePanel(mode, search)`); a page that replaces the sidebar has none, and Friends has a filter field of its own.
-  const searchable = !apps && !scheduled && !changes && sidebarMode !== 'friends' && !(sidebarMode === 'home' && homePanel && !projectListVisible);
+  const searchable = !apps && !datasets && !scheduled && !changes && sidebarMode !== 'friends' && !(sidebarMode === 'home' && homePanel && !projectListVisible);
   const asideRef = useRef<HTMLElement>(null);
   const railRef = useRef<HTMLElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
@@ -1005,7 +1005,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
       data-resizing={resizingSidebar || undefined}
       style={{ position: 'relative', width: sidebarWidth, flexShrink: 0, display: 'flex', flexDirection: 'column', '--desktop-accent': t.accent } as CSSProperties}
     >
-      {scheduled ? <div ref={pageSidebarRef} className="desktop-page-sidebar" /> : <>
+      {scheduled || datasets ? <div ref={pageSidebarRef} className="desktop-page-sidebar" /> : <>
       {searchOpen && searchable && <div className="sidebar-search"><DesktopIcon name="search" size={15} /><input ref={searchInputRef} type="search" aria-label={tr('desktop_search_chats_projects')} placeholder={tr('desktop_search_chats_projects')} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setSearchQuery(''); setSearchOpen(false); } }} /><button type="button" aria-label={tr('desktop_close_search')} onClick={() => { setSearchQuery(''); setSearchOpen(false); }}><Icon name="x" size={15} /></button></div>}
 
       {/* Electron drag regions discard pointer events. Keep every session control in

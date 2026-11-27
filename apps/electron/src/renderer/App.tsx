@@ -465,7 +465,13 @@ export function App() {
     setActivityView(false);
   }, [cancelLocalAppNavigation]);
   const showAppLibrary = useCallback(() => { setSidebarMode('apps'); openPage('apps'); }, [openPage, setSidebarMode]);
-  const showAppDatasets = useCallback(() => { setSidebarMode('apps'); openPage('datasets'); }, [openPage, setSidebarMode]);
+  const showAppDatasets = useCallback(() => {
+    if (sessionNavigationBlocked()) return;
+    leaveBots(() => {
+      setSidebarMode('apps');
+      openPage('datasets');
+    });
+  }, [leaveBots, openPage, sessionNavigationBlocked, setSidebarMode]);
   const openAppDevelopmentChat = useCallback(async (chat: AppDevelopmentChat) => {
     if (sessionNavigationBlocked()) return;
     cancelLocalAppNavigation();
@@ -820,9 +826,11 @@ export function App() {
             pageSidebarRef={setPageSidebar}
             activityView={activityView}
             onToggleActivityView={toggleActivityView}
-            apps={page === 'apps' || page === 'datasets'}
+            apps={page === 'apps'}
+            datasets={page === 'datasets'}
             changes={page === 'changes'}
             onOpenApps={showAppLibrary}
+            onOpenDatasets={showAppDatasets}
             botsAvailable={bots.available}
             teamsUnread={teams.snapshot?.totalUnread ?? 0}
             friendsUnread={friends.snapshot?.badge ?? 0}
@@ -845,9 +853,9 @@ export function App() {
             onSelectSidebarMode={selectSidebarMode}
             modePanel={(mode, search) => mode === 'apps'
               ? <LocalAppsSidebar groups={appWorkspace.groups} activeSessionId={bridge.activeSession?.sessionId}
-                  chatVisible={page === 'chat'} libraryVisible={page === 'apps'} datasetsVisible={page === 'datasets'} query={search}
+                  chatVisible={page === 'chat'} libraryVisible={page === 'apps'} query={search}
                   busy={sessionNavigationBlocked()} loading={appWorkspace.loading} error={appWorkspace.error} onRetry={() => { void appWorkspace.refresh(); }}
-                  onLibrary={showAppLibrary} onDatasets={showAppDatasets} onCreate={() => openLocalAppChat()}
+                  onLibrary={showAppLibrary} onCreate={() => openLocalAppChat()}
                   onNewChat={group => openLocalAppChat({ id: group.app?.id ?? '', name: group.name,
                     authoring: group.app?.authoring ?? { sourceDirectory: group.projectPath! },
                     authoringAction: 'createSession', authoringSetCurrent: Boolean(group.app) })}

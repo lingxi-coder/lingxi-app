@@ -7,13 +7,13 @@ export type AppPage = 'chat' | 'messages' | 'scheduled' | 'apps' | 'datasets' | 
 
 /**
  * Home shows the chat view; Apps, Teams and Friends have their own library pages.
- * Apps and Bots retain a visible chat belonging to their workspace; Apps also keep their Datasets page.
+ * Apps and Bots retain a visible chat belonging to their workspace.
  */
 export function pageForMode(mode: SidebarMode, current: { page: AppPage; botChat: boolean; appChat?: boolean }): AppPage {
   if (mode === 'home') return 'chat';
   if (mode === 'teams') return 'teams';
   if (mode === 'friends') return 'friends';
-  if (mode === 'apps') return (current.page === 'chat' && current.appChat) ? 'chat' : current.page === 'datasets' ? 'datasets' : 'apps';
+  if (mode === 'apps') return (current.page === 'chat' && current.appChat) ? 'chat' : 'apps';
   return current.page === 'chat' && current.botChat ? 'chat' : 'bots';
 }
 

@@ -31,12 +31,7 @@ test('Apps groups only native authoring projects, keeps distinct drafts and exac
   assert.match(markup, /aria-current="page"/);
   assert.match(markup, /First requirement/);
   assert.doesNotMatch(markup, /Projects and sessions/);
-  assert.doesNotMatch(markup, />Datasets</, 'a host without the Datasets page shows no link to it');
-  const datasets = renderToStaticMarkup(createElement(Theme.Provider, { value: tokens(false) }, createElement(LocalAppsSidebar, { groups, query: '',
-    chatVisible: false, libraryVisible: false, datasetsVisible: true, busy: false, error: '', onLibrary() {}, onDatasets() {}, onCreate() {}, onOpen() {}, onEdit() {}, onNewChat() {}, onChat() {}, onRetry() {} })));
-  const current = [...datasets.matchAll(/aria-current="page">(.*?)<\/button>/g)].map(match => match[1]);
-  assert.equal(current.length, 1, 'only one item is current');
-  assert.match(current[0], /<span>Datasets<\/span>/, 'Datasets is its own item, marked while its page is open');
+  assert.doesNotMatch(markup, />Datasets</);
 });
 
 test('moving a Global Code chat into an App cwd does not turn it into an App project session', () => {

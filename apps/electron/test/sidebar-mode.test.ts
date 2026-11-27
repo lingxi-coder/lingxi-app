@@ -24,7 +24,7 @@ test('Apps is a first-level workspace and retains its own development chat', () 
 test('the Datasets page belongs to the Apps workspace', () => {
   assert.equal(reconcileSidebarMode('home', 'datasets', true), 'apps');
   assert.equal(reconcileSidebarMode('home', 'datasets', true, true), 'apps');
-  assert.equal(pageForMode('apps', { page: 'datasets', botChat: false }), 'datasets', 'choosing Apps again keeps its Datasets page');
+  assert.equal(pageForMode('apps', { page: 'datasets', botChat: false }), 'apps', 'choosing Apps from Datasets opens the App library');
   assert.equal(pageForMode('home', { page: 'datasets', botChat: false }), 'chat');
   assert.equal(pageForMode('teams', { page: 'datasets', botChat: false }), 'teams');
   assert.equal(modeForSettledChat('apps', 'datasets', false), 'apps');

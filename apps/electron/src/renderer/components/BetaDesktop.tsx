@@ -9,6 +9,7 @@ import { tr } from '../i18n/locale';
 import { unreadBadgeText } from '../bridge/teamsUnread';
 import { AgentAvatar } from './AgentAvatar';
 import { DesktopIcon } from './DesktopIcon';
+import { DatasetGlyph } from './LocalAppsSidebar';
 import './HomeViews.css';
 import { ImagePreview } from './ImagePreview';
 import { localAppAuthoringPrompt, localAppDraftDisposition, type LocalAppDraft } from '../bridge/localAppChat';
@@ -454,7 +455,7 @@ export function SessionRow({ projectPath, session, active, pinned, opening, stat
   );
 }
 
-export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, changes = false, botsAvailable = false, teamsUnread = 0, friendsUnread = 0, sidebarMode = 'home', localAppProjects = [], onSelectSidebarMode, modePanel, homePanel, homeView = 'chats', onHomeViewChange, inboxBadge = 0, sidebarCollapsed: collapsedByParent, onSidebarCollapsedChange, onOpenChat, children, topbar, pageSidebarRef }: {
+export function BetaSidebar({ activityView = false, onToggleActivityView, bridge, onOpenSettings, scheduled = false, onOpenScheduled, apps = false, onOpenApps, datasets = false, onOpenDatasets, changes = false, botsAvailable = false, teamsUnread = 0, friendsUnread = 0, sidebarMode = 'home', localAppProjects = [], onSelectSidebarMode, modePanel, homePanel, homeView = 'chats', onHomeViewChange, inboxBadge = 0, sidebarCollapsed: collapsedByParent, onSidebarCollapsedChange, onOpenChat, children, topbar, pageSidebarRef }: {
   bridge: UseBridge;
   activityView?: boolean;
   onToggleActivityView?(): void;
@@ -463,6 +464,8 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
   onOpenScheduled?(): void;
   apps?: boolean;
   onOpenApps?(): void;
+  datasets?: boolean;
+  onOpenDatasets?(): void;
   changes?: boolean;
   /** Bots can be used on this computer. Where they cannot, the sidebar does not mention them. */
   botsAvailable?: boolean;
@@ -569,7 +572,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
     if (onHomeViewChange) onHomeViewChange(view);
     else selectMode('home');
   };
-  const appsMarked = railMarked && (sidebarMode === 'apps' || (!onSelectSidebarMode && apps));
+  const appsMarked = railMarked && !datasets && (sidebarMode === 'apps' || (!onSelectSidebarMode && apps));
   // The rail's Teams button says how many messages wait: the number is for the eye, the label for everything else.
   const teamsBadge = unreadBadgeText(teamsUnread);
   const teamsRailLabel = teamsBadge ? tr('desktop_teams_rail_unread', Math.floor(teamsUnread)) : tr('teams_title');
@@ -984,6 +987,7 @@ export function BetaSidebar({ activityView = false, onToggleActivityView, bridge
           {friendsBadge && <span className="desktop-rail-count" data-kind="unread" aria-hidden="true">{friendsBadge}</span>}
         </button>
         <button type="button" className="desktop-rail-button" data-active={appsMarked || undefined} aria-current={appsMarked ? 'page' : undefined} aria-label={tr('apps_title')} title={tr('apps_title')} onClick={() => onSelectSidebarMode ? selectMode('apps') : onOpenApps?.()}><DesktopIcon name="apps" size={20}/></button>
+        {onOpenDatasets && <button type="button" className="desktop-rail-button" data-active={datasets || undefined} aria-current={datasets ? 'page' : undefined} aria-label={tr('apps_datasets')} title={tr('apps_datasets')} onClick={onOpenDatasets}><DatasetGlyph /></button>}
         <span className="desktop-rail-divider" aria-hidden="true" />
         <button type="button" className="desktop-rail-button" data-active={scheduled || undefined} aria-current={scheduled ? 'page' : undefined} aria-label={tr('desktop_chat_scheduled_tasks')} title={tr('desktop_chat_scheduled_tasks')} onClick={onOpenScheduled}><DesktopIcon name="clock" size={20} /></button>
         <GitChangesButton active={changes} />

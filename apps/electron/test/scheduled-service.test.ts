@@ -54,6 +54,11 @@ test('Dataset approval survives a host restart, stays tied to the saved recipe a
   }
   assert.deepEqual(await host().approve(program, 'orders', {}, 'approval', uid), { permit: 'permit', planDigest: 'plan-digest' });
   assert.equal((await host().open(program, 'today'))?.finished, true);
+  // The caller is shown the approved dataset before the run opens, and may stop it.
+  const shown: string[] = [];
+  assert.equal((await host().open(program, 'today', undefined, undefined, dataset => { shown.push(dataset); }))?.finished, true);
+  await assert.rejects(host().open(program, 'today', undefined, undefined, () => { throw new Error('paused: out of scope'); }), /paused: out of scope/);
+  assert.deepEqual(shown, ['orders']);
   await assert.rejects(host().open(scheduledDatasetProgram({ ...task(), cron: '0 10 * * *' }, '/project'), 'today'), /program changed/);
   uid = 'another-user';
   assert.equal(await host().open(program, 'today'), undefined);
@@ -568,6 +573,8 @@ function botsOf(h: Awaited<ReturnType<typeof harness>>, options: { model?: strin
   const chosen = new Map<string, string>();
   const claims: { sessionId: string; startedBefore: number }[] = [];
   const chats = new Map<string, string>();
+  // The datasets the Bot's scope names.
+  const datasets = new Set<string>();
   const folders = () => [{ id: 'default', path: workspace, label: '' }, ...extra.map((folder) => ({ id: folder.id, path: folder.path, label: folder.label ?? basename(folder.path) }))];
   const bot: RoutineBot = {
     botId: 'Bot0000000000000000001', name: 'Research', workspace, ...(options.model ? { model: options.model } : {}), catalog: () => catalog,
@@ -577,6 +584,7 @@ function botsOf(h: Awaited<ReturnType<typeof harness>>, options: { model?: strin
     chosenFolders: () => Object.fromEntries(chosen),
     claim: (sessionId) => { claims.push({ sessionId, startedBefore: h.background.length }); },
     folderOfChat: (sessionId) => chats.get(sessionId),
+    reachesDataset: (dataset) => datasets.has(dataset),
   };
   const present = new Set([workspace]);
   const deleting = new Set<string>();
@@ -586,7 +594,7 @@ function botsOf(h: Awaited<ReturnType<typeof harness>>, options: { model?: strin
     isBotWorkspace: (path) => basename(path) === 'workspace' && dirname(dirname(path)) === root,
   };
   h.service.attachBots(api);
-  return { bot, workspace, rows, catalogCalls, deleting, remove: () => { present.delete(workspace); }, api, extra, chosen, claims, chats };
+  return { bot, workspace, rows, catalogCalls, deleting, remove: () => { present.delete(workspace); }, api, extra, chosen, claims, chats, datasets };
 }
 
 async function until(condition: () => Promise<boolean>): Promise<void> {
@@ -710,6 +718,38 @@ test('a routine of a Bot runs as the Bot in the folder it was given, and the not
   assert.deepEqual(h.notifications.map((item) => item.ref), [{ projectPath: folder, sessionId: result.sessionId }]);
   assert.deepEqual(h.bindings.map((binding) => binding.sessionId), [result.sessionId]);
   assert.deepEqual(h.errors, []);
+});
+
+test('a routine of a Bot pauses rather than run without its dataset once the Bot\'s scope no longer names it', async (t) => {
+  const h = await harness(t);
+  const opened: string[] = [];
+  const service = h.createService({ datasetTasks: () => ({ async open(_program, logicalRun, _signal, _preview, checkDataset) {
+    checkDataset?.('orders');
+    opened.push(logicalRun);
+    return undefined;
+  } }) });
+  t.after(() => service.dispose());
+  const b = botsOf(h);
+  service.attachBots(b.api);
+  const source = h.runtime({ projectPath: b.workspace, sessionId: targetId });
+  await assert.rejects(runClaim(service, source, 'dataset-gone', task()), /paused: The dataset this routine reads is not one the Bot can use any more/);
+  assert.deepEqual([opened, h.background.length, b.claims], [[], 0, []], 'the dataset is not opened, and nothing starts');
+  assert.match(h.notifications.at(-1)?.body ?? '', /not one the Bot can use any more/);
+  // The dataset is the Bot's again, and the routine reads it.
+  b.datasets.add('orders');
+  await runClaim(service, source, 'dataset-back', task());
+  assert.deepEqual([opened, h.background.length], [['dataset-back'], 1]);
+});
+
+test('a dataset can be approved for a Bot\'s routine only if the Bot\'s scope names it, and for any other scope\'s routine freely', async (t) => {
+  const h = await harness(t);
+  const b = botsOf(h);
+  assert.throws(() => h.service.assertRoutineDataset(b.workspace, 'orders'), /DATASET_OUTSIDE_BOT_SCOPE/);
+  b.datasets.add('orders');
+  h.service.assertRoutineDataset(b.workspace, 'orders');
+  b.remove();
+  assert.throws(() => h.service.assertRoutineDataset(b.workspace, 'orders'), /DATASET_OUTSIDE_BOT_SCOPE/, 'a Bot that is gone reaches nothing');
+  h.service.assertRoutineDataset(h.project, 'anything');
 });
 
 test('a routine of a Bot that was given no folder runs in the Bot\'s own, and is claimed all the same', async (t) => {

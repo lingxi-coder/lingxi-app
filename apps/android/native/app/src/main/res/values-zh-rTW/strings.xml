@@ -3519,6 +3519,7 @@
     <string name="desktop_dataset_task_plan">任務方案（JSON）</string>
     <string name="desktop_dataset_task_review">審核方案</string>
     <string name="desktop_dataset_task_invalid_plan">請輸入 JSON 物件格式的任務方案。</string>
+    <string name="desktop_dataset_task_outside_bot_scope">此 Bot 不能使用這個資料集。請先把它加入 Bot 的資料集，或選擇 Bot 能用的資料集。</string>
     <string name="desktop_dataset_task_revoke">撤銷 Dataset 許可</string>
     <string name="desktop_dataset_task_revoked">資料任務許可已撤銷。</string>
     <string name="teams_dataset_title">新增資料</string>

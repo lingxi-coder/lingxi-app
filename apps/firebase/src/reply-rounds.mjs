@@ -23,6 +23,12 @@ import { bidTiers } from './shared-bot-commands.mjs';
  * Decision call (`TRIAGE_TIMEOUT_MS`, 10 s), so that a slow Decision service still bids in time; a round whose Bots have all bid settles at once.
  */
 export const roundWindowMs = 15000, startWindowMs = 20000;
+/**
+ * A round is deleted by Firestore's TTL policy on `replyRounds.expireAt` a week after it opened. Nothing the service does needs it after its start
+ * window: a recall finds no round and has nothing to void, a late bid is refused, and the outcome each task was told is kept on the task. The week is
+ * only for looking into a round that went wrong.
+ */
+export const roundKeepMs = 7 * 86400000;
 
 /** The better the tier, the higher: a function, because the list is read when a round settles, not when this module loads (the two modules import each other through `shared-bots.mjs`). */
 const rank = tier => bidTiers.length - bidTiers.indexOf(tier);
@@ -42,7 +48,7 @@ const tasksOf = async (tx, team, rounds) => {
 
 /** The round a message opens: one candidate for each Bot whose task it admitted. `maxReplies` is fixed here, so a later change of the Chat's setting does not move an open round. */
 export function openRound(tx, team, { roundId, conversationId, candidates, maxReplies, now }) {
-  tx.create(roundRef(team, roundId), { schemaVersion: 1, roundId, conversationId, state: 'open', createdAt: now, deadlineAt: now + roundWindowMs, maxReplies,
+  tx.create(roundRef(team, roundId), { schemaVersion: 1, roundId, conversationId, state: 'open', createdAt: now, deadlineAt: now + roundWindowMs, expireAt: new Date(now + roundKeepMs), maxReplies,
     candidates: candidates.map(({ taskId, sharedBotId, addressed }) => ({ taskId, sharedBotId, ...(addressed ? { addressed: true } : {}) })), bids: {} });
 }
 

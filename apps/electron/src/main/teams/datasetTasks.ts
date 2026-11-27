@@ -13,7 +13,9 @@ export interface DatasetTaskProgram {
   recipe: unknown;
 }
 export interface DatasetTaskHooks {
-  open(program: DatasetTaskProgram, logicalRun: string, signal?: AbortSignal, privatePreview?: boolean): Promise<DatasetRunSession | undefined>;
+  /** `checkDataset` is shown the approved dataset before the run opens, and throws to stop it. */
+  open(program: DatasetTaskProgram, logicalRun: string, signal?: AbortSignal, privatePreview?: boolean,
+    checkDataset?: (dataset: string) => void): Promise<DatasetRunSession | undefined>;
 }
 interface StoredApproval extends DatasetApproval {
   uid: string;
@@ -90,7 +92,8 @@ export class DatasetTaskHost implements DatasetTaskHooks {
     });
   }
 
-  async open(program: DatasetTaskProgram, logicalRun: string, signal?: AbortSignal, privatePreview?: boolean): Promise<DatasetRunSession | undefined> {
+  async open(program: DatasetTaskProgram, logicalRun: string, signal?: AbortSignal, privatePreview?: boolean,
+    checkDataset?: (dataset: string) => void): Promise<DatasetRunSession | undefined> {
     const uid = this.account.snapshot().user?.uid;
     if (!uid) return undefined;
     const key = this.key(uid, program);
@@ -105,6 +108,7 @@ export class DatasetTaskHost implements DatasetTaskHooks {
     if (approval.uid !== uid || approval.permit !== marker.permit || approval.recipeSha256 !== recipeSha256) {
       throw new Error('Dataset task program changed and requires approval');
     }
+    checkDataset?.(approval.dataset);
     const epoch = this.account.sessionEpoch?.();
     const scopedFetch: typeof fetch = async (input, init) => {
       const current = () => this.account.snapshot().user?.uid === uid && this.account.sessionEpoch?.() === epoch;

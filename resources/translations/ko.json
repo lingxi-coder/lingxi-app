@@ -4186,6 +4186,7 @@
   "desktop_dataset_task_plan": "작업 계획(JSON)",
   "desktop_dataset_task_review": "계획 검토",
   "desktop_dataset_task_invalid_plan": "작업 계획을 JSON 객체로 입력하세요.",
+  "desktop_dataset_task_outside_bot_scope": "이 Bot은 이 데이터세트를 사용할 수 없습니다. 먼저 Bot의 데이터세트에 추가하거나 Bot이 사용할 수 있는 데이터세트를 선택하세요.",
   "desktop_dataset_task_revoke": "데이터세트 승인 취소",
   "desktop_dataset_task_revoked": "데이터세트 작업 승인이 취소되었습니다.",
   "teams_dataset_title": "데이터 추가",

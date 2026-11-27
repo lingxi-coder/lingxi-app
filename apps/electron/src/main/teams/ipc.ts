@@ -112,6 +112,7 @@ export function installTeamsIpc(service: TeamsService, windows: () => readonly B
           if (d.executor === 'nativeSchedule') {
             if (!schedules || typeof d.scope !== 'string' || typeof d.task !== 'string') throw new Error('INVALID_INPUT');
             const path = schedules.resolveScope(d.scope);
+            schedules.assertRoutineDataset(path, d.dataset);
             const job = (await schedules.manage(d.scope, { action: 'list' })).find(job => job.id === d.task);
             if (!job || job.permanent || job.durable === false) throw new Error('TASK_UNAVAILABLE');
             program = scheduledDatasetProgram(job, path);

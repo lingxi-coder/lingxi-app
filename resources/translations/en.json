@@ -4201,6 +4201,7 @@
   "desktop_dataset_task_plan": "Task plan (JSON)",
   "desktop_dataset_task_review": "Review plan",
   "desktop_dataset_task_invalid_plan": "Enter a JSON object for the task plan.",
+  "desktop_dataset_task_outside_bot_scope": "This Bot can't use this dataset. Add it to the Bot's datasets first, or choose one it can use.",
   "desktop_dataset_task_revoke": "Revoke Dataset approval",
   "desktop_dataset_task_revoked": "Dataset task approval revoked.",
   "teams_dataset_title": "Add data",

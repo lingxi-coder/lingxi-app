@@ -76,6 +76,7 @@ test('a message nobody asked a Bot about opens a round, and a task of it does no
   await say(member, 1);
   const round = await roundData(1);
   assert.deepEqual([round.state, round.maxReplies, round.deadlineAt, round.bids], ['open', 1, now + 15000, {}]);
+  assert.equal(round.expireAt.toMillis(), now + 7 * 86400000, 'Firestore deletes the round a week after it opened (TTL on expireAt)');
   assert.deepEqual(round.candidates.map(c => c.sharedBotId).sort(), ids);
   for (const b of all) {
     const task = await taskData(taskOf(1, b));

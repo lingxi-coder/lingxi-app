@@ -935,6 +935,9 @@ export class BotService {
         const chat = this.chat(sessionId);
         return chat !== undefined && chat.botId === botId ? chat.ref.projectPath : undefined;
       },
+      reachesDataset: (dataset) => {
+        try { return this.store.get(botId).scope.datasets.some((entry) => entry.dataset === dataset); } catch { return false; }
+      },
     };
   }
 

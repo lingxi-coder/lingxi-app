@@ -54,6 +54,8 @@ export interface RoutineBot {
   claim(sessionId: string): void;
   /** The folder a chat of the Bot works in, if it is one of its chats. */
   folderOfChat(sessionId: string): string | undefined;
+  /** Whether the Bot's scope names the dataset, as it stands now: a routine of the Bot reads no other. */
+  reachesDataset(dataset: string): boolean;
 }
 
 /** What the scheduler asks of the Bots. */
@@ -139,6 +141,12 @@ export class ScheduledTaskService {
   /** The folders of a Bot a routine can be given: only worth choosing from when it has more than its own. */
   private foldersOf(bot: RoutineBot): Array<{ id: string; label: string }> {
     try { return bot.folders().map(({ id, label }) => ({ id, label })); } catch (error) { this.report(error); return []; }
+  }
+
+  /** A routine of a Bot may be given only a dataset the Bot's scope names; a routine of another scope, any the owner approves. */
+  assertRoutineDataset(path: string, dataset: string): void {
+    const bot = this.bots?.routineBotFor(path);
+    if (bot ? !bot.reachesDataset(dataset) : this.bots?.isBotWorkspace(path)) throw new Error('DATASET_OUTSIDE_BOT_SCOPE');
   }
 
   resolveScope(id: string): string {
@@ -610,7 +618,10 @@ export class ScheduledTaskService {
       this.assertRunAllowed();
       let executionTask = task;
       const hooks = this.options.datasetTasks?.();
-      const data = hooks && await hooks.open(scheduledDatasetProgram(task, path), occurrenceId);
+      // A Bot's routine pauses rather than run without the dataset it was given, once the Bot's scope no longer names it.
+      const data = hooks && await hooks.open(scheduledDatasetProgram(task, path), occurrenceId, undefined, undefined, bot && ((dataset) => {
+        if (!bot.reachesDataset(dataset)) throw new Error('paused: The dataset this routine reads is not one the Bot can use any more. Add it to the Bot\'s datasets again, or approve another one for the routine.');
+      }));
       if (data) {
         const inputs = await data.modelInputs();
         this.assertRunAllowed();

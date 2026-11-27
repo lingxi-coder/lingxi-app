@@ -404,7 +404,8 @@ function ScheduledDatasetBinding({ item }: { item: ScopedJob }) {
       setStatus({ uid, text: tr('desktop_dataset_task_approved') });
       dialog.current?.close();
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      const message = failure instanceof Error ? failure.message : String(failure);
+      setError(message === 'DATASET_OUTSIDE_BOT_SCOPE' ? tr('desktop_dataset_task_outside_bot_scope') : message);
     } finally {
       setBusy(false);
     }

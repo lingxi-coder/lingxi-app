@@ -4186,6 +4186,7 @@
   "desktop_dataset_task_plan": "任务方案（JSON）",
   "desktop_dataset_task_review": "审核方案",
   "desktop_dataset_task_invalid_plan": "请输入 JSON 对象格式的任务方案。",
+  "desktop_dataset_task_outside_bot_scope": "此 Bot 不能使用这个数据集。请先把它加入 Bot 的数据集，或选择 Bot 能用的数据集。",
   "desktop_dataset_task_revoke": "撤销 Dataset 许可",
   "desktop_dataset_task_revoked": "数据任务许可已撤销。",
   "teams_dataset_title": "添加数据",

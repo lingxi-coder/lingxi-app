@@ -4186,6 +4186,7 @@
   "desktop_dataset_task_plan": "タスク計画（JSON）",
   "desktop_dataset_task_review": "計画を確認",
   "desktop_dataset_task_invalid_plan": "タスク計画を JSON オブジェクトで入力してください。",
+  "desktop_dataset_task_outside_bot_scope": "この Bot はこのデータセットを使えません。先に Bot のデータセットに追加するか、Bot が使えるものを選んでください。",
   "desktop_dataset_task_revoke": "データセットの承認を取り消す",
   "desktop_dataset_task_revoked": "データセットタスクの承認を取り消しました。",
   "teams_dataset_title": "データを追加",

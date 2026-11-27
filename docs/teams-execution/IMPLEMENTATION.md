@@ -782,7 +782,8 @@ Desktop host and the clients' decoding; the Chat settings screen, the offline li
 
 - Round (`apps/firebase/src/reply-rounds.mjs`). `teams/{team}/replyRounds/{messageId}` is written by `optionalTasks` in the transaction that writes
   the message and its tasks (`openRound`): `{ state: 'open', deadlineAt: now + 15 s, maxReplies, candidates: [{ taskId, sharedBotId, addressed? }],
-  bids: {} }`. `maxReplies` is copied from the Chat then, so a later change does not move an open round. Only the service's clock is used (`now`
+  bids: {}, expireAt }`. `expireAt` (a Timestamp, a week after the round opened) is the field of the TTL policy on the `replyRounds` collection
+  group: nothing reads a round after its start window, so Firestore deletes it then without the service. `maxReplies` is copied from the Chat then, so a later change does not move an open round. Only the service's clock is used (`now`
   of the transaction; a Desktop's is never sent). No rule matches the path: members, maintainers and hosts cannot read it
   (`teams.rules.emulator.test.mjs`), so a Bot's bid is seen by nobody but the service and, through `listTriage`, its own maintainer.
   States: `open` collects bids; `resolved` has chosen (`winners`, `standby`, `resolvedAt`, `startBy = resolvedAt + 20 s`); `voided` ended before

@@ -29186,6 +29186,40 @@
         }
       }
     },
+    "desktop_dataset_task_outside_bot_scope": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此 Bot 不能使用这个数据集。请先把它加入 Bot 的数据集，或选择 Bot 能用的数据集。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此 Bot 不能使用這個資料集。請先把它加入 Bot 的資料集，或選擇 Bot 能用的資料集。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This Bot can't use this dataset. Add it to the Bot's datasets first, or choose one it can use."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この Bot はこのデータセットを使えません。先に Bot のデータセットに追加するか、Bot が使えるものを選んでください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "이 Bot은 이 데이터세트를 사용할 수 없습니다. 먼저 Bot의 데이터세트에 추가하거나 Bot이 사용할 수 있는 데이터세트를 선택하세요."
+          }
+        }
+      }
+    },
     "desktop_dataset_task_plan": {
       "localizations": {
         "zh-Hans": {

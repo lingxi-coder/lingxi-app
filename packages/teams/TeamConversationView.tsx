@@ -239,7 +239,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   // The maintainer reads the reply their Bot made where everyone else is told it waits for approval; the others see that line.
   const botRun = (task: TeamTaskView) => {
     const row = task.state === 'awaiting_approval' ? placedHeld.byTask.get(task.taskId) : undefined;
-    return row ? heldCard(row) : <BotRun task={task} api={workspace.api} scope={scope} locale={locale} renderMarkdown={renderMarkdown} snapshot={snapshot} reason={reasons.get(task.taskId)}
+    return row ? heldCard(row) : <BotRun task={task} api={workspace.api} scope={scope} locale={locale} renderMarkdown={renderMarkdown} snapshot={snapshot} tasks={runs.tasks} reason={reasons.get(task.taskId)}
       onReply={answerable(task) ? startAnswer : undefined} onChanged={runs.refresh} />;
   };
   const taskRow = (task: TeamTaskView) => <TaskRow key={`task:${task.taskId}`} task={task} author={botIdentity(task.sharedBotId)} locale={locale} renderAvatar={renderAvatar}>

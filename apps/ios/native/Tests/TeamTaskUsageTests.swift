@@ -106,17 +106,17 @@ final class TeamTaskUsageTests: XCTestCase {
     func testOnlyTheRequesterAndTheMaintainerMayCancelAnUnfinishedTask() throws {
         for state in ["queued", "running", "waiting"] {
             let live = try task(state, state == "waiting" ? wait : "")
-            XCTAssertTrue(TeamTaskActions.canCancel(live, viewer: asker, maintainer: maintainer), state)
-            XCTAssertTrue(TeamTaskActions.canCancel(live, viewer: maintainer, maintainer: maintainer), state)
-            XCTAssertFalse(TeamTaskActions.canCancel(live, viewer: other, maintainer: maintainer), state)
-            XCTAssertFalse(TeamTaskActions.canCancel(live, viewer: other, maintainer: nil), state)
+            XCTAssertTrue(TeamTaskActions.canCancel(live, viewer: asker, maintainer: maintainer, delegator: nil), state)
+            XCTAssertTrue(TeamTaskActions.canCancel(live, viewer: maintainer, maintainer: maintainer, delegator: nil), state)
+            XCTAssertFalse(TeamTaskActions.canCancel(live, viewer: other, maintainer: maintainer, delegator: nil), state)
+            XCTAssertFalse(TeamTaskActions.canCancel(live, viewer: other, maintainer: nil, delegator: nil), state)
         }
         // The same person after rejoining is another member.
-        XCTAssertFalse(TeamTaskActions.canCancel(try task("queued"), viewer: TeamMemberRef(uid: "asker", generation: 4), maintainer: nil))
-        for state in ["completed", "failed", "cancelled", "expired"] { XCTAssertFalse(TeamTaskActions.canCancel(try task(state), viewer: asker, maintainer: maintainer), state) }
+        XCTAssertFalse(TeamTaskActions.canCancel(try task("queued"), viewer: TeamMemberRef(uid: "asker", generation: 4), maintainer: nil, delegator: nil))
+        for state in ["completed", "failed", "cancelled", "expired"] { XCTAssertFalse(TeamTaskActions.canCancel(try task(state), viewer: asker, maintainer: maintainer, delegator: nil), state) }
         let stopping = try task("running", #","cancelRequestedAt":5"#)
         XCTAssertTrue(stopping.cancelling)
-        XCTAssertFalse(TeamTaskActions.canCancel(stopping, viewer: asker, maintainer: maintainer))
+        XCTAssertFalse(TeamTaskActions.canCancel(stopping, viewer: asker, maintainer: maintainer, delegator: nil))
         XCTAssertFalse(try task("cancelled", #","cancelRequestedAt":5"#).cancelling)
     }
 

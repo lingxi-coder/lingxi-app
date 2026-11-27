@@ -159,18 +159,18 @@ class TeamsBotTextTest {
     @Test fun onlyTheRequesterAndTheMaintainerMayCancelAnUnfinishedTask() {
         for (state in listOf("queued", "running", "waiting")) {
             val live = task(state, if (state == "waiting") wait else "")
-            assertTrue(state, TeamTaskActions.canCancel(live, asker, keeper))
-            assertTrue(state, TeamTaskActions.canCancel(live, keeper, keeper))
-            assertFalse(state, TeamTaskActions.canCancel(live, other, keeper))
-            assertFalse(state, TeamTaskActions.canCancel(live, other, null))
-            assertFalse(state, TeamTaskActions.canCancel(live, null, null))
+            assertTrue(state, TeamTaskActions.canCancel(live, asker, keeper, null))
+            assertTrue(state, TeamTaskActions.canCancel(live, keeper, keeper, null))
+            assertFalse(state, TeamTaskActions.canCancel(live, other, keeper, null))
+            assertFalse(state, TeamTaskActions.canCancel(live, other, null, null))
+            assertFalse(state, TeamTaskActions.canCancel(live, null, null, null))
         }
         // The same person after rejoining is another member.
-        assertFalse(TeamTaskActions.canCancel(task("queued"), TeamMemberRef("asker", 4), null))
-        for (state in listOf("completed", "failed", "cancelled", "expired")) assertFalse(state, TeamTaskActions.canCancel(task(state), asker, keeper))
+        assertFalse(TeamTaskActions.canCancel(task("queued"), TeamMemberRef("asker", 4), null, null))
+        for (state in listOf("completed", "failed", "cancelled", "expired")) assertFalse(state, TeamTaskActions.canCancel(task(state), asker, keeper, null))
         val stopping = task("running", ""","cancelRequestedAt":5""")
         assertTrue(stopping.cancelling)
-        assertFalse(TeamTaskActions.canCancel(stopping, asker, keeper))
+        assertFalse(TeamTaskActions.canCancel(stopping, asker, keeper, null))
         assertFalse(task("cancelled", ""","cancelRequestedAt":5""").cancelling)
     }
 

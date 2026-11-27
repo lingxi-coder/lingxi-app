@@ -191,7 +191,7 @@ scenario('Availability and the member details read in each of the five languages
   }
   assert.equal(botAvailabilityText(bot({ state: 'paused', availability: 'ready' }), 'en'), 'Sharing stopped', 'a Bot whose sharing stopped reads so whatever its host reports');
   assert.equal(botAvailabilityText(bot({ availability: 'from-a-newer-service' as never }), 'en'), 'Status unverified'); assert.equal(botAvailabilityText(bot({ availability: 'constructor' as never }), 'en'), 'Status unverified');
-  const draw = (locale: string, more: Parameters<typeof bot>[0] = {}) => renderToStaticMarkup(createElement(BotMemberDetails, { bot: bot({ availability: 'ready', ...more }), locale, onExample: () => {} })).replace(/<!-- -->/g, '');
+  const draw = (locale: string, more: Parameters<typeof bot>[0] = {}) => renderToStaticMarkup(createElement(BotMemberDetails, { bot: bot({ availability: 'ready', ...more }), bots: [], locale, onExample: () => {} })).replace(/<!-- -->/g, '');
   assert.match(draw('en'), /Wait and resume: Supported · Write operations: Not supported/); assert.match(draw('en'), /Your remaining requests today: 4 · Resets: 2026-11-17 00:00:00 UTC/);
   assert.match(draw('ja'), /待機と再開: 対応 · 書き込み操作: 非対応/); assert.match(draw('ja'), /自分の今日の残りリクエスト数: 4 · リセット時刻: 2026-11-17 00:00:00 UTC/);
   assert.match(draw('zh-Hant'), /等待與恢復: 支援 · 寫入操作: 不支援/); assert.match(draw('ko'), /대기 및 재개: 지원됨 · 쓰기 작업: 지원되지 않음/);

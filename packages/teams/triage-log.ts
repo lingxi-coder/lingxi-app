@@ -1,4 +1,4 @@
-import { APPROVAL_OUTCOMES, BID_TIERS, executionCommand, ROUND_OUTCOMES, TRIAGE_ACTIONS, TRIAGE_REASONS, TRIAGE_SOURCES, type ApprovalOutcome, type ExecutionScope, type RoundOutcome, type SharedBotCard, type TaskRound, type TaskState, type TriageAction, type TriageLogItem, type TriageLogPage, type TriageReason } from './execution.js';
+import { APPROVAL_OUTCOMES, BID_TIERS, executionCommand, ROUND_OUTCOMES, TRIAGE_ACTIONS, TRIAGE_REASONS, TRIAGE_SOURCES, type ApprovalOutcome, type ExecutionScope, type RoundOutcome, type SharedBotCard, type TaskDelegation, type TaskRound, type TaskState, type TriageAction, type TriageLogItem, type TriageLogPage, type TriageReason } from './execution.js';
 import { TRIAGE_LOG_LIMIT } from './execution-validation.js';
 import type { TeamsApi } from './index.js';
 import type { TeamConversation } from './messages.js';
@@ -64,6 +64,20 @@ export const triageOutcomeText = (t: TeamsText, outcome: TriageOutcome): string 
 export const triageApprovalText = (t: TeamsText, approval: ApprovalOutcome | undefined): string => approval !== undefined && Object.prototype.hasOwnProperty.call(APPROVAL_TEXT, approval) ? t(APPROVAL_TEXT[approval]!) : '';
 /** "62% likely": what the Decision service gave. */
 export const triageProbabilityText = (t: TeamsText, probability: number): string => t('teams_triage_probability_fmt', triagePercent(probability));
+/**
+ * The Bot that passed the message on, for a task another Bot asked for (Bot v3 B8), by the name it had in the chain; nothing for a task nobody delegated. A Bot with no name to give
+ * (its chain entry is its id) reads as `unnamed`. The Desktop's Bots tab says the same with its own words.
+ */
+export function delegatedBy(delegation: TaskDelegation | undefined, unnamed: string): string | undefined {
+  if (!delegation) return undefined;
+  const name = delegation.chain.find(link => link.sharedBotId === delegation.parentBotId)?.name;
+  return name && name !== delegation.parentBotId ? name : unnamed;
+}
+/** "Delegated by Planner": what the log says of a message that no Bot judged because another Bot asked for it; nothing for any other row. */
+export const triageDelegatedText = (t: TeamsText, delegation: TaskDelegation | undefined): string => {
+  const by = delegatedBy(delegation, t('teams_bot_tag'));
+  return by === undefined ? '' : t('teams_triage_delegated_by_fmt', by);
+};
 
 // ── What the service says ──
 
@@ -74,9 +88,19 @@ const finite = (value: unknown): value is number => typeof value === 'number' &&
 const moment = (value: unknown): value is number => finite(value) && Math.abs(value) <= 8.64e15;
 const oneOf = <T extends string>(values: readonly T[], value: unknown): value is T => typeof value === 'string' && (values as readonly string[]).includes(value);
 
+/** A delegation as the service sent it, or nothing when this version cannot read all of it: the row it belongs to is still shown. */
+export function readTaskDelegation(value: unknown): TaskDelegation | undefined {
+  if (!record(value) || !word(value.delegationId) || !word(value.rootTaskId) || !word(value.parentTaskId) || !word(value.parentBotId)
+    || !finite(value.depth) || typeof value.expectReply !== 'boolean' || !Array.isArray(value.chain) || value.chain.length === 0) return undefined;
+  const chain = value.chain.flatMap(link => record(link) && word(link.sharedBotId) && typeof link.name === 'string' ? [{ sharedBotId: link.sharedBotId, name: link.name }] : []);
+  return chain.length === value.chain.length
+    ? { delegationId: value.delegationId, rootTaskId: value.rootTaskId, parentTaskId: value.parentTaskId, parentBotId: value.parentBotId, depth: value.depth, chain, expectReply: value.expectReply }
+    : undefined;
+}
+
 /**
  * One row of the log as the service sent it, or nothing when this version cannot read it: a row is never half shown, and one row that is not
- * understood does not hide the page it came in. A reason, a probability, an approval or a round outcome it does not know is left out of the row; the decision is kept.
+ * understood does not hide the page it came in. A reason, a probability, an approval, a round outcome or a delegation it does not know is left out of the row; the decision is kept.
  */
 export function triageItem(value: unknown): TriageLogItem | undefined {
   if (!record(value) || !record(value.triage)) return undefined;
@@ -84,6 +108,7 @@ export function triageItem(value: unknown): TriageLogItem | undefined {
   if (!word(value.taskId) || !word(value.conversationId) || !word(value.messageId) || !moment(value.createdAt)) return undefined;
   if (!oneOf(TRIAGE_ACTIONS, triage.action) || !oneOf(TRIAGE_SOURCES, triage.source) || !moment(triage.at)) return undefined;
   if (typeof value.state !== 'string' || !Object.prototype.hasOwnProperty.call(OUTCOMES, value.state)) return undefined;
+  const delegation = readTaskDelegation(value.delegation);
   return {
     taskId: value.taskId, conversationId: value.conversationId, messageId: value.messageId, createdAt: value.createdAt, state: value.state as TaskState,
     triage: {
@@ -94,6 +119,7 @@ export function triageItem(value: unknown): TriageLogItem | undefined {
     ...(word(value.conversationTitle) ? { conversationTitle: value.conversationTitle } : {}),
     ...(oneOf(APPROVAL_OUTCOMES, value.approval) ? { approval: value.approval } : {}),
     ...(record(value.round) && oneOf(ROUND_OUTCOMES, value.round.outcome) ? { round: { outcome: value.round.outcome, ...(oneOf(BID_TIERS, value.round.tier) ? { tier: value.round.tier } : {}) } } : {}),
+    ...(delegation ? { delegation } : {}),
   };
 }
 /** A page as the service sent it. An answer that is not a page at all is `INVALID_DATA`, never an empty log. */

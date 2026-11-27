@@ -214,7 +214,7 @@ class TeamBotComponentsUiTest {
     @Test fun stopSharingNamesTheBotSaysWhatStopsAndWhatStaysAndCancelChangesNothing() {
         rule.setContent {
             LingXiTheme(darkTheme = false) {
-                TeamBotCardView(bot, "Me", "u1", 1, enabled = true, onMessage = { events += "message" }, onStopSharing = { events += "stop" })
+                TeamBotCardView(bot, listOf(bot), "Me", "u1", 1, enabled = true, onMessage = { events += "message" }, onStopSharing = { events += "stop" })
             }
         }
         rule.onNodeWithText(text(R.string.friends_share_bot_stop)).performClick()
@@ -230,7 +230,7 @@ class TeamBotComponentsUiTest {
     }
 
     @Test fun anotherPersonsBotOffersNoStopSharing() {
-        rule.setContent { LingXiTheme(darkTheme = false) { TeamBotCardView(bot, "Ann", "u2", 1, enabled = true, onMessage = {}, onStopSharing = {}) } }
+        rule.setContent { LingXiTheme(darkTheme = false) { TeamBotCardView(bot, listOf(bot), "Ann", "u2", 1, enabled = true, onMessage = {}, onStopSharing = {}) } }
         rule.onNodeWithText(text(R.string.friends_share_bot_stop)).assertDoesNotExist()
     }
 

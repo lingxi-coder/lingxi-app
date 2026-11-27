@@ -2843,6 +2843,8 @@
     <string name="teams_task_cancelling">취소 중…</string>
     <string name="teams_task_waiting_you_fmt">내 답장 대기 중 · %1$s 만료</string>
     <string name="teams_task_waiting_member_fmt">%1$s 님의 답장 대기 중 · %2$s 만료</string>
+    <string name="teams_task_waiting_bot_fmt">%1$s의 답장 대기 중</string>
+    <string name="teams_task_delegation_chain_fmt">위임: %1$s</string>
     <string name="teams_task_waiting_approval">승인 대기 중</string>
     <string name="teams_approval_tag">승인</string>
     <string name="teams_approval_hint">승인하지 않으면 아무것도 변경되지 않습니다. Bot이 요청한 뒤 목록이 바뀌었다면 이 변경은 저장되지 않습니다.</string>
@@ -3235,6 +3237,10 @@
     <string name="teams_bot_not_supported">지원되지 않음</string>
     <string name="teams_bot_wait_resume">대기 및 재개</string>
     <string name="teams_bot_write_ops">쓰기 작업</string>
+    <string name="teams_bot_accepts_delegation">위임을 받는 Bot</string>
+    <string name="teams_bot_accepts_none">없음</string>
+    <string name="teams_bot_accepts_team">팀의 모든 Bot</string>
+    <string name="teams_bot_delegates_to">위임할 수 있는 Bot</string>
     <string name="teams_bot_remaining_today">오늘 남은 내 요청 수</string>
     <string name="teams_bot_resets">초기화 시각</string>
     <string name="teams_bot_examples_hint">예시는 초안에 추가됩니다. 내용을 확인한 뒤 직접 보내세요.</string>
@@ -3569,6 +3575,7 @@
     <string name="teams_triage_round_abstained">참여하지 않음</string>
     <string name="teams_triage_round_promoted">다른 Bot을 대신함</string>
     <string name="teams_triage_round_superseded">새 메시지로 인해 중단됨</string>
+    <string name="teams_triage_delegated_by_fmt">위임한 Bot: %1$s</string>
     <string name="teams_triage_probability_fmt">확률 %1$d%%</string>
     <string name="teams_held_title">내 승인 대기 중</string>
     <string name="teams_held_expires_fmt">승인하지 않으면 %1$s 폐기됩니다</string>

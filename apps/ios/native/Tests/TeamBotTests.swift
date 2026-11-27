@@ -47,9 +47,9 @@ final class TeamBotTests: XCTestCase {
         let requester = TeamMemberRef(uid: "member", generation: 3), maintainer = TeamMemberRef(uid: "owner", generation: 1), other = TeamMemberRef(uid: "other", generation: 1)
         let held = try task("awaiting_approval")
         XCTAssertFalse(held.terminal); XCTAssertFalse(held.busy)
-        XCTAssertTrue(TeamTaskActions.canCancel(held, viewer: requester, maintainer: maintainer))
-        XCTAssertTrue(TeamTaskActions.canCancel(held, viewer: maintainer, maintainer: maintainer))
-        XCTAssertFalse(TeamTaskActions.canCancel(held, viewer: other, maintainer: maintainer))
+        XCTAssertTrue(TeamTaskActions.canCancel(held, viewer: requester, maintainer: maintainer, delegator: nil))
+        XCTAssertTrue(TeamTaskActions.canCancel(held, viewer: maintainer, maintainer: maintainer, delegator: nil))
+        XCTAssertFalse(TeamTaskActions.canCancel(held, viewer: other, maintainer: maintainer, delegator: nil))
         for state in ["completed", "declined", "failed", "cancelled"] { XCTAssertTrue(try task(state).terminal, state) }
     }
     private func card(_ extra: String = "", permitted: Bool = true, state: String = "published") throws -> TeamBotCard {

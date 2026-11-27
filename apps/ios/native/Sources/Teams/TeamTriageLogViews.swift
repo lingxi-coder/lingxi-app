@@ -96,6 +96,8 @@ struct TeamTriageLogView: View {
         let outcome = TeamTriageRules.outcomes[item.state] ?? .waiting
         let chat = item.conversationTitle ?? String(localized: "teams_triage_chat_untitled")
         let when = Date(timeIntervalSince1970: item.triage.at / 1000).formatted(date: .abbreviated, time: .shortened)
+        // "Delegated by Planner" for a task another Bot asked for; nothing for a message a person sent.
+        let delegated = TeamDelegations.delegatedBy(item.delegation, unnamed: TeamsText.localized("teams_bot_tag")).map { String(localized: "teams_triage_delegated_by \($0)") }
         return HStack(alignment: .top, spacing: 10) {
             Image(systemName: TeamTriageRules.symbol(item.triage.action))
                 .foregroundStyle(item.triage.action == "run" ? Color.green : Color.secondary)
@@ -112,7 +114,7 @@ struct TeamTriageLogView: View {
                     }
                 }
                 if let key = TeamTriageRules.reasonKey(item.triage.reason) { Text(LocalizedStringKey(key)).font(.footnote).foregroundStyle(.secondary) }
-                Text(verbatim: TeamsStreamLogic.joinedLine([chat, when, TeamTriageRules.approvalKey(item.approval).map(TeamsText.localized), TeamTriageRules.roundKey(item.round).map(TeamsText.localized)])).font(.caption).foregroundStyle(.secondary)
+                Text(verbatim: TeamsStreamLogic.joinedLine([chat, when, TeamTriageRules.approvalKey(item.approval).map(TeamsText.localized), TeamTriageRules.roundKey(item.round).map(TeamsText.localized), delegated])).font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
             Text(LocalizedStringKey(TeamTriageRules.outcomeKey(outcome)))

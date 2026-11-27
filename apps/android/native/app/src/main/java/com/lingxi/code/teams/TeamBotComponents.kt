@@ -130,20 +130,21 @@ private fun declinedReasonLine(task: TeamTask, viewer: TeamMemberRef?, maintaine
  * Bot's question (set only on the question itself, while the viewer can still answer it), [onCancel] stops a task that has not ended, [onReview] opens the
  * review of an action of unknown outcome. [viewer] is the signed-in member and [maintainer] the Bot's maintainer when its card is known: they decide who may
  * cancel and review. [recipientName] names the member a waiting task waits for (not needed when that is the viewer). [reason] is the Bot's auto-reply log row of
- * this task, read for the Bot's maintainer only: under "Did not reply" it says why the Bot stayed silent. Nobody else is ever shown it.
+ * this task, read for the Bot's maintainer only: under "Did not reply" it says why the Bot stayed silent. Nobody else is ever shown it. [bots] and [tasks] (Bot v3 B8) are the Team's Bots and the Chat's
+ * other tasks: the Bots name the Bots of a chain and give the maintainer of the Bot that asked for a delegated task, who may cancel it too; the tasks name a Bot that has no card, for a task that waits for it.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun TeamTaskCard(
     task: TeamTask, botName: String, onArtifact: (String) -> Unit, onRefresh: (String) -> Unit = {}, viewer: TeamMemberRef? = null, maintainer: TeamMemberRef? = null,
-    recipientName: String = "", onCancel: (String) -> Unit = {}, onReply: (() -> Unit)? = null, onReview: ((String) -> Unit)? = null, modifier: Modifier = Modifier,
+    bots: List<TeamBotCard> = emptyList(), tasks: List<TeamTask> = emptyList(), recipientName: String = "", onCancel: (String) -> Unit = {}, onReply: (() -> Unit)? = null, onReview: ((String) -> Unit)? = null, modifier: Modifier = Modifier,
     reason: TeamTriageItem? = null,
 ) {
     var cancelAsked by remember(task.taskId, task.state, task.cancelRequestedAt) { mutableStateOf(false) }
     val run = TeamsBotText.runState(task.state)
     val words = rememberTeamUsageStrings()
     val completed = task.state == "completed"
-    val canCancel = TeamTaskActions.canCancel(task, viewer, maintainer)
+    val canCancel = TeamTaskActions.canCancel(task, viewer, maintainer, TeamDelegations.delegator(task, bots))
     val resolves = TeamOperationRules.canResolve(viewer, maintainer)
     val review = onReview?.takeIf { TeamOperationRules.canReview(task, viewer, maintainer) }
     val state = stringResource(TeamsBotText.stateLabel(task))
@@ -151,6 +152,9 @@ internal fun TeamTaskCard(
     val wait = task.wait?.takeIf { task.state == "waiting" }
     val detail: RunDetail? = when {
         usageShown -> RunDetail(TeamsBotText.usageLine(task.usage, words), "teams.task.usage.${task.taskId}")
+        // Another Bot's reply is not a question to the person who asked, whom the service names as the wait's recipient: the line names the Bot it waits for.
+        wait != null && wait.kind == "delegation" ->
+            RunDetail(stringResource(R.string.teams_task_waiting_bot_fmt, TeamDelegations.waitingFor(task, bots, tasks) ?: stringResource(R.string.teams_bot_tag)), "teams.task.wait.${task.taskId}")
         wait != null -> {
             val expires = teamWaitExpiryText(wait.expiresAt)
             RunDetail(
@@ -168,6 +172,8 @@ internal fun TeamTaskCard(
         else -> run.detail?.let { RunDetail(stringResource(it), "teams.task.usage.${task.taskId}") }
     }
     val split = if (usageShown) TeamsBotText.tokenSplit(task.usage, words) else null
+    // A task another Bot asked for says whose work it is part of: "Delegated: Planner → Travel".
+    val chain = TeamDelegations.chain(task, bots, stringResource(R.string.teams_bot_tag))?.let { stringResource(R.string.teams_task_delegation_chain_fmt, it) }
     val artifactId = task.artifactId?.takeIf { completed }
     Column(modifier.fillMaxWidth().padding(top = 4.dp).testTag("teams.task.${task.taskId}"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Column(Modifier.semantics(mergeDescendants = true) { split?.let { stateDescription = it } }, verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -176,6 +182,7 @@ internal fun TeamTaskCard(
                 Text(state, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
             }
             Text(botName, style = MaterialTheme.typography.titleSmall)
+            chain?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag("teams.task.chain.${task.taskId}")) }
             detail?.let { Text(it.text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.testTag(it.tag)) }
         }
         if (onReply != null || review != null || canCancel || run.active || artifactId != null) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -293,7 +300,7 @@ internal fun TeamApprovalCard(approval: TeamListApproval, waitId: String, state:
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun TeamBotCardView(
-    bot: TeamBotCard, ownerName: String, uid: String, generation: Long, enabled: Boolean, onMessage: () -> Unit, onStopSharing: () -> Unit,
+    bot: TeamBotCard, bots: List<TeamBotCard>, ownerName: String, uid: String, generation: Long, enabled: Boolean, onMessage: () -> Unit, onStopSharing: () -> Unit,
     modifier: Modifier = Modifier, onList: (() -> Unit)? = null, onExample: ((String) -> Unit)? = null, onTriageLog: (() -> Unit)? = null,
     heldModel: TeamMessagingModel? = null, heldSignals: Long = 0, onHeldChat: ((String) -> Unit)? = null,
 ) {
@@ -306,7 +313,7 @@ internal fun TeamBotCardView(
                 if (bot.description.isNotBlank()) Text(bot.description, style = MaterialTheme.typography.bodyMedium)
                 Text("${botAvailabilityText(bot)} · ${stringResource(R.string.teams_bot_owner_fmt, ownerName)}", style = MaterialTheme.typography.bodySmall)
                 Text(stringResource(if (bot.usePolicy.getString("mode") == "all") R.string.teams_bot_use_all else R.string.teams_bot_use_listed), style = MaterialTheme.typography.bodySmall)
-                TeamBotMemberInfo(bot, enabled, onExample)
+                TeamBotMemberInfo(bot, enabled, bots, onExample)
                 // Up to five actions: they wrap under each other rather than run out of the card at a large font size.
                 FlowRow {
                     TextButton(enabled = enabled && bot.selectable, onClick = onMessage) { Text(stringResource(R.string.teams_bot_message)) }
@@ -344,10 +351,12 @@ internal fun teamBotLine(items: List<TeamBotItem>): String = items.map { item ->
 
 /** Member-safe projection only: never render host reasons, credentials or configured quota limits. With a [conversation], what the Bot may use is what that Chat leaves of what its maintainer shared. */
 @Composable
-internal fun TeamBotMemberInfo(bot: TeamBotCard, enabled: Boolean, onExample: ((String) -> Unit)? = null, modifier: Modifier = Modifier, conversation: TeamMessageConversation? = null) {
+internal fun TeamBotMemberInfo(bot: TeamBotCard, enabled: Boolean, bots: List<TeamBotCard>, onExample: ((String) -> Unit)? = null, modifier: Modifier = Modifier, conversation: TeamMessageConversation? = null) {
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(teamBotLine(TeamBotEntry.capabilities(bot)), style = MaterialTheme.typography.bodySmall)
         Text(teamBotLine(listOf(TeamBotEntry.remaining(bot), TeamBotEntry.resets(bot))), style = MaterialTheme.typography.bodySmall)
+        // Read only: whom the Bot takes requests from and whom it may ask is chosen where it is published, on Desktop; [bots] name them.
+        TeamBotEntry.delegation(bot, bots).takeIf { it.isNotEmpty() }?.let { Text(teamBotLine(it), style = MaterialTheme.typography.bodySmall, modifier = Modifier.testTag("teams.bot.delegation.${bot.sharedBotId}")) }
         // With a Chat, what that Chat leaves of what the Bot's maintainer shared; without one, all of it.
         TeamBotScopeSummary(bot, conversation)
         if (onExample != null && bot.examples.isNotEmpty()) {

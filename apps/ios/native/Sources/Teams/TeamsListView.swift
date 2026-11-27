@@ -80,7 +80,7 @@ struct TeamsListView: View {
                                 .buttonStyle(.borderless)
                                 .disabled(workspace.messageBusy || (!bot.selectable && history == nil))
                                 .accessibilityIdentifier("teams.assistant.\(bot.sharedBotId)")
-                                TeamBotMemberInfo(bot: bot, unverified: model?.botsUnverified == true)
+                                TeamBotMemberInfo(bot: bot, cards: bots, unverified: model?.botsUnverified == true)
                                 TeamBotExamplesHint(bot: bot)
                                 ForEach(bot.memberExamples, id: \.self) { example in
                                     Button { open(bot, example: example) } label: {
@@ -99,6 +99,7 @@ struct TeamsListView: View {
                         ForEach(model.tasks) { task in
                             TeamTaskCard(task: task, botName: bots.first { $0.sharedBotId == task.sharedBotId }?.name ?? strings.bot, viewer: TeamMemberRef(uid: uid, generation: team.generation),
                                          maintainer: bots.first { $0.sharedBotId == task.sharedBotId }?.maintainer,
+                                         cards: bots, tasks: model.tasks,
                                          recipientName: task.wait.flatMap { wait in members.first { $0.uid == wait.recipient.uid }?.displayName } ?? strings.member)
                         }
                     }

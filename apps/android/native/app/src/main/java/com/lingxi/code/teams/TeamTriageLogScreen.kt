@@ -148,7 +148,9 @@ private fun TeamTriageRow(item: TeamTriageItem) {
                 }
             }
             TeamTriageRules.reasonLabel(item.triage.reason)?.let { Text(stringResource(it), style = MaterialTheme.typography.bodySmall, color = quiet) }
-            Text(listOfNotNull(chat, time, TeamTriageRules.approvalLabel(item.approval)?.let { stringResource(it) }, TeamTriageRules.roundLabel(item.round)?.let { stringResource(it) }).joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = quiet)
+            // "Delegated by Planner" for a task another Bot asked for; nothing for a message a person sent.
+            val delegated = TeamDelegations.delegatedBy(item.delegation, stringResource(R.string.teams_bot_tag))?.let { stringResource(R.string.teams_triage_delegated_by_fmt, it) }
+            Text(listOfNotNull(chat, time, TeamTriageRules.approvalLabel(item.approval)?.let { stringResource(it) }, TeamTriageRules.roundLabel(item.round)?.let { stringResource(it) }, delegated).joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = quiet)
         }
         Text(
             stringResource(TeamTriageRules.outcomeLabel(outcome)), Modifier.padding(start = 8.dp), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.End,

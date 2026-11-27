@@ -15,7 +15,12 @@ internal data class TeamBotCard(val sharedBotId: String, val name: String, val d
     /** Client-only: an expired/failed health projection cannot lift a previously known admission block. */
     val admissionBlockedPendingRefresh: Boolean = false, val autoReply: TeamBotAutoReply? = null,
     /** What the maintainer published of their computer for the Bot to use in the Team; null when nothing. A Chat can narrow it ([TeamMessageConversation.botScopes]). */
-    val scope: TeamBotScope? = null) {
+    val scope: TeamBotScope? = null,
+    /**
+     * What a published Bot takes from other Bots and whom it may ask (Bot v3 B8): [acceptDelegation] is `none`, `team_bots` or `listed` (then [acceptFrom] lists the Bots), and [delegateTo] lists
+     * the Bots it may ask. All three are absent for a Bot published before; a code this version does not know takes nobody. A member only reads them: they are chosen where the Bot is published.
+     */
+    val acceptDelegation: String? = null, val acceptFrom: List<String> = emptyList(), val delegateTo: List<String> = emptyList()) {
     val selectable get() = state == "published" && permitted
     val avatarId get() = sharedBotId
     fun canPause(uid: String, generation: Long) = state == "published" && maintainer == TeamMemberRef(uid, generation)
@@ -28,7 +33,8 @@ internal data class TeamBotCard(val sharedBotId: String, val name: String, val d
             TeamBotEntry.nonnegativeInteger(v.opt("dailyRemaining")), TeamBotEntry.nonnegativeInteger(v.opt("quotaResetsAt")),
             TeamBotEntry.nonnegativeInteger(v.opt("statusExpiresAt")),
             autoReply = v.optJSONObject("autoReply")?.let { TeamBotAutoReply(it.getInt("daily")) },
-            scope = v.optJSONObject("scope")?.let(TeamBotScope::parse))
+            scope = v.optJSONObject("scope")?.let(TeamBotScope::parse),
+            acceptDelegation = v.opt("acceptDelegation") as? String, acceptFrom = TeamBotEntry.idList(v, "acceptFrom"), delegateTo = TeamBotEntry.idList(v, "delegateTo"))
     }
 }
 /** Which Bots of a Chat judge for themselves whether to answer its messages. Any person in a group, channel or Bot DM may change it. */
@@ -63,15 +69,49 @@ internal data class TeamTaskUsage(val status: String, val inputTokens: Long = 0,
     companion object { fun parse(v: JSONObject) = TeamTaskUsage(v.getString("status"), v.optLong("inputTokens"), v.optLong("outputTokens"), if (v.has("costMicros") && !v.isNull("costMicros")) v.getDouble("costMicros") else null, v.stringOrNull("currency")) }
 }
 /** The answer a waiting task is blocked on; present only while `state` is `waiting`. `messageId` is the Bot's question. */
-internal data class TeamTaskWait(val waitId: String, val kind: String, val recipient: TeamMemberRef, val expiresAt: Long, val messageId: String) {
-    companion object { fun parse(v: JSONObject) = TeamTaskWait(v.getString("waitId"), v.getString("kind"), TeamMemberRef.parse(v.getJSONObject("recipient")), v.getLong("expiresAt"), v.getString("messageId")) }
+internal data class TeamTaskWait(val waitId: String, val kind: String, val recipient: TeamMemberRef, val expiresAt: Long, val messageId: String,
+    /** Only for `kind` `delegation` (Bot v3 B8): the task waits for another Bot's reply, which nobody types, so the [recipient] (the person who asked) has nothing to answer. */
+    val delegation: TeamTaskWaitDelegation? = null) {
+    companion object { fun parse(v: JSONObject) = TeamTaskWait(v.getString("waitId"), v.getString("kind"), TeamMemberRef.parse(v.getJSONObject("recipient")), v.getLong("expiresAt"), v.getString("messageId"),
+        TeamTaskWaitDelegation.parse(v.optJSONObject("delegation"))) }
+}
+private fun JSONObject.text(key: String): String? = (opt(key) as? String)?.takeIf { it.isNotEmpty() }
+/** The Bot a task that waits for another Bot's reply waits for, and the task it asked. */
+internal data class TeamTaskWaitDelegation(val sharedBotId: String, val taskId: String) {
+    companion object {
+        /** Null when this version cannot read it: the task is still shown, as one that waits. */
+        fun parse(v: JSONObject?): TeamTaskWaitDelegation? {
+            if (v == null) return null
+            return TeamTaskWaitDelegation(v.text("sharedBotId") ?: return null, v.text("taskId") ?: return null)
+        }
+    }
+}
+/** One Bot of a chain of delegations: its shared id and the name it had when it was asked. A chain made from a handoff may carry an id as the name. */
+internal data class TeamDelegationLink(val sharedBotId: String, val name: String)
+/** A task another Bot asked for (Bot v3 B8): [chain] runs from the Bot the person asked to the Bot that runs the task, and [parentBotId] is the Bot that asked for it. */
+internal data class TeamTaskDelegation(val parentBotId: String, val chain: List<TeamDelegationLink>) {
+    companion object {
+        /** Null for no delegation, or one this version cannot read all of: the task or the row it belongs to is still shown. */
+        fun parse(v: JSONObject?): TeamTaskDelegation? {
+            if (v == null) return null
+            val parent = v.text("parentBotId") ?: return null
+            val array = v.optJSONArray("chain") ?: return null
+            val chain = (0 until array.length()).map { index ->
+                val link = array.optJSONObject(index) ?: return null
+                TeamDelegationLink(link.text("sharedBotId") ?: return null, link.opt("name") as? String ?: return null)
+            }
+            return if (chain.isEmpty()) null else TeamTaskDelegation(parent, chain)
+        }
+    }
 }
 /** `deadline` ends the current phase: the pick-up limit while queued, the running budget while running, the wait's expiry while waiting, the maintainer's time to decide while the reply awaits approval. */
 internal data class TeamTask(val taskId: String, val conversationId: String, val sharedBotId: String, val requester: TeamMemberRef,
     val state: String, val createdAt: Long, val deadline: Long, val replyId: String?, val artifactId: String?, val usage: TeamTaskUsage? = null,
     val cancelRequestedAt: Long? = null, val wait: TeamTaskWait? = null,
     /** Present only while queued: the message was sent while the Bot's Desktop was off, so the task waits up to a day for it instead of five minutes. */
-    val hostWait: Boolean = false) {
+    val hostWait: Boolean = false,
+    /** Another Bot asked for this task (Bot v3 B8). */
+    val delegation: TeamTaskDelegation? = null) {
     val terminal get() = state !in setOf("queued", "running", "waiting", "awaiting_approval")
     /** A worker has it or is about to: its state changes within seconds. A waiting task changes only with its answer or its expiry, and one whose reply awaits approval with the maintainer's decision or the end of their time. */
     val busy get() = state == "queued" || state == "running"
@@ -82,7 +122,7 @@ internal data class TeamTask(val taskId: String, val conversationId: String, val
     companion object { fun parse(v: JSONObject) = TeamTask(v.getString("taskId"), v.getString("conversationId"), v.getString("sharedBotId"),
         TeamMemberRef.parse(v.getJSONObject("requester")), v.getString("state"), v.getLong("createdAt"), v.getLong("deadline"), v.stringOrNull("replyId"), v.stringOrNull("artifactId"), v.optJSONObject("usage")?.let(TeamTaskUsage::parse),
         if (v.has("cancelRequestedAt") && !v.isNull("cancelRequestedAt")) v.getLong("cancelRequestedAt") else null, v.optJSONObject("wait")?.let(TeamTaskWait::parse),
-        v.optBoolean("hostWait", false)) }
+        v.optBoolean("hostWait", false), TeamTaskDelegation.parse(v.optJSONObject("delegation"))) }
 }
 /** The identity of one decision on a request. Made once and sent again unchanged on a retry, so a lost answer cannot post the reply twice. */
 internal data class TeamDecisionIds(val commandId: String = java.util.UUID.randomUUID().toString(), val messageId: String = java.util.UUID.randomUUID().toString(),
@@ -101,9 +141,9 @@ internal sealed interface TeamApprovalState {
 /** What the viewer may do with a task (Desktop `BotRun`). */
 internal object TeamTaskActions {
     enum class ExpiryUnit { MINUTES, HOURS, DAYS }
-    /** The requester and the Bot's maintainer may stop a task that has not ended. */
-    fun canCancel(task: TeamTask, viewer: TeamMemberRef?, maintainer: TeamMemberRef?): Boolean =
-        viewer != null && !task.terminal && !task.cancelling && (task.requester == viewer || maintainer == viewer)
+    /** The requester and the Bot's maintainer may stop a task that has not ended; so may the maintainer of the Bot that asked for it, when another Bot did ([delegator], the service's `canCancel`). */
+    fun canCancel(task: TeamTask, viewer: TeamMemberRef?, maintainer: TeamMemberRef?, delegator: TeamMemberRef?): Boolean =
+        viewer != null && !task.terminal && !task.cancelling && (task.requester == viewer || maintainer == viewer || delegator == viewer)
     /** The wait an answer from the viewer would resolve: the task waits for exactly this viewer and no answer to it is already on its way. */
     fun answerableWait(task: TeamTask?, viewer: TeamMemberRef?, pendingWaitIds: Set<String>): String? {
         val wait = task?.wait ?: return null
@@ -134,6 +174,52 @@ internal object TeamTaskActions {
         val hours = (minutes + 59) / 60
         return if (hours < 48) hours.toInt() to ExpiryUnit.HOURS else ((hours + 23) / 24).toInt() to ExpiryUnit.DAYS
     }
+}
+/**
+ * What a task and a Bot's card say of Bots asking Bots (Bot v3 B8), without a screen and without words of their own: the run card, the Bot's card and the auto-reply log put them into the language
+ * of the person. `packages/teams/delegation.ts` says the same on Web and Desktop, and iOS `TeamDelegations` too.
+ */
+internal object TeamDelegations {
+    /** What a Bot is called: by its card as the Team lists it now, else by the name it had when it was asked. An id is never a name. */
+    fun name(sharedBotId: String, cards: List<TeamBotCard>, asked: String? = null): String? =
+        cards.firstOrNull { it.sharedBotId == sharedBotId }?.name?.takeIf { it.isNotEmpty() } ?: asked?.takeIf { it.isNotEmpty() && it != sharedBotId }
+    /** "A → B": the Bots from the one the person asked to the one that runs the task. Null for a task nobody delegated. [unnamed] stands for a Bot with no name to give. */
+    fun chain(task: TeamTask, cards: List<TeamBotCard>, unnamed: String): String? {
+        val chain = task.delegation?.chain?.takeIf { it.size > 1 } ?: return null
+        return chain.joinToString(" \u2192 ") { name(it.sharedBotId, cards, it.name) ?: unnamed }
+    }
+    /**
+     * The Bot a task that waits for another Bot's reply waits for: by its card, else by the name it had when it was asked, which the task it asked carries in its chain when that task is among
+     * [known]. Null for a task that waits for something else, or a Bot with no name to give.
+     */
+    fun waitingFor(task: TeamTask, cards: List<TeamBotCard>, known: List<TeamTask> = emptyList()): String? {
+        val asked = task.takeIf { it.state == "waiting" }?.wait?.delegation ?: return null
+        val link = known.firstOrNull { it.taskId == asked.taskId }?.delegation?.chain?.firstOrNull { it.sharedBotId == asked.sharedBotId }
+        return name(asked.sharedBotId, cards, link?.name)
+    }
+    /** The maintainer of the Bot that asked for a task another Bot asked for, when its card is known: one more person who may stop the task. */
+    fun delegator(task: TeamTask, cards: List<TeamBotCard>): TeamMemberRef? =
+        task.delegation?.let { asked -> cards.firstOrNull { it.sharedBotId == asked.parentBotId }?.maintainer }
+    /** The Bot that passed a message on, for a row of the auto-reply log, by the name it has in the chain; null for a message nobody delegated. A Bot with no name to give is [unnamed]. */
+    fun delegatedBy(delegation: TeamTaskDelegation?, unnamed: String): String? {
+        if (delegation == null) return null
+        val named = delegation.chain.firstOrNull { it.sharedBotId == delegation.parentBotId }?.name
+        return named?.takeIf { it.isNotEmpty() && it != delegation.parentBotId } ?: unnamed
+    }
+    /** What a published Bot takes from other Bots: nobody, any Bot of the Team, or the Bots it lists that are still in the Team (a list of Bots that are all gone takes nobody). */
+    sealed interface Accepts {
+        object Nobody : Accepts
+        object TeamBots : Accepts
+        data class Listed(val names: List<String>) : Accepts
+    }
+    fun accepts(bot: TeamBotCard, cards: List<TeamBotCard>): Accepts {
+        if (bot.acceptDelegation == "team_bots") return Accepts.TeamBots
+        val listed = if (bot.acceptDelegation == "listed") names(bot.acceptFrom, cards) else emptyList()
+        return if (listed.isEmpty()) Accepts.Nobody else Accepts.Listed(listed)
+    }
+    /** The Bots a published Bot may hand part of a request to, by name; the ones no longer in the Team are left out. */
+    fun delegatesTo(bot: TeamBotCard, cards: List<TeamBotCard>): List<String> = names(bot.delegateTo, cards)
+    private fun names(ids: List<String>, cards: List<TeamBotCard>): List<String> = ids.mapNotNull { id -> cards.firstOrNull { it.sharedBotId == id }?.name }
 }
 /** One revision of a shared document. [currentRevision] is the document's newest revision; a revision below it is read-only history. */
 internal data class TeamArtifact(val artifactId: String, val revision: Long, val digest: String, val title: String, val body: String, val currentRevision: Long) {

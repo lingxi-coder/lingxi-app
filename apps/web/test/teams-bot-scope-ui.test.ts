@@ -123,7 +123,7 @@ scenario('In a Chat the Bot is shown with what that Chat leaves of it: narrowed 
 
 for (const locale of ['zh-Hans', 'zh-Hant', 'ja', 'ko']) test(`${locale}: what a Bot may use is told in the language of the person`, () => {
   const t = teamsText(locale), en = teamsText('en');
-  const draw = (bot: SharedBotCard, conversationScopes?: Record<string, BotScopeEntry>) => renderToStaticMarkup(createElement(BotMemberDetails, { bot, locale, ...(conversationScopes ? { conversation: { botScopes: conversationScopes } } : {}) })).replace(/<!-- -->/g, '');
+  const draw = (bot: SharedBotCard, conversationScopes?: Record<string, BotScopeEntry>) => renderToStaticMarkup(createElement(BotMemberDetails, { bot, bots: [bot], locale, ...(conversationScopes ? { conversation: { botScopes: conversationScopes } } : {}) })).replace(/<!-- -->/g, '');
   const html = draw(scopedBot(), { [ASSISTANT]: { revision: 1, localApps: ['calendar'] } });
   for (const key of ['teams_bot_scope_uses', 'teams_bot_scope_apps', 'teams_bot_scope_datasets', 'teams_bot_scope_edit', 'teams_bot_scope_limited'] as const) {
     assert.notEqual(t(key), en(key), `${key} is translated`); assert.ok(html.includes(t(key)), `${key} is shown`);

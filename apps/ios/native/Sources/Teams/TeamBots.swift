@@ -38,6 +38,11 @@ struct TeamBotCard: Decodable, Identifiable, Equatable, Sendable {
     var examples: [String]? = nil
     var capabilities: TeamBotCapabilities? = nil
     var availability: TeamBotAvailability? = nil
+    /// What a published Bot takes from other Bots and whom it may ask (Bot v3 B8): `acceptDelegation` is `none`, `team_bots` or `listed` (then `acceptFrom` lists the Bots), and `delegateTo` lists the Bots it may
+    /// ask. All three are absent for a Bot published before; a code this version does not know takes nobody. The member only reads them: they are chosen where the Bot is published.
+    var acceptDelegation: String? = nil
+    var acceptFrom: [String]? = nil
+    var delegateTo: [String]? = nil
     var dailyRemaining: Int? = nil
     /// UTC epoch milliseconds, already projected for this member by the service.
     var quotaResetsAt: Double? = nil
@@ -47,7 +52,7 @@ struct TeamBotCard: Decodable, Identifiable, Equatable, Sendable {
     private var unavailableUntilRevalidated: TeamBotAvailability? = nil
     private enum CodingKeys: String, CodingKey {
         case sharedBotId, name, description, maintainer, revision, state, permitted, ready, onlineUntil, usePolicy, quotas, instanceId
-        case sharedList, examples, capabilities, availability, dailyRemaining, quotaResetsAt, statusExpiresAt, autoReply, scope
+        case sharedList, examples, capabilities, availability, dailyRemaining, quotaResetsAt, statusExpiresAt, autoReply, scope, acceptDelegation, acceptFrom, delegateTo
     }
     var newRequestBlock: TeamBotAvailability? {
         [.paused, .offline, .maintenance, .quota_exhausted].contains(memberAvailability) ? memberAvailability : unavailableUntilRevalidated
@@ -136,6 +141,19 @@ enum TeamBotMemberText {
         return [Item(label: "teams_bot_wait_resume", value: supported(value?.durableWait)),
                 Item(label: "teams_bot_write_ops", value: supported(value?.writeOperations))]
     }
+    /// What a published Bot takes from other Bots and whom it may ask (Bot v3 B8): "Accepts delegation from: Planner, Travel · May delegate to: Travel". Nothing for a Bot that is not published, and no
+    /// "May delegate to" for a Bot that may ask none. The limit its maintainer set is not shown: a member never reads the limits that were configured.
+    static func delegation(_ bot: TeamBotCard, cards: [TeamBotCard]) -> [Item] {
+        guard bot.state == "published" else { return [] }
+        let accepts: Item.Value
+        switch TeamDelegations.accepts(bot, cards: cards) {
+        case .nobody: accepts = .key("teams_bot_accepts_none")
+        case .teamBots: accepts = .key("teams_bot_accepts_team")
+        case .listed(let names): accepts = .figure(names.joined(separator: ", "))
+        }
+        let asks = TeamDelegations.delegatesTo(bot, cards: cards)
+        return [Item(label: "teams_bot_accepts_delegation", value: accepts)] + (asks.isEmpty ? [] : [Item(label: "teams_bot_delegates_to", value: .figure(asks.joined(separator: ", ")))])
+    }
     /// The member's own requests left today, or Unknown when the service has not said.
     static func remaining(_ value: Int?) -> Item {
         Item(label: "teams_bot_remaining_today", value: value.map { .figure(String($0)) } ?? .key("chat_status_unknown"))
@@ -166,6 +184,23 @@ struct TeamTaskWait: Decodable, Equatable, Sendable {
     let recipient: TeamMemberRef
     let expiresAt: Double
     let messageId: String
+    /// Only for `kind` `delegation` (Bot v3 B8): the task waits for another Bot's reply, which nobody types, so the `recipient` (the person who asked) has nothing to answer.
+    var delegation: TeamTaskWaitDelegation? = nil
+}
+/// The Bot a task that waits for another Bot's reply waits for, and the task it asked.
+struct TeamTaskWaitDelegation: Decodable, Equatable, Sendable {
+    let sharedBotId: String
+    let taskId: String
+}
+/// One Bot of a chain of delegations: its shared id and the name it had when it was asked. A chain made from a handoff may carry an id as the name.
+struct TeamDelegationLink: Decodable, Equatable, Sendable {
+    let sharedBotId: String
+    let name: String
+}
+/// A task another Bot asked for (Bot v3 B8): `chain` runs from the Bot the person asked to the Bot that runs the task, and `parentBotId` is the Bot that asked for it.
+struct TeamTaskDelegation: Decodable, Equatable, Sendable {
+    let parentBotId: String
+    let chain: [TeamDelegationLink]
 }
 struct TeamTask: Decodable, Equatable, Identifiable, Sendable {
     let taskId: String
@@ -183,6 +218,8 @@ struct TeamTask: Decodable, Equatable, Identifiable, Sendable {
     var wait: TeamTaskWait? = nil
     /// Present only while queued: the message was sent while the Bot's Desktop was off, so the task waits up to a day for it instead of five minutes.
     var hostWait: Bool? = nil
+    /// Another Bot asked for this task (Bot v3 B8).
+    var delegation: TeamTaskDelegation? = nil
     var id: String { taskId }
     var terminal: Bool { !["queued", "running", "waiting", "awaiting_approval"].contains(state) }
     /// A worker has it or is about to: its state changes within seconds. A waiting task changes only with its answer or its expiry, and one whose reply awaits approval with the maintainer's decision or the end of their time.
@@ -212,9 +249,9 @@ enum TeamApprovalState: Equatable, Sendable {
 /// What the viewer may do with a task (Desktop `BotRun`).
 enum TeamTaskActions {
     enum ExpiryUnit: Equatable, Sendable { case minutes, hours, days }
-    /// The requester and the Bot's maintainer may stop a task that has not ended.
-    static func canCancel(_ task: TeamTask, viewer: TeamMemberRef, maintainer: TeamMemberRef?) -> Bool {
-        !task.terminal && !task.cancelling && (task.requester == viewer || maintainer == viewer)
+    /// The requester and the Bot's maintainer may stop a task that has not ended; so may the maintainer of the Bot that asked for it, when another Bot did (`delegator`, the service's `canCancel`).
+    static func canCancel(_ task: TeamTask, viewer: TeamMemberRef, maintainer: TeamMemberRef?, delegator: TeamMemberRef?) -> Bool {
+        !task.terminal && !task.cancelling && (task.requester == viewer || maintainer == viewer || delegator == viewer)
     }
     /// The wait an answer from the viewer would resolve: the task waits for exactly this viewer and no answer to it is already on its way.
     static func answerableWait(_ task: TeamTask?, viewer: TeamMemberRef, pendingWaitIds: Set<String>) -> String? {
@@ -236,6 +273,50 @@ enum TeamTaskActions {
         if minutes < 60 { return (minutes, .minutes) }
         let hours = Int((Double(minutes) / 60).rounded(.up))
         return hours < 48 ? (hours, .hours) : (Int((Double(hours) / 24).rounded(.up)), .days)
+    }
+}
+/// What a task and a Bot's card say of Bots asking Bots (Bot v3 B8), without a screen and without words of their own: the run card, the Bot's card and the auto-reply log put them into the language of the person.
+/// `packages/teams/delegation.ts` says the same on Web and Desktop, and Android's `TeamDelegations` too.
+enum TeamDelegations {
+    /// What a Bot is called: by its card as the Team lists it now, else by the name it had when it was asked. An id is never a name.
+    static func name(of sharedBotId: String, cards: [TeamBotCard], asked: String? = nil) -> String? {
+        if let named = cards.first(where: { $0.sharedBotId == sharedBotId })?.name, !named.isEmpty { return named }
+        guard let asked, !asked.isEmpty, asked != sharedBotId else { return nil }
+        return asked
+    }
+    /// "A → B": the Bots from the one the person asked to the one that runs the task. Nothing for a task nobody delegated. `unnamed` stands for a Bot with no name to give.
+    static func chain(_ task: TeamTask, cards: [TeamBotCard], unnamed: String) -> String? {
+        guard let chain = task.delegation?.chain, chain.count > 1 else { return nil }
+        return chain.map { name(of: $0.sharedBotId, cards: cards, asked: $0.name) ?? unnamed }.joined(separator: " → ")
+    }
+    /// The Bot a task that waits for another Bot's reply waits for: by its card, else by the name it had when it was asked, which the task it asked carries in its chain when that task is among
+    /// `known`. Nothing for a task that waits for something else, or a Bot with no name to give.
+    static func waitingFor(_ task: TeamTask, cards: [TeamBotCard], known: [TeamTask] = []) -> String? {
+        guard task.state == "waiting", let asked = task.wait?.delegation else { return nil }
+        let link = known.first { $0.taskId == asked.taskId }?.delegation?.chain.first { $0.sharedBotId == asked.sharedBotId }
+        return name(of: asked.sharedBotId, cards: cards, asked: link?.name)
+    }
+    /// The maintainer of the Bot that asked for a task another Bot asked for, when its card is known: one more person who may stop the task.
+    static func delegator(_ task: TeamTask, cards: [TeamBotCard]) -> TeamMemberRef? {
+        task.delegation.flatMap { asked in cards.first { $0.sharedBotId == asked.parentBotId }?.maintainer }
+    }
+    /// The Bot that passed a message on, for a row of the auto-reply log, by the name it has in the chain; nothing for a message nobody delegated. A Bot with no name to give is `unnamed`.
+    static func delegatedBy(_ delegation: TeamTaskDelegation?, unnamed: String) -> String? {
+        guard let delegation else { return nil }
+        let name = delegation.chain.first { $0.sharedBotId == delegation.parentBotId }?.name
+        return name.flatMap { $0.isEmpty || $0 == delegation.parentBotId ? nil : $0 } ?? unnamed
+    }
+    /// What a published Bot takes from other Bots: nobody, any Bot of the Team, or the Bots it lists that are still in the Team (a list of Bots that are all gone takes nobody).
+    enum Accepts: Equatable, Sendable { case nobody, teamBots, listed([String]) }
+    static func accepts(_ bot: TeamBotCard, cards: [TeamBotCard]) -> Accepts {
+        if bot.acceptDelegation == "team_bots" { return .teamBots }
+        let listed = bot.acceptDelegation == "listed" ? names(of: bot.acceptFrom, cards: cards) : []
+        return listed.isEmpty ? .nobody : .listed(listed)
+    }
+    /// The Bots a published Bot may hand part of a request to, by name; the ones no longer in the Team are left out.
+    static func delegatesTo(_ bot: TeamBotCard, cards: [TeamBotCard]) -> [String] { names(of: bot.delegateTo, cards: cards) }
+    private static func names(of ids: [String]?, cards: [TeamBotCard]) -> [String] {
+        (ids ?? []).compactMap { id in cards.first { $0.sharedBotId == id }?.name }
     }
 }
 struct TeamArtifact: Decodable, Equatable, Identifiable, Sendable {

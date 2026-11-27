@@ -85,9 +85,9 @@ class TeamBotsTest {
         val requester = TeamMemberRef("member", 3); val maintainer = TeamMemberRef("owner", 1); val other = TeamMemberRef("other", 1)
         val held = task("awaiting_approval")
         assertFalse(held.terminal); assertFalse(held.busy)
-        assertTrue(TeamTaskActions.canCancel(held, requester, maintainer))
-        assertTrue(TeamTaskActions.canCancel(held, maintainer, maintainer))
-        assertFalse(TeamTaskActions.canCancel(held, other, maintainer))
+        assertTrue(TeamTaskActions.canCancel(held, requester, maintainer, null))
+        assertTrue(TeamTaskActions.canCancel(held, maintainer, maintainer, null))
+        assertFalse(TeamTaskActions.canCancel(held, other, maintainer, null))
         for (state in listOf("completed", "declined", "failed", "cancelled")) assertTrue(state, task(state).terminal)
     }
     private fun card(extra: String = "", permitted: Boolean = true, state: String = "published") = TeamBotCard.parse(JSONObject(

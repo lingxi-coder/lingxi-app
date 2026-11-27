@@ -2843,6 +2843,8 @@
     <string name="teams_task_cancelling">正在取消…</string>
     <string name="teams_task_waiting_you_fmt">等待你回覆 · %1$s過期</string>
     <string name="teams_task_waiting_member_fmt">等待 %1$s 回覆 · %2$s過期</string>
+    <string name="teams_task_waiting_bot_fmt">等待 %1$s 回覆</string>
+    <string name="teams_task_delegation_chain_fmt">委派：%1$s</string>
     <string name="teams_task_waiting_approval">等待核准</string>
     <string name="teams_approval_tag">審批</string>
     <string name="teams_approval_hint">只有你核准後才會修改。如果清單在 Bot 提出請求後已有變動，此修改不會儲存。</string>
@@ -3235,6 +3237,10 @@
     <string name="teams_bot_not_supported">不支援</string>
     <string name="teams_bot_wait_resume">等待與恢復</string>
     <string name="teams_bot_write_ops">寫入操作</string>
+    <string name="teams_bot_accepts_delegation">接受誰的委派</string>
+    <string name="teams_bot_accepts_none">不接受任何 Bot</string>
+    <string name="teams_bot_accepts_team">團隊中的任何 Bot</string>
+    <string name="teams_bot_delegates_to">可委派給</string>
     <string name="teams_bot_remaining_today">本人今日剩餘請求</string>
     <string name="teams_bot_resets">重置於</string>
     <string name="teams_bot_examples_hint">範例會加入草稿，請檢查後自行傳送。</string>
@@ -3569,6 +3575,7 @@
     <string name="teams_triage_round_abstained">未參與</string>
     <string name="teams_triage_round_promoted">遞補其他 Bot</string>
     <string name="teams_triage_round_superseded">因新訊息而放棄</string>
+    <string name="teams_triage_delegated_by_fmt">由 %1$s 委派</string>
     <string name="teams_triage_probability_fmt">機率 %1$d%%</string>
     <string name="teams_held_title">等待你核准</string>
     <string name="teams_held_expires_fmt">若未核准，%1$s捨棄</string>

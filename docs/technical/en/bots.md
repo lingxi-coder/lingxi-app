@@ -19,6 +19,20 @@ In Chat or Code enter /create-bot followed by what the assistant should do. Revi
 - [Publish to a team](teams.md#share-bot)
 - [Open Bot services](https://lingxios.net/services)
 
+<a id="delegation"></a>
+
+## Let Bots ask each other
+
+A Bot can ask another Bot of the same team only when both sides allow it. The settings are made by the maintainers on the Mac that publishes the Bots. How a request travels, what members see and who can cancel it are described under Teams, chats and messages.
+
+1. Publish the Bot to the team as described in “Share your Bot with a team”. In the publication settings, find “Bots asking Bots”. Bots shared with one friend and hosted Bot services do not have it.
+2. For a Bot that should take requests from other Bots, choose from whom: none (the default), any Bot of the team, or only the Bots you tick, at least one.
+3. For a Bot that should ask other Bots, tick the Bots it may ask and set how many requests it may make per UTC day. The Bot that is asked also has to accept it, so set both sides.
+4. Review the summary and confirm. When you publish a Bot again, the form starts from what it was published with. Members read the result, without changing it, in the Bot directory and in a Bot’s details on Web, Desktop, iOS and Android.
+
+- [Let a Bot ask another Bot for help](teams.md#bot-delegation)
+- [Share your Bot with a team](teams.md#share-bot)
+
 <a id="no-reply"></a>
 
 ## When a Bot does not reply
@@ -27,8 +41,11 @@ Check the conversation first. In a team, check the published Bot’s availabilit
 
 In a group or channel a reply can also be late for these reasons. If the Bot’s Mac is offline, the message still posts and the task card says the Bot will reply when it is back online; after a day it expires. A message that @mentions only people reaches no Bot unless the chat’s “Let Bots also judge messages that @mention only people” is on, and an edit never asks a Bot, so send a new message.
 
+A task card that says “Waiting for Travel” means the Bot asked another Bot and goes on when that Bot answers, or after ten minutes. To see whether the other Bot is working or its Mac is off, look at that Bot’s own task card.
+
 - [Auto-reply settings](teams.md#auto-reply)
 - [Which messages ask a Bot](teams.md#bot-mentions)
+- [Let a Bot ask another Bot for help](teams.md#bot-delegation)
 - [Remote connection checks](remote-control.md#direct)
 
 ## Sources and documentation baseline

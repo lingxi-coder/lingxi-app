@@ -286,6 +286,8 @@ INTENTIONAL_IDENTICAL_TO_BASE = {
     ("zh-Hant", "local_app_revision %llu"): "版本 %llu",
     ("zh-Hant", "local_app_revision_fmt"): "版本 %1$d",
     ("zh-Hant", "local_app_agent_model"): "Agent 模型",
+    # Reviewed 2026-11-26 (Bot v3 B8b): every character is also the Traditional form, and 不接受 is what zh-Hant says elsewhere.
+    ("zh-Hant", "teams_bot_accepts_none"): "不接受任何 Bot",
 }
 
 

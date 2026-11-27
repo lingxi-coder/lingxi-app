@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { BOT_REPLY_POLICY_USED_CHARS, BOT_REPLY_KEYWORD_CHARS_MAX, type BotReplyApprovalUi } from '../../shared/bots';
-import type { ApprovalOutcome, TaskRound, TriageAction, TriageReason } from '../../../../../packages/teams/execution';
+import type { ApprovalOutcome, TaskDelegation, TaskRound, TriageAction, TriageReason } from '../../../../../packages/teams/execution';
 import { tr } from '../i18n/locale';
 import { useI18n } from '../i18n/useI18n';
 import { desktopHost } from '../bridge/bridgeConnection';
@@ -10,7 +10,7 @@ import {
   type BotDraft, type BotDraftProblems, type BotKeywordAdd, type BotReplyDraft,
 } from '../bridge/botForm';
 import {
-  BotTriageLogController, desktopTriageSources, triageOutcome, triagePercent,
+  BotTriageLogController, delegatedBy, desktopTriageSources, readTaskDelegation, triageOutcome, triagePercent,
   type TriageLogSection, type TriageLogState, type TriageOutcome,
 } from '../bridge/botTriageLog';
 import { Field, problemText, useObservable } from './BotFields';
@@ -242,6 +242,15 @@ export function triageRoundText(round: TaskRound | undefined): string {
   }
 }
 
+/**
+ * Which Bot asked for the task, in words (Bot v3 B8): nothing for a message a person sent. The row is shown whatever the service sent of it, so a delegation this version
+ * cannot read says nothing, as on the Teams views.
+ */
+export function triageDelegatedText(delegation: TaskDelegation | undefined): string {
+  const by = delegatedBy(readTaskDelegation(delegation), tr('teams_bot_tag'));
+  return by === undefined ? '' : tr('teams_triage_delegated_by_fmt', by);
+}
+
 const VERDICT_ICON: Record<TriageAction, string> = { decline: 'pauseCircle', run: 'playCircle', run_may_decline: 'circleAlert' };
 /** The colour of the tag that says where the message ended up; the ones that are none of these keep the plain tag. */
 const OUTCOME_STATUS: Partial<Record<TriageOutcome, string>> = { replied: 'completed', failed: 'failed', waiting: 'working', approval: 'input-required' };
@@ -273,7 +282,7 @@ function BotTriageSection({ section, onRetry, onMore }: { section: TriageLogSect
     {items.length > 0 ? <ul className="bots-rows" aria-label={section.target.teamName}>
       {items.map((item) => {
         const outcome = triageOutcome(item.state);
-        const why = triageReasonText(item.triage.reason), decided = triageApprovalText(item.approval), round = triageRoundText(item.round);
+        const why = triageReasonText(item.triage.reason), decided = triageApprovalText(item.approval), round = triageRoundText(item.round), delegated = triageDelegatedText(item.delegation);
         return <li key={item.taskId} className="bots-row bots-triage-row">
           <span className="bots-triage-icon" data-action={item.triage.action} aria-hidden="true"><Icon name={VERDICT_ICON[item.triage.action]} size={16} /></span>
           <div className="bots-row-main">
@@ -282,7 +291,7 @@ function BotTriageSection({ section, onRetry, onMore }: { section: TriageLogSect
               {why ? <span className="bots-triage-why">{why}</span> : null}
               {item.triage.probability !== undefined ? <span className="bots-tag">{tr('bots_triage_probability', triagePercent(item.triage.probability))}</span> : null}
             </span>
-            <span className="bots-row-text">{item.conversationTitle || tr('bots_triage_chat_untitled')} · <time dateTime={new Date(item.triage.at).toISOString()}>{formatLogTime(item.triage.at, locale)}</time>{decided ? ` · ${decided}` : ''}{round ? ` · ${round}` : ''}</span>
+            <span className="bots-row-text">{item.conversationTitle || tr('bots_triage_chat_untitled')} · <time dateTime={new Date(item.triage.at).toISOString()}>{formatLogTime(item.triage.at, locale)}</time>{decided ? ` · ${decided}` : ''}{round ? ` · ${round}` : ''}{delegated ? ` · ${delegated}` : ''}</span>
           </div>
           <span className="bots-tag" data-status={OUTCOME_STATUS[outcome]}>{triageOutcomeText(outcome)}</span>
         </li>;

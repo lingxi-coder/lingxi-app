@@ -43,8 +43,20 @@ export interface BotTransfer { transferId: string; from: MemberRef; to: MemberRe
  */
 export type TaskState = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'expired' | 'interrupted' | 'authorization_required' | 'revoked' | 'cancelled' | 'needs_reconciliation' | 'declined' | 'awaiting_approval';
 export type TaskUsage = { status: 'missing' } | { status: 'partial' | 'complete'; inputTokens: number; outputTokens: number; costMicros?: number; currency?: string };
-/** What a waiting task is blocked on: a question to `recipient`, or (`tool_approval`) a list change only they can approve. Present only while `state` is `waiting`. */
-export interface TaskWait { waitId: string; kind: 'human_input' | 'tool_approval'; recipient: MemberRef; expiresAt: number; messageId: string }
+/** One Bot of a chain of delegations: its shared id and the name it had when the delegation was made. */
+export interface DelegationLink { sharedBotId: string; name: string }
+/**
+ * A task another Bot asked for (Bot v3 B8): `chain` runs from the Bot the person asked to the Bot that runs this task, and `parentBotId` is the Bot that asked for it.
+ * With `expectReply` the Bot that asked waits for the answer instead of the Chat getting it.
+ */
+export interface TaskDelegation { delegationId: string; rootTaskId: string; parentTaskId: string; parentBotId: string; depth: number; chain: DelegationLink[]; expectReply: boolean }
+/** What a task that waits for another Bot's reply waits for: the Bot and the task it asked. */
+export interface WaitDelegation { sharedBotId: string; taskId: string }
+/**
+ * What a waiting task is blocked on: a question to `recipient`, a list change only they can approve (`tool_approval`), or (`delegation`) the reply of another Bot, which
+ * nobody types: `recipient` is the person who asked, `delegation` names the Bot waited for. Present only while `state` is `waiting`.
+ */
+export interface TaskWait { waitId: string; kind: 'human_input' | 'tool_approval' | 'delegation'; recipient: MemberRef; expiresAt: number; messageId: string; delegation?: WaitDelegation }
 export interface TeamTaskView {
   taskId: string; conversationId: string; sharedBotId: string; requester: MemberRef;
   /** `deadline` ends the current phase: pick-up limit while queued, running budget while running, wait expiry while waiting, the maintainer's time to decide while awaiting approval. */
@@ -56,6 +68,8 @@ export interface TeamTaskView {
   optional?: true;
   /** Present only while `queued`: the message was sent while the Bot's Desktop was off, so the task waits up to a day for it to come back instead of five minutes. */
   hostWait?: true;
+  /** Another Bot asked for this task (Bot v3 B8). */
+  delegation?: TaskDelegation;
 }
 /**
  * What a Bot's host decided about a message nobody asked the Bot about, which step of its judgement decided it, and why. Codes only: the
@@ -102,6 +116,8 @@ export interface TriageLogItem {
   approval?: ApprovalOutcome;
   /** Only when the message was a round of several Bots and it has been settled. */
   round?: TaskRound;
+  /** Only when another Bot asked for the task (Bot v3 B8): the message was no one's judgement, a Bot passed it on. */
+  delegation?: TaskDelegation;
 }
 /** A page of the log, newest verdict first; pass `nextCursor` back for the page after. */
 export interface TriageLogPage { items: TriageLogItem[]; nextCursor?: string }

@@ -50,11 +50,12 @@ internal data class TeamTriageRound(val outcome: String, val tier: String? = nul
 /**
  * One message the Bot's host judged, as its maintainer reads the log. [state] is where the task stands now: it settles after the verdict. [approval] is what became of a
  * reply held for approval (`held`, `approved`, `rejected`, `timeout`, `superseded`); a code this version does not know is left out. [round] is what became of the Bot
- * among several that could answer; a message that was no such round, or an outcome this version does not know, has none.
+ * among several that could answer; a message that was no such round, or an outcome this version does not know, has none. [delegation] is there when another Bot asked for the task
+ * (Bot v3 B8): the message was no one's judgement, a Bot passed it on; one this version cannot read is left out, and the row is kept.
  */
 internal data class TeamTriageItem(
     val taskId: String, val conversationId: String, val messageId: String, val createdAt: Long, val triage: TeamTriageVerdict, val state: String, val conversationTitle: String? = null,
-    val approval: String? = null, val round: TeamTriageRound? = null,
+    val approval: String? = null, val round: TeamTriageRound? = null, val delegation: TeamTaskDelegation? = null,
 ) {
     companion object {
         /** A row is never half read: what this version needs of it is there and known, or the row is not one (null). */
@@ -67,7 +68,8 @@ internal data class TeamTriageItem(
             val createdAt = TeamTriageRules.moment(v.opt("createdAt")) ?: return null
             val triage = TeamTriageVerdict.parse(v.optJSONObject("triage")) ?: return null
             val state = text("state")?.takeIf { it in TeamTriageRules.outcomes } ?: return null
-            return TeamTriageItem(taskId, conversationId, messageId, createdAt, triage, state, text("conversationTitle"), text("approval")?.takeIf { it in TeamTriageRules.approvals }, TeamTriageRound.parse(v.opt("round")))
+            return TeamTriageItem(taskId, conversationId, messageId, createdAt, triage, state, text("conversationTitle"), text("approval")?.takeIf { it in TeamTriageRules.approvals }, TeamTriageRound.parse(v.opt("round")),
+                TeamTaskDelegation.parse(v.optJSONObject("delegation")))
         }
     }
 }
@@ -166,7 +168,7 @@ internal object TeamTriageRules {
         "teams_triage_reason_between_thresholds", "teams_triage_reason_above_threshold", "teams_triage_reason_decision_unavailable", "teams_triage_reason_message_unavailable",
         "teams_triage_state_replied", "teams_triage_state_silent", "teams_triage_state_failed", "teams_triage_state_waiting", "teams_triage_probability_fmt",
         "teams_task_waiting_approval", "teams_approval_reply_approved", "teams_approval_reply_declined", "teams_triage_approval_timeout", "teams_triage_approval_superseded",
-        "teams_triage_round_won", "teams_triage_round_lost", "teams_triage_round_abstained", "teams_triage_round_promoted", "teams_triage_round_superseded",
+        "teams_triage_round_won", "teams_triage_round_lost", "teams_triage_round_abstained", "teams_triage_round_promoted", "teams_triage_round_superseded", "teams_triage_delegated_by_fmt",
         "teams_list_refresh", "common_retry", "common_close",
     )
 

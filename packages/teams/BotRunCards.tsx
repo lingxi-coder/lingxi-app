@@ -8,6 +8,7 @@ import { Dialog, Icon, type IconName, type RenderMarkdown } from './ui';
 import type { TeamsSnapshot } from './workspace.js';
 import { intlTag, teamsText, tk, type TeamsKey, useTeamsText } from './i18n.js';
 import { triageProbabilityText, triageReasonText } from './triage-log.js';
+import { delegationChain, mayCancel, waitingForBot } from './delegation.js';
 
 /** Only Completed is `ok` and only Failed `danger` (U4); every other state is `muted`. */
 type RunTone = 'ok' | 'danger' | 'muted';
@@ -139,8 +140,10 @@ export function OperationsDialog({ api, scope, task, locale, canResolve, people,
 }
 const CANCELLABLE: TeamTaskView['state'][] = ['queued', 'running', 'waiting', 'awaiting_approval'];
 type RunViewer = Pick<TeamsSnapshot, 'uid' | 'bots' | 'directory' | 'pending'>;
-export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, reason, onReply, onChanged }: {
+export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, tasks, reason, onReply, onChanged }: {
   task: TeamTaskView; api: TeamsApi; scope: ExecutionScope; locale: string; renderMarkdown?: RenderMarkdown; snapshot: RunViewer;
+  /** The other tasks of the Chat: a task that waits for another Bot's reply finds that Bot's name in the task it asked when the Team's list has no card of it. */
+  tasks?: readonly TeamTaskView[];
   /** What the Bot decided about the message and why, from its auto-reply log. Given only where this person maintains the Bot; it says why a Bot that did not reply stayed silent. */
   reason?: TriageLogItem;
   /** Start answering the Bot's question; absent where the composer is not at hand. */
@@ -155,7 +158,8 @@ export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, rea
   const bot = snapshot.bots.find(card => card.sharedBotId === task.sharedBotId);
   const maintainer = bot?.maintainer;
   const maintains = !!maintainer && isMember(maintainer);
-  const canCancel = CANCELLABLE.includes(task.state) && (isMember(task.requester) || maintains);
+  // The person who asked and the Bot's maintainer; for a task another Bot asked for, also the maintainer of the Bot that asked (the service's `canCancel`).
+  const canCancel = CANCELLABLE.includes(task.state) && mayCancel(task, { uid: snapshot.uid, generation: scope.generation }, snapshot.bots);
   const unchecked = task.state === 'needs_reconciliation';
   const stopping = task.state === 'running' && task.cancelRequestedAt !== undefined;
   const wait = task.state === 'waiting' ? task.wait : undefined;
@@ -179,7 +183,9 @@ export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, rea
   const label = stopping ? t('teams_task_cancelling') : wait?.kind === 'tool_approval' ? t('teams_task_waiting_approval') : t(look.label);
   // One line under the state (U4): who it waits for, what to check, or what the state means.
   const expires = wait ? expiresIn(wait.expiresAt, Date.now(), locale) : '';
-  const detail = wait ? (isMember(wait.recipient) ? t('teams_task_waiting_you_fmt', expires) : t('teams_task_waiting_member_fmt', nameOf(wait.recipient.uid), expires))
+  // A wait for another Bot's reply (Bot v3 B8) is not for the person who asked, whom the service names as its recipient: it says which Bot it waits for.
+  const detail = wait ? (wait.kind === 'delegation' ? t('teams_task_waiting_bot_fmt', waitingForBot(task, snapshot.bots, tasks) ?? t('teams_bot_tag'))
+      : isMember(wait.recipient) ? t('teams_task_waiting_you_fmt', expires) : t('teams_task_waiting_member_fmt', nameOf(wait.recipient.uid), expires))
     : unchecked ? (maintains
       ? t('teams_task_needs_checking_maintainer')
       : t('teams_task_needs_checking_hint'))
@@ -188,11 +194,14 @@ export function BotRun({ task, api, scope, locale, renderMarkdown, snapshot, rea
     : look.detail ? t(look.detail) : '';
   // The usage (U5): always once completed; for any other state only when the run did use something, so a cost is never hidden.
   const usage = task.state === 'completed' || task.usage ? usageText(task.usage, locale) : '';
+  // A task another Bot asked for says whose work it is part of: "Planner → Travel", from the Bot the person asked to this one.
+  const chain = delegationChain(task, snapshot.bots, t('teams_bot_tag'));
   return <section className="team-bot-run" data-state={task.state} data-tone={look.tone} aria-label={t('tw_run_status_label')}>
     <p className="tw-run-state" role="status">
       <span className="tw-run-glyph"><Icon name={look.icon} className={look.spins && !stopping ? 'tw-run-spin' : undefined} />{look.spins && !stopping ? <Icon name="dotsCircle" className="tw-run-still" /> : null}</span>
       <span>{label}</span>
     </p>
+    {chain ? <p className="tw-run-detail tw-run-chain">{t('teams_task_delegation_chain_fmt', chain)}</p> : null}
     {detail ? <p className="tw-run-detail">{detail}</p> : null}
     {usage ? <p className="tw-run-detail" title={tokenSplit(task.usage, locale) || undefined}>{usage}</p> : null}
     {canReply || (canCancel && !stopping) ? <div className="teams-row-actions">

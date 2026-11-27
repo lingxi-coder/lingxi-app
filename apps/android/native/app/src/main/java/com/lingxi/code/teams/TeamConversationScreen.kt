@@ -541,7 +541,7 @@ private fun ConversationBody(
         if (conversation.kind == "bot_dm") bots.firstOrNull { it.sharedBotId == conversation.sharedBotId }?.let { bot ->
             val lock = TeamsComposeLogic.composerLock(uid, conversation.kind, conversation.participants, bots, messaging.botsLoaded, messaging.botsFailed, conversation.readers)
             TeamBotMemberInfo(
-                bot, enabled = editing == null && draft == ComposerDraft() && files.isEmpty() && lock == ComposerLock.None,
+                bot, bots = bots, enabled = editing == null && draft == ComposerDraft() && files.isEmpty() && lock == ComposerLock.None,
                 onExample = { example -> workspace.botEntryContext(uid)?.let { workspace.seedBotExample(it, conversationId, example) } },
                 modifier = Modifier.padding(horizontal = 16.dp), conversation = conversation,
             )
@@ -774,7 +774,7 @@ private fun MessageCell(
                         val taskBot = bots.firstOrNull { it.sharedBotId == task.sharedBotId }
                         val answerable = TeamTaskActions.answerableWait(message, messaging.tasks, viewer, pendingWaits) != null
                         TeamTaskCard(
-                            task, taskBot?.name ?: strings.bot, onArtifact, onRefreshTask, viewer = viewer, maintainer = taskBot?.maintainer,
+                            task, taskBot?.name ?: strings.bot, onArtifact, onRefreshTask, viewer = viewer, maintainer = taskBot?.maintainer, bots = bots, tasks = messaging.tasks,
                             recipientName = task.wait?.let { personName(it.recipient.uid) }.orEmpty(), onCancel = onCancelTask, onReply = if (answerable) ({ onReply(message) }) else null, onReview = onReviewTask,
                             reason = messaging.triageReasons[taskId],
                         )

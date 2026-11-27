@@ -326,6 +326,20 @@ scenario('Opening the log shows the newest verdicts first: what was decided, why
 
 const classesOf = (node: { props: { className?: unknown } }): string[] => String(node.props.className ?? '').split(' ');
 
+scenario('A row whose task another Bot asked for says "Delegated by" that Bot, after what became of it; the rows of messages a person sent say nothing of it', async context => {
+  const { fake, workspace } = await open(context, [mine()]);
+  const delegation = { delegationId: 'delegation-1', rootTaskId: 'task-0009', parentTaskId: 'task-0009', parentBotId: 'sharedbot_planner', depth: 1, expectReply: true, chain: [{ sharedBotId: 'sharedbot_planner', name: 'Planner' }, { sharedBotId: BOT, name: 'Fixture Bot' }] };
+  const all = [row(3, { state: 'completed', delegation }, { action: 'run', source: 'rule', reason: 'addressed', probability: undefined }), row(2, { state: 'declined', round: { outcome: 'lost', tier: 'run' }, delegation }), row(1, { state: 'completed' })];
+  wire(fake, serve(all));
+  const page = await mount(workspace, directory(workspace)); context.after(() => page.unmount());
+  await until(() => entries(page).length === 1, 'the entry'); await page.click(entries(page)[0]!);
+  const items = () => page.find(node => node.type === 'li' && classesOf(node).includes('tw-triage-row'));
+  await until(() => items().length === 3, 'the rows');
+  assert.match(textOf(items()[0]!), /· Delegated by PlannerReplied$/, 'after where and when, before where it ended up');
+  assert.match(textOf(items()[1]!), /· Another Bot was chosen · Delegated by PlannerStayed silent$/, 'after the part it had in a round');
+  assert.doesNotMatch(textOf(items()[2]!), /Delegated/, 'a message a person sent');
+});
+
 scenario('An empty log says so; a log that cannot be read says why and can be tried again, and a page that fails keeps the rows above it', async context => {
   const { fake, workspace } = await open(context, [mine()]);
   const service = serve([]); let failing = 1; const calls = wire(fake, service);

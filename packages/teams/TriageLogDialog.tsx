@@ -5,7 +5,7 @@ import { messageErrorText } from './errors.js';
 import { Dialog, Icon, type IconName } from './ui';
 import { intlTag, useTeamsText } from './i18n.js';
 import { useTriageLog } from './triage-hooks.js';
-import { triageActionText, triageApprovalText, triageOutcome, triageOutcomeText, triageProbabilityText, triageReasonText, triageRoundText } from './triage-log.js';
+import { triageActionText, triageApprovalText, triageDelegatedText, triageOutcome, triageOutcomeText, triageProbabilityText, triageReasonText, triageRoundText } from './triage-log.js';
 
 const VERDICT_ICON: Record<TriageAction, IconName> = { decline: 'pauseCircle', run: 'playCircle', run_may_decline: 'circleAlert' };
 /** A time in epoch milliseconds, as the maintainer reads dates: the day and the hour, in their language and their time zone. */
@@ -39,14 +39,14 @@ export function TriageLogDialog({ api, scope, bots, conversation, locale, onClos
     {view.status === 'loading' ? <p role="status">{t('teams_triage_loading')}</p> : null}
     {view.status === 'ready' && !view.items.length ? <p className="tw-hint">{t('teams_triage_empty')}</p> : null}
     {view.items.length ? <ul className="tw-triage-list" aria-label={t('teams_triage_title')}>{view.items.map(item => {
-      const outcome = triageOutcome(item.state), why = triageReasonText(t, item.triage.reason), decided = triageApprovalText(t, item.approval), round = triageRoundText(t, item.round);
+      const outcome = triageOutcome(item.state), why = triageReasonText(t, item.triage.reason), decided = triageApprovalText(t, item.approval), round = triageRoundText(t, item.round), delegated = triageDelegatedText(t, item.delegation);
       return <li key={item.taskId} className="tw-triage-row" data-action={item.triage.action}>
         <span className="tw-triage-icon" aria-hidden="true"><Icon name={VERDICT_ICON[item.triage.action]} /></span>
         <div className="tw-triage-main">
           <span className="tw-triage-title">{triageActionText(t, item.triage.action)}
             {why ? <span className="tw-triage-why">{why}</span> : null}
             {item.triage.probability !== undefined ? <span className="tw-tag">{triageProbabilityText(t, item.triage.probability)}</span> : null}</span>
-          <span className="tw-triage-meta">{item.conversationTitle || t('teams_triage_chat_untitled')} · <time dateTime={new Date(item.triage.at).toISOString()}>{logTime(item.triage.at, locale)}</time>{decided ? ` · ${decided}` : ''}{round ? ` · ${round}` : ''}</span>
+          <span className="tw-triage-meta">{item.conversationTitle || t('teams_triage_chat_untitled')} · <time dateTime={new Date(item.triage.at).toISOString()}>{logTime(item.triage.at, locale)}</time>{decided ? ` · ${decided}` : ''}{round ? ` · ${round}` : ''}{delegated ? ` · ${delegated}` : ''}</span>
         </div>
         <span className="tw-tag" data-outcome={outcome}>{triageOutcomeText(t, outcome)}</span>
       </li>;

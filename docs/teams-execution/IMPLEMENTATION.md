@@ -918,7 +918,7 @@ field, `hostWait`, on the task view. All text is in `resources/translations/*.js
 A Bot that is running for a person can hand part of the request to another Bot of the same Chat, and either go on with that Bot's reply or let it answer in the
 Chat itself. This is B8a: the service (`delegations.mjs` and the commands in `shared-bots.mjs`), the runtime's team worker (H, the tool `TeamDelegate`) and the
 Desktop connector, and the four publication controls of the Desktop publish wizard (`BotDirectory`). The other screens (the chain on a task, the wait on it, the
-capability shown on a card, on every client) are B8b; the fields they need are on the task view and the card.
+capability shown on a card, on every client) are B8b, below the notes of B8a; the fields they need are on the task view and the card.
 
 - Only a tool call delegates. The model calls `TeamDelegate {target, request, expectReply}`; an @ it writes in its text triggers nothing. With
   `expectReply: false` the worker asks its host for the operation `delegate`, which the connector sends as `delegateTask`; the answer is `{sent: true, ...}` or
@@ -977,6 +977,22 @@ capability shown on a card, on every client) are B8b; the fields they need are o
 - Where it is shown. `taskView` carries `delegation` (the chain, "A -> B") on the target's task and, on a waiting task, `wait.kind: 'delegation'` with
   `wait.delegation {sharedBotId, taskId}`; the inbox skips such waits (nobody is asked anything); `listTriage` rows carry `delegation`. Existing clients
   parse a wait by `messageId`, which stays, and ignore a kind they do not know.
+- Screens (B8b). Every client reads the fields above by the same rules, each in its own code: Web and Desktop in `packages/teams/delegation.ts` (the rules), `BotRunCards.tsx`,
+  `BotMemberDetails.tsx` (the Bot directory and a Bot's details), `TriageLogDialog.tsx` and, on Desktop, `BotAutoReplyField.tsx`; iOS in `TeamDelegations` and `TeamBotMemberText.delegation`
+  (`TeamBots.swift`), `TeamBotViews.swift` and `TeamTriageLog*.swift`; Android in `TeamDelegations` (`TeamBots.kt`), `TeamBotEntry.delegation`, `TeamBotComponents.kt` and `TeamTriageLog*.kt`.
+  A task another Bot asked for says "Delegated: A -> B" when its chain has two Bots or more, and keeps saying it once it has ended. A Bot is named by its card as the Team lists it now, else by the name
+  the chain carries, and an id is never shown as a name (a handoff-made chain carries ids): a Bot with no name to give is "Bot". The task that waits says "Waiting for B" where a question to a person would say
+  "Waiting for you . expires ...": the wait has nothing to answer, so there is no answer control and no expiry; B is named by its card, else by the name the task it asked has in its chain, else "Bot". A row
+  of the auto-reply log says "Delegated by A", A being the chain link whose id is `parentBotId`. Cancel on the card follows `canCancel`: the person who asked, the maintainer of the Bot that runs the task and the
+  maintainer of `delegation.parentBotId`, read from the Team's Bot cards (the service still decides). The offline line (`hostWait`) of a target whose Desktop is off shows on the delegated task in the Chat as on any
+  task. A published Bot's card and details say "Accepts delegation from" (No Bots, Any Bot of the Team, or the listed Bots by name; a listed Bot that is no longer in the Team is left out, and a list of such takes
+  nobody) and, when it may ask any, "May delegate to"; the daily limit belongs to its maintainer and members do not see it. Publishing stays on Desktop. The native models read only `parentBotId` and `chain` of a
+  delegation and `sharedBotId` and `taskId` of the wait, and a delegation they cannot read leaves the task or the log row as it was. The text is `teams_task_waiting_bot`, `teams_task_delegation_chain`,
+  `teams_triage_delegated_by`, `teams_bot_accepts_delegation`, `teams_bot_accepts_none`, `teams_bot_accepts_team` and `teams_bot_delegates_to` in the catalog (five locales, every client). The iOS and Android vector
+  tests refuse `reject-delegateTask-member` and `reject-detachDelegation-member` as they refuse any action a member may not send (an unknown action fails the contract); both now assert it by name.
+- Tests (B8b): Web `teams-delegation-views.test.ts` (the chain, the run card in five languages, the wait, who may cancel, an offline target, a Chat with a delegated task, the log helpers, the Bot's card, the catalog words, the
+  two vectors) and `teams-triage-log-ui.test.ts` ("Delegated by"); Electron `bot-reply-field.test.ts`; iOS `TeamDelegationTests` (and `TeamBotTests`, `TeamTaskUsageTests` for the `canCancel` argument); Android `TeamDelegationsTest`
+  (and `TeamsBotTextTest`, `TeamBotsTest`).
 - Runtime (H). `TeamDelegate` is registered only with an offer, on a route that continues; `TeamWaitKind::Delegation`; `Bootstrap.delegates` (strict, at most 20,
   absent for private data); `TeamOperationTool::Delegate`; `verify_continuation` accepts a delegation answer only with the tool present and no approval flag.
   The host's request carries `delegates` for `run` and `continue` and nothing else.
@@ -1000,10 +1016,10 @@ capability shown on a card, on every client) are B8b; the fields they need are o
   nobody asked, a held reply approved, rejected and run out, the directory); `shared-bot-commands.test.mjs` and `team-execution-contract.test.mjs` (the commands and
   the boolean capability); `teams.rules.emulator.test.mjs` (the record is server-only); `contracts/execution-vectors.json` (`delegateTask` and `detachDelegation`
   are host commands a member may not send); Web `teams-delegation-ui.test.ts` (the wizard's controls).
-- Not here, or not verified. Not here: the chain "A -> B" on a task, the wait on it and the capability on a card, in Web, iOS and Android (B8b; the fields they read are
-  listed above); a hosted service never delegates; no Cloud Tasks job ends a wait (the host does, and the service holds it to the time). Not verified: a run on two
-  real Desktops with a real model (the tests use the emulator, a fake service and a scripted provider, never a signed package); the iOS and Android vector tests,
-  which decode `contracts/execution-vectors.json` and are expected to take the two rejected commands as they take the others (not run here). A known gap: a run that
+- Not here, or not verified. Not here: a hosted service never delegates; no Cloud Tasks job ends a wait (the host does, and the service holds it to the time). Not verified: a run on two
+  real Desktops with a real model (the tests use the emulator, a fake service and a scripted provider, never a signed package); the B8b screens were not run on a device, a simulator or a signed Desktop
+  (Web and Desktop render in tests; iOS is type-checked whole-app and its logic tests run on macOS, without the SwiftUI screens); the Android code and `TeamDelegationsTest` were written and read through but
+  never compiled or run (Gradle was not started: the disk was too full). A known gap: a run that
   is still marked waiting after its own 24 hours (its Desktop was off all that time) is queued again by a reply that comes late, with a new deadline, instead of the
   reply being posted in the Chat; `waiterOf` does not read the deadline.
 

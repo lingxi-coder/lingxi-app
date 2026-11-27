@@ -21,6 +21,8 @@ extension TeamBotMemberText {
 struct TeamBotMemberInfo: View {
     @Environment(\.locale) private var locale
     let bot: TeamBotCard
+    /// The Team's Bots: they name the Bots a published Bot takes requests from and may ask (Bot v3 B8).
+    let cards: [TeamBotCard]
     var conversation: TeamMessageConversation? = nil
     var unverified = false
 
@@ -32,6 +34,11 @@ struct TeamBotMemberInfo: View {
             Text(verbatim: TeamBotMemberText.line([TeamBotMemberText.remaining(unverified ? nil : bot.memberRemaining)]))
                 .accessibilityIdentifier("teams.bot.remaining.\(bot.sharedBotId)")
             if !unverified, let reset = TeamBotMemberText.reset(bot.memberQuotaReset) { Text(verbatim: TeamBotMemberText.line([reset])) }
+            // Read only: whom the Bot takes requests from and whom it may ask is chosen where it is published, on Desktop.
+            let delegation = TeamBotMemberText.delegation(bot, cards: cards)
+            if !delegation.isEmpty {
+                Text(verbatim: TeamBotMemberText.line(delegation)).accessibilityIdentifier("teams.bot.delegation.\(bot.sharedBotId)")
+            }
             TeamBotScopeSummary(bot: bot, in: conversation)
         }
         .font(.caption).foregroundStyle(.secondary)
@@ -50,6 +57,8 @@ struct TeamBotExamplesHint: View {
 
 struct TeamBotCardView: View {
     let bot: TeamBotCard
+    /// The Team's Bots, which name the Bots this one takes requests from and may ask.
+    let cards: [TeamBotCard]
     let ownerName: String
     let isOwner: Bool
     let busy: Bool
@@ -86,7 +95,7 @@ struct TeamBotCardView: View {
             }
             if !bot.description.isEmpty { Text(bot.description).font(.subheadline) }
             if (bot.state == "published") {
-                TeamBotMemberInfo(bot: bot, unverified: unverified)
+                TeamBotMemberInfo(bot: bot, cards: cards, unverified: unverified)
                 if showsAudience {
                     Text(LocalizedStringKey(bot.usePolicy.mode == "all" ? "teams_bot_use_all" : "teams_bot_use_listed")).font(.caption).foregroundStyle(.secondary)
                 }
@@ -166,6 +175,10 @@ struct TeamTaskCard: View {
     /// The signed-in member, and the Bot's maintainer when its card is known: they decide who may cancel.
     let viewer: TeamMemberRef
     var maintainer: TeamMemberRef? = nil
+    /// The Team's Bots and the Chat's other tasks (Bot v3 B8): the Bots name the Bots of a chain and give the maintainer of the Bot that asked for a delegated task, who may cancel it too;
+    /// the tasks name a Bot that has no card, for a task that waits for it.
+    var cards: [TeamBotCard] = []
+    var tasks: [TeamTask] = []
     /// The name of the member a waiting task waits for (not needed when that is the viewer).
     var recipientName: String = ""
     /// Starts the answer to the Bot's question. Set only on the question itself, while it can still be answered by the viewer.
@@ -176,7 +189,7 @@ struct TeamTaskCard: View {
     @State private var reviewing = false
 
     private var run: TeamsBotText.RunState { TeamsBotText.runState(task.state) }
-    private var canCancel: Bool { TeamTaskActions.canCancel(task, viewer: viewer, maintainer: maintainer) }
+    private var canCancel: Bool { TeamTaskActions.canCancel(task, viewer: viewer, maintainer: maintainer, delegator: TeamDelegations.delegator(task, cards: cards)) }
     private var canResolve: Bool { TeamOperationRules.canResolve(viewer: viewer, maintainer: maintainer) }
     /// An outside action of unknown outcome: the maintainer confirms it where the review screen is.
     private var canReview: Bool { task.state == "needs_reconciliation" && TeamOperationRules.canReview(task, viewer: viewer, maintainer: maintainer) }
@@ -185,6 +198,11 @@ struct TeamTaskCard: View {
     private var showsUsage: Bool { task.state == "completed" || (task.state == "cancelled" && task.usage != nil) }
     private var waitLine: String? {
         guard task.state == "waiting", let wait = task.wait else { return nil }
+        // Another Bot's reply is not a question to the person who asked, whom the service names as the wait's recipient: the line names the Bot it waits for.
+        if wait.kind == "delegation" {
+            let bot = TeamDelegations.waitingFor(task, cards: cards, known: tasks) ?? TeamsText.localized("teams_bot_tag")
+            return String(localized: "teams_task_waiting_bot \(bot)")
+        }
         let expires = TeamsBotText.expiryText(at: wait.expiresAt, now: Date().timeIntervalSince1970 * 1000)
         return wait.recipient == viewer ? String(localized: "teams_task_waiting_you \(expires)") : String(localized: "teams_task_waiting_member \(recipientName) \(expires)")
     }
@@ -217,6 +235,11 @@ struct TeamTaskCard: View {
         return line.isEmpty ? nil : line
     }
 
+    /// "Delegated: Planner → Travel" for a task another Bot asked for: whose work it is part of.
+    private var chainLine: String? {
+        TeamDelegations.chain(task, cards: cards, unnamed: TeamsText.localized("teams_bot_tag")).map { String(localized: "teams_task_delegation_chain \($0)") }
+    }
+
     /// The text block keeps the identifier of the line it carries.
     private var textIdentifier: String {
         switch task.state {
@@ -231,6 +254,7 @@ struct TeamTaskCard: View {
         let words = TeamsBotText.UsageStrings.current(locale: locale)
         let state = TeamsText.localized(stateKey)
         let detail = detailLine(words)
+        let chain = chainLine
         VStack(alignment: .leading, spacing: 4) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
@@ -238,6 +262,11 @@ struct TeamTaskCard: View {
                     Text(verbatim: state).font(.footnote.weight(.semibold)).foregroundStyle(.primary)
                 }
                 Text(verbatim: botName).font(.subheadline.weight(.semibold))
+                if let chain {
+                    Text(verbatim: chain)
+                        .font(.footnote).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let detail {
                     Text(verbatim: detail)
                         .font(.footnote).foregroundStyle(.secondary)
@@ -245,7 +274,7 @@ struct TeamTaskCard: View {
                 }
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(Text(verbatim: TeamsStreamLogic.spokenLine([botName, state, detail])))
+            .accessibilityLabel(Text(verbatim: TeamsStreamLogic.spokenLine([botName, state, chain, detail])))
             .accessibilityValue(Text(verbatim: showsUsage ? (TeamsBotText.tokenSplit(task.usage, strings: words) ?? "") : ""))
             .accessibilityIdentifier(textIdentifier)
             if hasActions { actions }

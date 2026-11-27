@@ -184,7 +184,7 @@ internal fun TeamsListScreen(
                                 // In the column of the row's text: the avatar (40 dp) and its gap (12 dp) after the 16 dp edge.
                                 Column(Modifier.fillMaxWidth().padding(start = 68.dp, end = 16.dp, bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                     if (bot.description.isNotBlank()) Text(bot.description, style = MaterialTheme.typography.bodyMedium)
-                                    TeamBotMemberInfo(bot, enabled = !messaging.submitting && messaging.cache?.creation == null, onExample = { onBotExample(bot.sharedBotId, it) })
+                                    TeamBotMemberInfo(bot, bots = bots, enabled = !messaging.submitting && messaging.cache?.creation == null, onExample = { onBotExample(bot.sharedBotId, it) })
                                 }
                             }
                         }
@@ -195,6 +195,7 @@ internal fun TeamsListScreen(
                             val bot = bots.firstOrNull { it.sharedBotId == task.sharedBotId }
                             TeamTaskCard(
                                 task, bot?.name ?: strings.bot, onArtifact, onRefreshTask, viewer = messaging.cache?.let { TeamMemberRef(uid, it.generation) }, maintainer = bot?.maintainer,
+                                bots = bots, tasks = messaging.tasks,
                                 recipientName = task.wait?.let { wait -> members.firstOrNull { it.uid == wait.recipient.uid }?.displayName?.takeIf { it.isNotEmpty() } } ?: strings.member, onCancel = onCancelTask, onReview = onReviewTask,
                                 // A card in the list has no message column around it: it takes the list's own 16 dp edge.
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),

@@ -236,11 +236,15 @@ export type TeamsKey =
   | 'teams_auto_reply_rank_note'
   | 'teams_auto_reply_title'
   | 'teams_auto_reply_unavailable_fmt'
+  | 'teams_bot_accepts_delegation'
+  | 'teams_bot_accepts_none'
+  | 'teams_bot_accepts_team'
   | 'teams_bot_avail_maintenance'
   | 'teams_bot_avail_offline'
   | 'teams_bot_avail_quota'
   | 'teams_bot_avail_ready'
   | 'teams_bot_avail_unverified'
+  | 'teams_bot_delegates_to'
   | 'teams_bot_disabled'
   | 'teams_bot_examples_hint'
   | 'teams_bot_message'
@@ -523,11 +527,13 @@ export type TeamsKey =
   | 'teams_task_cancelled'
   | 'teams_task_cancelling'
   | 'teams_task_declined'
+  | 'teams_task_delegation_chain_fmt'
   | 'teams_task_needs_checking'
   | 'teams_task_needs_checking_hint'
   | 'teams_task_needs_checking_maintainer'
   | 'teams_task_waiting'
   | 'teams_task_waiting_approval'
+  | 'teams_task_waiting_bot_fmt'
   | 'teams_task_waiting_member_fmt'
   | 'teams_task_waiting_you_fmt'
   | 'teams_team_details'
@@ -538,6 +544,7 @@ export type TeamsKey =
   | 'teams_triage_approval_superseded'
   | 'teams_triage_approval_timeout'
   | 'teams_triage_chat_untitled'
+  | 'teams_triage_delegated_by_fmt'
   | 'teams_triage_empty'
   | 'teams_triage_intro'
   | 'teams_triage_loading'
@@ -1211,11 +1218,15 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_auto_reply_rank_note: { en: 'Bots on different Desktops are ranked by how sure each is first; Decision probabilities from different maintainers are not compared directly and only break ties.', 'zh-Hans': '不同 Desktop 上的 Bot 先按各自的把握程度排序；不同维护者判断服务给出的概率不直接比较，只在把握相同时用来分先后。', 'zh-Hant': '不同 Desktop 上的 Bot 先依各自的把握程度排序；不同維護者判斷服務給出的機率不直接比較，只在把握相同時用來分先後。', ja: '異なる Desktop の Bot は、まず各自の確信度で順位を付けます。メンテナーごとの判断サービスが返す確率は直接比較せず、確信度が同じときの順位付けにだけ使います。', ko: '서로 다른 Desktop의 Bot은 먼저 각자의 확신도로 순위를 매깁니다. 메인테이너마다 다른 판단 서비스의 확률은 직접 비교하지 않고, 확신도가 같을 때 순서를 가르는 데만 씁니다.' },
   teams_auto_reply_title: { en: 'Bots that answer on their own', 'zh-Hans': '自主回复的 Bot', 'zh-Hant': '自主回覆的 Bot', ja: '自分で返信する Bot', ko: '스스로 답장하는 Bot' },
   teams_auto_reply_unavailable_fmt: { en: '%1$s no longer answers on its own. Turn it off here.', 'zh-Hans': '%1$s 已不再支持自主回复，可在此关闭。', 'zh-Hant': '%1$s 已不再支援自主回覆，可在此關閉。', ja: '%1$s は自分で返信しなくなりました。ここでオフにしてください。', ko: '%1$s은(는) 더 이상 스스로 답장하지 않습니다. 여기서 끄세요.' },
+  teams_bot_accepts_delegation: { en: 'Accepts delegation from', 'zh-Hans': '接受谁的委托', 'zh-Hant': '接受誰的委派', ja: '受け付ける委任元', ko: '위임을 받는 Bot' },
+  teams_bot_accepts_none: { en: 'No Bots', 'zh-Hans': '不接受任何 Bot', 'zh-Hant': '不接受任何 Bot', ja: 'なし', ko: '없음' },
+  teams_bot_accepts_team: { en: 'Any Bot of the Team', 'zh-Hans': '团队中的任何 Bot', 'zh-Hant': '團隊中的任何 Bot', ja: 'チームのすべての Bot', ko: '팀의 모든 Bot' },
   teams_bot_avail_maintenance: { en: 'Temporarily under maintenance', 'zh-Hans': '暂时维护中', 'zh-Hant': '暫時維護中', ja: '一時的にメンテナンス中', ko: '일시적으로 점검 중' },
   teams_bot_avail_offline: { en: 'Host offline', 'zh-Hans': '宿主离线', 'zh-Hant': '宿主離線', ja: 'ホストがオフライン', ko: '호스트 오프라인' },
   teams_bot_avail_quota: { en: 'Daily quota exhausted', 'zh-Hans': '今日额度已用完', 'zh-Hant': '今日額度已用完', ja: '本日の上限に達しました', ko: '오늘의 한도를 모두 사용했습니다' },
   teams_bot_avail_ready: { en: 'Ready', 'zh-Hans': '已就绪', 'zh-Hant': '已就緒', ja: '準備完了', ko: '준비됨' },
   teams_bot_avail_unverified: { en: 'Status unverified', 'zh-Hans': '状态未确认', 'zh-Hant': '狀態未確認', ja: '状態を確認できません', ko: '상태를 확인할 수 없음' },
+  teams_bot_delegates_to: { en: 'May delegate to', 'zh-Hans': '可委托给', 'zh-Hant': '可委派給', ja: '委任できる相手', ko: '위임할 수 있는 Bot' },
   teams_bot_disabled: { en: 'Sharing stopped', 'zh-Hans': '已停止共享', 'zh-Hant': '已停止共享', ja: '共有停止中', ko: '공유 중지됨' },
   teams_bot_examples_hint: { en: 'Examples add to your draft. Review and send when ready.', 'zh-Hans': '示例会加入草稿，请检查后自行发送。', 'zh-Hant': '範例會加入草稿，請檢查後自行傳送。', ja: '入力例は下書きに追加されます。内容を確認してから送信してください。', ko: '예시는 초안에 추가됩니다. 내용을 확인한 뒤 직접 보내세요.' },
   teams_bot_message: { en: 'Message Bot', 'zh-Hans': '与 Bot 对话', 'zh-Hant': '與 Bot 對話', ja: 'Bot とチャット', ko: 'Bot과 대화' },
@@ -1498,11 +1509,13 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_task_cancelled: { en: 'Cancelled', 'zh-Hans': '已取消', 'zh-Hant': '已取消', ja: 'キャンセル済み', ko: '취소됨' },
   teams_task_cancelling: { en: 'Cancelling…', 'zh-Hans': '正在取消…', 'zh-Hant': '正在取消…', ja: 'キャンセル中…', ko: '취소 중…' },
   teams_task_declined: { en: 'Did not reply', 'zh-Hans': '未回复', 'zh-Hant': '未回覆', ja: '返信なし', ko: '답장 안 함' },
+  teams_task_delegation_chain_fmt: { en: 'Delegated: %1$s', 'zh-Hans': '委托：%1$s', 'zh-Hant': '委派：%1$s', ja: '委任：%1$s', ko: '위임: %1$s' },
   teams_task_needs_checking: { en: 'Needs checking', 'zh-Hans': '需要核实', 'zh-Hant': '需要核實', ja: '確認が必要', ko: '확인 필요' },
   teams_task_needs_checking_hint: { en: 'An action outside the chat may or may not have gone through. The Bot’s maintainer needs to confirm it.', 'zh-Hans': '会话之外的某个操作可能已执行，也可能没有，需要 Bot 维护者确认。', 'zh-Hant': '會話之外的某個操作可能已執行，也可能沒有，需要 Bot 維護者確認。', ja: 'チャット外の操作が実行されたかどうか確認できていません。Bot の管理者による確認が必要です。', ko: '채팅 밖의 작업이 실행되었는지 확인되지 않았습니다. Bot 관리자의 확인이 필요합니다.' },
   teams_task_needs_checking_maintainer: { en: 'An action outside the chat may or may not have gone through. Check it and confirm the result.', 'zh-Hans': '会话之外的某个操作可能已执行，也可能没有。请核实并确认结果。', 'zh-Hant': '會話之外的某個操作可能已執行，也可能沒有。請核實並確認結果。', ja: 'チャット外の操作が実行されたかどうか確認できていません。確認して結果を確定してください。', ko: '채팅 밖의 작업이 실행되었는지 확인되지 않았습니다. 확인한 뒤 결과를 확정해 주세요.' },
   teams_task_waiting: { en: 'Waiting for a reply', 'zh-Hans': '等待回复', 'zh-Hant': '等待回覆', ja: '返信待ち', ko: '답장 대기 중' },
   teams_task_waiting_approval: { en: 'Waiting for approval', 'zh-Hans': '等待批准', 'zh-Hant': '等待核准', ja: '承認待ち', ko: '승인 대기 중' },
+  teams_task_waiting_bot_fmt: { en: 'Waiting for %1$s', 'zh-Hans': '等待 %1$s 回复', 'zh-Hant': '等待 %1$s 回覆', ja: '%1$s の返信待ち', ko: '%1$s의 답장 대기 중' },
   teams_task_waiting_member_fmt: { en: 'Waiting for %1$s · expires %2$s', 'zh-Hans': '等待 %1$s 回复 · %2$s过期', 'zh-Hant': '等待 %1$s 回覆 · %2$s過期', ja: '%1$s の返信待ち · %2$sに期限切れ', ko: '%1$s 님의 답장 대기 중 · %2$s 만료' },
   teams_task_waiting_you_fmt: { en: 'Waiting for you · expires %1$s', 'zh-Hans': '等待你回复 · %1$s过期', 'zh-Hant': '等待你回覆 · %1$s過期', ja: 'あなたの返信待ち · %1$sに期限切れ', ko: '내 답장 대기 중 · %1$s 만료' },
   teams_team_details: { en: 'Team details', 'zh-Hans': '团队详情', 'zh-Hant': '團隊詳情', ja: 'チームの詳細', ko: '팀 세부정보' },
@@ -1513,6 +1526,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   teams_triage_approval_superseded: { en: 'Dropped for a newer message', 'zh-Hans': '因新消息而丢弃', 'zh-Hant': '因新訊息而捨棄', ja: '新しいメッセージのため破棄', ko: '새 메시지로 인해 폐기됨' },
   teams_triage_approval_timeout: { en: 'Not approved in time', 'zh-Hans': '超时未批准', 'zh-Hant': '逾時未核准', ja: '時間内に承認されず', ko: '시간 내에 승인되지 않음' },
   teams_triage_chat_untitled: { en: 'Chat', 'zh-Hans': '会话', 'zh-Hant': '對話', ja: 'チャット', ko: '채팅' },
+  teams_triage_delegated_by_fmt: { en: 'Delegated by %1$s', 'zh-Hans': '由 %1$s 委托', 'zh-Hant': '由 %1$s 委派', ja: '%1$s からの委任', ko: '위임한 Bot: %1$s' },
   teams_triage_empty: { en: 'Nothing yet. A line appears here for every message the Bot judges.', 'zh-Hans': '还没有记录。Bot 每判断一条消息，这里就会出现一行。', 'zh-Hant': '還沒有紀錄。Bot 每判斷一則訊息，這裡就會出現一行。', ja: 'まだ記録はありません。Bot が判断したメッセージごとに、ここに 1 行表示されます。', ko: '아직 기록이 없습니다. Bot이 메시지를 판단할 때마다 여기에 한 줄이 나타납니다.' },
   teams_triage_intro: { en: 'What the Bot decided about messages nobody asked it about, newest first. Only the decision and the reason are kept, never what the model said.', 'zh-Hans': 'Bot 对没有人点名的消息所做的决定，最新的在前。只保留决定和原因，不保留模型说的内容。', 'zh-Hant': 'Bot 對沒有人點名的訊息所做的決定，最新的在前。只保留決定和原因，不保留模型說的內容。', ja: '誰にも呼ばれていないメッセージに対する Bot の判断を新しい順に表示します。保存されるのは判断とその理由だけで、モデルの発言は保存されません。', ko: '아무도 요청하지 않은 메시지에 대한 Bot의 판단을 최신순으로 표시합니다. 판단과 이유만 보관되며 모델이 한 말은 보관되지 않습니다.' },
   teams_triage_loading: { en: 'Reading the log…', 'zh-Hans': '正在读取记录…', 'zh-Hant': '正在讀取紀錄…', ja: '記録を読み込み中…', ko: '기록 불러오는 중…' },

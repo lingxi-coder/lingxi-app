@@ -382,7 +382,7 @@ struct TeamDetailsPage: View {
             ForEach(bots) { bot in
                 let existing = workspace.uid.flatMap { TeamsListLogic.findBotDm(model?.cache?.conversations ?? [], uid: $0, sharedBotId: bot.sharedBotId, bots: bots) }
                 TeamBotCardView(
-                    bot: bot, ownerName: userName(bot.maintainer.uid), isOwner: bot.maintainer == TeamMemberRef(uid: workspace.uid ?? "", generation: team.generation),
+                    bot: bot, cards: bots, ownerName: userName(bot.maintainer.uid), isOwner: bot.maintainer == TeamMemberRef(uid: workspace.uid ?? "", generation: team.generation),
                     busy: workspace.messageBusy || (offline && existing == nil),
                     onMessage: {
                         Task { if let id = await workspace.openBotDM(bot) { onOpenConversation(id) } }

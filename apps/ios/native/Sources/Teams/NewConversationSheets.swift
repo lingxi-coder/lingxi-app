@@ -367,7 +367,7 @@ struct NewConversationSheet: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            TeamBotMemberInfo(bot: bot, unverified: model?.botsUnverified == true)
+            TeamBotMemberInfo(bot: bot, cards: model?.bots ?? [], unverified: model?.botsUnverified == true)
             TeamBotExamplesHint(bot: bot)
             ForEach(bot.memberExamples, id: \.self) { example in
                 Button {

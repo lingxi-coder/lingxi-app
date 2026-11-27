@@ -17,11 +17,11 @@ import {
 import { Field, problemText } from '../src/renderer/components/BotFields';
 import {
   BotAutoReplyField, BotAutoReplyTab, BotReplyQuietHours, BotReplyThresholds, BotTriageLog, approvalText, formatLogTime, triageActionText, triageApprovalText,
-  triageOutcomeText, triageReasonText,
+  triageDelegatedText, triageOutcomeText, triageReasonText,
 } from '../src/renderer/components/BotAutoReplyField';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
-import { APPROVAL_OUTCOMES, type TaskState, type TriageLogItem, type TriageLogPage, type TriageLogRequest, type TriageTarget } from '../../../packages/teams/execution';
+import { APPROVAL_OUTCOMES, type TaskDelegation, type TaskState, type TriageLogItem, type TriageLogPage, type TriageLogRequest, type TriageTarget } from '../../../packages/teams/execution';
 import { pinEnglish } from './bot-ui-helpers';
 
 (globalThis as { React?: typeof React }).React = React;
@@ -633,6 +633,29 @@ test('a reply that waits for its maintainer is a row of its own, and a reply tha
   assert.match(text(cells[3]!), / · Not approved in time$/);
   assert.match(text(cells[4]!), / · Dropped for a newer message$/);
   assert.ok(!/ · (Approved|Declined|Not approved|Dropped)/.test(text(cells[5]!)), 'a reply that was not held has no such line');
+  assert.ok(!/assistant/i.test(html));
+});
+
+test('a task another Bot asked for says which Bot, after what became of it; a message a person sent, and a delegation this version cannot read, say nothing', () => {
+  const delegation: TaskDelegation = {
+    delegationId: 'delegation_1', rootTaskId: 'task_root', parentTaskId: 'task_root', parentBotId: 'sharedbot_planner', depth: 1, expectReply: true,
+    chain: [{ sharedBotId: 'sharedbot_planner', name: 'Planner' }, { sharedBotId: 'sharedbot_a', name: 'Scribe' }],
+  };
+  assert.equal(triageDelegatedText(delegation), 'Delegated by Planner');
+  assert.equal(triageDelegatedText(undefined), '');
+  assert.equal(triageDelegatedText({ ...delegation, chain: [{ sharedBotId: 'sharedbot_planner', name: 'sharedbot_planner' }, delegation.chain[1]!] }), 'Delegated by Bot', 'a Bot named by its id is the Bot');
+  assert.equal(triageDelegatedText({ ...delegation, chain: 'Planner → Scribe' } as never), '', 'a delegation it cannot read');
+  const rows = [
+    item('d1', { state: 'completed', delegation, triage: { action: 'run', source: 'rule', reason: 'addressed', at: 1_700_000_001_000 } }),
+    item('d2', { state: 'declined', delegation, round: { outcome: 'lost', tier: 'run' } }),
+    item('d3', { state: 'completed' }),
+  ];
+  const html = render(React.createElement(BotTriageLog, { state: logState({ sections: [{ target: TRIP, items: rows, nextCursor: undefined, status: 'ready', error: undefined }] }), onRefresh: noop, onMore: noop }));
+  const cells = html.split('<li class="bots-row bots-triage-row">').slice(1);
+  const text = (cell: string) => cell.match(/<span class="bots-row-text">(.*?)<\/span>/)![1]!.replace(/<[^>]+>/g, '');
+  assert.equal(cells.length, 3);
+  assert.match(text(cells[0]!), / · Delegated by Planner$/); assert.match(text(cells[1]!), / · Another Bot was chosen · Delegated by Planner$/);
+  assert.ok(!text(cells[2]!).includes('Delegated'), 'a message a person sent');
   assert.ok(!/assistant/i.test(html));
 });
 

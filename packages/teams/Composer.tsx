@@ -314,7 +314,7 @@ export function Composer({ workspace, snapshot, conversation, label, locale, ren
   if (lock) return <div className="tw-composer tw-composer-locked"><p className="tw-readonly" role="status">{lock}</p>
     {moved ? <button type="button" disabled={snapshot.messageBusy} onClick={() => void workspace.openBotDm(moved)}>{t('tw_composer_new_chat')}</button> : null}</div>;
   return <form className="tw-composer" onSubmit={event => { event.preventDefault(); void send(); }} onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); }} onDrop={drop}>
-    {contextBots.map(bot => <div key={bot.sharedBotId}>{!dmBot ? <b>{bot.name}</b> : null}<BotMemberDetails bot={bot} locale={locale} conversation={conversation} busy={snapshot.messageBusy || !!editing || !!answering} onExample={dmBot ? example => workspace.fillExample(conversation.id, example) : undefined} /></div>)}
+    {contextBots.map(bot => <div key={bot.sharedBotId}>{!dmBot ? <b>{bot.name}</b> : null}<BotMemberDetails bot={bot} bots={snapshot.bots} locale={locale} conversation={conversation} busy={snapshot.messageBusy || !!editing || !!answering} onExample={dmBot ? example => workspace.fillExample(conversation.id, example) : undefined} /></div>)}
     <ComposerSurface className="tw-compose-box">
       {editing || reply || answering || targets.length > 0 || files.length > 0 || refused.length > 0 ? <div className="tw-compose-context">
         {editing ? <div className="tw-context"><Icon name="edit" /><span>{t('teams_editing_message')}</span></div> : null}

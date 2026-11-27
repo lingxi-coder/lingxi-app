@@ -73,7 +73,7 @@ struct FriendBotsView: View {
                 ForEach(bots) { bot in
                     let existing = workspace.uid.flatMap { TeamsListLogic.findBotDm(model?.cache?.conversations ?? [], uid: $0, sharedBotId: bot.sharedBotId) }
                     TeamBotCardView(
-                        bot: bot, ownerName: name(of: bot.maintainer.uid, in: workspace),
+                        bot: bot, cards: bots, ownerName: name(of: bot.maintainer.uid, in: workspace),
                         isOwner: bot.maintainer == TeamMemberRef(uid: workspace.uid ?? "", generation: chat.generation),
                         busy: workspace.messageBusy || (offline && existing == nil),
                         showsAudience: false,

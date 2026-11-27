@@ -285,7 +285,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.botsSection(
             item { Text(stringResource(R.string.teams_bots_share_hint), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             items(messaging.bots, key = { "bot-${it.sharedBotId}" }) { bot ->
                 TeamBotCardView(
-                    bot, detail?.members?.firstOrNull { it.uid == bot.maintainer.uid }?.displayName ?: bot.maintainer.uid, uid, messaging.cache?.generation ?: 0, !messaging.offline,
+                    bot, messaging.bots, detail?.members?.firstOrNull { it.uid == bot.maintainer.uid }?.displayName ?: bot.maintainer.uid, uid, messaging.cache?.generation ?: 0, !messaging.offline,
                     onMessage = { onMessageBot(bot.sharedBotId) }, onStopSharing = { workspace.messagingModel.pause(bot) },
                     onExample = { onBotExample(bot.sharedBotId, it) },
                     onList = if (TeamSharedListRules.canOpen(bot, uid, messaging.cache?.generation ?: 0)) ({ onOpenList(bot) }) else null,

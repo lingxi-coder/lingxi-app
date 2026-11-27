@@ -43,6 +43,11 @@ internal object TeamBotEntry {
             .filter { it.isNotBlank() && TeamsComposeLogic.canSendText(it) }.distinct().take(3)
     }.orEmpty()
 
+    /** The Bot ids an array of a card lists, each once; nothing for what is no array of text. */
+    fun idList(value: JSONObject, key: String): List<String> = value.optJSONArray(key)?.let { array ->
+        (0 until array.length()).mapNotNull { (array.opt(it) as? String)?.takeIf(String::isNotEmpty) }.distinct()
+    }.orEmpty()
+
     /** These cards were already filtered for visibility by the server; listing them never grants invocation permission. */
     fun memberDirectory(bots: List<TeamBotCard>): List<TeamBotCard> = bots.filter { it.state in setOf("published", "paused") }
 
@@ -121,6 +126,22 @@ internal object TeamBotEntry {
             TeamBotItem(R.string.teams_bot_wait_resume, supported(bot.capabilities?.durableWait)),
             TeamBotItem(R.string.teams_bot_write_ops, supported(bot.capabilities?.writeOperations)),
         )
+    }
+
+    /**
+     * What a published Bot takes from other Bots and whom it may ask (Bot v3 B8): "Accepts delegation from: Planner, Travel · May delegate to: Travel". Nothing for a Bot that is not published, and no
+     * "May delegate to" for a Bot that may ask none. The limit its maintainer set is not shown: a member never reads the limits that were configured.
+     */
+    fun delegation(bot: TeamBotCard, cards: List<TeamBotCard>): List<TeamBotItem> {
+        if (bot.state != "published") return emptyList()
+        val accepts = when (val kind = TeamDelegations.accepts(bot, cards)) {
+            TeamDelegations.Accepts.Nobody -> TeamBotValue.Words(R.string.teams_bot_accepts_none)
+            TeamDelegations.Accepts.TeamBots -> TeamBotValue.Words(R.string.teams_bot_accepts_team)
+            is TeamDelegations.Accepts.Listed -> TeamBotValue.Figure(kind.names.joinToString(", "))
+        }
+        val asks = TeamDelegations.delegatesTo(bot, cards)
+        return listOf(TeamBotItem(R.string.teams_bot_accepts_delegation, accepts)) +
+            if (asks.isEmpty()) emptyList<TeamBotItem>() else listOf(TeamBotItem(R.string.teams_bot_delegates_to, TeamBotValue.Figure(asks.joinToString(", "))))
     }
 
     /** The member's own requests left today, or Unknown when the service has not said. */

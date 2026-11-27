@@ -11,7 +11,7 @@ import { ipcErrorMessage } from './botForm';
 import { ObservableState } from './observableState';
 
 // What a judged message is called, and the percent a probability is shown as, are the Teams views' too: one definition of each, in packages/teams.
-export { TRIAGE_LOG_PAGE, triageOutcome, triagePercent, type TriageOutcome } from '../../../../../packages/teams/triage-log';
+export { delegatedBy, readTaskDelegation, TRIAGE_LOG_PAGE, triageOutcome, triagePercent, type TriageOutcome } from '../../../../../packages/teams/triage-log';
 
 /** Where the page learns what the Bot decided. */
 export interface TriageLogSources {

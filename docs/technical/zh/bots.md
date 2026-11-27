@@ -19,6 +19,20 @@
 - [发布给团队](teams.md#share-bot)
 - [打开 Bot 服务](https://lingxios.net/services)
 
+<a id="delegation"></a>
+
+## 让 Bot 互相请求帮忙
+
+只有双方都允许，Bot 才能请求同一团队里的另一个 Bot。设置由维护者在发布这些 Bot 的 Mac 上完成。请求如何传递、成员能看到什么、谁可以取消，见「团队、群聊与私信」。
+
+1. 按「把 Bot 分享给团队」发布这个 Bot。在发布设置里找到「Bot 之间的请求」。分享给单个好友的 Bot 和托管的 Bot 服务没有这一项。
+2. 想让这个 Bot 接受别的 Bot 的请求，选择接受谁的请求：不接受（默认）、团队中任何 Bot，或只接受你勾选的 Bot（至少选一个）。
+3. 想让这个 Bot 去请求别的 Bot，勾选它可以请求的 Bot，并设置每个 UTC 日最多发出多少次请求。被请求的 Bot 也必须接受它，所以两边都要设置。
+4. 核对摘要并确认。再次发布 Bot 时，表单会从它当前已发布的设置开始。成员可以在 Web、桌面端、iOS 和 Android 的 Bot 目录与 Bot 详情里查看结果，但不能修改。
+
+- [让 Bot 请另一个 Bot 帮忙](teams.md#bot-delegation)
+- [把 Bot 分享给团队](teams.md#share-bot)
+
 <a id="no-reply"></a>
 
 ## Bot 不回消息时
@@ -27,8 +41,11 @@
 
 在群聊或频道里，回复也可能因为下面的原因来得晚。Bot 的 Mac 离线时，消息照常发出，任务卡会写明它上线后会回复，超过一天则过期。只 @ 了成员的消息不会找到 Bot，除非本对话开启了「让 Bot 也判断只 @ 了成员的消息」；编辑消息也不会让 Bot 回复，请另发一条消息。
 
+任务卡上显示「等待 Travel 回复」，表示这个 Bot 请求了另一个 Bot，会在对方回复后继续，最多等十分钟。想知道对方是在处理还是它的 Mac 已关机，请看对方 Bot 自己的任务卡。
+
 - [自主回复设置](teams.md#auto-reply)
 - [哪些消息会让 Bot 回复](teams.md#bot-mentions)
+- [让 Bot 请另一个 Bot 帮忙](teams.md#bot-delegation)
 - [检查远控连接](remote-control.md#direct)
 
 ## 源码与文档基线

@@ -2843,6 +2843,8 @@
     <string name="teams_task_cancelling">Cancelling…</string>
     <string name="teams_task_waiting_you_fmt">Waiting for you · expires %1$s</string>
     <string name="teams_task_waiting_member_fmt">Waiting for %1$s · expires %2$s</string>
+    <string name="teams_task_waiting_bot_fmt">Waiting for %1$s</string>
+    <string name="teams_task_delegation_chain_fmt">Delegated: %1$s</string>
     <string name="teams_task_waiting_approval">Waiting for approval</string>
     <string name="teams_approval_tag">Approval</string>
     <string name="teams_approval_hint">Nothing is changed unless you approve. If the list has changed since the Bot asked, the change is not saved.</string>
@@ -3235,6 +3237,10 @@
     <string name="teams_bot_not_supported">Not supported</string>
     <string name="teams_bot_wait_resume">Wait and resume</string>
     <string name="teams_bot_write_ops">Write operations</string>
+    <string name="teams_bot_accepts_delegation">Accepts delegation from</string>
+    <string name="teams_bot_accepts_none">No Bots</string>
+    <string name="teams_bot_accepts_team">Any Bot of the Team</string>
+    <string name="teams_bot_delegates_to">May delegate to</string>
     <string name="teams_bot_remaining_today">Your remaining requests today</string>
     <string name="teams_bot_resets">Resets</string>
     <string name="teams_bot_examples_hint">Examples add to your draft. Review and send when ready.</string>
@@ -3569,6 +3575,7 @@
     <string name="teams_triage_round_abstained">Did not take part</string>
     <string name="teams_triage_round_promoted">Took over for another Bot</string>
     <string name="teams_triage_round_superseded">Ended by a newer message</string>
+    <string name="teams_triage_delegated_by_fmt">Delegated by %1$s</string>
     <string name="teams_triage_probability_fmt">%1$d%% likely</string>
     <string name="teams_held_title">Waiting for your approval</string>
     <string name="teams_held_expires_fmt">Dropped %1$s if not approved</string>

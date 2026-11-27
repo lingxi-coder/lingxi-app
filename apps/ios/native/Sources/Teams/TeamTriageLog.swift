@@ -45,6 +45,7 @@ struct TeamTriageRound: Equatable, Sendable {
 /// One message the Bot's host judged, as its maintainer reads the log. `state` is where the task stands now: it settles after the verdict.
 /// `approval` is what became of a reply held for approval: `held`, `approved`, `rejected`, `timeout` or `superseded`; a code this version does not know is left out.
 /// `round` is what became of the Bot among several that could answer; a message that was no such round, or an outcome this version does not know, has none.
+/// `delegation` is there when another Bot asked for the task (Bot v3 B8): the message was no one's judgement, a Bot passed it on.
 struct TeamTriageItem: Decodable, Equatable, Identifiable, Sendable {
     let taskId: String
     let conversationId: String
@@ -55,13 +56,14 @@ struct TeamTriageItem: Decodable, Equatable, Identifiable, Sendable {
     var conversationTitle: String? = nil
     var approval: String? = nil
     var round: TeamTriageRound? = nil
+    var delegation: TeamTaskDelegation? = nil
     var id: String { taskId }
 
-    init(taskId: String, conversationId: String, messageId: String, createdAt: Double, triage: TeamTriageVerdict, state: String, conversationTitle: String? = nil, approval: String? = nil, round: TeamTriageRound? = nil) {
+    init(taskId: String, conversationId: String, messageId: String, createdAt: Double, triage: TeamTriageVerdict, state: String, conversationTitle: String? = nil, approval: String? = nil, round: TeamTriageRound? = nil, delegation: TeamTaskDelegation? = nil) {
         self.taskId = taskId; self.conversationId = conversationId; self.messageId = messageId; self.createdAt = createdAt
-        self.triage = triage; self.state = state; self.conversationTitle = conversationTitle; self.approval = approval; self.round = round
+        self.triage = triage; self.state = state; self.conversationTitle = conversationTitle; self.approval = approval; self.round = round; self.delegation = delegation
     }
-    private enum CodingKeys: String, CodingKey { case taskId, conversationId, messageId, createdAt, triage, state, conversationTitle, approval, round }
+    private enum CodingKeys: String, CodingKey { case taskId, conversationId, messageId, createdAt, triage, state, conversationTitle, approval, round, delegation }
     private enum RoundKeys: String, CodingKey { case outcome, tier }
     /// A row is never half read: what this version needs of it is there and known, or the row is not one.
     init(from decoder: Decoder) throws {
@@ -79,7 +81,9 @@ struct TeamTriageItem: Decodable, Equatable, Identifiable, Sendable {
             guard let outcome = try? inner.decode(String.self, forKey: .outcome), TeamTriageRules.roundOutcomes.contains(outcome) else { return nil }
             return TeamTriageRound(outcome: outcome, tier: (try? inner.decodeIfPresent(String.self, forKey: .tier)).flatMap { TeamTriageRules.bidTiers.contains($0) ? $0 : nil })
         }
-        self.init(taskId: taskId, conversationId: conversationId, messageId: messageId, createdAt: createdAt, triage: triage, state: state, conversationTitle: title, approval: approval, round: round)
+        // A delegation is the Bot that asked and the Bots from the one the person asked: what cannot be read as that is none, and never a reason to drop the row.
+        let delegation = (try? values.decodeIfPresent(TeamTaskDelegation.self, forKey: .delegation)).flatMap { $0.parentBotId.isEmpty || $0.chain.isEmpty ? nil : $0 }
+        self.init(taskId: taskId, conversationId: conversationId, messageId: messageId, createdAt: createdAt, triage: triage, state: state, conversationTitle: title, approval: approval, round: round, delegation: delegation)
     }
 }
 
@@ -184,7 +188,7 @@ enum TeamTriageRules {
         "teams_triage_state_replied", "teams_triage_state_silent", "teams_triage_state_failed", "teams_triage_state_waiting", "teams_task_waiting_approval",
         "teams_approval_reply_approved", "teams_approval_reply_declined", "teams_triage_approval_timeout", "teams_triage_approval_superseded",
         "teams_triage_round_won", "teams_triage_round_lost", "teams_triage_round_abstained", "teams_triage_round_promoted", "teams_triage_round_superseded",
-        "teams_triage_probability %lld", "teams_list_refresh", "common_retry", "common_close",
+        "teams_triage_delegated_by %@", "teams_triage_probability %lld", "teams_list_refresh", "common_retry", "common_close",
     ]
 
     // MARK: Whose log

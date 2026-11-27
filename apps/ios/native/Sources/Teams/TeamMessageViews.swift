@@ -435,6 +435,7 @@ struct TeamMessageCell: View {
                         .padding(.top, 4)
                 } else {
                     TeamTaskCard(task: task, botName: bot?.name ?? context.strings.bot, viewer: context.viewer, maintainer: bot?.maintainer,
+                                 cards: context.bots, tasks: context.model.tasks,
                                  recipientName: task.wait.map { context.userName($0.recipient.uid) } ?? "",
                                  onReply: context.answerableWait(of: message) == nil ? nil : onReply.map { reply in { reply(message) } },
                                  reason: context.model.triageReasons[taskId])

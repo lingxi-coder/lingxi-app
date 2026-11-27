@@ -85,7 +85,26 @@ Bots are ranked by how sure they are. A Bot that was spoken to comes first, then
 - Quiet hours and the cooldown set for a Bot apply only when it judges for itself, never to a message that asked it.
 - The Bot’s Desktop is offline: in a group or channel the message still posts, and the chat shows that the Bot is offline and will reply when it’s back online. The Bot answers once its Desktop returns, for up to a day, and after that the task card shows it expired. A Bot DM, or a hosted Bot service, does not take a message while its host is offline.
 - Editing a message does not notify a Bot, because an edit never starts a Bot task. To ask a Bot, send a new message. Recalling a message ends its open round and cancels the Bot requests still waiting to run.
-- A message written by a Bot never asks another Bot and never opens a round.
+- Text a Bot writes never asks another Bot and never opens a round, and an @ in it triggers nothing. A Bot asks another Bot only through the delegation described next.
+
+<a id="bot-delegation"></a>
+
+## Let a Bot ask another Bot for help
+
+In a group or channel, a Bot that is working on your request can hand part of it to another Bot that takes part in the same chat. It does this as a step of its own work, not because its text contains an @. It either waits for the other Bot’s answer and goes on with it, or lets the other Bot answer in the chat itself.
+
+Both Bots have to agree. The Bot that is asked publishes whom it takes requests from: no Bot (the default), any Bot of the team, or only the Bots its maintainer lists. The Bot that asks publishes the Bots it may ask, with a daily limit. This is set only on the publishing Mac, as described under Personal and shared Bots. Everyone else reads it, without changing it, in the Bot directory and in a Bot’s details as “Accepts delegation from” and “May delegate to”.
+
+Your own rights apply. The other Bot works for you, the person who sent the message: you must be allowed to use it, exactly as if you had written to it yourself, and it uses only what has been shared with it, never what the first Bot may use.
+
+- How far it goes: at most two hops from your message (you → Planner → Travel → Chef, and Chef cannot ask anyone), and never a Bot that is already on the chain.
+- Waiting: the first Bot’s task card says “Waiting for Travel” and nobody has to answer anything. The other Bot’s task card shows the chain, “Delegated: Planner → Travel”. The first Bot waits up to ten minutes. After that it goes on without the answer and says so, and the other Bot’s reply is still posted in the chat when it comes.
+- Replying directly: when the first Bot does not need the answer, it only sends the request and does not wait. The other Bot posts its reply in the chat itself.
+- If the other Bot’s Desktop is off, its request is kept for up to a day and its task card says that Bot “is offline and will reply when it’s back online”. The first Bot still stops waiting after ten minutes.
+- Cancel: you, the maintainer of the Bot that was asked and the maintainer of the Bot that asked can cancel the other Bot’s task from its task card. Cancelling also stops what was started under it, and a Bot that was waiting for it goes on, told that the request was cancelled. Cancelling the first Bot’s waiting task cancels its request to the other Bot as well.
+- The auto-reply log of a Bot marks a request that came from another Bot with “Delegated by Planner”.
+
+- [Publish Bots that may ask each other](bots.md#delegation)
 
 <a id="share-bot"></a>
 

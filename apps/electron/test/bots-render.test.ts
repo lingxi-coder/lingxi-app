@@ -106,9 +106,11 @@ test('each Bot shows its name, description, whether it is working, and when it w
 
 test('the form that makes a Bot asks for each part, and does not scold an empty name before it is tried', () => {
   const html = render(React.createElement(BotCreate, { api: {} as BotsApi, models, pickFolder: async () => null, onCancel: noop, onCreated: noop }));
-  for (const label of ['Name', 'Description', 'Model', 'Persona', 'Default permission mode', 'Folders']) assert.match(html, new RegExp(`>${label}<`), label);
+  for (const label of ['Name', 'Description', 'Model', 'Persona', 'Default permission mode', 'Folders']) {
+    assert.match(html, new RegExp(`>${label}<`), label);
+  }
   assert.match(html, />Create Bot</);
-  assert.match(html, /← All Bots/);
+  assert.match(html, /aria-label="All Bots"/);
   assert.ok(!html.includes('Give the Bot a name.'));
   assert.ok(!html.includes('role="alert"'));
 });
@@ -377,7 +379,7 @@ test('a Bot opens to its general settings, with the routines and tasks listed fi
   assert.match(html, /<div class="bots-detail-identity"><span class="bots-avatar" aria-hidden="true"><img [^>]*data-agent-avatar="\d+"[^>]*\/><\/span><div class="bots-detail-title"><h1>Alpha<\/h1>/, 'its avatar stands beside the name');
   assert.deepEqual(avatarsOf(html), [agentAvatarIndex('a')], 'the one the list shows for it');
   assert.match(html, /First helper/);
-  for (const tab of ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions']) assert.match(html, new RegExp(`<button type="button"[^>]*>${tab}</button>`), tab);
+  for (const tab of ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions']) assert.match(html, new RegExp(`</span>${tab}</button>`), tab);
   assert.ok(html.indexOf('>Routines</button>') < html.indexOf('>Tasks</button>') && html.indexOf('>Tasks</button>') < html.indexOf('>General</button>'), 'the routines and the tasks come before the settings');
   assert.ok(!html.includes('aria-current'), 'the sections are tabs, not links to pages');
   assert.ok(!html.includes('>Chats</button>'), 'the chats of a Bot are listed under it in the sidebar, not here');
@@ -390,8 +392,9 @@ test('a Bot opens to its general settings, with the routines and tasks listed fi
 test('the sections of a Bot are a tab list: one tab selected and in the tab order, each naming the panel it controls, the panel naming the selected tab', async () => {
   const bots = await pageBots({ kind: 'detail', botId: 'a' }, [bot({ botId: 'a', name: 'Alpha' })]);
   const html = render(React.createElement(Bots, { visible: true, bots, api: {} as BotsApi, bridge: bridgeStub(), onOpenChat: noop, onNewRoutine: noop, onOpenRoutine: noop }));
-  assert.match(html, /<div class="bots-tabs" role="tablist" aria-label="Bot settings">/);
-  const tabs = [...html.matchAll(/<button type="button" role="tab" id="([^"]+)" aria-selected="(true|false)" aria-controls="([^"]+)" tabindex="(-?\d+)">([^<]+)<\/button>/g)]
+  const list = /<div class="bots-tabs" role="tablist" aria-labelledby="([^"]+)" aria-orientation="horizontal">/.exec(html);
+  assert.ok(list && html.includes(`id="${list[1]}">Bot settings</p>`));
+  const tabs = [...html.matchAll(/<button type="button" role="tab" id="([^"]+)" aria-selected="(true|false)" aria-controls="([^"]+)" tabindex="(-?\d+)"[^>]*><span class="bots-tab-icon" aria-hidden="true">.*?<\/span>([^<]+)<\/button>/g)]
     .map((match) => ({ id: match[1]!, selected: match[2], controls: match[3]!, tabindex: match[4], label: match[5] }));
   assert.deepEqual(tabs.map((tab) => tab.label), ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions', 'Package &amp; Market']);
   assert.deepEqual(tabs.filter((tab) => tab.selected === 'true').map((tab) => tab.label), ['General'], 'one is selected');
@@ -527,7 +530,10 @@ function sidebarBridge(overrides: Record<string, unknown> = {}) {
 
 const railOf = (html: string) => /<nav[^>]*desktop-nav-rail[\s\S]*?<\/nav>/.exec(html)?.[0] ?? '';
 const buttonLabels = (html: string) => [...html.matchAll(/<button[^>]*aria-label="([^"]+)"/g)].map((match) => match[1]);
-const markedLabels = (html: string) => [...railOf(html).matchAll(/data-active="true"(?: aria-current="page")? aria-label="([^"]+)"/g)].map((match) => match[1]);
+const markedLabels = (html: string) => buttonLabels([...railOf(html).matchAll(/<button\b[^>]*>/g)]
+  .map(([button]) => button)
+  .filter(button => button.includes('data-active="true"') || (button.includes('desktop-rail-workspace') && button.includes('aria-current="page"')))
+  .join(''));
 /** The rail buttons that a screen reader is told are the current page, which are the ones that are drawn marked. */
 const currentLabels = (html: string) => [...railOf(html).matchAll(/<button[^>]*aria-current="page"[^>]*aria-label="([^"]+)"/g)].map((match) => match[1]);
 
@@ -544,33 +550,33 @@ test('the sidebar offers Bots only where the host said they can be used, and onl
   assert.ok(!offered.includes('<span>Apps</span>') && !offered.includes('<span>Scheduled</span>'), 'Home does not repeat Apps or Scheduled from the rail');
 });
 
-test('the rail has the modes Home, Bots, Teams, Friends and Apps, then a divider, then the pages', () => {
+test('the rail has Messages, Projects, Bots, Teams, Friends and Apps, then a divider, then the pages', () => {
   const rail = railOf(render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop, botsAvailable: true })));
   const divider = rail.indexOf('desktop-rail-divider');
   assert.ok(divider > 0);
-  assert.deepEqual(buttonLabels(rail.slice(0, divider)), ['Home', 'Bots', 'Teams', 'Friends', 'Apps']);
+  assert.deepEqual(buttonLabels(rail.slice(0, divider)), ['Messages', 'Projects', 'Bots', 'Teams', 'Friends', 'Apps']);
   assert.deepEqual(buttonLabels(rail.slice(divider)), ['Scheduled tasks', 'Review changes', 'Settings']);
 
   const noBots = railOf(render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop })));
-  assert.deepEqual(buttonLabels(noBots.slice(0, noBots.indexOf('desktop-rail-divider'))), ['Home', 'Teams', 'Friends', 'Apps']);
+  assert.deepEqual(buttonLabels(noBots.slice(0, noBots.indexOf('desktop-rail-divider'))), ['Messages', 'Projects', 'Teams', 'Friends', 'Apps']);
 });
 
-test('the sidebar mode marks Home, Bots, Teams or Friends, Home when none was given, Apps marks itself beside the mode, and Cron replaces the mark of the mode', () => {
+test('the rail marks the selected workspace or the scheduled tasks page', () => {
   const sidebar = (props: Record<string, unknown> = {}) => render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop, botsAvailable: true, ...props }));
-  assert.deepEqual(markedLabels(sidebar()), ['Home']);
-  assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'home' })), ['Home']);
+  assert.deepEqual(markedLabels(sidebar()), ['Messages']);
+  assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'home', homeView: 'projects' })), ['Projects']);
   assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'bots' })), ['Bots']);
   assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'teams' })), ['Teams']);
   assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'friends' })), ['Friends']);
 
   assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'bots', apps: true })), ['Bots', 'Apps']);
   assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'teams', scheduled: true })), ['Scheduled tasks'], 'Cron owns its sidebar, so the mode is not marked behind it');
-  assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'home', apps: true })), ['Home', 'Apps']);
+  assert.deepEqual(markedLabels(sidebar({ sidebarMode: 'home', apps: true })), ['Messages', 'Apps']);
 });
 
 test('the rail tells assistive technology which page it is on with aria-current, for exactly the buttons it draws marked', () => {
   const sidebar = (props: Record<string, unknown> = {}) => render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop, botsAvailable: true, ...props }));
-  for (const props of [{}, { sidebarMode: 'home' }, { sidebarMode: 'bots' }, { sidebarMode: 'teams' }, { sidebarMode: 'friends' }, { sidebarMode: 'bots', apps: true }, { sidebarMode: 'teams', scheduled: true }, { sidebarMode: 'friends', changes: true }, { scheduled: true }]) {
+  for (const props of [{}, { sidebarMode: 'home', homeView: 'projects' }, { sidebarMode: 'bots' }, { sidebarMode: 'teams' }, { sidebarMode: 'friends' }, { sidebarMode: 'bots', apps: true }, { sidebarMode: 'teams', scheduled: true }, { sidebarMode: 'friends', changes: true }, { scheduled: true }]) {
     const html = sidebar(props);
     assert.deepEqual(currentLabels(html), markedLabels(html), JSON.stringify(props));
   }
@@ -582,28 +588,35 @@ test('the rail tells assistive technology which page it is on with aria-current,
   assert.equal([...bots.matchAll(/aria-current="page"/g)].length, 1, 'one button of the rail is the current page');
 });
 
-test('the rail buttons of the modes ask for their mode, and Home still opens the chat for a sidebar with no one to keep the mode', () => {
+test('the rail selects the requested workspace and keeps the chat fallback for a standalone sidebar', () => {
   const source = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
-  for (const mode of ['home', 'bots', 'teams', 'friends']) assert.match(source, new RegExp(`onClick=\\{\\(\\) => selectMode\\('${mode}'\\)\\}`), mode);
+  for (const mode of ['bots', 'teams', 'friends']) assert.match(source, new RegExp(`onClick=\\{\\(\\) => selectMode\\('${mode}'\\)\\}`), mode);
+  for (const view of ['chats', 'projects']) assert.match(source, new RegExp(`onClick=\\{\\(\\) => selectHomeView\\('${view}'\\)\\}`), view);
+  assert.match(source, /if \(onHomeViewChange\) onHomeViewChange\(view\);\s+else selectMode\('home'\);/);
   assert.match(source, /if \(onSelectSidebarMode\) onSelectSidebarMode\(mode\);\s+else if \(mode === 'home'\) onOpenChat\?\.\(\);/);
 });
 
-test('outside Home the sidebar lists what the mode is for, in place of the projects and the actions that go with them', () => {
+test('the split sidebar mounts project actions when Projects is opened', () => {
   const seen: unknown[][] = [];
   const modePanel = (mode: string, search: string) => { seen.push([mode, search]); return React.createElement('div', { id: 'mode-panel' }, `panel for ${mode}`); };
-  const sidebar = (sidebarMode: string) => render(React.createElement(BetaSidebar, { bridge: sidebarBridge(), onOpenSettings: noop, botsAvailable: true, sidebarMode, modePanel } as never));
+  const sidebar = (sidebarMode: 'home' | 'bots' | 'teams' | 'friends', homeView: 'chats' | 'projects' = 'chats') => render(React.createElement(BetaSidebar, {
+    bridge: sidebarBridge(), onOpenSettings: noop, botsAvailable: true, sidebarMode, modePanel,
+    homePanel: React.createElement('div', { id: 'messages-panel' }), homeView, onHomeViewChange: noop,
+  }));
 
-  const home = sidebar('home');
-  assert.deepEqual(seen, [], 'Home keeps its own list');
-  assert.ok(!home.includes('mode-panel'));
-  assert.match(home, /sidebar-new-chat/);
-  assert.match(home, new RegExp(`aria-label="${tr('desktop_projects_sessions')}"`));
+  const messages = sidebar('home');
+  assert.match(messages, /id="messages-panel"/);
+  assert.doesNotMatch(messages, /mode-panel|sidebar-new-chat/);
+  const projects = sidebar('home', 'projects');
+  assert.deepEqual(seen, []);
+  assert.match(projects, /sidebar-new-chat/);
+  assert.match(projects, new RegExp(`aria-label="${tr('desktop_projects_sessions')}"`));
 
-  for (const mode of ['bots', 'teams', 'friends']) {
+  for (const mode of ['bots', 'teams', 'friends'] as const) {
     const html = sidebar(mode);
     assert.match(html, new RegExp(`<div id="mode-panel">panel for ${mode}</div>`));
-    assert.ok(!html.includes('sidebar-new-chat'), `${mode}: the actions of Home are not repeated`);
-    assert.ok(!html.includes(`aria-label="${tr('desktop_projects_sessions')}"`), `${mode}: nor its projects`);
+    assert.ok(!html.includes('sidebar-new-chat'), mode);
+    assert.ok(!html.includes(`aria-label="${tr('desktop_projects_sessions')}"`), mode);
   }
   assert.deepEqual(seen, [['bots', ''], ['teams', ''], ['friends', '']], 'told the mode, and what the search box holds');
 });

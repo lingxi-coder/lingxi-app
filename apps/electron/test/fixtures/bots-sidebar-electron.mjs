@@ -26,9 +26,8 @@ const rail = name => `.desktop-nav-rail [aria-label="${name}"]`;
 const sidebar = 'nav[aria-label="Bots"]';
 const botRow = name => `${sidebar} button[title="${name}"]`;
 const railButtons = attribute => run(`Array.from(document.querySelectorAll('.desktop-nav-rail button[${attribute}]')).map(button => button.getAttribute('aria-label'))`);
-// What the rail marks for the eye (data-active) is what it marks for assistive technology (aria-current), at every step that looks.
 const marked = async () => {
-  const active = await railButtons('data-active');
+  const active = await run(`Array.from(document.querySelectorAll('.desktop-nav-rail button[data-active=true], .desktop-nav-rail button.desktop-rail-workspace[aria-current=page]')).map(button => button.getAttribute('aria-label'))`);
   assert.deepEqual(await railButtons('aria-current="page"'), active, 'aria-current is on the buttons that are marked');
   return active;
 };
@@ -43,14 +42,14 @@ const rightClick = selector => run(`document.querySelector(${JSON.stringify(sele
 const menuItems = () => run(`Array.from(document.querySelectorAll('[role="menu"] [role="menuitem"]')).map(item => item.textContent.trim())`);
 const result = {};
 try {
-  // The rail has the modes, a divider, then the pages; Home is the mode the window opens in.
+  // The window opens to Projects.
   await win.loadURL(url);
   await wait(`document.querySelector('${rail('Bots')}')`);
   assert.deepEqual(await run(`Array.from(document.querySelectorAll('.desktop-nav-rail button')).map(button => button.getAttribute('aria-label'))`),
-    ['Home', 'Bots', 'Teams', 'Friends', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
+    ['Messages', 'Projects', 'Bots', 'Teams', 'Friends', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
   assert.equal(await run(`document.querySelector('.desktop-rail-divider').previousElementSibling.getAttribute('aria-label')`), 'Apps');
-  assert.deepEqual(await marked(), ['Home']);
-  assert.equal(await run(`Boolean(document.querySelector('.sidebar-new-chat'))`), true, 'Home lists the projects and has its own New chat');
+  assert.deepEqual(await marked(), ['Projects']);
+  assert.equal(await shown('.sidebar-new-chat'), true);
   assert.equal(await run(`Array.from(document.querySelectorAll('.desktop-sidebar .sidebar-primary-action')).some(button => /^(Teams|Bots)$/.test(button.textContent.trim()))`), false, 'and does not repeat the rail');
   result.railGroups = true;
 
@@ -132,15 +131,17 @@ try {
   assert.equal(await run(`Boolean(document.querySelector('[data-conversation-space], .desktop-sidebar-brand .sidebar-header-icon'))`), false);
   result.pageKeepsMode = true;
 
-  // The View menu: Home, Bots (which stays on a Bot's chat), the Bot's own page from the chat's title, and the sidebar's visibility.
+  // The View menu opens Projects and restores the previous project session.
   await menuAction('home');
   await wait(`!document.querySelector('${sidebar}') && document.querySelector('.sidebar-new-chat')`);
-  assert.deepEqual(await marked(), ['Home']);
+  assert.deepEqual(await marked(), ['Projects']);
+  assert.equal(await run(`window.lingxi.bootstrap().then(state => state.activeSession.sessionId)`), 'project-session');
   await menuAction('bots');
   await wait(`document.querySelector('${sidebar}')`);
   assert.deepEqual(await marked(), ['Bots']);
-  assert.equal(await shown('.bots-page'), false, 'a Bot\'s chat is on screen and stays there');
-  assert.equal(await run(`document.querySelector('${sidebar} [data-session-id="a-2"][aria-current="page"]') !== null`), true);
+  assert.equal(await shown('.bots-page'), true);
+  await click(`${sidebar} [data-session-id="a-2"]`);
+  await wait(`document.querySelector('${sidebar} [data-session-id="a-2"][aria-current="page"]')`);
   await menuAction('toggle-sidebar');
   await wait(`document.querySelector('.desktop-navigation')?.getAttribute('data-collapsed') === 'true'`);
   await menuAction('toggle-sidebar');
@@ -150,11 +151,13 @@ try {
   await click('[aria-label="Open Bot"]');
   await wait(`document.querySelector('.desktop-window-toolbar .bots-detail-header h1')?.textContent === 'Alpha'`);
   assert.deepEqual(await marked(), ['Bots']);
-  assert.deepEqual(await run(`Array.from(document.querySelectorAll('.bots-tabs button')).map(button => button.textContent)`),
-    ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions', 'Package & Market'], 'no Chats tab: the chats are in the sidebar');
+  assert.deepEqual(await run(`Array.from(document.querySelectorAll('.bots-tabs button')).map(button => button.textContent.trim())`),
+    ['Routines', 'Tasks', 'General', 'Persona', 'Memory', 'Skills', 'Folders', 'Permissions', 'Package & Market']);
   // The sections are a tablist: one tab in the tab order, the selected one, which the panel is labelled by; the arrow keys, Home and End move to a tab and select it.
   const tabs = '.bots-tabs[role="tablist"] [role="tab"]';
-  const selectedTab = () => run(`document.querySelector('${tabs}[aria-selected="true"]')?.textContent`);
+  const orientation = value => `document.querySelector('.bots-tabs')?.getAttribute('aria-orientation') === '${value}'`;
+  const selectedTab = () => run(`document.querySelector('${tabs}[aria-selected="true"]')?.textContent.trim()`);
+  await wait(orientation('vertical'));
   assert.equal(await run(`document.querySelectorAll('${tabs}').length`), 9);
   assert.equal(await selectedTab(), 'General');
   assert.equal(await run(`document.querySelectorAll('.bots-tabs button:not([role="tab"])').length`), 0, 'every button of the strip is a tab');
@@ -162,20 +165,59 @@ try {
   assert.equal(await run(`(() => { const tab = document.querySelector('${tabs}[aria-selected="true"]'); const panel = document.querySelector('[role="tabpanel"]'); return tab.getAttribute('aria-controls') === panel.id && panel.getAttribute('aria-labelledby') === tab.id; })()`), true, 'the tab and its panel name each other');
   assert.equal(await run(`document.querySelectorAll('.bots-tabs [aria-current]').length`), 0, 'selected is aria-selected here, not aria-current');
   await run(`document.querySelector('${tabs}[aria-selected="true"]').focus()`);
-  await press('ArrowRight');
+  await press('ArrowDown');
   await wait(`document.activeElement?.textContent === 'Persona' && document.activeElement.getAttribute('aria-selected') === 'true'`);
   assert.equal(await selectedTab(), 'Persona', 'moving to a tab selects it');
   assert.equal(await run(`document.querySelector('[role="tabpanel"]').getAttribute('aria-labelledby') === document.activeElement.id`), true);
   await press('End');
-  await wait(`document.activeElement?.textContent === 'Package & Market' && document.activeElement.getAttribute('aria-selected') === 'true'`);
-  await press('ArrowRight');
+  await wait(`document.activeElement?.textContent.trim() === 'Package & Market' && document.activeElement.getAttribute('aria-selected') === 'true'`);
+  await press('ArrowDown');
   await wait(`document.activeElement?.textContent === 'Routines' && document.activeElement.getAttribute('aria-selected') === 'true'`);
-  await press('ArrowLeft');
-  await wait(`document.activeElement?.textContent === 'Package & Market' && document.activeElement.getAttribute('aria-selected') === 'true'`);
+  await press('ArrowUp');
+  await wait(`document.activeElement?.textContent.trim() === 'Package & Market' && document.activeElement.getAttribute('aria-selected') === 'true'`);
   await press('Home');
   await wait(`document.activeElement?.textContent === 'Routines' && document.activeElement.getAttribute('aria-selected') === 'true'`);
   assert.deepEqual(await run(`Array.from(document.querySelectorAll('${tabs}')).filter(tab => tab.tabIndex === 0).map(tab => tab.textContent)`), ['Routines'], 'the tab in the tab order goes with the selection');
-  await press('ArrowDown'); assert.equal(await selectedTab(), 'Routines', 'the keys of a column are not the keys of a strip');
+  await press('ArrowRight');
+  assert.equal(await selectedTab(), 'Routines');
+  await press('End');
+  await wait(`Boolean(document.querySelector('.bots-market-skill-list input'))`);
+  assert.equal(await run(`(() => {
+    const option = document.querySelector('.bots-market-skill-list label');
+    const box = option.querySelector('input').getBoundingClientRect();
+    const label = option.querySelector('span').getBoundingClientRect();
+    return box.width < 24 && label.left > box.right && label.top < box.bottom && label.bottom > box.top;
+  })()`), true, 'the checkbox stays inline with the skill name');
+  assert.equal(await run(`getComputedStyle(document.querySelector('.bots-market-grid')).gridTemplateColumns.split(' ').length`), 2);
+  await click('.bots-market-skill-list label');
+  await run(`(() => {
+    const set = (name, value) => {
+      const field = document.querySelector('[name="' + name + '"]');
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(field), 'value').set.call(field, value);
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    set('license', 'MIT');
+    set('licenseText', 'Fixture license text');
+  })()`);
+  await run(`document.querySelector('.bots-market-form').requestSubmit()`);
+  await wait(`Boolean(document.querySelector('.bots-market-files details'))`);
+  await wait(`document.activeElement?.textContent === 'Review package contents'`);
+  assert.deepEqual((await calls()).find(call => call[0] === 'market' && call[1].action === 'prepare')[1].selection.skills, ['weekly-notes']);
+  const reviewActionsDisabled = () => run(`Array.from(document.querySelectorAll('.bots-market-footer .bots-market-actions button'), button => button.disabled)`);
+  assert.deepEqual(await reviewActionsDisabled(), [true, true]);
+  await click('.bots-market-confirm');
+  assert.deepEqual(await reviewActionsDisabled(), [false, false]);
+  await click('.bots-market-secondary');
+  await wait(`Boolean(document.querySelector('.bots-market-form'))`);
+  assert.equal(await run(`document.querySelector('input[name="skills"]').checked`), true, 'selection is kept when leaving review');
+  win.setSize(760, 850);
+  await wait(orientation('horizontal'));
+  assert.equal(await run(`getComputedStyle(document.querySelector('.bots-market-grid')).gridTemplateColumns.split(' ').length`), 1);
+  await run(`document.querySelector('${tabs}[aria-selected="true"]').focus()`);
+  await press('ArrowLeft');
+  await wait(`document.activeElement?.textContent === 'Permissions' && document.activeElement.getAttribute('aria-selected') === 'true'`);
+  win.setSize(1280, 850);
+  await wait(orientation('vertical'));
   await run(`Array.from(document.querySelectorAll('${tabs}')).find(tab => tab.textContent === 'General').click()`);
   await wait(`document.querySelector('${tabs}[aria-selected="true"]')?.textContent === 'General'`);
   result.botPageFromTitle = true;
@@ -232,10 +274,10 @@ try {
   assert.deepEqual(await run(`Array.from(document.querySelectorAll('${sidebar} button[aria-expanded]:not([aria-haspopup])')).map(button => button.title)`), ['Beta']);
   result.deleteAsksFirst = true;
 
-  // Home brings back the projects, and the mode that was chosen last is what is saved.
-  await click(rail('Home'));
+  // Projects restores project navigation and saves the mode.
+  await click(rail('Projects'));
   await wait(`!document.querySelector('${sidebar}') && document.querySelector('.sidebar-new-chat')`);
-  assert.deepEqual(await marked(), ['Home']);
+  assert.deepEqual(await marked(), ['Projects']);
   assert.deepEqual((await calls()).filter(call => call[0] === 'updateSettings').at(-1), ['updateSettings', { sidebar: { mode: 'home' } }]);
   result.homeAgain = true;
 
@@ -296,7 +338,7 @@ try {
   await askedAndKept('the Bot\'s new chat menu item', () => botMenuItem('Alpha', 'New chat'));
   await askedAndKept('another Bot', () => botMenuItem('Beta', 'Bot settings'));
   await askedAndKept('the New Bot button', () => click(`${sidebar} [aria-label="New Bot"]`));
-  await askedAndKept('the rail\'s Home', () => click(rail('Home')));
+  await askedAndKept('the rail\'s Projects', () => click(rail('Projects')));
   await askedAndKept('the rail\'s Teams', () => click(rail('Teams')));
   await askedAndKept('the View menu\'s Home', () => menuAction('home'));
   await askedAndKept('the View menu\'s Teams', () => menuAction('teams'));
@@ -318,7 +360,7 @@ try {
   await wait(`document.querySelector('.desktop-window-toolbar .bots-detail-header h1')?.textContent === 'Alpha' && ${nameIs('Alpha')}`);
   assert.equal(await unsaved(), false, 'the edit was given up');
 
-  // The same for another Bot, and for the rail: Beta's page, edited, is left for Home.
+  // Repeat the check when opening a different Bot and leaving for Projects.
   await edit('Alpha edited again');
   await wait(nameIs('Alpha edited again'));
   await botMenuItem('Beta', 'Bot settings');
@@ -329,26 +371,26 @@ try {
   assert.equal(await unsaved(), false);
   await edit('Beta edited');
   await wait(nameIs('Beta edited'));
-  await click(rail('Home'));
+  await click(rail('Projects'));
   await wait(discardAsked);
   assert.deepEqual(await marked(), ['Bots']);
   await answer('primary');
   await wait(`!document.querySelector('${sidebar}') && document.querySelector('.sidebar-new-chat')`);
-  assert.deepEqual(await marked(), ['Home']);
+  assert.deepEqual(await marked(), ['Projects']);
   assert.equal(await run(`Boolean(document.querySelector('${dialog}'))`), false);
   result.dirtyGuard = true;
 
   // Where Bots cannot be used the saved mode is not brought back, and the sidebar does not mention them.
   await win.loadURL(`${url}?saved=bots&bots=off`);
-  await wait(`document.querySelector('${rail('Home')}[data-active]') && document.querySelector('.sidebar-new-chat')`);
+  await wait(`document.querySelector('${rail('Projects')}[aria-current=page]') && document.querySelector('.sidebar-new-chat')`);
   await delay(150);
   assert.deepEqual(await run(`Array.from(document.querySelectorAll('.desktop-nav-rail button')).map(button => button.getAttribute('aria-label'))`),
-    ['Home', 'Teams', 'Friends', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
+    ['Messages', 'Projects', 'Teams', 'Friends', 'Apps', 'Scheduled tasks', 'Review changes', 'Settings']);
   assert.equal(await shown('.bots-page'), false);
   assert.equal((await calls()).filter(call => call[0] === 'updateSettings').length, 0);
   await menuAction('bots');
   await delay(100);
-  assert.deepEqual(await marked(), ['Home'], 'the menu\'s Bots does nothing where they cannot run');
+  assert.deepEqual(await marked(), ['Projects'], 'the menu\'s Bots does nothing where they cannot run');
   result.unavailable = true;
 
   assert.deepEqual(errors, []);

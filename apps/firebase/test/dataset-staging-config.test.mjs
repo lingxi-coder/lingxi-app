@@ -36,3 +36,13 @@ test('Dataset staging uses only its project’s identities and browser origins',
     }
   `], { env: { ...process.env, FIREBASE_CONFIG: JSON.stringify({ projectId: project }), GCLOUD_PROJECT: project } });
 });
+
+test('production declares no render secret: firebase-tools would refuse to deploy without one', () => {
+  execFileSync(process.execPath, ['--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import { declaredParams } from 'firebase-functions/params';
+    const { teamsApi } = await import(${JSON.stringify(entry.href)});
+    assert.equal(teamsApi.__endpoint.secretEnvironmentVariables, undefined);
+    assert.deepEqual(declaredParams.filter(param => param.name === 'LINGXI_DATASET_RENDER_KEY'), []);
+  `], { env: { ...process.env, FIREBASE_CONFIG: JSON.stringify({ projectId: 'lingxi-5e4b2' }), GCLOUD_PROJECT: 'lingxi-5e4b2' } });
+});

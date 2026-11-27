@@ -116,12 +116,13 @@ export const pruneTeamVisualizations = onSchedule({ schedule: 'every 5 minutes',
   serviceAccount: pushServiceAccount }, async () => { await teamVisualizations?.sweep(); });
 const renderOrigin = process.env.LINGXI_DATASET_RENDER_ORIGIN;
 const useRenderSecret = datasetStaging || !!renderOrigin;
-const renderKey = defineSecret('LINGXI_DATASET_RENDER_KEY');
+// Declared only where it is used: firebase-tools requires every declared secret to exist, and production has no render service.
+const renderKey = useRenderSecret ? defineSecret('LINGXI_DATASET_RENDER_KEY') : undefined;
 let renderDataset;
 const teamsHandler = createTeamsHandler({ store: new TeamsStore(teamsDb), friends: friendsStore,
   datasets: datasetGateway?.datasets, datasetCommand: datasetGateway?.command, datasetRuns: datasetGateway?.run, datasetPages: datasetPages?.execute,
   visualizations: teamVisualizations,
-  datasetRender: renderOrigin && datasetPages ? (...args) => (renderDataset ??= createDatasetRender({
+  datasetRender: renderKey && renderOrigin && datasetPages ? (...args) => (renderDataset ??= createDatasetRender({
     origin: renderOrigin, secret: renderKey.value(), pages: datasetPages, db: teamsDb,
   }))(...args) : undefined,
   data: createProductDataTransport(process.env.LINGXI_DATA_PRODUCT_ORIGIN),

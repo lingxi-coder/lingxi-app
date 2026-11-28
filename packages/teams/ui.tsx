@@ -75,8 +75,11 @@ export function Avatar({ identity, size, render }: { identity: Identity; size: n
 }
 
 /** A team's rounded-square mark: its initials on a color that stays the same for the team. 24 pixels unless `size` says otherwise. */
-export function TeamMark({ id, name, size }: { id: string; name: string; size?: number }): ReactElement {
-  return <span className="tw-team-mark" aria-hidden="true" style={{ background: avatarColor(id), ...(size ? { width: size, height: size, fontSize: Math.max(11, Math.round(size * 0.42)) } : {}) }}>{initials(name)}</span>;
+export function TeamMark({ id, name, size, avatar }: { id: string; name: string; size?: number; avatar?: string | null }): ReactElement {
+  const [failed, setFailed] = useState<string>();
+  return <span className="tw-team-mark" aria-hidden="true" style={{ background: avatarColor(id), ...(size ? { width: size, height: size, fontSize: Math.max(11, Math.round(size * 0.42)) } : {}) }}>
+    {avatar && failed !== avatar ? <img alt="" src={`data:image/png;base64,${avatar}`} onError={() => setFailed(avatar)} /> : initials(name)}
+  </span>;
 }
 
 /** Up to `max` avatars, then "+N". */
@@ -293,8 +296,6 @@ export function rovingKeys(event: KeyboardEvent<HTMLElement>, selector = '[data-
 // ─── Shared wording ─────────────────────────────────────────────────────────
 
 /** Which tab of the details drawer to show. */
-export type DrawerTab = 'members' | 'invites' | 'bots' | 'settings';
-export type DrawerTarget = 'team' | 'conversation';
 
 /** Who can read Team data. Shown wherever a person creates, joins or opens a team, and on the conversation header and the details panel. */
 export const platformNotice = (locale: string): string => teamsText(locale)('teams_disclosure');

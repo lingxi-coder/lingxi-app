@@ -7,7 +7,12 @@ export type TeamRole = 'owner' | 'admin' | 'member';
 export interface TeamSummary { id: string; name: string; memberCount: number; role: TeamRole; generation: number }
 export interface TeamMember { uid: string; displayName: string; role: TeamRole; generation: number }
 export interface TeamInvite { id: string; role: 'admin' | 'member'; expiresAt: string; uses: number; maxUses: number; revoked: boolean }
-export interface TeamDetail { team: TeamSummary; members: TeamMember[]; invites: TeamInvite[] }
+/** Team-scoped settings. The avatar is a bounded square PNG thumbnail, encoded as base64. */
+export interface TeamProfile { version: number; description: string; avatar: string | null }
+export type TeamProfileChanges = Partial<Pick<TeamProfile, 'description' | 'avatar'> & Pick<TeamSummary, 'name'>>;
+export interface TeamDetail { team: TeamSummary; members: TeamMember[]; invites: TeamInvite[]; profile?: TeamProfile }
+export interface TeamRemovalBot { id: string; name: string; revision: number }
+type TeamMemberCommand = { teamId: string; uid: string; generation: number };
 export type TeamCommand =
   | { action: 'create'; teamId: string; name: string }
   | { action: 'delete'; teamId: string }
@@ -15,11 +20,17 @@ export type TeamCommand =
   | { action: 'revokeInvite'; teamId: string; inviteId: string }
   | { action: 'join'; code: string; requestId: string }
   | { action: 'leave'; teamId: string; generation: number }
-  | { action: 'remove'; teamId: string; uid: string; generation: number }
+  | ({ action: 'remove' } & TeamMemberCommand)
+  | ({ action: 'removalBlockers' } & TeamMemberCommand)
+  | ({ action: 'pauseRemovalBot'; actorGeneration: number; botId: string; revision: number } & TeamMemberCommand)
+  | { action: 'updateProfile'; teamId: string; generation: number; version: number; changes: TeamProfileChanges }
   | { action: 'role'; teamId: string; uid: string; generation: number; role: 'admin' | 'member' }
   /** The owner gives the team to a current member and stays as an admin. Bots, Chats and model accounts stay where they are. */
   | { action: 'handOver'; teamId: string; uid: string; generation: number };
-export interface TeamResult { teamId?: string; code?: string; generation?: number; alreadyMember?: boolean; ok?: boolean }
+export interface TeamResult { teamId?: string; code?: string; generation?: number; alreadyMember?: boolean; ok?: boolean; blockingBots?: TeamRemovalBot[] }
+export function teamCommandPath(command: TeamCommand): string {
+  return command.action === 'updateProfile' ? `/${encodeURIComponent(command.teamId)}/profile` : '';
+}
 export interface TeamsApi extends MessageApi {
   datasets?<T>(request: Record<string, unknown>): Promise<T>;
   approveDatasetTask?(draft: DatasetBindingDraft): Promise<{ permit: string; planDigest: string }>;

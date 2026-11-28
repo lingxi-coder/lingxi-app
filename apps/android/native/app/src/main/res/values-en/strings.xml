@@ -2550,6 +2550,7 @@
     <string name="teams_error">Could not connect to Teams. Check your connection and try again.</string>
     <string name="teams_invite_error">This invite has expired, was revoked or has no uses left.</string>
     <string name="teams_stale_error">Membership changed. Refresh before trying again.</string>
+    <string name="teams_remove_member_bots">Use Team settings on Web or Desktop to hand over or stop sharing this member’s Bots before removing them.</string>
     <string name="teams_disclosure">Team data and messages are readable by the platform. A Bot’s maintainer can read conversations with their Bot.</string>
     <string name="teams_join_disclosure">Join only teams you trust. Your name will be visible to their members.</string>
     <string name="teams_empty">Create a team or join with an invite.</string>

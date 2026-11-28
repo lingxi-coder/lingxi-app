@@ -34,7 +34,7 @@ import type { InboxNotification } from '../shared/inbox';
 import { friendLink, type FriendLink } from '../../../../packages/teams/friends';
 import { useTeamsDrawer } from './bridge/useTeamsDrawer';
 import { teamsThemeVariables } from './theme/teamsTheme';
-import type { DrawerTab } from '../../../../packages/teams/ui';
+import { useTeamSettings } from '../../../../packages/teams/TeamSettingsSurface';
 import { botScopesKey } from './bridge/botRoutines';
 import { LocalAppAuthoringError, localAppChatTarget, type LocalAppDraft } from './bridge/localAppChat';
 import { localAppAuthoringErrorPresentation, localAppErrorMessage } from './bridge/localAppErrors';
@@ -286,7 +286,9 @@ export function App() {
     savedWidth: bridge.bootstrap?.settings.sidebar?.teamsDrawerWidth,
     save: (width) => { void bridge.updateSidebarPreferences({ teamsDrawerWidth: width }).catch(() => undefined); },
   });
-  const { show: showTeamDetails, toggle: toggleTeamDetails } = teamsDrawer;
+  const { toggle: toggleTeamDetails } = teamsDrawer;
+  const teamSettings = useTeamSettings(teams.snapshot);
+  const { active: teamSettingsActive, open: showTeamSettings, dismiss: dismissTeamSettings, back: closeTeamSettings } = teamSettings;
   const teamsTheme = useMemo(() => teamsThemeVariables(palette), [palette]);
   // The sidebar follows the chat on screen when that changes from a Bot's chat to a project's or back (a link, the picker, a notification),
   // so the chat is always listed beside it. Only settled changes count: a chat that is still opening says nothing yet.
@@ -342,8 +344,9 @@ export function App() {
   const [botServices, setBotServices] = useState(false);
   const [serviceInboxTarget, setServiceInboxTarget] = useState<{ serviceId: string; sessionId: string }>();
   const [chatTopbar, setChatTopbar] = useState<HTMLDivElement | null>(null);
-  const openBotServices = useCallback(() => setBotServices(true), []);
+  const openBotServices = useCallback(() => { dismissTeamSettings(); setBotServices(true); }, [dismissTeamSettings]);
   const closeBotServices = useCallback(() => setBotServices(false), []);
+  const onTeamConversationSelected = useCallback(() => { dismissTeamSettings(); closeBotServices(); }, [dismissTeamSettings, closeBotServices]);
   const openInboxItem = useCallback(async (item: InboxItem, target?: InboxNoticeTarget) => {
     if (sessionNavigationBlocked()) return;
     if (target && (target.key && target.key !== item.key || target.generation !== undefined && target.generation !== item.ref.generation))
@@ -373,15 +376,17 @@ export function App() {
       friends.workspace.openChat(item.peerUid);
       setProjectBrowser(false); setSidebarMode('home'); setPage('friends');
     } else if (item.ref.kind === 'service') {
+      dismissTeamSettings();
       setServiceInboxTarget({ serviceId: item.ref.sourceId, sessionId: item.ref.conversationId });
       setBotServices(true); setProjectBrowser(false); setSidebarMode('home'); setPage('teams');
     } else if (teams.workspace) {
+      dismissTeamSettings();
       await teams.workspace.refresh();
       teams.workspace.selectTeam(item.ref.sourceId);
       teams.workspace.selectConversation(item.ref.conversationId);
       setBotServices(false); setProjectBrowser(false); setSidebarMode('home'); setPage('teams');
     } else throw new Error(locale.startsWith('zh') ? '请先登录后再打开此会话。' : 'Sign in before opening this conversation.');
-  }, [inbox.api, inbox.uid, friends.workspace, teams.workspace, locale, setSidebarMode, cancelLocalAppNavigation, sessionNavigationBlocked]);
+  }, [inbox.api, inbox.uid, friends.workspace, teams.workspace, locale, setSidebarMode, cancelLocalAppNavigation, sessionNavigationBlocked, dismissTeamSettings]);
   const openInboxNotification = useCallback(async (notice: InboxNotification) => {
     if (notice.key && inbox.api) {
       const { item } = await inbox.api.request<{ item: InboxItem }>(inbox.uid, { action: 'get', key: notice.key, generation: notice.generation });
@@ -460,15 +465,19 @@ export function App() {
     if (next.step === 'open') { teams.workspace.openConversation(next.teamId, next.conversationId); return; }
     if (next.step === 'team') { teams.workspace.selectTeam(next.teamId); return; }
     if (next.step === 'select') {
+      dismissTeamSettings();
       teams.workspace.selectConversation(next.conversationId);
       setSharedPost(teamLink.kind === 'conversation' && teamLink.postId
         ? { teamId: teamLink.teamId, conversationId: next.conversationId, postId: teamLink.postId } : undefined);
     }
-    else showTeamDetails('bots');
+    else { closeBotServices(); showTeamSettings('bots'); }
     setTeamLink(undefined);
-  }, [teamLink, teams.workspace, teams.snapshot, friendsWorkspace, friends.snapshot, showTeamDetails, setLocalAppNavigationError]);
-  /** The team menu of the sidebar: the details panel beside the conversation, on a tab when one is asked for. */
-  const openTeamDetails = useCallback((tab?: DrawerTab) => { showTeams(); showTeamDetails(tab); }, [showTeams, showTeamDetails]);
+  }, [teamLink, teams.workspace, teams.snapshot, friendsWorkspace, friends.snapshot, closeBotServices, showTeamSettings, dismissTeamSettings, setLocalAppNavigationError]);
+  const openTeamSettings = useCallback((opener?: HTMLButtonElement) => {
+    showTeams();
+    closeBotServices();
+    showTeamSettings('general', opener);
+  }, [showTeams, closeBotServices, showTeamSettings]);
   const showChat = useCallback(() => {
     cancelLocalAppNavigation();
     setPage('chat');
@@ -654,10 +663,12 @@ export function App() {
     } else if (action === 'toggle-sidebar' && !settingsRoute) {
       setSidebarCollapsed((collapsed) => !collapsed);
     } else if (action === 'team-details' && !settingsRoute) {
-      // The panel belongs to the Teams page: on any other page the menu item does nothing.
-      if (page === 'teams' && teams.workspace) toggleTeamDetails();
+      if (page !== 'teams' || !teams.snapshot?.team || botServices) return;
+      if (teamSettingsActive) closeTeamSettings();
+      else if (teams.snapshot.conversation) toggleTeamDetails();
+      else showTeamSettings();
     }
-  }), [openSettings, settingsRoute, sessionPicker, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation, sessionNavigationBlocked, selectSidebarMode, page, teams.workspace, toggleTeamDetails]);
+  }), [openSettings, settingsRoute, sessionPicker, activityView, bridge.setRuntimeCenterOverviewOpen, cancelLocalAppNavigation, sessionNavigationBlocked, selectSidebarMode, page, teams.snapshot?.team, teams.snapshot?.conversation, botServices, toggleTeamDetails, teamSettingsActive, closeTeamSettings, showTeamSettings]);
 
   const linkBusy = useRef(false);
   const linkSurfacePending = useRef(false);
@@ -882,7 +893,7 @@ export function App() {
               ? <FriendsPanel friends={friends} locale={locale} initialCode={friendTarget?.kind === 'add' ? friendTarget.code : undefined}
                   onCodeHandled={handledFriendCode} onShowFriends={showFriends} />
               : <TeamsSidebar teams={teams} locale={locale} query={search} initialInvite={teamInvite} onInviteHandled={handledTeamInvite}
-                  onShowTeams={showTeams} onOpenSettings={openTeamDetails} onOpenServices={openBotServices} onCloseServices={closeBotServices} />}
+                  onShowTeams={showTeams} onOpenSettings={openTeamSettings} onOpenServices={openBotServices} onConversationSelected={onTeamConversationSelected} />}
             sidebarCollapsed={sidebarCollapsed}
             onSidebarCollapsedChange={setSidebarCollapsed}
             scheduled={page === 'scheduled'}
@@ -932,7 +943,7 @@ export function App() {
           {page === 'messages' && <p style={{ margin: 'auto', color: palette.text3 }}>
             {locale.startsWith('zh') ? '选择一条会话以查看消息' : 'Select a conversation to view messages'}
           </p>}
-          {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} friends={friends} locale={locale} drawer={teamsDrawer} services={botServices} inboxTarget={serviceInboxTarget} notificationTarget={conversationNoticeTarget} sharedPost={sharedPost} onExitPost={() => setSharedPost(undefined)} channelInvite={channelInvite} onChannelInviteHandled={() => setChannelInvite(undefined)} onCloseServices={closeBotServices} /></Suspense>}
+          {page === 'teams' && <Suspense fallback={<p role="status" style={{ margin: 'auto' }}>{tr('desktop_teams_loading')}</p>}><TeamsMain teams={teams} friends={friends} locale={locale} drawer={teamsDrawer} settings={teamSettings} services={botServices} inboxTarget={serviceInboxTarget} notificationTarget={conversationNoticeTarget} sharedPost={sharedPost} onExitPost={() => setSharedPost(undefined)} channelInvite={channelInvite} onChannelInviteHandled={() => setChannelInvite(undefined)} onCloseServices={closeBotServices} /></Suspense>}
           <DesktopInboxToast notice={inboxNotice?.uid === inbox.uid ? inboxNotice.notice : undefined}
             api={inbox.api} uid={inbox.uid} locale={locale} onDismiss={dismissInboxNotice} onOpen={notice => {
               dismissInboxNotice(notice);

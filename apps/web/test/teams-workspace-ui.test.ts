@@ -17,7 +17,8 @@ import { loadTeamsModule } from './support/loadTeamsModule';
 // The components import React, which shared packages cannot resolve on their own; see the loader.
 const { composerLock } = loadTeamsModule<typeof import('../../../packages/teams/Composer')>('Composer');
 const { TeamConversationView, conversationSubtitle } = loadTeamsModule<typeof import('../../../packages/teams/TeamConversationView')>('TeamConversationView');
-const { DRAWER_DEFAULT, DRAWER_MAX, DRAWER_MIN, TeamDetailsDrawer, canManageMember, clampDrawerWidth, drawerTabs, drawerWidthForDrag, drawerWidthForKey } = loadTeamsModule<typeof import('../../../packages/teams/TeamDetailsDrawer')>('TeamDetailsDrawer');
+const { DRAWER_DEFAULT, DRAWER_MAX, DRAWER_MIN, TeamDetailsDrawer, clampDrawerWidth, drawerWidthForDrag, drawerWidthForKey } = loadTeamsModule<typeof import('../../../packages/teams/TeamDetailsDrawer')>('TeamDetailsDrawer');
+const { TeamSettingsPage, canManageMember } = loadTeamsModule<typeof import('../../../packages/teams/TeamSettingsPage')>('TeamSettingsPage');
 const { TeamSidebar, connectionStatus } = loadTeamsModule<typeof import('../../../packages/teams/TeamSidebar')>('TeamSidebar');
 const { AVATAR_COLORS, AVATAR_SIZES, Avatar, PopupMenu, avatarColor, initials, nextEnabled, rovingIndex, stackedSize } = loadTeamsModule<typeof import('../../../packages/teams/ui')>('ui');
 const roving = loadTeamsModule<typeof import('../../../packages/teams/roving')>('roving');
@@ -196,7 +197,6 @@ test('drawer width and rights', () => {
   assert.equal(drawerWidthForKey(360, 'ArrowLeft'), 376); assert.equal(drawerWidthForKey(360, 'ArrowRight'), 344);
   assert.equal(drawerWidthForKey(360, 'ArrowLeft', true), 408); assert.equal(drawerWidthForKey(470, 'ArrowLeft', true), 480);
   assert.equal(drawerWidthForKey(360, 'Home'), 280); assert.equal(drawerWidthForKey(360, 'End'), 480); assert.equal(drawerWidthForKey(360, 'a'), undefined);
-  assert.deepEqual(drawerTabs('owner'), ['members', 'invites', 'bots']); assert.deepEqual(drawerTabs('admin'), ['members', 'invites', 'bots']); assert.deepEqual(drawerTabs('member'), ['members', 'bots']);
   const person = (id: string, role: TeamMember['role']) => ({ uid: id, role });
   assert.ok(canManageMember('owner', 'alice', person('bob', 'member'))); assert.ok(canManageMember('owner', 'alice', person('bob', 'admin')));
   assert.ok(!canManageMember('owner', 'alice', person('alice', 'owner')), 'not yourself'); assert.ok(!canManageMember('owner', 'alice', person('cy', 'owner')), 'not another owner');
@@ -329,7 +329,9 @@ const html = (element: ReactElement) => renderToStaticMarkup(element);
 const count = (text: string, pattern: RegExp) => (text.match(pattern) ?? []).length;
 const sidebar = (workspace: TeamsWorkspace, snapshot: TeamsSnapshot, more: Record<string, unknown> = {}) => createElement(TeamSidebar, { workspace, snapshot, locale: 'en', now: NOW, ...more } as never);
 const view = (workspace: TeamsWorkspace, snapshot: TeamsSnapshot, more: Record<string, unknown> = {}) => createElement(TeamConversationView, { workspace, snapshot, locale: 'en', now: NOW, ...more } as never);
-const drawer = (workspace: TeamsWorkspace, snapshot: TeamsSnapshot, more: Record<string, unknown> = {}) => createElement(TeamDetailsDrawer, { workspace, snapshot, locale: 'en', onClose() {}, ...more } as never);
+const drawer = (snapshot: TeamsSnapshot, more: Record<string, unknown> = {}) => createElement(TeamDetailsDrawer, { snapshot, locale: 'en', onClose() {}, ...more } as never);
+const teamSettings = (workspace: TeamsWorkspace, snapshot: TeamsSnapshot, more: Record<string, unknown> = {}) =>
+  createElement(TeamSettingsPage, { workspace, snapshot, locale: 'en', onClose() {}, onOpenChat() {}, ...more } as never);
 const rowTags = (markup: string) => [...markup.matchAll(/<button[^>]*data-row="([^"]+)"[^>]*>/g)].map(match => ({ id: match[1]!, tag: match[0] }));
 
 test('sidebar: team switcher, three sections with their add buttons, rows with previews and unread badges', async context => {
@@ -639,7 +641,7 @@ test('conversation subtitle names who is in a conversation or whether its Bot is
   assert.equal(conversationSubtitle(conversation('c', { participants: [] }), snap([]), 'en'), '');
 });
 
-test('drawer: tabs by role above the team management footer, with a resizable separator and a close button', async context => {
+test('team settings: General, members, invitations, channel administration and Bots for a team owner', async context => {
   const list = members('alice', 'bob', 'owner'); list[1]!.role = 'admin';
   const { fake, workspace, snapshot } = await open(fake => {
     fake.details.set('team-aaaa', { team: team('team-aaaa', { name: 'Acme', role: 'owner' }), members: list, invites: [
@@ -649,41 +651,54 @@ test('drawer: tabs by role above the team management footer, with a resizable se
   });
   context.after(() => workspace.close());
   await until(() => !!snapshot().detail, 'detail');
-  const markup = html(drawer(workspace, snapshot()));
-  assert.match(markup, /<aside class="tw-scope tw-drawer" role="complementary" aria-label="Team details" style="width:360px">/);
-  assert.match(markup, /role="separator" aria-orientation="vertical"[^>]*aria-valuemin="280" aria-valuemax="480" aria-valuenow="360" tabindex="0"/);
-  assert.match(markup, /role="tabpanel"[^]*<footer class="tw-drawer-footer"[^]*>Delete team<\/button>/, 'the destructive action sits below the tab content');
-  assert.doesNotMatch(markup, /Leave team/); assert.match(markup, /<h2 tabindex="-1">Acme<\/h2>/); assert.match(markup, /aria-label="Close details"/);
-  assert.equal(count(markup, /role="tab"/g), 3); assert.match(markup, /role="tab"[^>]*aria-selected="true"[^>]*tabindex="0"[^>]*>Members</); assert.equal(count(markup, /tabindex="-1" class="tw-tab">(Invites|Bots)</g), 2);
-  assert.match(markup, /role="tabpanel"[^>]*aria-labelledby="[^"]*-tab-members"/);
-  assert.equal(count(markup, />Remove</g), 2, 'the owner can remove the other two'); assert.match(markup, />Make member</); assert.match(markup, />Make admin</); assert.equal(count(markup, />Make owner</g), 2, 'and can give the team to either of them');
-  assert.match(markup, /Alice<\/b><small>You · Owner/); assert.match(markup, /readable by the platform/);
-  const invites = html(drawer(workspace, snapshot(), { tab: 'invites' }));
+  const markup = html(teamSettings(workspace, snapshot()));
+  assert.match(markup, /<section[^>]*aria-label="Team settings"/);
+  assert.match(markup, /aria-current="page"[^>]*>.*?General<\/button>/);
+  assert.match(markup, /Channel administrators/);
+  assert.match(markup, /<h2 tabindex="-1">General<\/h2>/);
+  assert.match(markup, /aria-label="Back from team settings"/);
+  assert.match(markup, /<label>Team name<input[^>]*value="Acme"/);
+  assert.match(markup, /<label>Description<textarea/);
+  assert.match(markup, />Choose image<\/button>/);
+  assert.match(markup, /<footer[^]*>Save<\/button><\/footer>[^]*>Delete team<\/button>/);
+  assert.doesNotMatch(markup, /Leave team/);
+  const roster = html(teamSettings(workspace, snapshot(), { initialSection: 'members' }));
+  assert.equal(count(roster, />Remove</g), 2, 'the owner can remove the other two'); assert.match(roster, />Make member</); assert.match(roster, />Make admin</); assert.equal(count(roster, />Make owner</g), 2);
+  assert.match(roster, /Alice<\/b><small>You · Owner/); assert.match(markup, /readable by the platform/);
+  const invites = html(teamSettings(workspace, snapshot(), { initialSection: 'invites' }));
   assert.match(invites, /Create invite link/); assert.match(invites, /<option value="admin">Admin<\/option>/, 'an owner can invite admins');
   assert.match(invites, /Member · 1\/5/); assert.match(invites, />Revoke</); assert.match(invites, /Revoked/); assert.equal(count(invites, />Revoke</g), 1);
   fake.execute = async () => ({ code: 'A'.repeat(32) });
   await workspace.execute({ action: 'invite', teamId: 'team-aaaa', requestId: 'r', role: 'member', maxUses: 1, ttlSeconds: 3600 }); await until(() => !!snapshot().inviteLink, 'link');
-  const shared = html(drawer(workspace, snapshot(), { tab: 'invites' }));
+  const shared = html(teamSettings(workspace, snapshot(), { initialSection: 'invites' }));
   assert.match(shared, new RegExp(`value="https://lingxios.net/open/team/join\\?code=${'A'.repeat(32)}"`)); assert.match(shared, /Copy<\/button>/);
-  const bots = html(drawer(workspace, snapshot(), { tab: 'bots' }));
+  const bots = html(teamSettings(workspace, snapshot(), { initialSection: 'bots' }));
   assert.match(bots, /Fixture Bot/); assert.match(bots, /Message Bot/); assert.match(bots, /class="tw-embed"/);
-  assert.match(html(drawer(workspace, snapshot(), { width: 9999 })), /style="width:480px"/); assert.match(html(drawer(workspace, snapshot(), { defaultWidth: 300 })), /style="width:300px"/);
-  assert.match(html(drawer(workspace, snapshot(), { locale: 'zh-Hans' })), /删除团队/);
+  assert.match(html(teamSettings(workspace, snapshot(), { locale: 'zh-Hans' })), /删除团队/);
+  workspace.selectConversation('chan-general');
+  await until(() => !!snapshot().conversation, 'the selected conversation');
+  const details = html(drawer(snapshot(), { defaultWidth: 300 }));
+  assert.match(details, /style="width:300px"/);
+  assert.match(details, /role="separator" aria-orientation="vertical"[^>]*aria-valuemin="280" aria-valuemax="480" aria-valuenow="300" tabindex="0"/);
+  assert.doesNotMatch(details, /Delete team|Channel administrators/);
 });
 
-test('drawer: a plain member can leave and sees no Invites tab, even when asked for it', async context => {
+test('team settings: a member can view the profile and leave, with no manager sections', async context => {
   const { workspace, snapshot } = await open(); context.after(() => workspace.close());
   workspace.selectTeam('team-bbbb'); await until(() => snapshot().detail?.team.id === 'team-bbbb' && snapshot().botsLoaded, 'team B');
-  const markup = html(drawer(workspace, snapshot(), { tab: 'invites' }));
-  assert.match(markup, />Leave team</); assert.doesNotMatch(markup, /Delete team/); assert.equal(count(markup, /role="tab"/g), 2); assert.doesNotMatch(markup, />Invites</);
-  assert.match(markup, /aria-selected="true"[^>]*>Members</, 'falls back to Members'); assert.doesNotMatch(markup, /Create invite link/); assert.equal(count(markup, />Remove</g), 0);
+  const markup = html(teamSettings(workspace, snapshot(), { initialSection: 'invites' }));
+  assert.match(markup, />Leave team</); assert.doesNotMatch(markup, /Delete team|Invites|Channel administrators/);
+  assert.match(markup, /<h2 tabindex="-1">General<\/h2>/);
+  assert.match(markup, /<input[^>]*readonly=""/);
+  assert.doesNotMatch(markup, /Create invite link|Choose image|>Save<\/button>/);
+  assert.equal(count(html(teamSettings(workspace, snapshot(), { initialSection: 'members' })), />Remove</g), 0);
 });
 
-test('drawer: hidden detail after an invalidation shows loading, a failed load can be retried, no team renders nothing', async context => {
+test('team settings: an invalidated detail shows loading and an absent team renders nothing', async context => {
   const { fake, workspace, snapshot } = await open(); context.after(() => workspace.close());
   fake.detail = () => new Promise(() => {});
   fake.invalidate(); assert.equal(snapshot().detail, null);
-  assert.match(html(drawer(workspace, snapshot())), /Loading…/);
+  assert.match(html(teamSettings(workspace, snapshot())), /Loading…/);
   const none = await bare(); context.after(() => none.workspace.close());
-  assert.equal(html(drawer(none.workspace, none.snapshot())), '', 'no team, nothing to show');
+  assert.equal(html(teamSettings(none.workspace, none.snapshot())), '', 'no team, nothing to show');
 });

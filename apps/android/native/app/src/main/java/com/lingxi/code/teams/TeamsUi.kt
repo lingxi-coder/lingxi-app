@@ -133,6 +133,7 @@ internal fun teamsErrorRes(code: String): Int = when {
     code == "ATTACHMENT_UNREADABLE" -> R.string.teams_file_error_unreadable
     code == "INVALID_DATA" || code == "INVALID_MESSAGE_SNAPSHOT" -> R.string.teams_error_invalid_data
     code in setOf("MEMBERSHIP_REQUIRED", "STALE_MEMBERSHIP", "INVALID_SESSION", "SIGN_IN_REQUIRED") -> R.string.teams_stale_error
+    code == "TEAM_MEMBER_HAS_BOTS" -> R.string.teams_remove_member_bots
     code.contains("STORAGE") -> R.string.teams_messages_storage_error
     code == "MENTION_TARGET_REQUIRED" -> R.string.teams_error_mention_target
     code in setOf("BOT_USE_REQUIRED", "INVALID_BOT_TARGET", "BOT_PARTICIPANT_REQUIRED", "BOT_SELECTION_STALE", "CONVERSATION_POLICY_REQUIRED", "ARTIFACT_READ_REQUIRED", "GRANT_READ_REQUIRED", "INPUT_GRANT_REQUIRED") -> R.string.teams_error_bot_access_changed

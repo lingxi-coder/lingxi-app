@@ -65,19 +65,19 @@
 .teams-web-sidebar > .tw-sidebar { flex: 1 1 0; height: auto; min-height: 0; }
 .teams-web-conversation { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 .teams-web-conversation > .tw-conv { flex: 1 1 0; height: auto; min-height: 0; }
-.teams-web-body > .tw-drawer { height: auto; }
+.teams-web-body .tw-settings-underlay > .tw-drawer { height: auto; }
 .teams-web-back { display: none; align-self: flex-start; min-height: 36px; margin: 4px 8px 0; padding: 0 8px; background: none; border: 0; color: var(--accent-strong); font-size: 13px; cursor: pointer; }
 
 /* Keep the chat and the sidebar usable at narrow widths. */
-.teams-web-body > .tw-drawer { position: absolute; inset: 0 0 0 auto; z-index: 4; box-shadow: -12px 0 28px rgb(0 0 0 / 16%); }
+.teams-web-body .tw-settings-underlay > .tw-drawer { position: absolute; inset: 0 0 0 auto; z-index: 4; box-shadow: -12px 0 28px rgb(0 0 0 / 16%); }
 @container teams-web-workspace (width >= 69rem) {
-  .teams-web-body > .tw-drawer { position: relative; inset: auto; z-index: auto; box-shadow: none; }
+  .teams-web-body .tw-settings-underlay > .tw-drawer { position: relative; inset: auto; z-index: auto; box-shadow: none; }
 }
 /* A phone shows the sidebar or the conversation, and the conversation has a way back. */
 @media (max-width: 760px) {
   .teams-web-nav { gap: 16px; padding: 10px 16px; }
   .teams-web-sidebar { width: 100%; border-right: 0; }
-  .teams-web-body[data-pane='list'] .teams-web-conversation { display: none; }
+  .teams-web-body[data-pane='list'] > :is(.teams-web-conversation, .tw-settings-surface) { display: none; }
   .teams-web-body[data-pane='conversation'] .teams-web-sidebar { display: none; }
   .teams-web-back { display: inline-flex; align-items: center; }
   .teams-web-chat-slot .teams-web-back { order: -1; flex: none; min-height: 44px; align-self: center; margin: 0; padding-inline: 2px; }

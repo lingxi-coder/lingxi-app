@@ -5,7 +5,7 @@ import { snippet } from './compose.js';
 import { NewBotDmDialog, NewConversationDialog } from './NewConversationDialog';
 import { formatListTime } from './stream.js';
 import { CreateTeamDialog, JoinTeamDialog } from './team-dialogs';
-import { ConversationLead, Icon, platformNotice, PopupMenu, rovingKeys, TeamMark, UnreadBadge, type DrawerTab, type MenuItem, type RenderAvatar } from './ui';
+import { ConversationLead, Icon, platformNotice, PopupMenu, rovingKeys, TeamMark, UnreadBadge, type MenuItem, type RenderAvatar } from './ui';
 import { conversationLabel, conversationPreview, groupConversations, unreadCount, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';
 import { intlTag, useTeamsText } from './i18n.js';
 
@@ -19,12 +19,8 @@ export interface TeamSidebarProps {
   snapshot: TeamsSnapshot;
   /** Draw your own avatar for a person or Bot; return nothing for the initials avatar. */
   renderAvatar?: RenderAvatar;
-  /**
-   * Open team settings (the details drawer), optionally on a tab. Without it the team menu has no settings entry.
-   * The sidebar has no button for this besides that entry: the conversation header toggles the same drawer, and the
-   * entry is the way in while no conversation (and so no header) is open.
-   */
-  onOpenSettings?(tab?: DrawerTab): void;
+  /** Open team settings from the existing menu and return focus to the switcher on Back. */
+  onOpenSettings?(opener?: HTMLButtonElement): void;
   /** A conversation was chosen, including the one already open. */
   onConversationSelected?(id: string): void;
   /** Show a conversation's details. Without it the row menu has no such entry. */
@@ -106,7 +102,7 @@ export function TeamSidebar({ workspace, snapshot, renderAvatar, onOpenSettings,
       detail: (snapshot.unreadByTeam[value.id] ?? 0) > 0 && value.id !== snapshot.selectedTeamId ? <UnreadBadge count={snapshot.unreadByTeam[value.id]!} locale={locale} /> : undefined,
       onSelect: () => workspace.selectTeam(value.id),
     })),
-    ...(team && onOpenSettings ? [{ id: 'settings', label: t('tw_sidebar_team_settings'), icon: 'panel' as const, separated: true, onSelect: () => onOpenSettings() }] : []),
+    ...(team && onOpenSettings ? [{ id: 'settings', label: t('tw_sidebar_team_settings'), icon: 'panel' as const, separated: true, onSelect: () => onOpenSettings(switcherRef.current ?? undefined) }] : []),
     { id: 'create', label: t('tw_sidebar_create_team'), icon: 'plus', separated: !(team && onOpenSettings), onSelect: () => setDialog({ kind: 'createTeam' }) },
     { id: 'join', label: t('teams_join'), icon: 'plus', onSelect: () => setDialog({ kind: 'joinTeam', code: '' }) },
   ];
@@ -119,7 +115,7 @@ export function TeamSidebar({ workspace, snapshot, renderAvatar, onOpenSettings,
       <div className="tw-switcher-wrap">
         <button ref={switcherRef} type="button" className="tw-switcher" aria-haspopup="menu" aria-expanded={switcherOpen}
           onClick={() => setSwitcherOpen(open => !open)}>
-          {team ? <TeamMark id={team.id} name={team.name} /> : null}
+          {team ? <TeamMark id={team.id} name={team.name} avatar={snapshot.detail?.team.id === team.id ? snapshot.detail.profile?.avatar : undefined} /> : null}
           <span className="tw-switcher-name">{team?.name ?? (snapshot.loading ? t('teams_loading') : t('tw_sidebar_no_team'))}</span>
           {otherUnread > 0 ? <UnreadBadge count={otherUnread} locale={locale} /> : null}
           <Icon name="chevronDown" size={14} />

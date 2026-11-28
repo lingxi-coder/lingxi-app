@@ -32,7 +32,7 @@ async function open(context: TestContext) {
 const layout = (workspace: TeamsWorkspace, more: Record<string, unknown> = {}) => (snapshot: TeamsSnapshot) =>
   createElement(TeamsWorkspaceLayout, { teams: { workspace, snapshot, signedIn: true }, locale: 'en', ...more } as never);
 
-scenario('layout: sidebar and conversation side by side, with the details only when asked for, from the header or the team menu', async context => {
+scenario('layout: the team menu opens main content settings, and channel details stay beside the conversation', async context => {
   const { workspace } = await open(context);
   const page = await mount(workspace, layout(workspace)); context.after(() => page.unmount());
   assert.equal(page.oneByClass('teams-web-body').props['data-pane'], 'conversation');
@@ -40,20 +40,25 @@ scenario('layout: sidebar and conversation side by side, with the details only w
   await page.click(page.oneByClass('tw-switcher'));
   await page.click(page.find(node => node.props.role === 'menuitem' && textOf(node) === 'Team members & settings')[0]);
   const drawer = () => page.find(node => node.type === 'aside');
-  assert.equal(drawer().length, 1, 'the team menu opens the details, on the tab they were last on');
-  assert.deepEqual(page.find(node => node.props.role === 'tab').map(node => node.props['aria-selected']), [true, false, false]);
-  await page.click(page.find(node => node.props.role === 'tab' && textOf(node) === 'Bots')[0]);
-  await page.click(page.oneByLabel('Close details')); assert.equal(drawer().length, 0);
+  const selectedSection = () => page.find(node => node.type === 'button' && node.props['aria-current'] === 'page').map(textOf);
+  assert.equal(drawer().length, 0);
+  assert.equal(page.byClass('tw-team-settings-page').length, 1);
+  assert.equal(page.oneByClass('tw-settings-underlay').props.inert, '');
+  assert.ok(selectedSection().includes('General'));
+  await page.click(page.button('Bots'));
+  assert.ok(selectedSection().includes('Bots'));
+  await page.click(page.oneByLabel('Back from team settings'));
+  assert.equal(page.byClass('tw-team-settings-page').length, 0);
   await page.click(page.oneByClass('tw-switcher'));
   await page.click(page.find(node => node.props.role === 'menuitem' && textOf(node) === 'Team members & settings')[0]);
-  assert.deepEqual(page.find(node => node.props.role === 'tab').map(node => node.props['aria-selected']), [false, false, true], 'reopened where it was left');
-  await page.click(page.oneByLabel('Close details'));
+  assert.ok(selectedSection().includes('General'));
+  await page.click(page.oneByLabel('Back from team settings'));
   workspace.selectConversation('chan-general'); await settle(); await page.during(() => undefined);
   const toggle = () => page.find(node => node.type === 'button' && node.props['aria-pressed'] !== undefined && node.props['aria-label'] === 'Channel details')[0]!;
   assert.equal(toggle().props['aria-pressed'], false);
   await page.click(toggle()); assert.equal(drawer().length, 1); assert.equal(toggle().props['aria-pressed'], true);
   assert.equal(drawer()[0].props['aria-label'], 'Channel details');
-  assert.deepEqual(page.find(node => node.props.role === 'tab').map(textOf), ['Members']);
+  assert.match(textOf(drawer()[0]), /Bob/);
   await page.click(page.oneByLabel('Channel settings')); assert.equal(drawer().length, 0);
   assert.match(page.text(), /General.*Posting.*Members/);
   await page.click(page.oneByLabel('Back to channel'));
@@ -93,7 +98,7 @@ scenario('layout: an owner invites friends from the Invites tab; the Friends wor
   const page = await mount(workspace, layout(workspace, { friends: friends.api })); context.after(() => page.unmount());
   await page.click(page.oneByClass('tw-switcher'));
   await page.click(page.find(node => node.props.role === 'menuitem' && textOf(node) === 'Team members & settings')[0]);
-  await page.click(page.find(node => node.props.role === 'tab' && textOf(node) === 'Invites')[0]);
+  await page.click(page.button('Invites'));
   assert.deepEqual(friends.open, { cards: 0, blocks: 0, offers: 0 }, 'the Teams page runs no Friends listener');
   await page.click(page.button('Invite friends'));
   await until(() => friends.open.cards === 1 && friends.open.offers === 1, 'the picker\'s Friends workspace'); await page.during(() => undefined);
@@ -119,7 +124,7 @@ scenario('layout: without a Friends API the Invites tab has no Invite friends bu
   const page = await mount(workspace, layout(workspace)); context.after(() => page.unmount());
   await page.click(page.oneByClass('tw-switcher'));
   await page.click(page.find(node => node.props.role === 'menuitem' && textOf(node) === 'Team members & settings')[0]);
-  await page.click(page.find(node => node.props.role === 'tab' && textOf(node) === 'Invites')[0]);
+  await page.click(page.button('Invites'));
   assert.equal(page.find(node => node.type === 'button' && textOf(node) === 'Invite friends').length, 0); assert.match(page.text(), /Create invite link/);
 });
 

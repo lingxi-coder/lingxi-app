@@ -359,11 +359,15 @@ export class SharedBotsStore {
     const ref = team.collection('sharedBots').doc(p.sharedBotId), bot = (await tx.get(ref)).data();
     if (!ownerOf(bot, identity)) deny(403, 'MAINTAINER_REQUIRED');
     if (bot.identity.revision !== p.expectedRevision) deny(409, 'BOT_REVISION_CONFLICT');
-    const revision = p.expectedRevision + 1, handover = await this.handover(tx, team, ref, bot);
+    return this.pausePublication(tx, team, ref, bot, now);
+  }
+  /** Callers verify the actor, maintainer and revision before applying the same team-sharing stop. */
+  async pausePublication(tx, team, ref, bot, now) {
+    const revision = bot.identity.revision + 1, handover = await this.handover(tx, team, ref, bot);
     tx.update(ref, { 'identity.state': 'paused', 'identity.revision': revision, transfer: FieldValue.delete(), sourceRevision: FieldValue.delete() });
     handover.end('cancelled', now, 'paused');
-    tx.set(team.collection('signals').doc(p.sharedBotId), { updatedAt: new Date(now) });
-    return { sharedBotId: p.sharedBotId, revision };
+    tx.set(team.collection('signals').doc(ref.id), { updatedAt: new Date(now) });
+    return { sharedBotId: ref.id, revision };
   }
   /** The open handover of a Bot, read before any write: its record and the parts of its package. `end` only writes. */
   async handover(tx, team, botRef, bot) {

@@ -131,9 +131,10 @@ export function observeTranscript(
   root: HTMLElement,
   frontier: VisibleReadFrontier,
   options?: {
-    selector: string;
-    cursors: (node: HTMLElement) => readonly number[];
+    selector?: string;
+    cursors?: (node: HTMLElement) => readonly number[];
     onRecheck?: (recheck: () => void) => () => void;
+    isForeground?: () => boolean;
   },
 ) {
   if (typeof IntersectionObserver === 'undefined') return () => frontier.close();
@@ -141,12 +142,12 @@ export function observeTranscript(
     tracked = new Set<HTMLElement>();
   let previous = new Set<number>();
   const selector = options?.selector ?? '[data-message-seq]';
-  const foreground = () => document.visibilityState === 'visible' && document.hasFocus();
+  const foreground = () => document.visibilityState === 'visible' && document.hasFocus() && (options?.isForeground?.() ?? true);
   function recheck() {
     const next = new Set<number>();
     if (foreground())
       for (const node of intersecting)
-        for (const seq of options?.cursors(node) ?? [Number(node.dataset.messageSeq)]) {
+        for (const seq of options?.cursors?.(node) ?? [Number(node.dataset.messageSeq)]) {
           if (Number.isSafeInteger(seq) && seq > 0) next.add(seq);
         }
     for (const seq of previous) if (!next.has(seq)) frontier.observe(seq, false);

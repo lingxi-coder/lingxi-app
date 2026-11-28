@@ -119650,6 +119650,40 @@
         }
       }
     },
+    "teams_remove_member_bots": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请在 Web 或桌面端的团队设置中移交该成员维护的 Bot，或停止共享这些 Bot，再将该成员移出。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "請在 Web 或桌面版的團隊設定中移交該成員維護的 Bot，或停止共享這些 Bot，再移除該成員。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use Team settings on Web or Desktop to hand over or stop sharing this member’s Bots before removing them."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Web またはデスクトップのチーム設定で、このメンバーが担当する Bot を引き継ぐか、共有を停止してから、メンバーを削除してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "웹 또는 데스크톱의 팀 설정에서 이 멤버가 담당하는 Bot을 인계하거나 공유를 중지한 뒤 멤버를 제거하세요."
+          }
+        }
+      }
+    },
     "teams_replying_to %@": {
       "localizations": {
         "zh-Hans": {

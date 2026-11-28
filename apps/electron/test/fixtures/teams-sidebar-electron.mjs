@@ -44,12 +44,16 @@ const railTeams = '.desktop-nav-rail .desktop-rail-teams';
 const sidebar = '.teams-sidebar';
 const row = id => `${sidebar} [data-row="${id}"]`;
 const channelDetails = '.desktop-window-toolbar button[aria-pressed][aria-label="Channel details"]';
-const pickDrawerTab = title => run(`Array.from(document.querySelectorAll('.tw-drawer [role="tab"]')).find(tab => tab.textContent.trim() === ${JSON.stringify(title)}).click()`);
+const pickSettingsSection = (page, title) => run(`Array.from(document.querySelectorAll(${JSON.stringify(page + ' nav button')})).find(button => button.textContent.trim() === ${JSON.stringify(title)}).click()`);
+const teamSettings = '.tw-team-settings-page';
+const channelSettings = '.tw-channel-settings-page';
+const teamSettingsBack = '.desktop-window-toolbar button[aria-label="Back from team settings"]';
+const channelSettingsGear = '.desktop-window-toolbar button[aria-label="Channel settings"]';
 async function openTeamSettings() {
   await click(`${sidebar} .tw-switcher`);
   await wait(`document.querySelector('${sidebar} [role="menu"]')`);
   await run(`Array.from(document.querySelectorAll('${sidebar} [role="menuitem"]')).find(item => item.textContent.trim() === 'Team members & settings').click()`);
-  await wait(`document.querySelector('.tw-drawer[aria-label="Team details"]')`);
+  await wait(`document.querySelector('${teamSettings}')`);
 }
 // The marked buttons of the rail; the Teams button is named with its unread count, which these checks are not about.
 const marked = () => run(`Array.from(document.querySelectorAll('.desktop-nav-rail button[data-active]')).map(button => button.getAttribute('aria-label').replace(/^Teams, \\d+ unread$/, 'Teams'))`);
@@ -59,6 +63,12 @@ const writes = async () => (await calls()).filter(call => call[0] === 'updateSet
 const menuAction = action => run(`window.applicationMenuAction(${JSON.stringify(action)})`);
 const rows = () => run(`Array.from(document.querySelectorAll('${sidebar} [data-row]')).map(button => button.getAttribute('data-row'))`);
 const setValue = (selector, value) => run(`(() => { const element = document.querySelector(${JSON.stringify(selector)}); Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), 'value').set.call(element, ${JSON.stringify(value)}); element.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+const setEditor = (selector, value) => run(`(() => {
+  const editor = document.querySelector(${JSON.stringify(selector)});
+  editor.focus();
+  editor.textContent = ${JSON.stringify(value)};
+  editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+})()`);
 const drawerWidth = () => run(`Math.round(document.querySelector('.tw-drawer').getBoundingClientRect().width)`);
 async function assertDialogCentered() {
   const geometry = await run(`(() => {
@@ -74,6 +84,69 @@ async function assertDialogCentered() {
 }
 const result = {};
 try {
+  if (process.env.LINGXI_TEST_TEAM_SETTINGS === '1') {
+    await load('?saved=teams&theme=light');
+    await configureFixtureWindow(win);
+    await setViewport(1280, 850);
+    const homeGear = '.desktop-window-toolbar button[data-team-settings-home]';
+    const nav = `${teamSettings} nav`;
+    const layout = `${teamSettings} .tw-settings-layout`;
+    const field = `${teamSettings} input[maxlength="80"]`;
+    const editor = '.teams-conversation .tw-message-editor';
+    await wait(`document.querySelector('${homeGear}') && document.querySelector('${row('chan-general')}')`);
+    const sidebarWidth = () => run(`document.querySelector('${sidebar}').clientWidth`);
+    const initialWidth = await sidebarWidth();
+    await click(homeGear);
+    await wait(`document.activeElement?.textContent === 'General'`);
+    assert.equal(await sidebarWidth(), initialWidth);
+    const columns = () => run(`getComputedStyle(document.querySelector('${layout}')).gridTemplateColumns.split(' ').length`);
+    assert.equal(await columns(), 2);
+    await run(`(() => {
+      const field = document.querySelector(${JSON.stringify(field)});
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(field, 'Fieldwork Studio');
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await pickSettingsSection(teamSettings, 'Members');
+    await pickSettingsSection(teamSettings, 'General');
+    assert.equal(await run(`document.querySelector(${JSON.stringify(field)}).value`), 'Fieldwork Studio');
+    await click(`${teamSettings} button[type="submit"]`);
+    await wait(`document.querySelector('${sidebar} .tw-switcher-name')?.textContent === 'Fieldwork Studio'`);
+    await wait(`document.querySelector('${teamSettings}')?.textContent.includes('Team settings saved.')`);
+    if (screenshots) {
+      mkdirSync(screenshots, { recursive: true });
+      writeFileSync(join(screenshots, 'team-settings-desktop.png'), (await win.webContents.capturePage()).toPNG());
+    }
+    await click(teamSettingsBack);
+    await wait(`document.activeElement === document.querySelector('${homeGear}')`);
+    await click(row('chan-general'));
+    await wait(`document.querySelector('${editor}')`);
+    await run(`(() => {
+      const node = document.querySelector('${editor}');
+      node.focus();
+      node.textContent = 'Draft from Electron';
+      node.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+      window.settingsTestEditor = node;
+    })()`);
+    await openTeamSettings();
+    assert.equal(await shown(channelSettingsGear), false, 'the settings header occupies the main toolbar');
+    assert.equal(await run(`document.querySelector('.tw-settings-underlay').inert`), true);
+    assert.equal(await run(`document.querySelector('${nav} [aria-current="page"]').textContent`), 'General');
+    await setViewport(900, 700);
+    assert.equal(await columns(), 1);
+    await setViewport(1280, 850);
+    await click(teamSettingsBack);
+    await wait(`document.activeElement === document.querySelector('${sidebar} .tw-switcher')`);
+    assert.equal(await run(`document.querySelector('${editor}') === window.settingsTestEditor`), true);
+    assert.equal(await run(`document.querySelector('${editor}').textContent`), 'Draft from Electron');
+    await click(channelSettingsGear);
+    await wait(`document.querySelector('${channelSettings}')`);
+    assert.equal(await shown(teamSettings), false);
+    assert.deepEqual(errors, []);
+    console.log(JSON.stringify({ teamSettings: true }));
+    win.destroy(); app.exit(0);
+    return;
+  }
+
   if (process.env.LINGXI_TEST_TEAM_BOT_UI === '1') {
     await load('?saved=teams&theme=light');
     await configureFixtureWindow(win);
@@ -88,7 +161,7 @@ try {
     assert.ok(sharedAvatar, 'Team home uses the published Bot avatar');
     const sharedRadius = await cardRadius(homeCard);
     await click(row('chan-general'));
-    const composerFocusInput = '.teams-conversation textarea[aria-label="Message"]';
+    const composerFocusInput = '.teams-conversation .tw-message-editor';
     await wait(`document.querySelector('${composerFocusInput}')`);
     await run(`document.querySelector('${row('chan-general')}').focus()`);
     const editorBackground = () => run(`(() => {
@@ -102,15 +175,15 @@ try {
     assert.deepEqual(await editorBackground(), idleBackground, 'focusing the composer adds no background');
     assert.notEqual(await run(`getComputedStyle(document.querySelector('.tw-compose-box')).borderTopColor`), idleBorder, 'the existing border indicates focus');
     await openTeamSettings();
-    await pickDrawerTab('Bots');
-    const botCard = '.tw-drawer .team-directory-card';
+    await pickSettingsSection(teamSettings, 'Bots');
+    const botCard = `${teamSettings} .team-directory-card`;
     const botDetails = `${botCard} details`;
     await wait(`document.querySelector('${botDetails}')`);
     const botCardHeight = () => run(`document.querySelector('${botCard}').getBoundingClientRect().height`);
     const collapsedBotHeight = await botCardHeight();
     assert.equal(await run(`document.querySelector('${botDetails}').open`), false);
     assert.equal(await run(`document.querySelector('${botCard} h4').textContent`), 'Fixture Bot');
-    assert.equal(await cardAvatar(botCard), sharedAvatar, 'the drawer uses the same Bot avatar as Team home');
+    assert.equal(await cardAvatar(botCard), sharedAvatar, 'settings uses the same Bot avatar as Team home');
     assert.equal(await cardRadius(botCard), sharedRadius, 'the compact card shares the same surface styling');
     assert.equal(await shown(`${botCard} .tw-bot-card-actions button`), true);
     await click(`${botDetails} summary`);
@@ -126,8 +199,8 @@ try {
       writeFileSync(join(screenshots, 'teams-bots-focused-composer.png'), (await win.webContents.capturePage()).toPNG());
     }
     await setViewport(900, 700);
-    await wait(`getComputedStyle(document.querySelector('.tw-drawer')).position === 'absolute'`);
-    assert.equal(await run(`document.querySelector('${botCard}').scrollWidth <= document.querySelector('${botCard}').clientWidth`), true, 'Bot actions fit the narrow drawer');
+    await wait(`getComputedStyle(document.querySelector('${teamSettings} .tw-settings-layout')).gridTemplateColumns.split(' ').length === 1`);
+    assert.equal(await run(`document.querySelector('${botCard}').scrollWidth <= document.querySelector('${botCard}').clientWidth`), true, 'Bot actions fit the narrow settings page');
     await setViewport(1280, 850);
     await click(rail('Bots'));
     const personalCard = '.bots-page .bots-card';
@@ -179,13 +252,10 @@ try {
   await wait(`document.querySelector('.desktop-window-toolbar .tw-top-connection[data-kind="ok"]')`);
   assert.equal(await shown('.teams-page .tw-conv-head'), false);
   assert.equal(await shown('.teams-sidebar .tw-conn'), false);
-  await click(`${sidebar} .tw-switcher`);
-  await wait(`document.querySelector('${sidebar} [role="menu"]')`);
-  await run(`Array.from(document.querySelectorAll('${sidebar} [role="menuitem"]')).find(item => item.textContent.trim() === 'Team members & settings').click()`);
-  await wait(`document.querySelector('.teams-page > .tw-drawer')`);
+  await openTeamSettings();
   await wait(`!document.querySelector('${sidebar} [role="menu"]')`);
-  await click('.tw-drawer button[aria-label="Close details"]');
-  await wait(`!document.querySelector('.tw-drawer')`);
+  await click(teamSettingsBack);
+  await wait(`!document.querySelector('${teamSettings}')`);
   result.teamsMode = true;
 
   // The sidebar's search box narrows the conversations.
@@ -238,7 +308,7 @@ try {
   await run(`document.querySelector(${JSON.stringify(reply)}).focus()`);
   await wait(`getComputedStyle(document.querySelector(${JSON.stringify(reply)}).parentElement).opacity === '1'`);
   await click(reply);
-  await wait(`document.querySelector('.tw-composer .tw-context-text')?.textContent.includes('Standup in five') && document.activeElement === document.querySelector('.tw-composer textarea')`);
+  await wait(`document.querySelector('.tw-composer .tw-context-text')?.textContent.includes('Standup in five') && document.activeElement === document.querySelector('.tw-composer .tw-message-editor')`);
   await click('.tw-composer .tw-context button');
   await wait(`!document.querySelector('.tw-composer .tw-context')`);
   // Cached state and recovery are reachable from the outer bar without a banner in the chat.
@@ -251,40 +321,36 @@ try {
   result.stream = true;
 
   // The shared input card keeps the chat's editor, keyboard behavior and send command.
-  const composerInput = '.teams-conversation .composer-surface .composer-input-view textarea';
+  const composerInput = '.teams-conversation .tw-message-editor';
   const editorHeight = () => run(`document.querySelector(${JSON.stringify(composerInput)}).getBoundingClientRect().height`);
   const initialHeight = await editorHeight();
-  await setValue(composerInput, Array.from({ length: 8 }, () => 'Draft line').join('\n'));
+  await setEditor(composerInput, Array.from({ length: 8 }, () => 'Draft line').join('\n'));
   await wait(`document.querySelector(${JSON.stringify(composerInput)}).getBoundingClientRect().height > ${initialHeight}`);
-  await setValue(composerInput, 'Hello team');
+  await setEditor(composerInput, 'Hello team');
   await wait(`document.querySelector(${JSON.stringify(composerInput)}).getBoundingClientRect().height === ${initialHeight}`);
   await run(`document.querySelector(${JSON.stringify(composerInput)}).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true }))`);
   assert.equal(await run(`window.fixtureCalls.some(call => call[0] === 'messages' && call[1].operation === 'create')`), false);
   await click('.teams-conversation .composer-toolbar .tw-send');
   await wait(`window.fixtureCalls.some(call => call[0] === 'messages' && call[1].operation === 'create' && call[1].text === 'Hello team' && call[1].conversationId === 'chan-general')`);
   await wait(`document.querySelector('.teams-conversation [role="log"]').textContent.includes('Hello team')`);
-  assert.equal(await run(`document.querySelector('.teams-conversation textarea[aria-label="Message"]').value`), '', 'and the box is empty again');
+  assert.equal(await run(`document.querySelector('${composerInput}').textContent`), '', 'and the box is empty again');
   result.sends = true;
 
   // The details panel: the header button, the width the keyboard sets and the window keeps, the View menu, and the sidebar's team menu.
   assert.equal(await shown('.tw-drawer'), false);
   await click('.desktop-window-toolbar .tw-conv-identity-button');
-  await wait(`document.querySelector('.teams-page > .tw-drawer')`);
+  await wait(`document.querySelector('.teams-page .tw-drawer')`);
   assert.equal(await run(`document.querySelector(${JSON.stringify(channelDetails)}).getAttribute('aria-pressed')`), 'true');
   assert.equal(await run(`document.querySelector('.tw-drawer h2').textContent`), 'general');
   assert.equal(await run(`document.querySelector('.tw-drawer .tw-drawer-title p').textContent`), 'Channel · 2 members');
   assert.equal(await shown('.tw-drawer-footer'), false);
   assert.doesNotMatch(await run(`document.querySelector('.desktop-window-toolbar .tw-conv-head').innerText`), /Add data/);
-  await pickDrawerTab('Channel settings');
-  const setting = '.tw-drawer .tw-channel-setting';
-  await wait(`document.querySelector('${setting}')`);
-  assert.doesNotMatch(await run(`document.querySelector('.tw-drawer').textContent`), /Visualization size limit/);
-  await run(`document.querySelector('${setting}').focus()`);
-  await click(setting);
-  await wait(`document.querySelector('.tw-drawer dialog[open]')`);
-  win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
-  win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
-  await wait(`!document.querySelector('.tw-drawer dialog[open]') && document.activeElement === document.querySelector('${setting}')`);
+  await click(channelSettingsGear);
+  await wait(`document.querySelector('${channelSettings}') && !document.querySelector('.tw-drawer')`);
+  await click('.desktop-window-toolbar button[aria-label="Back to channel"]');
+  await wait(`!document.querySelector('${channelSettings}')`);
+  await click(channelDetails);
+  await wait(`document.querySelector('.tw-drawer')`);
   assert.equal(await drawerWidth(), 360, 'the panel\'s own default, when none was chosen');
   await run(`(() => { const handle = document.querySelector('.tw-resize'); handle.focus(); handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true })); })()`);
   await wait(`document.querySelector('.tw-drawer').getBoundingClientRect().width === 376`);
@@ -313,8 +379,9 @@ try {
   assert.equal(await run(`document.querySelectorAll('${sidebar} .tw-sidebar-head button').length`), 1);
   assert.equal(await run(`Boolean(document.querySelector('${sidebar} [aria-label="Team members & settings"]'))`), false);
   await openTeamSettings();
-  assert.equal(await run(`document.querySelector('.tw-drawer h2').textContent`), 'Acme');
-  const memberActions = '.tw-drawer .tw-member-actions';
+  assert.equal(await run(`document.querySelector('${teamSettings} h2').textContent`), 'General');
+  await pickSettingsSection(teamSettings, 'Members');
+  const memberActions = `${teamSettings} .tw-member-actions`;
   const memberRowHeight = () => run(`document.querySelector('${memberActions}').getBoundingClientRect().height`);
   const collapsedHeight = await memberRowHeight();
   assert.equal(await run(`document.querySelector('${memberActions}').open`), false);
@@ -323,7 +390,7 @@ try {
   assert.ok(await memberRowHeight() > collapsedHeight, 'actions expand in place below the member');
   await click(`${memberActions} summary`);
   await menuAction('team-details');
-  await wait(`!document.querySelector('.tw-drawer')`);
+  await wait(`!document.querySelector('${teamSettings}')`);
   // Off the Teams page the menu item does nothing: it must not have opened the panel behind the chat.
   await click(rail('Messages'));
   await wait(`!document.querySelector('${sidebar}') && document.querySelector('.sidebar-new-chat')`);
@@ -371,10 +438,10 @@ try {
   await wait(`!document.querySelector('${sidebar}') && document.querySelector('.sidebar-new-chat')`);
   await menuAction('teams');
   await wait(`document.activeElement === document.querySelector('${row('dm-bob')}')`);
-  await run(`document.querySelector('.teams-conversation textarea[aria-label="Message"]').focus()`);
+  await run(`document.querySelector('.teams-conversation .tw-message-editor').focus()`);
   await menuAction('teams');
   await delay(300);
-  assert.equal(await run(`document.activeElement === document.querySelector('.teams-conversation textarea[aria-label="Message"]')`), true, 'the composer keeps the keyboard');
+  assert.equal(await run(`document.activeElement === document.querySelector('.teams-conversation .tw-message-editor')`), true, 'the composer keeps the keyboard');
   result.focus = true;
 
   // A team invitation from a link opens in Teams mode even when the sidebar is hidden, reviewed in the join dialog and not joined.
@@ -506,7 +573,8 @@ try {
       await wait(`document.querySelector('.tw-drawer')`);
       await delay(500);
       await snap(`teams-drawer-${theme}.png`);
-      await pickDrawerTab('Channel settings');
+      await click(channelSettingsGear);
+      await wait(`document.querySelector('${channelSettings}')`);
       await snap(`teams-channel-settings-${theme}.png`);
       await load(`?saved=bots&theme=${theme}`);
       await wait(`document.querySelector('.bots-page')?.getClientRects().length > 0 && document.querySelectorAll('nav[aria-label="Bots"] button[aria-expanded]:not([aria-haspopup])').length === 3`);
@@ -528,7 +596,7 @@ try {
     await click(row('chan-general'));
     await wait(`document.querySelectorAll('.teams-conversation .tw-msg').length === 7`);
     await openTeamSettings();
-    await pickDrawerTab('Bots');
+    await pickSettingsSection(teamSettings, 'Bots');
     await delay(500);
     await snap('teams-drawer-bots-light.png');
     await setViewport(900, 700);

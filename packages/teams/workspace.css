@@ -111,6 +111,7 @@
 .tw-stack-more { margin-left: 4px; font-size: 11px; color: var(--tw-muted); }
 .tw-chan { display: inline-flex; align-items: center; justify-content: center; flex: none; border-radius: 24%; background: var(--tw-hover); color: var(--tw-muted); font-weight: 600; }
 .tw-team-mark { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 24px; height: 24px; border-radius: 24%; color: #fff; font-size: 11px; font-weight: 700; }
+.tw-team-mark > img { display: block; inline-size: 100%; block-size: 100%; border-radius: inherit; object-fit: cover; }
 .tw-badge { display: inline-block; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--tw-badge-bg); color: var(--tw-badge-fg); font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; flex: none; }
 
 /* ── Menus ── */
@@ -278,6 +279,7 @@
 .tw-scope .tw-conv-identity-button { position: absolute; inset: 0; border: 0; border-radius: inherit; padding: 0; }
 .tw-scope .tw-conv-identity-button:hover:enabled { background: transparent; }
 .tw-conv-title { flex: 1; min-width: 0; }
+.tw-team-home-heading .tw-conv-title { flex: 0 1 auto; }
 .tw-conv-title h2 { font-size: 16px; line-height: 1.3; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tw-conv-title p { font-size: 12px; color: var(--tw-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tw-head-actions { display: flex; align-items: center; justify-content: flex-end; flex: none; gap: 4px; }
@@ -940,22 +942,33 @@ button.tw-lookup-who { text-align: start; }
 .tw-scope .tw-visualization-frame { display: block; width: 100%; border: 0; }
 .tw-scope .tw-data-record form fieldset { display: grid; gap: .5rem; }
 
-.tw-channel-settings-page { flex: 1; min-width: 0; min-height: 0; overflow: auto; container: channel-settings / inline-size; }
-.tw-channel-settings-layout { display: grid; grid-template-columns: 11rem minmax(0, 1fr); align-items: start; gap: 2rem; padding: 2rem clamp(1rem, 4cqw, 2.5rem); max-width: 69rem; margin: 0 auto; }
-.tw-channel-settings-layout nav { display: grid; gap: .25rem; }
-.tw-channel-settings-layout nav p { margin: .375rem .625rem; color: var(--tw-muted); font-weight: 600; }
-.tw-channel-settings-layout nav button { display: flex; align-items: center; justify-content: flex-start; gap: .625rem; min-height: 2.25rem; padding: .5rem .625rem; border: 0; background: transparent; text-align: start; color: var(--tw-muted); }
-.tw-channel-settings-layout nav button[aria-current] { color: var(--tw-fg); background: var(--tw-selected); font-weight: 600; }
-.tw-channel-settings-layout nav button[aria-current] .tw-icon { color: var(--tw-accent); }
-.tw-channel-settings-layout nav button:focus-visible { outline: 0; color: var(--tw-fg); background: color-mix(in srgb, var(--tw-accent) 24%, transparent); }
-.tw-channel-section { min-width: 0; }
-.tw-channel-section h2 { margin: 0 0 1.25rem; font-size: 1.6rem; }
-.tw-channel-section h2:focus { outline: none; }
-.tw-channel-fields { display: grid; gap: 1rem; margin: 0; padding: 1.25rem; min-width: 0; border: 1px solid var(--tw-line); border-radius: .875rem; background: color-mix(in srgb, var(--tw-fg) 4%, var(--tw-bg)); }
-.tw-channel-fields p { margin: 0; }
+.tw-settings-surface, .tw-settings-underlay { display: flex; flex: 1; min-width: 0; min-height: 0; }
+.tw-settings-surface { position: relative; }
+.tw-settings-underlay[data-settings-covered='true'] { visibility: hidden; }
+.tw-settings-page { flex: 1; min-width: 0; min-height: 0; overflow: auto; container: teams-settings / inline-size; }
+.tw-team-settings-page { position: absolute; inset: 0; background: var(--tw-bg); }
+.tw-settings-layout { display: grid; grid-template-columns: 11rem minmax(0, 1fr); align-items: start; gap: 2rem; padding: 2rem clamp(1rem, 4cqw, 2.5rem); max-width: 69rem; margin: 0 auto; }
+.tw-settings-nav { display: grid; gap: .25rem; }
+.tw-settings-nav p { margin: .375rem .625rem; color: var(--tw-muted); font-weight: 600; }
+.tw-settings-nav button { display: flex; align-items: center; justify-content: flex-start; gap: .625rem; min-height: 2.25rem; padding: .5rem .625rem; border: 0; background: transparent; text-align: start; color: var(--tw-muted); }
+.tw-settings-nav button[aria-current] { color: var(--tw-fg); background: var(--tw-selected); font-weight: 600; }
+.tw-settings-nav button[aria-current] .tw-icon { color: var(--tw-accent); }
+.tw-settings-nav button:focus-visible { outline: 0; color: var(--tw-fg); background: color-mix(in srgb, var(--tw-accent) 24%, transparent); }
+.tw-settings-section { min-width: 0; }
+.tw-settings-section > h2 { margin: 0 0 1.25rem; font-size: 1.6rem; }
+.tw-settings-section > h2:focus { outline: none; }
+.tw-settings-fields { display: grid; gap: 1rem; margin: 0; padding: 1.25rem; min-width: 0; border: 1px solid var(--tw-line); border-radius: .875rem; background: color-mix(in srgb, var(--tw-fg) 4%, var(--tw-bg)); }
+.tw-scope ul.tw-settings-fields { padding: .5rem 1rem; gap: 0; }
+.tw-settings-fields p { margin: 0; }
+.tw-settings-fields :is(input, textarea, select):focus-visible { outline: 0; border-color: var(--tw-focus); background-color: var(--tw-surface); }
 .tw-channel-field { display: grid; gap: .375rem; }
-.tw-channel-fields textarea { resize: vertical; }
-.tw-channel-section footer { display: flex; justify-content: end; padding-top: 1rem; border-top: 1px solid var(--tw-border); }
+.tw-settings-fields textarea { resize: vertical; }
+.tw-settings-section footer { display: flex; justify-content: end; padding-top: 1rem; border-top: 1px solid var(--tw-border); }
+.tw-team-avatar-setting { display: flex; align-items: center; gap: .875rem; }
+.tw-team-avatar-actions { display: flex; flex-wrap: wrap; gap: .375rem; margin-block-start: .375rem; }
+.tw-team-settings-membership { display: flex; flex-wrap: wrap; align-items: center; gap: .625rem 1rem; margin-block-start: 2rem; padding-block: 1rem; border-block-start: 1px solid var(--tw-line); color: var(--tw-muted); }
+.tw-team-settings-membership .tw-danger-btn { color: var(--tw-danger); margin-inline-start: auto; }
+.tw-team-settings-page > .tw-banner { margin: .75rem 1rem 0; }
 .tw-channel-picks { display: grid; gap: .375rem; padding: 0; margin: 0; border: 0; }
 .tw-channel-picks legend { margin-bottom: .5rem; }
 .tw-channel-picks label { display: flex; flex-direction: row; align-items: center; }
@@ -1057,10 +1070,16 @@ button.tw-lookup-who { text-align: start; }
   .tw-post-actions button:focus-visible, .tw-post-menu > button:focus-visible, .tw-post-write:focus-visible,
   .tw-scope .tw-post-tile > .tw-file-picture:focus-visible { outline: 2px solid Highlight; outline-offset: -2px; }
 }
-@container channel-settings (max-width: 42rem) {
-  .tw-channel-settings-layout { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
-  .tw-channel-settings-layout nav { display: flex; flex-wrap: wrap; align-items: center; }
-  .tw-channel-settings-layout nav p { flex-basis: 100%; }
+@container teams-settings (max-width: 42rem) {
+  .tw-settings-layout { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+  .tw-settings-nav { display: flex; flex-wrap: wrap; align-items: center; }
+  .tw-settings-nav p { flex-basis: 100%; }
+}
+@media (hover: none) and (pointer: coarse) {
+  .tw-scope .tw-settings-nav button { min-height: 44px; }
+}
+@media (forced-colors: active) {
+  .tw-settings-nav button:focus-visible, .tw-settings-fields :is(input, textarea, select):focus-visible { outline: 2px solid Highlight; outline-offset: -2px; }
 }
 .tw-send[data-post] { inline-size: auto; padding-inline: .75rem; white-space: nowrap; }
 .tw-post-context { list-style: none; padding: .5rem 1rem; }

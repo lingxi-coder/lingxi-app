@@ -42,7 +42,7 @@ import { HeldReplyCard } from './HeldReplyCard';
 import { useHeldReplies } from './held-hooks.js';
 import { heldReplyBots, placeHeld, type HeldRow } from './held-replies.js';
 import { buildStreamRows, formatClock, formatPostTime, placeTasks, visibleStart, WINDOW_SIZE, type StreamRow } from './stream.js';
-import { Avatar, ConversationLead, Dialog, Icon, PopupMenu, platformChip, platformNotice, useIsoLayoutEffect, type MenuItem, type RenderAvatar, type RenderMarkdown } from './ui';
+import { Avatar, ConversationLead, Dialog, Icon, PopupMenu, TeamMark, platformChip, platformNotice, useIsoLayoutEffect, type MenuItem, type RenderAvatar, type RenderMarkdown } from './ui';
 import { conversationLabel, unreadCount, type Identity, type TeamsSnapshot, type TeamsWorkspace } from './workspace.js';
 import { intlTag, teamsText, useTeamsText } from './i18n.js';
 
@@ -66,6 +66,10 @@ export interface TeamConversationViewProps {
   detailsOpen?: boolean;
   onToggleDetails?(): void;
   onOpenChannelSettings?(): void;
+  onOpenTeamSettings?(opener: HTMLButtonElement): void;
+  onOpenTeamSettingsInChat?(opener: HTMLButtonElement): void;
+  /** Settings covers this mounted conversation; messages underneath should not count as read. */
+  covered?: boolean;
   renderAvatar?: RenderAvatar;
   /** Renders a shared Bot's messages and documents as Markdown. People's messages stay plain text. */
   renderMarkdown?: RenderMarkdown;
@@ -119,8 +123,14 @@ export function TeamConversationView(props: TeamConversationViewProps): ReactEle
   const hasTopbar = useContext(ChatTopbarTarget) !== undefined;
   if (!conversation || !model || !team) {
     const { title, body } = emptyState(snapshot, locale);
-    const chrome = hasTopbar ? <ChatTopbarHeader><header className="tw-conv-head">
-      <div className="tw-conv-identity"><div className="tw-conv-title"><h2>{team?.name ?? t('teams_title')}</h2></div></div>
+    const openSettings = team && !snapshot.selectedConversationId && !snapshot.creation ? props.onOpenTeamSettings : undefined;
+    const chrome = hasTopbar || openSettings ? <ChatTopbarHeader><header className="tw-conv-head">
+      <div className="tw-conv-identity tw-team-home-heading">
+        {team && openSettings ? <TeamMark id={team.id} name={team.name} avatar={snapshot.detail?.team.id === team.id ? snapshot.detail.profile?.avatar : undefined} /> : null}
+        <div className="tw-conv-title"><h2>{team?.name ?? t('teams_title')}</h2></div>
+        {openSettings ? <button type="button" className="tw-icon-btn" data-team-settings-home="" data-team-settings-opener=""
+          aria-label={t('tw_team_settings')} title={t('tw_team_settings')} onClick={event => openSettings(event.currentTarget)}><Icon name="gear" /></button> : null}
+      </div>
       <TopbarConnection snapshot={snapshot} workspace={props.workspace} locale={locale} />
     </header></ChatTopbarHeader> : null;
     if (snapshot.loading) return <>{chrome}<section className="tw-scope tw-conv tw-conv-empty"><p className="tw-empty-line" role="status">{t('teams_loading')}</p></section></>;
@@ -147,7 +157,7 @@ export function CreationBanner({ workspace, snapshot, locale }: { workspace: Tea
 
 type Pane = TeamConversationViewProps & { conversation: TeamConversation; model: NonNullable<TeamsSnapshot['messaging']>; team: NonNullable<TeamsSnapshot['team']> };
 
-function ConversationPane({ workspace, snapshot, conversation, model, team, detailsOpen, onToggleDetails, onOpenChannelSettings, renderAvatar, renderMarkdown, locale, now, friend, onBack, sharedPostId, onExitPost }: Pane): ReactElement {
+function ConversationPane({ workspace, snapshot, conversation, model, team, detailsOpen, onToggleDetails, onOpenChannelSettings, onOpenTeamSettingsInChat, renderAvatar, renderMarkdown, locale, now, friend, onBack, sharedPostId, onExitPost, covered = false }: Pane): ReactElement {
   const t = useTeamsText(locale);
   const hasTopbar = useContext(ChatTopbarTarget) !== undefined;
   const uid = snapshot.uid, messages = snapshot.messages, tag = intlTag(locale);
@@ -478,7 +488,13 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
   }, [visible]);
   useEffect(() => { if (pinned) setSeen(tail?.seq ?? 0); }, [pinned, tail?.seq]);
   const readFrontier=useRef<VisibleReadFrontier>();
+  const recheckRead = useRef<() => void>();
+  const foreground = useRef(!covered && !settings);
   const [readError,setReadError]=useState(false);
+  useIsoLayoutEffect(() => {
+    foreground.current = !covered && !settings;
+    recheckRead.current?.();
+  }, [covered, settings]);
   // Capture the manual flag only on entry. A later flag set on another device survives old exposure callbacks.
   useEffect(()=>{
     const node=scroller.current;
@@ -486,7 +502,10 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
     const frontier=durableReadFrontier(uid,'team:'+team.id+':'+conversation.id,team.generation,conversation.lastReadSeq,conversation.manualUnreadRevision??0,
       (through,revision)=>{void model.visibleRead(conversation.id,through,revision,conversation.pendingActionRevision,conversation.failureRevision).then(()=>setReadError(false)).catch(()=>setReadError(true));},()=>setReadError(true));
     readFrontier.current=frontier;
-    return observeTranscript(node,frontier);
+    return observeTranscript(node,frontier, {
+      isForeground: () => foreground.current,
+      onRecheck: recheck => { recheckRead.current = recheck; return () => { recheckRead.current = undefined; }; },
+    });
   },[model,conversation.id]);
   useEffect(()=>readFrontier.current?.advance(conversation.lastReadSeq),[conversation.lastReadSeq]);
   useEffect(() => {
@@ -606,6 +625,10 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
         {logBots.length ? <button type="button" className="tw-icon-btn" aria-label={t('teams_triage_title')} title={t('teams_triage_title')} onClick={() => setTriageOpen(true)}><Icon name="clock" /></button> : null}
         {hasChannelSettings ? <button ref={gear} type="button" className="tw-icon-btn" aria-label={settingsLabel} title={settingsLabel}
           onClick={() => { onOpenChannelSettings?.(); setSettings(true); }}><Icon name="gear" /></button> : null}
+        {onOpenTeamSettingsInChat && !friend ? <button type="button" className="tw-icon-btn" data-team-settings-opener=""
+          aria-label={t('tw_team_settings')} title={t('tw_team_settings')} onClick={event => onOpenTeamSettingsInChat(event.currentTarget)}>
+          <Icon name={hasChannelSettings ? 'sliders' : 'gear'} />
+        </button> : null}
         {onToggleDetails && !friend ? <button type="button" className="tw-icon-btn" aria-pressed={!!detailsOpen} aria-label={t(channel ? 'tw_channel_details' : 'teams_team_details')} title={t(channel ? 'tw_channel_details' : 'teams_team_details')} onClick={onToggleDetails}><Icon name="panel" /></button> : null}
       </div>
     </header></ChatTopbarHeader> : null}
@@ -701,7 +724,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
               {message.artifactId && !tasks?.some(task => task.artifactId === message.artifactId) ? <ArtifactButton key={message.artifactId} api={workspace.api} scope={scope} artifactId={message.artifactId} locale={locale} renderMarkdown={renderMarkdown} people={snapshot} replyText={replyText} /> : null}
               {tasks?.map(task => <div className="tw-embed" key={task.taskId}>{botRun(task, replyText)}</div>)}
               {message.channelPost && !pending ? <PostActions api={workspace.api} scope={scope} conversationId={conversation.id} post={message} locale={tag}
-                online={!snapshot.offline} participant={participant} knownReplies={thread?.filter(row => !row.message.recalled).length ?? 0}
+                online={!snapshot.offline && !covered && !settings} participant={participant} knownReplies={thread?.filter(row => !row.message.recalled).length ?? 0}
                 threadComplete={page?.next === null}
                 openForReply={sharedPostId === message.id || reply?.id === message.id || reply?.postId === message.id}
                 needsThread={!page && !threadLoading.has(message.id) && !threadErrors.has(message.id)}

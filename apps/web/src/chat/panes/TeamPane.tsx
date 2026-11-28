@@ -3,8 +3,9 @@ import type { TeamMember } from '../../../../../packages/teams';
 import type { FriendsApi } from '../../../../../packages/teams/friends';
 import { TeamConversationView } from '../../../../../packages/teams/TeamConversationView';
 import { TeamDetailsDrawer } from '../../../../../packages/teams/TeamDetailsDrawer';
+import { TeamSettingsPage } from '../../../../../packages/teams/TeamSettingsPage';
+import { TeamSettingsSurface, useTeamSettings } from '../../../../../packages/teams/TeamSettingsSurface';
 import { useTeamsText } from '../../../../../packages/teams/i18n';
-import type { DrawerTab } from '../../../../../packages/teams/ui';
 import type { UseTeams } from '../../../../../packages/teams/useTeamsWorkspace';
 import type { ChatTarget } from '../../app/router';
 import { MemberFriend } from '../../friends/MemberFriend';
@@ -27,10 +28,11 @@ interface Props {
 export function TeamPane({ teams: { workspace, snapshot }, teamId, conversationId, postId, locale, friends, onFollow }: Props) {
   const t = useTeamsText(locale);
   const zh = locale === 'zh';
-  const [drawer, setDrawer] = useState<{ open: boolean; tab: DrawerTab }>({ open: false, tab: 'members' });
+  const [drawer, setDrawer] = useState(false);
   const [adding, setAdding] = useState<TeamMember>();
   useEffect(() => { workspace?.openConversation(teamId, conversationId); }, [workspace, teamId, conversationId]);
   const selected = snapshot?.selectedTeamId === teamId ? snapshot.selectedConversationId : '';
+  const settings = useTeamSettings(selected === conversationId ? snapshot : undefined);
   // Follow only a change made after the requested conversation opened, never the previous one still selected.
   const settled = useRef('');
   useEffect(() => {
@@ -54,13 +56,18 @@ export function TeamPane({ teams: { workspace, snapshot }, teamId, conversationI
     title={zh ? '无法打开这个对话' : 'This chat is not available'}
     text={zh ? '这个对话已不存在，或者你不在其中。' : 'This conversation no longer exists, or you are not in it.'} />;
   return <div className="chat-pane-team">
-    <div className="chat-pane-conversation">
-      <TeamConversationView workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown}
-        sharedPostId={selected === conversationId ? postId : undefined} onExitPost={() => onFollow({ kind: 'team', teamId, conversationId })}
-        detailsOpen={drawer.open} onToggleDetails={() => setDrawer(current => ({ ...current, open: !current.open }))} />
-    </div>
-    {drawer.open ? <TeamDetailsDrawer target="conversation" workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} tab={drawer.tab}
-      onTabChange={tab => setDrawer(current => ({ ...current, tab }))} onClose={() => setDrawer(current => ({ ...current, open: false }))} onAddFriend={friends ? setAdding : undefined} /> : null}
+    <TeamSettingsSurface settings={settings.active ? <TeamSettingsPage key={settings.active.id} initialSection={settings.active.section}
+      workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar}
+      onClose={settings.back} onOpenChat={settings.back} onAddFriend={friends ? setAdding : undefined} /> : undefined}>
+      <div className="chat-pane-conversation">
+        <TeamConversationView workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar} renderMarkdown={renderMarkdown}
+          sharedPostId={selected === conversationId ? postId : undefined} onExitPost={() => onFollow({ kind: 'team', teamId, conversationId })}
+          detailsOpen={drawer} onToggleDetails={() => setDrawer(current => !current)} onOpenChannelSettings={() => setDrawer(false)}
+          covered={!!settings.active} onOpenTeamSettingsInChat={selected === conversationId ? opener => settings.open('general', opener) : undefined} />
+      </div>
+      {drawer ? <TeamDetailsDrawer snapshot={snapshot} locale={locale} renderAvatar={renderTeamAvatar}
+        onClose={() => setDrawer(false)} onAddFriend={friends ? setAdding : undefined} /> : null}
+    </TeamSettingsSurface>
     {adding && friends && snapshot.team ? <MemberFriend friends={friends} teams={workspace.api} uid={snapshot.uid} teamId={snapshot.team.id} member={adding} locale={locale} onClose={() => setAdding(undefined)} /> : null}
   </div>;
 }

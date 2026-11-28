@@ -19,6 +19,10 @@ test('the Team Bots card discloses secondary details and composer focus keeps th
   assert.equal((await runFixture({ LINGXI_TEST_TEAM_BOT_UI: '1' })).teamBotUi, true);
 });
 
+test('Team settings opens from the home gear and menu, keeps the chat draft and adapts to the window', async () => {
+  assert.equal((await runFixture({ LINGXI_TEST_TEAM_SETTINGS: '1' })).teamSettings, true);
+});
+
 async function runFixture(fixtureEnv = {}) {
   const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
   const fixtureRoot = join(root, 'test/fixtures');

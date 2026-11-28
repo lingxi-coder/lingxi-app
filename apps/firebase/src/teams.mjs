@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { TeamConversationError, conversationRecord } from './team-conversations.mjs';
 import { ChannelError } from './channel-settings.mjs';
 import { TeamMessagesStore, TeamMessageError } from './team-messages.mjs';
-import { SharedBotError } from './shared-bots.mjs';
+import { SharedBotError, SharedBotsStore } from './shared-bots.mjs';
 import { HostedBotServiceError, HostedBotServices, SERVICE_PREFIX } from './hosted-bot-service.mjs';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{8,64}$/u);
@@ -23,10 +23,46 @@ const command = z.discriminatedUnion('action', [
   z.object({ action: z.literal('join'), code: z.string().regex(/^[A-Za-z0-9_-]{32}$/u), requestId: id }).strict(),
   z.object({ action: z.literal('leave'), ...teamId, generation }).strict(),
   z.object({ action: z.literal('remove'), ...teamId, uid, generation }).strict(),
+  z.object({ action: z.literal('removalBlockers'), ...teamId, uid, generation }).strict(),
+  z.object({ action: z.literal('pauseRemovalBot'), ...teamId, uid, generation, actorGeneration: generation,
+    botId: id, revision: generation }).strict(),
   z.object({ action: z.literal('role'), ...teamId, uid, generation, role: z.enum(['admin', 'member']) }).strict(),
   z.object({ action: z.literal('handOver'), ...teamId, uid, generation }).strict(),
 
 ]);
+const TEAM_PROFILE_PATH = /^\/v1\/teams\/([A-Za-z0-9_-]{8,64})\/profile$/u;
+const TEAM_AVATAR_BYTES = 48 * 1024;
+const TEAM_AVATAR_EDGE = 96;
+const profileCommand = z.object({
+  action: z.literal('updateProfile'), ...teamId, generation,
+  version: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  changes: z.object({
+    name: z.string().trim().min(1).max(80).optional(),
+    description: z.string().trim().max(1000).optional(),
+    avatar: z.string().min(1).max(4 * Math.ceil(TEAM_AVATAR_BYTES / 3)).regex(/^[A-Za-z0-9+/]+={0,2}$/u).nullable().optional(),
+  }).strict().refine(changes => Object.keys(changes).length > 0),
+}).strict();
+const PNG_HEADER = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+const PNG_END = Buffer.from('0000000049454e44ae426082', 'hex');
+function validTeamAvatar(avatar) {
+  const png = Buffer.from(avatar, 'base64');
+  return png.length >= 45 && png.length <= TEAM_AVATAR_BYTES && png.toString('base64') === avatar
+    && png.subarray(0, PNG_HEADER.length).equals(PNG_HEADER) && png.subarray(-PNG_END.length).equals(PNG_END)
+    && png.readUInt32BE(16) === TEAM_AVATAR_EDGE && png.readUInt32BE(20) === TEAM_AVATAR_EDGE;
+}
+
+const teamProfileRef = team => team.collection('profile').doc('current');
+function teamProfile(value) {
+  return { version: value?.version ?? 0, description: value?.description ?? '', avatar: value?.avatar ?? null };
+}
+async function publishedBotsBy(tx, team, memberId, membershipGeneration) {
+  const bots = await tx.get(team.collection('sharedBots').where('identity.maintainer.uid', '==', memberId));
+  return bots.docs.flatMap(doc => {
+    const { identity, name } = doc.data();
+    return identity.state === 'published' && identity.maintainer.generation === membershipGeneration
+      ? [{ id: doc.id, name, revision: identity.revision }] : [];
+  });
+}
 const hash = value => createHash('sha256').update(value).digest('hex');
 const millis = value => value?.toMillis?.() ?? Number.NaN;
 export const TEAM_MEMBER_LIMIT = 200;
@@ -117,12 +153,45 @@ export class TeamsStore {
       const ref = this.team(tid);
       const [team, self] = await tx.getAll(ref, ref.collection('members').doc(user));
       if (!active(team.data()) || !self.exists) fail(403, 'MEMBERSHIP_REQUIRED');
-      const members = await tx.get(ref.collection('members').limit(TEAM_MEMBER_LIMIT));
-      const invitations = manager(self.data()) ? await tx.get(ref.collection('invites').orderBy('createdAt', 'desc').limit(50)) : null;
+      const [members, invitations, settings] = await Promise.all([
+        tx.get(ref.collection('members').limit(TEAM_MEMBER_LIMIT)),
+        manager(self.data()) ? tx.get(ref.collection('invites').orderBy('createdAt', 'desc').limit(50)) : null,
+        pair(team.data()) ? null : tx.get(teamProfileRef(ref)),
+      ]);
       return { team: summary(team, self.data()), members: members.docs.map(doc => ({ uid: doc.id,
         displayName: doc.data().displayName, role: doc.data().role, generation: doc.data().generation })),
       invites: invitations?.docs.map(doc => { const v = doc.data(); return { id: doc.id, role: v.role,
-        expiresAt: v.expiresAt.toDate().toISOString(), uses: v.uses, maxUses: v.maxUses, revoked: v.revoked }; }) ?? [] };
+        expiresAt: v.expiresAt.toDate().toISOString(), uses: v.uses, maxUses: v.maxUses, revoked: v.revoked }; }) ?? [],
+      ...(settings ? { profile: teamProfile(settings.data()) } : {}) };
+    });
+  }
+  async updateProfile(user, raw) {
+    const input = profileCommand.parse(raw);
+    const { changes } = input;
+    if (changes.avatar && !validTeamAvatar(changes.avatar)) fail(400, 'TEAM_AVATAR_INVALID');
+    return this.db.runTransaction(async tx => {
+      const ref = this.team(input.teamId), settings = teamProfileRef(ref);
+      const [team, self, profileDoc] = await tx.getAll(ref, ref.collection('members').doc(user), settings);
+      const previous = team.data();
+      if (!active(previous) || !self.exists) fail(403, 'MEMBERSHIP_REQUIRED');
+      if (pair(previous)) fail(400, 'PAIR_TEAM');
+      if (self.data().generation !== input.generation) fail(409, 'STALE_MEMBERSHIP');
+      if (!manager(self.data())) fail(403, 'ROLE_REQUIRED');
+
+      const current = teamProfile(profileDoc.data());
+      const name = changes.name ?? previous.name;
+      const description = changes.description ?? current.description;
+      const avatar = changes.avatar === undefined ? current.avatar : changes.avatar;
+      // A transport retry of an already saved change is safe even if the version has advanced.
+      if (name === previous.name && description === current.description && avatar === current.avatar) return { ok: true };
+      if (input.version !== current.version || current.version >= Number.MAX_SAFE_INTEGER) fail(409, 'TEAM_PROFILE_CHANGED');
+      const members = await tx.get(ref.collection('members').limit(TEAM_MEMBER_LIMIT));
+      const version = current.version + 1;
+      tx.set(settings, { version, description, avatar });
+      tx.update(ref, { name, createdName: previous.createdName ?? previous.name, updatedAt: new Date(this.clock()) });
+      // Every client already watches its team index. Refresh its names and selected detail without duplicating the thumbnail.
+      for (const member of members.docs) tx.set(this.index(member.id, ref.id), { profileVersion: version }, { merge: true });
+      return { ok: true };
     });
   }
   async execute(user, raw) {
@@ -134,7 +203,8 @@ export class TeamsStore {
       return this.db.runTransaction(async tx => {
         const ref = this.team(input.teamId), previous = await tx.get(ref);
         if (previous.exists) {
-          if (!active(previous.data()) || previous.data().createdBy !== user.uid || previous.data().name !== input.name) fail(409, 'TEAM_ID_CONFLICT');
+          const original = previous.data();
+          if (!active(original) || original.createdBy !== user.uid || (original.createdName ?? original.name) !== input.name) fail(409, 'TEAM_ID_CONFLICT');
           return { teamId: ref.id };
         }
         const memberships = await tx.get(this.db.collection(`users/${user.uid}/teams`).limit(USER_TEAM_LIMIT));
@@ -210,6 +280,7 @@ export class TeamsStore {
         if (role !== 'owner') fail(403, 'OWNER_REQUIRED');
         const members = await tx.get(ref.collection('members').limit(TEAM_MEMBER_LIMIT));
         endTeam(tx, ref, members.docs.map(member => member.ref), now);
+        tx.delete(teamProfileRef(ref));
         retireTeamVisualizations(tx, ref, now.getTime());
         for (const member of members.docs) tx.delete(this.index(member.id, ref.id));
         return { ok: true };
@@ -235,6 +306,21 @@ export class TeamsStore {
       if (!target.exists) fail(409, 'STALE_MEMBERSHIP');
       if (target.data().generation !== input.generation) fail(409, 'STALE_MEMBERSHIP');
       if (target.data().role === 'owner') fail(409, 'OWNER_CANNOT_LEAVE');
+      if (input.action === 'removalBlockers' || input.action === 'remove') {
+        const blockingBots = await publishedBotsBy(tx, ref, targetUid, input.generation);
+        if (input.action === 'removalBlockers') return { blockingBots };
+        if (blockingBots.length) fail(409, 'TEAM_MEMBER_HAS_BOTS');
+      }
+      if (input.action === 'pauseRemovalBot') {
+        if (self.data().generation !== input.actorGeneration) fail(409, 'STALE_MEMBERSHIP');
+        const botRef = ref.collection('sharedBots').doc(input.botId), bot = (await tx.get(botRef)).data();
+        const identity = bot?.identity;
+        if (identity?.maintainer.uid !== targetUid || identity.maintainer.generation !== input.generation) fail(409, 'BOT_REVISION_CONFLICT');
+        if (identity.state === 'paused' && identity.revision === input.revision + 1) return { ok: true };
+        if (identity.state !== 'published' || identity.revision !== input.revision) fail(409, 'BOT_REVISION_CONFLICT');
+        await new SharedBotsStore(this.db, this.clock).pausePublication(tx, ref, botRef, bot, now.getTime());
+        return { ok: true };
+      }
       if (input.action === 'role') {
         if (role !== 'owner') fail(403, 'OWNER_REQUIRED');
         tx.update(targetRef, { role: input.role });
@@ -259,6 +345,10 @@ export function datasetBodyLimit(path) {
   if (path === capturePath || path === pagesPath || path === '/v1/teams/visualizations') return 3 * 1024 * 1024;
   if (path === datasetPath || path === '/v2/dataset-runs' || path.startsWith('/v1/dataset-browser/')) return 131072;
   return undefined;
+}
+
+export function teamProfileBodyLimit(path) {
+  return TEAM_PROFILE_PATH.test(path) ? 80 * 1024 : undefined;
 }
 
 async function boundedDatasetBody(request, limit) {
@@ -351,6 +441,14 @@ export function createTeamsHandler({ store, friends, inbox, data, datasets, data
       if (friends && path === '/v1/friends/profile' && request.method === 'GET') return reply(await friends.profile(user));
       const detail = /^\/v1\/teams\/([A-Za-z0-9_-]{8,64})$/u.exec(path);
       if (detail && detail[1] !== 'session' && request.method === 'GET') return reply(await store.detail(user.uid, detail[1]));
+      const profile = TEAM_PROFILE_PATH.exec(path);
+      if (profile && request.method === 'POST') {
+        const raw = await boundedDatasetBody(request, teamProfileBodyLimit(path));
+        let body;
+        try { body = JSON.parse(raw); } catch { fail(400, 'INVALID_JSON'); }
+        if (body?.teamId !== profile[1]) fail(400, 'INVALID_INPUT');
+        return reply(await store.updateProfile(user.uid, body));
+      }
       if (request.method !== 'POST' || !['/v1/teams', '/v1/teams/session', '/v1/teams/messages', '/v1/services', ...(data ? ['/v1/teams/data'] : []), ...(datasetPages ? ['/v1/teams/dataset-pages'] : []), ...(friends ? ['/v1/friends'] : [])].includes(path)) fail(404, 'NOT_FOUND');
       const raw = path === pagesPath ? await boundedDatasetBody(request, datasetBodyLimit(path)) : await request.text();
       const size = Buffer.byteLength(raw);

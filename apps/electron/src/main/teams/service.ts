@@ -2,7 +2,7 @@ import { validateHistoryPage } from './historyPage.js';
 import { EventEmitter } from 'node:events';
 import type { FirebaseOptions } from 'firebase/app';
 import type { Firestore } from 'firebase/firestore';
-import { TeamsApiError, teamsTransport, type TeamCommand, type TeamDetail, type TeamResult, type TeamSummary } from '../../../../../packages/teams';
+import { TeamsApiError, teamCommandPath, teamsTransport, type TeamCommand, type TeamDetail, type TeamResult, type TeamSummary } from '../../../../../packages/teams';
 import type { MessageSignal, MessageSnapshot, MessageCommand, MessageScope, TeamMessage } from '../../../../../packages/teams/messages';
 import type { AcceptSharedBotInput, LocalPublishableBot, OfferSharedBotInput, PublishLocalBotInput, PublishedKnowledge, SharedHostStatus, SelectedSharedFile, TriageLogPage, TriageLogRequest, TriageTarget } from '../../../../../packages/teams/execution';
 import type { ChatReadRequest, ChatReadResult } from '../../../../../packages/teams/chat-source';
@@ -419,7 +419,7 @@ export class TeamsService {
     const session = await this.connectMessages(context.uid); this.assertHostContext(context);
     const result = await session.read(request); this.assertHostContext(context); return result;
   }
-  execute(command: TeamCommand, expectedUid: string): Promise<TeamResult> { return this.checked(expectedUid, '', command); }
+  execute(command: TeamCommand, expectedUid: string): Promise<TeamResult> { return this.checked(expectedUid, teamCommandPath(command), command); }
   /** A caller's session or task command in a hosted Bot service's scope. Only what a caller may send there leaves this computer. */
   async serviceMessages<T>(command: unknown, expectedUid: string): Promise<T> {
     if (this.account.snapshot().user?.uid !== expectedUid) throw new Error('INVALID_SESSION');

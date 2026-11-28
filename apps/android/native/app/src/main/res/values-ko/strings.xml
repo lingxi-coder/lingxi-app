@@ -2550,6 +2550,7 @@
     <string name="teams_error">팀에 연결할 수 없습니다. 연결 상태를 확인하고 다시 시도하세요.</string>
     <string name="teams_invite_error">이 초대는 만료되었거나 철회되었거나 남은 사용 횟수가 없습니다.</string>
     <string name="teams_stale_error">멤버십이 변경되었습니다. 새로 고친 뒤 다시 시도하세요.</string>
+    <string name="teams_remove_member_bots">웹 또는 데스크톱의 팀 설정에서 이 멤버가 담당하는 Bot을 인계하거나 공유를 중지한 뒤 멤버를 제거하세요.</string>
     <string name="teams_disclosure">팀 데이터와 메시지는 플랫폼에서 읽을 수 있습니다. Bot과의 대화는 해당 Bot의 메인테이너가 읽을 수 있습니다.</string>
     <string name="teams_join_disclosure">신뢰하는 팀에만 참가하세요. 참가하면 팀 멤버에게 내 이름이 표시됩니다.</string>
     <string name="teams_empty">Create a team or join with an invite.</string>

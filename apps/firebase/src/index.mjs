@@ -27,7 +27,7 @@ import { createMarketGateway } from './market-gateway.mjs';
 import { createHandler } from './catalog.mjs';
 import { CatalogStore } from './store.mjs';
 import { createPushHandler, PushStore } from './push.mjs';
-import { PAIR_CONVERSATION_ID, createTeamsHandler, datasetBodyLimit, TeamsStore } from './teams.mjs';
+import { PAIR_CONVERSATION_ID, createTeamsHandler, datasetBodyLimit, teamProfileBodyLimit, TeamsStore } from './teams.mjs';
 import { FriendsStore, friendNotifier } from './friends.mjs';
 import { sweepUploads } from './team-attachments.mjs';
 import { OAuth2Client } from 'google-auth-library';
@@ -140,7 +140,7 @@ export const teamsApi = onRequest({ region: 'us-central1', minInstances: 0, maxI
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) if (value) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
   const url = new URL(req.url, 'https://teams.internal');
-  const limit = datasetBodyLimit(url.pathname);
+  const limit = teamProfileBodyLimit(url.pathname) ?? datasetBodyLimit(url.pathname);
   if (limit && req.rawBody?.byteLength > limit) {
     res.status(413).json({ error: { code: 'REQUEST_TOO_LARGE' } });
     return;

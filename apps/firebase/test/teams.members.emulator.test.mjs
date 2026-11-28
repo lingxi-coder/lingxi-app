@@ -161,3 +161,96 @@ test('T1: HTTP authentication, strict inputs, CORS and custom-token UID are enfo
   assert.equal((await request({ action: 'create', teamId, name: 'Fixture team' })).status, 200);
   assert.equal((await handle(new Request(`https://test.invalid/v1/teams/${teamId}`, { headers: { Authorization: 'Bearer valid' } }))).status, 200);
 });
+
+test('team profiles are private, versioned, and shared with every current member', options, async () => {
+  const admin = { uid: 'admin' };
+  await create();
+  const { code } = await invite();
+  await join(code, alice);
+  await join(code, admin);
+  await store.execute(owner, { action: 'role', teamId, uid: admin.uid, generation: 1, role: 'admin' });
+  assert.deepEqual((await store.detail(alice.uid, teamId)).profile, { avatar: null, description: '', version: 0 });
+  const handle = createTeamsHandler({ store, verifyToken: async uid => ({ uid }) });
+  const path = `/v1/teams/${teamId}/profile`;
+  const request = (actor, version, changes, extra = {}) => handle(new Request(`https://test.invalid${path}`, {
+    method: 'POST', headers: { Authorization: `Bearer ${actor.uid}` },
+    body: JSON.stringify({ action: 'updateProfile', teamId, generation: 1, version, changes, ...extra }),
+  }));
+  assert.equal((await request(alice, 0, { name: 'Forbidden' })).status, 403);
+  assert.equal((await request({ uid: 'outsider' }, 0, { description: 'Forbidden' })).status, 403);
+  assert.equal((await request(owner, 0, { name: 'Wrong team' }, { teamId: 'other-team' })).status, 400);
+  assert.equal((await request(owner, 0, { description: 'Oversized'.repeat(12000) })).status, 413);
+  assert.equal((await request(owner, 0, { avatar: 'dGV4dA==' })).status, 400);
+  const concurrent = await Promise.all([request(owner, 0, { name: 'New name' }), request(admin, 0, { description: 'New description' })]);
+  assert.deepEqual(concurrent.map(response => response.status).sort(), [200, 409]);
+  const conflict = concurrent.find(response => response.status === 409);
+  assert.equal((await conflict.json()).error.code, 'TEAM_PROFILE_CHANGED');
+
+  // An actual 96 × 96 PNG.
+  const avatar = 'iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAIAAABt+uBvAAAAMklEQVR4nO3BMQEAAADCoPVPbQ0PoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgBcDbGAAAVwixpAAAAAASUVORK5CYII=';
+  const update = { name: ' Studio ', description: ' Shared workshop ', avatar };
+  assert.equal((await request(admin, 1, update)).status, 200);
+  assert.equal((await request(admin, 1, update)).status, 200, 'a lost success response can be retried');
+  assert.deepEqual((await store.detail(alice.uid, teamId)).profile, { avatar, description: 'Shared workshop', version: 2 });
+  assert.equal((await store.list(alice.uid)).teams[0].name, 'Studio');
+  const index = await getDoc(doc(client(alice.uid), `users/${alice.uid}/teams/${teamId}`));
+  assert.equal(index.data().profileVersion, 2, 'existing team index listeners receive a change');
+  await assertFails(getDoc(doc(client(alice.uid), `teams/${teamId}/profile/current`)));
+  await create(); // The idempotent initial name is still recognized after rename.
+  assert.equal((await request(owner, 2, { avatar: null, description: '' })).status, 200);
+  assert.deepEqual((await store.detail(alice.uid, teamId)).profile, { avatar: null, description: '', version: 3 });
+  await store.execute(owner, { action: 'remove', teamId, uid: alice.uid, generation: 1 });
+  await assert.rejects(store.detail(alice.uid, teamId), { code: 'MEMBERSHIP_REQUIRED' });
+  await store.execute(owner, { action: 'delete', teamId });
+  assert.equal((await db.doc(`teams/${teamId}/profile/current`).get()).exists, false);
+});
+
+test('team removal requires every published Bot to be paused or handed over, including offline and restricted Bots', options, async () => {
+  const admin = { uid: 'admin' }, bob = { uid: 'bob' };
+  await create();
+  const { code } = await invite();
+  await join(code, alice);
+  await join(code, admin);
+  await join(code, bob);
+  await store.execute(owner, { action: 'role', teamId, uid: admin.uid, generation: 1, role: 'admin' });
+  const target = { teamId, uid: alice.uid, generation: 1 };
+  const stop = (botId, revision, actor = admin) => store.execute(actor, { action: 'pauseRemovalBot', ...target, actorGeneration: 1, botId, revision });
+  const blockers = () => store.execute(admin, { action: 'removalBlockers', ...target });
+  const remove = () => store.execute(admin, { action: 'remove', ...target });
+  assert.deepEqual(await blockers(), { blockingBots: [] });
+  const teamRef = db.doc(`teams/${teamId}`);
+  const privateBot = teamRef.collection('sharedBots').doc('private-bot');
+  const otherBot = teamRef.collection('sharedBots').doc('second-bot');
+  const identity = { maintainer: { uid: alice.uid, generation: 1 }, state: 'published', revision: 1, usePolicy: { mode: 'listed', members: [] } };
+  await privateBot.set({ name: 'Private Bot', identity, transfer: { transferId: 'first-transfer' } });
+  await teamRef.collection('transfers').doc('first-transfer').set({ state: 'offered' });
+  const transferPart = privateBot.collection('transferParts').doc('first-part');
+  await transferPart.set({ data: 'package part' });
+  await otherBot.set({ name: 'Second Bot', identity });
+  await teamRef.collection('sharedBots').doc('previous-membership').set({ name: 'Old Bot', identity: { ...identity, maintainer: { uid: alice.uid, generation: 0 } } });
+
+  assert.deepEqual((await blockers()).blockingBots, [
+    { id: privateBot.id, name: 'Private Bot', revision: 1 }, { id: otherBot.id, name: 'Second Bot', revision: 1 },
+  ]);
+  await assert.rejects(remove(), { code: 'TEAM_MEMBER_HAS_BOTS' });
+  await assert.rejects(stop(privateBot.id, 1, bob), { code: 'ROLE_REQUIRED' });
+  await assert.rejects(store.execute(admin, { action: 'pauseRemovalBot', ...target, uid: owner.uid,
+    actorGeneration: 1, botId: privateBot.id, revision: 1 }), { code: 'ROLE_REQUIRED' });
+  await assert.rejects(stop(privateBot.id, 2), { code: 'BOT_REVISION_CONFLICT' });
+  await stop(privateBot.id, 1);
+  await stop(privateBot.id, 1);
+  assert.equal((await privateBot.get()).data().identity.state, 'paused');
+  assert.equal((await teamRef.collection('transfers').doc('first-transfer').get()).data().state, 'cancelled');
+  assert.equal((await transferPart.get()).exists, false);
+  // A re-publish during removal makes the old confirmation insufficient.
+  await privateBot.update({ 'identity.state': 'published', 'identity.revision': 3 });
+  await assert.rejects(remove(), { code: 'TEAM_MEMBER_HAS_BOTS' });
+  await stop(privateBot.id, 3);
+  assert.equal((await blockers()).blockingBots.length, 1);
+  await otherBot.update({ 'identity.maintainer': { uid: bob.uid, generation: 1 }, 'identity.revision': 2 });
+  await assert.rejects(stop(otherBot.id, 1), { code: 'BOT_REVISION_CONFLICT' });
+  assert.deepEqual(await blockers(), { blockingBots: [] });
+  assert.deepEqual(await remove(), { ok: true });
+  assert.equal((await otherBot.get()).data().identity.state, 'published');
+  assert.equal((await store.detail(admin.uid, teamId)).members.some(member => member.uid === alice.uid), false);
+});

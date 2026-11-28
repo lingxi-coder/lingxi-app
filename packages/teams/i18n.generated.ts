@@ -1074,14 +1074,29 @@ export type TeamsKey =
   | 'tw_signin_title'
   | 'tw_signin_title_register'
   | 'tw_team'
+  | 'tw_team_avatar'
+  | 'tw_team_avatar_choose'
+  | 'tw_team_avatar_invalid'
+  | 'tw_team_avatar_preparing'
+  | 'tw_team_avatar_remove'
+  | 'tw_team_avatar_replace'
   | 'tw_team_close_details'
   | 'tw_team_copy_hint'
   | 'tw_team_invitations'
   | 'tw_team_join_role'
   | 'tw_team_owner_body'
   | 'tw_team_owner_title_fmt'
+  | 'tw_team_pause_remove_bot_fmt'
   | 'tw_team_platform_readable'
+  | 'tw_team_profile_changed'
+  | 'tw_team_profile_reload'
+  | 'tw_team_profile_saved'
+  | 'tw_team_refresh_bot_list'
+  | 'tw_team_remove_bot_changed'
+  | 'tw_team_remove_bots_first'
   | 'tw_team_resize'
+  | 'tw_team_settings'
+  | 'tw_team_settings_back'
   | 'tw_turn_off'
   | 'tw_turn_on'
   | 'tw_unchanged'
@@ -2163,14 +2178,29 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_signin_title: { en: 'Sign in to LingXi Teams', 'zh-Hans': '登录灵犀团队', 'zh-Hant': '登入靈犀團隊', ja: 'LingXi チームにサインイン', ko: 'LingXi 팀에 로그인' },
   tw_signin_title_register: { en: 'Create your LingXi account', 'zh-Hans': '注册灵犀账号', 'zh-Hant': '註冊靈犀帳號', ja: 'LingXi アカウントを作成', ko: 'LingXi 계정 만들기' },
   tw_team: { en: 'Team', 'zh-Hans': '团队', 'zh-Hant': '團隊', ja: 'チーム', ko: '팀' },
+  tw_team_avatar: { en: 'Team avatar', 'zh-Hans': '团队头像', 'zh-Hant': '團隊頭像', ja: 'チームの画像', ko: '팀 아바타' },
+  tw_team_avatar_choose: { en: 'Choose image', 'zh-Hans': '选择图片', 'zh-Hant': '選擇圖片', ja: '画像を選択', ko: '이미지 선택' },
+  tw_team_avatar_invalid: { en: 'Choose a PNG, JPG, or WebP image up to 20 MB.', 'zh-Hans': '请选择不超过 20 MB 的 PNG、JPG 或 WebP 图片。', 'zh-Hant': '請選擇不超過 20 MB 的 PNG、JPG 或 WebP 圖片。', ja: '20 MB 以下の PNG、JPG、WebP 画像を選択してください。', ko: '20 MB 이하의 PNG, JPG 또는 WebP 이미지를 선택하세요.' },
+  tw_team_avatar_preparing: { en: 'Preparing image…', 'zh-Hans': '正在处理图片…', 'zh-Hant': '正在處理圖片…', ja: '画像を処理しています…', ko: '이미지 처리 중…' },
+  tw_team_avatar_remove: { en: 'Remove image', 'zh-Hans': '移除图片', 'zh-Hant': '移除圖片', ja: '画像を削除', ko: '이미지 제거' },
+  tw_team_avatar_replace: { en: 'Change image', 'zh-Hans': '更换图片', 'zh-Hant': '更換圖片', ja: '画像を変更', ko: '이미지 변경' },
   tw_team_close_details: { en: 'Close details', 'zh-Hans': '关闭详情', 'zh-Hant': '關閉詳細資訊', ja: '詳細を閉じる', ko: '세부 정보 닫기' },
   tw_team_copy_hint: { en: 'Select and copy the link above.', 'zh-Hans': '请选中上方链接并复制。', 'zh-Hant': '請選取上方連結並複製。', ja: '上のリンクを選択してコピーしてください。', ko: '위 링크를 선택해 복사하세요.' },
   tw_team_invitations: { en: 'Invitations', 'zh-Hans': '邀请', 'zh-Hant': '邀請', ja: '招待', ko: '초대' },
   tw_team_join_role: { en: 'Role', 'zh-Hans': '加入角色', 'zh-Hant': '加入角色', ja: '参加時のロール', ko: '참가 시 역할' },
   tw_team_owner_body: { en: 'You stay in the team as an admin, and only the new owner can make you the owner again. Each Bot stays with the member who maintains it, and every chat stays with the people in it.', 'zh-Hans': '你将以管理员身份留在团队中，只有新的所有者才能再把你设为所有者。每个 Bot 仍由其维护者维护，每个对话仍只属于其中的成员。', 'zh-Hant': '你將以管理員身分留在團隊中，只有新的擁有者才能再把你設為擁有者。每個 Bot 仍由其維護者維護，每個對話仍只屬於其中的成員。', ja: 'あなたは管理者としてチームに残り、再びオーナーになるには新しいオーナーの操作が必要です。各 Bot はそのメンテナーのもとに残り、各チャットは参加者だけのものであり続けます。', ko: '회원님은 관리자로 팀에 남으며, 새 소유자만 회원님을 다시 소유자로 지정할 수 있습니다. 각 Bot은 메인테이너에게 그대로 남고, 각 채팅은 참여자에게만 그대로 남습니다.' },
   tw_team_owner_title_fmt: { en: 'Make %1$s the owner of %2$s?', 'zh-Hans': '将「%2$s」的所有者变更为 %1$s？', 'zh-Hant': '將「%2$s」的擁有者變更為 %1$s？', ja: '%1$s を %2$s のオーナーにしますか？', ko: '%1$s 님을 %2$s의 소유자로 지정할까요?' },
+  tw_team_pause_remove_bot_fmt: { en: 'Stop sharing %1$s with this team? Members will lose access to the shared Bot. The maintainer keeps their local Bot.', 'zh-Hans': '停止在本团队共享 %1$s？团队成员将无法使用这个共享 Bot，维护人仍保有本地 Bot。', 'zh-Hant': '停止在本團隊共享 %1$s？團隊成員將無法使用這個共享 Bot，維護者仍保有本機 Bot。', ja: '%1$s のチームへの共有を停止しますか？チームメンバーは共有 Bot を利用できなくなります。メンテナーのローカル Bot は引き続き利用できます。', ko: '이 팀에서 %1$s의 공유를 중지할까요? 팀 멤버는 공유 Bot을 사용할 수 없게 됩니다. 관리자의 로컬 Bot은 유지됩니다.' },
   tw_team_platform_readable: { en: 'Platform readable', 'zh-Hans': '平台可读', 'zh-Hant': '平台可讀', ja: 'プラットフォームが閲覧可能', ko: '플랫폼에서 열람 가능' },
+  tw_team_profile_changed: { en: 'Someone updated the team settings. Your edits are still here. Load the latest version to review and save them.', 'zh-Hans': '团队设置已被他人更新。你的修改仍在，请加载最新版本，检查后再保存。', 'zh-Hant': '其他人已更新團隊設定。你的變更仍在，請載入最新版本，確認後再儲存。', ja: '別のメンバーがチーム設定を更新しました。入力内容は保持されています。最新版を読み込んで確認してから保存してください。', ko: '다른 사람이 팀 설정을 변경했습니다. 입력한 내용은 그대로 남아 있습니다. 최신 버전을 불러와 확인한 뒤 저장하세요.' },
+  tw_team_profile_reload: { en: 'Load latest version', 'zh-Hans': '加载最新版本', 'zh-Hant': '載入最新版本', ja: '最新版を読み込む', ko: '최신 버전 불러오기' },
+  tw_team_profile_saved: { en: 'Team settings saved.', 'zh-Hans': '已保存团队设置。', 'zh-Hant': '已儲存團隊設定。', ja: 'チーム設定を保存しました。', ko: '팀 설정을 저장했습니다.' },
+  tw_team_refresh_bot_list: { en: 'Refresh Bot list', 'zh-Hans': '刷新 Bot 列表', 'zh-Hant': '重新整理 Bot 清單', ja: 'Bot 一覧を更新', ko: 'Bot 목록 새로 고침' },
+  tw_team_remove_bot_changed: { en: 'This Bot changed. Review the updated list before trying again.', 'zh-Hans': '这个 Bot 已变更，请查看更新后的列表再重试。', 'zh-Hant': '這個 Bot 已變更，請查看更新後的清單再試一次。', ja: 'この Bot は変更されています。最新の一覧を確認してから再試行してください。', ko: '이 Bot이 변경되었습니다. 업데이트된 목록을 확인한 뒤 다시 시도하세요.' },
+  tw_team_remove_bots_first: { en: 'Hand over or stop sharing each of this member’s Bots before removing them.', 'zh-Hans': '请先移交该成员维护的 Bot，或停止这些 Bot 在本团队的共享，再将该成员移出。', 'zh-Hant': '請先移交該成員維護的 Bot，或停止這些 Bot 在本團隊的共享，再移除該成員。', ja: 'このメンバーを削除する前に、担当するすべての Bot を引き継ぐか、チームへの共有を停止してください。', ko: '이 멤버를 제거하기 전에 담당하는 모든 Bot을 인계하거나 팀 공유를 중지하세요.' },
   tw_team_resize: { en: 'Resize details panel', 'zh-Hans': '调整详情面板宽度', 'zh-Hant': '調整詳細資訊面板寬度', ja: '詳細パネルの幅を調整', ko: '세부 정보 패널 너비 조절' },
+  tw_team_settings: { en: 'Team settings', 'zh-Hans': '团队设置', 'zh-Hant': '團隊設定', ja: 'チーム設定', ko: '팀 설정' },
+  tw_team_settings_back: { en: 'Back from team settings', 'zh-Hans': '退出团队设置', 'zh-Hant': '離開團隊設定', ja: 'チーム設定から戻る', ko: '팀 설정에서 돌아가기' },
   tw_turn_off: { en: 'Turn off', 'zh-Hans': '关闭', 'zh-Hant': '關閉', ja: 'オフにする', ko: '끄기' },
   tw_turn_on: { en: 'Turn on', 'zh-Hans': '开启', 'zh-Hant': '開啟', ja: 'オンにする', ko: '켜기' },
   tw_unchanged: { en: 'unchanged', 'zh-Hans': '未更改', 'zh-Hant': '未變更', ja: '変更なし', ko: '변경 없음' },

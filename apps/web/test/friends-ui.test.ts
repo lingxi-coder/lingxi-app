@@ -19,7 +19,7 @@ const { FriendProfileSettings } = loadTeamsModule<typeof import('../../../packag
 const { BlockedList } = loadTeamsModule<typeof import('../../../packages/teams/BlockedList')>('BlockedList');
 const { FriendsMain } = loadTeamsModule<typeof import('../../../packages/teams/FriendsMain')>('FriendsMain');
 const { FriendLinkDialog, InviteFriendsDialog, InviteNotice, MemberFriendDialog } = loadTeamsModule<typeof import('../../../packages/teams/friend-dialogs')>('friend-dialogs');
-const { TeamDetailsDrawer } = loadTeamsModule<typeof import('../../../packages/teams/TeamDetailsDrawer')>('TeamDetailsDrawer');
+const { TeamSettingsPage } = loadTeamsModule<typeof import('../../../packages/teams/TeamSettingsPage')>('TeamSettingsPage');
 
 // The fake browser stays for the whole file, so a view that is unmounted after its test still finds its document.
 withDom({ after } as unknown as TestContext);
@@ -741,13 +741,13 @@ scenario('a Team member can be added as a friend from their row, with the proof 
   context.after(() => workspace.close());
   await until(() => workspace.getSnapshot().detail?.members.length === 3, 'the team');
   const added: TeamMember[] = [];
-  const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer as never, { workspace, snapshot, locale: 'en', tab: 'members', onTabChange() {}, onClose() {}, onAddFriend: (member: TeamMember) => added.push(member) } as never));
+  const page = await mount(workspace, snapshot => createElement(TeamSettingsPage as never, { workspace, snapshot, locale: 'en', initialSection: 'members', onClose() {}, onOpenChat() {}, onAddFriend: (member: TeamMember) => added.push(member) } as never));
   context.after(() => page.unmount());
   const buttons = page.find(node => node.type === 'button' && textOf(node) === 'Add friend');
   assert.equal(buttons.length, 2, 'every member but me');
   await page.click(buttons[0]!);
   assert.deepEqual(added.map(member => member.uid), ['bob']);
-  const without = await mount(workspace, snapshot => createElement(TeamDetailsDrawer as never, { workspace, snapshot, locale: 'en', tab: 'members', onTabChange() {}, onClose() {} } as never));
+  const without = await mount(workspace, snapshot => createElement(TeamSettingsPage as never, { workspace, snapshot, locale: 'en', initialSection: 'members', onClose() {}, onOpenChat() {} } as never));
   context.after(() => without.unmount());
   assert.equal(without.find(node => node.type === 'button' && textOf(node) === 'Add friend').length, 0, 'a host that has no Friends offers nothing');
 });
@@ -1141,7 +1141,7 @@ scenario('the Invites tab has the Invite friends button for an owner or an admin
     context.after(() => workspace.close());
     await until(() => workspace.getSnapshot().detail?.members.length === 3, 'the team');
     let invited = 0;
-    const page = await mount(workspace, snapshot => createElement(TeamDetailsDrawer as never, { workspace, snapshot, locale: 'en', tab: 'invites', onTabChange() {}, onClose() {}, onInviteFriends: () => { invited++; } } as never));
+    const page = await mount(workspace, snapshot => createElement(TeamSettingsPage as never, { workspace, snapshot, locale: 'en', initialSection: 'invites', onClose() {}, onOpenChat() {}, onInviteFriends: () => { invited++; } } as never));
     context.after(() => page.unmount());
     const button = page.find(node => node.type === 'button' && textOf(node) === 'Invite friends');
     assert.equal(button.length, offered ? 1 : 0, role);
@@ -1149,7 +1149,7 @@ scenario('the Invites tab has the Invite friends button for an owner or an admin
       assert.ok(page.text().indexOf('Invite friends') < page.text().indexOf('Create invite link'), 'above Create invite link');
       await page.click(button[0]!); assert.equal(invited, 1);
     }
-    const without = await mount(workspace, snapshot => createElement(TeamDetailsDrawer as never, { workspace, snapshot, locale: 'en', tab: 'invites', onTabChange() {}, onClose() {} } as never));
+    const without = await mount(workspace, snapshot => createElement(TeamSettingsPage as never, { workspace, snapshot, locale: 'en', initialSection: 'invites', onClose() {}, onOpenChat() {} } as never));
     context.after(() => without.unmount());
     assert.equal(without.find(node => node.type === 'button' && textOf(node) === 'Invite friends').length, 0, `${role}: a host that has no Friends offers nothing`);
   }

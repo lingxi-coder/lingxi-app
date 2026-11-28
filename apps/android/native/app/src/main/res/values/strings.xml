@@ -2550,6 +2550,7 @@
     <string name="teams_error">无法连接团队服务，请检查网络后重试。</string>
     <string name="teams_invite_error">邀请已过期、撤销或用尽。</string>
     <string name="teams_stale_error">成员身份已变化，请刷新后重试。</string>
+    <string name="teams_remove_member_bots">请在 Web 或桌面端的团队设置中移交该成员维护的 Bot，或停止共享这些 Bot，再将该成员移出。</string>
     <string name="teams_disclosure">团队资料与消息平台可读。与 Bot 的对话对该 Bot 的维护者可见。</string>
     <string name="teams_join_disclosure">仅加入你信任的团队。加入后团队成员可见你的名称。</string>
     <string name="teams_empty">创建团队，或通过邀请加入。</string>

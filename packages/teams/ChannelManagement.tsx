@@ -4,7 +4,8 @@ import { ChannelSettings as BotSettings } from './ChannelSettings';
 import { channelCommand, channelInviteLink, DEFAULT_POSTING, type ChannelInvite, type ChannelManagement as Management, type ChannelPosting, type ChannelRequest } from './channel-settings';
 import { teamsText, useTeamsText } from './i18n';
 import type { TeamConversation } from './messages';
-import { Avatar, Dialog, Icon, type IconName } from './ui';
+import { Avatar, Dialog, type IconName } from './ui';
+import { SettingsLayout } from './SettingsLayout';
 import { conversationParticipants, type TeamsSnapshot, type TeamsWorkspace } from './workspace';
 
 type Context = { workspace: TeamsWorkspace; snapshot: TeamsSnapshot; locale: string };
@@ -90,26 +91,20 @@ export function ChannelSettingsPage({ workspace, snapshot, locale, conversation,
   const selected = rule.selected.filter(principal => currentPrincipals.has(principal));
   const knownAdmins = snapshot.directory.filter(member => conversation.channelAdmins?.[`user:${member.uid}`] === member.generation
     && conversation.participants.includes(`user:${member.uid}`));
-  return <section className="tw-scope tw-channel-settings-page" aria-label={t('tw_channel_settings')}>
+  return <section className="tw-scope tw-settings-page tw-channel-settings-page" aria-label={t('tw_channel_settings')}>
     <ChatTopbarHeader><div className="tw-conv-head">
       <button type="button" className="tw-icon-btn tw-channel-back" onClick={onClose} aria-label={t('tw_channel_back')}>‹</button>
       <strong>{conversation.title}</strong>
     </div></ChatTopbarHeader>
-    <div className="tw-channel-settings-layout">
-      <nav aria-label={t('tw_channel_settings')}>
-        <p>{t('tw_channel_settings')}</p>
-        {sections.map(item => <button key={item.id} type="button" aria-current={active.id === item.id ? 'page' : undefined}
-          onClick={() => { setSection(item.id); setError(''); setNotice(''); }}><Icon name={item.icon} />{item.text}</button>)}
-      </nav>
-      <div className="tw-channel-section">
-        <h2 ref={heading} tabIndex={-1}>{active.text}</h2>
+    <SettingsLayout label={t('tw_channel_settings')} sections={sections} active={active} heading={heading}
+      onSelect={id => { setSection(id); setError(''); setNotice(''); }}>
         {error ? <p role="alert" className="tw-error">{error}</p> : null}
         {notice ? <p role="status">{notice}</p> : null}
         {active.id === 'general' ? <form className="tw-form" onSubmit={event => {
           event.preventDefault();
           void run({ op: 'profile', conversationId: id, ...values }, () => { setProfile(undefined); setNotice(t('teams_bot_scope_saved')); });
         }}>
-          <fieldset className="tw-channel-fields">
+          <fieldset className="tw-settings-fields">
             <label>{t('tw_channel_name')}<input required maxLength={120} value={values.title} readOnly={!canManage} onChange={event => setProfile({ ...values, title: event.target.value })} /></label>
             <label>{t('tw_channel_description')}<textarea rows={4} maxLength={1000} value={values.description} readOnly={!canManage} onChange={event => setProfile({ ...values, description: event.target.value })} /></label>
           </fieldset>{canManage ? save(!profile || !values.title.trim()) : null}
@@ -118,7 +113,7 @@ export function ChannelSettingsPage({ workspace, snapshot, locale, conversation,
           event.preventDefault();
           void run({ op: 'posting', conversationId: id, posting: { ...rule, selected } }, () => { setPosting(undefined); setNotice(t('teams_bot_scope_saved')); });
         }}>
-          <fieldset className="tw-channel-fields" disabled={!canManage}>
+          <fieldset className="tw-settings-fields" disabled={!canManage}>
             <div className="tw-channel-field"><label htmlFor={fieldsId + '-mode'}>{t('tw_channel_mode')}</label>
               <select id={fieldsId + '-mode'} value={rule.mode} onChange={event => setPosting({ ...rule, mode: event.target.value as ChannelPosting['mode'] })}>
               <option value="chat">{t('drawer_tab_chat')}</option><option value="posts">{t('tw_channel_posts')}</option>
@@ -157,7 +152,7 @@ export function ChannelSettingsPage({ workspace, snapshot, locale, conversation,
           </li>;
         })}</ul>{blocked.length ? <div role="alert"><p>{t('tw_channel_bot_dependency')}</p><ul>{blocked.map(bot => <li key={bot.id}>{bot.name}</li>)}</ul></div> : null}</> : null}
         {active.id === 'invites' ? !management && !error ? <p role="status">{t('teams_loading')}</p> : management
-          ? <div className="tw-channel-fields">
+          ? <div className="tw-settings-fields">
             <p>{t('tw_channel_invite_scope')}</p>
             {management.code ? <>
               <input aria-label={t('tw_channel_invite_link')} readOnly value={channelInviteLink({ teamId: team.id, conversationId: id, code: management.code })} />
@@ -181,8 +176,7 @@ export function ChannelSettingsPage({ workspace, snapshot, locale, conversation,
           : knownAdmins.length ? <ul className="tw-channel-roster">{knownAdmins.map(member => <li key={member.uid}>{member.displayName}</li>)}</ul>
           : <p>{t('tw_channel_no_admins')}</p> : null}
         {active.id === 'bots' ? <BotSettings workspace={workspace} snapshot={snapshot} conversation={conversation} scope={scope} locale={locale} /> : null}
-      </div>
-    </div>
+    </SettingsLayout>
     {confirmation ? <Dialog title={confirmation.title} onClose={() => setConfirmation(undefined)}>
       <div className="tw-dialog-actions"><button type="button" onClick={() => setConfirmation(undefined)}>{t('common_cancel')}</button>
         <button type="button" className="tw-danger-btn" onClick={() => { confirmation.action(); setConfirmation(undefined); }}>{t('tw_channel_confirm')}</button></div>
@@ -190,7 +184,7 @@ export function ChannelSettingsPage({ workspace, snapshot, locale, conversation,
   </section>;
 }
 
-export function TeamChannelAdmins({ workspace, snapshot, locale, onClose }: Context & { onClose(): void }) {
+export function TeamChannelAdmins({ workspace, snapshot, locale }: Context) {
   const t = useTeamsText(locale), { id: teamId, generation } = snapshot.team!;
   const [channels, setChannels] = useState<ChannelResponse['channels']>();
   const [selected, select] = useState(''), [management, setManagement] = useState<Management>();
@@ -205,24 +199,26 @@ export function TeamChannelAdmins({ workspace, snapshot, locale, onClose }: Cont
   useEffect(() => {
     if (!selected) return;
     let live = true;
-    setManagement(undefined); setError('');
     makeRequest(workspace, teamId, generation, { op: 'get', conversationId: selected }).then(result => {
       if (live) setManagement({ members: result.members ?? [], admins: result.admins ?? [], code: null });
     }).catch(e => { if (live) setError(channelError(e, locale)); });
     return () => { live = false; };
   }, [workspace, teamId, generation, locale, selected]);
-  return <Dialog title={t('tw_channel_manage_admins')} onClose={onClose}>
+  return <div className="tw-form">
     {error ? <p role="alert">{error}</p> : null}
-    {channels ? <label>{t('teams_conversation_channel')}<select disabled={busy} value={selected} onChange={event => select(event.target.value)}>
+    {channels ? <label>{t('teams_conversation_channel')}<select disabled={busy} value={selected} onChange={event => {
+      select(event.currentTarget.value); setManagement(undefined); setError('');
+    }}>
       <option value="">{t('tw_channel_choose')}</option>{channels.map(channel => <option key={channel.id} value={channel.id}>{channel.title}</option>)}
     </select></label> : !error ? <p role="status">{t('teams_loading')}</p> : null}
-    {management ? <AdministratorList management={management} snapshot={snapshot} locale={locale} busy={busy} change={(uid, enabled) => {
+    {selected && !management && !error ? <p role="status">{t('teams_loading')}</p> : null}
+    {management ? <AdministratorList management={management} snapshot={snapshot} locale={locale} busy={busy || snapshot.offline} change={(uid, enabled) => {
       setBusy(true); setError('');
       void makeRequest(workspace, teamId, generation, { op: 'admin', conversationId: selected, uid, enabled }).then(() =>
         setManagement({ ...management, admins: enabled ? [...management.admins, uid] : management.admins.filter(value => value !== uid) })
       ).catch(e => setError(channelError(e, locale))).finally(() => setBusy(false));
     }} /> : null}
-  </Dialog>;
+  </div>;
 }
 
 export function ChannelJoinDialog({ workspace, snapshot, locale, invite, onClose, onJoined }: Context & {

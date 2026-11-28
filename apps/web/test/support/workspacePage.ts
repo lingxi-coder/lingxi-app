@@ -77,7 +77,8 @@ export function withDom(context: TestContext): void {
   class FakeElement {}
   Object.defineProperty(globalThis, 'HTMLElement', { configurable: true, value: FakeElement });
   Object.defineProperty(globalThis, 'document', { configurable: true, value: { activeElement: null, addEventListener() {}, removeEventListener() {}, contains: () => true, getElementById: () => null } });
-  Object.defineProperty(globalThis, 'window', { configurable: true, value: { innerHeight: 800, innerWidth: 1200, addEventListener() {}, removeEventListener() {} } });
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { innerHeight: 800, innerWidth: 1200, addEventListener() {}, removeEventListener() {},
+    requestAnimationFrame: (callback: FrameRequestCallback) => { queueMicrotask(() => callback(0)); return 0; } } });
   context.after(() => { for (const [name, descriptor] of saved) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); } });
 }
 

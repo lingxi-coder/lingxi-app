@@ -72,7 +72,20 @@ fake.messages = async <T,>(command: any): Promise<T> => {
   return baseMessages(command) as Promise<T>;
 };
 const baseExecute = fake.execute;
-fake.execute = async command => { calls.push(['execute', command]); return baseExecute(command); };
+fake.execute = async command => {
+  calls.push(['execute', command]);
+  if (command.action === 'updateProfile') {
+    const detail = await fake.detail(command.teamId);
+    const { name, ...profile } = command.changes;
+    if (name !== undefined) {
+      detail.team.name = name;
+      fake.teams = fake.teams.map(team => team.id === command.teamId ? { ...team, name } : team);
+    }
+    fake.details.set(command.teamId, { ...detail, profile: { description: '', avatar: null, ...detail.profile, ...profile, version: command.version + 1 } });
+    return { ok: true };
+  }
+  return baseExecute(command);
+};
 
 const desktopTeams = {
   localBots: async () => [],

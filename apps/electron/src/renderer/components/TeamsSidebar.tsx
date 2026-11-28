@@ -1,6 +1,5 @@
 import type { CSSProperties } from 'react';
 import { TeamSidebar } from '../../../../../packages/teams/TeamSidebar';
-import type { DrawerTab } from '../../../../../packages/teams/ui';
 import type { UseTeams } from '../../../../../packages/teams/useTeamsWorkspace';
 import { tr } from '../i18n/locale';
 import { renderTeamAvatar } from './TeamAvatar';
@@ -16,15 +15,14 @@ export interface TeamsSidebarProps {
   onInviteHandled(): void;
   /** Show the Teams page. Pressing anything in the sidebar brings it forward, since the page can be showing something else (Apps, say) while the mode is Teams. */
   onShowTeams(): void;
-  /** Open the details panel of the team, on a tab when one is asked for. */
-  onOpenSettings(tab?: DrawerTab): void;
+  onOpenSettings(opener?: HTMLButtonElement): void;
   /** Show Bot services in the Teams page, and go back to the Team when a conversation is chosen. */
   onOpenServices(): void;
-  onCloseServices(): void;
+  onConversationSelected(): void;
 }
 
 /** The sidebar in Teams mode: the workspace's own sidebar, or a way to sign in when there is no account to open it for. */
-export function TeamsSidebar({ teams, locale, query, initialInvite, onInviteHandled, onShowTeams, onOpenSettings, onOpenServices, onCloseServices }: TeamsSidebarProps) {
+export function TeamsSidebar({ teams, locale, query, initialInvite, onInviteHandled, onShowTeams, onOpenSettings, onOpenServices, onConversationSelected }: TeamsSidebarProps) {
   const { workspace, snapshot, signedIn } = teams;
   if (!signedIn) return <nav className="no-drag teams-sidebar desktop-sidebar-list" aria-label={tr('teams_title')} style={listStyle}><TeamsSignIn compact /></nav>;
   if (!workspace || !snapshot) return <div className="no-drag teams-sidebar" style={listStyle}><p role="status" style={noteStyle}>{tr('desktop_teams_loading')}</p></div>;
@@ -33,7 +31,7 @@ export function TeamsSidebar({ teams, locale, query, initialInvite, onInviteHand
     <div className="no-drag teams-sidebar" style={hostStyle} onClickCapture={onShowTeams}>
       <TeamSidebar workspace={workspace} snapshot={snapshot} locale={locale} query={query} renderAvatar={renderTeamAvatar}
         initialInvite={initialInvite} onInviteHandled={onInviteHandled} onOpenSettings={onOpenSettings}
-        onOpenServices={workspace.api.services && workspace.api.serviceMessages ? onOpenServices : undefined} onConversationSelected={onCloseServices} />
+        onOpenServices={workspace.api.services && workspace.api.serviceMessages ? onOpenServices : undefined} onConversationSelected={onConversationSelected} />
     </div>
   );
 }

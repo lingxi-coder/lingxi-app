@@ -279,21 +279,21 @@ body {
   min-height: 0;
 }
 .teams-conversation > .tw-conv { flex: 1 1 0; height: auto; min-height: 0; }
-.teams-page > .tw-drawer { height: auto; }
+.teams-page .tw-settings-underlay > .tw-drawer { height: auto; }
 .teams-sidebar > .tw-sidebar { flex: 1 1 0; height: auto; min-height: 0; }
 /* Friends: the chat or the page fills the main area, and the list fills the sidebar. */
 .friends-page { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 .friends-page > * { flex: 1 1 0; min-height: 0; height: auto; }
 .friends-sidebar > .tw-sidebar { flex: 1 1 0; height: auto; min-height: 0; }
 /* The safe layout is an overlay. Give the panel its own column when the chat has room beside it. */
-.teams-page > .tw-drawer {
+.teams-page .tw-settings-underlay > .tw-drawer {
   position: absolute;
   inset: 0 0 0 auto;
   z-index: 4;
   box-shadow: -12px 0 28px rgb(0 0 0 / 16%);
 }
 @container teams-workspace (width >= 50rem) {
-  .teams-page > .tw-drawer { position: relative; inset: auto; z-index: auto; box-shadow: none; }
+  .teams-page .tw-settings-underlay > .tw-drawer { position: relative; inset: auto; z-index: auto; box-shadow: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .desktop-sidebar, .desktop-sidebar-brand, .desktop-rail-button { transition: none; }

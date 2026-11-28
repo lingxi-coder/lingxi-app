@@ -1,7 +1,7 @@
 import { botMarketLink } from './market-link';
 import * as firestore from 'firebase/firestore';
 import { collection, onSnapshot, type Firestore } from 'firebase/firestore';
-import { teamsTransport, type TeamsApi, type TeamCommand, type TeamDetail, type TeamResult, type TeamSummary } from '../../../../packages/teams';
+import { teamCommandPath, teamsTransport, type TeamsApi, type TeamCommand, type TeamDetail, type TeamResult, type TeamSummary } from '../../../../packages/teams';
 import { InboxController } from '../../../../packages/inbox/controller';
 import { createInboxRequest } from '../../../../packages/inbox/client';
 import { prefetchFirestoreMessages, readFirestoreMessagePage, watchFirestoreMessages } from '../../../../packages/teams/firestore.js';
@@ -47,7 +47,7 @@ export function webTeamsApi(user: User, db: Firestore, currentUid: () => string 
       const current = await checked<TeamDetail>(`/${teamId}`);
       watch(teamId, ['teams', teamId, 'members'], current.team.generation); return current;
     },
-    execute: (command: TeamCommand) => checked<TeamResult>('', command),
+    execute: (command: TeamCommand) => checked<TeamResult>(teamCommandPath(command), command),
     datasets: <T>(request: Record<string, unknown>) => request.action === 'page' ? checked<T>('/dataset-pages', request.request)
       : request.action === 'teamVisualization' ? checked<T>('/visualizations', request.request) : checked<T>('/datasets', request),
     data: <T>(input: DataRequest) => checked<T>('/data', input),

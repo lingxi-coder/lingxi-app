@@ -11,6 +11,10 @@ const membership: Record<string, TeamsKey> = {
   OWNER_REQUIRED: tk('tw_error_owner_only'),
   TEAM_LIMIT: tk('tw_error_team_limit'),
   MEMBER_LIMIT: tk('friends_error_member_limit'),
+  TEAM_PROFILE_CHANGED: tk('tw_team_profile_changed'),
+  TEAM_AVATAR_INVALID: tk('tw_team_avatar_invalid'),
+  TEAM_MEMBER_HAS_BOTS: tk('tw_team_remove_bots_first'),
+  BOT_REVISION_CONFLICT: tk('tw_team_remove_bot_changed'),
 };
 
 /** Team membership, invitation and listing errors. */

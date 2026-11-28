@@ -2550,6 +2550,7 @@
     <string name="teams_error">チームに接続できませんでした。接続を確認して、もう一度お試しください。</string>
     <string name="teams_invite_error">この招待は期限切れ、取り消し済み、または使用回数の上限に達しています。</string>
     <string name="teams_stale_error">メンバーシップが変更されました。更新してからもう一度お試しください。</string>
+    <string name="teams_remove_member_bots">Web またはデスクトップのチーム設定で、このメンバーが担当する Bot を引き継ぐか、共有を停止してから、メンバーを削除してください。</string>
     <string name="teams_disclosure">チームのデータとメッセージはプラットフォームから閲覧できます。Bot とのやり取りは、その Bot のメンテナーも読めます。</string>
     <string name="teams_join_disclosure">信頼できるチームにだけ参加してください。参加すると、メンバーにあなたの名前が表示されます。</string>
     <string name="teams_empty">Create a team or join with an invite.</string>

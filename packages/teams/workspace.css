@@ -106,18 +106,6 @@
 .tw-avatar[data-kind='bot'] { border-radius: 24%; }
 .tw-avatar-custom { background: var(--tw-hover); }
 .tw-avatar-custom > * { max-width: 100%; max-height: 100%; }
-.tw-dm-group { position: relative; display: inline-block; flex: none; isolation: isolate; }
-.tw-dm-group .tw-avatar { position: absolute; inset-block: 1px auto; inset-inline: 1px auto; }
-.tw-dm-group .tw-avatar + .tw-avatar { inset-block: auto 1px; inset-inline: auto 1px; box-shadow: 0 0 0 2px var(--tw-dm-bg, var(--tw-bg)); }
-.tw-row .tw-dm-group { --tw-dm-bg: var(--tw-sidebar-bg); }
-.tw-row[data-selected='true'] .tw-dm-group { --tw-dm-bg: var(--tw-selected); }
-.tw-row-main:hover .tw-dm-group { --tw-dm-bg: var(--tw-hover); }
-.tw-dm-group-more {
-  position: absolute; inset-block-end: 0; inset-inline-start: 0; padding: 1px 3px;
-  border-radius: 999px; background: var(--tw-surface); color: var(--tw-fg); line-height: 1.2;
-  font-size: .6875rem; font-weight: 700; font-variant-numeric: tabular-nums;
-  box-shadow: 0 0 0 1px var(--tw-dm-bg, var(--tw-bg));
-}
 .tw-chan { display: inline-flex; align-items: center; justify-content: center; flex: none; border-radius: 24%; background: var(--tw-hover); color: var(--tw-muted); font-weight: 600; }
 .tw-team-mark { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 24px; height: 24px; border-radius: 24%; color: #fff; font-size: 11px; font-weight: 700; }
 .tw-team-mark > img { display: block; inline-size: 100%; block-size: 100%; border-radius: inherit; object-fit: cover; }

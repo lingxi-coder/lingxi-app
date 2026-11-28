@@ -20,7 +20,7 @@ const { TeamConversationView, conversationSubtitle } = loadTeamsModule<typeof im
 const { DRAWER_DEFAULT, DRAWER_MAX, DRAWER_MIN, TeamDetailsDrawer, clampDrawerWidth, drawerWidthForDrag, drawerWidthForKey } = loadTeamsModule<typeof import('../../../packages/teams/TeamDetailsDrawer')>('TeamDetailsDrawer');
 const { TeamSettingsPage, canManageMember } = loadTeamsModule<typeof import('../../../packages/teams/TeamSettingsPage')>('TeamSettingsPage');
 const { TeamSidebar, connectionStatus } = loadTeamsModule<typeof import('../../../packages/teams/TeamSidebar')>('TeamSidebar');
-const { AVATAR_COLORS, AVATAR_SIZES, Avatar, ConversationLead, PopupMenu, avatarColor, initials, nextEnabled, rovingIndex, stackedSize } = loadTeamsModule<typeof import('../../../packages/teams/ui')>('ui');
+const { AVATAR_COLORS, AVATAR_SIZES, Avatar, ConversationLead, PopupMenu, avatarColor, initials, nextEnabled, rovingIndex } = loadTeamsModule<typeof import('../../../packages/teams/ui')>('ui');
 const roving = loadTeamsModule<typeof import('../../../packages/teams/roving')>('roving');
 
 // ── Pure helpers ──
@@ -68,16 +68,17 @@ test('Avatar draws initials, or the host\'s avatar when it supplies one', () => 
   assert.match(declined, />FB</, 'returning nothing keeps the initials');
 });
 
-test('DM leads keep a single avatar for a person and give group counts a fixed avatar footprint', () => {
-  const snapshot = { uid: 'alice', directory: [], bots: [] };
-  const lead = (kind: 'dm' | 'group', participants: string[]) => renderToStaticMarkup(createElement(ConversationLead, {
-    conversation: conversation('fixture', { kind, participants }), label: 'Fixture', snapshot, locale: 'en',
+test('DM leads use the peer avatar for a private chat and one conversation avatar for a group', () => {
+  const snapshot = { uid: 'alice', directory: members('alice', 'bob', 'carol', 'dan'), bots: [] };
+  const lead = (kind: 'dm' | 'group', participants: string[], label: string) => renderToStaticMarkup(createElement(ConversationLead, {
+    conversation: conversation('fixture', { kind, participants }), label, snapshot, locale: 'en',
+    render: identity => identity.id === 'bob' ? createElement('img', { src: 'bob.png', alt: '' }) : undefined,
   }));
-  assert.doesNotMatch(lead('dm', ['user:alice', 'user:bob']), /tw-dm-group/);
-  const group = lead('group', ['user:alice', 'user:bob', 'user:carol', 'user:dan']);
-  assert.match(group, /class="tw-dm-group" style="width:40px;height:40px"/);
-  assert.equal(count(group, /class="tw-avatar"/g), 2);
-  assert.match(group, /class="tw-dm-group-more"[^>]*>\+1</);
+  assert.match(lead('dm', ['user:alice', 'user:bob'], 'Bob'), /<img src="bob.png"/);
+  const group = lead('group', ['user:alice', 'user:bob', 'user:carol', 'user:dan'], 'Design review');
+  assert.equal(count(group, /class="tw-avatar"/g), 1);
+  assert.match(group, /aria-hidden="true" style="width:40px;height:40px;[^"]*">DR<\/span>$/);
+  assert.doesNotMatch(group, /<img|\+1/);
 });
 
 test('menu and roving-focus helpers skip disabled items and wrap or stop as asked', () => {
@@ -101,13 +102,12 @@ test('the roving rule is one function for the Teams sidebars, the Desktop\'s Bot
   assert.equal(roving.rovingIndex(0, -1, 'ArrowDown'), undefined, 'nothing to move between');
 });
 
-test('avatars: five sizes, and a stack of them takes the largest size that is at most 70% of its lead; every size the views ask for is on the scale', () => {
+test('avatars: every size the views ask for is on the five-size scale', () => {
   assert.deepEqual([...AVATAR_SIZES], [20, 24, 32, 40, 56]);
-  assert.deepEqual([56, 40, 32, 24].map(stackedSize), [32, 24, 20, 20]);
   const folder = new URL('../../../packages/teams/', import.meta.url);
   const asked: { file: string; size: number }[] = [];
   for (const file of readdirSync(folder).filter(name => name.endsWith('.tsx'))) {
-    for (const line of readFileSync(new URL(file, folder), 'utf8').split('\n')) for (const match of line.matchAll(/<(?:Avatar|TeamMark|AvatarStack|ConversationLead)\b[^\n]*?\bsize=\{(\d+)\}/g)) asked.push({ file, size: Number(match[1]) });
+    for (const line of readFileSync(new URL(file, folder), 'utf8').split('\n')) for (const match of line.matchAll(/<(?:Avatar|TeamMark|ConversationLead)\b[^\n]*?\bsize=\{(\d+)\}/g)) asked.push({ file, size: Number(match[1]) });
   }
   assert.ok(asked.length >= 10, `the views draw avatars (${asked.length} found)`);
   assert.deepEqual(asked.filter(({ size }) => !(AVATAR_SIZES as readonly number[]).includes(size)), [], 'no avatar off the scale');

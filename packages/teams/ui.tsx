@@ -42,9 +42,6 @@ export type RenderMarkdown = (text: string) => ReactNode;
  */
 export const AVATAR_SIZES = [20, 24, 32, 40, 56] as const;
 
-/** The avatar of one person inside a stack of avatars in a lead of `lead` pixels: the largest size of the scale that is at most 70% of it. */
-export const stackedSize = (lead: number): number => [...AVATAR_SIZES].reverse().find(size => size <= lead * 0.7) ?? AVATAR_SIZES[0];
-
 /** Every entry has at least 4.5:1 contrast against the white initials. */
 export const AVATAR_COLORS = ['#4a5fc1', '#2e7d6b', '#b04a6e', '#8a5a1f', '#6b4fa3', '#2a7aa3', '#9a4b2d', '#4f7a28', '#a1427d', '#5a6b78', '#3f6fb5', '#a8571a'] as const;
 
@@ -82,31 +79,16 @@ export function TeamMark({ id, name, size, avatar }: { id: string; name: string;
   </span>;
 }
 
-/** A group lead occupies the same footprint as a single conversation avatar. */
-function GroupConversationAvatar({ identities, size, render, more }: { identities: Identity[]; size: number; render?: RenderAvatar; more: (count: number) => string }): ReactElement {
-  if (identities.length === 1) return <Avatar identity={identities[0]!} size={size} render={render} />;
-  const rest = identities.length - 2;
-  return <span className="tw-dm-group" style={{ width: size, height: size }} aria-hidden="true">
-    {identities.slice(0, 2).map(identity => <Avatar key={`${identity.kind}:${identity.id}`} identity={identity} size={stackedSize(size)} render={render} />)}
-    {rest > 0 ? <span className="tw-dm-group-more" title={more(rest)}>+{rest}</span> : null}
-  </span>;
-}
-
-/**
- * The picture for a conversation: `#` for a channel, the other person for a dm, the Bot for a Bot dm,
- * and a short stack of members for a group. `label` is the name used when no participant is known.
- */
+/** Channels use a # tile, groups use the conversation name, and DMs use the peer's avatar. */
 export function ConversationLead({ conversation, label, snapshot, locale, size = 40, render }: {
   conversation: TeamConversation; label: string; snapshot: Pick<TeamsSnapshot, 'directory' | 'bots' | 'uid'>; locale: string; size?: number; render?: RenderAvatar;
 }): ReactElement {
-  const t = useTeamsText(locale);
   if (conversation.kind === 'channel') return <span className="tw-chan" aria-hidden="true" style={{ width: size, height: size, fontSize: Math.round(size * 0.55) }}>#</span>;
+  const fallback: Identity = { kind: conversation.kind === 'bot_dm' ? 'bot' : 'user', id: conversation.id, name: label };
+  if (conversation.kind === 'group') return <Avatar identity={fallback} size={size} />;
+
   const people = conversationParticipants(conversation, snapshot.directory, snapshot.bots, snapshot.uid, locale);
   const others = people.filter(person => !person.self);
-  const fallback: Identity = { kind: conversation.kind === 'bot_dm' ? 'bot' : 'user', id: conversation.id, name: label };
-  if (conversation.kind === 'group') {
-    return <GroupConversationAvatar identities={others.length ? others : people.length ? people : [fallback]} size={size} render={render} more={count => t('tw_more_fmt', count)} />;
-  }
   const lead = conversation.kind === 'bot_dm' ? people.find(person => person.kind === 'bot') : others[0] ?? people[0];
   return <Avatar identity={lead ?? fallback} size={size} render={render} />;
 }

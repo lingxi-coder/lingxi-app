@@ -94,9 +94,11 @@ try {
     const field = `${teamSettings} input[maxlength="80"]`;
     const editor = '.teams-conversation .tw-message-editor';
     await wait(`document.querySelector('${homeGear}') && document.querySelector('${row('chan-general')}')`);
-    const groupLead = `${row('dm-group')} .tw-dm-group`;
+    const groupLead = `${row('dm-group')} .tw-row-lead .tw-avatar`;
     await wait(`document.querySelector('${groupLead}')`);
-    assert.equal(await run(`document.querySelector('${groupLead} .tw-dm-group-more').textContent`), '+1');
+    assert.equal(await run(`document.querySelectorAll('${groupLead}').length`), 1);
+    assert.equal(await run(`document.querySelector('${groupLead}').textContent`), 'DR');
+    assert.equal(await run(`getComputedStyle(document.querySelector('${groupLead}')).borderRadius`), '50%');
     assert.equal(await run(`document.querySelector('${groupLead}').getBoundingClientRect().width`), 40);
     const sidebarWidth = () => run(`document.querySelector('${sidebar}').clientWidth`);
     const initialWidth = await sidebarWidth();

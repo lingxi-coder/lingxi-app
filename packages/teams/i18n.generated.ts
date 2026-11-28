@@ -976,7 +976,6 @@ export type TeamsKey =
   | 'tw_message_sent'
   | 'tw_messages'
   | 'tw_more'
-  | 'tw_more_fmt'
   | 'tw_nav_remote'
   | 'tw_new_bots_note'
   | 'tw_new_message_label'
@@ -2088,7 +2087,6 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_message_sent: { en: 'Sent', 'zh-Hans': '已发送', 'zh-Hant': '已傳送', ja: '送信済み', ko: '전송됨' },
   tw_messages: { en: 'Messages', 'zh-Hans': '消息', 'zh-Hant': '訊息', ja: 'メッセージ', ko: '메시지' },
   tw_more: { en: 'More', 'zh-Hans': '更多', 'zh-Hant': '更多', ja: 'その他', ko: '더 보기' },
-  tw_more_fmt: { en: '%1$s more', 'zh-Hans': '另外 %1$s 人', 'zh-Hant': '另外 %1$s 人', ja: 'ほか %1$s 人', ko: '외 %1$s명' },
   tw_nav_remote: { en: 'Remote', 'zh-Hans': '远控', 'zh-Hant': '遠控', ja: 'リモート', ko: '원격' },
   tw_new_bots_note: { en: 'Bots run on their maintainer’s Desktop. The maintainer can read every conversation containing their Bot.', 'zh-Hans': 'Bot 在维护者的 Desktop 上运行。维护者可阅读包含其 Bot 的所有会话。', 'zh-Hant': 'Bot 在維護者的 Desktop 上執行。維護者可閱讀包含其 Bot 的所有對話。', ja: 'Bot はメンテナーの Desktop 上で動作します。メンテナーは自分の Bot を含むすべての会話を読めます。', ko: 'Bot은 메인테이너의 Desktop에서 실행됩니다. 메인테이너는 자신의 Bot이 포함된 모든 대화를 읽을 수 있습니다.' },
   tw_new_message_label: { en: 'Message', 'zh-Hans': '发给', 'zh-Hant': '傳給', ja: '宛先', ko: '받는 사람' },

@@ -23,3 +23,7 @@ export function SettingsLayout<Id extends string>({ label, sections, active, onS
     </div>
   </div>;
 }
+
+export function SettingsRole({ children, elevated = false }: { children: ReactNode; elevated?: boolean }) {
+  return <span className="tw-settings-role" data-elevated={elevated || undefined}>{children}</span>;
+}

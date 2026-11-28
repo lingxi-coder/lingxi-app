@@ -1,12 +1,13 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import { ChatTopbarHeader } from './ChatTopbar';
+import { ChatTopbarHeader, TopbarConnection } from './ChatTopbar';
 import { ChannelSettings as BotSettings } from './ChannelSettings';
 import { channelCommand, channelInviteLink, DEFAULT_POSTING, type ChannelInvite, type ChannelManagement as Management, type ChannelPosting, type ChannelRequest } from './channel-settings';
 import { teamsText, useTeamsText } from './i18n';
+import type { TeamRole } from './index';
 import type { TeamConversation } from './messages';
-import { Avatar, Dialog, type IconName } from './ui';
-import { SettingsLayout } from './SettingsLayout';
-import { conversationParticipants, type TeamsSnapshot, type TeamsWorkspace } from './workspace';
+import { Avatar, ConversationLead, Dialog, Icon, type IconName, type RenderAvatar } from './ui';
+import { SettingsLayout, SettingsRole } from './SettingsLayout';
+import { conversationParticipants, type Identity, type TeamsSnapshot, type TeamsWorkspace } from './workspace';
 
 type Context = { workspace: TeamsWorkspace; snapshot: TeamsSnapshot; locale: string };
 type ChannelResponse = Partial<Management> & { channels?: { id: string; title: string }[]; blockedBy?: { id: string; name: string }[]; conversationId?: string };
@@ -25,22 +26,40 @@ function makeRequest(workspace: TeamsWorkspace, teamId: string, generation: numb
   return workspace.api.messages<ChannelResponse>(channelCommand({ teamId, generation }, request));
 }
 
-/** Shared by the channel's Administrators page and the team's management entry. */
-function AdministratorList({ management, snapshot, locale, busy, change }: {
-  management: Management; snapshot: TeamsSnapshot; locale: string; busy: boolean; change(uid: string, enabled: boolean): void;
+function ChannelMemberIdentity({ identity, admin, teamRole, locale, renderAvatar }: {
+  identity: Identity; admin: boolean; teamRole?: TeamRole; locale: string; renderAvatar?: RenderAvatar;
 }) {
   const t = useTeamsText(locale);
-  return <ul className="tw-channel-roster">{management.members.map(uid => {
+  return <>
+    <Avatar identity={identity} size={32} render={renderAvatar} />
+    <div className="tw-person-text"><b>{identity.name}</b><div className="tw-role-line">
+      {identity.kind === 'bot' ? <SettingsRole>{t('teams_bot_tag')}</SettingsRole> : <>
+        {teamRole === 'owner' ? <SettingsRole elevated>{t('tw_role_team_owner')}</SettingsRole> : null}
+        {teamRole === 'admin' ? <SettingsRole elevated>{t('tw_role_team_admin')}</SettingsRole> : null}
+        {admin ? <SettingsRole elevated>{t('tw_role_channel_admin')}</SettingsRole> : null}
+        {!admin && teamRole !== 'owner' && teamRole !== 'admin' ? <SettingsRole>{t('teams_member')}</SettingsRole> : null}
+      </>}
+    </div></div>
+  </>;
+}
+
+/** Shared by the channel's Roles page and the team's management entry. */
+function AdministratorList({ management, snapshot, locale, busy, change, renderAvatar }: {
+  management: Management; snapshot: TeamsSnapshot; locale: string; busy: boolean; change(uid: string, enabled: boolean): void; renderAvatar?: RenderAvatar;
+}) {
+  const t = useTeamsText(locale);
+  return <ul className="tw-settings-fields tw-channel-roster" aria-label={t('tw_channel_roles')}>{management.members.map(uid => {
     const admin = management.admins.includes(uid);
-    return <li key={uid}><span>{snapshot.directory.find(member => member.uid === uid)?.displayName || uid}</span>
-      <button type="button" disabled={busy} onClick={() => change(uid, !admin)}>
-        {admin ? t('tw_channel_dismiss_admin') : t('tw_channel_appoint_admin')}
-      </button></li>;
+    const member = snapshot.directory.find(person => person.uid === uid);
+    const name = member?.displayName || uid;
+    const action = t(admin ? 'tw_channel_dismiss_admin' : 'tw_channel_appoint_admin');
+    return <li key={uid}><ChannelMemberIdentity identity={{ kind: 'user', id: uid, name }} admin={admin} teamRole={member?.role} locale={locale} renderAvatar={renderAvatar} />
+      <button type="button" disabled={busy} aria-label={`${action} · ${name}`} onClick={() => change(uid, !admin)}>{action}</button></li>;
   })}</ul>;
 }
 type Section = 'general' | 'posting' | 'members' | 'invites' | 'admins' | 'bots';
 
-export function ChannelSettingsPage({ workspace, snapshot, locale, conversation, onClose }: Context & { conversation: TeamConversation; onClose(): void }) {
+export function ChannelSettingsPage({ workspace, snapshot, locale, conversation, onClose, renderAvatar }: Context & { conversation: TeamConversation; onClose(): void; renderAvatar?: RenderAvatar }) {
   const t = useTeamsText(locale), team = snapshot.team!, scope = { teamId: team.id, generation: team.generation };
   const isTeamManager = team.role !== 'member';
   const canManage = isTeamManager || conversation.channelAdmins?.[`user:${snapshot.uid}`] === team.generation;
@@ -53,18 +72,15 @@ export function ChannelSettingsPage({ workspace, snapshot, locale, conversation,
   const [confirmation, setConfirmation] = useState<{ title: string; action(): void }>();
   const [blocked, setBlocked] = useState<{ id: string; name: string }[]>([]);
   const heading = useRef<HTMLHeadingElement>(null);
+  const page = useRef<HTMLElement>(null);
   const fieldsId = useId();
-  useEffect(() => {
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
-    heading.current?.focus();
-    return () => previous?.focus();
-  }, []);
+  useEffect(() => { heading.current?.focus({ preventScroll: true }); }, []);
   const sections: { id: Section; text: string; icon: IconName }[] = [
     { id: 'general', text: t('settings_group_general'), icon: 'sliders' },
     { id: 'posting', text: t('tw_channel_posting'), icon: 'send' },
     { id: 'members', text: t('teams_members'), icon: 'person' },
     ...(canManage ? [{ id: 'invites' as const, text: t('tw_channel_invite_links'), icon: 'link' as const }] : []),
-    { id: 'admins', text: t('tw_channel_admins'), icon: 'lock' },
+    { id: 'admins', text: t('tw_channel_roles'), icon: 'lock' },
     ...(people.some(person => person.kind === 'bot') ? [{ id: 'bots' as const, text: t('remote_bots'), icon: 'bot' as const }] : []),
   ];
   const active = sections.find(item => item.id === section) ?? sections[0]!;
@@ -91,13 +107,27 @@ export function ChannelSettingsPage({ workspace, snapshot, locale, conversation,
   const selected = rule.selected.filter(principal => currentPrincipals.has(principal));
   const knownAdmins = snapshot.directory.filter(member => conversation.channelAdmins?.[`user:${member.uid}`] === member.generation
     && conversation.participants.includes(`user:${member.uid}`));
-  return <section className="tw-scope tw-settings-page tw-channel-settings-page" aria-label={t('tw_channel_settings')}>
-    <ChatTopbarHeader><div className="tw-conv-head">
-      <button type="button" className="tw-icon-btn tw-channel-back" onClick={onClose} aria-label={t('tw_channel_back')}>‹</button>
-      <strong>{conversation.title}</strong>
-    </div></ChatTopbarHeader>
+  return <section ref={page} className="tw-scope tw-settings-page tw-channel-settings-page" aria-label={t('tw_channel_settings')} onKeyDown={event => {
+    if (event.key !== 'Escape' || event.defaultPrevented || confirmation) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onClose();
+  }}>
+    <ChatTopbarHeader><header className="tw-conv-head">
+      <button type="button" className="tw-icon-btn" onClick={onClose} aria-label={t('tw_channel_back')} title={t('tw_channel_back')}><Icon name="chevronLeft" /></button>
+      <div className="tw-conv-identity">
+        <ConversationLead conversation={conversation} label={conversation.title} snapshot={snapshot} locale={locale} size={24} />
+        <div className="tw-conv-title"><h2>{conversation.title}</h2></div>
+      </div>
+      <TopbarConnection snapshot={snapshot} workspace={workspace} locale={locale} />
+    </header></ChatTopbarHeader>
     <SettingsLayout label={t('tw_channel_settings')} sections={sections} active={active} heading={heading}
-      onSelect={id => { setSection(id); setError(''); setNotice(''); }}>
+      onSelect={next => {
+        setSection(next);
+        setError('');
+        setNotice('');
+        if (page.current) page.current.scrollTop = 0;
+      }}>
         {error ? <p role="alert" className="tw-error">{error}</p> : null}
         {notice ? <p role="status">{notice}</p> : null}
         {active.id === 'general' ? <form className="tw-form" onSubmit={event => {
@@ -134,10 +164,12 @@ export function ChannelSettingsPage({ workspace, snapshot, locale, conversation,
             </div> : null}
           </fieldset>{canManage ? save(!posting || rule.senders === 'selected' && !selected.length) : null}
         </form> : null}
-        {active.id === 'members' ? <><ul className="tw-channel-roster">{people.map(person => {
+        {active.id === 'members' ? <div className="tw-settings-group"><ul className="tw-settings-fields tw-channel-roster" aria-label={t('teams_members')}>{people.map(person => {
           const member = snapshot.directory.find(m => m.uid === person.id);
           const bot = snapshot.bots.find(bot => bot.sharedBotId === person.id);
-          return <li key={person.kind + ':' + person.id}><Avatar identity={person} size={32} /><span>{person.name}</span>
+          return <li key={person.kind + ':' + person.id}>
+            <ChannelMemberIdentity identity={person} admin={person.kind === 'user' && knownAdmins.some(m => m.uid === person.id)}
+              teamRole={person.self ? team.role : member?.role} locale={locale} renderAvatar={renderAvatar} />
             {canManage && person.kind === 'user' && !person.self && member?.role === 'member' && !knownAdmins.some(m => m.uid === person.id)
               ? <button type="button" disabled={busy || snapshot.offline} onClick={() => setConfirmation({ title: t('tw_channel_remove_fmt', person.name),
                 action: () => { setBlocked([]); void run({ op: 'remove', conversationId: id, uid: person.id }, result => {
@@ -150,7 +182,7 @@ export function ChannelSettingsPage({ workspace, snapshot, locale, conversation,
                   setBlocked(previous => previous.filter(value => value.id !== person.id)); setNotice(t('tw_channel_bot_removed'));
                 }) })}>{t('tw_channel_remove_bot')}</button> : null}
           </li>;
-        })}</ul>{blocked.length ? <div role="alert"><p>{t('tw_channel_bot_dependency')}</p><ul>{blocked.map(bot => <li key={bot.id}>{bot.name}</li>)}</ul></div> : null}</> : null}
+        })}</ul>{blocked.length ? <div role="alert"><p>{t('tw_channel_bot_dependency')}</p><ul>{blocked.map(bot => <li key={bot.id}>{bot.name}</li>)}</ul></div> : null}</div> : null}
         {active.id === 'invites' ? !management && !error ? <p role="status">{t('teams_loading')}</p> : management
           ? <div className="tw-settings-fields">
             <p>{t('tw_channel_invite_scope')}</p>
@@ -168,13 +200,24 @@ export function ChannelSettingsPage({ workspace, snapshot, locale, conversation,
                 action: () => void run({ op: 'revokeInvite', conversationId: id, code: management.code! }, () => setManagement({ ...management, code: null })) })}>{t('tw_channel_invite_revoke')}</button></div>
             </> : <button type="button" className="tw-primary" disabled={busy || snapshot.offline} onClick={() => void run({ op: 'createInvite', conversationId: id }, result => setManagement({ ...management, code: result.code ?? null }))}>{t('teams_invite_create')}</button>}
           </div> : null : null}
-        {active.id === 'admins' ? isTeamManager
-          ? management ? <AdministratorList management={management} snapshot={snapshot} locale={locale} busy={busy || snapshot.offline} change={(uid, enabled) => {
-            void run({ op: 'admin', conversationId: id, uid, enabled }, () => setManagement({ ...management,
-              admins: enabled ? [...management.admins, uid] : management.admins.filter(previous => previous !== uid) }));
-          }} /> : !error ? <p role="status">{t('teams_loading')}</p> : null
-          : knownAdmins.length ? <ul className="tw-channel-roster">{knownAdmins.map(member => <li key={member.uid}>{member.displayName}</li>)}</ul>
-          : <p>{t('tw_channel_no_admins')}</p> : null}
+        {active.id === 'admins' ? <div className="tw-settings-group">
+          <div className="tw-settings-fields tw-role-description">
+            <SettingsRole elevated>{t('tw_role_channel_admin')}</SettingsRole>
+            <p>{t('tw_channel_roles_hint')}</p>
+            <p className="tw-hint">{t('tw_channel_roles_assignment')}</p>
+          </div>
+          {isTeamManager
+            ? management ? <AdministratorList management={management} snapshot={snapshot} locale={locale} renderAvatar={renderAvatar}
+              busy={busy || snapshot.offline} change={(uid, enabled) => {
+                void run({ op: 'admin', conversationId: id, uid, enabled }, () => setManagement({
+                  ...management, admins: enabled ? [...management.admins, uid] : management.admins.filter(previous => previous !== uid),
+                }));
+              }} /> : !error ? <p role="status">{t('teams_loading')}</p> : null
+            : knownAdmins.length ? <ul className="tw-settings-fields tw-channel-roster" aria-label={t('tw_channel_admins')}>
+              {knownAdmins.map(member => <li key={member.uid}><ChannelMemberIdentity
+                identity={{ kind: 'user', id: member.uid, name: member.displayName }} admin teamRole={member.role} locale={locale} renderAvatar={renderAvatar} /></li>)}
+            </ul> : <p className="tw-hint">{t('tw_channel_no_admins')}</p>}
+        </div> : null}
         {active.id === 'bots' ? <BotSettings workspace={workspace} snapshot={snapshot} conversation={conversation} scope={scope} locale={locale} /> : null}
     </SettingsLayout>
     {confirmation ? <Dialog title={confirmation.title} onClose={() => setConfirmation(undefined)}>
@@ -184,7 +227,7 @@ export function ChannelSettingsPage({ workspace, snapshot, locale, conversation,
   </section>;
 }
 
-export function TeamChannelAdmins({ workspace, snapshot, locale }: Context) {
+export function TeamChannelAdmins({ workspace, snapshot, locale, renderAvatar }: Context & { renderAvatar?: RenderAvatar }) {
   const t = useTeamsText(locale), { id: teamId, generation } = snapshot.team!;
   const [channels, setChannels] = useState<ChannelResponse['channels']>();
   const [selected, select] = useState(''), [management, setManagement] = useState<Management>();
@@ -205,14 +248,14 @@ export function TeamChannelAdmins({ workspace, snapshot, locale }: Context) {
     return () => { live = false; };
   }, [workspace, teamId, generation, locale, selected]);
   return <div className="tw-form">
-    {error ? <p role="alert">{error}</p> : null}
-    {channels ? <label>{t('teams_conversation_channel')}<select disabled={busy} value={selected} onChange={event => {
+    {error ? <p role="alert" className="tw-error">{error}</p> : null}
+    {channels ? <div className="tw-settings-fields"><label>{t('teams_conversation_channel')}<select disabled={busy} value={selected} onChange={event => {
       select(event.currentTarget.value); setManagement(undefined); setError('');
     }}>
       <option value="">{t('tw_channel_choose')}</option>{channels.map(channel => <option key={channel.id} value={channel.id}>{channel.title}</option>)}
-    </select></label> : !error ? <p role="status">{t('teams_loading')}</p> : null}
+    </select></label><p className="tw-hint">{t('tw_channel_roles_assignment')}</p></div> : !error ? <p role="status">{t('teams_loading')}</p> : null}
     {selected && !management && !error ? <p role="status">{t('teams_loading')}</p> : null}
-    {management ? <AdministratorList management={management} snapshot={snapshot} locale={locale} busy={busy || snapshot.offline} change={(uid, enabled) => {
+    {management ? <AdministratorList management={management} snapshot={snapshot} locale={locale} renderAvatar={renderAvatar} busy={busy || snapshot.offline} change={(uid, enabled) => {
       setBusy(true); setError('');
       void makeRequest(workspace, teamId, generation, { op: 'admin', conversationId: selected, uid, enabled }).then(() =>
         setManagement({ ...management, admins: enabled ? [...management.admins, uid] : management.admins.filter(value => value !== uid) })

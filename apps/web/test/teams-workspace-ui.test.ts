@@ -20,7 +20,7 @@ const { TeamConversationView, conversationSubtitle } = loadTeamsModule<typeof im
 const { DRAWER_DEFAULT, DRAWER_MAX, DRAWER_MIN, TeamDetailsDrawer, clampDrawerWidth, drawerWidthForDrag, drawerWidthForKey } = loadTeamsModule<typeof import('../../../packages/teams/TeamDetailsDrawer')>('TeamDetailsDrawer');
 const { TeamSettingsPage, canManageMember } = loadTeamsModule<typeof import('../../../packages/teams/TeamSettingsPage')>('TeamSettingsPage');
 const { TeamSidebar, connectionStatus } = loadTeamsModule<typeof import('../../../packages/teams/TeamSidebar')>('TeamSidebar');
-const { AVATAR_COLORS, AVATAR_SIZES, Avatar, PopupMenu, avatarColor, initials, nextEnabled, rovingIndex, stackedSize } = loadTeamsModule<typeof import('../../../packages/teams/ui')>('ui');
+const { AVATAR_COLORS, AVATAR_SIZES, Avatar, ConversationLead, PopupMenu, avatarColor, initials, nextEnabled, rovingIndex, stackedSize } = loadTeamsModule<typeof import('../../../packages/teams/ui')>('ui');
 const roving = loadTeamsModule<typeof import('../../../packages/teams/roving')>('roving');
 
 // ── Pure helpers ──
@@ -66,6 +66,18 @@ test('Avatar draws initials, or the host\'s avatar when it supplies one', () => 
   assert.match(custom, /tw-avatar-custom/); assert.match(custom, /<img src="bot.png"/); assert.doesNotMatch(custom, />FB</);
   const declined = renderToStaticMarkup(createElement(Avatar, { identity, size: 32, render: () => undefined }));
   assert.match(declined, />FB</, 'returning nothing keeps the initials');
+});
+
+test('DM leads keep a single avatar for a person and give group counts a fixed avatar footprint', () => {
+  const snapshot = { uid: 'alice', directory: [], bots: [] };
+  const lead = (kind: 'dm' | 'group', participants: string[]) => renderToStaticMarkup(createElement(ConversationLead, {
+    conversation: conversation('fixture', { kind, participants }), label: 'Fixture', snapshot, locale: 'en',
+  }));
+  assert.doesNotMatch(lead('dm', ['user:alice', 'user:bob']), /tw-dm-group/);
+  const group = lead('group', ['user:alice', 'user:bob', 'user:carol', 'user:dan']);
+  assert.match(group, /class="tw-dm-group" style="width:40px;height:40px"/);
+  assert.equal(count(group, /class="tw-avatar"/g), 2);
+  assert.match(group, /class="tw-dm-group-more"[^>]*>\+1</);
 });
 
 test('menu and roving-focus helpers skip disabled items and wrap or stop as asked', () => {
@@ -664,7 +676,9 @@ test('team settings: General, members, invitations, channel administration and B
   assert.doesNotMatch(markup, /Leave team/);
   const roster = html(teamSettings(workspace, snapshot(), { initialSection: 'members' }));
   assert.equal(count(roster, />Remove</g), 2, 'the owner can remove the other two'); assert.match(roster, />Make member</); assert.match(roster, />Make admin</); assert.equal(count(roster, />Make owner</g), 2);
-  assert.match(roster, /Alice<\/b><small>You · Owner/); assert.match(markup, /readable by the platform/);
+  assert.match(roster, /Members &amp; roles/);
+  assert.match(roster, /Alice<\/b>.*class="tw-settings-role"[^>]*>Owner<\/span><small>You/);
+  assert.match(roster, /Bob<\/b>.*class="tw-settings-role"[^>]*>Admin<\/span>/); assert.match(markup, /readable by the platform/);
   const invites = html(teamSettings(workspace, snapshot(), { initialSection: 'invites' }));
   assert.match(invites, /Create invite link/); assert.match(invites, /<option value="admin">Admin<\/option>/, 'an owner can invite admins');
   assert.match(invites, /Member · 1\/5/); assert.match(invites, />Revoke</); assert.match(invites, /Revoked/); assert.equal(count(invites, />Revoke</g), 1);

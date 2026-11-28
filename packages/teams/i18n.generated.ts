@@ -757,6 +757,9 @@ export type TeamsKey =
   | 'tw_channel_replies_closed'
   | 'tw_channel_replies_empty'
   | 'tw_channel_reply_permission'
+  | 'tw_channel_roles'
+  | 'tw_channel_roles_assignment'
+  | 'tw_channel_roles_hint'
   | 'tw_channel_selected_members'
   | 'tw_channel_send_permission'
   | 'tw_channel_settings'
@@ -1001,6 +1004,9 @@ export type TeamsKey =
   | 'tw_report_ready_one_fmt'
   | 'tw_report_ready_other_fmt'
   | 'tw_report_unpriced_fmt'
+  | 'tw_role_channel_admin'
+  | 'tw_role_team_admin'
+  | 'tw_role_team_owner'
   | 'tw_run_reply'
   | 'tw_run_status_label'
   | 'tw_service_all'
@@ -1084,6 +1090,7 @@ export type TeamsKey =
   | 'tw_team_copy_hint'
   | 'tw_team_invitations'
   | 'tw_team_join_role'
+  | 'tw_team_members_roles'
   | 'tw_team_owner_body'
   | 'tw_team_owner_title_fmt'
   | 'tw_team_pause_remove_bot_fmt'
@@ -1095,6 +1102,7 @@ export type TeamsKey =
   | 'tw_team_remove_bot_changed'
   | 'tw_team_remove_bots_first'
   | 'tw_team_resize'
+  | 'tw_team_roles_hint'
   | 'tw_team_settings'
   | 'tw_team_settings_back'
   | 'tw_turn_off'
@@ -1861,6 +1869,9 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_channel_replies_closed: { en: 'No replies', 'zh-Hans': '关闭回复', 'zh-Hant': '關閉回覆', ja: '返信を受け付けない', ko: '댓글 닫기' },
   tw_channel_replies_empty: { en: 'No replies yet', 'zh-Hans': '暂无回复', 'zh-Hant': '目前沒有回覆', ja: 'まだ返信はありません', ko: '아직 댓글이 없습니다' },
   tw_channel_reply_permission: { en: 'Who can reply', 'zh-Hans': '谁可以回复帖子', 'zh-Hant': '誰可以回覆貼文', ja: '返信できるメンバー', ko: '댓글을 달 수 있는 멤버' },
+  tw_channel_roles: { en: 'Roles', 'zh-Hans': '角色', 'zh-Hant': '角色', ja: 'ロール', ko: '역할' },
+  tw_channel_roles_assignment: { en: 'Team owners and team admins can grant or remove the channel admin role.', 'zh-Hans': '团队所有者和团队管理员可以任免频道管理员。', 'zh-Hant': '團隊擁有者和團隊管理員可以任免頻道管理員。', ja: 'チームオーナーとチーム管理者は、チャンネル管理者を任命または解除できます。', ko: '팀 소유자와 팀 관리자는 채널 관리자 역할을 부여하거나 해제할 수 있습니다.' },
+  tw_channel_roles_hint: { en: 'Channel admins can edit channel details, manage invite links, remove eligible members, and change posting rules.', 'zh-Hans': '频道管理员可以编辑频道资料、管理邀请链接、移除普通成员和调整发言规则。', 'zh-Hant': '頻道管理員可以編輯頻道資料、管理邀請連結、移除一般成員及調整發言規則。', ja: 'チャンネル管理者は、チャンネル情報の編集、招待リンクの管理、一般メンバーの削除、投稿ルールの変更ができます。', ko: '채널 관리자는 채널 정보 편집, 초대 링크 관리, 일반 멤버 제거 및 게시 규칙 변경을 할 수 있습니다.' },
   tw_channel_selected_members: { en: 'Selected members', 'zh-Hans': '指定成员', 'zh-Hant': '指定成員', ja: '指定したメンバー', ko: '선택한 멤버' },
   tw_channel_send_permission: { en: 'Who can send messages', 'zh-Hans': '谁可以发送消息', 'zh-Hant': '誰可以傳送訊息', ja: 'メッセージを送信できるメンバー', ko: '메시지를 보낼 수 있는 멤버' },
   tw_channel_settings: { en: 'Channel settings', 'zh-Hans': '频道设置', 'zh-Hant': '頻道設定', ja: 'チャンネル設定', ko: '채널 설정' },
@@ -2105,6 +2116,9 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_report_ready_one_fmt: { en: '%1$d task summary ready.', 'zh-Hans': '已生成 %1$d 项任务摘要。', 'zh-Hant': '已產生 %1$d 項任務摘要。', ja: 'タスク概要を %1$d 件生成しました。', ko: '작업 요약 %1$d개를 생성했습니다.' },
   tw_report_ready_other_fmt: { en: '%1$d task summaries ready.', 'zh-Hans': '已生成 %1$d 项任务摘要。', 'zh-Hant': '已產生 %1$d 項任務摘要。', ja: 'タスク概要を %1$d 件生成しました。', ko: '작업 요약 %1$d개를 생성했습니다.' },
   tw_report_unpriced_fmt: { en: 'Unpriced usage: %1$d', 'zh-Hans': '费用未知：%1$d', 'zh-Hant': '費用未知：%1$d', ja: '価格未確定: %1$d', ko: '가격 미책정: %1$d' },
+  tw_role_channel_admin: { en: 'Channel admin', 'zh-Hans': '频道管理员', 'zh-Hant': '頻道管理員', ja: 'チャンネル管理者', ko: '채널 관리자' },
+  tw_role_team_admin: { en: 'Team admin', 'zh-Hans': '团队管理员', 'zh-Hant': '團隊管理員', ja: 'チーム管理者', ko: '팀 관리자' },
+  tw_role_team_owner: { en: 'Team owner', 'zh-Hans': '团队所有者', 'zh-Hant': '團隊擁有者', ja: 'チームオーナー', ko: '팀 소유자' },
   tw_run_reply: { en: 'Reply to the Bot’s question', 'zh-Hans': '回复 Bot 的问题', 'zh-Hant': '回覆 Bot 的問題', ja: 'Bot の質問に返信', ko: 'Bot의 질문에 답장' },
   tw_run_status_label: { en: 'Task status', 'zh-Hans': '任务状态', 'zh-Hant': '任務狀態', ja: 'タスクの状態', ko: '작업 상태' },
   tw_service_all: { en: 'Everyone together', 'zh-Hans': '所有人合计', 'zh-Hant': '所有人合計', ja: '全員の合計', ko: '전체 합계' },
@@ -2188,6 +2202,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_team_copy_hint: { en: 'Select and copy the link above.', 'zh-Hans': '请选中上方链接并复制。', 'zh-Hant': '請選取上方連結並複製。', ja: '上のリンクを選択してコピーしてください。', ko: '위 링크를 선택해 복사하세요.' },
   tw_team_invitations: { en: 'Invitations', 'zh-Hans': '邀请', 'zh-Hant': '邀請', ja: '招待', ko: '초대' },
   tw_team_join_role: { en: 'Role', 'zh-Hans': '加入角色', 'zh-Hant': '加入角色', ja: '参加時のロール', ko: '참가 시 역할' },
+  tw_team_members_roles: { en: 'Members & roles', 'zh-Hans': '成员与角色', 'zh-Hant': '成員與角色', ja: 'メンバーとロール', ko: '멤버 및 역할' },
   tw_team_owner_body: { en: 'You stay in the team as an admin, and only the new owner can make you the owner again. Each Bot stays with the member who maintains it, and every chat stays with the people in it.', 'zh-Hans': '你将以管理员身份留在团队中，只有新的所有者才能再把你设为所有者。每个 Bot 仍由其维护者维护，每个对话仍只属于其中的成员。', 'zh-Hant': '你將以管理員身分留在團隊中，只有新的擁有者才能再把你設為擁有者。每個 Bot 仍由其維護者維護，每個對話仍只屬於其中的成員。', ja: 'あなたは管理者としてチームに残り、再びオーナーになるには新しいオーナーの操作が必要です。各 Bot はそのメンテナーのもとに残り、各チャットは参加者だけのものであり続けます。', ko: '회원님은 관리자로 팀에 남으며, 새 소유자만 회원님을 다시 소유자로 지정할 수 있습니다. 각 Bot은 메인테이너에게 그대로 남고, 각 채팅은 참여자에게만 그대로 남습니다.' },
   tw_team_owner_title_fmt: { en: 'Make %1$s the owner of %2$s?', 'zh-Hans': '将「%2$s」的所有者变更为 %1$s？', 'zh-Hant': '將「%2$s」的擁有者變更為 %1$s？', ja: '%1$s を %2$s のオーナーにしますか？', ko: '%1$s 님을 %2$s의 소유자로 지정할까요?' },
   tw_team_pause_remove_bot_fmt: { en: 'Stop sharing %1$s with this team? Members will lose access to the shared Bot. The maintainer keeps their local Bot.', 'zh-Hans': '停止在本团队共享 %1$s？团队成员将无法使用这个共享 Bot，维护人仍保有本地 Bot。', 'zh-Hant': '停止在本團隊共享 %1$s？團隊成員將無法使用這個共享 Bot，維護者仍保有本機 Bot。', ja: '%1$s のチームへの共有を停止しますか？チームメンバーは共有 Bot を利用できなくなります。メンテナーのローカル Bot は引き続き利用できます。', ko: '이 팀에서 %1$s의 공유를 중지할까요? 팀 멤버는 공유 Bot을 사용할 수 없게 됩니다. 관리자의 로컬 Bot은 유지됩니다.' },
@@ -2199,6 +2214,7 @@ export const TEAMS_CATALOG: Readonly<Record<TeamsKey, Readonly<Record<TeamsLocal
   tw_team_remove_bot_changed: { en: 'This Bot changed. Review the updated list before trying again.', 'zh-Hans': '这个 Bot 已变更，请查看更新后的列表再重试。', 'zh-Hant': '這個 Bot 已變更，請查看更新後的清單再試一次。', ja: 'この Bot は変更されています。最新の一覧を確認してから再試行してください。', ko: '이 Bot이 변경되었습니다. 업데이트된 목록을 확인한 뒤 다시 시도하세요.' },
   tw_team_remove_bots_first: { en: 'Hand over or stop sharing each of this member’s Bots before removing them.', 'zh-Hans': '请先移交该成员维护的 Bot，或停止这些 Bot 在本团队的共享，再将该成员移出。', 'zh-Hant': '請先移交該成員維護的 Bot，或停止這些 Bot 在本團隊的共享，再移除該成員。', ja: 'このメンバーを削除する前に、担当するすべての Bot を引き継ぐか、チームへの共有を停止してください。', ko: '이 멤버를 제거하기 전에 담당하는 모든 Bot을 인계하거나 팀 공유를 중지하세요.' },
   tw_team_resize: { en: 'Resize details panel', 'zh-Hans': '调整详情面板宽度', 'zh-Hant': '調整詳細資訊面板寬度', ja: '詳細パネルの幅を調整', ko: '세부 정보 패널 너비 조절' },
+  tw_team_roles_hint: { en: 'Owners manage team roles. Administrators can manage regular members.', 'zh-Hans': '团队所有者可以管理团队角色。团队管理员可以管理普通成员。', 'zh-Hant': '團隊擁有者可以管理團隊角色。團隊管理員可以管理一般成員。', ja: 'チームオーナーはチームのロールを管理できます。管理者は一般メンバーを管理できます。', ko: '팀 소유자는 팀 역할을 관리할 수 있습니다. 팀 관리자는 일반 멤버를 관리할 수 있습니다.' },
   tw_team_settings: { en: 'Team settings', 'zh-Hans': '团队设置', 'zh-Hant': '團隊設定', ja: 'チーム設定', ko: '팀 설정' },
   tw_team_settings_back: { en: 'Back from team settings', 'zh-Hans': '退出团队设置', 'zh-Hant': '離開團隊設定', ja: 'チーム設定から戻る', ko: '팀 설정에서 돌아가기' },
   tw_turn_off: { en: 'Turn off', 'zh-Hans': '关闭', 'zh-Hant': '關閉', ja: 'オフにする', ko: '끄기' },

@@ -35,6 +35,21 @@ fake.conversations.set('team-aaaa', [
   conversation('bot-chat', { kind: 'bot_dm', title: 'Fixture Bot', participants: ['user:alice', sharedBotIdentity], lastSeq: 2, lastReadSeq: 2,
     lastMessage: { id: 'b-2', seq: 2, at: ago(90), preview: 'Done: the summary is ready', author: { kind: 'shared_bot', sharedBotId: ownerBot.sharedBotId, displayName: ownerBot.name } } }),
 ]);
+if (params.get('groupDm') === '1') {
+  fake.conversations.get('team-aaaa')?.push(conversation('dm-group', {
+    kind: 'group', title: 'Design review', participants: ['user:alice', 'user:bob', 'user:owner', 'user:carol'],
+  }));
+}
+if (params.get('channelAdmin') === '1') {
+  const summary = fake.teams[0]!;
+  summary.role = 'member';
+  fake.details.set(summary.id, { team: summary, invites: [], members: [
+    { uid: 'alice', displayName: 'Alice', role: 'member', generation: summary.generation },
+    { uid: 'bob', displayName: 'Bob', role: 'owner', generation: 1 },
+  ] });
+  const channel = fake.conversations.get(summary.id)?.find(item => item.id === 'chan-general');
+  if (channel) channel.channelAdmins = { 'user:alice': summary.generation };
+}
 const many = params.get('many') === '1';
 fake.conversations.set('team-bbbb', [conversation('chan-b', { title: 'announcements', lastSeq: many ? 250 : 4, lastReadSeq: 1, lastMessage: lastMessage('m-b', many ? 250 : 4, 700, 'Welcome to Beta', 'bob') })]);
 fake.threads.set('chan-general', [
@@ -56,6 +71,21 @@ const calls: unknown[][] = [];
 // Like the service: a message that is sent joins its thread, and every open watch of the conversation is told.
 const baseMessages = fake.messages;
 fake.messages = async <T,>(command: any): Promise<T> => {
+  if (command.action === 'channelSettings') {
+    calls.push(['messages', command]);
+    const request = command.request;
+    const channel = fake.conversations.get(command.teamId)?.find(item => item.id === request.conversationId);
+    if (channel && request.op === 'get') {
+      return { members: ['alice', 'bob'], admins: Object.keys(channel.channelAdmins ?? {}).map(id => id.slice(5)), code: null } as T;
+    }
+    if (channel && request.op === 'admin') {
+      const admins = { ...channel.channelAdmins };
+      if (request.enabled) admins[`user:${request.uid}`] = 1;
+      else delete admins[`user:${request.uid}`];
+      channel.channelAdmins = admins;
+      return { ok: true } as T;
+    }
+  }
   if (command.action === 'mutate') {
     calls.push(['messages', command]);
     if (command.operation === 'create') {

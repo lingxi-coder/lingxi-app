@@ -575,7 +575,7 @@ function ConversationPane({ workspace, snapshot, conversation, model, team, deta
 
   const settingsLabel = t('tw_channel_settings');
   return <>
-    {settings && channel ? <ChannelSettingsPage workspace={workspace} snapshot={snapshot} locale={locale} conversation={conversation}
+    {settings && channel ? <ChannelSettingsPage workspace={workspace} snapshot={snapshot} locale={locale} conversation={conversation} renderAvatar={renderAvatar}
       onClose={() => { returnToGear.current = true; setSettings(false); }} /> : null}
     <section className="tw-scope tw-conv" aria-label={label} hidden={settings} style={settings ? { display: 'none' } : undefined}>
     {!settings ? <ChatTopbarHeader><header className="tw-conv-head">

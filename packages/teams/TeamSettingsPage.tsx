@@ -5,7 +5,7 @@ import { ChatTopbarHeader, TopbarConnection } from './ChatTopbar';
 import { messageErrorText, teamsErrorText } from './errors';
 import { intlTag, useTeamsText } from './i18n';
 import type { TeamCommand, TeamMember, TeamRole } from './index';
-import { SettingsLayout, type SettingsSection } from './SettingsLayout';
+import { SettingsLayout, SettingsRole, type SettingsSection } from './SettingsLayout';
 import { TeamMemberRemoval } from './TeamMemberRemoval';
 import { TeamProfileSettings } from './TeamProfileSettings';
 import { Avatar, Dialog, Icon, platformNotice, TeamMark, type RenderAvatar } from './ui';
@@ -53,7 +53,7 @@ export function TeamSettingsPage({ workspace, snapshot, locale, initialSection, 
   const busy = snapshot.busy || snapshot.offline;
   const sections: SettingsSection<TeamSettingsSection>[] = [
     { id: 'general', text: t('settings_group_general'), icon: 'sliders' },
-    { id: 'members', text: t('teams_members'), icon: 'person' },
+    { id: 'members', text: t('tw_team_members_roles'), icon: 'person' },
     ...(canManage ? [
       { id: 'invites' as const, text: t('teams_invites'), icon: 'link' as const },
       { id: 'channelAdmins' as const, text: t('tw_channel_manage_admins'), icon: 'lock' as const },
@@ -116,7 +116,7 @@ export function TeamSettingsPage({ workspace, snapshot, locale, initialSection, 
         {active.id === 'general' && !detail ? loading : null}
         <TeamProfileSettings workspace={workspace} snapshot={snapshot} team={team} locale={locale} />
         <section className="tw-team-settings-membership" aria-label={t('teams_team_details')}>
-          <p>{role(team.role)} · {count}</p>
+          <div className="tw-role-line"><SettingsRole elevated={canManage}>{role(team.role)}</SettingsRole><span>{count}</span></div>
           <details className="tw-panel-disclosure">
             <summary><Icon name="lock" size={15} />{t('tw_team_platform_readable')}</summary>
             <p className="tw-hint">{platformNotice(locale)}</p>
@@ -124,42 +124,48 @@ export function TeamSettingsPage({ workspace, snapshot, locale, initialSection, 
           <button type="button" className="tw-link tw-danger-btn" disabled={busy} onClick={leaveOrDelete}>{team.role === 'owner' ? t('teams_delete') : t('teams_leave')}</button>
         </section>
       </div>
-      {active.id === 'members' ? detail ? <ul className="tw-people tw-settings-fields" aria-label={t('teams_members')}>
-        {detail.members.map(member => {
-          const identity = <>
-            <Avatar identity={{ kind: 'user', id: member.uid, name: member.displayName }} size={40} render={renderAvatar} />
-            <div className="tw-person-text"><b>{member.displayName}</b><small>{member.uid === uid ? `${t('teams_you')} · ` : ''}{role(member.role)}</small></div>
-          </>;
-          const friend = onAddFriend && member.uid !== uid;
-          const manage = canManageMember(team.role, uid, member);
-          return <li key={member.uid}>
-            {friend || manage ? <details className="tw-member-actions">
-              <summary className="tw-person-row" aria-label={`${member.displayName} · ${t('tw_more')}`}>
-                {identity}<span className="tw-person-more"><Icon name="more" /></span>
-              </summary>
-              <div className="tw-person-actions">
-                {friend ? <button type="button" onClick={() => onAddFriend(member)}>{t('friends_add')}</button> : null}
-                {manage && team.role === 'owner' ? <>
-                  <button type="button" disabled={busy} onClick={() => ask(
-                    { action: 'role', teamId: team.id, uid: member.uid, generation: member.generation, role: member.role === 'admin' ? 'member' : 'admin' },
-                    t(member.role === 'admin' ? 'teams_confirm_demote_title_fmt' : 'teams_confirm_promote_title_fmt', member.displayName),
-                    t(member.role === 'admin' ? 'teams_confirm_demote_body' : 'teams_confirm_promote_body'),
-                    t(member.role === 'admin' ? 'teams_demote' : 'teams_promote'), false)}>
-                    {t(member.role === 'admin' ? 'teams_demote' : 'teams_promote')}
-                  </button>
-                  <button type="button" disabled={busy} onClick={() => ask(
-                    { action: 'handOver', teamId: team.id, uid: member.uid, generation: member.generation },
-                    t('tw_team_owner_title_fmt', member.displayName, team.name), t('tw_team_owner_body'), t('teams_make_owner'), false)}>
-                    {t('teams_make_owner')}
-                  </button>
-                </> : null}
-                {manage ? <button type="button" className="tw-danger-btn" disabled={busy}
-                  onClick={() => { setError(''); setRemoving(member); }}>{t('teams_confirm_remove_button')}</button> : null}
+      {active.id === 'members' ? detail ? <div className="tw-settings-group">
+        <p className="tw-hint">{t('tw_team_roles_hint')}</p>
+        <ul className="tw-people tw-settings-fields" aria-label={t('teams_members')}>
+          {detail.members.map(member => {
+            const identity = <>
+              <Avatar identity={{ kind: 'user', id: member.uid, name: member.displayName }} size={40} render={renderAvatar} />
+              <div className="tw-person-text"><b>{member.displayName}</b>
+                <div className="tw-role-line"><SettingsRole elevated={member.role !== 'member'}>{role(member.role)}</SettingsRole>
+                  {member.uid === uid ? <small>{t('teams_you')}</small> : null}</div>
               </div>
-            </details> : <div className="tw-person-row">{identity}</div>}
-          </li>;
-        })}
-      </ul> : loading : null}
+            </>;
+            const friend = onAddFriend && member.uid !== uid;
+            const manage = canManageMember(team.role, uid, member);
+            return <li key={member.uid}>
+              {friend || manage ? <details className="tw-member-actions">
+                <summary className="tw-person-row" aria-label={`${member.displayName} · ${t('tw_more')}`}>
+                  {identity}<span className="tw-person-more"><Icon name="more" /></span>
+                </summary>
+                <div className="tw-person-actions">
+                  {friend ? <button type="button" onClick={() => onAddFriend(member)}>{t('friends_add')}</button> : null}
+                  {manage && team.role === 'owner' ? <>
+                    <button type="button" disabled={busy} onClick={() => ask(
+                      { action: 'role', teamId: team.id, uid: member.uid, generation: member.generation, role: member.role === 'admin' ? 'member' : 'admin' },
+                      t(member.role === 'admin' ? 'teams_confirm_demote_title_fmt' : 'teams_confirm_promote_title_fmt', member.displayName),
+                      t(member.role === 'admin' ? 'teams_confirm_demote_body' : 'teams_confirm_promote_body'),
+                      t(member.role === 'admin' ? 'teams_demote' : 'teams_promote'), false)}>
+                      {t(member.role === 'admin' ? 'teams_demote' : 'teams_promote')}
+                    </button>
+                    <button type="button" disabled={busy} onClick={() => ask(
+                      { action: 'handOver', teamId: team.id, uid: member.uid, generation: member.generation },
+                      t('tw_team_owner_title_fmt', member.displayName, team.name), t('tw_team_owner_body'), t('teams_make_owner'), false)}>
+                      {t('teams_make_owner')}
+                    </button>
+                  </> : null}
+                  {manage ? <button type="button" className="tw-danger-btn" disabled={busy}
+                    onClick={() => { setError(''); setRemoving(member); }}>{t('teams_confirm_remove_button')}</button> : null}
+                </div>
+              </details> : <div className="tw-person-row">{identity}</div>}
+            </li>;
+          })}
+        </ul>
+      </div> : loading : null}
       {active.id === 'invites' ? detail ? <div className="tw-invites">
         {onInviteFriends ? <button type="button" disabled={busy} onClick={onInviteFriends}>{t('friends_invite_action')}</button> : null}
         <form className="tw-form tw-settings-fields" onSubmit={event => {
@@ -195,7 +201,7 @@ export function TeamSettingsPage({ workspace, snapshot, locale, initialSection, 
           {!detail.invites.length ? <li className="tw-empty-line">{t('teams_invite_none')}</li> : null}
         </ul>
       </div> : loading : null}
-      {active.id === 'channelAdmins' ? <TeamChannelAdmins workspace={workspace} snapshot={snapshot} locale={locale} /> : null}
+      {active.id === 'channelAdmins' ? <TeamChannelAdmins workspace={workspace} snapshot={snapshot} locale={locale} renderAvatar={renderAvatar} /> : null}
       {active.id === 'bots' ? <div className="tw-embed">
         <BotDirectory key={snapshot.authority} api={workspace.api} uid={uid} team={team} members={snapshot.directory} bots={snapshot.bots} locale={locale}
           busy={snapshot.messageBusy} renderAvatar={renderAvatar}

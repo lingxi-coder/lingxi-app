@@ -82,12 +82,13 @@ export function TeamMark({ id, name, size, avatar }: { id: string; name: string;
   </span>;
 }
 
-/** Up to `max` avatars, then "+N". */
-export function AvatarStack({ identities, size, render, max = 3, more }: { identities: Identity[]; size: number; render?: RenderAvatar; max?: number; more: (count: number) => string }): ReactElement {
-  const shown = identities.slice(0, max), rest = identities.length - shown.length;
-  return <span className="tw-stack">
-    {shown.map(identity => <Avatar key={`${identity.kind}:${identity.id}`} identity={identity} size={size} render={render} />)}
-    {rest > 0 ? <span className="tw-stack-more" title={more(rest)}>+{rest}</span> : null}
+/** A group lead occupies the same footprint as a single conversation avatar. */
+function GroupConversationAvatar({ identities, size, render, more }: { identities: Identity[]; size: number; render?: RenderAvatar; more: (count: number) => string }): ReactElement {
+  if (identities.length === 1) return <Avatar identity={identities[0]!} size={size} render={render} />;
+  const rest = identities.length - 2;
+  return <span className="tw-dm-group" style={{ width: size, height: size }} aria-hidden="true">
+    {identities.slice(0, 2).map(identity => <Avatar key={`${identity.kind}:${identity.id}`} identity={identity} size={stackedSize(size)} render={render} />)}
+    {rest > 0 ? <span className="tw-dm-group-more" title={more(rest)}>+{rest}</span> : null}
   </span>;
 }
 
@@ -104,7 +105,7 @@ export function ConversationLead({ conversation, label, snapshot, locale, size =
   const others = people.filter(person => !person.self);
   const fallback: Identity = { kind: conversation.kind === 'bot_dm' ? 'bot' : 'user', id: conversation.id, name: label };
   if (conversation.kind === 'group') {
-    return <AvatarStack identities={others.length ? others : people.length ? people : [fallback]} size={stackedSize(size)} max={2} render={render} more={count => t('tw_more_fmt', count)} />;
+    return <GroupConversationAvatar identities={others.length ? others : people.length ? people : [fallback]} size={size} render={render} more={count => t('tw_more_fmt', count)} />;
   }
   const lead = conversation.kind === 'bot_dm' ? people.find(person => person.kind === 'bot') : others[0] ?? people[0];
   return <Avatar identity={lead ?? fallback} size={size} render={render} />;

@@ -85,7 +85,7 @@ async function assertDialogCentered() {
 const result = {};
 try {
   if (process.env.LINGXI_TEST_TEAM_SETTINGS === '1') {
-    await load('?saved=teams&theme=light');
+    await load('?saved=teams&theme=light&groupDm=1');
     await configureFixtureWindow(win);
     await setViewport(1280, 850);
     const homeGear = '.desktop-window-toolbar button[data-team-settings-home]';
@@ -94,6 +94,10 @@ try {
     const field = `${teamSettings} input[maxlength="80"]`;
     const editor = '.teams-conversation .tw-message-editor';
     await wait(`document.querySelector('${homeGear}') && document.querySelector('${row('chan-general')}')`);
+    const groupLead = `${row('dm-group')} .tw-dm-group`;
+    await wait(`document.querySelector('${groupLead}')`);
+    assert.equal(await run(`document.querySelector('${groupLead} .tw-dm-group-more').textContent`), '+1');
+    assert.equal(await run(`document.querySelector('${groupLead}').getBoundingClientRect().width`), 40);
     const sidebarWidth = () => run(`document.querySelector('${sidebar}').clientWidth`);
     const initialWidth = await sidebarWidth();
     await click(homeGear);
@@ -106,7 +110,8 @@ try {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(field, 'Fieldwork Studio');
       field.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
-    await pickSettingsSection(teamSettings, 'Members');
+    await pickSettingsSection(teamSettings, 'Members & roles');
+    assert.equal(await run(`document.querySelector('${teamSettings} .tw-people .tw-settings-role').textContent`), 'Owner');
     await pickSettingsSection(teamSettings, 'General');
     assert.equal(await run(`document.querySelector(${JSON.stringify(field)}).value`), 'Fieldwork Studio');
     await click(`${teamSettings} button[type="submit"]`);
@@ -141,6 +146,36 @@ try {
     await click(channelSettingsGear);
     await wait(`document.querySelector('${channelSettings}')`);
     assert.equal(await shown(teamSettings), false);
+    await pickSettingsSection(channelSettings, 'Roles');
+    const roster = `${channelSettings} .tw-channel-roster`;
+    const appointBob = `${roster} [aria-label="Make administrator · Bob"]`;
+    const removeBob = `${roster} [aria-label="Remove administrator · Bob"]`;
+    await wait(`document.querySelector('${appointBob}')`);
+    await click(appointBob);
+    await wait(`document.querySelector('${removeBob}')`);
+    assert.equal(await run(`document.querySelector('${removeBob}').closest('li').querySelector('.tw-settings-role').textContent`), 'Channel admin');
+    if (screenshots) {
+      await run('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+      await delay(150);
+      writeFileSync(join(screenshots, 'channel-roles-desktop.png'), (await win.webContents.capturePage()).toPNG());
+    }
+    await setViewport(900, 700);
+    assert.equal(await run(`document.querySelector('${channelSettings}').scrollWidth === document.querySelector('${channelSettings}').clientWidth`), true);
+    await click(removeBob);
+    await wait(`document.querySelector('${appointBob}')`);
+    await run(`document.querySelector('${appointBob}').focus()`);
+    await win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+    await wait(`!document.querySelector('${channelSettings}') && document.activeElement === document.querySelector('${channelSettingsGear}')`);
+    await load('?saved=teams&theme=light&channelAdmin=1');
+    await wait(`document.querySelector(${JSON.stringify(row('chan-general'))})`);
+    await click(row('chan-general'));
+    await wait(`document.querySelector('${channelSettingsGear}')`);
+    await click(channelSettingsGear);
+    await pickSettingsSection(channelSettings, 'Roles');
+    assert.equal(await run(`document.querySelector('${roster} .tw-settings-role').textContent`), 'Channel admin');
+    assert.equal(await run(`document.querySelectorAll('${roster} button').length`), 0);
+    await pickSettingsSection(channelSettings, 'Posting');
+    assert.equal(await run(`document.querySelector('${channelSettings} fieldset').disabled`), false);
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ teamSettings: true }));
     win.destroy(); app.exit(0);
@@ -380,7 +415,7 @@ try {
   assert.equal(await run(`Boolean(document.querySelector('${sidebar} [aria-label="Team members & settings"]'))`), false);
   await openTeamSettings();
   assert.equal(await run(`document.querySelector('${teamSettings} h2').textContent`), 'General');
-  await pickSettingsSection(teamSettings, 'Members');
+  await pickSettingsSection(teamSettings, 'Members & roles');
   const memberActions = `${teamSettings} .tw-member-actions`;
   const memberRowHeight = () => run(`document.querySelector('${memberActions}').getBoundingClientRect().height`);
   const collapsedHeight = await memberRowHeight();
